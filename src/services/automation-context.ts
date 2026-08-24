@@ -127,6 +127,71 @@ export function shouldPersistDelay(waitMs: number, inlineMax = DELAY_INLINE_MAX_
   return waitMs > inlineMax;
 }
 
+/**
+ * TTL de segurança para step pausante SEM `timeoutMs` do autor do fluxo.
+ *
+ * Sem `timeoutAt` o contexto fica RUNNING para sempre — `sweepExpiredTimeouts`
+ * só varre `timeoutAt IS NOT NULL`. Isso trava o re-disparo da automação para
+ * o contato E o 1º atendimento da IA, que sai em
+ * `first_attendance_skip_automation_waiting` enquanto houver contexto ativo
+ * (caso Juliana, 24/ago/26: template "BV - CALOUROS" com botões e sem
+ * timeout configurado).
+ *
+ * `AUTOMATION_PAUSED_CONTEXT_TTL_MS=0` desliga.
+ */
+const PAUSED_CONTEXT_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
+
+export const PAUSED_CONTEXT_TTL_MS = (() => {
+  // Var vazia no painel (`AUTOMATION_PAUSED_CONTEXT_TTL_MS=`) tem que cair no
+  // default — `Number("")` é 0, que desligaria o TTL sem ninguém pedir.
+  const raw = process.env.AUTOMATION_PAUSED_CONTEXT_TTL_MS?.trim();
+  if (!raw) return PAUSED_CONTEXT_TTL_DEFAULT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return PAUSED_CONTEXT_TTL_DEFAULT_MS;
+  return parsed;
+})();
+
+/**
+ * Marca, nas variáveis do contexto, que o `timeoutAt` do step atual veio do
+ * TTL e não do canvas. `processTimeout` usa isso para só ENCERRAR o contexto,
+ * sem seguir `timeoutGotoStepId`/fallback linear — o autor nunca configurou
+ * um timeout ali, então disparar um ramo seria inventar comportamento.
+ */
+const PAUSED_TTL_VAR = "__pausedTtlStepId";
+
+function usesPausedTtl(explicitTimeoutMs: number | undefined): boolean {
+  if (explicitTimeoutMs && explicitTimeoutMs > 0) return false;
+  return PAUSED_CONTEXT_TTL_MS > 0;
+}
+
+/** `timeoutAt` de um step pausante: o do autor; senão o TTL de segurança. */
+export function pausedStepTimeoutMs(
+  explicitTimeoutMs: number | undefined,
+): number | undefined {
+  if (explicitTimeoutMs && explicitTimeoutMs > 0) return explicitTimeoutMs;
+  return PAUSED_CONTEXT_TTL_MS > 0 ? PAUSED_CONTEXT_TTL_MS : undefined;
+}
+
+/** Grava/limpa o marcador de TTL sintético nas variáveis do contexto. */
+export function markPausedTtl(
+  variables: Record<string, unknown>,
+  stepId: string,
+  explicitTimeoutMs: number | undefined,
+): Record<string, unknown> {
+  const next = { ...variables };
+  if (usesPausedTtl(explicitTimeoutMs)) next[PAUSED_TTL_VAR] = stepId;
+  else delete next[PAUSED_TTL_VAR];
+  return next;
+}
+
+/** `true` se o `timeoutAt` que acabou de expirar foi armado pelo TTL. */
+function timeoutCameFromTtl(
+  variables: Record<string, unknown>,
+  currentStepId: string,
+): boolean {
+  return variables[PAUSED_TTL_VAR] === currentStepId;
+}
+
 export type InteractiveOption = {
   text?: string;
   title?: string;
@@ -704,11 +769,18 @@ export async function processIncomingMessage(
         // ou pausante que precisa ENVIAR algo antes de esperar
         // (question, send_whatsapp_interactive). Propaga timeoutMs se
         // aplicável.
-        const targetTimeoutMs = PAUSING_STEP_TYPES.has(targetStep.type)
+        const targetIsPausing = PAUSING_STEP_TYPES.has(targetStep.type);
+        const targetExplicitTimeoutMs = targetIsPausing
           ? readNumber(targetStep.config, "timeoutMs")
           : undefined;
+        const targetTimeoutMs = targetIsPausing
+          ? pausedStepTimeoutMs(targetExplicitTimeoutMs)
+          : undefined;
+        const targetVariables = targetIsPausing
+          ? markPausedTtl(variables, currentTargetId, targetExplicitTimeoutMs)
+          : variables;
 
-        await advanceContext(ctx.id, currentTargetId, variables, targetTimeoutMs);
+        await advanceContext(ctx.id, currentTargetId, targetVariables, targetTimeoutMs);
 
         try {
           const { continueFromStep } = await import("@/services/automation-executor");
@@ -784,11 +856,18 @@ async function dispatchToNextStep(
     return;
   }
 
-  const targetTimeoutMs = PAUSING_STEP_TYPES.has(targetStep.type)
+  const targetIsPausing = PAUSING_STEP_TYPES.has(targetStep.type);
+  const targetExplicitTimeoutMs = targetIsPausing
     ? readNumber(targetStep.config, "timeoutMs")
     : undefined;
+  const targetTimeoutMs = targetIsPausing
+    ? pausedStepTimeoutMs(targetExplicitTimeoutMs)
+    : undefined;
+  const targetVariables = targetIsPausing
+    ? markPausedTtl(variables, nextStepId, targetExplicitTimeoutMs)
+    : variables;
 
-  await advanceContext(ctx.id, nextStepId, variables, targetTimeoutMs);
+  await advanceContext(ctx.id, nextStepId, targetVariables, targetTimeoutMs);
 
   if (ctx.contactId) {
     try {
@@ -831,6 +910,24 @@ export async function processTimeout(contextId: string) {
   }
 
   const step = ctx.automation.steps.find((s) => s.id === ctx.currentStepId);
+
+  // TTL de segurança: o autor NÃO configurou timeout neste passo, então não
+  // seguimos aresta nenhuma — só encerramos o contexto para destravar o
+  // contato (re-disparo da automação e 1º atendimento da IA).
+  if (timeoutCameFromTtl(
+    (ctx.variables as Record<string, unknown>) ?? {},
+    ctx.currentStepId,
+  )) {
+    log.info(
+      `TTL de contexto pausado expirou — auto=${ctx.automation.name} step=${ctx.currentStepId} (${step?.type ?? "?"}) → encerrando contexto`,
+    );
+    await advanceContext(
+      ctx.id,
+      null,
+      (ctx.variables as Record<string, unknown>) ?? {},
+    );
+    return;
+  }
 
   // `delay` persistido: o "timeout" É a conclusão da espera — segue a
   // aresta `nextStepId` (fallback linear só pra legado pré-canvas).

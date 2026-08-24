@@ -67,6 +67,8 @@ import {
   closeStrandedContext,
   getActiveContext,
   interpolateVariables,
+  markPausedTtl,
+  pausedStepTimeoutMs,
   shouldPersistDelay,
 } from "@/services/automation-context";
 import {
@@ -754,14 +756,29 @@ async function persistPausedContext(
 ): Promise<void> {
   if (!rt.contactId) return;
   const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-  const vars = {
-    ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
-    ...channelBindVars(rt),
-  };
+  // Sem `timeoutMs` do canvas o contexto ficava RUNNING pra sempre (o sweeper
+  // só varre `timeoutAt` preenchido), travando o re-disparo da automação e o
+  // 1º atendimento da IA. `pausedStepTimeoutMs` arma o TTL de segurança e o
+  // marcador diz ao `processTimeout` para apenas encerrar, sem seguir ramo.
+  const effectiveTimeoutMs = pausedStepTimeoutMs(timeoutMs);
+  const vars = markPausedTtl(
+    {
+      ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
+      ...channelBindVars(rt),
+    },
+    stepId,
+    timeoutMs,
+  );
   if (existingCtx) {
-    await advanceContext(existingCtx.id, stepId, vars, timeoutMs);
+    await advanceContext(existingCtx.id, stepId, vars, effectiveTimeoutMs);
   } else {
-    await createContext(rt.automationId, rt.contactId, stepId, timeoutMs, vars);
+    await createContext(
+      rt.automationId,
+      rt.contactId,
+      stepId,
+      effectiveTimeoutMs,
+      vars,
+    );
   }
 }
 
