@@ -127,6 +127,8 @@ export function shouldPersistDelay(waitMs: number, inlineMax = DELAY_INLINE_MAX_
   return waitMs > inlineMax;
 }
 
+const PAUSED_CONTEXT_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
+
 /**
  * TTL de segurança para step pausante SEM `timeoutMs` do autor do fluxo.
  *
@@ -139,8 +141,6 @@ export function shouldPersistDelay(waitMs: number, inlineMax = DELAY_INLINE_MAX_
  *
  * `AUTOMATION_PAUSED_CONTEXT_TTL_MS=0` desliga.
  */
-const PAUSED_CONTEXT_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
-
 export const PAUSED_CONTEXT_TTL_MS = (() => {
   // Var vazia no painel (`AUTOMATION_PAUSED_CONTEXT_TTL_MS=`) tem que cair no
   // default — `Number("")` é 0, que desligaria o TTL sem ninguém pedir.
