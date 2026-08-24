@@ -31,6 +31,7 @@ import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
 } from "@/services/distribution/assignee-eligibility";
+import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 import { executeDistribution } from "./engine";
 import {
@@ -604,6 +605,27 @@ export async function maybeDistributeNewInboundTicket(input: {
     }),
   );
   // #endregion
+
+  // Automação encerrou e o aluno voltou: o consultor anterior continua.
+  // Sem isso o 1º atendimento da IA tira o humano e ninguém responde.
+  try {
+    const keptHumanId = await keepHumanAfterAutomationClose({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+    });
+    if (keptHumanId) {
+      console.warn(
+        "[DBG-e46688 maybeDist] keep_human_after_automation_close",
+        JSON.stringify({
+          convId: input.conversationId,
+          humanUserId: keptHumanId,
+        }),
+      );
+      return;
+    }
+  } catch (e) {
+    console.error("[distribution] keepHumanAfterAutomationClose failed", e);
+  }
 
   // Herança de contato/deal NÃO pode burlar elegibilidade: offline /
   // indisponível / fora do expediente devem cair na redistribuição (ou IA).
