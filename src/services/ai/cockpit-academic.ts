@@ -82,7 +82,7 @@ function classifyHandoffDept(name: string | null): string {
   return name!.trim();
 }
 
-function classifyCloseReason(reason: string | null): "idle" | "student" | "other" {
+export function classifyCloseReason(reason: string | null): "idle" | "student" | "other" {
   const t = (reason ?? "").toLowerCase();
   if (
     t.includes("30 min") ||
