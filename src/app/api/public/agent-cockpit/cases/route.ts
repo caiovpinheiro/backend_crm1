@@ -21,9 +21,10 @@ function jsonWithCors(request: Request, body: unknown, init?: ResponseInit) {
 async function serveCases(request: Request) {
   const url = new URL(request.url);
   const key = url.searchParams.get("key")?.trim() ?? "";
+  const page = Number(url.searchParams.get("page") ?? "1");
   try {
     const organizationId = getOrgIdOrThrow();
-    const data = await getAcademicCockpitCases({ organizationId, key });
+    const data = await getAcademicCockpitCases({ organizationId, key, page });
     return jsonWithCors(request, data);
   } catch (e) {
     const status = (e as { status?: number }).status === 400 ? 400 : 500;

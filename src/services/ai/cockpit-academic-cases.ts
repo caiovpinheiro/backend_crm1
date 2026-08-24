@@ -35,7 +35,7 @@ export type AcademicCockpitCase = {
   phone: string | null;
 };
 
-const LIMIT = 80;
+export const ACADEMIC_CASE_PAGE_SIZE = 50;
 
 function isCaseKey(v: string): v is AcademicCaseKey {
   return (ACADEMIC_CASE_KEYS as readonly string[]).includes(v);
@@ -72,27 +72,51 @@ function mapRows(rows: RawCase[]): AcademicCockpitCase[] {
       contactName: (r.contact_name ?? "").trim() || "Sem nome",
       phone: r.phone?.trim() || null,
     });
-    if (out.length >= LIMIT) break;
   }
   return out;
+}
+
+function pageArgs(page: number) {
+  const p = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
+  return { page: p, limit: ACADEMIC_CASE_PAGE_SIZE, offset: (p - 1) * ACADEMIC_CASE_PAGE_SIZE };
 }
 
 export async function getAcademicCockpitCases(args: {
   organizationId: string;
   key: string;
-}): Promise<{ key: AcademicCaseKey; title: string; cases: AcademicCockpitCase[] }> {
+  page?: number;
+}): Promise<{
+  key: AcademicCaseKey;
+  title: string;
+  cases: AcademicCockpitCase[];
+  page: number;
+  pageSize: number;
+  total: number;
+}> {
   if (!isCaseKey(args.key)) {
     throw Object.assign(new Error("KPI inválido"), { status: 400 });
   }
   const orgId = args.organizationId;
   const since = startOfTodaySaoPaulo();
   const key = args.key;
+  const { page, limit, offset } = pageArgs(args.page ?? 1);
 
   let rows: RawCase[] = [];
+  let total = 0;
 
   switch (key) {
-    case "spoke_today":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
+    case "spoke_today": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT m."conversationId")::bigint AS n
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${orgId}
+            AND m."authorType" = 'bot'
+            AND COALESCE(m."isPrivate", false) = false
+            AND m."createdAt" >= ${since}
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
         SELECT DISTINCT ON (c.id)
           c.id AS conversation_id,
           c.number AS conversation_number,
@@ -106,12 +130,25 @@ export async function getAcademicCockpitCases(args: {
           AND COALESCE(m."isPrivate", false) = false
           AND m."createdAt" >= ${since}
         ORDER BY c.id, m."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+        OFFSET ${offset} LIMIT ${limit}
+      `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
-    case "attending_now":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
+    case "attending_now": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(*)::bigint AS n
+          FROM conversations c
+          JOIN users u ON u.id = c."assignedToId"
+          WHERE c."organizationId" = ${orgId}
+            AND c.status = 'OPEN'
+            AND u.type = 'AI'
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
         SELECT
           c.id AS conversation_id,
           c.number AS conversation_number,
@@ -124,9 +161,13 @@ export async function getAcademicCockpitCases(args: {
           AND c.status = 'OPEN'
           AND u.type = 'AI'
         ORDER BY c."updatedAt" DESC
-        LIMIT ${LIMIT}
-      `;
+        OFFSET ${offset} LIMIT ${limit}
+      `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
     case "resolved_solo":
     case "closed_by_ai":
@@ -155,7 +196,6 @@ export async function getAcademicCockpitCases(args: {
           AND ae."occurredAt" >= ${since}
           AND COALESCE(ae.meta->>'action', '') = 'ai_close'
         ORDER BY ae."occurredAt" DESC
-        LIMIT 300
       `;
       const want =
         key === "closed_by_idle"
@@ -163,154 +203,265 @@ export async function getAcademicCockpitCases(args: {
           : key === "closed_by_student"
             ? "student"
             : null;
-      rows = events
-        .filter((e) => (want ? classifyCloseReason(e.reason) === want : true))
-        .map((e) => ({
-          conversation_id: e.conversation_id ?? "",
-          conversation_number: e.conversation_number,
-          contact_name: e.contact_name,
-          phone: e.phone,
-        }));
+      const all = mapRows(
+        events
+          .filter((e) => (want ? classifyCloseReason(e.reason) === want : true))
+          .map((e) => ({
+            conversation_id: e.conversation_id ?? "",
+            conversation_number: e.conversation_number,
+            contact_name: e.contact_name,
+            phone: e.phone,
+          })),
+      );
+      total = all.length;
+      rows = all.slice(offset, offset + limit).map((c) => ({
+        conversation_id: c.conversationId,
+        conversation_number: c.conversationNumber,
+        contact_name: c.contactName,
+        phone: c.phone,
+      }));
       break;
     }
 
-    case "idle_nudges":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (c.id)
-          c.id AS conversation_id,
-          c.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM messages m
-        JOIN conversations c ON c.id = m."conversationId"
-        LEFT JOIN contacts ct ON ct.id = c."contactId"
-        WHERE c."organizationId" = ${orgId}
-          AND m.direction = 'out'
-          AND m."authorType" = 'bot'
-          AND m."createdAt" >= ${since}
-          AND m.content ILIKE ${"%" + IDLE_NUDGE_SIGNATURE + "%"}
-        ORDER BY c.id, m."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+    case "idle_nudges": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT m."conversationId")::bigint AS n
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${orgId}
+            AND m.direction = 'out'
+            AND m."authorType" = 'bot'
+            AND m."createdAt" >= ${since}
+            AND m.content ILIKE ${"%" + IDLE_NUDGE_SIGNATURE + "%"}
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (c.id)
+            c.id AS conversation_id,
+            c.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          LEFT JOIN contacts ct ON ct.id = c."contactId"
+          WHERE c."organizationId" = ${orgId}
+            AND m.direction = 'out'
+            AND m."authorType" = 'bot'
+            AND m."createdAt" >= ${since}
+            AND m.content ILIKE ${"%" + IDLE_NUDGE_SIGNATURE + "%"}
+          ORDER BY c.id, m."createdAt" DESC
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
-    case "returned_after_close":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (c2."contactId")
-          c2.id AS conversation_id,
-          c2.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM activity_events ae
-        JOIN conversations c2
-          ON c2."contactId" = ae."contactId"
-         AND c2."organizationId" = ae."organizationId"
-         AND c2."createdAt" > ae."occurredAt"
-        LEFT JOIN contacts ct ON ct.id = c2."contactId"
-        WHERE ae."organizationId" = ${orgId}
-          AND ae.type = 'CONVERSATION_CLOSED'
-          AND ae."occurredAt" >= ${since}
-          AND COALESCE(ae.meta->>'action', '') = 'ai_close'
-          AND ae."contactId" IS NOT NULL
-        ORDER BY c2."contactId", c2."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+    case "returned_after_close": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT c2."contactId")::bigint AS n
+          FROM activity_events ae
+          JOIN conversations c2
+            ON c2."contactId" = ae."contactId"
+           AND c2."organizationId" = ae."organizationId"
+           AND c2."createdAt" > ae."occurredAt"
+          WHERE ae."organizationId" = ${orgId}
+            AND ae.type = 'CONVERSATION_CLOSED'
+            AND ae."occurredAt" >= ${since}
+            AND COALESCE(ae.meta->>'action', '') = 'ai_close'
+            AND ae."contactId" IS NOT NULL
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (c2."contactId")
+            c2.id AS conversation_id,
+            c2.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM activity_events ae
+          JOIN conversations c2
+            ON c2."contactId" = ae."contactId"
+           AND c2."organizationId" = ae."organizationId"
+           AND c2."createdAt" > ae."occurredAt"
+          LEFT JOIN contacts ct ON ct.id = c2."contactId"
+          WHERE ae."organizationId" = ${orgId}
+            AND ae.type = 'CONVERSATION_CLOSED'
+            AND ae."occurredAt" >= ${since}
+            AND COALESCE(ae.meta->>'action', '') = 'ai_close'
+            AND ae."contactId" IS NOT NULL
+          ORDER BY c2."contactId", c2."createdAt" DESC
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
-    case "send_failed":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (c.id)
-          c.id AS conversation_id,
-          c.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM messages m
-        JOIN conversations c ON c.id = m."conversationId"
-        LEFT JOIN contacts ct ON ct.id = c."contactId"
-        WHERE c."organizationId" = ${orgId}
-          AND m.direction = 'out'
-          AND m."authorType" = 'bot'
-          AND m."createdAt" >= ${since}
-          AND m."sendStatus" IN ('failed', 'error', 'FAILED', 'ERROR')
-        ORDER BY c.id, m."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+    case "send_failed": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT m."conversationId")::bigint AS n
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${orgId}
+            AND m.direction = 'out'
+            AND m."authorType" = 'bot'
+            AND m."createdAt" >= ${since}
+            AND m."sendStatus" IN ('failed', 'error', 'FAILED', 'ERROR')
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (c.id)
+            c.id AS conversation_id,
+            c.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          LEFT JOIN contacts ct ON ct.id = c."contactId"
+          WHERE c."organizationId" = ${orgId}
+            AND m.direction = 'out'
+            AND m."authorType" = 'bot'
+            AND m."createdAt" >= ${since}
+            AND m."sendStatus" IN ('failed', 'error', 'FAILED', 'ERROR')
+          ORDER BY c.id, m."createdAt" DESC
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
     case "handoff_today":
-    case "handoff_assigned":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (COALESCE(l."conversationId", l."contactId"))
-          COALESCE(l."conversationId", c.id) AS conversation_id,
-          c.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM distribution_logs l
-        LEFT JOIN conversations c ON c.id = l."conversationId"
-        LEFT JOIN contacts ct ON ct.id = COALESCE(l."contactId", c."contactId")
-        WHERE l."organizationId" = ${orgId}
-          AND l.success = true
-          AND l."createdAt" >= ${since}
-          AND l."triggerSource" ILIKE '%AI_AGENT%'
-          AND (${key} <> 'handoff_assigned' OR l.reason = 'ASSIGNED')
-        ORDER BY COALESCE(l."conversationId", l."contactId"), l."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+    case "handoff_assigned": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT COALESCE(l."conversationId", l."contactId"))::bigint AS n
+          FROM distribution_logs l
+          WHERE l."organizationId" = ${orgId}
+            AND l.success = true
+            AND l."createdAt" >= ${since}
+            AND l."triggerSource" ILIKE '%AI_AGENT%'
+            AND (${key} <> 'handoff_assigned' OR l.reason = 'ASSIGNED')
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (COALESCE(l."conversationId", l."contactId"))
+            COALESCE(l."conversationId", c.id) AS conversation_id,
+            c.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM distribution_logs l
+          LEFT JOIN conversations c ON c.id = l."conversationId"
+          LEFT JOIN contacts ct ON ct.id = COALESCE(l."contactId", c."contactId")
+          WHERE l."organizationId" = ${orgId}
+            AND l.success = true
+            AND l."createdAt" >= ${since}
+            AND l."triggerSource" ILIKE '%AI_AGENT%'
+            AND (${key} <> 'handoff_assigned' OR l.reason = 'ASSIGNED')
+          ORDER BY COALESCE(l."conversationId", l."contactId"), l."createdAt" DESC
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
     case "channel_academic":
-    case "channel_other":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (c.id)
-          c.id AS conversation_id,
-          c.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM messages m
-        JOIN conversations c ON c.id = m."conversationId"
-        LEFT JOIN channels ch ON ch.id = COALESCE(m."channelId", c."channelId")
-        LEFT JOIN contacts ct ON ct.id = c."contactId"
-        WHERE c."organizationId" = ${orgId}
-          AND m."authorType" = 'bot'
-          AND COALESCE(m."isPrivate", false) = false
-          AND m."createdAt" >= ${since}
-          AND (
-            (${key} = 'channel_academic' AND COALESCE(ch.name, '') ILIKE '%acad%')
-            OR (${key} = 'channel_other' AND COALESCE(ch.name, '') NOT ILIKE '%acad%')
-          )
-        ORDER BY c.id, m."createdAt" DESC
-        LIMIT ${LIMIT}
-      `;
+    case "channel_other": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT m."conversationId")::bigint AS n
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          LEFT JOIN channels ch ON ch.id = COALESCE(m."channelId", c."channelId")
+          WHERE c."organizationId" = ${orgId}
+            AND m."authorType" = 'bot'
+            AND COALESCE(m."isPrivate", false) = false
+            AND m."createdAt" >= ${since}
+            AND (
+              (${key} = 'channel_academic' AND COALESCE(ch.name, '') ILIKE '%acad%')
+              OR (${key} = 'channel_other' AND COALESCE(ch.name, '') NOT ILIKE '%acad%')
+            )
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (c.id)
+            c.id AS conversation_id,
+            c.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM messages m
+          JOIN conversations c ON c.id = m."conversationId"
+          LEFT JOIN channels ch ON ch.id = COALESCE(m."channelId", c."channelId")
+          LEFT JOIN contacts ct ON ct.id = c."contactId"
+          WHERE c."organizationId" = ${orgId}
+            AND m."authorType" = 'bot'
+            AND COALESCE(m."isPrivate", false) = false
+            AND m."createdAt" >= ${since}
+            AND (
+              (${key} = 'channel_academic' AND COALESCE(ch.name, '') ILIKE '%acad%')
+              OR (${key} = 'channel_other' AND COALESCE(ch.name, '') NOT ILIKE '%acad%')
+            )
+          ORDER BY c.id, m."createdAt" DESC
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
 
     case "lead_entrada_open":
-    case "lead_entrada_ai":
-      rows = await prismaBase.$queryRaw<RawCase[]>`
-        SELECT DISTINCT ON (d."contactId")
-          c.id AS conversation_id,
-          c.number AS conversation_number,
-          ct.name AS contact_name,
-          ct.phone
-        FROM deals d
-        JOIN stages st ON st.id = d."stageId"
-        LEFT JOIN conversations c
-          ON c."contactId" = d."contactId"
-         AND c.status = 'OPEN'
-        LEFT JOIN users u ON u.id = c."assignedToId"
-        LEFT JOIN contacts ct ON ct.id = d."contactId"
-        WHERE d."organizationId" = ${orgId}
-          AND d.status = 'OPEN'
-          AND (st.slug = 'lead-de-entrada' OR st.name ILIKE 'lead de entrada')
-          AND (${key} <> 'lead_entrada_ai' OR u.type = 'AI')
-        ORDER BY d."contactId", c."updatedAt" DESC NULLS LAST
-        LIMIT ${LIMIT}
-      `;
+    case "lead_entrada_ai": {
+      const [countRow, data] = await Promise.all([
+        prismaBase.$queryRaw<[{ n: bigint }]>`
+          SELECT COUNT(DISTINCT d."contactId")::bigint AS n
+          FROM deals d
+          JOIN stages st ON st.id = d."stageId"
+          LEFT JOIN conversations c
+            ON c."contactId" = d."contactId"
+           AND c.status = 'OPEN'
+          LEFT JOIN users u ON u.id = c."assignedToId"
+          WHERE d."organizationId" = ${orgId}
+            AND d.status = 'OPEN'
+            AND (st.slug = 'lead-de-entrada' OR st.name ILIKE 'lead de entrada')
+            AND (${key} <> 'lead_entrada_ai' OR u.type = 'AI')
+        `,
+        prismaBase.$queryRaw<RawCase[]>`
+          SELECT DISTINCT ON (d."contactId")
+            c.id AS conversation_id,
+            c.number AS conversation_number,
+            ct.name AS contact_name,
+            ct.phone
+          FROM deals d
+          JOIN stages st ON st.id = d."stageId"
+          LEFT JOIN conversations c
+            ON c."contactId" = d."contactId"
+           AND c.status = 'OPEN'
+          LEFT JOIN users u ON u.id = c."assignedToId"
+          LEFT JOIN contacts ct ON ct.id = d."contactId"
+          WHERE d."organizationId" = ${orgId}
+            AND d.status = 'OPEN'
+            AND (st.slug = 'lead-de-entrada' OR st.name ILIKE 'lead de entrada')
+            AND (${key} <> 'lead_entrada_ai' OR u.type = 'AI')
+          ORDER BY d."contactId", c."updatedAt" DESC NULLS LAST
+          OFFSET ${offset} LIMIT ${limit}
+        `,
+      ]);
+      total = Number(countRow[0]?.n ?? 0);
+      rows = data;
       break;
+    }
   }
 
   return {
     key,
     title: key,
     cases: mapRows(rows),
+    page,
+    pageSize: limit,
+    total,
   };
 }
