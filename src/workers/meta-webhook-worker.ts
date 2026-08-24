@@ -12,6 +12,7 @@ import {
 } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
+import { flushStatusWrites } from "@/lib/status-write-buffer";
 
 const log = getLogger("worker.meta-webhook");
 
@@ -101,6 +102,9 @@ export function startMetaWebhookWorker() {
 
 async function shutdown(worker: Worker): Promise<void> {
   log.info("Encerrando worker-meta-webhook...");
+  // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
+  // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
+  await flushStatusWrites().catch(() => {});
   await worker.close().catch(() => {});
   await prismaBase.$disconnect().catch(() => {});
   process.exit(0);

@@ -19,6 +19,7 @@ import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
+import { cache } from "@/lib/cache";
 
 /**
  * Scope multi-tenancy do webhook. Quando presente:
@@ -72,6 +73,11 @@ import {
   incrementCampaignCounter,
   type CampaignCounterField,
 } from "@/lib/campaign-counters";
+import {
+  bufferMessageStatus,
+  bufferRecipientStatus,
+  isStatusWriteBufferEnabled,
+} from "@/lib/status-write-buffer";
 import {
   formatWhatsappFlowResponse,
   parseWhatsappFlowResponsePayload,
@@ -1439,7 +1445,100 @@ async function downloadAndSaveMedia(
 
 const VALID_STATUSES = new Set(["sent", "delivered", "read", "failed"]);
 
-async function processStatusUpdate(status: Record<string, unknown>) {
+function findStatusMessage(wamid: string) {
+  return prisma.message.findFirst({
+    where: { externalId: wamid },
+    select: {
+      id: true,
+      sendStatus: true,
+      conversationId: true,
+      organizationId: true,
+      externalId: true,
+      content: true,
+    },
+  });
+}
+
+type StatusMessageRow = NonNullable<Awaited<ReturnType<typeof findStatusMessage>>>;
+type CampaignRecipientRow = { id: string; status: string; campaignId: string };
+
+/**
+ * Resolução em lote dos `wamid` de um mesmo `change` do webhook. Um blast
+ * de campanha chega com dezenas de statuses por payload e cada um fazia
+ * dois `findFirst` (message + campaign_recipient) antes dos updates. Aqui
+ * as duas leituras viram um `in` só e o laço trabalha em memória.
+ *
+ * As entradas são MUTÁVEIS de propósito: quando o mesmo wamid aparece duas
+ * vezes no payload (sent seguido de delivered), o segundo passo precisa
+ * enxergar o `sendStatus`/`status` já gravado pelo primeiro, exatamente
+ * como acontecia quando cada iteração relia do banco.
+ */
+type StatusBatchCache = {
+  messages: Map<string, StatusMessageRow>;
+  recipients: Map<string, CampaignRecipientRow>;
+};
+
+async function prefetchStatusBatch(
+  statuses: unknown[],
+): Promise<StatusBatchCache | undefined> {
+  const wamids = Array.from(
+    new Set(
+      statuses
+        .map((s) => str(obj(s).id))
+        .filter((id) => id.length > 0),
+    ),
+  );
+  // Com 0 ou 1 wamid o lote não economiza nada — mantém o caminho antigo.
+  if (wamids.length < 2) return undefined;
+
+  try {
+    const [messages, recipients] = await Promise.all([
+      prisma.message.findMany({
+        where: { externalId: { in: wamids } },
+        select: {
+          id: true,
+          sendStatus: true,
+          conversationId: true,
+          organizationId: true,
+          externalId: true,
+          content: true,
+        },
+      }),
+      prisma.campaignRecipient.findMany({
+        where: { metaMessageId: { in: wamids } },
+        select: { id: true, status: true, campaignId: true, metaMessageId: true },
+      }),
+    ]);
+
+    const cache: StatusBatchCache = { messages: new Map(), recipients: new Map() };
+    for (const m of messages) {
+      // Mesma escolha do `findFirst`: a primeira linha vista vence.
+      if (m.externalId && !cache.messages.has(m.externalId)) {
+        cache.messages.set(m.externalId, m);
+      }
+    }
+    for (const r of recipients) {
+      if (r.metaMessageId && !cache.recipients.has(r.metaMessageId)) {
+        cache.recipients.set(r.metaMessageId, {
+          id: r.id,
+          status: r.status,
+          campaignId: r.campaignId,
+        });
+      }
+    }
+    return cache;
+  } catch (err) {
+    // Falha na pré-carga não pode derrubar o webhook: sem cache, cada
+    // status volta a resolver sozinho.
+    log.warn("Erro na pré-carga em lote dos statuses:", err);
+    return undefined;
+  }
+}
+
+async function processStatusUpdate(
+  status: Record<string, unknown>,
+  cache?: StatusBatchCache,
+) {
   const wamid = str(status.id);
   const s = str(status.status);
   if (!wamid || !s) return;
@@ -1450,22 +1549,14 @@ async function processStatusUpdate(status: Record<string, unknown>) {
   }
 
   try {
-    const msg = await prisma.message.findFirst({
-      where: { externalId: wamid },
-      select: {
-        id: true,
-        sendStatus: true,
-        conversationId: true,
-        organizationId: true,
-        externalId: true,
-        content: true,
-      },
-    });
+    const msg = cache
+      ? cache.messages.get(wamid) ?? null
+      : await findStatusMessage(wamid);
     if (!msg) {
       // Status chegou antes do externalId ser gravado (race raro) ou
       // wamid desconhecido — sem mensagem não há o que atualizar na UI.
       log.info(`Status ${s} ignorado: mensagem externalId=${wamid} não encontrada`);
-      await updateCampaignRecipientStatus(wamid, s, status);
+      await updateCampaignRecipientStatus(wamid, s, status, cache);
       return;
     }
 
@@ -1490,7 +1581,7 @@ async function processStatusUpdate(status: Record<string, unknown>) {
     // Sempre sincroniza CampaignRecipient (contadores delivered/read), mesmo
     // quando o Message já está no mesmo status — e usa o retorno para
     // silenciar SSE/activity em blast.
-    const isCampaignMsg = await updateCampaignRecipientStatus(wamid, s, status);
+    const isCampaignMsg = await updateCampaignRecipientStatus(wamid, s, status, cache);
 
     if (shouldUpdate) {
         // Estrutura oficial do erro do webhook (Meta docs):
@@ -1534,19 +1625,42 @@ async function processStatusUpdate(status: Record<string, unknown>) {
 
         const sendError = errorInfo?.text ?? (isFailure ? "Falha no envio" : null);
 
-        await prisma.message.update({
-          where: { id: msg.id },
-          data: {
+        // `wasFailed` é lido depois do update; guarda o valor de antes.
+        const previousSendStatus = msg.sendStatus;
+
+        // Kill switch: STATUS_WRITE_BUFFER_ENABLED=0 volta ao update individual
+        // (caminho histórico). Default ligado — escrita em lote com guarda de
+        // prioridade no WHERE (ver src/lib/status-write-buffer.ts).
+        // sendError: undefined = não tocar, null = limpar, string = gravar.
+        if (isStatusWriteBufferEnabled()) {
+          bufferMessageStatus({
+            id: msg.id,
             sendStatus: s,
-            ...(isFailure
-              ? { sendError }
-              : // Entrega/leitura posteriores limpam erro stale (ex.: sweeper
-                // marcou timeout e a Meta confirmou delivered depois).
-                s === "delivered" || s === "read"
-                ? { sendError: null }
-                : {}),
-          },
-        });
+            sendError: isFailure
+              ? sendError
+              : s === "delivered" || s === "read"
+                ? null
+                : undefined,
+          });
+        } else {
+          await prisma.message.update({
+            where: { id: msg.id },
+            data: {
+              sendStatus: s,
+              ...(isFailure
+                ? { sendError }
+                : // Entrega/leitura posteriores limpam erro stale (ex.: sweeper
+                  // marcou timeout e a Meta confirmou delivered depois).
+                  s === "delivered" || s === "read"
+                  ? { sendError: null }
+                  : {}),
+            },
+          });
+        }
+
+        // Mantém a linha em cache coerente com o banco para o caso de o
+        // mesmo wamid aparecer de novo no mesmo payload.
+        msg.sendStatus = s;
 
         if (isFailure) {
           // Erros de elegibilidade (fora da janela 24h, conta inexistente,
@@ -1613,7 +1727,7 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           // Só vale rodar o count quando ESTA mensagem estava failed — em
           // blast (sent→delivered/read sem falha prévia) o count por status
           // gerava ~4-6k queries inúteis no PG compartilhado.
-          const wasFailed = (msg.sendStatus ?? "").toLowerCase() === "failed";
+          const wasFailed = (previousSendStatus ?? "").toLowerCase() === "failed";
           if (wasFailed) {
             const stillFailed = await prisma.message
               .count({
@@ -1733,12 +1847,15 @@ async function updateCampaignRecipientStatus(
   metaMessageId: string,
   status: string,
   raw: Record<string, unknown>,
+  cache?: StatusBatchCache,
 ): Promise<boolean> {
   try {
-    const recipient = await prisma.campaignRecipient.findFirst({
-      where: { metaMessageId },
-      select: { id: true, status: true, campaignId: true },
-    });
+    const recipient = cache
+      ? cache.recipients.get(metaMessageId) ?? null
+      : await prisma.campaignRecipient.findFirst({
+          where: { metaMessageId },
+          select: { id: true, status: true, campaignId: true },
+        });
     if (!recipient) return false;
 
     const statusMap: Record<string, string> = {
@@ -1769,10 +1886,26 @@ async function updateCampaignRecipientStatus(
         code != null ? `${human} (code ${code})` : human;
     }
 
-    await prisma.campaignRecipient.update({
-      where: { id: recipient.id },
-      data,
-    });
+    // Kill switch: STATUS_WRITE_BUFFER_ENABLED=0 volta ao update individual.
+    // Default ligado — escrita em lote com guarda de prioridade no WHERE do
+    // UPDATE (ver src/lib/status-write-buffer.ts). A guarda em memória acima
+    // (:1850) vira otimização; a de verdade está no SQL.
+    if (isStatusWriteBufferEnabled()) {
+      bufferRecipientStatus({
+        id: recipient.id,
+        status: newStatus,
+        data: {
+          deliveredAt: data.deliveredAt as Date | undefined,
+          readAt: data.readAt as Date | undefined,
+          errorMessage: data.errorMessage as string | null | undefined,
+        },
+      });
+    } else {
+      await prisma.campaignRecipient.update({
+        where: { id: recipient.id },
+        data,
+      });
+    }
 
     const counterField: CampaignCounterField | null =
       status === "delivered"
@@ -1788,6 +1921,10 @@ async function updateCampaignRecipientStatus(
       // na mesma row da Campaign gerava lock contention no PG compartilhado.
       incrementCampaignCounter(recipient.campaignId, counterField);
     }
+
+    // Depois de `counterField`, que compara com o status ANTERIOR: mantém
+    // o cache coerente para um segundo status do mesmo wamid no payload.
+    recipient.status = newStatus;
     return true;
   } catch (err) {
     log.warn("Erro ao atualizar destinatário da campanha:", err);
@@ -1939,6 +2076,11 @@ export async function handleMetaWebhookGet(
 
 // ── POST: Receive messages ───────────────────────
 
+/** TTL do cache de lookups de canal do webhook (phoneNumberId→org e
+ * appSecrets). 60s: janela curta de staleness; a invalidação explícita em
+ * `services/channels.ts` (delPattern "meta_wh:*") cobre edições de canal. */
+const META_WH_CACHE_TTL_SEC = 60;
+
 async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   const secrets = new Set<string>();
 
@@ -1953,42 +2095,58 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   const igSecret = process.env.INSTAGRAM_APP_SECRET?.trim();
   if (igSecret) secrets.add(igSecret);
 
+  // Cache-aside 60s: este findMany rodava 1× por POST de webhook (28,6k
+  // calls na janela do stress sa221601). O loader NÃO captura erro de DB —
+  // throw dentro do wrap não grava cache, então um blip transitório não
+  // fica cacheado como lista degradada; o catch aqui preserva o fallback
+  // histórico (só secrets de env).
   try {
-    // Usa prismaBase sempre: no path scoped filtramos por organizationId
-    // explicitamente; no path legacy (sem slug — agora padrao oficial da
-    // conexao manual token-based) buscamos cross-org e o handler routeia
-    // pelo phone_number_id do payload. prismaBase evita a exigencia de
-    // RequestContext ativo da Prisma extension.
-    const where = scope
-      ? {
-          organizationId: scope.organizationId,
-          OR: META_WEBHOOK_CHANNEL_OR,
-        }
-      : { OR: META_WEBHOOK_CHANNEL_OR };
-    const channels = await prismaBase.channel.findMany({
-      where,
-      select: { config: true },
-    });
-    for (const ch of channels) {
-      const cfg = ch.config as Record<string, unknown> | null;
-      const raw = typeof cfg?.appSecret === "string" ? cfg.appSecret.trim() : "";
-      if (!raw) continue;
-      // PR-1.2: appSecret pode estar encriptado ou plaintext (back-compat).
-      let secret = raw;
-      if (isEncryptedSecret(raw)) {
-        try {
-          secret = decryptSecret(raw);
-        } catch (err) {
-          log.error(
-            `Falha ao decriptar appSecret de canal Meta: ${err instanceof Error ? err.message : err}`,
-          );
-          continue;
-        }
-      }
-      if (secret) secrets.add(secret);
-    }
+    const channelSecrets = await cache.wrap(
+      `meta_wh:secrets:${scope?.organizationId ?? "global"}`,
+      META_WH_CACHE_TTL_SEC,
+      () => loadChannelAppSecrets(scope),
+    );
+    for (const s of channelSecrets) secrets.add(s);
   } catch (e) {
     log.warn("Erro ao buscar appSecrets dos canais:", e);
+  }
+  return [...secrets];
+}
+
+async function loadChannelAppSecrets(scope?: WebhookScope): Promise<string[]> {
+  // Usa prismaBase sempre: no path scoped filtramos por organizationId
+  // explicitamente; no path legacy (sem slug — agora padrao oficial da
+  // conexao manual token-based) buscamos cross-org e o handler routeia
+  // pelo phone_number_id do payload. prismaBase evita a exigencia de
+  // RequestContext ativo da Prisma extension.
+  const where = scope
+    ? {
+        organizationId: scope.organizationId,
+        OR: META_WEBHOOK_CHANNEL_OR,
+      }
+    : { OR: META_WEBHOOK_CHANNEL_OR };
+  const channels = await prismaBase.channel.findMany({
+    where,
+    select: { config: true },
+  });
+  const secrets = new Set<string>();
+  for (const ch of channels) {
+    const cfg = ch.config as Record<string, unknown> | null;
+    const raw = typeof cfg?.appSecret === "string" ? cfg.appSecret.trim() : "";
+    if (!raw) continue;
+    // PR-1.2: appSecret pode estar encriptado ou plaintext (back-compat).
+    let secret = raw;
+    if (isEncryptedSecret(raw)) {
+      try {
+        secret = decryptSecret(raw);
+      } catch (err) {
+        log.error(
+          `Falha ao decriptar appSecret de canal Meta: ${err instanceof Error ? err.message : err}`,
+        );
+        continue;
+      }
+    }
+    if (secret) secrets.add(secret);
   }
   return [...secrets];
 }
@@ -2022,18 +2180,34 @@ export async function handleMetaWebhookPost(
     const parsed = JSON.parse(bodyText) as Record<string, unknown>;
     const phoneNumberId = extractFirstPhoneNumberId(parsed);
     if (phoneNumberId) {
-      const channel = await prismaBase.channel.findFirst({
-        where: {
-          type: "WHATSAPP",
-          provider: "META_CLOUD_API",
-          config: { path: ["phoneNumberId"], equals: phoneNumberId },
+      // Cache-aside 60s do mapeamento phoneNumberId → org/canal: este
+      // findFirst rodava 1× por POST (somado ao findMany de appSecrets,
+      // eram 2 lookups de channel por webhook — stress sa221601).
+      // Invalidado na edição de canal (delPattern "meta_wh:*").
+      const channel = await cache.wrap(
+        `meta_wh:phone:${phoneNumberId}`,
+        META_WH_CACHE_TTL_SEC,
+        async () => {
+          const ch = await prismaBase.channel.findFirst({
+            where: {
+              type: "WHATSAPP",
+              provider: "META_CLOUD_API",
+              config: { path: ["phoneNumberId"], equals: phoneNumberId },
+            },
+            select: { organizationId: true, organization: { select: { slug: true } } },
+          });
+          return ch
+            ? {
+                organizationId: ch.organizationId,
+                organizationSlug: ch.organization?.slug ?? "",
+              }
+            : null;
         },
-        select: { organizationId: true, organization: { select: { slug: true } } },
-      });
+      );
       if (channel) {
         inferredScope = {
           organizationId: channel.organizationId,
-          organizationSlug: channel.organization?.slug ?? "",
+          organizationSlug: channel.organizationSlug,
         };
       } else {
         log.debug(
@@ -2369,8 +2543,11 @@ export async function processMetaWebhookPayload(
       const messages = arr(value.messages);
       const statuses = arr(value.statuses);
 
+      // Duas leituras em lote no lugar de 2 `findFirst` por status; a
+      // ordem de processamento do laço continua a mesma.
+      const statusCache = await prefetchStatusBatch(statuses);
       for (const s of statuses) {
-        await processStatusUpdate(obj(s));
+        await processStatusUpdate(obj(s), statusCache);
       }
 
       const contactMap = new Map<string, string>();
