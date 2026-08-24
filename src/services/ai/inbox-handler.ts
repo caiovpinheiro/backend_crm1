@@ -156,6 +156,36 @@ function stripConfidenceTag(text: string): string {
   return parseAgentConfidence(text).text.trim();
 }
 
+const RUN_FAILURE_WINDOW_MS = 30 * 60 * 1000;
+
+/** Erro que retry não resolve: chave, permissão, cota, billing. */
+function isPermanentRunFailure(error?: string | null): boolean {
+  const msg = (error ?? "").toLowerCase();
+  if (!msg) return false;
+  return /api[_\s-]?key|unauthorized|forbidden|401|403|invalid_api_key|insufficient_quota|quota|billing|credit|permission/.test(
+    msg,
+  );
+}
+
+/**
+ * Blip isolado de LLM fica na IA para retry. Chave/cota inválida ou falha
+ * repetida deixaria o aluno sem ninguém — nesse caso distribui.
+ */
+async function shouldDistributeAfterRunFailure(args: {
+  conversationId: string;
+  error?: string | null;
+}): Promise<boolean> {
+  if (isPermanentRunFailure(args.error)) return true;
+  const failures = await prisma.aIAgentRun.count({
+    where: {
+      conversationId: args.conversationId,
+      status: "FAILED",
+      createdAt: { gte: new Date(Date.now() - RUN_FAILURE_WINDOW_MS) },
+    },
+  });
+  return failures >= 2;
+}
+
 function runHadTransferTools(
   toolCalls: Array<{ name: string }> | undefined,
 ): boolean {
@@ -1131,9 +1161,56 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         error: result.error ?? "unknown",
         durationMs: Date.now() - startedAt.getTime(),
       });
-      // Falha de LLM/chave NÃO é pedido de humano. Distribuir aqui era o
-      // motivo do agente "só enfileirar": qualquer erro (ex. API key)
-      // mandava o lead à fila. A conversa fica na IA para retry.
+      // Falha de LLM/chave NÃO é pedido de humano: um erro isolado fica na
+      // IA para retry. Mas chave/cota inválida ou falha repetida derruba o
+      // atendimento inteiro — aí o aluno precisa de um consultor.
+      const distributeOnFailure = await shouldDistributeAfterRunFailure({
+        conversationId: args.conversationId,
+        error: result.error,
+      });
+      if (!distributeOnFailure) return;
+
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        reason: `Falha no run da IA: ${result.error ?? "unknown"}`,
+      }).catch(() => null);
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        // Durante uma queda o aluno escreve várias vezes: só avisa da fila
+        // uma vez, senão repete o mesmo texto em cada mensagem.
+        const lastBotOut = await prisma.message.findFirst({
+          where: {
+            conversationId: args.conversationId,
+            direction: "out",
+            authorType: "bot",
+            isPrivate: false,
+            messageType: { not: "note" },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+        if (!messageLooksLikeHumanQueueNotice(lastBotOut?.content)) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: buildGenericQueueHandoffMessage(),
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+      }
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "run_failed",
+        error: result.error ?? "unknown",
+      });
       return;
     }
 

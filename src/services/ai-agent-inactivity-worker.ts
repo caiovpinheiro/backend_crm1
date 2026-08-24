@@ -34,6 +34,10 @@ import {
   executeAgentHandoff,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import {
+  STUCK_INBOUND_MS,
+  distributeStuckInbound,
+} from "@/services/ai/stuck-inbound-distribution";
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
 const BATCH_SIZE = 50;
@@ -224,6 +228,19 @@ async function processIdleAiOnly(
 
 export async function tickOnce(now: Date = new Date()) {
   const { closed } = await processIdleAiOnly(now);
+
+  // Aluno esperando resposta da IA há tempo demais → consultor humano.
+  try {
+    await distributeStuckInbound(
+      now,
+      envMs("AI_AGENT_STUCK_INBOUND_MS", STUCK_INBOUND_MS),
+    );
+  } catch (err) {
+    console.warn(
+      "[ai-inactivity] distributeStuckInbound falhou:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 
   // Worker cross-tenant: varre TODAS as orgs. Usa prismaBase para que
   // o extension nao tente escopar ou exigir RequestContext. O JOIN
