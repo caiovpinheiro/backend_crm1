@@ -31,6 +31,7 @@ import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
 } from "@/services/distribution/assignee-eligibility";
+import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 import { executeDistribution } from "./engine";
@@ -648,6 +649,22 @@ export async function maybeDistributeNewInboundTicket(input: {
           where: { id: input.conversationId },
           select: { hasHumanReply: true },
         });
+        // Herança de ticket antigo pode ir para a IA; quem foi atribuído
+        // NESTA conversa fica (a saudação da distribuição sai como bot e
+        // não marca `hasHumanReply` — não é sinal de "humano não atendeu").
+        if (
+          !conv?.hasHumanReply &&
+          (await humanWasAssignedInThisConversation(
+            input.conversationId,
+            assignee,
+          ))
+        ) {
+          console.warn(
+            "[DBG-e46688 maybeDist] keep_assigned_human",
+            JSON.stringify({ convId: input.conversationId, assignee }),
+          );
+          return;
+        }
         if (!conv?.hasHumanReply) {
           console.warn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",
