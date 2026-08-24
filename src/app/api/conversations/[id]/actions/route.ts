@@ -78,6 +78,57 @@ async function logDealEventsForConversationContact(
   }
 }
 
+async function logConversationAssigneeChanged(args: {
+  conversationId: string;
+  userId: string;
+  organizationId: string | null;
+  contactId: string | null;
+  entityLabel: string | null;
+  fromUserId: string | null;
+  toUserId: string | null;
+  fromName: string | null;
+  toName: string | null;
+}) {
+  if (args.fromUserId === args.toUserId) return;
+  await logDealEventsForConversationContact(
+    args.conversationId,
+    args.userId,
+    "ASSIGNEE_CHANGED",
+    {
+      from: args.fromUserId
+        ? { id: args.fromUserId, name: args.fromName }
+        : null,
+      to: args.toUserId ? { id: args.toUserId, name: args.toName } : null,
+    },
+  );
+  // AWAIT: o espelho no chat precisa existir antes da resposta, senão o
+  // refetch imediato do inbox perde atribuição/transferência/remoção.
+  await logEvent({
+    type: "ASSIGNEE_CHANGED",
+    entityType: "CONVERSATION",
+    entityId: args.conversationId,
+    entityLabel: args.entityLabel,
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    field: "assignedTo",
+    oldValue: args.fromName,
+    newValue: args.toName,
+    meta: {
+      fromUserId: args.fromUserId,
+      toUserId: args.toUserId,
+    },
+  });
+  try {
+    sseBus.publish("conversation_timeline_updated", {
+      organizationId: args.organizationId,
+      conversationId: args.conversationId,
+      type: "ASSIGNEE_CHANGED",
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 type RouteContext = { params: Promise<{ id: string }> };
 
 const VALID_ACTIONS = new Set(["resolve", "reopen", "toggle_status", "assign", "transfer"]);
@@ -164,27 +215,16 @@ export async function POST(request: Request, context: RouteContext) {
           return NextResponse.json({ message: msg }, { status });
         }
         if ((prev?.assignedToId ?? null) !== (result.conversation.assignedToId ?? null)) {
-          await logDealEventsForConversationContact(id, user.id, "ASSIGNEE_CHANGED", {
-            from: prev?.assignedTo ?? null,
-            to: result.conversation.assignedTo ?? null,
-          });
-          // Evento da própria conversa — independe de haver deal aberto.
-          // Reusa o tipo ASSIGNEE_CHANGED (já mapeado no EVENT_CONFIG do
-          // feed); o entityType=CONVERSATION distingue do escopo deal.
-          void logEvent({
-            type: "ASSIGNEE_CHANGED",
-            entityType: "CONVERSATION",
-            entityId: id,
-            entityLabel: result.conversation.externalId ?? null,
+          await logConversationAssigneeChanged({
             conversationId: id,
+            userId: user.id,
+            organizationId: sessionUser.organizationId,
             contactId: result.conversation.contactId ?? null,
-            field: "assignedTo",
-            oldValue: prev?.assignedTo?.name ?? null,
-            newValue: result.conversation.assignedTo?.name ?? null,
-            meta: {
-              fromUserId: prev?.assignedToId ?? null,
-              toUserId: result.conversation.assignedToId ?? null,
-            },
+            entityLabel: result.conversation.externalId ?? null,
+            fromUserId: prev?.assignedToId ?? null,
+            toUserId: result.conversation.assignedToId ?? null,
+            fromName: prev?.assignedTo?.name ?? null,
+            toName: result.conversation.assignedTo?.name ?? null,
           });
           // Assumir / reassign: cancela debounce IA pendente.
           cancelAiReplyDebounce(id, "assignee_changed");
@@ -282,41 +322,17 @@ export async function POST(request: Request, context: RouteContext) {
             (prev?.assignedToId ?? null) !==
             (result.conversation.assignedToId ?? null)
           ) {
-            await logDealEventsForConversationContact(id, user.id, "ASSIGNEE_CHANGED", {
-              from: prev?.assignedTo ?? null,
-              to: result.conversation.assignedTo ?? null,
-            });
-            // AWAIT (nao fire-and-forget): garante que a linha exista ANTES
-            // da resposta, senao o refetch imediato do chatter perde o
-            // evento (mesma corrida do resolve/reopen).
-            await logEvent({
-              type: "ASSIGNEE_CHANGED",
-              entityType: "CONVERSATION",
-              entityId: id,
-              entityLabel: result.conversation.externalId ?? null,
+            await logConversationAssigneeChanged({
               conversationId: id,
+              userId: user.id,
+              organizationId: sessionUser.organizationId,
               contactId: result.conversation.contactId ?? null,
-              field: "assignedTo",
-              oldValue: prev?.assignedTo?.name ?? null,
-              newValue: result.conversation.assignedTo?.name ?? null,
-              meta: {
-                fromUserId: prev?.assignedToId ?? null,
-                toUserId: result.conversation.assignedToId ?? null,
-              },
+              entityLabel: result.conversation.externalId ?? null,
+              fromUserId: prev?.assignedToId ?? null,
+              toUserId: result.conversation.assignedToId ?? null,
+              fromName: prev?.assignedTo?.name ?? null,
+              toName: result.conversation.assignedTo?.name ?? null,
             });
-            // Empurra o evento pro chatter em tempo real (mesma via do
-            // resolve/reopen): atualiza a timeline mesmo quando a acao veio
-            // de outro agente.
-            try {
-              sseBus.publish("conversation_timeline_updated", {
-                organizationId: (session.user as { organizationId: string | null })
-                  .organizationId,
-                conversationId: id,
-                type: "ASSIGNEE_CHANGED",
-              });
-            } catch {
-              /* best-effort */
-            }
           }
         }
 

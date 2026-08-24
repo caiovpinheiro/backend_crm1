@@ -94,7 +94,8 @@ function activityMatchesMessage(
         action === "transferencia" ||
         action === "entrada" ||
         action === "saida" ||
-        action === "distribuicao"
+        action === "distribuicao" ||
+        action === "atribuicao"
       );
     case "CONVERSATION_DEPARTMENT_CHANGED":
       return action === "transferencia";
