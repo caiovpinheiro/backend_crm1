@@ -3112,14 +3112,14 @@ export async function processMetaWebhookPayload(
               log.error("Falha no ensureInboundAiAttendance:", err);
             }
 
-            let salesbotHandled = false;
+            let salesbotReplied = false;
             try {
               const salesbotResult = await processSalesbotMessage(contact.id, parsed.text, {
                 interactiveId: parsed.interactiveButtonId,
                 channelId: conversation.channelId,
                 conversationId: conversation.id,
               });
-              salesbotHandled = Boolean(salesbotResult?.handled);
+              salesbotReplied = Boolean(salesbotResult?.replied);
             } catch (err) {
               log.error("Falha no salesbot:", err);
             }
@@ -3151,10 +3151,12 @@ export async function processMetaWebhookPayload(
             }
 
             // Agente de IA: agenda resposta com debounce (agrupa msgs consecutivas).
-            // Quando o salesbot consumiu a mensagem (clique de botão casado
-            // com automação pausada), a IA NÃO fala — a resposta era insumo
-            // do fluxo, não uma pergunta pro agente.
-            if (!isSystemMessage && parsed.text && !salesbotHandled) {
+            // Quando o salesbot RESPONDEU (clique de botão casado com automação
+            // pausada), a IA NÃO fala — a resposta era insumo do fluxo, não uma
+            // pergunta pro agente. Mas quando ele só encerrou o robô (handoff
+            // por texto livre / ponteiro morto) ninguém falou com o aluno:
+            // silenciar a IA aí deixava a mensagem sem nenhuma resposta.
+            if (!isSystemMessage && parsed.text && !salesbotReplied) {
               void scheduleAiReply({
                 conversationId: conversation.id,
                 contactId: contact.id,
