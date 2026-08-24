@@ -15,6 +15,8 @@ import {
 import { prisma } from "@/lib/prisma";
 import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
 
+export const maxDuration = 30;
+
 type RouteContext = { params: Promise<{ id: string }> };
 
 function str(v: unknown): string {
@@ -261,12 +263,8 @@ export async function POST(request: Request, context: RouteContext) {
         }
         return NextResponse.json(result);
       } catch (err) {
-        const raw = err instanceof Error ? err.message : String(err);
-        const mapped = mapMetaWhatsappCallGraphError(raw);
-        if (mapped) {
-          return NextResponse.json({ message: mapped.message }, { status: mapped.status });
-        }
-        throw err;
+        const mapped = mapMetaWhatsappCallGraphError(err);
+        return NextResponse.json({ message: mapped.message }, { status: mapped.status });
       }
     }
 
@@ -307,8 +305,8 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json(result);
     } catch (e) {
       console.error(e);
-      const msg = e instanceof Error ? e.message : "Erro na chamada WhatsApp.";
-      return NextResponse.json({ message: msg }, { status: 500 });
+      const mapped = mapMetaWhatsappCallGraphError(e);
+      return NextResponse.json({ message: mapped.message }, { status: mapped.status });
     }
   });
 }
