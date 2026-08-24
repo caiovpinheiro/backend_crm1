@@ -16,6 +16,7 @@ import { sseBus } from "@/lib/sse-bus";
 
 export const CONVERSATION_EVENT_ACTIONS = [
   "distribuicao",
+  "atribuicao",
   "transferencia",
   "status",
   "tabulacao",

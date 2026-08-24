@@ -167,16 +167,17 @@ function mapChatEvent(
       // Não espelhar no chat — gerava o mesmo evento a cada ciclo.
       return null;
     case "ASSIGNEE_CHANGED": {
+      const fromShort = formatHumanActorDisplayName(from) || from;
+      const toShort = formatHumanActorDisplayName(to) || to;
       if (from && to) {
-        const dest = dept ? `${to} (${dept})` : to;
+        const dest = dept ? `${toShort} (${dept})` : toShort;
         return {
           action: "transferencia",
-          text: `Transferida de ${from} para ${dest}`,
+          text: `Transferida de ${fromShort} para ${dest}`,
           actor,
         };
       }
       if (!from && to) {
-        const toShort = formatHumanActorDisplayName(to) || to;
         if (isSelfAssigneeAction(input, actor, to, "toUserId")) {
           return {
             action: "entrada",
@@ -185,13 +186,12 @@ function mapChatEvent(
           };
         }
         return {
-          action: "distribuicao",
-          text: `Conversa distribuída para ${to}`,
+          action: "atribuicao",
+          text: `Atribuída a ${toShort}`,
           actor: actor || "Sistema",
         };
       }
       if (from && !to) {
-        const fromShort = formatHumanActorDisplayName(from) || from;
         if (isSelfAssigneeAction(input, actor, from, "fromUserId")) {
           return {
             action: "saida",
@@ -288,12 +288,29 @@ function mapChatEvent(
   }
 }
 
-/** Fire-and-forget. Não lança. */
-export function mirrorConversationChatEvent(input: MirrorInput): void {
+const CHAT_MIRROR_TYPES = new Set([
+  "LEAD_DISTRIBUTED",
+  "ASSIGNEE_CHANGED",
+  "CONVERSATION_DEPARTMENT_CHANGED",
+  "CONVERSATION_CREATED",
+  "CONVERSATION_CLOSED",
+  "CONVERSATION_REOPENED",
+  "CONVERSATION_STATUS_CHANGED",
+  "CONVERSATION_TABULATED",
+  "TAG_ADDED",
+  "TAG_REMOVED",
+  "AI_AGENT_HANDOFF",
+]);
+
+/** Espelha no chat. Não lança. Await para o evento existir antes da resposta. */
+export async function mirrorConversationChatEvent(
+  input: MirrorInput,
+): Promise<void> {
   const conversationId = conversationIdOf(input);
   if (!conversationId) return;
+  if (!CHAT_MIRROR_TYPES.has(input.type)) return;
 
-  void (async () => {
+  try {
     const actor = await resolveChatEventActor(input);
     let conversationNumber: number | null = null;
     if (
@@ -340,5 +357,7 @@ export function mirrorConversationChatEvent(input: MirrorInput): void {
       dedupeStartsWith,
       dedupeWindowMs: mapped.action === "distribuicao" ? 120_000 : 20_000,
     });
-  })().catch(() => {});
+  } catch {
+    /* espelho não pode derrubar o log principal */
+  }
 }

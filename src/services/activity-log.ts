@@ -180,7 +180,7 @@ export async function logEvent(input: LogEventInput): Promise<void> {
         meta: metaJson,
       }),
     });
-    mirrorConversationChatEvent({
+    await mirrorConversationChatEvent({
       type: input.type,
       entityType: input.entityType,
       entityId: input.entityId,
