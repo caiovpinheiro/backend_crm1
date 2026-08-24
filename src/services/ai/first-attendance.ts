@@ -21,6 +21,7 @@ import {
   isInauguralLinkWindow,
 } from "@/services/ai/inaugural-class-link";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -255,6 +256,23 @@ export async function tryAssignFirstAttendanceAi(args: {
   } catch (e) {
     console.error("[ai] first_attendance allowlist failed — skipping", e);
     return null;
+  }
+
+  try {
+    const keptHumanId = await keepHumanAfterAutomationClose({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+    });
+    if (keptHumanId) {
+      logAi("first_attendance_keep_human_after_automation_close", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        humanUserId: keptHumanId,
+      });
+      return null;
+    }
+  } catch (e) {
+    console.error("[ai] keepHumanAfterAutomationClose failed", e);
   }
 
   try {
