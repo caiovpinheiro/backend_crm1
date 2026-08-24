@@ -199,6 +199,8 @@ export async function PUT(request: Request, context: RouteContext) {
           : typeof b.ownerId === "string"
             ? b.ownerId
             : undefined,
+      propagateToChat:
+        typeof b.propagateToChat === "boolean" ? b.propagateToChat : undefined,
       orgUnitId:
         b.orgUnitId === null
           ? null
@@ -240,7 +242,7 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     // Campos comuns (título, valor, contato…) seguem sob `deal:edit`.
-    const scopedFields = new Set(["stageId", "ownerId"]);
+    const scopedFields = new Set(["stageId", "ownerId", "propagateToChat"]);
     const touchesCommonFields = Object.keys(payload).some((k) => !scopedFields.has(k));
     if (touchesCommonFields) {
       const editDenied = await requirePermissionForUser(authResult.user, "deal:edit");
@@ -249,6 +251,7 @@ export async function PUT(request: Request, context: RouteContext) {
 
     const blockedFields: string[] = [];
     for (const key of Object.keys(payload)) {
+      if (key === "propagateToChat") continue;
       if (!(await canEditFieldForUser(authResult.user, "deal", key))) blockedFields.push(key);
     }
     if (blockedFields.length > 0) {
