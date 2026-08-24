@@ -131,10 +131,11 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 
 ## CONFIANÇA (obrigatório)
 Última linha da sua resposta (oculta para o aluno — o sistema remove): [CONFIANCA:X.X]
-- Alta (0.8+) se o tema está claramente nas refs/tools **ou** em MODELOS INTERNOS DE REFERÊNCIA.
-- Média (0.5–0.7) se dá orientação útil parcial.
-- Baixa (< 0.5) SOMENTE se as refs/modelos NÃO cobrem o assunto — não chute; o sistema pode transferir automaticamente abaixo de 0.40.
-- Se for baixa após tentar orientar: marque confiança baixa; o backend cuida do handoff. Evite transferir "no escuro" sem tentar uma resposta útil.
+A nota mede se VOCÊ consegue seguir o turno — não se a KB trouxe um card.
+- Alta (0.8+): cumprimento (oi/olá/bom dia), conversa leve, ou tema coberto nas refs/modelos/tools.
+- Média (0.5–0.7): orientação útil parcial; ainda dá para continuar com 1 pergunta.
+- Baixa (< 0.40): o aluno fez uma DÚVIDA FACTUAL e as refs/modelos NÃO cobrem — não chute. O sistema transfere abaixo de 0.40.
+- PROIBIDO marcar baixa em "oi", "bom dia", "tudo bem", agradecimento ou mensagem vaga. Nesses casos use 0.85+.
 `.trim();
 
 /** Prompt override pronto para colar / script em agentes existentes. */
@@ -144,6 +145,15 @@ export const ACADEMIC_SYSTEM_PROMPT_OVERRIDE = ACADEMIC_ATENDIMENTO_RULES;
  * Bloco curto injetado sempre no runtime acadêmico (mesmo se o
  * `systemPromptOverride` do banco estiver desatualizado).
  */
+/** Injetado sempre no runtime — o override do banco pode ter a régua velha. */
+export const ACADEMIC_CONFIDENCE_RULES = `
+## CONFIANÇA (runtime — regra dura)
+Última linha: [CONFIANCA:X.X]
+- 0.85+ em oi/olá/bom dia/boa tarde/boa noite/tudo bem/obrigado — isso NÃO é falta de base.
+- 0.8+ se você consegue continuar o atendimento (saudação, pergunta de destravar, ou refs cobrem).
+- < 0.40 SÓ se o aluno perguntou algo factual e as refs/modelos não cobrem. Aí o sistema distribui.
+`.trim();
+
 export const ACADEMIC_MEDIA_CAPABILITY_RULES = `
 ## MÍDIA / VÍDEO (runtime — regra dura)
 - Você NÃO envia vídeo/imagem/áudio/arquivo neste WhatsApp — só texto e URLs.

@@ -1131,29 +1131,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         error: result.error ?? "unknown",
         durationMs: Date.now() - startedAt.getTime(),
       });
-      // Distribui primeiro; só avisa fila se não caiu em consultor humano
-      // (saudação fica com a automação "como responsável").
-      await executeAcademicDepartmentHandoff({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        dealId: openDeal?.id ?? null,
-        userMessage: args.userMessage,
-        reason: `Falha no run da IA: ${result.error ?? "unknown"}`,
-      }).catch(() => null);
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text: buildGenericQueueHandoffMessage(),
-          channel: args.channel,
-          kind: "text",
-          humanBehavior,
-          generationId: args.generationId,
-          bypassAssigneeCheck: true,
-        }).catch(() => null);
-      }
+      // Falha de LLM/chave NÃO é pedido de humano. Distribuir aqui era o
+      // motivo do agente "só enfileirar": qualquer erro (ex. API key)
+      // mandava o lead à fila. A conversa fica na IA para retry.
       return;
     }
 
@@ -1163,11 +1143,14 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // distribui de fato. "Atender primeiro" = não chamar tool / não prometer
     // handoff enquanto ainda dá para orientar; se o agente já decidiu
     // transferir, o backend NÃO adia.
+    const lowConfHandoff =
+      shouldHandoffOnLowConfidence(parsedEarly.confidence) &&
+      !isBareGreetingMessage(args.userMessage);
     const transferred =
       result.status === "HANDOFF" ||
       runHadTransferTools(result.toolCalls) ||
       textImpliesAcademicHandoff(replyText) ||
-      shouldHandoffOnLowConfidence(parsedEarly.confidence);
+      lowConfHandoff;
 
     if (transferred) {
       const handoffText =
@@ -1207,7 +1190,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           contactId: args.contactId,
           dealId: openDeal?.id ?? null,
           userMessage: args.userMessage,
-          reason: shouldHandoffOnLowConfidence(parsedEarly.confidence)
+          reason: lowConfHandoff
             ? `Baixa confiança da IA (${parsedEarly.confidence?.toFixed(2)})`
             : runHadTransferTools(result.toolCalls)
               ? "Handoff via tool da IA — distribuição/fila"
@@ -1358,67 +1341,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         })
         .catch(() => null);
     }
-    if (!text && !shouldHandoffOnLowConfidence(parsed.confidence)) {
-      logAi("empty_reply", {
-        conversationId: args.conversationId,
-        durationMs: Date.now() - startedAt.getTime(),
-      });
-      return;
-    }
-
-    // Paridade DataCrazy: confiança < 0.40 → mensagem neutra + handoff
-    // (não envia chute do LLM; não usa execute_distribution).
-    if (shouldHandoffOnLowConfidence(parsed.confidence)) {
-      const authLow = await assertAiStillAuthorized({
-        conversationId: args.conversationId,
-        expectedAgentUserId: assignee.id,
-        generationId: args.generationId,
-        since: startedAt,
-      });
-      if (!authLow.ok) {
-        logAi("blocked", {
-          conversationId: args.conversationId,
-          reason: authLow.reason,
-          phase: "pre_low_conf_handoff",
-        });
-        return;
-      }
-      await executeAcademicDepartmentHandoff({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        dealId: openDeal?.id ?? null,
-        userMessage: args.userMessage,
-        reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
-      });
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text: buildHumanUnavailableOfferMessage(),
-          channel: args.channel,
-          kind: "text",
-          humanBehavior,
-          generationId: args.generationId,
-          bypassAssigneeCheck: true,
-        }).catch(() => null);
-      }
-      await prisma.aIAgentRun
-        .update({
-          where: { id: result.runId },
-          data: { status: "HANDOFF", handoffReason: "low_confidence" },
-        })
-        .catch(() => null);
-      logAi("handoff", {
-        conversationId: args.conversationId,
-        reason: "low_confidence",
-        confidence: parsed.confidence,
-        durationMs: Date.now() - startedAt.getTime(),
-      });
-      return;
-    }
-
     if (!text) {
       logAi("empty_reply", {
         conversationId: args.conversationId,
