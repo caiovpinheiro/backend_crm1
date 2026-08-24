@@ -5,44 +5,112 @@
  * de LLM/chave, canal fora do ar e qualquer caminho em que o agente fica
  * em silêncio — sem isso o lead fica preso na IA e nunca chega a humano.
  *
- * Override: `AI_AGENT_STUCK_INBOUND_MS` (0 desliga).
+ * Roda no tick do `ai-agent-inactivity-worker` (override:
+ * `AI_AGENT_STUCK_INBOUND_MS`, 0 desliga) e como ação de ops via
+ * `/api/cron/distribute-stuck-inbound` (dry-run + limite).
+ *
+ * Nunca envia mensagem ao aluno: só reatribui / enfileira.
  */
 
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { executeAcademicDepartmentHandoff } from "@/services/ai/academic-department-routing";
 
 export const STUCK_INBOUND_MS = 15 * 60 * 1000;
 
 const BATCH_SIZE = 50;
+const MAX_LIMIT = 500;
 
 type StuckRow = {
   conversation_id: string;
+  conversation_number: number;
   contact_id: string;
+  contact_name: string | null;
+  contact_phone: string | null;
   organization_id: string;
   last_inbound_at: Date;
+  channel_name: string | null;
+  channel_phone: string | null;
+  channel_config: unknown;
 };
 
-async function listStuckInbound(
-  now: Date,
-  stuckMs: number,
-): Promise<StuckRow[]> {
+export type StuckInboundOptions = {
+  now?: Date;
+  /** Tempo mínimo sem resposta para entrar na varredura. 0 desliga. */
+  stuckMs?: number;
+  /** Só olha inbound dos últimos N ms. 0 = sem limite (padrão). */
+  sinceMs?: number;
+  limit?: number;
+  /** false = dry-run (só lista, não distribui). Padrão true. */
+  apply?: boolean;
+  organizationId?: string | null;
+};
+
+export type StuckInboundItem = {
+  conversationNumber: number;
+  contact: string;
+  phone: string | null;
+  lastInboundAt: string | null;
+  idleMinutes: number;
+  status: "listed" | "distributed" | "queued" | "failed";
+  department: string | null;
+  assignedTo: string | null;
+  reason?: string;
+  error?: string;
+};
+
+export type StuckInboundResult = {
+  apply: boolean;
+  stuckMs: number;
+  sinceMs: number;
+  candidates: number;
+  distributed: number;
+  queued: number;
+  failed: number;
+  items: StuckInboundItem[];
+};
+
+async function listStuckInbound(args: {
+  now: Date;
+  stuckMs: number;
+  sinceMs: number;
+  limit: number;
+  organizationId: string;
+}): Promise<StuckRow[]> {
+  const cutoff = new Date(args.now.getTime() - args.stuckMs);
+  // sinceMs = 0 → epoch, ou seja, sem limite inferior de janela.
+  const since = new Date(
+    args.sinceMs > 0 ? args.now.getTime() - args.sinceMs : 0,
+  );
+  const org = args.organizationId;
+
   return prismaBase.$queryRaw<StuckRow[]>`
     SELECT
       c.id AS conversation_id,
+      c."number" AS conversation_number,
       c."contactId" AS contact_id,
+      ct.name AS contact_name,
+      ct.phone AS contact_phone,
       c."organizationId" AS organization_id,
-      c."lastInboundAt" AS last_inbound_at
+      c."lastInboundAt" AS last_inbound_at,
+      ch.name AS channel_name,
+      ch."phoneNumber" AS channel_phone,
+      ch.config AS channel_config
     FROM "conversations" c
     JOIN "users" u ON u.id = c."assignedToId"
     JOIN "ai_agent_configs" a ON a."userId" = u.id
+    LEFT JOIN "contacts" ct ON ct.id = c."contactId"
+    LEFT JOIN "channels" ch ON ch.id = c."channelId"
     WHERE u.type = 'AI'
       AND a.active = true
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
       AND c."contactId" IS NOT NULL
       AND c."lastInboundAt" IS NOT NULL
-      AND c."lastInboundAt" < (${now}::timestamptz - ((${stuckMs})::text || ' milliseconds')::interval)
+      AND c."lastInboundAt" < ${cutoff}::timestamptz
+      AND c."lastInboundAt" >= ${since}::timestamptz
+      AND (${org}::text = '' OR c."organizationId" = ${org}::text)
       -- Ninguém respondeu depois da última mensagem do aluno.
       AND NOT EXISTS (
         SELECT 1 FROM messages m
@@ -59,33 +127,116 @@ async function listStuckInbound(
           AND (dp."conversationId" = c.id OR dp."contactId" = c."contactId")
       )
     ORDER BY c."lastInboundAt" ASC
-    LIMIT ${BATCH_SIZE};
+    LIMIT ${args.limit};
   `;
 }
 
+/**
+ * Aceita a forma legada `(now, stuckMs)` usada pelo worker e a forma
+ * com opções usada pela rota de ops.
+ */
 export async function distributeStuckInbound(
-  now: Date = new Date(),
-  stuckMs: number = STUCK_INBOUND_MS,
-): Promise<{ distributed: number }> {
-  if (stuckMs <= 0) return { distributed: 0 };
+  arg?: Date | StuckInboundOptions,
+  legacyStuckMs?: number,
+): Promise<StuckInboundResult> {
+  const opts: StuckInboundOptions =
+    arg === undefined || arg instanceof Date
+      ? { now: arg, stuckMs: legacyStuckMs }
+      : arg;
 
-  const rows = await listStuckInbound(now, stuckMs);
+  const now = opts.now ?? new Date();
+  const stuckMs = opts.stuckMs ?? STUCK_INBOUND_MS;
+  const sinceMs = Math.max(0, opts.sinceMs ?? 0);
+  const limit = Math.min(MAX_LIMIT, Math.max(1, opts.limit ?? BATCH_SIZE));
+  const apply = opts.apply ?? true;
+
+  const empty: StuckInboundResult = {
+    apply,
+    stuckMs,
+    sinceMs,
+    candidates: 0,
+    distributed: 0,
+    queued: 0,
+    failed: 0,
+    items: [],
+  };
+  if (stuckMs <= 0) return empty;
+
+  const rows = await listStuckInbound({
+    now,
+    stuckMs,
+    sinceMs,
+    limit,
+    organizationId: opts.organizationId?.trim() || "",
+  });
+
+  const items: StuckInboundItem[] = [];
   let distributed = 0;
+  let queued = 0;
+  let failed = 0;
 
   for (const row of rows) {
-    const idleMin = Math.round(
+    // Número aposentado: não desatribui nem enfileira — ninguém atende ali.
+    if (
+      isRetiredWhatsAppChannel({
+        name: row.channel_name,
+        phoneNumber: row.channel_phone,
+        config: row.channel_config,
+      })
+    ) {
+      continue;
+    }
+
+    const idleMinutes = Math.round(
       (now.getTime() - new Date(row.last_inbound_at).getTime()) / 60_000,
     );
+    const base: StuckInboundItem = {
+      conversationNumber: row.conversation_number,
+      contact: row.contact_name ?? "?",
+      phone: row.contact_phone,
+      lastInboundAt: new Date(row.last_inbound_at).toISOString(),
+      idleMinutes,
+      status: "listed",
+      department: null,
+      assignedTo: null,
+    };
+
+    if (!apply) {
+      items.push(base);
+      continue;
+    }
+
     try {
-      await withSystemContext(row.organization_id, () =>
+      const result = await withSystemContext(row.organization_id, () =>
         executeAcademicDepartmentHandoff({
           conversationId: row.conversation_id,
           contactId: row.contact_id,
-          reason: `IA sem responder há ${idleMin} min — distribuição de segurança`,
+          reason: `IA sem responder há ${idleMinutes} min — distribuição de segurança`,
         }),
       );
-      distributed++;
+      const assigned =
+        result.distribution?.success && result.distribution.selectedUserId
+          ? (result.distribution.selectedUserName ?? "atribuído")
+          : null;
+      if (assigned) {
+        distributed++;
+      } else {
+        queued++;
+      }
+      items.push({
+        ...base,
+        status: assigned ? "distributed" : "queued",
+        department: result.departmentName,
+        assignedTo: assigned,
+        reason: result.distribution?.reason,
+      });
     } catch (err) {
+      failed++;
+      items.push({
+        ...base,
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
       console.error(
         `[ai-stuck-inbound] falha conv=${row.conversation_id}:`,
         err instanceof Error ? err.message : err,
@@ -93,10 +244,20 @@ export async function distributeStuckInbound(
     }
   }
 
-  if (distributed > 0) {
+  if (distributed > 0 || queued > 0) {
     console.info(
-      `[ai-stuck-inbound] distribuídas=${distributed} de ${rows.length} candidatas`,
+      `[ai-stuck-inbound] distribuídas=${distributed} enfileiradas=${queued} de ${items.length} candidatas`,
     );
   }
-  return { distributed };
+
+  return {
+    apply,
+    stuckMs,
+    sinceMs,
+    candidates: items.length,
+    distributed,
+    queued,
+    failed,
+    items,
+  };
 }
