@@ -5,6 +5,7 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { isAssigneeCurrentlyEligible } from "@/services/distribution/assignee-eligibility";
 
 const RETURN_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -51,8 +52,13 @@ async function wasClosedByAutomation(conversationId: string): Promise<boolean> {
       conversationId,
       isPrivate: false,
       OR: [
-        { senderName: { contains: "Automa", mode: "insensitive" } },
         { content: { contains: "encerrada por Automa", mode: "insensitive" } },
+        {
+          content: {
+            contains: "encerrada devido a falta de intera",
+            mode: "insensitive",
+          },
+        },
       ],
     },
     orderBy: { createdAt: "desc" },
@@ -110,7 +116,12 @@ export async function findHumanToKeepAfterAutomationClose(
     where: { id: humanId, type: "HUMAN" },
     select: { id: true },
   });
-  return stillHuman?.id ?? null;
+  if (!stillHuman) return null;
+
+  // Offline / fora do expediente / fila cheia: devolver a ele deixaria o
+  // aluno parado. Nesse caso segue o fluxo normal de distribuição.
+  const check = await isAssigneeCurrentlyEligible(stillHuman.id);
+  return check.eligible ? stillHuman.id : null;
 }
 
 /** Atribui o consultor anterior e impede a IA de assumir. */
