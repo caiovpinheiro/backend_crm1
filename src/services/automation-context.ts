@@ -411,6 +411,20 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
   });
 }
 
+export type SalesbotProcessResult = {
+  /** O robô consumiu a mensagem (o fluxo avançou ou foi encerrado por ela). */
+  handled: boolean;
+  /**
+   * O robô de fato RESPONDEU o aluno. Quando ele apenas encerrou o contexto
+   * (handoff: texto livre sem match, ponteiro morto, step que não esperava
+   * resposta), ninguém falou com o aluno — e a IA precisa assumir. O gate em
+   * `src/lib/meta-webhook/handler.ts` usa este campo, não `handled`.
+   */
+  replied: boolean;
+  automationId?: string;
+  contextId?: string;
+};
+
 export async function processIncomingMessage(
   contactId: string,
   messageContent: string,
@@ -419,7 +433,7 @@ export async function processIncomingMessage(
     channelId?: string | null;
     conversationId?: string | null;
   },
-) {
+): Promise<SalesbotProcessResult> {
   // Só cancela/bloqueia retomada quando HUMANO está no atendimento
   // (`humanAttending`). `suppressAutomation` também é true com assignee IA
   // e serve para NÃO disparar automações novas nos triggers — aqui não
@@ -435,7 +449,7 @@ export async function processIncomingMessage(
       log.info(
         `processIncomingMessage skip — humano atendendo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"} hasHumanReply=${snap.hasHumanReply}`,
       );
-      return { handled: false as const };
+      return { handled: false, replied: false };
     }
     if (snap?.assignedToId) {
       log.debug(
@@ -608,7 +622,14 @@ export async function processIncomingMessage(
               `processIncomingMessage handoff — texto livre sem match de botão ("${messageContent.slice(0, 40)}") auto=${ctx.automation.name} step=${currentStep.id}`,
             );
             await cancelContext(ctx.id);
-            return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+            // Handoff: o robô saiu de cena SEM responder o aluno — a IA/o
+            // consultor é quem precisa falar agora (`replied: false`).
+            return {
+              handled: true,
+              replied: false,
+              automationId: ctx.automationId,
+              contextId: ctx.id,
+            };
           } else {
             nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
             log.info(
@@ -647,12 +668,12 @@ export async function processIncomingMessage(
             `nextStepId=${currentTargetId} não existe na automação ${ctx.automation.name} — fechando contexto`,
           );
           await advanceContext(ctx.id, null, variables);
-          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+          return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
         }
         if (targetStep.type === "finish") {
           await advanceContext(ctx.id, null, variables);
           log.info(`fluxo finalizado — auto=${ctx.automation.name} contato=${contactId}`);
-          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+          return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
         }
 
         if (targetStep.type === "wait_for_reply") {
@@ -664,7 +685,7 @@ export async function processIncomingMessage(
                 `wait_for_reply (cascata) sem receivedGotoStepId — auto=${ctx.automation.name} step=${targetStep.id} → fim de ramo (conecte a saída "resposta recebida" no canvas)`,
               );
               await advanceContext(ctx.id, null, variables);
-              return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+              return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
             }
             currentTargetId = fallback;
             log.info(
@@ -711,7 +732,7 @@ export async function processIncomingMessage(
           `cascata de wait_for_reply excedeu ${CASCADE_LIMIT} saltos — auto=${ctx.automation.name} → fechando contexto (possível loop de configuração)`,
         );
         await advanceContext(ctx.id, null, variables);
-        return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+        return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
       }
     } else {
       // nextStepId nulo: encerra o contexto (não cai em fallback de array
@@ -720,7 +741,7 @@ export async function processIncomingMessage(
       log.info(`fluxo finalizado (sem próximo) — auto=${ctx.automation.name} contato=${contactId}`);
     }
 
-    return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+    return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
   }
 
   log.debug(`nenhum contexto interativo encontrado pra contato=${contactId}`);
@@ -732,7 +753,9 @@ export async function processIncomingMessage(
       `processIncomingMessage handoff leftover — contact=${contactId} cancelled=${leftover}`,
     );
   }
-  return { handled: false };
+  // Também chega aqui quando os contextos foram encerrados no loop acima
+  // (ponteiro morto / step que não esperava resposta): ninguém respondeu.
+  return { handled: false, replied: false };
 }
 
 async function dispatchToNextStep(
