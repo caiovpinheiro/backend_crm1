@@ -3,7 +3,8 @@ import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
+import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
+import { sseBus } from "@/lib/sse-bus";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { logEvent, withAutomationOriginMeta } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
@@ -526,6 +527,11 @@ export type UpdateDealInput = {
   stageId?: string;
   ownerId?: string | null;
   orgUnitId?: string | null;
+  /**
+   * Quando o owner muda: também atualiza conversas do contato.
+   * `false` = só negócio (e contato). Default `true` (herança).
+   */
+  propagateToChat?: boolean;
 };
 
 export async function updateDeal(id: string, data: UpdateDealInput) {
@@ -564,6 +570,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     data.stageId === undefined ? null : await pipelineIdOfDeal(id);
 
   // REGRA DE HERANÇA DE RESPONSÁVEL (ver `assignDealOwner` abaixo).
+  let chatAssigneeChanges: ConversationAssigneeChange[] = [];
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.deal.update({
       where: { id },
@@ -574,11 +581,19 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     if (data.ownerId !== undefined) {
       const contactId =
         data.contactId !== undefined ? data.contactId : row.contactId;
-      await propagateOwnerToContactAndChat(tx, contactId, data.ownerId);
+      chatAssigneeChanges = await propagateOwnerToContactAndChat(
+        tx,
+        contactId,
+        data.ownerId,
+        { conversations: data.propagateToChat !== false },
+      );
     }
 
     return row;
   });
+  if (chatAssigneeChanges.length > 0) {
+    await logConversationAssigneeChanges(chatAssigneeChanges);
+  }
 
   await invalidateBoardsForPipelines([
     updated.stage?.pipelineId,
@@ -600,19 +615,65 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
  *
  * - `ownerId === null` → desatribui contato e conversas.
  * - `contactId === null` → no-op (não há a quem propagar).
+ * - `opts.conversations === false` → só contato, não mexe no chat.
  * - Deve rodar dentro de uma transaction (`tx`) — a função não
  *   abre uma própria para poder compor com contextos maiores.
+ * - Devolve as conversas que mudaram (para o caller logar no chat).
  */
+export type ConversationAssigneeChange = {
+  conversationId: string;
+  contactId: string | null;
+  entityLabel: string | null;
+  fromUserId: string | null;
+  fromName: string | null;
+  toUserId: string | null;
+  toName: string | null;
+};
+
+async function logConversationAssigneeChanges(
+  changes: ConversationAssigneeChange[],
+) {
+  const organizationId = getOrgIdOrNull();
+  for (const c of changes) {
+    await logEvent({
+      type: "ASSIGNEE_CHANGED",
+      entityType: "CONVERSATION",
+      entityId: c.conversationId,
+      entityLabel: c.entityLabel,
+      conversationId: c.conversationId,
+      contactId: c.contactId,
+      field: "assignedTo",
+      oldValue: c.fromName,
+      newValue: c.toName,
+      meta: {
+        fromUserId: c.fromUserId,
+        toUserId: c.toUserId,
+      },
+    });
+    try {
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId,
+        conversationId: c.conversationId,
+        type: "ASSIGNEE_CHANGED",
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 export async function propagateOwnerToContactAndChat(
   tx: ScopedTx,
   contactId: string | null | undefined,
   ownerId: string | null,
-) {
-  if (!contactId) return;
+  opts?: { conversations?: boolean },
+): Promise<ConversationAssigneeChange[]> {
+  if (!contactId) return [];
   await tx.contact.update({
     where: { id: contactId },
     data: { assignedToId: ownerId },
   });
+  if (opts?.conversations === false) return [];
   // Só reseta aiGreetedAt quando o assignedToId MUDA — evita flush
   // acidental quando a automação roda sem alteração real.
   //
@@ -630,24 +691,48 @@ export async function propagateOwnerToContactAndChat(
           OR: [{ assignedToId: null }, { assignedToId: { not: ownerId } }],
         };
 
+  const toChange = await tx.conversation.findMany({
+    where: changedWhere,
+    select: {
+      id: true,
+      contactId: true,
+      externalId: true,
+      assignedToId: true,
+      assignedTo: { select: { id: true, name: true } },
+    },
+  });
+  if (toChange.length === 0) return [];
+
   // Só reseta aiGreetedAt quando o novo responsável é IA — atribuição a
   // humano (ou remoção) não deve apagar o marcador de saudação.
   let newOwnerIsAi = false;
+  let toName: string | null = null;
   if (ownerId) {
     const ownerRow = await tx.user.findUnique({
       where: { id: ownerId },
-      select: { type: true },
+      select: { type: true, name: true },
     });
     newOwnerIsAi = ownerRow?.type === "AI";
+    toName = ownerRow?.name ?? null;
   }
 
   await tx.conversation.updateMany({
-    where: changedWhere,
+    where: { id: { in: toChange.map((c) => c.id) } },
     data: {
       assignedToId: ownerId,
       ...(newOwnerIsAi ? { aiGreetedAt: null } : {}),
     },
   });
+
+  return toChange.map((c) => ({
+    conversationId: c.id,
+    contactId: c.contactId,
+    entityLabel: c.externalId ?? null,
+    fromUserId: c.assignedToId,
+    fromName: c.assignedTo?.name ?? null,
+    toUserId: ownerId,
+    toName,
+  }));
 }
 
 /**
