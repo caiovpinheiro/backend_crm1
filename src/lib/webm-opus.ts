@@ -187,6 +187,16 @@ export function demuxWebmOpus(buf: Buffer): WebmOpusTrack | null {
       const dataStart = off + id.length + size.length;
       if (dataStart > end) return;
 
+      // Cluster é percorrido SEM recursão. O MediaRecorder grava Cluster com
+      // tamanho desconhecido; nesse caso o próximo Cluster viraria filho do
+      // anterior, a profundidade cresceria 1 por cluster e o teto `depth > 8`
+      // descartaria o áudio a partir do 8º cluster (~0,7 s com timeslice de
+      // 100 ms). Tratar os filhos no mesmo nível mantém profundidade constante.
+      if (id.value === ID_CLUSTER) {
+        off = dataStart;
+        continue;
+      }
+
       if (MASTER_IDS.has(id.value)) {
         const childEnd = size.value === UNKNOWN_SIZE ? end : Math.min(dataStart + size.value, end);
         if (id.value === ID_TRACK_ENTRY) {
