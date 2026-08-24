@@ -34,6 +34,7 @@ import {
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import {
   ACADEMIC_ATENDIMENTO_RULES,
+  ACADEMIC_CONFIDENCE_RULES,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
   formatCanonicalPortalAccessHint,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
@@ -217,8 +218,9 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
                 .filter(Boolean)
                 .join("\n\n"),
-          // Sempre: override no banco pode estar velho sem a regra de mídia.
+          // Sempre: override no banco pode estar velho sem mídia/confiança.
           ACADEMIC_MEDIA_CAPABILITY_RULES,
+          ACADEMIC_CONFIDENCE_RULES,
         ]
           .filter(Boolean)
           .join("\n\n")

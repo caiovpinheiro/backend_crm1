@@ -132,9 +132,14 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       AND a.active = true
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
-      AND c."lastMessageDirection" = 'out'
-      AND c."hasAgentReply" = true
       AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
+      -- Aluno não falou depois da última mensagem da IA. Não usamos
+      -- lastMessageDirection/hasAgentReply: no lead de entrada essas flags
+      -- atrasam ou ficam 'in' e o check-in nunca disparava.
+      AND (
+        c."lastInboundAt" IS NULL
+        OR c."lastInboundAt" <= last_out."createdAt"
+      )
     ORDER BY last_out."createdAt" ASC
     LIMIT ${BATCH_SIZE};
   `;
@@ -193,7 +198,14 @@ async function processIdleAiOnly(
             kind: "text",
           }),
         );
-        if (sent.status === "sent") nudged++;
+        if (sent.status === "sent") {
+          nudged++;
+        } else {
+          console.warn(
+            `[ai-inactivity] check-in não enviado conv=${row.conversation_id} status=${sent.status}` +
+              ("reason" in sent ? ` reason=${sent.reason}` : ""),
+          );
+        }
       }
     } catch (err) {
       console.error(
