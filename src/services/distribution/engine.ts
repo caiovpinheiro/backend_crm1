@@ -29,6 +29,7 @@ import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
+  shouldClearOwnershipOnIneligible,
 } from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
@@ -609,19 +610,29 @@ export async function executeDistribution(
     if (already?.assignedToId) {
       const contactId = input.contactId ?? already.contactId ?? null;
       const check = await isAssigneeCurrentlyEligible(already.assignedToId);
+      // O teto de fila barra lead NOVO; não tira de quem já é responsável.
+      // Soltar o dono por fila cheia jogaria o ticket na fila de espera sem
+      // ninguém elegível. Offline / fora do expediente seguem liberando.
+      const keepHumanAssignee =
+        !check.isAi &&
+        (check.eligible ||
+          !shouldClearOwnershipOnIneligible(
+            check.reason,
+            check.blockedReasons,
+          ));
       // IA nunca conta como distribuição humana bem-sucedida — limpa e segue.
       if (check.isAi && contactId) {
         await clearOwnershipForRedistribution({
           conversationId: input.conversationId,
           contactId,
         });
-      } else if (!check.eligible && contactId) {
+      } else if (!keepHumanAssignee && contactId) {
         // Offline/indisponível herdado: limpa e segue redistribuição.
         await clearOwnershipForRedistribution({
           conversationId: input.conversationId,
           contactId,
         });
-      } else if (check.eligible && !check.isAi) {
+      } else if (keepHumanAssignee) {
         if (contactId) {
           await syncOwnershipForContact(contactId);
         } else if (input.dealId) {
@@ -676,7 +687,14 @@ export async function executeDistribution(
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
         const healCheck = await isAssigneeCurrentlyEligible(healed);
-        if (!healCheck.eligible || healCheck.isAi) {
+        const healKeep =
+          !healCheck.isAi &&
+          (healCheck.eligible ||
+            !shouldClearOwnershipOnIneligible(
+              healCheck.reason,
+              healCheck.blockedReasons,
+            ));
+        if (!healKeep) {
           await clearOwnershipForRedistribution({
             conversationId: input.conversationId,
             contactId,

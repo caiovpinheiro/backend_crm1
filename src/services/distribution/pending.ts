@@ -30,6 +30,7 @@ import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
+  shouldClearOwnershipOnIneligible,
 } from "@/services/distribution/assignee-eligibility";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
@@ -641,7 +642,12 @@ export async function maybeDistributeNewInboundTicket(input: {
       );
       return;
     }
-    if (check.eligible) {
+    // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
+    // contato já é dele. Offline / fora do expediente seguem liberando.
+    const keepHumanAssignee =
+      check.eligible ||
+      !shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons);
+    if (keepHumanAssignee) {
       // IA herdada: mantém. Humano elegível sem reply nesta conversa:
       // libera p/ 1º atendimento IA (substitui INICIO-PIPE).
       if (!check.isAi) {
