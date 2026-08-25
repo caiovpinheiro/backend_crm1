@@ -765,6 +765,105 @@ export async function assignDealOwner(
 }
 
 /**
+ * Encerramento de conversa sem "manter atendente" (keepAgentOnEnd off):
+ * o responsável removido do chat também sai dos deals ABERTOS do contato
+ * e do próprio contato — senão o kanban segue mostrando a pessoa num
+ * atendimento já encerrado, e o próximo inbound herda o nome antigo.
+ *
+ * Guardas (não comprometer outros vínculos):
+ *   - Só limpa entidades cujo responsável É o `clearedUserId` removido —
+ *     deal de outro dono (ex.: transferido manualmente antes) fica intacto.
+ *   - Se outra conversa ABERTA do contato ainda está com esse responsável,
+ *     não limpa nada (o vínculo segue vivo por ali).
+ *
+ * Logs: OWNER_CHANGED por deal (timeline do card) + CONTACT_OWNER_CHANGED
+ * (feed do contato). Não dispara trigger `agent_changed` — encerramento
+ * já tem seus próprios gatilhos; disparar automação extra aqui seria
+ * efeito colateral fora do pedido.
+ */
+export async function clearContactOwnershipOnClose(args: {
+  contactId: string;
+  clearedUserId: string;
+  actorUserId: string | null;
+}): Promise<void> {
+  const { contactId, clearedUserId, actorUserId } = args;
+
+  const stillAssigned = await prisma.conversation.findFirst({
+    where: {
+      contactId,
+      status: { not: "RESOLVED" },
+      assignedToId: clearedUserId,
+    },
+    select: { id: true },
+  });
+  if (stillAssigned) return;
+
+  const [contact, deals] = await Promise.all([
+    prisma.contact.findUnique({
+      where: { id: contactId },
+      select: {
+        assignedToId: true,
+        assignedTo: { select: { name: true } },
+      },
+    }),
+    prisma.deal.findMany({
+      where: { contactId, status: "OPEN", ownerId: clearedUserId },
+      select: {
+        id: true,
+        owner: { select: { id: true, name: true } },
+        stage: { select: { pipelineId: true } },
+      },
+    }),
+  ]);
+
+  const clearContact = contact?.assignedToId === clearedUserId;
+  if (!clearContact && deals.length === 0) return;
+
+  await prisma.$transaction(async (tx) => {
+    if (clearContact) {
+      await tx.contact.update({
+        where: { id: contactId },
+        data: { assignedToId: null },
+      });
+    }
+    if (deals.length > 0) {
+      await tx.deal.updateMany({
+        where: { id: { in: deals.map((d) => d.id) } },
+        data: { ownerId: null },
+      });
+    }
+  });
+
+  const fromName = contact?.assignedTo?.name ?? null;
+  for (const deal of deals) {
+    createDealEvent(deal.id, actorUserId, "OWNER_CHANGED", {
+      from: deal.owner ? { id: deal.owner.id, name: deal.owner.name } : null,
+      to: null,
+      source: "conversation_closed",
+    }).catch(() => {});
+  }
+
+  if (clearContact) {
+    await logEvent({
+      type: "CONTACT_OWNER_CHANGED",
+      entityType: "CONTACT",
+      entityId: contactId,
+      contactId,
+      field: "assignedToId",
+      oldValue: fromName,
+      newValue: null,
+      meta: { from: fromName, to: null, source: "conversation_closed" },
+    }).catch(() => {});
+  }
+
+  if (deals.length > 0) {
+    await invalidateBoardsForPipelines(
+      deals.map((d) => d.stage?.pipelineId),
+    );
+  }
+}
+
+/**
  * Cura inconsistência Deal ↔ Contato ↔ Conversa: preenche só lados
  * vazios a partir de um responsável já existente (não sobrescreve donos
  * diferentes). Preferência: conversa → contato → deal aberto.

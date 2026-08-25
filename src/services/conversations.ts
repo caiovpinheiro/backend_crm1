@@ -13,7 +13,13 @@ import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label"
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
-import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  getOrgIdOrNull,
+  getOrgIdOrThrow,
+  getRequestContext,
+} from "@/lib/request-context";
+import { sseBus } from "@/lib/sse-bus";
+import { logEvent } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
@@ -1458,6 +1464,28 @@ export async function updateConversationStatusInDb(
         }
       : {};
 
+  // Snapshot ANTES do update: precisamos de quem era o atendente para
+  // logar a remoção e limpar deal/contato (abaixo).
+  let clearedAssignee: { id: string; name: string | null } | null = null;
+  let closeContactId: string | null = null;
+  if (status === "RESOLVED" && extra?.clearAssignedTo) {
+    const prev = await prisma.conversation.findUnique({
+      where: { id },
+      select: {
+        assignedToId: true,
+        contactId: true,
+        assignedTo: { select: { name: true } },
+      },
+    });
+    if (prev?.assignedToId) {
+      clearedAssignee = {
+        id: prev.assignedToId,
+        name: prev.assignedTo?.name ?? null,
+      };
+      closeContactId = prev.contactId ?? null;
+    }
+  }
+
   const updated = await prisma.conversation.update({
     where: { id },
     data: {
@@ -1489,6 +1517,46 @@ export async function updateConversationStatusInDb(
         }),
       )
       .catch(() => {});
+  }
+
+  // Encerrou SEM manter atendente → registra a remoção (chat + timeline)
+  // e limpa deal/contato que ainda apontavam para ela. Import dinâmico:
+  // deals.ts é pesado e este arquivo é importado por webhooks quentes.
+  if (clearedAssignee) {
+    const orgId = getOrgIdOrNull();
+    await logEvent({
+      type: "ASSIGNEE_CHANGED",
+      entityType: "CONVERSATION",
+      entityId: id,
+      entityLabel: updated.externalId ?? null,
+      conversationId: id,
+      contactId: closeContactId,
+      field: "assignedTo",
+      oldValue: clearedAssignee.name,
+      newValue: null,
+      meta: {
+        fromUserId: clearedAssignee.id,
+        toUserId: null,
+        reason: "conversation_closed",
+      },
+    });
+    try {
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId: orgId,
+        conversationId: id,
+        type: "ASSIGNEE_CHANGED",
+      });
+    } catch {
+      /* best-effort */
+    }
+    if (closeContactId) {
+      const { clearContactOwnershipOnClose } = await import("@/services/deals");
+      await clearContactOwnershipOnClose({
+        contactId: closeContactId,
+        clearedUserId: clearedAssignee.id,
+        actorUserId: getRequestContext()?.userId ?? null,
+      }).catch(() => {});
+    }
   }
 
   return updated;
