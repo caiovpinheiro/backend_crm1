@@ -5,6 +5,16 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-25 — Bulk move_stage resolve o recorte do board (até 5000)
+
+**Decisão.** `POST /api/deals/bulk` (`move_stage`) aceita o mesmo `scope` da edição de campos (`pipelineId` + status + filtros + stageId opcional). O servidor chama `resolveBoardDealIds` (teto 5000) e enfileira no worker `leads-bulk`. Sem `scope`, o comportamento antigo (IDs explícitos, sync se ≤50) permanece.
+
+**Contexto.** Kanban/lista só carregam ~200 cards por coluna. Mover usava só os IDs visíveis; editar campos já expandia o filtro no servidor. Cruzeiro EAD precisava mover 1000+ leads de uma tag.
+
+**Alternativas descartadas.** Subir `perStage` do board (payload de 540KB já saturava Redis). Mover síncrono de 1000+ (timeout HTTP / pool). Worker novo (já existe `bulk-move-stage`).
+
+**Impacto.** `src/app/api/deals/bulk/route.ts`. Worker inalterado (chunks de 50).
+
 ### 2026-08-25 — Cache Redis: circuit breaker + gzip + singleflight
 
 **Decisão.** No cliente de cache (`src/lib/cache/index.ts`): circuit breaker (5 timeouts → 15s sem Redis), `enableOfflineQueue: false`, reconnect no `Command timed out`, `commandTimeout` 2s (era 500ms), gzip de payload ≥8KB, singleflight in-memory no `wrap()`, chave do board hasheada. Não separar Redis de cache vs BullMQ neste passo.
