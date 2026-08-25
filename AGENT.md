@@ -73,6 +73,16 @@ lista dinâmica por contato nesta versão (sem cadastro de endereços).
 
 ---
 
+### 2026-08-25 — Clique de botão retoma automação mesmo com humano atendendo
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** `processIncomingMessage` só cancela contextos pausados quando há humano atendendo E o inbound é texto livre. Clique de botão/lista (`interactiveId`) e `nfm_reply` (`flowReply`) retomam o passo pausado — senão o disparo manual pela conversa (sempre com assignee humano / hasHumanReply) morre no primeiro clique.
+
+**Alternativas descartadas.** Remover o guard inteiro (salesbot voltaria a falar em cima do consultor). Ignorar só `hasHumanReply` (conversa atribuída a humano ainda quebraria o teste).
+
+---
+
 ### 2026-08-20 — Roster acadêmico não cria departamentos em outros tenants
 
 **Decisão.** `ensureAcademicDepartmentRoster` só cria/sincroniza Acolhimento,

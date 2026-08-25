@@ -278,6 +278,14 @@ export function decideInteractiveMenuInbound(input: {
   return { action: "no_match" };
 }
 
+/** Clique de botão/lista ou nfm_reply deve retomar menu pausado mesmo com humano atendendo. */
+export function shouldResumePausedMenuDespiteHumanAttendance(opts?: {
+  interactiveId?: string | null;
+  flowReply?: boolean;
+}): boolean {
+  return Boolean(opts?.flowReply || (opts?.interactiveId ?? "").trim());
+}
+
 /**
  * Casa resposta de botão/lista com a opção do config.
  * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
@@ -581,22 +589,30 @@ export async function processIncomingMessage(
     flowPayload?: Record<string, unknown> | null;
   },
 ): Promise<SalesbotProcessResult> {
-  // Só cancela/bloqueia retomada quando HUMANO está no atendimento
-  // (`humanAttending`). `suppressAutomation` também é true com assignee IA
-  // e serve para NÃO disparar automações novas nos triggers — aqui não
-  // usamos, senão o clique na lista/botão morre se a IA já era assignee
-  // antes do gatilho manual.
+  // Guard: texto livre com humano atendendo não deixa o robô falar em cima
+  // do consultor. Clique de botão/lista (`interactiveId`) e `nfm_reply`
+  // (`flowReply`) devem retomar o menu que o próprio disparo manual acabou
+  // de enviar. `suppressAutomation` também é true com assignee IA e serve
+  // para NÃO disparar automações novas nos triggers — aqui não usamos,
+  // senão o clique na lista/botão morre se a IA já era assignee antes do
+  // gatilho manual.
   try {
     const { getHumanAttendanceForContact } = await import(
       "@/services/attendance-guards"
     );
     const snap = await getHumanAttendanceForContact(contactId);
     if (snap?.humanAttending) {
-      const cancelled = await cancelActiveContextsForContact(contactId);
-      log.info(
-        `processIncomingMessage skip — humano atendendo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"} hasHumanReply=${snap.hasHumanReply}`,
-      );
-      return { handled: false, replied: false };
+      if (shouldResumePausedMenuDespiteHumanAttendance(opts)) {
+        log.info(
+          `processIncomingMessage — humano atendendo mas inbound é clique/flow contact=${contactId} interactiveId=${opts?.interactiveId ?? "-"} flowReply=${Boolean(opts?.flowReply)} — retoma menu pausado`,
+        );
+      } else {
+        const cancelled = await cancelActiveContextsForContact(contactId);
+        log.info(
+          `processIncomingMessage skip — humano atendendo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"} hasHumanReply=${snap.hasHumanReply}`,
+        );
+        return { handled: false, replied: false };
+      }
     }
     if (snap?.assignedToId) {
       log.debug(

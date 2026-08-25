@@ -21,6 +21,7 @@ import {
   decideInteractiveMenuInbound,
   isFlowKindButton,
   readAwaitingFlow,
+  shouldResumePausedMenuDespiteHumanAttendance,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -479,6 +480,39 @@ describe("matchStaleInteractiveOption — clique em menu anterior (WhatsApp)", (
       "Entrega de Documento",
     );
     expect(hit?.gotoStepId).toBe("docs");
+  });
+});
+
+describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
+  it("sem opts → false", () => {
+    expect(shouldResumePausedMenuDespiteHumanAttendance()).toBe(false);
+  });
+
+  it('interactiveId vazio/"  " → false', () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "" }),
+    ).toBe(false);
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "  " }),
+    ).toBe(false);
+  });
+
+  it('interactiveId "btn_1" → true', () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "btn_1" }),
+    ).toBe(true);
+  });
+
+  it("flowReply true → true", () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ flowReply: true }),
+    ).toBe(true);
+  });
+
+  it("flowReply false + sem id → false", () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ flowReply: false }),
+    ).toBe(false);
   });
 });
 
