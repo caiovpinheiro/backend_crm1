@@ -41,7 +41,7 @@ name: Build & Deploy
 
 on:
   push:
-    branches: [main, DEV_BRANCH]
+    branches: [main, DEV_BRANCH, digitalocean]
   workflow_dispatch:
 
 # Cancela runs anteriores da mesma branch quando um push novo chega.
@@ -90,6 +90,11 @@ jobs:
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
             TAG=latest
             WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO $S_WEBHOOK_PROD_META"
+          elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
+            # Branch de migração DO: publica com a tag da branch para o
+            # EasyPanel da DO puxar uma imagem distinta da de produção.
+            TAG=digitalocean
+            WEBHOOKS=""
           else
             TAG=dev
             WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META"
