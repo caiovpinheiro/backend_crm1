@@ -710,6 +710,101 @@ async function resolveAutomationMetaClient(opts: {
   return metaWhatsApp;
 }
 
+export async function sendInteractiveFlowAfterButtonClick(opts: {
+  automationId: string;
+  automationName?: string | null;
+  contactId: string;
+  conversationId?: string | null;
+  channelId?: string | null;
+  body: string;
+  header?: string;
+  footer?: string;
+  flowMetaId: string;
+  flowCta: string;
+  flowToken: string;
+}): Promise<{ ok: true } | { ok: false }> {
+  const contact = await prisma.contact.findUnique({
+    where: { id: opts.contactId },
+    select: { phone: true, whatsappBsuid: true },
+  });
+  const phoneRaw = (contact?.phone ?? "").replace(/\D/g, "");
+  const to = phoneRaw.length >= 8 ? phoneRaw : undefined;
+  const recipient = contact?.whatsappBsuid?.trim() || undefined;
+  if (!to && !recipient) {
+    log.warn(`sendInteractiveFlowAfterButtonClick: contato ${opts.contactId} sem destino`);
+    return { ok: false };
+  }
+
+  const client = await resolveAutomationMetaClient({
+    automationId: opts.automationId,
+    conversationId: opts.conversationId,
+    contactId: opts.contactId,
+    channelId: opts.channelId,
+  });
+  if (!client.configured) {
+    log.warn("sendInteractiveFlowAfterButtonClick: Meta client não configurado");
+    return { ok: false };
+  }
+
+  const displayContent = `${opts.body}\n[Flow: ${opts.flowCta}]`;
+  let externalId: string | null = null;
+  try {
+    const sendResult = await client.sendInteractiveFlow(
+      to,
+      opts.body,
+      {
+        flowId: opts.flowMetaId,
+        flowCta: opts.flowCta,
+        flowToken: opts.flowToken,
+      },
+      opts.header,
+      opts.footer,
+      recipient,
+    );
+    externalId = sendResult.messages?.[0]?.id ?? null;
+  } catch (sendErr) {
+    log.error(
+      `Envio de Flow interativo falhou (contato=${opts.contactId}): ${
+        sendErr instanceof Error ? sendErr.message : String(sendErr)
+      }`,
+    );
+    await persistFailedAutomationOutbound({
+      conversationId: opts.conversationId,
+      content: displayContent,
+      messageType: "interactive",
+      senderName: opts.automationName ?? "Automação",
+      error: sendErr,
+      channelId: opts.channelId,
+    });
+    return { ok: false };
+  }
+
+  if (opts.conversationId) {
+    await prisma.message.create({
+      data: withOrgFromCtx({
+        conversationId: opts.conversationId,
+        content: displayContent,
+        direction: "out",
+        messageType: "interactive",
+        senderName: opts.automationName ?? "Automação",
+        authorType: "bot",
+        externalId,
+        sendStatus: "sent",
+        ...(opts.channelId ? { channelId: opts.channelId } : {}),
+      }),
+    });
+    sseBus.publish("new_message", {
+      organizationId: getOrgIdOrNull(),
+      conversationId: opts.conversationId,
+      contactId: opts.contactId,
+      direction: "out",
+      content: displayContent,
+    });
+  }
+
+  return { ok: true };
+}
+
 /**
  * Gatilhos em que o envio deve sair pelo mesmo número do inbound.
  * `config.channelId` do 1º passo (obrigatório na UI com 2+ canais) NÃO

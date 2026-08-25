@@ -1049,6 +1049,7 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
       flowMetaName = parsedFlow.flowMetaName;
       flowToken = parsedFlow.flowToken;
     }
+    if (!flowToken) flowToken = str(nfm.flow_token) || null;
     const formatted = formatWhatsappFlowResponse(nfm);
     if (formatted) {
       fromNfm = formatted;
@@ -3114,10 +3115,17 @@ export async function processMetaWebhookPayload(
 
             let salesbotReplied = false;
             try {
+              const isFlowReply =
+                parsed.interactiveKind === "nfm_reply" ||
+                parsed.interactiveKind === "flow_reply" ||
+                Boolean(parsed.flowPayload && Object.keys(parsed.flowPayload).length > 0);
               const salesbotResult = await processSalesbotMessage(contact.id, parsed.text, {
                 interactiveId: parsed.interactiveButtonId,
                 channelId: conversation.channelId,
                 conversationId: conversation.id,
+                flowReply: isFlowReply,
+                flowToken: parsed.flowToken,
+                flowPayload: parsed.flowPayload,
               });
               salesbotReplied = Boolean(salesbotResult?.replied);
             } catch (err) {

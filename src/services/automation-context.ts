@@ -197,7 +197,86 @@ export type InteractiveOption = {
   title?: string;
   id?: string;
   gotoStepId?: string;
+  kind?: string;
+  flowDefinitionId?: string;
+  flowCta?: string;
 };
+
+export const AWAITING_FLOW_VAR = "__awaitingFlow";
+
+export type AwaitingFlowState = {
+  stepId: string;
+  buttonId: string;
+  flowToken: string;
+  gotoStepId?: string;
+};
+
+export function readAwaitingFlow(variables: Record<string, unknown>): AwaitingFlowState | null {
+  const raw = variables[AWAITING_FLOW_VAR];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const stepId = typeof o.stepId === "string" ? o.stepId.trim() : "";
+  const buttonId = typeof o.buttonId === "string" ? o.buttonId.trim() : "";
+  const flowToken = typeof o.flowToken === "string" ? o.flowToken.trim() : "";
+  if (!stepId || !buttonId || !flowToken) return null;
+  const gotoStepId = typeof o.gotoStepId === "string" ? o.gotoStepId.trim() : "";
+  return { stepId, buttonId, flowToken, ...(gotoStepId ? { gotoStepId } : {}) };
+}
+
+export function isFlowKindButton(b: InteractiveOption): boolean {
+  if ((b.kind ?? "").trim().toLowerCase() === "flow") return true;
+  if ((b.kind ?? "").trim().toLowerCase() === "action") return false;
+  return Boolean((b.flowDefinitionId ?? "").trim());
+}
+
+export function interactiveButtonId(b: InteractiveOption, idx: number): string {
+  return (b.id || "").trim() || `btn_${idx}`;
+}
+
+export type InteractiveMenuDecision =
+  | { action: "complete_flow"; buttonId: string }
+  | { action: "send_flow"; button: InteractiveOption; buttonId: string }
+  | { action: "goto_button"; button: InteractiveOption }
+  | { action: "stay" }
+  | { action: "no_match" };
+
+/**
+ * Decide o que fazer com um inbound enquanto o passo espera botões/lista.
+ * nfm_reply não pode cair em "Outra resposta" se já houver um Flow aberto.
+ */
+export function decideInteractiveMenuInbound(input: {
+  buttons: InteractiveOption[];
+  messageContent: string;
+  interactiveId?: string | null;
+  flowReply?: boolean;
+  flowToken?: string | null;
+  awaitingFlow?: AwaitingFlowState | null;
+}): InteractiveMenuDecision {
+  const awaiting = input.awaitingFlow;
+  const inboundToken = (input.flowToken ?? "").trim();
+  if (awaiting && input.flowReply) {
+    if (!inboundToken || inboundToken === awaiting.flowToken) {
+      return { action: "complete_flow", buttonId: awaiting.buttonId };
+    }
+    return { action: "stay" };
+  }
+
+  const matched = matchInteractiveOption(
+    input.buttons,
+    input.messageContent,
+    input.interactiveId,
+  );
+  if (matched) {
+    const idx = input.buttons.indexOf(matched);
+    const buttonId = interactiveButtonId(matched, idx >= 0 ? idx : 0);
+    if (isFlowKindButton(matched) && !input.flowReply) {
+      return { action: "send_flow", button: matched, buttonId };
+    }
+    return { action: "goto_button", button: matched };
+  }
+
+  return { action: "no_match" };
+}
 
 /**
  * Casa resposta de botão/lista com a opção do config.
@@ -497,6 +576,9 @@ export async function processIncomingMessage(
     interactiveId?: string | null;
     channelId?: string | null;
     conversationId?: string | null;
+    flowReply?: boolean;
+    flowToken?: string | null;
+    flowPayload?: Record<string, unknown> | null;
   },
 ): Promise<SalesbotProcessResult> {
   // Só cancela/bloqueia retomada quando HUMANO está no atendimento
@@ -604,47 +686,31 @@ export async function processIncomingMessage(
       variables = { ...variables, [varName]: messageContent };
 
       const buttonsFromButtons = Array.isArray(config.buttons)
-        ? (config.buttons as {
-            text?: string;
-            title?: string;
-            id?: string;
-            gotoStepId?: string;
-          }[])
+        ? (config.buttons as InteractiveOption[])
         : [];
       const buttonsFromRows = Array.isArray(config.rows)
-        ? (config.rows as {
-            text?: string;
-            title?: string;
-            id?: string;
-            gotoStepId?: string;
-          }[])
+        ? (config.rows as InteractiveOption[])
         : [];
       // Lista WhatsApp usa `rows`; botões/question usam `buttons`.
       const buttons =
         buttonsFromButtons.length > 0 ? buttonsFromButtons : buttonsFromRows;
 
       if (buttons.length > 0) {
-        // Match por título, id do config, interactiveId e fallback row_N/btn_N
-        // (quando o executor gerou id e o JSON salvo não tem). Ver
-        // matchInteractiveOption.
-        const matchedBtn = matchInteractiveOption(
+        const elseGoto = readStepRef(config, "elseGotoStepId");
+        const defaultOut = readStepRef(config, "nextStepId");
+        const awaitingFlow = readAwaitingFlow(variables);
+        const decision = decideInteractiveMenuInbound({
           buttons,
           messageContent,
-          opts?.interactiveId,
-        );
+          interactiveId: opts?.interactiveId,
+          flowReply: Boolean(opts?.flowReply),
+          flowToken: opts?.flowToken,
+          awaitingFlow,
+        });
 
-        const elseGoto = readStepRef(config, "elseGotoStepId");
-        // Saída padrão do passo. Em menus do canvas é comum vários botões
-        // convergirem pra ela; os que ficaram sem aresta herdam o destino.
-        const defaultOut = readStepRef(config, "nextStepId");
-
-        if (matchedBtn) {
-          // Escolha VÁLIDA do cliente. Não pode cair no ramo "nenhuma
-          // opção" só porque a aresta daquele botão ficou desconectada —
-          // herda a saída padrão do passo antes disso.
+        const gotoFromButton = (matchedBtn: InteractiveOption, label: string) => {
           const btnGoto = readStepRef(matchedBtn, "gotoStepId");
           nextStepId = btnGoto ?? defaultOut ?? elseGoto;
-          const btnLabel = matchedBtn.title || matchedBtn.text || matchedBtn.id;
           if (nextStepId) {
             const via = btnGoto
               ? "aresta do botão"
@@ -652,13 +718,65 @@ export async function processIncomingMessage(
                 ? "saída padrão do passo"
                 : "saída 'nenhuma opção'";
             log.info(
-              `botão "${btnLabel}" matched — auto=${ctx.automation.name} → step=${nextStepId} (via ${via})`,
+              `botão "${label}" matched — auto=${ctx.automation.name} → step=${nextStepId} (via ${via})`,
             );
           } else {
             log.warn(
-              `botão "${btnLabel}" matched mas sem nenhum destino — auto=${ctx.automation.name} step=${currentStep.id} → encerrando ramo (conecte esse botão no canvas)`,
+              `botão "${label}" matched mas sem nenhum destino — auto=${ctx.automation.name} step=${currentStep.id} → encerrando ramo (conecte esse botão no canvas)`,
             );
           }
+        };
+
+        if (decision.action === "complete_flow") {
+          const awaiting = readAwaitingFlow(variables);
+          delete variables[AWAITING_FLOW_VAR];
+          if (opts?.flowPayload && Object.keys(opts.flowPayload).length > 0) {
+            const varName = String(config.saveToVariable ?? "lastResponse");
+            variables = { ...variables, [varName]: opts.flowPayload };
+          }
+          const doneBtn =
+            buttons.find((b, i) => interactiveButtonId(b, i) === decision.buttonId) ??
+            buttons.find((b) => (b.id || "").trim() === decision.buttonId);
+          const storedGoto = (awaiting?.gotoStepId ?? "").trim();
+          if (storedGoto) {
+            nextStepId = storedGoto;
+            log.info(
+              `Flow concluído — auto=${ctx.automation.name} → step=${nextStepId} (goto gravado no envio)`,
+            );
+          } else if (doneBtn) {
+            gotoFromButton(doneBtn, doneBtn.title || doneBtn.text || decision.buttonId);
+          } else {
+            nextStepId = defaultOut ?? elseGoto;
+            log.info(
+              `Flow concluído sem botão ${decision.buttonId} — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
+            );
+          }
+        } else if (decision.action === "send_flow") {
+          const sent = await dispatchPausedInteractiveFlow({
+            ctx,
+            contactId,
+            currentStep,
+            config,
+            variables,
+            button: decision.button,
+            buttonId: decision.buttonId,
+          });
+          if (sent) {
+            return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+          }
+          log.warn(
+            `Falha ao enviar Flow do botão "${decision.button.title || decision.buttonId}" — auto=${ctx.automation.name}`,
+          );
+          nextStepId = elseGoto ?? defaultOut;
+        } else if (decision.action === "goto_button") {
+          delete variables[AWAITING_FLOW_VAR];
+          const matchedBtn = decision.button;
+          gotoFromButton(matchedBtn, matchedBtn.title || matchedBtn.text || matchedBtn.id || "");
+        } else if (decision.action === "stay") {
+          log.info(
+            `nfm_reply ignorado (token não casa com Flow em aberto) — auto=${ctx.automation.name} step=${currentStep.id}`,
+          );
+          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
           const staleBtn = matchStaleInteractiveOption(
             ctx.automation.steps,
@@ -666,6 +784,20 @@ export async function processIncomingMessage(
             messageContent,
             opts?.interactiveId,
           );
+          if (staleBtn && isFlowKindButton(staleBtn) && !opts?.flowReply) {
+            const sent = await dispatchPausedInteractiveFlow({
+              ctx,
+              contactId,
+              currentStep,
+              config,
+              variables,
+              button: staleBtn,
+              buttonId: (staleBtn.id || "").trim() || "stale_flow",
+            });
+            if (sent) {
+              return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+            }
+          }
           const staleGoto = staleBtn ? readStepRef(staleBtn, "gotoStepId") : null;
           if (staleGoto) {
             nextStepId = staleGoto;
@@ -1029,6 +1161,90 @@ export async function processTimeout(contextId: string) {
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
   await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
+}
+
+async function dispatchPausedInteractiveFlow(opts: {
+  ctx: {
+    id: string;
+    automationId: string;
+    automation: { name: string };
+  };
+  contactId: string;
+  currentStep: { id: string; type: string };
+  config: Record<string, unknown>;
+  variables: Record<string, unknown>;
+  button: InteractiveOption;
+  buttonId: string;
+}): Promise<boolean> {
+  const flowDefinitionId = (opts.button.flowDefinitionId ?? "").trim();
+  if (!flowDefinitionId) {
+    log.warn(
+      `botão Flow sem flowDefinitionId — auto=${opts.ctx.automation.name} btn=${opts.buttonId}`,
+    );
+    return false;
+  }
+
+  const { getFlowDefinitionById } = await import("@/services/whatsapp-flow-definitions");
+  const def = await getFlowDefinitionById(flowDefinitionId);
+  const metaFlowId = def?.metaFlowId?.trim() ?? "";
+  if (!def || def.status !== "PUBLISHED" || !metaFlowId) {
+    log.warn(
+      `Flow ${flowDefinitionId} não está publicado — auto=${opts.ctx.automation.name}`,
+    );
+    return false;
+  }
+
+  const { randomUUID } = await import("crypto");
+  const flowToken = randomUUID();
+  const title = (opts.button.title || opts.button.text || "Continuar").trim();
+  const flowCta = (opts.button.flowCta || title).trim();
+  const bodyRaw = String(opts.config.body ?? "").trim() || title;
+  const body = interpolateVariables(bodyRaw, opts.variables);
+  const headerRaw = String(opts.config.header ?? "").trim();
+  const footerRaw = String(opts.config.footer ?? "").trim();
+  const header = headerRaw ? interpolateVariables(headerRaw, opts.variables) : undefined;
+  const footer = footerRaw ? interpolateVariables(footerRaw, opts.variables) : undefined;
+  const btnGoto = readStepRef(opts.button, "gotoStepId");
+
+  const { sendInteractiveFlowAfterButtonClick } = await import(
+    "@/services/automation-executor"
+  );
+  const sent = await sendInteractiveFlowAfterButtonClick({
+    automationId: opts.ctx.automationId,
+    automationName: opts.ctx.automation.name,
+    contactId: opts.contactId,
+    conversationId:
+      typeof opts.variables.conversationId === "string"
+        ? opts.variables.conversationId
+        : null,
+    channelId:
+      typeof opts.variables.channelId === "string" ? opts.variables.channelId : null,
+    body,
+    header,
+    footer,
+    flowMetaId: metaFlowId,
+    flowCta,
+    flowToken,
+  });
+  if (!sent.ok) return false;
+
+  const INTERACTIVE_DEFAULT_TIMEOUT_MS = 86_400_000;
+  const rawTimeout = readNumber(opts.config, "timeoutMs");
+  const timeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : INTERACTIVE_DEFAULT_TIMEOUT_MS;
+  const nextVars: Record<string, unknown> = {
+    ...opts.variables,
+    [AWAITING_FLOW_VAR]: {
+      stepId: opts.currentStep.id,
+      buttonId: opts.buttonId,
+      flowToken,
+      ...(btnGoto ? { gotoStepId: btnGoto } : {}),
+    },
+  };
+  await advanceContext(opts.ctx.id, opts.currentStep.id, nextVars, timeoutMs);
+  log.info(
+    `Flow enviado (btn=${opts.buttonId} meta=${metaFlowId}) — auto=${opts.ctx.automation.name} permanece no step ${opts.currentStep.id}`,
+  );
+  return true;
 }
 
 function applyVariableTransform(raw: unknown, transform?: string): string {

@@ -228,6 +228,15 @@ export function isMetaGraphError(err: unknown): err is MetaGraphError {
   return err instanceof MetaGraphError;
 }
 
+/** CTA do Flow: máx. 20 caracteres, sem emoji (exigência da Cloud API). */
+export function sanitizeFlowCta(raw: string): string {
+  const stripped = raw
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (stripped || "Continuar").slice(0, 20);
+}
+
 /**
  * Timeout da chamada à Graph (AbortSignal.timeout em graphFetchOnce). Tipo
  * dedicado para o circuit breaker por phoneNumberId contar como falha de
@@ -607,6 +616,53 @@ export class MetaWhatsAppClient {
     };
     if (header) interactive.header = { type: "text", text: header };
     if (footer) interactive.footer = { text: footer };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
+  /**
+   * Envia WhatsApp Flow como mensagem de sessão (janela 24h).
+   * Fora da janela a Graph recusa — aí o caminho é template com botão FLOW.
+   */
+  async sendInteractiveFlow(
+    to: string | undefined,
+    body: string,
+    params: {
+      flowId: string;
+      flowCta: string;
+      flowToken: string;
+      flowAction?: "navigate" | "data_exchange";
+    },
+    header?: string,
+    footer?: string,
+    recipient?: string,
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const cta = sanitizeFlowCta(params.flowCta);
+    const interactive: Record<string, unknown> = {
+      type: "flow",
+      body: { text: body },
+      action: {
+        name: "flow",
+        parameters: {
+          flow_message_version: "3",
+          flow_token: params.flowToken,
+          flow_id: params.flowId.trim(),
+          flow_cta: cta,
+          flow_action: params.flowAction ?? "navigate",
+        },
+      },
+    };
+    if (header) interactive.header = { type: "text", text: header };
+    if (footer) interactive.footer = { type: "text", text: footer };
 
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
@@ -1138,6 +1194,10 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${waba}/flows`, {
       method: "POST",
       body: JSON.stringify(payload),
+      // 1 tentativa / 45s: create+publish na Meta é lento. 3×20s estourava o
+      // proxy e o frontend só via HTML 502 («Erro ao publicar.»).
+      maxAttempts: 1,
+      signal: AbortSignal.timeout(45_000),
     });
   }
 

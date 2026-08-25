@@ -18,6 +18,9 @@ import {
   matchStaleInteractiveOption,
   readStepRef,
   shouldPersistDelay,
+  decideInteractiveMenuInbound,
+  isFlowKindButton,
+  readAwaitingFlow,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -476,5 +479,112 @@ describe("matchStaleInteractiveOption — clique em menu anterior (WhatsApp)", (
       "Entrega de Documento",
     );
     expect(hit?.gotoStepId).toBe("docs");
+  });
+});
+
+describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
+  const buttons = [
+    { id: "btn_0", title: "Sim", kind: "action", gotoStepId: "step-sim" },
+    {
+      id: "btn_1",
+      title: "Trocar endereço",
+      kind: "flow",
+      flowDefinitionId: "flow-def-1",
+      gotoStepId: "step-depois-flow",
+    },
+  ];
+
+  it("kind flow sem nfm_reply dispara envio do Flow", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Trocar endereço",
+      interactiveId: "btn_1",
+    });
+    expect(d.action).toBe("send_flow");
+    if (d.action === "send_flow") {
+      expect(d.buttonId).toBe("btn_1");
+      expect(d.button.flowDefinitionId).toBe("flow-def-1");
+    }
+  });
+
+  it("kind action segue goto do botão", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Sim",
+      interactiveId: "btn_0",
+    });
+    expect(d.action).toBe("goto_button");
+    if (d.action === "goto_button") {
+      expect(d.button.gotoStepId).toBe("step-sim");
+    }
+  });
+
+  it("nfm_reply com o mesmo flow_token completa o Flow", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: Rua A",
+      flowReply: true,
+      flowToken: "tok-abc",
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+        gotoStepId: "step-depois-flow",
+      },
+    });
+    expect(d.action).toBe("complete_flow");
+    if (d.action === "complete_flow") expect(d.buttonId).toBe("btn_1");
+  });
+
+  it("nfm_reply sem token da Meta ainda completa (omissão conhecida)", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: Rua A",
+      flowReply: true,
+      flowToken: null,
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+      },
+    });
+    expect(d.action).toBe("complete_flow");
+  });
+
+  it("nfm_reply com token diferente permanece pausado", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: outro",
+      flowReply: true,
+      flowToken: "tok-outro",
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+      },
+    });
+    expect(d.action).toBe("stay");
+  });
+
+  it("texto formatado do Flow sem awaiting cai em no_match (não casa botão)", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Sexo: Masculino",
+      flowReply: true,
+      flowToken: "x",
+    });
+    expect(d.action).toBe("no_match");
+  });
+
+  it("isFlowKindButton e readAwaitingFlow", () => {
+    expect(isFlowKindButton({ kind: "flow" })).toBe(true);
+    expect(isFlowKindButton({ kind: "action", flowDefinitionId: "x" })).toBe(false);
+    expect(isFlowKindButton({ flowDefinitionId: "x" })).toBe(true);
+    expect(
+      readAwaitingFlow({
+        __awaitingFlow: { stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" },
+      }),
+    ).toEqual({ stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" });
+    expect(readAwaitingFlow({})).toBeNull();
   });
 });
