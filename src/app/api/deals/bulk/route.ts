@@ -1,17 +1,25 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import type { AppUserRole } from "@/lib/auth-types";
+import {
+  requirePermissionForUser,
+  requirePipelineScope,
+} from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
+import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
   assertLostReasonAllowed,
   assignDealOwner,
   createDealEvent,
+  isValidDealStatus,
   markDealLost,
   markDealWon,
+  resolveBoardDealIds,
 } from "@/services/deals";
+import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 
 const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "delete"] as const;
 type BulkAction = (typeof VALID_ACTIONS)[number];
@@ -23,6 +31,81 @@ type BulkAction = (typeof VALID_ACTIONS)[number];
  * esperam `{ affected: number }` na resposta.
  */
 const ASYNC_AUTO_THRESHOLD = 50;
+
+/** Mesmo teto da edição em massa de campos — o worker processa em chunks de 50. */
+const MAX_BULK_IDS = 5000;
+
+type BulkMoveScope = {
+  pipelineId: string;
+  status?: string;
+  stageId?: string;
+  filters?: unknown;
+};
+
+function parseBulkMoveScope(raw: unknown): BulkMoveScope | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.pipelineId !== "string" || o.pipelineId.trim() === "") return null;
+  return {
+    pipelineId: o.pipelineId.trim(),
+    status: typeof o.status === "string" ? o.status : undefined,
+    stageId:
+      typeof o.stageId === "string" && o.stageId.trim()
+        ? o.stageId.trim()
+        : undefined,
+    filters: "filters" in o ? o.filters : undefined,
+  };
+}
+
+/**
+ * Resolve IDs para `move_stage`: `scope` (filtro do board, até 5000) tem
+ * prioridade sobre `dealIds` explícitos — mesmo contrato de
+ * POST /api/deals/bulk/custom-fields.
+ */
+async function resolveMoveDealIds(args: {
+  user: {
+    id: string;
+    organizationId: string | null;
+    role?: string | null;
+    isSuperAdmin?: boolean;
+  };
+  dealIds: string[];
+  scope: BulkMoveScope | null;
+}): Promise<{ dealIds: string[]; capped: boolean } | { error: NextResponse }> {
+  if (args.scope) {
+    const scopeDenied = await requirePipelineScope(
+      args.user,
+      "view",
+      args.scope.pipelineId,
+    );
+    if (scopeDenied) return { error: scopeDenied };
+
+    const visibility = await getVisibilityFilter(
+      args.user as { id: string; role: AppUserRole },
+    );
+    const statusFilter =
+      args.scope.status === "ALL"
+        ? ("ALL" as const)
+        : args.scope.status && isValidDealStatus(args.scope.status)
+          ? args.scope.status
+          : undefined;
+
+    const resolved = await resolveBoardDealIds(args.scope.pipelineId, {
+      visibilityOwnerId: visibility.canSeeAll ? null : args.user.id,
+      statusFilter,
+      filters: parseAdvancedDealFilters(args.scope.filters),
+      stageId: args.scope.stageId,
+      cap: MAX_BULK_IDS,
+    });
+    return { dealIds: resolved.ids, capped: resolved.capped };
+  }
+
+  const capped = args.dealIds.length > MAX_BULK_IDS;
+  return {
+    dealIds: args.dealIds.slice(0, MAX_BULK_IDS),
+    capped,
+  };
+}
 
 /**
  * Bug 23/mai/26: usavamos `auth()` direto. As chamadas a `createDealEvent`
@@ -47,10 +130,14 @@ export async function POST(request: Request) {
       const userLike = session.user;
 
       const body = (await request.json()) as Record<string, unknown>;
-      const dealIds = Array.isArray(body.dealIds) ? (body.dealIds as string[]).filter((id) => typeof id === "string") : [];
+      let dealIds = Array.isArray(body.dealIds) ? (body.dealIds as string[]).filter((id) => typeof id === "string") : [];
       const action = body.action as BulkAction;
+      const moveScope =
+        action === "move_stage" ? parseBulkMoveScope(body.scope) : null;
 
-      if (dealIds.length === 0) return NextResponse.json({ message: "Nenhum deal selecionado." }, { status: 400 });
+      if (dealIds.length === 0 && !moveScope) {
+        return NextResponse.json({ message: "Nenhum deal selecionado." }, { status: 400 });
+      }
       if (!VALID_ACTIONS.includes(action)) return NextResponse.json({ message: "Ação inválida." }, { status: 400 });
       const actionPermission: Record<BulkAction, string> = {
         move_stage: "deal:change_stage",
@@ -102,13 +189,26 @@ export async function POST(request: Request) {
         });
         if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
 
-        // Modo async opt-in: explicito (body.async=true) ou implícito por
-        // tamanho (> ASYNC_AUTO_THRESHOLD). Cria BulkOperation, enfileira
-        // job e devolve 202 com operationId. Frontend pollar via GET
-        // /api/bulk-operations/[id]. Preserva o comportamento síncrono
-        // existente para chamadas menores (compat com UI atual).
+        const resolved = await resolveMoveDealIds({
+          user: userLike,
+          dealIds,
+          scope: moveScope,
+        });
+        if ("error" in resolved) return resolved.error;
+        dealIds = resolved.dealIds;
+        if (dealIds.length === 0) {
+          return NextResponse.json(
+            { message: "Nenhum negócio no recorte (filtro/visibilidade)." },
+            { status: 400 },
+          );
+        }
+
+        // Modo async: explícito, volume > threshold, ou `scope` (recorte do
+        // board pode ser milhares — mesmo caminho da edição de campos).
         const wantAsync =
-          body.async === true || dealIds.length > ASYNC_AUTO_THRESHOLD;
+          body.async === true ||
+          dealIds.length > ASYNC_AUTO_THRESHOLD ||
+          moveScope !== null;
 
         if (wantAsync) {
           if (!userLike.organizationId) {
@@ -165,6 +265,7 @@ export async function POST(request: Request) {
               operationId: operation.id,
               total: dealIds.length,
               action,
+              capped: resolved.capped,
             },
             { status: 202 },
           );
