@@ -137,10 +137,16 @@ export interface DistributionResponsibleView {
   /** Expediente (null se não configurado). */
   schedule: ResponsibleScheduleView | null;
   /**
-   * Fila atual (conversas OPEN aguardando o consultor). POR DEPARTAMENTO quando
-   * a chamada tem escopo de departamento (distribuição); global caso contrário.
+   * Fila usada para SELEÇÃO ("menor carga"). POR DEPARTAMENTO quando a chamada
+   * tem escopo de departamento (distribuição); global caso contrário.
    */
   queueCount: number;
+  /**
+   * Carga TOTAL do consultor (todos os departamentos + conversas sem
+   * departamento) — é ela que o teto `queueLimit` compara. Sem escopo de
+   * departamento é igual a `queueCount`.
+   */
+  totalQueueCount: number;
   /** Resultado da regra única. */
   eligible: boolean;
   blockedReasons: DistributionBlockReason[];
@@ -217,6 +223,7 @@ export async function getDistributionResponsibles(
     statuses,
     schedules,
     queue,
+    totalQueue,
     memberships,
     systemPresence,
   ] = await Promise.all([
@@ -239,10 +246,17 @@ export async function getDistributionResponsibles(
       select: { userId: true, status: true },
     }),
     loadSchedules(userIds),
-    // Volume de fila POR DEPARTAMENTO quando há escopo (distribuição por
-    // departamento): o consultor concorre/limita pela fila daquele depto, não
-    // pela global. Sem escopo (tela/cockpit) = fila global.
+    // Fila POR DEPARTAMENTO quando há escopo: usada só para SELEÇÃO (o
+    // consultor concorre pela menor fila daquele depto). Sem escopo
+    // (tela/cockpit) = fila global.
     getQueueCounts(userIds, scopeDeptIds),
+    // Carga TOTAL, usada para o TETO (`queueLimit`). Contar só o depto fazia
+    // membro de 2 departamentos receber um limite por departamento, e ignorava
+    // conversas sem departamento — o consultor passava de 25 sem nunca ficar
+    // "fila cheia" para o motor.
+    scopeDeptIds.length > 0
+      ? getQueueCounts(userIds)
+      : Promise.resolve(null),
     prisma.departmentMember.findMany({
       where: { userId: { in: userIds }, organizationId: orgId },
       select: { userId: true, department: { select: { id: true, name: true } } },
@@ -290,6 +304,9 @@ export async function getDistributionResponsibles(
     const status = statusByUser.get(u.id) ?? null;
     const schedule = scheduleByUser.get(u.id) ?? null;
     const queueCount = queue.get(u.id) ?? 0;
+    const totalQueueCount = totalQueue
+      ? (totalQueue.get(u.id) ?? 0)
+      : queueCount;
 
     const { eligible, blockedReasons } = evaluateResponsibleEligibility(
       {
@@ -300,7 +317,7 @@ export async function getDistributionResponsibles(
         status,
         schedule,
         preLunchStopMinutes: cfg.preLunchStopMinutes,
-        queueCount,
+        queueCount: totalQueueCount,
         // undefined = modo desligado (sem restrição); false = fora do depto.
         inDepartment: departmentMemberIds ? departmentMemberIds.has(u.id) : undefined,
       },
@@ -342,6 +359,7 @@ export async function getDistributionResponsibles(
           }
         : null,
       queueCount,
+      totalQueueCount,
       eligible,
       blockedReasons,
       systemOnline: systemPresence.get(u.id)?.systemOnline ?? false,
