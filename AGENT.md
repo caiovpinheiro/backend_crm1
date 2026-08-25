@@ -5,6 +5,16 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
+
+**Decisão.** Quando a conversa é encerrada SEM "manter atendente" (`conversation.keepAgentOnEnd` off), `updateConversationStatusInDb` agora também: loga `ASSIGNEE_CHANGED` (chat + timeline, "X removida da conversa") e chama `clearContactOwnershipOnClose` — zera `ownerId` dos deals ABERTOS do contato e `assignedToId` do contato, com `OWNER_CHANGED`/`CONTACT_OWNER_CHANGED` nos logs. Guardas: só limpa quem era o responsável removido, e só se nenhuma outra conversa aberta do contato ainda está com ele. O bulk-resolve (worker leads) faz o mesmo por par (contato, atendente).
+
+**Contexto.** Operador removia a atendente ao encerrar, mas o deal seguia com ela no kanban (ex.: Beatriz no deal do Marcelo Pinheiro) e nada aparecia na timeline/chat — o clear só mexia na conversa.
+
+**Alternativas descartadas.** Limpar sempre (sem respeitar keepAgentOnEnd) — quebraria orgs que mantêm o atendente de propósito. Disparar trigger `agent_changed` — efeito colateral fora do pedido. Mexer no `halt-inbound-burst` — lá o assignee é a IA, não humano; a guarda por `clearedUserId` já no-oparia.
+
+**Impacto.** `services/conversations.ts`, `services/deals.ts`, `jobs/leads/bulk-resolve-conversations.job.ts`. Sem mudança de frontend — os tipos de evento já renderizam.
+
 ### 2026-08-25 — Bulk move_stage resolve o recorte do board (até 5000)
 
 **Decisão.** `POST /api/deals/bulk` (`move_stage`) aceita o mesmo `scope` da edição de campos (`pipelineId` + status + filtros + stageId opcional). O servidor chama `resolveBoardDealIds` (teto 5000) e enfileira no worker `leads-bulk`. Sem `scope`, o comportamento antigo (IDs explícitos, sync se ≤50) permanece.
