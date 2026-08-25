@@ -5,6 +5,16 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-25 — Cache Redis: circuit breaker + gzip + singleflight
+
+**Decisão.** No cliente de cache (`src/lib/cache/index.ts`): circuit breaker (5 timeouts → 15s sem Redis), `enableOfflineQueue: false`, reconnect no `Command timed out`, `commandTimeout` 2s (era 500ms), gzip de payload ≥8KB, singleflight in-memory no `wrap()`, chave do board hasheada. Não separar Redis de cache vs BullMQ neste passo.
+
+**Contexto.** Produção (`crm-eduit`) inundou warn `[cache] get falhou — fallback memoria` / `Command timed out` em `authz:user:*`, `org_settings_prefix:*`, `inbox_tab_counts:*`. Inbox/kanban travavam. Redis em si estava saudável (~4ms PING interno, 6MB, 295 ops/s). O board cacheava JSON de ~540KB numa conexão ioredis única; `commandTimeout: 500` conta espera na fila, então GETs minúsculos de authz/settings timeoutavam juntos. Timeout do ioredis não cancela o comando no servidor e envenena o pipeline. Sem singleflight local, o fallback disparava N `computeTabCounts` / `computeBoardData` e esgotava o pool Postgres (SELECT 1 chegou a 456ms).
+
+**Alternativas descartadas.** Redis dedicado só para cache (ops extra, não ataca o timeout na conexão da API). Remover cache do board (devolve o stampede de ~13s no Postgres). Subir só o timeout sem circuit/reconnect (pipeline envenenado continua).
+
+**Impacto.** `src/lib/cache/index.ts`, `src/lib/cache/keys.ts`. Após o deploy, reiniciar o container da API se o singleton ioredis já estiver preso.
+
 ### 2026-08-20 — Roster acadêmico não cria departamentos em outros tenants
 
 **Decisão.** `ensureAcademicDepartmentRoster` só cria/sincroniza Acolhimento,
