@@ -355,12 +355,32 @@ async function resolveAutomationSendConv(
   } catch (err) {
     log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
   }
-  const conv = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
-    orderBy: { updatedAt: "desc" },
+  // Fallback: só chega aqui quando o `ensure` acima NÃO resolveu (contato sem
+  // telefone/BSUID, org sem canal Meta CONNECTED — caso Baileys —, ou erro).
+  // Preferir o ticket ATIVO evita gravar o outbound num ticket encerrado
+  // enquanto a resposta do cliente entra no aberto (outbound e inbound em
+  // tickets diferentes: o envio some da timeline do ticket que o cliente usa).
+  const active = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     select: { id: true },
   });
-  return conv ? { id: conv.id } : null;
+  if (active) return { id: active.id };
+  // Sem ticket ativo, usa o encerrado mais recente em vez de abortar: deixar
+  // de enviar a mensagem é pior que o split de ticket que estamos corrigindo.
+  const resolved = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp" },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    select: { id: true },
+  });
+  if (resolved) {
+    log.warn(
+      `resolveAutomationSendConv: contato ${contactId} sem conversa ativa; ` +
+        `gravando envio na conversa encerrada ${resolved.id}`,
+    );
+    return { id: resolved.id };
+  }
+  return null;
 }
 
 /** Campanha AUTOMATION: não herdar dono do contato no ticket novo (ver ensure opts). */
@@ -1281,6 +1301,57 @@ async function interpolateMessageVariables(
     ...(flowVars ?? {}),
     ...assigneeVars,
   });
+}
+
+/**
+ * A Cloud API rejeita parâmetro de template com quebra de linha, tab ou
+ * corrida longa de espaços (132000/132012). Campo customizado preenchido
+ * por formulário costuma trazer justamente isso, então achatamos antes de
+ * enviar em vez de deixar a Meta recusar a mensagem inteira.
+ */
+function sanitizeTemplateParameterText(value: string): string {
+  return value.replace(/[\r\n\t]+/g, " ").replace(/ {4,}/g, "   ").trim();
+}
+
+/**
+ * Resolve tokens `{{...}}` nos parâmetros de texto que vão para a Meta no
+ * `send_whatsapp_template`.
+ *
+ * Este era o único passo de envio que NÃO passava pelo interpolador: o
+ * operador escrevia `{{dealCustomFields.titulovaga1}}` (grafia que o próprio
+ * atalho de variáveis do editor sugere) e o aluno recebia a expressão
+ * literal. Usa o mesmo `interpolateMessageVariables` dos passos de texto,
+ * então caminho com ponto (`contact.name`, `dealCustomFields.<campo>`,
+ * `conversation.id`), filtro `|first_name` e token ausente virando string
+ * vazia se comportam igual em todo o motor.
+ */
+async function interpolateTemplateComponents(
+  components: unknown[] | undefined,
+  rt: RuntimeContext,
+  flowVars: Record<string, unknown> | undefined,
+): Promise<unknown[] | undefined> {
+  if (!Array.isArray(components) || components.length === 0) return components;
+
+  const out: unknown[] = [];
+  for (const component of components) {
+    const comp = asRecord(component);
+    if (!comp || !Array.isArray(comp.parameters)) {
+      out.push(component);
+      continue;
+    }
+    const parameters: unknown[] = [];
+    for (const parameter of comp.parameters) {
+      const param = asRecord(parameter);
+      if (!param || typeof param.text !== "string" || !param.text.includes("{{")) {
+        parameters.push(parameter);
+        continue;
+      }
+      const resolved = await interpolateMessageVariables(param.text, rt, flowVars);
+      parameters.push({ ...param, text: sanitizeTemplateParameterText(resolved) });
+    }
+    out.push({ ...comp, parameters });
+  }
+  return out;
 }
 
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
@@ -2975,9 +3046,12 @@ async function executeStep(
       let tplBodyFromDb: string | null = null;
       let templateGraphId: string | null = null;
 
-      const rawComponents = Array.isArray(cfg["components"])
-        ? (cfg["components"] as unknown[])
-        : undefined;
+      const tplFlowVars = asRecord(cfg["__variables"]) ?? undefined;
+      const rawComponents = await interpolateTemplateComponents(
+        Array.isArray(cfg["components"]) ? (cfg["components"] as unknown[]) : undefined,
+        rt,
+        tplFlowVars,
+      );
 
       try {
         const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
@@ -2997,9 +3071,23 @@ async function executeStep(
       const renderedBody = rawBody
         ? renderTemplatePreview(rawBody, templateVariablesFromSendComponents(rawComponents)) || rawBody
         : null;
-      const flowVars = asRecord(cfg["__variables"]);
       const resolvedBody =
-        renderedBody && flowVars ? interpolateVariables(renderedBody, flowVars) : renderedBody;
+        renderedBody && tplFlowVars
+          ? interpolateVariables(renderedBody, tplFlowVars)
+          : renderedBody;
+
+      // Token que sobrou no corpo APROVADO do template não é variável da
+      // Meta — ela manda o texto do jeito que está cadastrado e o aluno
+      // recebe `{{dealCustomFields.x}}` cru. Nada que o CRM interpole aqui
+      // muda isso; o template precisa ser recadastrado com `{{1}}`/`{{2}}`.
+      const leftoverTplTokens = resolvedBody
+        ? [...new Set(resolvedBody.match(/\{\{[^}]+\}\}/g) ?? [])]
+        : [];
+      if (leftoverTplTokens.length > 0) {
+        log.warn(
+          `send_whatsapp_template "${templateName}": o corpo aprovado na Meta contém ${leftoverTplTokens.join(", ")} como TEXTO FIXO (sem parâmetro correspondente). O aluno vai receber o token literal — recadastre o template usando {{1}}, {{2}}… e preencha os valores no passo.`,
+        );
+      }
       const tplContent = buildOutboundTemplateMessageContent(
         templateName,
         "generic",
