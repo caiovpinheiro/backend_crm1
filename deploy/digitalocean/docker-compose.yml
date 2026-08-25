@@ -1,0 +1,143 @@
+name: crm1
+
+# Base compartilhada pelos 6 processos do backend. Todos usam a mesma
+# imagem e se diferenciam por APP_MODE, igual ao EasyPanel.
+x-backend: &backend
+  image: ${BACKEND_IMAGE:-ghcr.io/caiovpinheiro/backend_crm1:latest}
+  env_file: [.env]
+  restart: unless-stopped
+  volumes:
+    - storage:/app/storage
+    # CA do Postgres/Valkey gerenciados. A DigitalOcean assina os
+    # certificados com uma CA própria que não está no truststore padrão —
+    # sem isto o Prisma falha com "self-signed certificate in chain".
+    - ./certs:/app/certs:ro
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    # Limites por serviço (droplet 4 vCPU / 8 GB): um worker em fuga não
+    # asfixia os demais. Tetos, não reservas — a soma de cpus pode passar
+    # de 4. Baseline medida via `docker stats` pós-stress (23/08).
+    cpus: 0.25
+    mem_limit: 128m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL}
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/caiovpinheiro/frontend_crm1:latest}
+    env_file: [.env]
+    restart: unless-stopped
+    cpus: 0.75
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # Único serviço que aplica migrations (ver docker-entrypoint.sh). Os
+  # workers esperam o healthcheck para não subir contra um schema antigo.
+  api:
+    <<: *backend
+    cpus: 1.5
+    mem_limit: 1536m
+    environment:
+      APP_MODE: api
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  worker-whatsapp:
+    <<: *backend
+    # Envio de campanha. Sob carga total (stress 23/08) usou ~140% de CPU —
+    # 2.5 era folga excessiva que roubava CPU do inbound e da API. 2.0 sustenta
+    # o throughput medido com folga sem asfixiar os demais.
+    cpus: 2.0
+    mem_limit: 1g
+    environment:
+      APP_MODE: worker-whatsapp
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-meta-webhook:
+    <<: *backend
+    # Inbound ao vivo (atendimento). Sob carga total ficou throttled 33% do
+    # tempo com 0.5 CPU e a fila acumulou 12,3k msgs (~50min de atraso). É o
+    # worker que NÃO pode ficar sem CPU — atendimento ao vivo depende dele.
+    cpus: 1.0
+    mem_limit: 768m
+    environment:
+      APP_MODE: worker-meta-webhook
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-automation:
+    <<: *backend
+    # Throttled 55% do tempo com 0.3 CPU sob carga total. Automação aciona
+    # envio WhatsApp — sem CPU, trava o disparo.
+    cpus: 0.6
+    mem_limit: 768m
+    environment:
+      APP_MODE: worker-automation
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-leads:
+    <<: *backend
+    cpus: 0.3
+    mem_limit: 768m
+    environment:
+      APP_MODE: worker-leads
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-etl:
+    <<: *backend
+    # Parsing de XLSX/CSV grandes pica em memória; pool de import max=4.
+    cpus: 0.75
+    mem_limit: 1g
+    environment:
+      APP_MODE: worker-etl
+      # Import em massa não grava activity_events (até 8 por linha em
+      # update). Setado SÓ aqui — na API o feed /logs precisa dos eventos.
+      IMPORT_SKIP_ACTIVITY_LOG: "true"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  storage:
+  caddy_data:
+  caddy_config:
