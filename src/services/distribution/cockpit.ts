@@ -39,7 +39,7 @@ export interface CockpitConsultant {
   departments: string[];
   /** Carga atual (conversas OPEN atribuídas) — mesma base do limite. */
   queueCount: number;
-  /** 0 = sem limite. */
+  /** Teto da fila. 0 = não recebe. */
   queueLimit: number;
   status: string | null;
   eligible: boolean;

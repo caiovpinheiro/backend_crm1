@@ -6,6 +6,8 @@
  * Default OFF — só reply humano altera abas e (para bots) a marcação.
  */
 
+import type { Prisma } from "@prisma/client";
+
 import { getOrgSettingFor } from "@/lib/org-settings";
 import { getOrgIdOrNull } from "@/lib/request-context";
 
@@ -37,4 +39,32 @@ export async function botOutboundReplyMark(
     return { lastMessageDirection: "out", hasAgentReply: true };
   }
   return {};
+}
+
+/** Reply que conta para Aguardando/Respondidas (humano; + agente se setting ON). */
+export function countableReplyWhere(
+  countAgent: boolean,
+): Prisma.ConversationWhereInput {
+  return countAgent
+    ? { OR: [{ hasHumanReply: true }, { hasAgentReply: true }] }
+    : { hasHumanReply: true };
+}
+
+export function noCountableReplyWhere(
+  countAgent: boolean,
+): Prisma.ConversationWhereInput {
+  return countAgent
+    ? { hasHumanReply: false, hasAgentReply: false }
+    : { hasHumanReply: false };
+}
+
+/** Chave do card da inbox: 1 por contato+canal (ticket sem contato conta sozinho). */
+export function inboxCardGroupKey(row: {
+  id: string;
+  contactId: string | null;
+  channel?: string | null;
+}): string {
+  return row.contactId
+    ? `c:${row.contactId}::${row.channel ?? ""}`
+    : `id:${row.id}`;
 }
