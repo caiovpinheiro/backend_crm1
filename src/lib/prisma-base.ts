@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
@@ -148,6 +150,28 @@ function createPrismaClient() {
   // NÃO monkey-patchar pool.connect: pg.Pool.query usa a forma callback.
   // Substituir só a Promise (c2892a0) vazava conexões — SELECT 1 do /health
   // estourava 2s e login/inbox devolviam "Internal Server Error".
+  //
+  // TLS para Postgres gerenciado (DigitalOcean): a CA da DO não está no
+  // truststore do Node, então `sslmode=require` na URL falha com
+  // "self-signed certificate in certificate chain". O driver `pg` NÃO lê
+  // `sslcert` da connection string — ele precisa do objeto `ssl` com a CA.
+  // Lemos o arquivo do CA (montado via bind mount) e passamos ao pool.
+  // PGSSLROOTCERT ou PG_CA_PATH apontam para o arquivo; se ausentes, cai no
+  // comportamento padrão do pg (sslmode da URL).
+  const caPath =
+    process.env.PGSSLROOTCERT?.trim() || process.env.PG_CA_PATH?.trim();
+  let ssl: { ca: string; rejectUnauthorized: boolean } | undefined;
+  if (caPath) {
+    try {
+      ssl = { ca: readFileSync(caPath, "utf8"), rejectUnauthorized: true };
+    } catch (err) {
+      console.warn(
+        `[prisma-base] não conseguiu ler o CA em ${caPath} — caindo no TLS padrão:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     max,
@@ -159,6 +183,7 @@ function createPrismaClient() {
     // Só statement_timeout. `application_name` via options (c2892a0) pode
     // travar o handshake no PgBouncer — /health SELECT 1 estourava 2s.
     options: `-c statement_timeout=${statementTimeoutMs}`,
+    ...(ssl ? { ssl } : {}),
   });
 
   // Resiliencia: log mas nao crash em erros transientes do pool.
