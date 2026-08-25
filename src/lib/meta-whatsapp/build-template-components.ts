@@ -14,7 +14,12 @@
  * e determinística.
  */
 
-import { extractPlaceholderKeysFromBodyText } from "./operator-template-variables";
+import {
+  extractMetaPlaceholderKeys,
+  extractPlaceholderKeysFromBodyText,
+  extractUnsupportedPlaceholderTokens,
+  isMetaPlaceholderKey,
+} from "./operator-template-variables";
 
 export type TemplateVariableComponent = "body" | "header" | "button";
 
@@ -67,7 +72,10 @@ export function buildTemplateComponents(
       value: v.value == null ? "" : String(v.value),
       buttonIndex: typeof v.buttonIndex === "number" ? v.buttonIndex : 0,
     }))
-    .filter((v) => v.key.length > 0);
+    // Chave que a Meta não reconhece como parâmetro (`dealCustomFields.x`,
+    // maiúscula, hífen) não pode virar `parameter_name`: o template é tratado
+    // como sem parâmetros e o envio volta 132000.
+    .filter((v) => v.key.length > 0 && isMetaPlaceholderKey(v.key));
 
   if (clean.length === 0) return [];
 
@@ -169,4 +177,9 @@ export function renderTemplatePreview(
 }
 
 /** Reexport para consumidores que só precisam saber quais chaves existem. */
-export { extractPlaceholderKeysFromBodyText };
+export {
+  extractMetaPlaceholderKeys,
+  extractPlaceholderKeysFromBodyText,
+  extractUnsupportedPlaceholderTokens,
+  isMetaPlaceholderKey,
+};

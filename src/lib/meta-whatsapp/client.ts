@@ -909,7 +909,9 @@ export class MetaWhatsAppClient {
       template: {
         name: templateName,
         language: { code: languageCode },
-        ...(components ? { components } : {}),
+        // Array vazio (template sem parâmetro válido) sai do payload: mandar
+        // `components: []` é ruído e confunde o diagnóstico de 132000.
+        ...(Array.isArray(components) && components.length > 0 ? { components } : {}),
       },
     };
     // Caminho quente de blast: 1 JSON.stringify + write no stdout por
