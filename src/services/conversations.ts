@@ -12,7 +12,12 @@ import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
+import {
+  countableReplyWhere,
+  countAgentReplyAsAnswered,
+  inboxCardGroupKey,
+  noCountableReplyWhere,
+} from "@/lib/conversation-reply-marking";
 import {
   getOrgIdOrNull,
   getOrgIdOrThrow,
@@ -29,8 +34,8 @@ import {
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
-/** TTL curto: badges podem ficar levemente stale; cold-load deixa de custar 4–7s. */
-const TAB_COUNTS_CACHE_TTL_SEC = 45;
+/** TTL curto: badges e Fila da distribuição precisam acompanhar o inbox. */
+const TAB_COUNTS_CACHE_TTL_SEC = 5;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -294,23 +299,6 @@ function buildConversationSourceCondition(
   }
   if (or.length === 0) return null;
   return or.length === 1 ? or[0] : { OR: or };
-}
-
-/** Reply que conta para Aguardando/Respondidas (humano; + agente se setting ON). */
-function countableReplyWhere(
-  countAgent: boolean,
-): Prisma.ConversationWhereInput {
-  return countAgent
-    ? { OR: [{ hasHumanReply: true }, { hasAgentReply: true }] }
-    : { hasHumanReply: true };
-}
-
-function noCountableReplyWhere(
-  countAgent: boolean,
-): Prisma.ConversationWhereInput {
-  return countAgent
-    ? { hasHumanReply: false, hasAgentReply: false }
-    : { hasHumanReply: false };
 }
 
 /**
@@ -866,9 +854,7 @@ export async function getConversations(
 
     for (const r of batch) {
       const groupKey =
-        collapse && r.contactId
-          ? `c:${r.contactId}::${r.channel ?? ""}`
-          : `id:${r.id}`;
+        collapse && r.contactId ? inboxCardGroupKey(r) : `id:${r.id}`;
       if (seenGroups.has(groupKey)) continue;
       seenGroups.add(groupKey);
       repIds.push(r.id);

@@ -14,7 +14,7 @@
  *  - `OUTSIDE_WORKING_HOURS`→ fora do expediente (AgentSchedule).
  *  - `PRE_LUNCH`            → pré-almoço / almoço (`lunchStart - N` até `lunchEnd`).
  *  - `PRE_END`              → pré-fim de expediente (`endTime - N` até `endTime`).
- *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`queueLimit > 0 && filaAtual >= queueLimit`).
+ *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`filaAtual >= queueLimit`; 0 = não recebe).
  *  - `TYPE_INCOMPATIBLE`    → tipo/segmento do responsável != tipo solicitado.
  *
  * Compatibilidade: a lógica de presença/expediente espelha o legado
@@ -58,7 +58,7 @@ export interface ResponsibleEligibilityInput {
   participates: boolean;
   /** Pausa temporária dedicada. */
   paused: boolean;
-  /** 0 = sem limite; >0 bloqueia quando filaAtual >= queueLimit. */
+  /** Teto da fila. 0 = não recebe (fila já está no limite). */
   queueLimit: number;
   /** Tipo/segmento opcional do responsável. */
   type: string | null;
@@ -258,7 +258,7 @@ export function evaluateResponsibleEligibility(
     }
   }
 
-  if (input.queueLimit > 0 && input.queueCount >= input.queueLimit) {
+  if (input.queueCount >= input.queueLimit) {
     reasons.push("QUEUE_LIMIT_REACHED");
   }
 

@@ -6,6 +6,11 @@
 
 import type { Prisma } from "@prisma/client";
 
+import {
+  countableReplyWhere,
+  countAgentReplyAsAnswered,
+  noCountableReplyWhere,
+} from "@/lib/conversation-reply-marking";
 import { prisma } from "@/lib/prisma";
 import { assignConversationAssignedTo } from "@/services/conversations";
 import { scheduleProcessPendingDistributionQueue } from "./pending";
@@ -35,29 +40,34 @@ export type RedistributeResult = {
   recipients: { userId: string; name: string | null; received: number }[];
 };
 
-function queueWhere(
+async function queueWhere(
   sourceUserId: string,
   scope: RedistributeQueueScope,
-): Prisma.ConversationWhereInput {
+): Promise<Prisma.ConversationWhereInput> {
+  const countAgent = await countAgentReplyAsAnswered();
   const base: Prisma.ConversationWhereInput = {
     status: "OPEN",
     assignedToId: sourceUserId,
+    hasError: false,
   };
   if (scope === "entrada") {
-    return {
-      ...base,
-      hasHumanReply: false,
-      assignedTo: { is: { type: "HUMAN" } },
-    };
+    return { ...base, ...noCountableReplyWhere(countAgent) };
   }
   if (scope === "aguardando") {
-    // Cliente falou por último depois de atendimento humano.
-    return { ...base, hasHumanReply: true, lastMessageDirection: "in" };
+    return {
+      ...base,
+      AND: [countableReplyWhere(countAgent)],
+      lastMessageDirection: "in",
+    };
   }
-  // Escopo "all" = Entrada + Aguardando do consultor.
   return {
     ...base,
-    OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],
+    OR: [
+      noCountableReplyWhere(countAgent),
+      {
+        AND: [countableReplyWhere(countAgent), { lastMessageDirection: "in" }],
+      },
+    ],
   };
 }
 
@@ -77,7 +87,7 @@ export async function redistributeResponsibleQueue(
   }
 
   const conversations = await prisma.conversation.findMany({
-    where: queueWhere(input.sourceUserId, scope),
+    where: await queueWhere(input.sourceUserId, scope),
     select: { id: true },
     orderBy: { updatedAt: "asc" },
   });

@@ -260,9 +260,6 @@ export type PendingQueueTrigger =
   | "manual"
   | "scheduled";
 
-/** Teto de segurança por consultor por passagem quando queueLimit=0 (sem limite configurado). */
-const SAFETY_CAP_PER_USER = 25;
-
 /** Debounce / lock in-memory por org (sem schema novo). */
 const drainState = new Map<
   string,
@@ -303,10 +300,7 @@ function liveFreeCapacityForUser(
 ): number {
   const delta = assignedDeltaByUser.get(r.userId) ?? 0;
   const loaded = r.queueCount + delta;
-  // Sem limite configurado: ainda assim não ultrapassa o teto de segurança
-  // por consultor (conta carga atual + o que já entrou nesta passagem).
-  const cap = r.queueLimit > 0 ? r.queueLimit : SAFETY_CAP_PER_USER;
-  return Math.max(0, cap - loaded);
+  return Math.max(0, r.queueLimit - loaded);
 }
 
 function eligibleInDeptScope(

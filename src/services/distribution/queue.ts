@@ -1,25 +1,44 @@
 /**
- * Fila (carga) de cada responsável = nº de CONVERSAS OPEN atribuídas onde é a
- * VEZ DO AGENTE responder — "Entrada" + "Aguardando" no vocabulário do inbox.
- * Serve de base tanto para o LIMITE (`queueLimit` = teto de conversas abertas
- * simultâneas) quanto para a SELEÇÃO ("menor carga" em `engine.selectResponsible`).
+ * Fila (carga) de cada responsável = cards da inbox "Entrada" + "Aguardando"
+ * daquele consultor. Mesmo critério das abas (`tabToWhere`) e o mesmo
+ * colapso da lista (1 card por contato+canal). Alimenta o teto
+ * (`queueLimit`) e a seleção ("menor carga" em `engine.selectResponsible`).
  *
- * Critério (ver AGENT.md 2026-07-30):
- *   `status = OPEN` AND `assignedToId = user` AND `hasError = false`
- *   AND (`hasHumanReply = false` OR `lastMessageDirection = "in"`)
+ * Um ticket não entra nas duas abas: Entrada = ainda sem reply contável;
+ * Aguardando = já teve reply contável e o cliente falou por último.
+ * A soma é a dos dois badges/cards, não o colapso da união.
+ *
+ * `countAgentReplyAsAnswered` entra igual ao inbox: reply de bot/IA pode
+ * tirar o card de Entrada e, se a última msg for nossa, de Respondidas
+ * (sai da carga). Sem o setting, só `hasHumanReply` move o card.
  *
  * Quem já está atribuído ao consultor conta mesmo se o PIPE ainda não
- * encerrou (handoff) — a carga é dele. Robô sem assignee não aparece aqui
- * (não tem assignedToId).
- *
- * `Conversation` é org-scoped, então o filtro de organização é injetado pela
- * Prisma Extension. Uma única `groupBy` (sem N+1).
+ * encerrou (handoff). Robô sem assignee humano não aparece aqui.
  */
 
+import {
+  countableReplyWhere,
+  countAgentReplyAsAnswered,
+  inboxCardGroupKey,
+  noCountableReplyWhere,
+} from "@/lib/conversation-reply-marking";
 import { prisma } from "@/lib/prisma";
 
+function addCard(
+  byUser: Map<string, Set<string>>,
+  userId: string,
+  key: string,
+) {
+  let set = byUser.get(userId);
+  if (!set) {
+    set = new Set();
+    byUser.set(userId, set);
+  }
+  set.add(key);
+}
+
 /**
- * Mapa userId → nº de conversas OPEN aguardando ação do consultor.
+ * Mapa userId → nº de cards Entrada + Aguardando do consultor.
  * Usuários sem conversas não aparecem no mapa (o caller assume 0).
  *
  * `departmentIds` (opcional): quando informado, conta APENAS as conversas cujo
@@ -41,26 +60,59 @@ export async function getQueueCounts(
   const scopeDeptIds = (departmentIds ?? []).filter(
     (id): id is string => typeof id === "string" && id.length > 0,
   );
+  const countAgent = await countAgentReplyAsAnswered();
+  const deptFilter =
+    scopeDeptIds.length > 0 ? { departmentId: { in: scopeDeptIds } } : {};
 
-  const rows = await prisma.conversation.groupBy({
-    by: ["assignedToId"],
+  const rows = await prisma.conversation.findMany({
     where: {
       status: "OPEN",
       assignedToId: { in: userIds },
       hasError: false,
-      ...(scopeDeptIds.length > 0
-        ? { departmentId: { in: scopeDeptIds } }
-        : {}),
+      ...deptFilter,
       OR: [
-        { hasHumanReply: false },
-        { lastMessageDirection: "in" },
+        noCountableReplyWhere(countAgent),
+        {
+          AND: [
+            countableReplyWhere(countAgent),
+            { lastMessageDirection: "in" },
+          ],
+        },
       ],
     },
-    _count: { _all: true },
+    select: {
+      id: true,
+      assignedToId: true,
+      contactId: true,
+      channel: true,
+      hasHumanReply: true,
+      hasAgentReply: true,
+      lastMessageDirection: true,
+    },
   });
 
+  const entrada = new Map<string, Set<string>>();
+  const aguardando = new Map<string, Set<string>>();
+
   for (const row of rows) {
-    if (row.assignedToId) result.set(row.assignedToId, row._count._all);
+    if (!row.assignedToId) continue;
+    const countable = countAgent
+      ? row.hasHumanReply || row.hasAgentReply
+      : row.hasHumanReply;
+    const key = inboxCardGroupKey(row);
+    if (countable && row.lastMessageDirection === "in") {
+      addCard(aguardando, row.assignedToId, key);
+    } else if (!countable) {
+      addCard(entrada, row.assignedToId, key);
+    }
+  }
+
+  const userIdsWithCards = new Set([...entrada.keys(), ...aguardando.keys()]);
+  for (const userId of userIdsWithCards) {
+    result.set(
+      userId,
+      (entrada.get(userId)?.size ?? 0) + (aguardando.get(userId)?.size ?? 0),
+    );
   }
   return result;
 }
