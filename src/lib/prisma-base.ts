@@ -172,8 +172,23 @@ function createPrismaClient() {
     }
   }
 
+  // Quando passamos o objeto `ssl`, o `sslmode` da connection string CONFLITA
+  // e vence (o pg trata `require` como `verify-full` e ignora o objeto ssl) —
+  // provado em teste local: mesmo `rejectUnauthorized:false` falhava com
+  // `sslmode=require` presente. Por isso removemos o `sslmode`/`sslcert` da URL
+  // quando o objeto ssl está presente, deixando o objeto mandar no TLS.
+  let connectionString = process.env.DATABASE_URL;
+  if (ssl && connectionString) {
+    connectionString = connectionString
+      .replace(/([?&])sslmode=[^&]*/g, "$1")
+      .replace(/([?&])sslcert=[^&]*/g, "$1")
+      .replace(/[?&]$/, "")
+      .replace(/\?&/, "?")
+      .replace(/\?$/, "");
+  }
+
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString,
     max,
     idleTimeoutMillis,
     connectionTimeoutMillis,
