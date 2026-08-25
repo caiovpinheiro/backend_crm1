@@ -743,7 +743,7 @@
       }
 
       function statusBadge(consultant) {
-        if (consultant.queueLimit > 0 && consultant.queueCount >= consultant.queueLimit) {
+        if (consultant.queueCount >= consultant.queueLimit) {
           return '<span class="badge b-full"><span class="bdot"></span>Fila cheia</span>';
         }
         if (consultant.eligible) {
@@ -754,14 +754,12 @@
       }
 
       function queueCell(c) {
-        var limit = c.queueLimit > 0 ? c.queueLimit : null;
-        var pct = limit ? Math.min(100, Math.round((c.queueCount / limit) * 100)) : 0;
+        var limit = c.queueLimit;
+        var pct = limit > 0 ? Math.min(100, Math.round((c.queueCount / limit) * 100)) : 100;
         var cls = "";
-        if (limit) {
-          if (c.queueCount >= limit) cls = "full";
-          else if (pct >= 80) cls = "warn";
-        }
-        var text = limit ? c.queueCount + " / " + limit : String(c.queueCount);
+        if (c.queueCount >= limit) cls = "full";
+        else if (limit > 0 && pct >= 80) cls = "warn";
+        var text = c.queueCount + " / " + limit;
         var bar = limit
           ? '<div class="bar"><i class="' + cls + '" style="width:' + pct + '%"></i></div>'
           : "";

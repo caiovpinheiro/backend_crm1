@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
-import { prisma } from "@/lib/prisma";
+import { getQueueCounts } from "@/services/distribution/queue";
 
 export const dynamic = "force-dynamic";
 
@@ -11,8 +11,7 @@ export const dynamic = "force-dynamic";
  * Conceito — quão ocupado o agente está AGORA, expresso em % da carga
  * máxima recomendada. Usamos:
  *
- *   activeConversations = conversas OPEN atribuídas onde é a VEZ do agente
- *                         responder ("Entrada" + "Aguardando" do inbox).
+ *   activeConversations = cards Entrada + Aguardando do inbox (`getQueueCounts`).
  *                         Ignoramos "Respondidas" (aguarda cliente voltar)
  *                         e "Erro" (não é carga ativa).
  *   maxConcurrent       = limite recomendado (20 por padrão — pode
@@ -46,17 +45,8 @@ export async function GET() {
   if (!r.ok) return r.response;
   const userId = r.session.user.id;
 
-  const activeConversations = await prisma.conversation.count({
-    where: {
-      status: "OPEN",
-      assignedToId: userId,
-      hasError: false,
-      OR: [
-        { hasHumanReply: false },
-        { lastMessageDirection: "in" },
-      ],
-    },
-  });
+  const activeConversations =
+    (await getQueueCounts([userId])).get(userId) ?? 0;
 
   const maxConcurrent = DEFAULT_MAX_CONCURRENT;
   const loadPct = Math.max(

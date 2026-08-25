@@ -3762,7 +3762,7 @@ model DistributionResponsible {
   participates    Boolean      @default(true)
   /// Se false, some da grade de cobertura (útil para admins que não atendem).
   visibleInCoverage Boolean    @default(true)
-  /// 0 = SEM limite de fila. >0 bloqueia quando filaAtual >= queueLimit.
+  /// Teto da fila. 0 = não recebe. Bloqueia quando filaAtual >= queueLimit.
   queueLimit      Int          @default(0)
   /// Peso/volume exibido na v2 (default 1). Nao altera a selecao v1.
   volume          Int          @default(1)
