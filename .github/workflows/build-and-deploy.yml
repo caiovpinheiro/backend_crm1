@@ -86,15 +86,21 @@ jobs:
           S_WEBHOOK_DEV_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_ETL }}
           S_WEBHOOK_DEV_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS }}
           S_WEBHOOK_DEV_META: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK }}
+          S_WEBHOOK_DO: ${{ secrets.EASYPANEL_WEBHOOK_DO_API }}
+          S_WEBHOOK_DO_WA: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_WHATSAPP }}
+          S_WEBHOOK_DO_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_LEADS }}
+          S_WEBHOOK_DO_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_ETL }}
+          S_WEBHOOK_DO_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS }}
+          S_WEBHOOK_DO_META: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK }}
         run: |
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
             TAG=latest
             WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO $S_WEBHOOK_PROD_META"
           elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
-            # Branch de migração DO: publica com a tag da branch para o
-            # EasyPanel da DO puxar uma imagem distinta da de produção.
+            # Branch de migração DO: publica com a tag da branch e dispara o
+            # redeploy dos serviços do EasyPanel da DO (API + workers).
             TAG=digitalocean
-            WEBHOOKS=""
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META"
           else
             TAG=dev
             WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META"
