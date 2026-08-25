@@ -269,26 +269,132 @@ async function resolveCtxFromNextCookie(): Promise<RequestContext | null> {
   }
 }
 
-function modelDelegateName(model: string): string {
-  return model.charAt(0).toLowerCase() + model.slice(1);
+/** Tabela do contador — ver model `OrgNumberCounter` no schema. */
+const NUMBER_COUNTER_TABLE = "org_number_counters";
+
+type NumberedTableMeta = {
+  table: string;
+  orgColumn: string;
+  numberColumn: string;
+};
+
+const numberedTableMetaCache = new Map<Prisma.ModelName, NumberedTableMeta>();
+
+/**
+ * Identificador para interpolação via `Prisma.raw`. Os nomes só vêm do DMMF
+ * (nunca de input), mas validamos de todo jeito: `Prisma.raw` não escapa
+ * nada, então um nome inesperado aqui viraria injeção de SQL.
+ */
+function quoteIdentifier(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `[prisma] identificador rejeitado para SQL cru: ${JSON.stringify(name)}`,
+    );
+  }
+  return `"${name}"`;
 }
 
-async function allocateNextNumber(
+/**
+ * Resolve nome real de tabela/colunas no banco a partir dos metadados do
+ * client. Model name != table name: quase todo model usa `@@map`
+ * (`Conversation` -> `conversations`, `CustomField` -> `custom_fields`).
+ * Lança se o model não existir ou não tiver as colunas esperadas — melhor
+ * estourar no primeiro create do que montar SQL contra tabela errada.
+ */
+function numberedTableMeta(model: Prisma.ModelName): NumberedTableMeta {
+  const cached = numberedTableMetaCache.get(model);
+  if (cached) return cached;
+
+  const dm = Prisma.dmmf.datamodel.models.find((m) => m.name === model);
+  if (!dm) {
+    throw new Error(`[prisma] model ${model} nao encontrado no DMMF.`);
+  }
+  const org = dm.fields.find((f) => f.name === "organizationId");
+  const num = dm.fields.find((f) => f.name === "number");
+  if (!org || !num) {
+    throw new Error(
+      `[prisma] model ${model} esta em NUMBERED_ORG_MODELS mas nao tem ` +
+        `os campos organizationId + number.`,
+    );
+  }
+
+  const meta: NumberedTableMeta = {
+    table: dm.dbName ?? dm.name,
+    orgColumn: org.dbName ?? org.name,
+    numberColumn: num.dbName ?? num.name,
+  };
+  numberedTableMetaCache.set(model, meta);
+  return meta;
+}
+
+/**
+ * Reserva `count` números sequenciais para (model, org) e devolve o
+ * primeiro da faixa.
+ *
+ * Por que não é mais `MAX(number) + 1` (stress test staging, 23/08):
+ *   - custo: a extension de scope traduz `aggregate({_max})` para
+ *     `SELECT MAX(number) FROM (SELECT number FROM t WHERE org=$1 OFFSET $2)`.
+ *     O `OFFSET` mata o Index Only Scan Backward — 344ms lendo 78k linhas
+ *     contra 0,3ms na forma direta. Eram 27k chamadas/180s.
+ *   - corrida: ler o MAX e inserir são statements distintos, então N workers
+ *     concorrentes leem o mesmo número. Deu 27k P2002 em
+ *     `(organizationId, number)` numa janela de 180s.
+ *
+ * A alocação virou UM statement. `ON CONFLICT DO UPDATE` serializa no row
+ * lock do contador (granularidade org+model: orgs e models distintos não se
+ * bloqueiam), então duas chamadas concorrentes nunca recebem a mesma faixa.
+ *
+ * Advisory lock foi descartado de propósito: `pg_advisory_xact_lock` só
+ * solta no fim da transaction, e aqui a leitura roda em `prismaBase` (fora
+ * da transaction do caller, que a extension nem consegue alcançar — o
+ * callback `query()` do `$allOperations` já está preso ao client de origem).
+ * O lock seria liberado antes do INSERT e não protegeria nada. Com o
+ * contador a atomicidade é do statement, então não depende de transaction.
+ *
+ * `GREATEST(lastNumber, MAX(number))` é rede de segurança: se alguém inserir
+ * `number` por fora do contador (seed, SQL manual, backfill), o contador se
+ * realinha em vez de reemitir número já usado. O `MAX` aqui é a forma rápida
+ * (sem OFFSET), então custa ~0,3ms.
+ *
+ * Efeito colateral aceito: a faixa é consumida mesmo se o INSERT do caller
+ * falhar depois (o contador não participa da transaction dele). Isso abre
+ * buracos na numeração, o que já acontecia antes via retry. Numeração é
+ * identificador público, não contagem.
+ */
+export async function allocateOrgNumber(
   model: Prisma.ModelName,
   orgId: string,
+  count = 1,
 ): Promise<number> {
-  const key = modelDelegateName(model) as keyof typeof prismaBase;
-  const delegate = prismaBase[key] as {
-    aggregate: (args: {
-      where: { organizationId: string };
-      _max: { number: true };
-    }) => Promise<{ _max: { number: number | null } }>;
-  };
-  const r = await delegate.aggregate({
-    where: { organizationId: orgId },
-    _max: { number: true },
-  });
-  return (r._max.number ?? 0) + 1;
+  const { table, orgColumn, numberColumn } = numberedTableMeta(model);
+  const n = Math.max(1, Math.trunc(count));
+
+  const counter = Prisma.raw(quoteIdentifier(NUMBER_COUNTER_TABLE));
+  const rows = await prismaBase.$queryRaw<
+    Array<{ next_number: bigint | number | string }>
+  >`
+    WITH atual AS (
+      SELECT COALESCE(MAX(${Prisma.raw(quoteIdentifier(numberColumn))}), 0) AS max_num
+        FROM ${Prisma.raw(quoteIdentifier(table))}
+       WHERE ${Prisma.raw(quoteIdentifier(orgColumn))} = ${orgId}
+    )
+    INSERT INTO ${counter} ("organizationId", "model", "lastNumber", "updatedAt")
+    SELECT ${orgId}, ${model}, atual.max_num + ${n}::int, now() FROM atual
+    ON CONFLICT ("organizationId", "model") DO UPDATE
+       SET "lastNumber" =
+             GREATEST(${counter}."lastNumber", excluded."lastNumber" - ${n}::int)
+             + ${n}::int,
+           "updatedAt" = now()
+    RETURNING "lastNumber" - ${n}::int + 1 AS next_number
+  `;
+
+  const first = Number(rows[0]?.next_number ?? 0);
+  if (!Number.isFinite(first) || first < 1) {
+    throw new Error(
+      `[prisma] allocateOrgNumber(${model}) nao retornou numero valido.`,
+    );
+  }
+  return first;
 }
 
 function isNumberUniqueViolation(err: unknown): boolean {
@@ -394,7 +500,7 @@ function extend(base: typeof prismaBase = prismaBase) {
                 (a.data as { number?: unknown }).number == null
               ) {
                 (a.data as { number: number }).number =
-                  await allocateNextNumber(model as Prisma.ModelName, orgId);
+                  await allocateOrgNumber(model as Prisma.ModelName, orgId);
               }
               break;
             }
@@ -414,9 +520,13 @@ function extend(base: typeof prismaBase = prismaBase) {
                   (d) => d && typeof d === "object" && d.number == null,
                 );
                 if (missing.length > 0) {
-                  let n = await allocateNextNumber(
+                  // Reserva a faixa inteira num statement: pedir 1 número e
+                  // incrementar em memória devolvia números já emitidos para
+                  // outro createMany concorrente.
+                  let n = await allocateOrgNumber(
                     model as Prisma.ModelName,
                     orgId,
+                    missing.length,
                   );
                   for (const d of missing) {
                     d.number = n++;
@@ -443,7 +553,7 @@ function extend(base: typeof prismaBase = prismaBase) {
                   (a.create as { number?: unknown }).number == null
                 ) {
                   (a.create as { number: number }).number =
-                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                    await allocateOrgNumber(model as Prisma.ModelName, orgId);
                 }
               }
               if (a.update) {
@@ -455,9 +565,19 @@ function extend(base: typeof prismaBase = prismaBase) {
               break;
             }
             default:
-              break;
+              // Operação não mapeada em model scoped NUNCA pode passar
+              // sem filtro de tenant — falha ruidosa em vez de leak silencioso.
+              throw new Error(
+                `[prisma] operação "${operation}" não mapeada na extension de ` +
+                  `organization-scope (model ${model}). Mapeie explicitamente ` +
+                  `ou use prismaBase (@/lib/prisma-base).`,
+              );
           }
 
+          // Retry mantido como rede de segurança: `allocateOrgNumber` já é
+          // atômico, mas ainda existem call sites que atribuem `number` por
+          // conta própria (ex.: `withConversationNumberRetry`) e podem
+          // colidir com a faixa emitida pelo contador.
           if (
             numbered &&
             (operation === "create" ||
@@ -474,10 +594,10 @@ function extend(base: typeof prismaBase = prismaBase) {
                 if (!isNumberUniqueViolation(err)) throw err;
                 if (operation === "create" && a.data) {
                   (a.data as { number: number }).number =
-                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                    await allocateOrgNumber(model as Prisma.ModelName, orgId);
                 } else if (operation === "upsert" && a.create) {
                   (a.create as { number: number }).number =
-                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                    await allocateOrgNumber(model as Prisma.ModelName, orgId);
                 } else {
                   throw err;
                 }

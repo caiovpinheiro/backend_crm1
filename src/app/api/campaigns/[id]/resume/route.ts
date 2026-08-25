@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { enqueueCampaignSend } from "@/lib/queue";
+import { isCampaignSendRoundRobinEnabled } from "@/lib/campaign-send-rate";
 
 export async function POST(
   _request: Request,
@@ -35,6 +36,18 @@ export async function POST(
       where: { id },
       data: { status: "SENDING" },
     });
+
+    if (isCampaignSendRoundRobinEnabled()) {
+      // O loop de rodízio descobre os PENDING direto no banco — enfileirar
+      // seria redundante (a fila campaign-send não tem consumidor neste modo).
+      const pending = await prisma.campaignRecipient.count({
+        where: { campaignId: id, status: "PENDING" },
+      });
+      return NextResponse.json({
+        message: `Campanha retomada. ${pending} envios pendentes serão retomados automaticamente.`,
+        status: "SENDING",
+      });
+    }
 
     const pendingRecipients = await prisma.campaignRecipient.findMany({
       where: { campaignId: id, status: "PENDING" },

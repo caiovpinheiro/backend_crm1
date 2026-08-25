@@ -11,7 +11,7 @@
  * Performance:
  *   - Hot path `can(ctx, key)` e O(1) via `Set.has`. A construcao do
  *     Set vem do banco mas e cacheada via `cache.wrap` (TTL 60s + lock
- *     anti-stampede). Mutations chamam `invalidateAuthzForUser(userId)`
+ *     anti-stampede). Mutations chamam `invalidateAuthzForUser(orgId, userId)`
  *     pra zerar a cache imediatamente.
  *
  * Super-admin EduIT:
@@ -44,7 +44,10 @@ import { PRESET_PERMISSIONS } from "./presets";
 
 const log = getLogger("authz");
 
-const CACHE_PREFIX = "authz:user:";
+// Chave namespaced por org (`authz:<orgId>:user:<userId>`) para que
+// `invalidateAuthzForOrg` apague APENAS os users daquela org via
+// delPattern — antes era `authz:user:*` global, que derrubava o cache
+// de TODOS os tenants no mesmo Redis a cada edição de Role.
 const CACHE_TTL_SEC = 60;
 
 // ──────────────────────────────────────────────
@@ -120,8 +123,8 @@ const PERMISSIVE_GRANTS: RoleGrantContext = {
 // Carregamento + cache
 // ──────────────────────────────────────────────
 
-function cacheKey(userId: string): string {
-  return `${CACHE_PREFIX}${userId}`;
+function cacheKey(organizationId: string, userId: string): string {
+  return `authz:${organizationId}:user:${userId}`;
 }
 
 /**
@@ -310,7 +313,7 @@ export async function loadAuthzContext(input: {
 
   const orgId = input.organizationId;
   const payload = await cache.wrap<CachedAuthzPayload>(
-    cacheKey(input.userId),
+    cacheKey(orgId, input.userId),
     CACHE_TTL_SEC,
     () => loadFromDb(input.userId, orgId),
   );
@@ -472,8 +475,11 @@ export async function requirePermission(
  *     os users com essa Role — usar `invalidateAuthzForOrg` ou
  *     `invalidateAuthzForRole`).
  */
-export async function invalidateAuthzForUser(userId: string): Promise<void> {
-  await cache.del(cacheKey(userId));
+export async function invalidateAuthzForUser(
+  organizationId: string,
+  userId: string,
+): Promise<void> {
+  await cache.del(cacheKey(organizationId, userId));
 }
 
 /**
@@ -481,13 +487,11 @@ export async function invalidateAuthzForUser(userId: string): Promise<void> {
  * permissions de uma Role (afeta todos os assignments). Mais barato que
  * iterar por user ID porque usa `delPattern` em SCAN batch.
  *
- * Nota: usa pattern global (`authz:user:*`) — em deploys multi-org no
- * mesmo Redis, isso invalida users de OUTRAS orgs tambem. Aceitavel
- * porque cache e re-construido lazy no proximo hit. Se virar gargalo,
- * trocar pra namespacing por org (`authz:org:<id>:user:<id>`).
+ * O pattern e namespaced por org (`authz:<orgId>:user:*`) — em deploys
+ * multi-org no mesmo Redis, users de OUTRAS orgs nao sao afetados.
  */
-export async function invalidateAuthzForOrg(_organizationId: string): Promise<void> {
-  await cache.delPattern("authz:user:*");
+export async function invalidateAuthzForOrg(organizationId: string): Promise<void> {
+  await cache.delPattern(`authz:${organizationId}:user:*`);
 }
 
 /**

@@ -30,17 +30,39 @@ function appMode(): string {
 }
 
 /**
- * Defaults por APP_MODE — workers NÃO devem competir com a API pelo
- * orçamento de `max_connections` do Postgres compartilhado.
+ * Defaults por APP_MODE. A regra é `pool ≥ demanda real de conexões
+ * simultâneas do processo`, e não `pool ≥ concurrency nominal`: um job
+ * pode segurar mais de uma conexão quando dispara trabalho sem `await`.
+ * Quando o pool fica abaixo da demanda, o excedente espera invisível na
+ * fila interna do pg-pool e estoura em `DB_POOL_CONN_TIMEOUT_MS` com
+ * "timeout exceeded when trying to connect" — que no worker vira retry do
+ * job inteiro.
  *
  * - api: 20 (inbox/pipeline/board sob carga)
- * - worker-whatsapp: 6 (dispatch=2 + send≈4; campanha precisa headroom)
- * - demais workers: 4 (alinhado a concurrency ≤ pool)
+ * - worker-whatsapp: 16 (rodízio de campanha com CAMPAIGN_SEND_CONCURRENCY
+ *   runners: o tempo do runner é dominado por espera de throttle/HTTP Meta,
+ *   mas cada envio faz ~4-6 queries curtas; 16 conexões cobrem o duty cycle
+ *   sem fila invisível no pg-pool. Antes: 6 — gargalo medido a 300 msg/s)
+ * - worker-meta-webhook: 16 (concurrency 4 × ~4 conexões: o handler de
+ *   status/inbound dispara IIFEs `void (async () => ...)` que rodam em
+ *   paralelo ao job e não são contabilizadas pela concurrency)
+ * - worker-leads: 10 (concurrency 5 + semáforo de efeitos colaterais do
+ *   bulk-move-stage, limitado a 3 em voo por processo, + folga)
+ * - worker-automation: 6 (concurrency 4 + folga p/ enqueue/log)
+ * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas
+ *   por linha)
+ *
+ * Soma dos defaults com 1 réplica de cada: 20 + 16 + 16 + 10 + 6 + 4 = 72,
+ * contra ~197 conexões disponíveis no Postgres gerenciado (4 vCPU/8 GB).
+ * Sobram ~125 para réplicas, migrations e sessões de manutenção.
  */
 function defaultPoolMax(): number {
   const mode = appMode();
   if (!mode.startsWith("worker")) return 20;
-  if (mode === "worker-whatsapp") return 6;
+  if (mode === "worker-whatsapp") return 16;
+  if (mode === "worker-meta-webhook") return 16;
+  if (mode === "worker-leads") return 10;
+  if (mode === "worker-automation") return 6;
   return 4;
 }
 

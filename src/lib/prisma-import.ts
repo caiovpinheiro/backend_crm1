@@ -2,6 +2,8 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
+import { applyOrgScope } from "@/lib/prisma";
+
 /**
  * Pool/cliente Prisma DEDICADO para cargas em massa (import ETL, backfills).
  *
@@ -72,6 +74,19 @@ function createImportClient(): PrismaClient {
 
 export const prismaImport: PrismaClient =
   globalForImport.prismaImport ?? createImportClient();
+
+/**
+ * Versão COM a extension de organization-scope aplicada sobre o pool de
+ * import. É o client que os cores de ETL (`contact-import-core`,
+ * `deal-import-core`) usam: as queries pesadas de importação saem do
+ * pool interativo compartilhado e passam a rodar com
+ * statement_timeout=60s / lock_timeout=3s / pool max=4.
+ *
+ * `allocateOrgNumber` dentro da extension continua usando `prismaBase`
+ * (query pequena de contador) — apenas o tráfego de linhas do ETL é
+ * isolado aqui.
+ */
+export const prismaImportScoped = applyOrgScope(prismaImport);
 
 if (process.env.NODE_ENV !== "production") {
   globalForImport.prismaImportPool = prismaImportPool;
