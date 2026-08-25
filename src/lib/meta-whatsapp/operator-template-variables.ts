@@ -9,6 +9,17 @@ export type OperatorVariableMeta = {
   example?: string;
 };
 
+/**
+ * A Meta só promove a parâmetro o marcador posicional (`{{1}}`) ou o nomeado
+ * simples — minúsculas, dígitos e underscore (`{{nome_curso}}`). Qualquer
+ * outra coisa entre chaves (ponto, maiúscula, hífen, espaço) é texto literal
+ * do corpo aprovado: o template conta como SEM parâmetros e mandar
+ * `components` para ele devolve 132000.
+ */
+export function isMetaPlaceholderKey(key: string): boolean {
+  return /^[a-z0-9_]+$/.test(key);
+}
+
 /** Extrai chaves únicas na ordem de aparição: `{{1}}`, `{{nome}}`, etc. */
 export function extractPlaceholderKeysFromBodyText(text: string): string[] {
   const keys: string[] = [];
@@ -23,6 +34,19 @@ export function extractPlaceholderKeysFromBodyText(text: string): string[] {
     }
   }
   return keys;
+}
+
+/** Só as chaves que a Meta realmente aceita como parâmetro. */
+export function extractMetaPlaceholderKeys(text: string): string[] {
+  return extractPlaceholderKeysFromBodyText(text).filter(isMetaPlaceholderKey);
+}
+
+/**
+ * O contrário: os tokens entre chaves que a Meta ignora. Serve para avisar o
+ * operador de que o corpo aprovado tem marcador que nunca vira parâmetro.
+ */
+export function extractUnsupportedPlaceholderTokens(text: string): string[] {
+  return extractPlaceholderKeysFromBodyText(text).filter((k) => !isMetaPlaceholderKey(k));
 }
 
 /** Preserva labels/exemplos já gravados quando as chaves continuam iguais. */

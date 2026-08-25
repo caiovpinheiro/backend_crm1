@@ -48,10 +48,13 @@ export const SOURCE_NONE = "__none__";
 // Tipos
 // ──────────────────────────────────────────────────────────────────
 
+/** Sentinela / vazio = todos os funis da org. */
+export const PIPELINE_ALL = "__all__";
+
 export interface DashboardFilters {
   from: Date;
   to: Date;
-  /** Pipeline já resolvido (default da org quando não informado). */
+  /** Pipeline resolvido. Vazio = consolidado de todos os funis. */
   pipelineId: string;
   stageIds?: string[];
   tagIds?: string[];
@@ -204,6 +207,29 @@ function previousPeriod(from: Date, to: Date): { from: Date; to: Date } {
   return { from: prevFrom, to: prevTo };
 }
 
+/** Consolida etapas de vários funis pelo nome (visão "Todos"). */
+function mergeFunnelByName(
+  rows: DashboardFunnelStage[],
+): DashboardFunnelStage[] {
+  const map = new Map<string, DashboardFunnelStage>();
+  for (const row of rows) {
+    const key = row.name.trim().toLowerCase();
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, { ...row, id: `all:${key}` });
+      continue;
+    }
+    prev.count += row.count;
+    prev.value = round2(prev.value + row.value);
+    prev.won += row.won;
+    prev.lost += row.lost;
+    prev.entered += row.entered;
+    prev.exited += row.exited;
+    prev.conversion = conversion(prev.won, prev.lost);
+  }
+  return [...map.values()];
+}
+
 function conversion(won: number, lost: number): number {
   const decided = won + lost;
   return decided > 0 ? round2((won / decided) * 100) : 0;
@@ -227,8 +253,10 @@ function and(
 function buildDealScopeSql(f: DashboardFilters, orgId: string): Prisma.Sql {
   const parts: Prisma.Sql[] = [
     Prisma.sql`d."organizationId" = ${orgId}`,
-    Prisma.sql`s."pipelineId" = ${f.pipelineId}`,
   ];
+  if (f.pipelineId) {
+    parts.push(Prisma.sql`s."pipelineId" = ${f.pipelineId}`);
+  }
   if (f.stageIds && f.stageIds.length > 0) {
     parts.push(Prisma.sql`d."stageId" IN (${Prisma.join(f.stageIds)})`);
   }
@@ -404,8 +432,12 @@ export async function getDashboard(
     stalledAgg,
   ] = await Promise.all([
     prisma.stage.findMany({
-      where: { pipelineId: f.pipelineId },
-      orderBy: { position: "asc" },
+      where: f.pipelineId
+        ? { pipelineId: f.pipelineId }
+        : { pipeline: { archivedAt: null } },
+      orderBy: f.pipelineId
+        ? { position: "asc" }
+        : [{ pipeline: { createdAt: "asc" } }, { position: "asc" }],
       select: { id: true, name: true, color: true, rottingDays: true },
     }),
     prisma.deal.aggregate({
@@ -615,6 +647,8 @@ export async function getDashboard(
       exited: exitedMap.get(s.id) ?? 0,
     };
   });
+
+  const funnelView = f.pipelineId ? funnel : mergeFunnelByName(funnel);
 
   // ── Ranking de consultores ───────────────────────────────────────
   const ownerIds = new Set<string>();
@@ -827,10 +861,10 @@ export async function getDashboard(
   newDealsAcc.lostValue = round2(newDealsAcc.lostValue);
 
   return {
-    pipelineId: f.pipelineId,
+    pipelineId: f.pipelineId || PIPELINE_ALL,
     summary,
     newDeals: newDealsAcc,
-    funnel,
+    funnel: funnelView,
     bySource,
     byOwner,
     byTag,

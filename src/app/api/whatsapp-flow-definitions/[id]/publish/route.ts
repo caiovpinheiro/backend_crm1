@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { getFlowDefinitionById, publishFlowDefinition } from "@/services/whatsapp-flow-definitions";
 
@@ -35,9 +36,14 @@ export async function POST(_request: Request, context: RouteContext) {
     } catch (e: unknown) {
       const extra = e as Error & { validationErrors?: unknown[] };
       const validationErrors = extra.validationErrors ?? [];
+      const message = isMetaGraphError(e)
+        ? e.toPersistedString()
+        : e instanceof Error
+          ? e.message
+          : "Erro ao publicar na Meta.";
       return NextResponse.json(
         {
-          message: e instanceof Error ? e.message : "Erro ao publicar na Meta.",
+          message,
           validationErrors,
         },
         { status: 502 },

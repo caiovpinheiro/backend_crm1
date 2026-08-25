@@ -5,7 +5,10 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { isAssigneeCurrentlyEligible } from "@/services/distribution/assignee-eligibility";
+import {
+  isAssigneeCurrentlyEligible,
+  shouldClearOwnershipOnIneligible,
+} from "@/services/distribution/assignee-eligibility";
 
 const RETURN_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -118,10 +121,15 @@ export async function findHumanToKeepAfterAutomationClose(
   });
   if (!stillHuman) return null;
 
-  // Offline / fora do expediente / fila cheia: devolver a ele deixaria o
-  // aluno parado. Nesse caso segue o fluxo normal de distribuição.
+  // Offline / fora do expediente: devolver a ele deixaria o aluno parado, então
+  // segue o fluxo normal de distribuição. Fila cheia é exceção: o teto barra
+  // lead NOVO, e aqui o aluno já é caso dele — mandar para a fila de espera
+  // seria pior do que devolver ao consultor que o atendeu.
   const check = await isAssigneeCurrentlyEligible(stillHuman.id);
-  return check.eligible ? stillHuman.id : null;
+  if (check.eligible) return stillHuman.id;
+  return shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons)
+    ? null
+    : stillHuman.id;
 }
 
 /** Atribui o consultor anterior e impede a IA de assumir. */

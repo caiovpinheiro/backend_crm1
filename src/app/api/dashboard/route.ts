@@ -131,6 +131,22 @@ export async function GET(request: Request) {
 
       let pipelineId = searchParams.get("pipelineId") || "";
       const pipelineRef = searchParams.get("pipeline");
+      const isAll =
+        pipelineRef === "all" ||
+        pipelineId === "all" ||
+        pipelineId === "__all__";
+      if (isAll) {
+        const data = await getDashboard({
+          from,
+          to,
+          pipelineId: "",
+          stageIds: csv(searchParams.get("stages")),
+          tagIds: csv(searchParams.get("tags")),
+          ownerIds: csv(searchParams.get("owners")),
+          sources: csv(searchParams.get("sources")),
+        });
+        return NextResponse.json(data);
+      }
       if (pipelineRef && (!pipelineId || /^\d+$/.test(pipelineId))) {
         const resolved = await resolvePipelineByPublicRef(pipelineRef);
         if (resolved) pipelineId = resolved.id;

@@ -72,7 +72,10 @@ export interface ResponsibleEligibilityInput {
    * nem pré-fim). Default 30 quando omitido.
    */
   preLunchStopMinutes?: number;
-  /** Fila atual (deals OPEN com este owner). */
+  /**
+   * Carga atual comparada com `queueLimit`. É a fila TOTAL do consultor
+   * (todos os departamentos), não a do departamento em distribuição.
+   */
   queueCount: number;
   /**
    * Distribuição por departamento: `false` bloqueia com `DEPARTMENT_MISMATCH`

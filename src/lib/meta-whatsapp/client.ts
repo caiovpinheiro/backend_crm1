@@ -41,8 +41,18 @@ const GRAPH_VERSION = "v21.0";
 const GRAPH_TIMEOUT_MS = 20_000;
 
 /** Retries curtos no Graph para code 2 / 5xx transitórios (antes de falhar a bolha). */
-const GRAPH_TRANSIENT_MAX_ATTEMPTS = 3;
 const GRAPH_TRANSIENT_BACKOFF_MS = 1_000;
+
+/**
+ * Tentativas do retry interno do graphFetch. Default 3 (histórico);
+ * META_GRAPH_MAX_ATTEMPTS ajusta sem rebuild — o circuit breaker por
+ * phoneNumberId (meta-circuit-breaker.ts) é a proteção fleet-wide que
+ * permite baixar isto sem perder resiliência por mensagem.
+ */
+function graphTransientMaxAttempts(): number {
+  const raw = Number(process.env.META_GRAPH_MAX_ATTEMPTS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -218,6 +228,34 @@ export function isMetaGraphError(err: unknown): err is MetaGraphError {
   return err instanceof MetaGraphError;
 }
 
+/** CTA do Flow: máx. 20 caracteres, sem emoji (exigência da Cloud API). */
+export function sanitizeFlowCta(raw: string): string {
+  const stripped = raw
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (stripped || "Continuar").slice(0, 20);
+}
+
+/**
+ * Timeout da chamada à Graph (AbortSignal.timeout em graphFetchOnce). Tipo
+ * dedicado para o circuit breaker por phoneNumberId contar como falha de
+ * infra sem depender de string matching. A mensagem é idêntica à versão
+ * anterior (Error simples) — nada muda em Message.sendError.
+ */
+export class MetaGraphTimeoutError extends Error {
+  readonly name = "MetaGraphTimeoutError";
+}
+
+/**
+ * Falha de transporte na chamada à Graph (DNS, conexão recusada/resetada —
+ * o `fetch` rejeita antes de haver resposta HTTP). Mesmo papel do
+ * MetaGraphTimeoutError para o circuit breaker; mensagem preservada.
+ */
+export class MetaGraphNetworkError extends Error {
+  readonly name = "MetaGraphNetworkError";
+}
+
 /**
  * Formata qualquer erro para persistir em `Message.sendError` /
  * `CampaignRecipient.errorMessage`. Se for `MetaGraphError`, preserva
@@ -274,7 +312,7 @@ export class MetaWhatsAppClient {
     path: string,
     init: RequestInit & { maxAttempts?: number } = {},
   ): Promise<T> {
-    const { maxAttempts = GRAPH_TRANSIENT_MAX_ATTEMPTS, ...fetchInit } = init;
+    const { maxAttempts = graphTransientMaxAttempts(), ...fetchInit } = init;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -289,7 +327,11 @@ export class MetaWhatsAppClient {
         if (!transient || attempt >= maxAttempts) {
           throw err;
         }
-        const delay = GRAPH_TRANSIENT_BACKOFF_MS * attempt;
+        // Jitter 50–100% do backoff linear: sem ele, dezenas de runners
+        // re-tentam em lockstep e a recuperação da Meta vira rajada
+        // sincronizada (thundering herd).
+        const base = GRAPH_TRANSIENT_BACKOFF_MS * attempt;
+        const delay = Math.floor(base * (0.5 + Math.random() * 0.5));
         console.warn(
           `[MetaWA] transient code=${isMetaGraphError(err) ? err.code : "?"} http=${isMetaGraphError(err) ? err.httpStatus : "?"} — retry ${attempt}/${maxAttempts - 1} em ${delay}ms (${path})`,
         );
@@ -324,11 +366,15 @@ export class MetaWhatsAppClient {
         (err.name === "TimeoutError" || err.name === "AbortError")
       ) {
         console.error(`[MetaWA] timeout ${GRAPH_TIMEOUT_MS}ms em ${path}`);
-        throw new Error(
+        throw new MetaGraphTimeoutError(
           `Tempo limite ao comunicar com a Meta (${GRAPH_TIMEOUT_MS}ms) em ${path}. Tente novamente.`,
         );
       }
-      throw err;
+      // Demais rejeições do fetch são de transporte (DNS/ECONNRESET/...) —
+      // empacota em tipo próprio p/ o circuit breaker contar como infra.
+      throw new MetaGraphNetworkError(
+        err instanceof Error ? err.message : String(err),
+      );
     }
     recordMetaCall(path, String(res.status), t0);
     const text = await res.text();
@@ -582,6 +628,53 @@ export class MetaWhatsAppClient {
     });
   }
 
+  /**
+   * Envia WhatsApp Flow como mensagem de sessão (janela 24h).
+   * Fora da janela a Graph recusa — aí o caminho é template com botão FLOW.
+   */
+  async sendInteractiveFlow(
+    to: string | undefined,
+    body: string,
+    params: {
+      flowId: string;
+      flowCta: string;
+      flowToken: string;
+      flowAction?: "navigate" | "data_exchange";
+    },
+    header?: string,
+    footer?: string,
+    recipient?: string,
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const cta = sanitizeFlowCta(params.flowCta);
+    const interactive: Record<string, unknown> = {
+      type: "flow",
+      body: { text: body },
+      action: {
+        name: "flow",
+        parameters: {
+          flow_message_version: "3",
+          flow_token: params.flowToken,
+          flow_id: params.flowId.trim(),
+          flow_cta: cta,
+          flow_action: params.flowAction ?? "navigate",
+        },
+      },
+    };
+    if (header) interactive.header = { type: "text", text: header };
+    if (footer) interactive.footer = { type: "text", text: footer };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
   // ── Upload media ──────────────────────────────
 
   async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
@@ -816,10 +909,16 @@ export class MetaWhatsAppClient {
       template: {
         name: templateName,
         language: { code: languageCode },
-        ...(components ? { components } : {}),
+        // Array vazio (template sem parâmetro válido) sai do payload: mandar
+        // `components: []` é ruído e confunde o diagnóstico de 132000.
+        ...(Array.isArray(components) && components.length > 0 ? { components } : {}),
       },
     };
-    console.log("[meta-send-template]", JSON.stringify(payload));
+    // Caminho quente de blast: 1 JSON.stringify + write no stdout por
+    // mensagem. Mesmo gate do `[meta-graph]` acima (ver lib/debug-log).
+    if (isVerboseLogging()) {
+      console.log("[meta-send-template]", JSON.stringify(payload));
+    }
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -846,9 +945,14 @@ export class MetaWhatsAppClient {
   // ── Calling API (Cloud API) ───────────────────
   // @see https://developers.facebook.com/docs/whatsapp/cloud-api/calling
 
+  /**
+   * Calling: uma tentativa só. O graphFetch default (3×20s) estoura o
+   * timeout do Traefik/EasyPanel e o operador vê HTML 502 no inbox.
+   */
   private async postCall(body: Record<string, unknown>): Promise<unknown> {
     return this.graphFetch(`${this.phoneNumberId}/calls`, {
       method: "POST",
+      maxAttempts: 1,
       body: JSON.stringify({
         messaging_product: "whatsapp",
         ...body,
@@ -1092,6 +1196,10 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${waba}/flows`, {
       method: "POST",
       body: JSON.stringify(payload),
+      // 1 tentativa / 45s: create+publish na Meta é lento. 3×20s estourava o
+      // proxy e o frontend só via HTML 502 («Erro ao publicar.»).
+      maxAttempts: 1,
+      signal: AbortSignal.timeout(45_000),
     });
   }
 

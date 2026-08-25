@@ -1,4 +1,9 @@
-import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
+import {
+  Prisma,
+  type ConversationStatus,
+  type DealRole,
+  type DealStatus,
+} from "@prisma/client";
 
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
@@ -280,8 +285,20 @@ const detailInclude = {
       // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
       // nao existe no schema; passou a usar contact.source.
       source: true,
+      // `updatedAt` sozinho empata: `propagateOwnerToContactAndChat` faz um
+      // `updateMany` que carimba o MESMO milissegundo em todos os tickets do
+      // contato. Sem desempate o Postgres devolve ordem arbitraria e o painel
+      // do deal podia cair num ticket encerrado. `createdAt`/`id` tornam a
+      // ordem deterministica; a preferencia pelo ticket ATIVO e aplicada
+      // depois, em `sortConversationsActiveFirst` (status nao e ordenavel
+      // aqui: o enum e OPEN, RESOLVED, PENDING, SNOOZED — RESOLVED nao fica
+      // por ultimo — e `closedAt` e nulo em ~5.6k linhas RESOLVED legadas).
       conversations: {
-        orderBy: { updatedAt: "desc" as const },
+        orderBy: [
+          { updatedAt: "desc" as const },
+          { createdAt: "desc" as const },
+          { id: "desc" as const },
+        ],
         select: {
           id: true, number: true, externalId: true, channel: true,
           status: true, inboxName: true, closedAt: true,
@@ -340,6 +357,26 @@ export type DealDetail = Prisma.DealGetPayload<{
   include: typeof detailInclude;
 }>;
 
+/**
+ * Coloca os tickets ATIVOS (nao-RESOLVED) na frente, preservando a ordem
+ * relativa vinda do banco dentro de cada grupo (`Array.prototype.sort` e
+ * estavel). O consumidor principal e o painel do deal, que le
+ * `conversations[0]` como "a conversa do negocio": sem isso ele podia abrir
+ * um ticket encerrado enquanto o cliente respondia em outro, aberto.
+ *
+ * Seguro por construcao: `ensureWhatsAppConversationForContact` so reusa
+ * conversa nao-RESOLVED, entao existe no maximo um ticket ativo por
+ * (org, contato, canal) — confirmado no banco (0 grupos com mais de um).
+ */
+function sortConversationsActiveFirst<T extends { status: ConversationStatus }>(
+  conversations: T[],
+): T[] {
+  return [...conversations].sort(
+    (a, b) =>
+      Number(a.status === "RESOLVED") - Number(b.status === "RESOLVED"),
+  );
+}
+
 export async function getDealById(idOrNumber: string): Promise<DealDetail | null> {
   const isNumeric = /^\d+$/.test(idOrNumber);
   const orgId = getOrgIdOrThrow();
@@ -350,6 +387,9 @@ export async function getDealById(idOrNumber: string): Promise<DealDetail | null
     include: detailInclude,
   })) as DealDetail | null;
   if (deal?.contact) {
+    deal.contact.conversations = sortConversationsActiveFirst(
+      deal.contact.conversations,
+    );
     await enrichContactsWithUserAvatarFallback([deal.contact]);
   }
   return deal;
@@ -716,6 +756,20 @@ export async function propagateOwnerToContactAndChat(
     toName = ownerRow?.name ?? null;
   }
 
+  // ATENCAO (`updatedAt` != atividade de conversa): este `updateMany` toca
+  // todos os tickets do contato de uma vez, entao o `@updatedAt` do Prisma
+  // grava o MESMO milissegundo em todos eles — inclusive nos ja encerrados,
+  // que nao tiveram mensagem nenhuma. Quem ordenar conversa "atual" so por
+  // `updatedAt desc` empata aqui e pode escolher um ticket morto.
+  //
+  // A correcao NAO e preservar `updatedAt` com SQL cru (brigar com o
+  // `@updatedAt` deixa a coluna mentindo sobre a ultima escrita). E os
+  // candidatos "atividade real" nao servem: `lastMessageAt` nao existe no
+  // schema e `lastInboundAt` e nulo em ~52k conversas que TEM mensagem
+  // (tickets so de outbound: campanha/HSM). Entao o criterio segue sendo
+  // `updatedAt`, e a defesa mora no lado da leitura: desempate
+  // deterministico + preferencia por ticket ativo (ver `detailInclude` /
+  // `sortConversationsActiveFirst`).
   await tx.conversation.updateMany({
     where: { id: { in: toChange.map((c) => c.id) } },
     data: {

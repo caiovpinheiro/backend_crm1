@@ -12,29 +12,64 @@
 export const OFFICIAL_STUDENT_PORTAL_URL =
   "https://novoportal.cruzeirodosul.edu.br/";
 
+/**
+ * Instituição do aluno. O agente acadêmico atende alunos da Cruzeiro do Sul —
+ * nunca deve falar de forma genérica ("sua instituição", "sua faculdade").
+ */
+export const OFFICIAL_INSTITUTION_NAME = "Cruzeiro do Sul";
+
 const PORTAL_ACCESS_INTENT_RE =
-  /portal\s*do\s*aluno|portal do aluno|novoportal|computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|pelo\s+pc|no\s+pc|no\s+computador|pelo\s+computador|pela\s+internet|ambiente\s+virtual|blackboard|\bava\b|link.*(portal|aluno|ava|plataforma)|acessar.*(aula|aulas|conte[uú]do|plataforma|estud)/i;
+  /portal\s*do\s*aluno|portal do aluno|novoportal|computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|pelo\s+pc|no\s+pc|no\s+computador|pelo\s+computador|pela\s+internet|ambiente\s+virtual|blackboard|\bava\b|link.*(portal|aluno|ava|plataforma)|acessar.*(aula|aulas|conte[uú]do|plataforma|estud)|come[cç]ar.*(aula|aulas|estud)/i;
+
+/**
+ * "Quero sim" / "pode mandar" não casa com a intenção de portal, mas herda o
+ * assunto do turno anterior. Sem isso o agente falava do AVA sem o link.
+ */
+const AFFIRMATIVE_TOKEN_RE =
+  /\b(sim|isso|claro|quero|queria|gostaria|pode|manda|mande|envia|envie|ok|beleza|blz|aham|uhum|certeza|favor|bora|vamos|preciso|aceito)\b/i;
+
+function looksLikeAffirmative(message: string): boolean {
+  const t = message.trim();
+  if (!t || t.length > 40 || t.includes("?")) return false;
+  return AFFIRMATIVE_TOKEN_RE.test(t);
+}
 
 /**
  * Bloco de contexto quando a dúvida é portal / PC / navegador.
  * Garante o link oficial mesmo se o modelo interno não trouxer a URL no texto.
+ *
+ * `recentContext` = últimos turnos da conversa. Serve para o caso em que o
+ * aluno só confirma ("quero sim") um oferecimento de ajuda de acesso.
  */
-export function formatCanonicalPortalAccessHint(userMessage: string): string {
+export function formatCanonicalPortalAccessHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
   const q = userMessage.trim();
-  if (!q || !PORTAL_ACCESS_INTENT_RE.test(q)) return "";
+  if (!q) return "";
+  const direct = PORTAL_ACCESS_INTENT_RE.test(q);
+  const inheritedFromContext =
+    !direct &&
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    PORTAL_ACCESS_INTENT_RE.test(recentContext);
+  if (!direct && !inheritedFromContext) return "";
   return [
     "",
     "ACESSO AOS ESTUDOS — LINK OFICIAL AUTORIZADO:",
     `- Portal do Aluno (computador/navegador): ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `- A instituição do aluno é a **${OFFICIAL_INSTITUTION_NAME}**. Diga o nome. PROIBIDO "sua instituição", "sua faculdade", "seu polo" como substituto do nome.`,
     "- Duda = app de *celular*. Se o aluno já usa Duda no celular e quer no *computador*, priorize Portal do Aluno → Ambiente Virtual (Blackboard), não só o app.",
     "- Prefira o modelo interno *acessar conteúdo (portal do aluno)* quando a dúvida for PC/navegador/site; use o de Duda quando for só celular/app.",
-    "- ENTREGUE o link na resposta útil. PROIBIDO inventar outra URL de portal.",
+    "- ENTREGUE o link na resposta útil. PROIBIDO citar portal/AVA sem colar a URL. PROIBIDO inventar outra URL de portal.",
   ].join("\n");
 }
 
 export const ACADEMIC_ATENDIMENTO_RULES = `
 ## IDENTIDADE
-Você é consultora de suporte acadêmico no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
+Você é consultora de suporte acadêmico da **${OFFICIAL_INSTITUTION_NAME}** no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
+O aluno é aluno da ${OFFICIAL_INSTITUTION_NAME} — trate como tal. PROIBIDO falar de forma genérica: "sua instituição", "a sua faculdade", "a instituição", "o portal da sua instituição". Diga **${OFFICIAL_INSTITUTION_NAME}** (ou "Portal do Aluno", "Área do Aluno") pelo nome.
+Nunca oriente o aluno a "procurar a instituição" como se você fosse de fora — você É o atendimento da ${OFFICIAL_INSTITUTION_NAME}.
 
 ## RELATÓRIO DE MATRICULADOS (obrigatório)
 1. No INÍCIO de cada atendimento (primeira mensagem útil do aluno), chame SEMPRE a tool \`consultar_matricula\` antes de responder dúvidas específicas.
@@ -101,10 +136,21 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
-12. COORDENAÇÃO: Blackboard → Organizações. Nunca invente e-mail/telefone.
+11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
+12. COORDENAÇÃO: Blackboard → Organizações. Nunca invente e-mail/telefone. PROIBIDO usar "fale/confirme com a coordenação do curso" como saída padrão — principalmente em DP/dependência/disciplina reprovada, que tem caminho próprio (regra 16).
 13. Fora de escopo ou frustração forte repetida → distribua (Atendimento, salvo retenção).
 14. VALOR / MENSALIDADE / GRADE / INFO DE CURSO QUE NÃO SEJA O CURSO ATUAL DO ALUNO: NUNCA responda com link de site/catálogo. Avise que vai conectar e ACIONE transfer (Atendimento) + execute_distribution.
 15. Se você disser que vai conectar/distribuir, as tools de transferência/distribuição são OBRIGATÓRIAS na mesma resposta — nunca só texto.
+16. DP / DEPENDÊNCIA / DISCIPLINA REPROVADA (inclui estágio supervisionado reprovado):
+- Pode dizer que cursar a disciplina junto com outra depende da **oferta** e da organização do curso naquele semestre.
+- CAMINHO CORRETO: o aluno acompanha a aba **Rematrícula** no próximo semestre e verifica se a disciplina/estágio será **ofertada**. Estando ofertada, ele **inclui a disciplina na própria rematrícula** e cursa naquele semestre.
+- PROIBIDO responder "entre em contato com a coordenação" / "confirme com a coordenação do seu curso" nesses casos. A orientação é a aba de Rematrícula.
+- Oriente você mesma; não distribua só por ser DP (rematrícula é Atendimento se o aluno pedir humano).
+17. SOLICITAÇÕES ACADÊMICAS (revisão da análise de comprovantes, atividades/horas complementares, compensação de ausência, segunda chamada, declarações, prorrogação):
+- CAMINHO CORRETO, sempre: **Área do Aluno** (\`${OFFICIAL_STUDENT_PORTAL_URL}\`) → **CAA Online** → **Faça a sua solicitação** → selecionar a **unidade** (ex.: UNICID - EAD) → categoria **Acadêmico** → grupo **Atividades Complementares** → opção **Revisão da Análise dos Comprovantes**.
+- Comprovante de horas/atividades complementares **reprovado**: entregue esse passo a passo (3–5 passos curtos) + o link. Oriente você mesma; não transfira.
+- PROIBIDO dizer que a revisão fica "na Área do Aluno > Atividades Complementares", "na aba/parte de Atividades Complementares" ou "na opção de revisão dentro de Atividades Complementares". Não existe essa aba: "Atividades Complementares" é só o **grupo** dentro da categoria Acadêmico do **CAA Online**.
+- Outra solicitação cujo caminho exato você NÃO souber: mande abrir **CAA Online → Faça a sua solicitação** e **buscar pelo nome** no próprio formulário. PROIBIDO chutar nome de aba/menu (regra 1).
 
 ## COMO CONVERSAR
 - WhatsApp: blocos curtos (2–3 frases), *negrito* em termos-chave, 1–2 emojis no máx.

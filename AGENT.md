@@ -35,6 +35,54 @@ documenta **por que** algo foi feito, não **o que**.
 
 **Impacto.** `src/lib/cache/index.ts`, `src/lib/cache/keys.ts`. Após o deploy, reiniciar o container da API se o singleton ioredis já estiver preso.
 
+### 2026-08-25 — Flow JSON 7.3 para publicar na Meta
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Novos publishes usam Flow JSON `7.3` (versão recomendada). `5.0` está frozen desde set/2025 e a Meta devolve 139002/4233046 («versões não disponíveis para publicação»).
+
+---
+
+### 2026-08-25 — Publish de WhatsApp Flow: Form wrapper + slug reservado
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** O Flow JSON v5 passa a embrulhar os inputs num `Form` `name=form` (Footer fora), porque `${form.campo}` sem Form é rejeitado pela Meta (`INVALID_ON_CLICK_ACTION_PAYLOAD`). Chaves reservadas (`none`, `form`, …) são substituídas pelo rótulo. Create+publish na Graph usa 1 tentativa / 45s para não estourar o proxy com HTML 502 e toast «Erro ao publicar.». Nome duplicado na WABA tenta de novo com o shortId.
+
+**Alternativas descartadas.** Dois passos create-then-publish (mais API, mesmo JSON inválido falha igual).
+
+---
+
+### 2026-08-25 — Botão de Flow no node Botões WhatsApp
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Cada opção de `send_whatsapp_interactive` pode ser `kind: action`
+(reply, como hoje) ou `kind: flow` (escolhe um `WhatsappFlowDefinition`
+publicado). O 1º envio continua botões/lista por quantidade. No clique do
+botão Flow o executor envia `interactive.type=flow` na janela 24h, pausa com
+`variables.__awaitingFlow` + `flow_token`, e o `nfm_reply` retoma a aresta
+daquele botão. O mapeamento do formulário no lead permanece no webhook.
+
+**Alternativas descartadas.** Lista nativa aninhada (não reproduz a tela iFood);
+gerar/publicar Flow a partir das opções do node (rejeição da Meta); injetar
+lista dinâmica por contato nesta versão (sem cadastro de endereços).
+
+**Impacto.** `MetaWhatsAppClient.sendInteractiveFlow`, `automation-context`
+(`decideInteractiveMenuInbound`), editor inline do canvas.
+
+---
+
+### 2026-08-25 — Clique de botão retoma automação mesmo com humano atendendo
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** `processIncomingMessage` só cancela contextos pausados quando há humano atendendo E o inbound é texto livre. Clique de botão/lista (`interactiveId`) e `nfm_reply` (`flowReply`) retomam o passo pausado — senão o disparo manual pela conversa (sempre com assignee humano / hasHumanReply) morre no primeiro clique.
+
+**Alternativas descartadas.** Remover o guard inteiro (salesbot voltaria a falar em cima do consultor). Ignorar só `hasHumanReply` (conversa atribuída a humano ainda quebraria o teste).
+
+---
+
 ### 2026-08-20 — Roster acadêmico não cria departamentos em outros tenants
 
 **Decisão.** `ensureAcademicDepartmentRoster` só cria/sincroniza Acolhimento,

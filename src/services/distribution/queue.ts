@@ -24,10 +24,12 @@ import { prisma } from "@/lib/prisma";
  *
  * `departmentIds` (opcional): quando informado, conta APENAS as conversas cujo
  * `Conversation.departmentId` está no conjunto — ou seja, o "volume de fila"
- * fica POR DEPARTAMENTO. Usado na distribuição por departamento (o consultor
- * concorre pela menor fila DAQUELE departamento, e o teto `queueLimit` também
- * conta só as conversas do departamento). Vazio/undefined = fila global (todas
- * as conversas do consultor, todos os departamentos) — usado pela tela/cockpit.
+ * fica POR DEPARTAMENTO. Usado na distribuição por departamento para a
+ * SELEÇÃO (o consultor concorre pela menor fila DAQUELE departamento). O teto
+ * `queueLimit` NÃO usa este número: ele compara a carga total (ver
+ * `totalQueueCount` em `responsibles.ts`), senão quem é membro de dois
+ * departamentos ganharia um limite por departamento. Vazio/undefined = fila
+ * global (todos os departamentos) — usado pela tela/cockpit.
  */
 export async function getQueueCounts(
   userIds: string[],

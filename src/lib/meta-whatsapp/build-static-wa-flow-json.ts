@@ -3,7 +3,11 @@
  * normalizado no CRM (telas + campos). Um único ecrã Meta com secções por tela.
  *
  * @see https://developers.facebook.com/docs/whatsapp/flows/reference/flowjson/
+ * @see https://developers.facebook.com/docs/whatsapp/flows/changelogs/
  */
+
+/** Versão aceita para *publicar* (5.0 está frozen desde set/2025 — erro 139002). */
+export const WA_FLOW_JSON_VERSION = "7.3";
 
 export type CrmFlowFieldInput = {
   fieldKey: string;
@@ -26,6 +30,39 @@ function mapInputType(fieldType: string): "text" | "email" | "phone" {
   return "text";
 }
 
+/** Nomes que a Meta rejeita ou que colidem com o Form / payload `${form.*}`. */
+const RESERVED_FIELD_KEYS = new Set([
+  "none",
+  "form",
+  "data",
+  "success",
+  "error",
+  "error_message",
+  "payload",
+  "screen",
+  "footer",
+]);
+
+export function sanitizeFlowFieldKey(raw: string, fallbackIndex = 1): string {
+  let s = raw
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (/^[0-9]/.test(s)) s = `c_${s}`;
+  s = s.slice(0, 80);
+  if (!s || RESERVED_FIELD_KEYS.has(s.toLowerCase())) return `campo_${fallbackIndex}`;
+  return s;
+}
+
+/** Se a chave é reservada (ex.: none), usa o rótulo. */
+export function resolveFlowFieldKey(fieldKey: string, label: string, fallbackIndex = 1): string {
+  const raw = fieldKey.trim();
+  const source = raw && !RESERVED_FIELD_KEYS.has(raw.toLowerCase()) ? raw : label;
+  return sanitizeFlowFieldKey(source, fallbackIndex);
+}
+
 function slugOptionId(title: string, index: number): string {
   const s = title
     .toLowerCase()
@@ -44,14 +81,17 @@ function buildDataSource(options?: string[]): { id: string; title: string }[] {
       { id: "opcao_2", title: "Opção 2" },
     ];
   }
-  return opts.map((title, i) => ({
-    id: slugOptionId(title, i),
-    title: title.slice(0, 80),
-  }));
+  const used = new Set<string>();
+  return opts.map((title, i) => {
+    let id = slugOptionId(title, i);
+    if (used.has(id)) id = `${id}_${i + 1}`.slice(0, 40);
+    used.add(id);
+    return { id, title: title.slice(0, 80) };
+  });
 }
 
-function buildFieldComponent(f: CrmFlowFieldInput): Record<string, unknown> {
-  const key = f.fieldKey.trim().replace(/[^a-zA-Z0-9_]/g, "_") || "campo";
+function buildFieldComponent(f: CrmFlowFieldInput, index: number): Record<string, unknown> {
+  const key = resolveFlowFieldKey(f.fieldKey, f.label, index + 1);
   const label = f.label.trim().slice(0, 80) || key;
   const t = f.fieldType.toUpperCase();
 
@@ -113,41 +153,48 @@ export function buildWaFlowJsonObject(input: { screens: CrmFlowScreenInput[] }):
   }
 
   const children: Record<string, unknown>[] = [];
+  const formChildren: Record<string, unknown>[] = [];
+  const payload: Record<string, string> = {};
+  let fieldIndex = 0;
   for (const screen of screens) {
     if (screen.title.trim()) {
       children.push({ type: "TextHeading", text: screen.title.trim().slice(0, 80) });
     }
     for (const f of screen.fields) {
-      children.push(buildFieldComponent(f));
+      const key = resolveFlowFieldKey(f.fieldKey, f.label, fieldIndex + 1);
+      formChildren.push(buildFieldComponent(f, fieldIndex));
+      payload[key] = `\${form.${key}}`;
+      fieldIndex += 1;
     }
   }
 
-  const payload: Record<string, string> = {};
-  for (const screen of screens) {
-    for (const f of screen.fields) {
-      const key = f.fieldKey.trim().replace(/[^a-zA-Z0-9_]/g, "_") || "campo";
-      payload[key] = `\${form.${key}}`;
-    }
-  }
+  // `${form.x}` só é válido com um Form chamado `form`. Sem isto a Meta
+  // devolve INVALID_ON_CLICK_ACTION_PAYLOAD e o publish falha.
+  children.push({
+    type: "Form",
+    name: "form",
+    children: formChildren.length
+      ? formChildren
+      : [{ type: "TextInput", name: "campo_1", label: "Campo", required: true, "input-type": "text" }],
+  });
 
   children.push({
     type: "Footer",
     label: "Concluir",
     "on-click-action": {
       name: "complete",
-      payload,
+      payload: Object.keys(payload).length ? payload : { campo_1: "${form.campo_1}" },
     },
   });
 
   const mainTitle = screens[0]?.title?.trim()?.slice(0, 60) || "Formulário";
 
   return {
-    version: "5.0",
+    version: WA_FLOW_JSON_VERSION,
     screens: [
       {
         id: "MAIN",
         title: mainTitle,
-        data: {},
         layout: {
           type: "SingleColumnLayout",
           children,
