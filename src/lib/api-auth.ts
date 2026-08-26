@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { logApiAccessAuthReject, logApiAccessCompleted, resolveResponseStatus } from "@/lib/api-access-audit";
 import { auth } from "@/lib/auth";
 import { observeHttpRequest } from "@/lib/metrics";
-import { checkRateLimit, setRateLimitHeaders } from "@/lib/rate-limiter";
+import { consumeRateLimit, type RateLimitDecision } from "@/lib/rate-limit";
 import { validateToken } from "@/services/api-tokens";
 import {
   enterRequestContext,
@@ -44,14 +44,17 @@ export async function authenticateApiRequest(
     const result = await validateToken(rawToken);
 
     if (result) {
-      const rl = checkRateLimit(`token:${result.tokenHash}`);
+      // Rate limit DISTRIBUÍDO (Redis) por token — o limiter em memória
+      // anterior valia por processo: com N réplicas o teto efetivo era
+      // N×400/min, e um restart zerava a janela.
+      const rl = await consumeRateLimit(`token:${result.tokenHash}`, "api.token");
       if (!rl.allowed) {
         logApiAccessAuthReject(request, { reason: "bearer_rate_limited", status: 429, via: "bearer" });
         const res = NextResponse.json(
           { message: "Limite de requisições excedido. Tente novamente em breve." },
           { status: 429 }
         );
-        setRateLimitHeaders(res.headers, rl);
+        setTokenRateLimitHeaders(res.headers, rl);
         return { ok: false, response: res };
       }
 
@@ -150,13 +153,25 @@ export async function authenticateApiRequest(
   };
 }
 
-export function withRateLimitHeaders(
+function setTokenRateLimitHeaders(
+  headers: Headers,
+  rl: RateLimitDecision
+): void {
+  headers.set("X-RateLimit-Limit", String(rl.limit));
+  headers.set("X-RateLimit-Remaining", String(rl.remaining));
+  headers.set("X-RateLimit-Reset", String(Math.floor(rl.resetAt / 1000)));
+  if (!rl.allowed) {
+    headers.set("Retry-After", String(rl.retryAfterSec));
+  }
+}
+
+export async function withRateLimitHeaders(
   response: NextResponse,
   tokenHash?: string
-): NextResponse {
+): Promise<NextResponse> {
   if (tokenHash) {
-    const rl = checkRateLimit(`token:${tokenHash}`, 400);
-    setRateLimitHeaders(response.headers, rl);
+    const rl = await consumeRateLimit(`token:${tokenHash}`, "api.token");
+    setTokenRateLimitHeaders(response.headers, rl);
   }
   return response;
 }

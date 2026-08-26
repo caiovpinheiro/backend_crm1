@@ -99,6 +99,21 @@ export type EnsureWhatsAppConversationOptions = {
    * da org — errado quando o inbound (ou o passo) aponta para outra conexão.
    */
   channelId?: string | null;
+  /**
+   * Suprime o `logEvent(CONVERSATION_CREATED)` da conversa recém-criada.
+   *
+   * Só para blast de campanha, onde cada destinatário é um contato distinto e
+   * o evento acontece 1× por mensagem. O `logEvent` dispara
+   * `mirrorConversationChatEvent`, que custa 1 leitura do número da conversa,
+   * 1 query de dedupe, 1 `Message` extra (bolha "Conversa #N aberta"), mais 1
+   * leitura da conversa e um `sseBus.publish("new_message")` que ecoa em Redis
+   * pub/sub para todos os clientes da org (mesma razão pela qual o worker já
+   * não publica SSE no caminho direto).
+   *
+   * Suprime APENAS auditoria + bolha de sistema + notificação em tempo real.
+   * A conversa, o `fireTrigger` e a mensagem real do disparo continuam iguais.
+   */
+  skipActivityLog?: boolean;
 };
 
 /**
@@ -237,19 +252,21 @@ export async function ensureWhatsAppConversationForContact(
     throw err;
   }
 
-  void logEvent({
-    type: "CONVERSATION_CREATED",
-    entityType: "CONVERSATION",
-    entityId: created.id,
-    entityLabel: contact.name ?? contact.phone ?? null,
-    conversationId: created.id,
-    contactId: contact.id,
-    meta: {
-      channel: "whatsapp",
-      inboxName: defaultChannel.name,
-      source: "auto_ensure",
-    },
-  });
+  if (!opts?.skipActivityLog) {
+    void logEvent({
+      type: "CONVERSATION_CREATED",
+      entityType: "CONVERSATION",
+      entityId: created.id,
+      entityLabel: contact.name ?? contact.phone ?? null,
+      conversationId: created.id,
+      contactId: contact.id,
+      meta: {
+        channel: "whatsapp",
+        inboxName: defaultChannel.name,
+        source: "auto_ensure",
+      },
+    });
+  }
 
   // Gatilho de automacao (fire-and-forget). O tipo `conversation_created`
   // ja existe registrado; ate hoje o fireTrigger nao era chamado — so o

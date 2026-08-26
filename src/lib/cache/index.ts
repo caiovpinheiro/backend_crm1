@@ -84,6 +84,16 @@ const GZ_PREFIX = "gz1:";
 const GZ_MIN_BYTES = 8_192;
 const MAX_REDIS_VALUE_BYTES = 256_000;
 
+/**
+ * Libera o lock SÓ se o valor ainda é o token desta chamada
+ * (compare-and-delete atômico). Retorna 1 se apagou, 0 caso contrário.
+ */
+const RELEASE_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end`;
+
 let redis: IORedisClient | null = null;
 let redisDisabled = false;
 let consecutiveFailures = 0;
@@ -359,11 +369,13 @@ export async function delPattern(pattern: string): Promise<number> {
         "MATCH",
         fullPattern,
         "COUNT",
-        100,
+        1000,
       );
       cursor = next;
       if (batch.length > 0) {
-        await client.del(...batch);
+        // UNLINK é assíncrono (não bloqueia o event loop do Redis em
+        // batches grandes, ao contrário do DEL síncrono).
+        await client.unlink(...batch);
         total += batch.length;
       }
     } while (cursor !== "0");
@@ -419,10 +431,17 @@ async function loadAndStore<T>(
   const client = getClient();
 
   if (client) {
+    // Token único por chamada: o release só apaga o lock se ele ainda
+    // for NOSSO (compare-and-delete via Lua). Sem isso, um loader lento
+    // (> LOCK_TTL_MS) tinha o lock expirado, outro request adquiria, e o
+    // primeiro liberava o lock do segundo — dois loaders concorrentes.
+    const lockToken = `${process.pid}:${Date.now()}:${Math.random()
+      .toString(36)
+      .slice(2)}`;
     let acquired = false;
     let lockUnavailable = false;
     try {
-      const reply = await client.set(lockKey, "1", "PX", LOCK_TTL_MS, "NX");
+      const reply = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
       acquired = reply === "OK";
       noteSuccess();
     } catch (err) {
@@ -439,7 +458,7 @@ async function loadAndStore<T>(
         const retry = await get<T>(key);
         if (retry !== undefined) return retry;
         try {
-          const again = await client.set(lockKey, "1", "PX", LOCK_TTL_MS, "NX");
+          const again = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
           if (again === "OK") {
             acquired = true;
             noteSuccess();
@@ -453,8 +472,14 @@ async function loadAndStore<T>(
       if (!acquired) {
         const late = await get<T>(key);
         if (late !== undefined) return late;
-        // Nao throw: pagina 500 e pior que um loader extra neste processo
-        // (singleflight ja colapsa os waiters locais).
+        // Degrada em vez de estourar 500: chama o loader direto (sem
+        // lock). Pior caso = alguns loaders concorrentes pontuais, que é
+        // exatamente o cenário que o lock evita no hot path — aceitável
+        // como fallback, inaceitável como resposta de erro ao usuário.
+        log.warn({ key }, "[cache] stampede timeout — degradando para loader direto");
+        const value = await loader();
+        await set(key, value, ttlSec);
+        return value;
       }
     }
 
@@ -464,7 +489,9 @@ async function loadAndStore<T>(
       return value;
     } finally {
       if (acquired) {
-        client.del(lockKey).catch(() => undefined);
+        client
+          .eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockToken)
+          .catch(() => undefined);
       }
     }
   }

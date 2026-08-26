@@ -72,6 +72,12 @@ export type AutomationJobPayload = {
   context: AutomationJobContext;
   /** Tentativas já feitas no BullMQ (0 = primeira). Usado pra não reenviar WhatsApp no retry. */
   attemptsMade?: number;
+  /**
+   * Tenant do job. Opcional no produtor: o admission control de justiça
+   * (`lib/automation-fairness.ts`) resolve e carimba via lookup cacheado por
+   * automationId quando ausente. O worker usa para liberar o slot da org.
+   */
+  organizationId?: string;
 };
 
 export type BaileysOutboundPayload = {
@@ -92,6 +98,10 @@ export type BaileysControlPayload = {
 
 export type CampaignDispatchPayload = {
   campaignId: string;
+  // Cursor keyset (contact.id) da última fatia processada. Ausente = primeira
+  // fatia. Permite ao dispatch fatiar a campanha e se re-enfileirar, cedendo o
+  // slot para outras campanhas intercalarem em vez de enfileirar tudo de uma vez.
+  cursor?: string;
 };
 
 export type CampaignSendPayload = {
@@ -100,6 +110,10 @@ export type CampaignSendPayload = {
   contactId: string;
   contactPhone: string;
   contactBsuid?: string;
+  /** ISO do último inbound do contato no canal da campanha, lido no claim do
+   * rodízio (prefetch da janela 24h). Ausente/null no caminho FIFO ou sem
+   * inbound no claim — o check de janela então consulta ao vivo. */
+  lastInboundAt?: string | null;
 };
 
 export type MetaWebhookJobPayload = {
@@ -236,6 +250,13 @@ export type ContactImportPayload = {
   importMode?: "create" | "update" | "upsert";
   /** Tag opcional a aplicar em todos os contatos importados. */
   tagName?: string;
+  /**
+   * Fatia do import (justiça entre tenants): linha inicial (0-based, sem o
+   * cabeçalho) que este sub-job processa. Ausente = primeira fatia. Cada fatia
+   * re-enfileira a próxima no FIM da fila, cedendo o slot à próxima org — sem
+   * isso um import grande monopoliza o worker por minutos.
+   */
+  offset?: number;
 };
 
 /**
@@ -280,6 +301,38 @@ function getQueue(): Queue<AutomationJobPayload> | null {
   return globalForQueue.automationQueue;
 }
 
+/**
+ * Enqueue direto no BullMQ com as opções padrão de automação. Usado pelo
+ * admission control de justiça (`lib/automation-fairness.ts`) — o `jobId`
+ * determinístico do envelope permite re-add idempotente após crash no pump
+ * (BullMQ deduplica por jobId, mesmo padrão do `enqueueMetaWebhookEvent`).
+ */
+export async function addAutomationJobNow(
+  payload: AutomationJobPayload,
+  jobId?: string,
+) {
+  const queue = getQueue();
+  if (!queue) {
+    throw new Error(
+      `[queue] fila ${AUTOMATION_JOBS_QUEUE_NAME} indisponível (Redis) — automationId=${payload.automationId}`,
+    );
+  }
+  const attempts = readPositiveInt(process.env.AUTOMATION_MAX_ATTEMPTS, 3);
+  const backoffDelay = readPositiveInt(process.env.AUTOMATION_BACKOFF_DELAY, 3000);
+  return queue.add(AUTOMATION_JOB_NAME, payload, {
+    removeOnComplete: true,
+    removeOnFail: { count: 1000 },
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+    ...(jobId ? { jobId } : {}),
+  });
+}
+
+/** Fila de automações no processo corrente — usada pelo sweeper do worker. */
+export function getAutomationQueue(): Queue<AutomationJobPayload> | null {
+  return getQueue();
+}
+
 export async function enqueueAutomationJob(payload: AutomationJobPayload) {
   const workerMode = process.env.AUTOMATION_WORKER_MODE?.trim().toLowerCase();
   debugInfo(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode ?? "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event}`);
@@ -295,15 +348,30 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
       console.error(err.message);
       throw err;
     }
+
+    // Justiça por org (default ligado; AUTOMATION_FAIRNESS=0 = rollback pro
+    // FIFO global): admission control com backlog por org no Redis — ver
+    // lib/automation-fairness.ts. Fallbacks preservam o comportamento
+    // histórico: org não resolvida ou Redis do backlog fora → enqueue direto.
+    const { isAutomationFairnessEnabled, enqueueAutomationJobFair } =
+      await import("@/lib/automation-fairness");
+    if (isAutomationFairnessEnabled()) {
+      const fair = await enqueueAutomationJobFair(payload, (p, jobId) =>
+        addAutomationJobNow(p, jobId),
+      );
+      if (fair === "fair") return null;
+      if (fair === "unavailable") {
+        const err = new Error(
+          `[queue] Redis do admission control indisponível — não enfileirando automação ${payload.automationId}`,
+        );
+        console.error(err.message);
+        throw err;
+      }
+      // "fallback" → segue pro enqueue direto abaixo.
+    }
+
     console.info(`[queue] Enfileirando automação ${payload.automationId} no BullMQ`);
-    const attempts = readPositiveInt(process.env.AUTOMATION_MAX_ATTEMPTS, 3);
-    const backoffDelay = readPositiveInt(process.env.AUTOMATION_BACKOFF_DELAY, 3000);
-    return queue.add(AUTOMATION_JOB_NAME, payload, {
-      removeOnComplete: true,
-      removeOnFail: false,
-      attempts,
-      backoff: { type: "exponential", delay: backoffDelay },
-    });
+    return addAutomationJobNow(payload);
   }
 
   debugInfo(`[queue] Executando automação ${payload.automationId} inline (sem worker externo)...`);
@@ -356,7 +424,7 @@ export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
   }
   return queue.add("send", payload, {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
   });
 }
 
@@ -368,7 +436,7 @@ export async function enqueueBaileysControl(payload: BaileysControlPayload) {
   }
   return queue.add(payload.action, payload, {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
   });
 }
 
@@ -406,7 +474,7 @@ export async function enqueueCampaignDispatch(payload: CampaignDispatchPayload, 
   }
   return queue.add("dispatch", payload, {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
     ...(delay ? { delay } : {}),
   });
 }
@@ -419,7 +487,7 @@ function campaignSendJobOptions(): JobsOptions {
   const backoffDelay = readPositiveInt(process.env.WHATSAPP_BACKOFF_DELAY, 3000);
   return {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
     attempts,
     backoff: { type: "exponential", delay: backoffDelay },
   };
@@ -500,7 +568,7 @@ export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
   );
   const opts: JobsOptions = {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
     attempts,
     backoff: { type: "exponential", delay: backoffDelay },
     ...overrides,
@@ -546,7 +614,7 @@ export async function enqueueImportEtl(
   const backoffDelay = readPositiveInt(process.env.IMPORT_ETL_BACKOFF_DELAY, 10000);
   const opts: JobsOptions = {
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
     attempts,
     backoff: { type: "exponential", delay: backoffDelay },
     ...overrides,
@@ -587,7 +655,7 @@ export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
   return queue.add("process", payload, {
     jobId: payload.metaWebhookEventId,
     removeOnComplete: true,
-    removeOnFail: false,
+    removeOnFail: { count: 1000 },
     attempts,
     backoff: { type: "exponential", delay: backoffDelay },
   });

@@ -112,10 +112,16 @@ async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
 }
 
 export function startEtlWorker() {
-  // Default 1 (era 2): com o Postgres compartilhado entre tenants, manter o
-  // ETL de import serializado por processo reduz a pressão simultânea. Ajuste
-  // via IMPORT_ETL_CONCURRENCY se o worker tiver pool/DB dedicados.
-  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 1);
+  // Default 2 (era 1): imports de orgs distintas tocam linhas disjuntas
+  // (org-scoped), então o lock_timeout=3s do pool de import (max=4) raramente
+  // é atingido entre jobs concorrentes — cada job usa 1 conexão por statement
+  // na prática, então 2 jobs cabem folgados no pool. O risco real é o MESMO
+  // tenant rodar 2 imports sobre os mesmos contatos (upserts nas mesmas
+  // linhas → lock_timeout → linha marcada como failed no BulkOperation,
+  // recuperável reimportando). Não subir acima de 2 sem antes subir
+  // IMPORT_DB_POOL_MAX e revisar o lock_timeout. Override via
+  // IMPORT_ETL_CONCURRENCY.
+  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 2);
   const connection = duplicateBullConnection();
   getBullConnection();
 

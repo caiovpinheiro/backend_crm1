@@ -6,7 +6,7 @@ import {
 } from "@prisma/client";
 
 import { defaultDealTitleForContact } from "@/lib/display-name";
-import { prisma, type ScopedTx } from "@/lib/prisma";
+import { allocateOrgNumber, prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
@@ -81,6 +81,118 @@ export function isValidDealStatus(v: string): v is DealStatus {
  * sao convencao em quase todos os call sites) para popular as colunas
  * dedicadas do novo log.
  */
+/// Extrai field/old/new do meta (convencao herdada do log antigo).
+function deriveDealEventColumns(meta: Record<string, unknown>) {
+  const field =
+    typeof meta.field === "string"
+      ? (meta.field as string)
+      : typeof meta.fieldKey === "string"
+        ? (meta.fieldKey as string)
+        : null;
+  const oldValue =
+    meta.from !== undefined && meta.from !== null
+      ? String(meta.from)
+      : meta.oldValue !== undefined && meta.oldValue !== null
+        ? String(meta.oldValue)
+        : null;
+  const newValue =
+    meta.to !== undefined && meta.to !== null
+      ? String(meta.to)
+      : meta.newValue !== undefined && meta.newValue !== null
+        ? String(meta.newValue)
+        : null;
+  return { field, oldValue, newValue };
+}
+
+export type DealEventInput = {
+  dealId: string;
+  userId: string | null;
+  type: string;
+  meta?: Record<string, unknown>;
+};
+
+/**
+ * Versão em lote de `createDealEvent`, para handlers de operação em massa.
+ *
+ * Diferenças em relação a chamar `createDealEvent` N vezes:
+ *   - o log legado `deal_events` vira um único `createMany` (N inserts em
+ *     1 round-trip);
+ *   - as gravações em `activity_events` deixam de ser N promises soltas e
+ *     passam por um limite de 3 em voo, para não estourar o pool do worker.
+ *
+ * Continua best-effort: erros são logados e nunca sobem para o chamador.
+ */
+export async function createDealEventsMany(
+  events: DealEventInput[],
+): Promise<void> {
+  if (events.length === 0) return;
+
+  const rows = events.map((e) => {
+    const meta = e.meta ?? {};
+    return {
+      input: e,
+      meta,
+      columns: deriveDealEventColumns(meta),
+      metaJson: withAutomationOriginMeta(meta),
+    };
+  });
+
+  try {
+    await prisma.dealEvent.createMany({
+      data: rows.map((r) =>
+        withOrgFromCtx({
+          dealId: r.input.dealId,
+          userId: r.input.userId,
+          type: r.input.type,
+          meta: r.metaJson,
+        }),
+      ),
+    });
+  } catch {
+    // Mesmo fallback do singular: FK de userId inválida derruba o lote
+    // inteiro, então re-tenta sem atribuir o autor.
+    try {
+      await prisma.dealEvent.createMany({
+        data: rows.map((r) =>
+          withOrgFromCtx({
+            dealId: r.input.dealId,
+            userId: null,
+            type: r.input.type,
+            meta: r.metaJson,
+          }),
+        ),
+      });
+    } catch (err) {
+      console.warn(
+        "[createDealEventsMany] falha ao gravar deal_events em lote:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  const LOG_EVENT_CONCURRENCY = 3;
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(LOG_EVENT_CONCURRENCY, rows.length) },
+    async () => {
+      while (cursor < rows.length) {
+        const r = rows[cursor++];
+        await logEvent({
+          type: r.input.type,
+          entityType: "DEAL",
+          entityId: r.input.dealId,
+          dealId: r.input.dealId,
+          field: r.columns.field,
+          oldValue: r.columns.oldValue,
+          newValue: r.columns.newValue,
+          meta: r.meta,
+        });
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
 export function createDealEvent(
   dealId: string,
   userId: string | null,
@@ -100,26 +212,7 @@ export function createDealEvent(
   // `withAutomationOriginMeta`) — o endpoint da timeline cai no
   // `deal_events` legado quando o deal nao tem activity_events.
   const metaJson = withAutomationOriginMeta(meta);
-
-  // Extrai field/old/new do meta (convencao herdada do log antigo).
-  const field =
-    typeof meta.field === "string"
-      ? (meta.field as string)
-      : typeof meta.fieldKey === "string"
-        ? (meta.fieldKey as string)
-        : null;
-  const oldValue =
-    meta.from !== undefined && meta.from !== null
-      ? String(meta.from)
-      : meta.oldValue !== undefined && meta.oldValue !== null
-        ? String(meta.oldValue)
-        : null;
-  const newValue =
-    meta.to !== undefined && meta.to !== null
-      ? String(meta.to)
-      : meta.newValue !== undefined && meta.newValue !== null
-        ? String(meta.newValue)
-        : null;
+  const { field, oldValue, newValue } = deriveDealEventColumns(meta);
 
   // Fire-and-forget para o novo log — falhas nao afetam o legado.
   void logEvent({
@@ -429,17 +522,6 @@ export async function nextDealNumber(): Promise<number> {
   return (r._max.number ?? 0) + 1;
 }
 
-const DEAL_NUMBER_MAX_RETRIES = 5;
-
-function isPrismaUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code: string }).code === "P2002"
-  );
-}
-
 export async function createDeal(data: CreateDealInput) {
   // Título opcional. Prioridade:
   //  1. título informado
@@ -454,49 +536,47 @@ export async function createDeal(data: CreateDealInput) {
     rawTitle = defaultDealTitleForContact(contact?.name) ?? "";
   }
 
-  const maxPos = await prisma.deal.aggregate({
-    where: { stageId: data.stageId },
-    _max: { position: true },
-  });
-  const position = data.position ?? (maxPos._max.position ?? -1) + 1;
-
-  // `number` e mandatorio (sem default) e unico por org. Tentamos
-  // alocar max+1 e repetimos em P2002 para cobrir corridas concorrentes
-  // (ex.: dois usuarios da mesma org criando deal no mesmo segundo).
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < DEAL_NUMBER_MAX_RETRIES; attempt++) {
-    const number = await nextDealNumber();
-    const title = rawTitle || `Negócio - #${number}`;
-    try {
-      const created = await prisma.deal.create({
-        data: withOrgFromCtx({
-          ...(data.id ? { id: data.id } : {}),
-          number,
-          title,
-          externalId: data.externalId === undefined ? undefined : data.externalId,
-          value: data.value !== undefined ? data.value : undefined,
-          status: data.status,
-          expectedClose: data.expectedClose === undefined ? undefined : data.expectedClose,
-          lostReason: data.lostReason === undefined ? undefined : data.lostReason,
-          position,
-          contactId: data.contactId === undefined ? undefined : data.contactId,
-          stageId: data.stageId,
-          ownerId: data.ownerId === undefined ? undefined : data.ownerId,
-          dealRole: data.dealRole === undefined ? undefined : data.dealRole,
-        }),
-        include: listInclude,
-      });
-      await invalidateBoardsForPipelines([created.stage?.pipelineId]);
-      return created;
-    } catch (err) {
-      lastErr = err;
-      if (isPrismaUniqueViolation(err)) {
-        continue;
-      }
-      throw err;
-    }
+  // Posição: o MAX(position) por estágio só roda quando o caller não informou
+  // uma posição. O import em massa (`deal-import-core`) passa `position`
+  // explícita de um contador por estágio em memória — sem isso eram 2.852
+  // aggregates num import de 5 mil linhas (stress sa221601).
+  let position = data.position;
+  if (position === undefined) {
+    const maxPos = await prisma.deal.aggregate({
+      where: { stageId: data.stageId },
+      _max: { position: true },
+    });
+    position = (maxPos._max.position ?? -1) + 1;
   }
-  throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
+
+  // `number` vem do contador atômico por org (1 statement, ~0,3ms) —
+  // substitui o `MAX(number)+1` com retry que lia dezenas de milhares de
+  // linhas por create (a extension de scope traduz aggregate para uma
+  // subquery com OFFSET, matando o index-only scan) e gerava storm de
+  // P2002 sob concorrência. A extension mantém retry de segurança para
+  // P2002 residual de `number` (ver `allocateOrgNumber` em lib/prisma.ts).
+  const number = await allocateOrgNumber("Deal", getOrgIdOrThrow());
+  const title = rawTitle || `Negócio - #${number}`;
+  const created = await prisma.deal.create({
+    data: withOrgFromCtx({
+      ...(data.id ? { id: data.id } : {}),
+      number,
+      title,
+      externalId: data.externalId === undefined ? undefined : data.externalId,
+      value: data.value !== undefined ? data.value : undefined,
+      status: data.status,
+      expectedClose: data.expectedClose === undefined ? undefined : data.expectedClose,
+      lostReason: data.lostReason === undefined ? undefined : data.lostReason,
+      position,
+      contactId: data.contactId === undefined ? undefined : data.contactId,
+      stageId: data.stageId,
+      ownerId: data.ownerId === undefined ? undefined : data.ownerId,
+      dealRole: data.dealRole === undefined ? undefined : data.dealRole,
+    }),
+    include: listInclude,
+  });
+  await invalidateBoardsForPipelines([created.stage?.pipelineId]);
+  return created;
 }
 
 /**
@@ -568,7 +648,7 @@ export type UpdateDealInput = {
   ownerId?: string | null;
   orgUnitId?: string | null;
   /**
-   * Quando o owner muda: também atualiza conversas do contato.
+   * Quando o owner muda: também atualiza conversas abertas do contato.
    * `false` = só negócio (e contato). Default `true` (herança).
    */
   propagateToChat?: boolean;
@@ -643,23 +723,6 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   return updated;
 }
 
-/**
- * Propaga o `ownerId` do deal para o contato e as conversas desse
- * contato — regra de herança do "responsável único": quando um deal
- * é distribuído/transferido, o contato vinculado e todas as
- * conversas desse contato herdam o mesmo assignee. Evita ter
- * Atendimento/Contato/Chat em pessoas diferentes.
- *
- * Exposto como helper para que `updateDeal`, a rota bulk e o
- * executor de automações apliquem a mesma cascata.
- *
- * - `ownerId === null` → desatribui contato e conversas.
- * - `contactId === null` → no-op (não há a quem propagar).
- * - `opts.conversations === false` → só contato, não mexe no chat.
- * - Deve rodar dentro de uma transaction (`tx`) — a função não
- *   abre uma própria para poder compor com contextos maiores.
- * - Devolve as conversas que mudaram (para o caller logar no chat).
- */
 export type ConversationAssigneeChange = {
   conversationId: string;
   contactId: string | null;
@@ -702,6 +765,23 @@ async function logConversationAssigneeChanges(
   }
 }
 
+/**
+ * Propaga o `ownerId` do deal para o contato e as conversas desse
+ * contato — regra de herança do "responsável único": quando um deal
+ * é distribuído/transferido, o contato vinculado e todas as
+ * conversas desse contato herdam o mesmo assignee. Evita ter
+ * Atendimento/Contato/Chat em pessoas diferentes.
+ *
+ * Exposto como helper para que `updateDeal`, a rota bulk e o
+ * executor de automações apliquem a mesma cascata.
+ *
+ * - `ownerId === null` → desatribui contato e conversas.
+ * - `contactId === null` → no-op (não há a quem propagar).
+ * - `opts.conversations === false` → só contato, não mexe no chat.
+ * - Deve rodar dentro de uma transaction (`tx`) — a função não
+ *   abre uma própria para poder compor com contextos maiores.
+ * - Devolve as conversas que mudaram (para o caller logar no chat).
+ */
 export async function propagateOwnerToContactAndChat(
   tx: ScopedTx,
   contactId: string | null | undefined,

@@ -10,7 +10,7 @@ import {
 } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
-import { prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
@@ -1550,13 +1550,18 @@ export async function updateConversationStatusInDb(
 
 /**
  * Retorna o proximo `number` sequencial de Conversation na org do
- * contexto atual. Mesmo padrao de `nextContactNumber()` — a Prisma
- * extension escopa o `_max` por org via AsyncLocalStorage. Combinar
- * com retry P2002 na criacao para lidar com corrida entre workers/webhooks.
+ * contexto atual.
+ *
+ * Delega no contador atomico compartilhado (`org_number_counters`) em vez de
+ * fazer `MAX(number) + 1` aqui. Ter dois alocadores para o mesmo model era o
+ * que sobrava de corrida depois do fix de custo: este caminho emitia MAX+1
+ * enquanto a extension de scope emitia pelo contador, e os dois colidiam
+ * entre si. Fonte unica de verdade -> a colisao deixa de existir por
+ * construcao. Ver `allocateOrgNumber` em lib/prisma.ts.
  */
 export async function nextConversationNumber(): Promise<number> {
-  const r = await prisma.conversation.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
+  const orgId = getOrgIdOrThrow();
+  return allocateOrgNumber("Conversation", orgId);
 }
 
 /**

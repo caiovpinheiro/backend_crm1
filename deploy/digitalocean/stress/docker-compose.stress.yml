@@ -1,0 +1,67 @@
+# Override de stress test. Uso:
+#   docker compose -f docker-compose.yml -f stress/docker-compose.stress.yml up -d
+#
+# A interceptação da Meta é feita por alias de rede, não por extra_hosts nem
+# IP fixo: o DNS embutido do Docker resolve graph.facebook.com para o container
+# do mock em qualquer serviço da mesma rede. Assim o código de produção segue
+# chamando a URL hardcoded e nada sai do droplet.
+#
+# A confiança no certificado do mock reaproveita o bundle que os backends já
+# montam por causa da CA da DigitalOcean (NODE_EXTRA_CA_CERTS=/app/certs/do-ca.crt);
+# prepare-mock.sh acrescenta a CA local a esse mesmo arquivo.
+
+services:
+  mock-graph:
+    image: node:22-bookworm-slim
+    command: ["node", "/app/server.mjs"]
+    restart: unless-stopped
+    environment:
+      MOCK_PROFILE: ${MOCK_PROFILE:-realista}
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-90}
+      MOCK_429_PCT: ${MOCK_429_PCT:-5}
+      MOCK_503_PCT: ${MOCK_503_PCT:-1}
+      MOCK_KEY: /certs/mock.key
+      MOCK_CERT: /certs/mock.crt
+      NODE_OPTIONS: --max-old-space-size=512
+    volumes:
+      - ./stress/mock-graph:/app:ro
+      - ./stress/certs:/certs:ro
+    networks:
+      default:
+        aliases:
+          - graph.facebook.com
+          - graph.instagram.com
+          - lookaside.fbsbx.com
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Os workers só devem subir depois que o mock estiver de pé, senão as
+  # primeiras chamadas Graph falham com ENOTFOUND e sujam a medição.
+  worker-whatsapp:
+    depends_on:
+      api:
+        condition: service_healthy
+      mock-graph:
+        condition: service_started
+
+  worker-meta-webhook:
+    depends_on:
+      api:
+        condition: service_healthy
+      mock-graph:
+        condition: service_started
+
+  worker-automation:
+    depends_on:
+      api:
+        condition: service_healthy
+      mock-graph:
+        condition: service_started
+
+  api:
+    depends_on:
+      mock-graph:
+        condition: service_started
