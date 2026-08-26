@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
+import {
+  ensureWhatsappTemplateHiddenAtColumn,
+  isMissingHiddenAtColumn,
+} from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
 
@@ -52,16 +56,39 @@ export async function GET(request: Request) {
       }
 
       // Labels amigáveis do config local (opcional; só enriquece o rótulo).
-      const configs = await prisma.whatsAppTemplateConfig.findMany({
-        select: {
-          metaTemplateId: true,
-          metaTemplateName: true,
-          label: true,
-          agentEnabled: true,
-          operatorVariables: true,
-          hiddenAt: true,
-        },
-      });
+      await ensureWhatsappTemplateHiddenAtColumn();
+      let configs: Array<{
+        metaTemplateId: string;
+        metaTemplateName: string;
+        label: string;
+        agentEnabled: boolean;
+        operatorVariables: unknown;
+        hiddenAt: Date | null;
+      }>;
+      try {
+        configs = await prisma.whatsAppTemplateConfig.findMany({
+          select: {
+            metaTemplateId: true,
+            metaTemplateName: true,
+            label: true,
+            agentEnabled: true,
+            operatorVariables: true,
+            hiddenAt: true,
+          },
+        });
+      } catch (e) {
+        if (!isMissingHiddenAtColumn(e)) throw e;
+        const rows = await prisma.whatsAppTemplateConfig.findMany({
+          select: {
+            metaTemplateId: true,
+            metaTemplateName: true,
+            label: true,
+            agentEnabled: true,
+            operatorVariables: true,
+          },
+        });
+        configs = rows.map((c) => ({ ...c, hiddenAt: null }));
+      }
       // Template oculto no CRM sai também dos seletores (automação, mensagens
       // prontas). Envio não é afetado: o executor resolve por nome sem olhar
       // `hiddenAt`, então automação que já usa continua funcionando.
@@ -141,8 +168,9 @@ export async function GET(request: Request) {
 
       return NextResponse.json(out);
     } catch (e) {
+      console.error("[whatsapp-template-configs/approved]", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao carregar templates." },
         { status: 500 },
       );
     }

@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import {
+  ensureWhatsappTemplateHiddenAtColumn,
+  isMissingHiddenAtColumn,
+} from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -12,13 +16,24 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 export async function GET() {
   return withOrgContext(async () => {
     try {
-      const configs = await prisma.whatsAppTemplateConfig.findMany({
-        orderBy: { metaTemplateName: "asc" },
-      });
+      await ensureWhatsappTemplateHiddenAtColumn();
+      let configs;
+      try {
+        configs = await prisma.whatsAppTemplateConfig.findMany({
+          orderBy: { metaTemplateName: "asc" },
+        });
+      } catch (e) {
+        if (!isMissingHiddenAtColumn(e)) throw e;
+        configs = await prisma.whatsAppTemplateConfig.findMany({
+          orderBy: { metaTemplateName: "asc" },
+          omit: { hiddenAt: true },
+        });
+      }
       return NextResponse.json(configs);
     } catch (e) {
+      console.error("[whatsapp-template-configs] GET", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao carregar templates." },
         { status: 500 },
       );
     }
@@ -90,6 +105,7 @@ export async function PUT(request: Request) {
       }
 
       const orgId = getOrgIdOrThrow();
+      await ensureWhatsappTemplateHiddenAtColumn();
       const config = await prisma.whatsAppTemplateConfig.upsert({
         where: { organizationId_metaTemplateId: { organizationId: orgId, metaTemplateId } },
         create: withOrgFromCtx({
@@ -125,8 +141,9 @@ export async function PUT(request: Request) {
 
       return NextResponse.json(config);
     } catch (e) {
+      console.error("[whatsapp-template-configs] PUT", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao salvar template." },
         { status: 500 },
       );
     }
