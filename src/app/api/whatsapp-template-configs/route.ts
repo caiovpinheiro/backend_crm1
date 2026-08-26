@@ -69,9 +69,22 @@ export async function PUT(request: Request) {
               const label = typeof o.label === "string" ? o.label.trim() : "";
               if (!key) return null;
               const example = typeof o.example === "string" && o.example.trim() ? o.example.trim() : undefined;
-              return { key, label: label || key, ...(example ? { example } : {}) };
+              // `crmField` é o token do CRM que preenche o marcador no envio
+              // (`{{dealCustomFields.x}}`). Nunca vai para a Meta — o corpo
+              // aprovado lá continua com `{{1}}`.
+              const crmField =
+                typeof o.crmField === "string" && o.crmField.trim() ? o.crmField.trim() : undefined;
+              return {
+                key,
+                label: label || key,
+                ...(example ? { example } : {}),
+                ...(crmField ? { crmField } : {}),
+              };
             })
-            .filter((x): x is { key: string; label: string; example?: string } => x != null);
+            .filter(
+              (x): x is { key: string; label: string; example?: string; crmField?: string } =>
+                x != null,
+            );
           operatorVariables = cleaned as unknown as Prisma.InputJsonValue;
         }
       }
