@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { logEvent } from "@/services/activity-log";
+import { fireTrigger } from "@/services/automation-triggers";
 import { maybeSendMissedCallScheduleTemplate } from "@/services/missed-call-schedule-offer";
 import {
   buildConnectChatLine,
@@ -278,7 +280,10 @@ export async function processMetaWhatsappCallsWebhook(
     const errorsPayload =
       callErrors.length > 0 ? callErrors : valueErrors.length > 0 ? valueErrors : undefined;
 
-    const sessionPayload = extractWhatsappCallSdpSession(c) ?? undefined;
+    const sessionPayload =
+      extractWhatsappCallSdpSession(c, {
+        defaultSdpType: direction === "USER_INITIATED" ? "offer" : "answer",
+      }) ?? undefined;
     const errorsJson: Prisma.InputJsonValue | undefined =
       sessionPayload || errorsPayload
         ? ({
@@ -364,7 +369,7 @@ export async function processMetaWhatsappCallsWebhook(
         durationSec,
         startDate,
         endDate,
-        agentName: direction === "BUSINESS_INITIATED" ? agentName : undefined,
+        agentName,
         pickedUp,
         rejected,
       });
@@ -499,11 +504,31 @@ export async function processMetaWhatsappCallsWebhook(
       organizationId: sseOrgId(conv.organizationId),
       conversationId: conv.id,
       contactId: contact.id,
+      contactName: contact.name || profileName || null,
+      fromWa: fromWa || customerWa || null,
       callId,
       event,
       direction,
       ...(sessionPayload ? { session: sessionPayload } : {}),
     });
+
+    if (event === "terminate") {
+      try {
+        await emitWhatsappCallClosed({
+          callId,
+          direction,
+          conversationId: conv.id,
+          contactId: contact.id,
+          durationSec,
+          startTime: startT ? new Date(Number(startT) * 1000) : null,
+          fromWa: fromWa || null,
+          toWa: toWa || null,
+          terminateStatus,
+        });
+      } catch (e) {
+        console.warn("[meta-webhook] call closed log/trigger:", e);
+      }
+    }
   }
 
   for (const [callId, p] of missedUserCallOffers) {
@@ -523,4 +548,95 @@ export async function processMetaWhatsappCallsWebhook(
       });
     }
   }
+}
+
+/**
+ * Log de atividade + gatilho `call_received` / `call_made` no encerramento
+ * da chamada WhatsApp (espelha o hangup SIP em services/calls.ts).
+ * Idempotente: o 2º `terminate` do mesmo metaCallId não re-dispara.
+ */
+async function emitWhatsappCallClosed(params: {
+  callId: string;
+  direction: string;
+  conversationId: string;
+  contactId: string;
+  durationSec: number | null;
+  startTime: Date | null;
+  fromWa: string | null;
+  toWa: string | null;
+  terminateStatus: string;
+}): Promise<void> {
+  const terminateCount = await prisma.whatsappCallEvent.count({
+    where: { metaCallId: params.callId, eventKind: "terminate" },
+  });
+  if (terminateCount > 1) return;
+
+  const prior = await prisma.whatsappCallEvent.findMany({
+    where: { metaCallId: params.callId },
+    select: { signalingStatus: true },
+  });
+  const signalingStatuses = prior.map((p) => p.signalingStatus);
+  const answered = wasWhatsappCallPickedUp({
+    durationSec: params.durationSec,
+    startTime: params.startTime,
+    signalingStatuses,
+  });
+
+  const conv = await prisma.conversation.findUnique({
+    where: { id: params.conversationId },
+    select: { channelId: true },
+  });
+  const deal = await prisma.deal.findFirst({
+    where: { contactId: params.contactId, status: "OPEN" },
+    select: { id: true, title: true },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const isInbound = params.direction === "USER_INITIATED";
+  const eventType = answered ? "CALL_COMPLETED" : "CALL_MISSED";
+
+  await logEvent({
+    type: eventType,
+    entityType: deal ? "DEAL" : "CONTACT",
+    entityId: deal?.id ?? params.contactId,
+    entityLabel: deal?.title ?? null,
+    dealId: deal?.id ?? null,
+    contactId: params.contactId,
+    conversationId: params.conversationId,
+    meta: {
+      callId: params.callId,
+      provider: "whatsapp",
+      direction: params.direction,
+      initiatedBy: isInbound ? "contact" : "company",
+      durationSec: params.durationSec,
+      durationSeconds: params.durationSec,
+      answered,
+      terminateStatus: params.terminateStatus || null,
+      from: params.fromWa,
+      to: params.toWa,
+    },
+  }).catch((err) =>
+    console.warn("[meta-webhook] logEvent de chamada WhatsApp:", err),
+  );
+
+  const trigger = isInbound ? "call_received" : "call_made";
+  await fireTrigger(trigger, {
+    contactId: params.contactId,
+    dealId: deal?.id ?? undefined,
+    data: {
+      callId: params.callId,
+      provider: "whatsapp",
+      channel: "whatsapp",
+      channelId: conv?.channelId ?? null,
+      conversationId: params.conversationId,
+      direction: params.direction,
+      status: answered ? "COMPLETED" : "MISSED",
+      answered,
+      durationSeconds: params.durationSec,
+      from: params.fromWa,
+      to: params.toWa,
+    },
+  }).catch((err) =>
+    console.warn("[meta-webhook] fireTrigger de chamada WhatsApp:", err),
+  );
 }
