@@ -263,6 +263,8 @@ async function main() {
 
     // DistributionResponsible — participa do motor + limite de fila (volume).
     // Nao mexe em presenca (online/offline) nem em lastExecutionAt.
+    // Nao reescreve queueLimit no update — o admin pode ter baixado o
+    // teto na tela de Distribuicao (mesma regra do roster sync em runtime).
     await prisma.distributionResponsible.upsert({
       where: { organizationId_userId: { organizationId: orgId, userId: user.id } },
       create: {
@@ -271,7 +273,7 @@ async function main() {
         participates: true,
         queueLimit: QUEUE_LIMIT,
       },
-      update: { participates: true, queueLimit: QUEUE_LIMIT },
+      update: { participates: true },
       select: { userId: true },
     });
 
