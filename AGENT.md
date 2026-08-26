@@ -73,6 +73,16 @@ lista dinâmica por contato nesta versão (sem cadastro de endereços).
 
 ---
 
+### 2026-08-26 — Node Botões WhatsApp volta a ser só reply
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Removido `kind: action|flow` do node `send_whatsapp_interactive`. A mistura iFood (Flow + resposta rápida na mesma bolha) já existe em template aprovado (`FLOW` + `QUICK_REPLY`). Na janela 24h a Meta não mistura `interactive.type=button` com `type=flow`; o clique gerava uma segunda bolha `[Flow: …]`.
+
+**Alternativas descartadas.** Manter o seletor no canvas (UX enganosa). Colocar o menu inteiro dentro do Flow (a opção simples também abriria a ficha nativa).
+
+---
+
 ### 2026-08-25 — Clique de botão retoma automação mesmo com humano atendendo
 
 **Modelo usado.** Cursor Grok 4.6.

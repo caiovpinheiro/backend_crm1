@@ -223,19 +223,12 @@ export function readAwaitingFlow(variables: Record<string, unknown>): AwaitingFl
   return { stepId, buttonId, flowToken, ...(gotoStepId ? { gotoStepId } : {}) };
 }
 
-export function isFlowKindButton(b: InteractiveOption): boolean {
-  if ((b.kind ?? "").trim().toLowerCase() === "flow") return true;
-  if ((b.kind ?? "").trim().toLowerCase() === "action") return false;
-  return Boolean((b.flowDefinitionId ?? "").trim());
-}
-
 export function interactiveButtonId(b: InteractiveOption, idx: number): string {
   return (b.id || "").trim() || `btn_${idx}`;
 }
 
 export type InteractiveMenuDecision =
   | { action: "complete_flow"; buttonId: string }
-  | { action: "send_flow"; button: InteractiveOption; buttonId: string }
   | { action: "goto_button"; button: InteractiveOption }
   | { action: "stay" }
   | { action: "no_match" };
@@ -267,11 +260,6 @@ export function decideInteractiveMenuInbound(input: {
     input.interactiveId,
   );
   if (matched) {
-    const idx = input.buttons.indexOf(matched);
-    const buttonId = interactiveButtonId(matched, idx >= 0 ? idx : 0);
-    if (isFlowKindButton(matched) && !input.flowReply) {
-      return { action: "send_flow", button: matched, buttonId };
-    }
     return { action: "goto_button", button: matched };
   }
 
@@ -767,23 +755,6 @@ export async function processIncomingMessage(
               `Flow concluído sem botão ${decision.buttonId} — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
             );
           }
-        } else if (decision.action === "send_flow") {
-          const sent = await dispatchPausedInteractiveFlow({
-            ctx,
-            contactId,
-            currentStep,
-            config,
-            variables,
-            button: decision.button,
-            buttonId: decision.buttonId,
-          });
-          if (sent) {
-            return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
-          }
-          log.warn(
-            `Falha ao enviar Flow do botão "${decision.button.title || decision.buttonId}" — auto=${ctx.automation.name}`,
-          );
-          nextStepId = elseGoto ?? defaultOut;
         } else if (decision.action === "goto_button") {
           delete variables[AWAITING_FLOW_VAR];
           const matchedBtn = decision.button;
@@ -800,20 +771,6 @@ export async function processIncomingMessage(
             messageContent,
             opts?.interactiveId,
           );
-          if (staleBtn && isFlowKindButton(staleBtn) && !opts?.flowReply) {
-            const sent = await dispatchPausedInteractiveFlow({
-              ctx,
-              contactId,
-              currentStep,
-              config,
-              variables,
-              button: staleBtn,
-              buttonId: (staleBtn.id || "").trim() || "stale_flow",
-            });
-            if (sent) {
-              return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
-            }
-          }
           const staleGoto = staleBtn ? readStepRef(staleBtn, "gotoStepId") : null;
           if (staleGoto) {
             nextStepId = staleGoto;
@@ -1177,90 +1134,6 @@ export async function processTimeout(contextId: string) {
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
   await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
-}
-
-async function dispatchPausedInteractiveFlow(opts: {
-  ctx: {
-    id: string;
-    automationId: string;
-    automation: { name: string };
-  };
-  contactId: string;
-  currentStep: { id: string; type: string };
-  config: Record<string, unknown>;
-  variables: Record<string, unknown>;
-  button: InteractiveOption;
-  buttonId: string;
-}): Promise<boolean> {
-  const flowDefinitionId = (opts.button.flowDefinitionId ?? "").trim();
-  if (!flowDefinitionId) {
-    log.warn(
-      `botão Flow sem flowDefinitionId — auto=${opts.ctx.automation.name} btn=${opts.buttonId}`,
-    );
-    return false;
-  }
-
-  const { getFlowDefinitionById } = await import("@/services/whatsapp-flow-definitions");
-  const def = await getFlowDefinitionById(flowDefinitionId);
-  const metaFlowId = def?.metaFlowId?.trim() ?? "";
-  if (!def || def.status !== "PUBLISHED" || !metaFlowId) {
-    log.warn(
-      `Flow ${flowDefinitionId} não está publicado — auto=${opts.ctx.automation.name}`,
-    );
-    return false;
-  }
-
-  const { randomUUID } = await import("crypto");
-  const flowToken = randomUUID();
-  const title = (opts.button.title || opts.button.text || "Continuar").trim();
-  const flowCta = (opts.button.flowCta || title).trim();
-  const bodyRaw = String(opts.config.body ?? "").trim() || title;
-  const body = interpolateVariables(bodyRaw, opts.variables);
-  const headerRaw = String(opts.config.header ?? "").trim();
-  const footerRaw = String(opts.config.footer ?? "").trim();
-  const header = headerRaw ? interpolateVariables(headerRaw, opts.variables) : undefined;
-  const footer = footerRaw ? interpolateVariables(footerRaw, opts.variables) : undefined;
-  const btnGoto = readStepRef(opts.button, "gotoStepId");
-
-  const { sendInteractiveFlowAfterButtonClick } = await import(
-    "@/services/automation-executor"
-  );
-  const sent = await sendInteractiveFlowAfterButtonClick({
-    automationId: opts.ctx.automationId,
-    automationName: opts.ctx.automation.name,
-    contactId: opts.contactId,
-    conversationId:
-      typeof opts.variables.conversationId === "string"
-        ? opts.variables.conversationId
-        : null,
-    channelId:
-      typeof opts.variables.channelId === "string" ? opts.variables.channelId : null,
-    body,
-    header,
-    footer,
-    flowMetaId: metaFlowId,
-    flowCta,
-    flowToken,
-  });
-  if (!sent.ok) return false;
-
-  const INTERACTIVE_DEFAULT_TIMEOUT_MS = 86_400_000;
-  const rawTimeout = readNumber(opts.config, "timeoutMs");
-  const timeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : INTERACTIVE_DEFAULT_TIMEOUT_MS;
-  const nextVars: Record<string, unknown> = {
-    ...opts.variables,
-    [AWAITING_FLOW_VAR]: {
-      stepId: opts.currentStep.id,
-      buttonId: opts.buttonId,
-      flowToken,
-      ...(btnGoto ? { gotoStepId: btnGoto } : {}),
-    },
-  };
-  await advanceContext(opts.ctx.id, opts.currentStep.id, nextVars, timeoutMs);
-  log.info(
-    `Flow enviado (btn=${opts.buttonId} meta=${metaFlowId}) — auto=${opts.ctx.automation.name} permanece no step ${opts.currentStep.id}`,
-  );
-  return true;
 }
 
 function applyVariableTransform(raw: unknown, transform?: string): string {

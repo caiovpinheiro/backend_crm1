@@ -19,7 +19,6 @@ import {
   readStepRef,
   shouldPersistDelay,
   decideInteractiveMenuInbound,
-  isFlowKindButton,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
 } from "@/services/automation-context";
@@ -516,7 +515,7 @@ describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
   });
 });
 
-describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
+describe("decideInteractiveMenuInbound — botão retoma goto", () => {
   const buttons = [
     { id: "btn_0", title: "Sim", kind: "action", gotoStepId: "step-sim" },
     {
@@ -528,16 +527,15 @@ describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
     },
   ];
 
-  it("kind flow sem nfm_reply dispara envio do Flow", () => {
+  it("kind flow legado no config segue goto como botão de ação", () => {
     const d = decideInteractiveMenuInbound({
       buttons,
       messageContent: "Trocar endereço",
       interactiveId: "btn_1",
     });
-    expect(d.action).toBe("send_flow");
-    if (d.action === "send_flow") {
-      expect(d.buttonId).toBe("btn_1");
-      expect(d.button.flowDefinitionId).toBe("flow-def-1");
+    expect(d.action).toBe("goto_button");
+    if (d.action === "goto_button") {
+      expect(d.button.gotoStepId).toBe("step-depois-flow");
     }
   });
 
@@ -610,10 +608,7 @@ describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
     expect(d.action).toBe("no_match");
   });
 
-  it("isFlowKindButton e readAwaitingFlow", () => {
-    expect(isFlowKindButton({ kind: "flow" })).toBe(true);
-    expect(isFlowKindButton({ kind: "action", flowDefinitionId: "x" })).toBe(false);
-    expect(isFlowKindButton({ flowDefinitionId: "x" })).toBe(true);
+  it("readAwaitingFlow", () => {
     expect(
       readAwaitingFlow({
         __awaitingFlow: { stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" },
