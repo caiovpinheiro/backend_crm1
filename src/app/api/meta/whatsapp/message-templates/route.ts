@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import { extractMetaPlaceholderKeys } from "@/lib/meta-whatsapp/operator-template-variables";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
+import { prisma } from "@/lib/prisma";
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
   const r = session.user?.role;
@@ -169,7 +170,37 @@ export async function GET(request: Request) {
         after,
         limit: Number.isFinite(limit) ? limit : undefined,
       });
-      return NextResponse.json(data);
+
+      // Templates que o operador ocultou no CRM saem da lista. A Meta não tem
+      // esse conceito: quando ela recusa a exclusão, o template volta a cada
+      // refresh. `includeHidden=1` traz de volta (tela "mostrar ocultos").
+      const includeHidden = url.searchParams.get("includeHidden") === "1";
+      const hidden = await prisma.whatsAppTemplateConfig.findMany({
+        where: { hiddenAt: { not: null } },
+        select: { metaTemplateId: true, metaTemplateName: true },
+      });
+      const hiddenIds = new Set(hidden.map((h) => h.metaTemplateId));
+      const hiddenNames = new Set(hidden.map((h) => h.metaTemplateName));
+
+      const payload =
+        data && typeof data === "object" && !Array.isArray(data)
+          ? (data as Record<string, unknown>)
+          : {};
+      const rows = Array.isArray(payload.data)
+        ? (payload.data as Record<string, unknown>[])
+        : [];
+      const marked = rows.map((row) => ({
+        ...row,
+        hiddenInCrm:
+          hiddenIds.has(String(row.id ?? "")) ||
+          hiddenNames.has(String(row.name ?? "")),
+      }));
+
+      return NextResponse.json({
+        ...payload,
+        data: includeHidden ? marked : marked.filter((r) => !r.hiddenInCrm),
+        hiddenCount: marked.filter((r) => r.hiddenInCrm).length,
+      });
     } catch (e: unknown) {
       console.error("[meta-templates] GET", e);
       const msg = e instanceof Error ? e.message : "Erro ao listar templates na Meta.";

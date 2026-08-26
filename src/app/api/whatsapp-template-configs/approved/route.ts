@@ -59,8 +59,18 @@ export async function GET(request: Request) {
           label: true,
           agentEnabled: true,
           operatorVariables: true,
+          hiddenAt: true,
         },
       });
+      // Template oculto no CRM sai também dos seletores (automação, mensagens
+      // prontas). Envio não é afetado: o executor resolve por nome sem olhar
+      // `hiddenAt`, então automação que já usa continua funcionando.
+      const hiddenIds = new Set(
+        configs.filter((c) => c.hiddenAt).map((c) => c.metaTemplateId),
+      );
+      const hiddenNames = new Set(
+        configs.filter((c) => c.hiddenAt).map((c) => c.metaTemplateName),
+      );
       const labelById = new Map<string, string>();
       const labelByName = new Map<string, string>();
       const agentByName = new Map<string, boolean>();
@@ -94,6 +104,7 @@ export async function GET(request: Request) {
           const name = typeof row.name === "string" ? row.name : "";
           if (!name) continue;
           const id = typeof row.id === "string" ? row.id : "";
+          if (hiddenIds.has(id) || hiddenNames.has(name)) continue;
           const components = Array.isArray(row.components) ? (row.components as unknown[]) : [];
           const pf = typeof row.parameter_format === "string" ? row.parameter_format : null;
           const analysis = analyzeTemplateComponents(components, { parameterFormat: pf });
