@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 
@@ -56,6 +57,11 @@ export async function DELETE(request: Request, context: RouteContext) {
         name,
         templateGraphId: id.trim(),
       });
+      // O catálogo em cache (usado pelo inbox) acabou de ficar desatualizado.
+      await invalidateWhatsappTemplateCatalog(
+        session.user.organizationId,
+        resolved.client.wabaId,
+      );
       return NextResponse.json(data ?? { success: true });
     } catch (e: unknown) {
       console.error("[meta-templates] DELETE", e);

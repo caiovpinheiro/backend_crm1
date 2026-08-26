@@ -34,8 +34,14 @@ import {
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
-/** TTL curto: badges e Fila da distribuição precisam acompanhar o inbox. */
-const TAB_COUNTS_CACHE_TTL_SEC = 5;
+/**
+ * Frescura dos badges vem da invalidação (mensagem nova via `sse-bus`,
+ * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
+ * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
+ * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
+ * rede de segurança contra invalidação perdida.
+ */
+const TAB_COUNTS_CACHE_TTL_SEC = 30;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;

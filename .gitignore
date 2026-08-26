@@ -16,6 +16,11 @@
 /prod-preflight.dump
 /scripts/*.local.*
 
+# Scripts de diagnostico ad-hoc (prefixo `_`): rodam so na maquina local e
+# costumam carregar URL/senha de producao coladas na mao pra reproduzir um
+# problema. NUNCA versionar.
+/scripts/_*
+
 # next.js
 /.next/
 /out/
