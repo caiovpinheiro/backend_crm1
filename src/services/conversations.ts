@@ -30,6 +30,7 @@ import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
+  resolveConversationSearchCandidates,
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
@@ -463,43 +464,30 @@ export async function buildConversationSearchWhere(
   const q = search?.trim() ?? "";
   if (q.length === 0) return null;
 
-  // Agrupa predicados de `contact` / `assignedTo` sob UM join cada.
-  // Vários `{ contact: { campo } }` no OR faziam o Prisma emitir 4–8
-  // LEFT JOINs no mesmo contacts (mesmo contactId) — COUNT/listagem da
-  // inbox ~300–900ms mean no pg_stat (ago/26). Semanticamente idêntico.
+  // O `where` final só toca colunas de `conversations`. Tudo que exige join
+  // (contato, empresa, campos personalizados, título de negócio, responsável)
+  // é resolvido antes em pré-queries indexadas — ver
+  // `resolveConversationSearchCandidates`. Agrupar os predicados por join,
+  // como fazíamos até 26/ago/26, reduziu o número de LEFT JOINs mas manteve
+  // ILIKE cross-table e EXISTS por linha no mesmo OR: 4s por busca em prod.
   const or: Prisma.ConversationWhereInput[] = [
-    {
-      contact: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { phone: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-          { whatsappUsername: { contains: q, mode: "insensitive" } },
-          { source: { contains: q, mode: "insensitive" } },
-          { company: { name: { contains: q, mode: "insensitive" } } },
-          { customFields: { some: { value: { contains: q, mode: "insensitive" } } } },
-          { deals: { some: { title: { contains: q, mode: "insensitive" } } } },
-        ],
-      },
-    },
     { inboxName: { contains: q, mode: "insensitive" } },
-    {
-      assignedTo: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-        ],
-      },
-    },
   ];
+
   // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
   // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
   const digits = q.replace(/\D+/g, "");
-  if (digits.length >= 3) {
-    const contactIds = await findContactIdsByPhoneDigits(digits);
-    if (contactIds.length > 0) {
-      or.push({ contactId: { in: contactIds } });
-    }
+  const [candidates, phoneContactIds] = await Promise.all([
+    resolveConversationSearchCandidates(q),
+    digits.length >= 3 ? findContactIdsByPhoneDigits(digits) : Promise.resolve([]),
+  ]);
+
+  const contactIds = new Set([...candidates.contactIds, ...phoneContactIds]);
+  if (contactIds.size > 0) {
+    or.push({ contactId: { in: [...contactIds] } });
+  }
+  if (candidates.assignedToIds.length > 0) {
+    or.push({ assignedToId: { in: candidates.assignedToIds } });
   }
   // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
   // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
