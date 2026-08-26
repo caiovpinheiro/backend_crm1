@@ -161,7 +161,9 @@ async function syncUserDepts(args: {
     update: { allowedDepartmentIds: args.deptIds },
   });
 
-  // Motor de distribuição: participa + teto de fila (não mexe em presença).
+  // Motor de distribuição: entra no pool na 1ª vez. NÃO reescreve
+  // queueLimit no update — senão o teto que o admin baixou na tela
+  // (ex.: 25 → 15) volta a 25 a cada sync de 5 min / 1º atendimento.
   await prisma.distributionResponsible.upsert({
     where: {
       organizationId_userId: {
@@ -175,7 +177,7 @@ async function syncUserDepts(args: {
       participates: true,
       queueLimit: QUEUE_LIMIT,
     },
-    update: { participates: true, queueLimit: QUEUE_LIMIT },
+    update: { participates: true },
   });
 }
 
