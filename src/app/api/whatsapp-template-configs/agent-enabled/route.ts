@@ -33,7 +33,8 @@ export async function GET(request: Request) {
       const channelId = url.searchParams.get("channelId")?.trim() || "";
 
       const configs = await prisma.whatsAppTemplateConfig.findMany({
-        where: { agentEnabled: true },
+        // Oculto no CRM não é oferecido ao agente, mesmo com o toggle ligado.
+        where: { agentEnabled: true, hiddenAt: null },
         orderBy: { label: "asc" },
       });
 

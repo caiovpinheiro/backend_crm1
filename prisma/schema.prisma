@@ -3595,6 +3595,13 @@ model WhatsAppTemplateConfig {
   flowId            String?      @map("flow_id")
   /// Variáveis do corpo/cabeçalho que o operador preenche no envio (ex.: [{"key":"1","label":"Dia"}]).
   operatorVariables Json?        @map("operator_variables")
+  /// Quando preenchido, o template fica OCULTO no CRM: sai da lista de
+  /// Configurações, do seletor das automações e das mensagens prontas.
+  /// Usado quando a Meta recusa a exclusão (template em uso numa campanha,
+  /// janela de 30 dias, etc.) mas o operador não quer mais vê-lo. Não afeta
+  /// a Meta — lá o template continua existindo — nem quebra automação que já
+  /// referencie o nome: o envio segue funcionando.
+  hiddenAt          DateTime?    @map("hidden_at")
   /// Mensagens outbound enviadas com este template — relação inversa
   /// usada pelo resolver de Flow inbound para identificar o flow correto.
   messages          Message[]
@@ -3604,6 +3611,7 @@ model WhatsAppTemplateConfig {
   @@unique([organizationId, metaTemplateId])
   @@index([organizationId])
   @@index([organizationId, agentEnabled])
+  @@index([organizationId, hiddenAt])
   @@map("whatsapp_template_configs")
 }
 
