@@ -77,16 +77,20 @@ async function tryUpstreamFallback(
   }
 
   const cookieHeader = request.headers.get("cookie") ?? "";
-  const cookieNames = cookieHeader
-    ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
-    : [];
   const sessionToken = extractSessionToken(cookieHeader);
 
-  console.log(
-    `[storage] upstream fallback: cookies recebidos=[${cookieNames.join(",")}] sessionToken=${sessionToken ? sessionToken.slice(0, 20) + "..." : "AUSENTE"}`,
-  );
-
-  if (!sessionToken) return null;
+  if (!sessionToken) {
+    // Só o caso de falha é logado. O log anterior era incondicional e
+    // imprimia um prefixo do JWT a cada arquivo servido — com a mídia
+    // histórica toda passando por aqui, é ruído e material de sessão no log.
+    const cookieNames = cookieHeader
+      ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
+      : [];
+    console.warn(
+      `[storage] upstream fallback sem sessao: cookies recebidos=[${cookieNames.join(",")}]`,
+    );
+    return null;
+  }
 
   // Forwarda o cookie ORIGINAL inteiro + duplica o JWT sob os 4 nomes que
   // NextAuth v4/v5 conhece (com e sem __Secure-). Isso cobre qualquer
@@ -99,19 +103,27 @@ async function tryUpstreamFallback(
   ];
   const upstreamCookie = [cookieHeader, ...variants].filter(Boolean).join("; ");
 
+  const upstreamHeaders: Record<string, string> = {
+    cookie: upstreamCookie,
+    // Algumas verificações de NextAuth checam Host/Origin/Referer.
+    host: new URL(base).host,
+  };
+  // Repassa o Range. Sem isso o upstream devolve 200 com o arquivo inteiro e
+  // o `<video controls>` não inicia — o mesmo motivo que levou o caminho
+  // local a suportar Range (ver comentário no GET).
+  const range = request.headers.get("range");
+  if (range) upstreamHeaders.range = range;
+
   const upstreamUrl = `${base}/api/storage/${joined}`;
   try {
     const upstream = await fetch(upstreamUrl, {
-      headers: {
-        cookie: upstreamCookie,
-        // Algumas verificações de NextAuth checam Host/Origin/Referer.
-        host: new URL(base).host,
-      },
+      headers: upstreamHeaders,
       cache: "no-store",
       redirect: "follow",
     });
 
-    if (!upstream.ok) {
+    // `ok` cobre 200-299, o que inclui o 206 de resposta parcial.
+    if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "(no body)");
       console.warn(
         `[storage] upstream fallback ${upstream.status} para ${joined}: ${errBody.slice(0, 200)}`,
@@ -119,18 +131,27 @@ async function tryUpstreamFallback(
       return null;
     }
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    console.log(`[storage] upstream fallback OK (${buf.length}b) para ${joined}`);
-    return new Response(buf, {
-      status: 200,
-      headers: {
-        "Content-Type":
-          upstream.headers.get("content-type") ?? "application/octet-stream",
-        "Content-Length": String(buf.length),
-        "Cache-Control": "private, max-age=300",
-        "X-Storage-Source": "upstream-fallback",
-      },
-    });
+    // Encaminha o corpo como stream. Bufferizar em `Buffer` segurava o
+    // arquivo inteiro na memória do processo da API a cada request — com
+    // vídeos antigos e vários operadores simultâneos, isso derruba a API.
+    const out = new Headers();
+    for (const name of [
+      "content-type",
+      "content-length",
+      "content-range",
+      "accept-ranges",
+      "last-modified",
+      "etag",
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) out.set(name, value);
+    }
+    if (!out.has("content-type")) out.set("content-type", "application/octet-stream");
+    if (!out.has("accept-ranges")) out.set("accept-ranges", "bytes");
+    out.set("Cache-Control", "private, max-age=300");
+    out.set("X-Storage-Source", "upstream-fallback");
+
+    return new Response(upstream.body, { status: upstream.status, headers: out });
   } catch (err) {
     console.warn("[storage] upstream fallback erro:", err);
     return null;
