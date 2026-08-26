@@ -6,7 +6,19 @@
 export type OperatorVariableMeta = {
   key: string;
   label: string;
+  /**
+   * Valor de exemplo mostrado à Meta na criação do template (`example` do
+   * componente BODY/HEADER). Não é usado no envio.
+   */
   example?: string;
+  /**
+   * Token do CRM que preenche este marcador por padrão quando o template é
+   * usado (ex.: `{{dealCustomFields.titulovaga1}}`). Informação EXCLUSIVA do
+   * CRM: o corpo aprovado na Meta continua com `{{1}}`, e é o interpolador do
+   * envio que resolve o token. Escrever isso dentro do corpo do template faria
+   * a Meta entregar o texto literal.
+   */
+  crmField?: string;
 };
 
 /**
@@ -49,7 +61,7 @@ export function extractUnsupportedPlaceholderTokens(text: string): string[] {
   return extractPlaceholderKeysFromBodyText(text).filter((k) => !isMetaPlaceholderKey(k));
 }
 
-/** Preserva labels/exemplos já gravados quando as chaves continuam iguais. */
+/** Preserva labels/exemplos/mapeamentos já gravados quando as chaves continuam iguais. */
 export function mergeOperatorVariables(
   bodyText: string,
   previous: OperatorVariableMeta[] | null | undefined,
@@ -59,10 +71,21 @@ export function mergeOperatorVariables(
   return keys.map((key) => {
     const old = prevByKey.get(key);
     const ex = old?.example?.trim();
+    const crm = old?.crmField?.trim();
     return {
       key,
       label: old?.label?.trim() || key,
       ...(ex ? { example: ex } : {}),
+      ...(crm ? { crmField: crm } : {}),
     };
   });
+}
+
+/** Mapeamento CRM gravado para uma chave, se houver. */
+export function operatorVariableCrmField(
+  vars: OperatorVariableMeta[] | null | undefined,
+  key: string,
+): string {
+  const hit = (vars ?? []).find((v) => String(v?.key ?? "").trim() === key);
+  return hit?.crmField?.trim() ?? "";
 }
