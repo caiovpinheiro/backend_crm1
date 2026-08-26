@@ -1065,15 +1065,9 @@ export async function sendTemplateToConversation(
     }
   }
 
-  const sendDenied = await requireChannelScope(
-    { id: args.actor.id, role: args.actor.role ?? undefined, organizationId: args.actor.organizationId, isSuperAdmin: args.actor.isSuperAdmin },
-    "send",
-    conv.channelId,
-  );
-  if (sendDenied) return denialToFailure(sendDenied);
-
-  // Override de canal (11/ago/26): mesma máquina de resolução usada pelos
-  // demais envios. Sem override, devolve `conv.channelRef` sem round-trip.
+  // Override de canal: resolve ANTES do scope. Sessão 24h fechada costuma
+  // cair num canal DISCONNECTED; o operador escolhe outro CONNECTED e o
+  // grant tem que ser o do canal de saída, não o do ticket antigo.
   const resolved = await resolveOutboundChannel({
     conv: {
       channelId: conv.channelId,
@@ -1091,6 +1085,13 @@ export async function sendTemplateToConversation(
   if (!resolved.ok) return denialToFailure(resolved.response);
   const outboundChannelRef = resolved.channelRef;
   const outboundChannelId = resolved.channelId;
+
+  const sendDenied = await requireChannelScope(
+    { id: args.actor.id, role: args.actor.role ?? undefined, organizationId: args.actor.organizationId, isSuperAdmin: args.actor.isSuperAdmin },
+    "send",
+    outboundChannelId,
+  );
+  if (sendDenied) return denialToFailure(sendDenied);
 
   const disconnected = ensureChannelConnected(outboundChannelRef);
   if (disconnected) return disconnected;

@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
+import {
+  ensureWhatsappTemplateHiddenAtColumn,
+  isMissingHiddenAtColumn,
+} from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { extractMetaPlaceholderKeys } from "@/lib/meta-whatsapp/operator-template-variables";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
@@ -175,10 +179,16 @@ export async function GET(request: Request) {
       // esse conceito: quando ela recusa a exclusão, o template volta a cada
       // refresh. `includeHidden=1` traz de volta (tela "mostrar ocultos").
       const includeHidden = url.searchParams.get("includeHidden") === "1";
-      const hidden = await prisma.whatsAppTemplateConfig.findMany({
-        where: { hiddenAt: { not: null } },
-        select: { metaTemplateId: true, metaTemplateName: true },
-      });
+      await ensureWhatsappTemplateHiddenAtColumn();
+      let hidden: Array<{ metaTemplateId: string; metaTemplateName: string }> = [];
+      try {
+        hidden = await prisma.whatsAppTemplateConfig.findMany({
+          where: { hiddenAt: { not: null } },
+          select: { metaTemplateId: true, metaTemplateName: true },
+        });
+      } catch (e) {
+        if (!isMissingHiddenAtColumn(e)) throw e;
+      }
       const hiddenIds = new Set(hidden.map((h) => h.metaTemplateId));
       const hiddenNames = new Set(hidden.map((h) => h.metaTemplateName));
 

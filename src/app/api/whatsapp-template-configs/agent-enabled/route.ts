@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
+import {
+  ensureWhatsappTemplateHiddenAtColumn,
+  isMissingHiddenAtColumn,
+} from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { listMessageTemplatesByGraphId } from "@/lib/meta-whatsapp/list-message-templates-index";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
@@ -32,11 +36,22 @@ export async function GET(request: Request) {
       const url = new URL(request.url);
       const channelId = url.searchParams.get("channelId")?.trim() || "";
 
-      const configs = await prisma.whatsAppTemplateConfig.findMany({
-        // Oculto no CRM não é oferecido ao agente, mesmo com o toggle ligado.
-        where: { agentEnabled: true, hiddenAt: null },
-        orderBy: { label: "asc" },
-      });
+      await ensureWhatsappTemplateHiddenAtColumn();
+      let configs;
+      try {
+        configs = await prisma.whatsAppTemplateConfig.findMany({
+          // Oculto no CRM não é oferecido ao agente, mesmo com o toggle ligado.
+          where: { agentEnabled: true, hiddenAt: null },
+          orderBy: { label: "asc" },
+        });
+      } catch (e) {
+        if (!isMissingHiddenAtColumn(e)) throw e;
+        configs = await prisma.whatsAppTemplateConfig.findMany({
+          where: { agentEnabled: true },
+          orderBy: { label: "asc" },
+          omit: { hiddenAt: true },
+        });
+      }
 
       const orgId = session.user.organizationId;
       let graphMap: GraphMap | null = null;
@@ -90,8 +105,9 @@ export async function GET(request: Request) {
 
       return NextResponse.json(enriched);
     } catch (e) {
+      console.error("[whatsapp-template-configs/agent-enabled]", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao carregar templates." },
         { status: 500 },
       );
     }

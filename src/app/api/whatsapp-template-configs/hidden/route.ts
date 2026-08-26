@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { ensureWhatsappTemplateHiddenAtColumn } from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -76,8 +77,9 @@ export async function GET(request: Request) {
       const usage = await findAutomationUsage(name);
       return NextResponse.json(usage);
     } catch (e) {
+      console.error("[whatsapp-template-configs/hidden] GET", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao consultar uso do template." },
         { status: 500 },
       );
     }
@@ -117,6 +119,7 @@ export async function POST(request: Request) {
       const hidden = body.hidden !== false;
 
       const orgId = getOrgIdOrThrow();
+      await ensureWhatsappTemplateHiddenAtColumn();
       const config = await prisma.whatsAppTemplateConfig.upsert({
         where: {
           organizationId_metaTemplateId: {
@@ -135,8 +138,9 @@ export async function POST(request: Request) {
       const usage = await findAutomationUsage(metaTemplateName);
       return NextResponse.json({ config, ...usage });
     } catch (e) {
+      console.error("[whatsapp-template-configs/hidden] POST", e);
       return NextResponse.json(
-        { message: e instanceof Error ? e.message : "Erro." },
+        { message: "Erro ao ocultar template." },
         { status: 500 },
       );
     }
