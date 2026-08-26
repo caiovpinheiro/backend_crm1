@@ -50,3 +50,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "contacts_whatsapp_username_trgm_idx"
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "contacts_source_trgm_idx"
   ON "contacts" USING GIN ("source" gin_trgm_ops)
   WHERE "source" IS NOT NULL;
+
+-- Busca por telefone (`findContactIdsByPhoneDigits`). O `text_pattern_ops` é
+-- obrigatório: em collation en_US.UTF-8 um btree comum não responde
+-- `LIKE 'prefixo%'`, e o índice sem pattern ops nunca chegou a ser usado.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "contacts_org_phone_digits_rev_pattern_idx"
+  ON "contacts" USING btree (
+    "organizationId",
+    (reverse(regexp_replace(COALESCE(phone, ''), '\D', '', 'g'))) text_pattern_ops
+  );

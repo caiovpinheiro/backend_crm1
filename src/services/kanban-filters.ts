@@ -29,7 +29,14 @@ export async function findContactIdsByPhoneDigits(
   const orgId = ctx?.organizationId;
   if (!orgId) return [];
   // Sufixo via reverse(...) LIKE 'rev%' — bate no índice
-  // `contacts_org_phone_digits_rev_idx` (prefixo em btree).
+  // `contacts_org_phone_digits_rev_pattern_idx`.
+  //
+  // O `text_pattern_ops` desse índice não é detalhe: o banco roda em
+  // collation en_US.UTF-8, e nela um btree comum NÃO atende `LIKE 'x%'`.
+  // O índice original (`..._rev_idx`, sem pattern ops) nunca foi usado —
+  // o plano em produção varria os 42k contatos da org aplicando
+  // regexp_replace por linha, 95ms por chamada. Ver migration
+  // 20260826191000_phone_digits_pattern_idx.
   const suffix = digits.length > 11 ? digits.slice(-11) : digits;
   const revPrefix = [...suffix].reverse().join("") + "%";
   const rows = await prisma.$queryRaw<{ id: string }[]>`
