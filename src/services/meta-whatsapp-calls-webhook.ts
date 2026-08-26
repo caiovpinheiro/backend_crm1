@@ -8,6 +8,10 @@ import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { maybeSendMissedCallScheduleTemplate } from "@/services/missed-call-schedule-offer";
 import {
+  getInboundCallHumanAssigneeId,
+  rejectInboundCallWithoutAgent,
+} from "@/services/whatsapp-inbound-call-routing";
+import {
   buildConnectChatLine,
   buildConversationTimelineCallRecordingContent,
   buildTerminateChatLine,
@@ -317,6 +321,9 @@ export async function processMetaWhatsappCallsWebhook(
       }),
     });
 
+    let inboundRingAssigneeId: string | null = null;
+    let skipInboundRingSse = false;
+
     if (event === "connect" && direction === "USER_INITIATED") {
       await prisma.conversation
         .update({
@@ -328,6 +335,19 @@ export async function processMetaWhatsappCallsWebhook(
           },
         })
         .catch(() => {});
+
+      inboundRingAssigneeId = await getInboundCallHumanAssigneeId(conv.id);
+      if (!inboundRingAssigneeId) {
+        skipInboundRingSse = true;
+        void rejectInboundCallWithoutAgent({
+          callId,
+          conversationId: conv.id,
+          contactId: contact.id,
+          organizationId: sseOrgId(conv.organizationId),
+        }).catch((e) =>
+          console.warn("[meta-webhook] recusa de ligação sem responsável:", e),
+        );
+      }
     }
 
     const dedupeKey = `call_evt:${callId}:${event}`;
@@ -500,17 +520,20 @@ export async function processMetaWhatsappCallsWebhook(
       }
     }
 
-    sseBus.publish("whatsapp_call", {
-      organizationId: sseOrgId(conv.organizationId),
-      conversationId: conv.id,
-      contactId: contact.id,
-      contactName: contact.name || profileName || null,
-      fromWa: fromWa || customerWa || null,
-      callId,
-      event,
-      direction,
-      ...(sessionPayload ? { session: sessionPayload } : {}),
-    });
+    if (!skipInboundRingSse) {
+      sseBus.publish("whatsapp_call", {
+        organizationId: sseOrgId(conv.organizationId),
+        conversationId: conv.id,
+        contactId: contact.id,
+        contactName: contact.name || profileName || null,
+        fromWa: fromWa || customerWa || null,
+        callId,
+        event,
+        direction,
+        ...(inboundRingAssigneeId ? { assignedToId: inboundRingAssigneeId } : {}),
+        ...(sessionPayload ? { session: sessionPayload } : {}),
+      });
+    }
 
     if (event === "terminate") {
       try {
