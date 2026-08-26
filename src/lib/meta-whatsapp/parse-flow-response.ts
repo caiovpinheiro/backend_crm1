@@ -32,10 +32,10 @@ export function parseWhatsappFlowResponsePayload(
 
   if (!payload) return null;
 
-  const flowToken =
-    typeof payload.flow_token === "string" && payload.flow_token.trim()
-      ? payload.flow_token.trim()
-      : null;
+  const fromPayload =
+    typeof payload.flow_token === "string" ? payload.flow_token.trim() : "";
+  const fromNfm = typeof nfm.flow_token === "string" ? nfm.flow_token.trim() : "";
+  const flowToken = fromPayload || fromNfm || null;
 
   const entries = Object.fromEntries(
     Object.entries(payload).filter(([k]) => k !== "flow_token" && !k.startsWith("__")),

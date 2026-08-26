@@ -228,6 +228,15 @@ export function isMetaGraphError(err: unknown): err is MetaGraphError {
   return err instanceof MetaGraphError;
 }
 
+/** CTA do Flow: máx. 20 caracteres, sem emoji (exigência da Cloud API). */
+export function sanitizeFlowCta(raw: string): string {
+  const stripped = raw
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (stripped || "Continuar").slice(0, 20);
+}
+
 /**
  * Timeout da chamada à Graph (AbortSignal.timeout em graphFetchOnce). Tipo
  * dedicado para o circuit breaker por phoneNumberId contar como falha de
@@ -619,6 +628,53 @@ export class MetaWhatsAppClient {
     });
   }
 
+  /**
+   * Envia WhatsApp Flow como mensagem de sessão (janela 24h).
+   * Fora da janela a Graph recusa — aí o caminho é template com botão FLOW.
+   */
+  async sendInteractiveFlow(
+    to: string | undefined,
+    body: string,
+    params: {
+      flowId: string;
+      flowCta: string;
+      flowToken: string;
+      flowAction?: "navigate" | "data_exchange";
+    },
+    header?: string,
+    footer?: string,
+    recipient?: string,
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const cta = sanitizeFlowCta(params.flowCta);
+    const interactive: Record<string, unknown> = {
+      type: "flow",
+      body: { text: body },
+      action: {
+        name: "flow",
+        parameters: {
+          flow_message_version: "3",
+          flow_token: params.flowToken,
+          flow_id: params.flowId.trim(),
+          flow_cta: cta,
+          flow_action: params.flowAction ?? "navigate",
+        },
+      },
+    };
+    if (header) interactive.header = { type: "text", text: header };
+    if (footer) interactive.footer = { type: "text", text: footer };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
   // ── Upload media ──────────────────────────────
 
   async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
@@ -853,7 +909,9 @@ export class MetaWhatsAppClient {
       template: {
         name: templateName,
         language: { code: languageCode },
-        ...(components ? { components } : {}),
+        // Array vazio (template sem parâmetro válido) sai do payload: mandar
+        // `components: []` é ruído e confunde o diagnóstico de 132000.
+        ...(Array.isArray(components) && components.length > 0 ? { components } : {}),
       },
     };
     // Caminho quente de blast: 1 JSON.stringify + write no stdout por
@@ -1113,11 +1171,39 @@ export class MetaWhatsAppClient {
     });
   }
 
-  /** Remove template pelo `id` Graph retornado na listagem. */
-  async deleteMessageTemplate(templateGraphId: string): Promise<unknown> {
-    const id = templateGraphId.trim();
-    if (!id) throw new Error("ID do template inválido.");
-    return this.graphFetch(id, { method: "DELETE" });
+  /**
+   * Remove template na coleção da WABA.
+   *
+   * `DELETE /{template_id}` NÃO existe na Graph — devolve
+   * `(#100) Unsupported delete request`, que era a causa do "Erro ao excluir"
+   * na tela de templates. A exclusão é sempre em
+   * `DELETE /{WABA_ID}/message_templates`, e `name` é obrigatório nos dois
+   * modos:
+   *  - só `name`: apaga o template em TODOS os idiomas;
+   *  - `name` + `hsm_id`: apaga apenas aquela versão/idioma.
+   *
+   * @param name Nome canônico do template (campo `name` da listagem).
+   * @param templateGraphId `id` da listagem, enviado como `hsm_id`. Ausente =
+   *   apaga todos os idiomas daquele nome.
+   */
+  async deleteMessageTemplate(args: {
+    name: string;
+    templateGraphId?: string | null;
+  }): Promise<unknown> {
+    const waba = this.wabaOrThrow();
+    const name = args.name?.trim() ?? "";
+    if (!name) {
+      throw new Error(
+        "Meta: nome do template é obrigatório para excluir (a Graph exige `name` em message_templates).",
+      );
+    }
+    const params = new URLSearchParams();
+    params.set("name", name);
+    const hsmId = args.templateGraphId?.trim();
+    if (hsmId) params.set("hsm_id", hsmId);
+    return this.graphFetch(`${waba}/message_templates?${params.toString()}`, {
+      method: "DELETE",
+    });
   }
 
   // ── WhatsApp Flows (Flows API) ─────────────────────────────────
@@ -1138,6 +1224,10 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${waba}/flows`, {
       method: "POST",
       body: JSON.stringify(payload),
+      // 1 tentativa / 45s: create+publish na Meta é lento. 3×20s estourava o
+      // proxy e o frontend só via HTML 502 («Erro ao publicar.»).
+      maxAttempts: 1,
+      signal: AbortSignal.timeout(45_000),
     });
   }
 

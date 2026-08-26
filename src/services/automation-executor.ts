@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   Prisma,
   type ActivityType,
@@ -67,8 +68,13 @@ import {
   closeStrandedContext,
   getActiveContext,
   interpolateVariables,
+  markPausedTtl,
+  pausedStepTimeoutMs,
   shouldPersistDelay,
+  AWAITING_FLOW_VAR,
+  readStepRef,
 } from "@/services/automation-context";
+import { getPublishedFlowForSend } from "@/services/whatsapp-flow-definitions";
 import {
   ensureWhatsAppConversationForContact,
   maybeResolveUnansweredOutboundTicket,
@@ -83,6 +89,7 @@ const META_SEND_FAILURE_STEP_TYPES = new Set([
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "question",
 ]);
 
@@ -353,12 +360,32 @@ async function resolveAutomationSendConv(
   } catch (err) {
     log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
   }
-  const conv = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
-    orderBy: { updatedAt: "desc" },
+  // Fallback: só chega aqui quando o `ensure` acima NÃO resolveu (contato sem
+  // telefone/BSUID, org sem canal Meta CONNECTED — caso Baileys —, ou erro).
+  // Preferir o ticket ATIVO evita gravar o outbound num ticket encerrado
+  // enquanto a resposta do cliente entra no aberto (outbound e inbound em
+  // tickets diferentes: o envio some da timeline do ticket que o cliente usa).
+  const active = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     select: { id: true },
   });
-  return conv ? { id: conv.id } : null;
+  if (active) return { id: active.id };
+  // Sem ticket ativo, usa o encerrado mais recente em vez de abortar: deixar
+  // de enviar a mensagem é pior que o split de ticket que estamos corrigindo.
+  const resolved = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp" },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    select: { id: true },
+  });
+  if (resolved) {
+    log.warn(
+      `resolveAutomationSendConv: contato ${contactId} sem conversa ativa; ` +
+        `gravando envio na conversa encerrada ${resolved.id}`,
+    );
+    return { id: resolved.id };
+  }
+  return null;
 }
 
 /** Campanha AUTOMATION: não herdar dono do contato no ticket novo (ver ensure opts). */
@@ -751,17 +778,34 @@ async function persistPausedContext(
   rt: ChannelBindSource & { automationId: string; contactId?: string | null },
   stepId: string,
   timeoutMs: number | undefined,
+  extraVars?: Record<string, unknown>,
 ): Promise<void> {
   if (!rt.contactId) return;
   const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-  const vars = {
-    ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
-    ...channelBindVars(rt),
-  };
+  // Sem `timeoutMs` do canvas o contexto ficava RUNNING pra sempre (o sweeper
+  // só varre `timeoutAt` preenchido), travando o re-disparo da automação e o
+  // 1º atendimento da IA. `pausedStepTimeoutMs` arma o TTL de segurança e o
+  // marcador diz ao `processTimeout` para apenas encerrar, sem seguir ramo.
+  const effectiveTimeoutMs = pausedStepTimeoutMs(timeoutMs);
+  const vars = markPausedTtl(
+    {
+      ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
+      ...channelBindVars(rt),
+      ...(extraVars ?? {}),
+    },
+    stepId,
+    timeoutMs,
+  );
   if (existingCtx) {
-    await advanceContext(existingCtx.id, stepId, vars, timeoutMs);
+    await advanceContext(existingCtx.id, stepId, vars, effectiveTimeoutMs);
   } else {
-    await createContext(rt.automationId, rt.contactId, stepId, timeoutMs, vars);
+    await createContext(
+      rt.automationId,
+      rt.contactId,
+      stepId,
+      effectiveTimeoutMs,
+      vars,
+    );
   }
 }
 
@@ -1169,6 +1213,57 @@ async function interpolateMessageVariables(
     ...(flowVars ?? {}),
     ...assigneeVars,
   });
+}
+
+/**
+ * A Cloud API rejeita parâmetro de template com quebra de linha, tab ou
+ * corrida longa de espaços (132000/132012). Campo customizado preenchido
+ * por formulário costuma trazer justamente isso, então achatamos antes de
+ * enviar em vez de deixar a Meta recusar a mensagem inteira.
+ */
+function sanitizeTemplateParameterText(value: string): string {
+  return value.replace(/[\r\n\t]+/g, " ").replace(/ {4,}/g, "   ").trim();
+}
+
+/**
+ * Resolve tokens `{{...}}` nos parâmetros de texto que vão para a Meta no
+ * `send_whatsapp_template`.
+ *
+ * Este era o único passo de envio que NÃO passava pelo interpolador: o
+ * operador escrevia `{{dealCustomFields.titulovaga1}}` (grafia que o próprio
+ * atalho de variáveis do editor sugere) e o aluno recebia a expressão
+ * literal. Usa o mesmo `interpolateMessageVariables` dos passos de texto,
+ * então caminho com ponto (`contact.name`, `dealCustomFields.<campo>`,
+ * `conversation.id`), filtro `|first_name` e token ausente virando string
+ * vazia se comportam igual em todo o motor.
+ */
+async function interpolateTemplateComponents(
+  components: unknown[] | undefined,
+  rt: RuntimeContext,
+  flowVars: Record<string, unknown> | undefined,
+): Promise<unknown[] | undefined> {
+  if (!Array.isArray(components) || components.length === 0) return components;
+
+  const out: unknown[] = [];
+  for (const component of components) {
+    const comp = asRecord(component);
+    if (!comp || !Array.isArray(comp.parameters)) {
+      out.push(component);
+      continue;
+    }
+    const parameters: unknown[] = [];
+    for (const parameter of comp.parameters) {
+      const param = asRecord(parameter);
+      if (!param || typeof param.text !== "string" || !param.text.includes("{{")) {
+        parameters.push(parameter);
+        continue;
+      }
+      const resolved = await interpolateMessageVariables(param.text, rt, flowVars);
+      parameters.push({ ...param, text: sanitizeTemplateParameterText(resolved) });
+    }
+    out.push({ ...comp, parameters });
+  }
+  return out;
 }
 
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
@@ -2863,9 +2958,12 @@ async function executeStep(
       let tplBodyFromDb: string | null = null;
       let templateGraphId: string | null = null;
 
-      const rawComponents = Array.isArray(cfg["components"])
-        ? (cfg["components"] as unknown[])
-        : undefined;
+      const tplFlowVars = asRecord(cfg["__variables"]) ?? undefined;
+      const rawComponents = await interpolateTemplateComponents(
+        Array.isArray(cfg["components"]) ? (cfg["components"] as unknown[]) : undefined,
+        rt,
+        tplFlowVars,
+      );
 
       try {
         const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
@@ -2885,9 +2983,23 @@ async function executeStep(
       const renderedBody = rawBody
         ? renderTemplatePreview(rawBody, templateVariablesFromSendComponents(rawComponents)) || rawBody
         : null;
-      const flowVars = asRecord(cfg["__variables"]);
       const resolvedBody =
-        renderedBody && flowVars ? interpolateVariables(renderedBody, flowVars) : renderedBody;
+        renderedBody && tplFlowVars
+          ? interpolateVariables(renderedBody, tplFlowVars)
+          : renderedBody;
+
+      // Token que sobrou no corpo APROVADO do template não é variável da
+      // Meta — ela manda o texto do jeito que está cadastrado e o aluno
+      // recebe `{{dealCustomFields.x}}` cru. Nada que o CRM interpole aqui
+      // muda isso; o template precisa ser recadastrado com `{{1}}`/`{{2}}`.
+      const leftoverTplTokens = resolvedBody
+        ? [...new Set(resolvedBody.match(/\{\{[^}]+\}\}/g) ?? [])]
+        : [];
+      if (leftoverTplTokens.length > 0) {
+        log.warn(
+          `send_whatsapp_template "${templateName}": o corpo aprovado na Meta contém ${leftoverTplTokens.join(", ")} como TEXTO FIXO (sem parâmetro correspondente). O aluno vai receber o token literal — recadastre o template usando {{1}}, {{2}}… e preencha os valores no passo.`,
+        );
+      }
       const tplContent = buildOutboundTemplateMessageContent(
         templateName,
         "generic",
@@ -3532,6 +3644,148 @@ async function executeStep(
         rawTimeout && rawTimeout > 0 ? rawTimeout : LIST_DEFAULT_TIMEOUT_MS;
       if (stepId && rt.contactId) {
         await persistPausedContext(rt, stepId, listTimeoutMs);
+      }
+
+      return { skipRemaining: true };
+    }
+
+    case "send_whatsapp_flow": {
+      const phoneRaw = readString(cfg, "phone")?.trim() || rt.contact?.phone || "";
+      const digits = phoneRaw.replace(/\D/g, "");
+      const to = digits.length >= 8 ? digits : undefined;
+      const recipient =
+        readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
+      if (!to && !recipient) {
+        throw new MetaSendFailureError("send_whatsapp_flow: sem destino");
+      }
+
+      const flowDefId = readString(cfg, "flowDefinitionId")?.trim();
+      if (!flowDefId) throw new Error("send_whatsapp_flow: formulário obrigatório");
+      const flow = await getPublishedFlowForSend(flowDefId);
+      if (!flow) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_flow: formulário não encontrado ou ainda não publicado na Meta",
+        );
+      }
+
+      const flowVars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const bodyRaw = readString(cfg, "body")?.trim() || `Preencha o formulário: ${flow.name}`;
+      const body = await interpolateMessageVariables(bodyRaw, rt, flowVars);
+      const ctaRaw = readString(cfg, "flowCta")?.trim() || "Abrir formulário";
+      const flowCta = await interpolateMessageVariables(ctaRaw, rt, flowVars);
+
+      const headerRaw = readString(cfg, "header");
+      const footerRaw = readString(cfg, "footer");
+      const header = headerRaw
+        ? await interpolateMessageVariables(headerRaw, rt, flowVars)
+        : headerRaw;
+      const footer = footerRaw
+        ? await interpolateMessageVariables(footerRaw, rt, flowVars)
+        : footerRaw;
+
+      const displayContent = `${body}\n[Flow: ${flowCta}]`;
+      const flowChannelId = resolveOutboundChannelId(cfg, rt);
+      let conversationId: string | undefined;
+      if (rt.contactId) {
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, flowChannelId),
+        );
+        conversationId = conv?.id;
+      }
+      const flowMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+        channelId: flowChannelId,
+      });
+      rt.activeChannelId = flowChannelId;
+      if (!flowMetaClient.configured) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_flow: nenhum canal META_CLOUD_API configurado para esta organização.",
+        );
+      }
+
+      const flowToken = randomUUID();
+      let externalId: string | null = null;
+      try {
+        const sendResult = await flowMetaClient.sendInteractiveFlow(
+          to,
+          body,
+          {
+            flowId: flow.metaFlowId,
+            flowCta,
+            flowToken,
+            flowAction: "navigate",
+          },
+          header,
+          footer,
+          recipient,
+        );
+        externalId = sendResult.messages?.[0]?.id ?? null;
+      } catch (sendErr) {
+        const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
+        log.error(
+          `Envio WhatsApp Flow falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
+        );
+        await persistFailedAutomationOutbound({
+          conversationId,
+          content: displayContent,
+          messageType: "interactive",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+          channelId: flowChannelId,
+        });
+        throw classified;
+      }
+
+      if (conversationId) {
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId,
+            content: displayContent,
+            direction: "out",
+            messageType: "interactive",
+            senderName: rt.automationName ?? "Automação",
+            authorType: "bot",
+            ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
+            externalId,
+            sendStatus: "sent",
+            flowToken,
+            ...(flowChannelId ? { channelId: flowChannelId } : {}),
+          }),
+        });
+        sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
+          conversationId,
+          contactId: rt.contactId ?? undefined,
+          direction: "out",
+          content: displayContent,
+        });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_flow");
+        }
+      }
+
+      const stepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      const FLOW_DEFAULT_TIMEOUT_MS = 86_400_000;
+      const rawTimeout = readNumber(cfg, "timeoutMs");
+      const flowTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : FLOW_DEFAULT_TIMEOUT_MS;
+      if (stepId && rt.contactId) {
+        const nextId = readStepRef(cfg, "nextStepId");
+        await persistPausedContext(rt, stepId, flowTimeoutMs, {
+          [AWAITING_FLOW_VAR]: {
+            stepId,
+            buttonId: "flow",
+            flowToken,
+            ...(nextId ? { gotoStepId: nextId } : {}),
+          },
+        });
       }
 
       return { skipRemaining: true };
@@ -4387,6 +4641,7 @@ const WA_SEND_STEP_TYPES = new Set([
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "send_product",
   "question",
 ]);
@@ -4396,6 +4651,7 @@ const RETRY_PAUSE_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "wait_for_reply",
 ]);
 
@@ -4882,6 +5138,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   send_whatsapp_media: "Mídia WhatsApp",
   send_whatsapp_interactive: "Botões WhatsApp",
   send_whatsapp_list: "Lista WhatsApp",
+  send_whatsapp_flow: "Formulário WhatsApp",
   send_product: "Enviar produto",
   webhook: "Webhook",
   delay: "Atraso",

@@ -12,8 +12,19 @@ import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
-import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  countableReplyWhere,
+  countAgentReplyAsAnswered,
+  inboxCardGroupKey,
+  noCountableReplyWhere,
+} from "@/lib/conversation-reply-marking";
+import {
+  getOrgIdOrNull,
+  getOrgIdOrThrow,
+  getRequestContext,
+} from "@/lib/request-context";
+import { sseBus } from "@/lib/sse-bus";
+import { logEvent } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
@@ -23,8 +34,8 @@ import {
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
-/** TTL curto: badges podem ficar levemente stale; cold-load deixa de custar 4–7s. */
-const TAB_COUNTS_CACHE_TTL_SEC = 45;
+/** TTL curto: badges e Fila da distribuição precisam acompanhar o inbox. */
+const TAB_COUNTS_CACHE_TTL_SEC = 5;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -288,23 +299,6 @@ function buildConversationSourceCondition(
   }
   if (or.length === 0) return null;
   return or.length === 1 ? or[0] : { OR: or };
-}
-
-/** Reply que conta para Aguardando/Respondidas (humano; + agente se setting ON). */
-function countableReplyWhere(
-  countAgent: boolean,
-): Prisma.ConversationWhereInput {
-  return countAgent
-    ? { OR: [{ hasHumanReply: true }, { hasAgentReply: true }] }
-    : { hasHumanReply: true };
-}
-
-function noCountableReplyWhere(
-  countAgent: boolean,
-): Prisma.ConversationWhereInput {
-  return countAgent
-    ? { hasHumanReply: false, hasAgentReply: false }
-    : { hasHumanReply: false };
 }
 
 /**
@@ -860,9 +854,7 @@ export async function getConversations(
 
     for (const r of batch) {
       const groupKey =
-        collapse && r.contactId
-          ? `c:${r.contactId}::${r.channel ?? ""}`
-          : `id:${r.id}`;
+        collapse && r.contactId ? inboxCardGroupKey(r) : `id:${r.id}`;
       if (seenGroups.has(groupKey)) continue;
       seenGroups.add(groupKey);
       repIds.push(r.id);
@@ -1458,6 +1450,28 @@ export async function updateConversationStatusInDb(
         }
       : {};
 
+  // Snapshot ANTES do update: precisamos de quem era o atendente para
+  // logar a remoção e limpar deal/contato (abaixo).
+  let clearedAssignee: { id: string; name: string | null } | null = null;
+  let closeContactId: string | null = null;
+  if (status === "RESOLVED" && extra?.clearAssignedTo) {
+    const prev = await prisma.conversation.findUnique({
+      where: { id },
+      select: {
+        assignedToId: true,
+        contactId: true,
+        assignedTo: { select: { name: true } },
+      },
+    });
+    if (prev?.assignedToId) {
+      clearedAssignee = {
+        id: prev.assignedToId,
+        name: prev.assignedTo?.name ?? null,
+      };
+      closeContactId = prev.contactId ?? null;
+    }
+  }
+
   const updated = await prisma.conversation.update({
     where: { id },
     data: {
@@ -1489,6 +1503,46 @@ export async function updateConversationStatusInDb(
         }),
       )
       .catch(() => {});
+  }
+
+  // Encerrou SEM manter atendente → registra a remoção (chat + timeline)
+  // e limpa deal/contato que ainda apontavam para ela. Import dinâmico:
+  // deals.ts é pesado e este arquivo é importado por webhooks quentes.
+  if (clearedAssignee) {
+    const orgId = getOrgIdOrNull();
+    await logEvent({
+      type: "ASSIGNEE_CHANGED",
+      entityType: "CONVERSATION",
+      entityId: id,
+      entityLabel: updated.externalId ?? null,
+      conversationId: id,
+      contactId: closeContactId,
+      field: "assignedTo",
+      oldValue: clearedAssignee.name,
+      newValue: null,
+      meta: {
+        fromUserId: clearedAssignee.id,
+        toUserId: null,
+        reason: "conversation_closed",
+      },
+    });
+    try {
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId: orgId,
+        conversationId: id,
+        type: "ASSIGNEE_CHANGED",
+      });
+    } catch {
+      /* best-effort */
+    }
+    if (closeContactId) {
+      const { clearContactOwnershipOnClose } = await import("@/services/deals");
+      await clearContactOwnershipOnClose({
+        contactId: closeContactId,
+        clearedUserId: clearedAssignee.id,
+        actorUserId: getRequestContext()?.userId ?? null,
+      }).catch(() => {});
+    }
   }
 
   return updated;

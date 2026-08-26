@@ -1,4 +1,9 @@
-import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
+import {
+  Prisma,
+  type ConversationStatus,
+  type DealRole,
+  type DealStatus,
+} from "@prisma/client";
 
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
@@ -280,8 +285,20 @@ const detailInclude = {
       // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
       // nao existe no schema; passou a usar contact.source.
       source: true,
+      // `updatedAt` sozinho empata: `propagateOwnerToContactAndChat` faz um
+      // `updateMany` que carimba o MESMO milissegundo em todos os tickets do
+      // contato. Sem desempate o Postgres devolve ordem arbitraria e o painel
+      // do deal podia cair num ticket encerrado. `createdAt`/`id` tornam a
+      // ordem deterministica; a preferencia pelo ticket ATIVO e aplicada
+      // depois, em `sortConversationsActiveFirst` (status nao e ordenavel
+      // aqui: o enum e OPEN, RESOLVED, PENDING, SNOOZED — RESOLVED nao fica
+      // por ultimo — e `closedAt` e nulo em ~5.6k linhas RESOLVED legadas).
       conversations: {
-        orderBy: { updatedAt: "desc" as const },
+        orderBy: [
+          { updatedAt: "desc" as const },
+          { createdAt: "desc" as const },
+          { id: "desc" as const },
+        ],
         select: {
           id: true, number: true, externalId: true, channel: true,
           status: true, inboxName: true, closedAt: true,
@@ -340,6 +357,26 @@ export type DealDetail = Prisma.DealGetPayload<{
   include: typeof detailInclude;
 }>;
 
+/**
+ * Coloca os tickets ATIVOS (nao-RESOLVED) na frente, preservando a ordem
+ * relativa vinda do banco dentro de cada grupo (`Array.prototype.sort` e
+ * estavel). O consumidor principal e o painel do deal, que le
+ * `conversations[0]` como "a conversa do negocio": sem isso ele podia abrir
+ * um ticket encerrado enquanto o cliente respondia em outro, aberto.
+ *
+ * Seguro por construcao: `ensureWhatsAppConversationForContact` so reusa
+ * conversa nao-RESOLVED, entao existe no maximo um ticket ativo por
+ * (org, contato, canal) — confirmado no banco (0 grupos com mais de um).
+ */
+function sortConversationsActiveFirst<T extends { status: ConversationStatus }>(
+  conversations: T[],
+): T[] {
+  return [...conversations].sort(
+    (a, b) =>
+      Number(a.status === "RESOLVED") - Number(b.status === "RESOLVED"),
+  );
+}
+
 export async function getDealById(idOrNumber: string): Promise<DealDetail | null> {
   const isNumeric = /^\d+$/.test(idOrNumber);
   const orgId = getOrgIdOrThrow();
@@ -350,6 +387,9 @@ export async function getDealById(idOrNumber: string): Promise<DealDetail | null
     include: detailInclude,
   })) as DealDetail | null;
   if (deal?.contact) {
+    deal.contact.conversations = sortConversationsActiveFirst(
+      deal.contact.conversations,
+    );
     await enrichContactsWithUserAvatarFallback([deal.contact]);
   }
   return deal;
@@ -716,6 +756,20 @@ export async function propagateOwnerToContactAndChat(
     toName = ownerRow?.name ?? null;
   }
 
+  // ATENCAO (`updatedAt` != atividade de conversa): este `updateMany` toca
+  // todos os tickets do contato de uma vez, entao o `@updatedAt` do Prisma
+  // grava o MESMO milissegundo em todos eles — inclusive nos ja encerrados,
+  // que nao tiveram mensagem nenhuma. Quem ordenar conversa "atual" so por
+  // `updatedAt desc` empata aqui e pode escolher um ticket morto.
+  //
+  // A correcao NAO e preservar `updatedAt` com SQL cru (brigar com o
+  // `@updatedAt` deixa a coluna mentindo sobre a ultima escrita). E os
+  // candidatos "atividade real" nao servem: `lastMessageAt` nao existe no
+  // schema e `lastInboundAt` e nulo em ~52k conversas que TEM mensagem
+  // (tickets so de outbound: campanha/HSM). Entao o criterio segue sendo
+  // `updatedAt`, e a defesa mora no lado da leitura: desempate
+  // deterministico + preferencia por ticket ativo (ver `detailInclude` /
+  // `sortConversationsActiveFirst`).
   await tx.conversation.updateMany({
     where: { id: { in: toChange.map((c) => c.id) } },
     data: {
@@ -762,6 +816,105 @@ export async function assignDealOwner(
   await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
 
   return deal;
+}
+
+/**
+ * Encerramento de conversa sem "manter atendente" (keepAgentOnEnd off):
+ * o responsável removido do chat também sai dos deals ABERTOS do contato
+ * e do próprio contato — senão o kanban segue mostrando a pessoa num
+ * atendimento já encerrado, e o próximo inbound herda o nome antigo.
+ *
+ * Guardas (não comprometer outros vínculos):
+ *   - Só limpa entidades cujo responsável É o `clearedUserId` removido —
+ *     deal de outro dono (ex.: transferido manualmente antes) fica intacto.
+ *   - Se outra conversa ABERTA do contato ainda está com esse responsável,
+ *     não limpa nada (o vínculo segue vivo por ali).
+ *
+ * Logs: OWNER_CHANGED por deal (timeline do card) + CONTACT_OWNER_CHANGED
+ * (feed do contato). Não dispara trigger `agent_changed` — encerramento
+ * já tem seus próprios gatilhos; disparar automação extra aqui seria
+ * efeito colateral fora do pedido.
+ */
+export async function clearContactOwnershipOnClose(args: {
+  contactId: string;
+  clearedUserId: string;
+  actorUserId: string | null;
+}): Promise<void> {
+  const { contactId, clearedUserId, actorUserId } = args;
+
+  const stillAssigned = await prisma.conversation.findFirst({
+    where: {
+      contactId,
+      status: { not: "RESOLVED" },
+      assignedToId: clearedUserId,
+    },
+    select: { id: true },
+  });
+  if (stillAssigned) return;
+
+  const [contact, deals] = await Promise.all([
+    prisma.contact.findUnique({
+      where: { id: contactId },
+      select: {
+        assignedToId: true,
+        assignedTo: { select: { name: true } },
+      },
+    }),
+    prisma.deal.findMany({
+      where: { contactId, status: "OPEN", ownerId: clearedUserId },
+      select: {
+        id: true,
+        owner: { select: { id: true, name: true } },
+        stage: { select: { pipelineId: true } },
+      },
+    }),
+  ]);
+
+  const clearContact = contact?.assignedToId === clearedUserId;
+  if (!clearContact && deals.length === 0) return;
+
+  await prisma.$transaction(async (tx) => {
+    if (clearContact) {
+      await tx.contact.update({
+        where: { id: contactId },
+        data: { assignedToId: null },
+      });
+    }
+    if (deals.length > 0) {
+      await tx.deal.updateMany({
+        where: { id: { in: deals.map((d) => d.id) } },
+        data: { ownerId: null },
+      });
+    }
+  });
+
+  const fromName = contact?.assignedTo?.name ?? null;
+  for (const deal of deals) {
+    createDealEvent(deal.id, actorUserId, "OWNER_CHANGED", {
+      from: deal.owner ? { id: deal.owner.id, name: deal.owner.name } : null,
+      to: null,
+      source: "conversation_closed",
+    }).catch(() => {});
+  }
+
+  if (clearContact) {
+    await logEvent({
+      type: "CONTACT_OWNER_CHANGED",
+      entityType: "CONTACT",
+      entityId: contactId,
+      contactId,
+      field: "assignedToId",
+      oldValue: fromName,
+      newValue: null,
+      meta: { from: fromName, to: null, source: "conversation_closed" },
+    }).catch(() => {});
+  }
+
+  if (deals.length > 0) {
+    await invalidateBoardsForPipelines(
+      deals.map((d) => d.stage?.pipelineId),
+    );
+  }
 }
 
 /**

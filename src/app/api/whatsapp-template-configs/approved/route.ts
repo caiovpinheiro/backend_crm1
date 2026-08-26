@@ -58,16 +58,27 @@ export async function GET(request: Request) {
           metaTemplateName: true,
           label: true,
           agentEnabled: true,
+          operatorVariables: true,
         },
       });
       const labelById = new Map<string, string>();
       const labelByName = new Map<string, string>();
       const agentByName = new Map<string, boolean>();
+      // Mapeamento variável → campo do CRM definido na criação do template.
+      // Serve de PADRÃO para o passo `send_whatsapp_template` pré-preencher os
+      // parâmetros; o operador continua podendo sobrescrever.
+      const operatorVarsById = new Map<string, unknown[]>();
+      const operatorVarsByName = new Map<string, unknown[]>();
       for (const c of configs) {
-        if (c.metaTemplateId) labelById.set(c.metaTemplateId, c.label ?? "");
+        const opVars = Array.isArray(c.operatorVariables) ? c.operatorVariables : null;
+        if (c.metaTemplateId) {
+          labelById.set(c.metaTemplateId, c.label ?? "");
+          if (opVars) operatorVarsById.set(c.metaTemplateId, opVars);
+        }
         if (c.metaTemplateName) {
           labelByName.set(c.metaTemplateName, c.label ?? "");
           agentByName.set(c.metaTemplateName, c.agentEnabled);
+          if (opVars) operatorVarsByName.set(c.metaTemplateName, opVars);
         }
       }
 
@@ -104,6 +115,8 @@ export async function GET(request: Request) {
             flowAction: analysis.flowAction,
             flowId: analysis.flowId,
             headerFormat: analysis.headerFormat,
+            operatorVariables:
+              operatorVarsById.get(id) ?? operatorVarsByName.get(name) ?? null,
           });
         }
         after = extractAfter(raw);

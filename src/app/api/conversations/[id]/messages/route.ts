@@ -309,16 +309,34 @@ export async function GET(request: Request, context: RouteContext) {
           contactId: conv.contactId,
           channel: conv.channel,
           id: { not: conv.id },
-          // Ticket RESOLVED: só anteriores (não misturar o ticket aberto).
-          // Ticket aberto: todos os outros do contato/canal — se o card
-          // saltou para um id antigo, o chat recente continua visível.
+          // Ticket RESOLVED: os encerrados ANTERIORES (não poluir a timeline
+          // de um ticket antigo com tudo que veio depois) MAIS o ticket ativo
+          // do contato/canal, se houver. O ticket ativo é a exceção porque a
+          // mesma proteção do ramo aberto vale aqui: se o card saltou para um
+          // id antigo, o chat recente continua visível. Sem ele, uma resposta
+          // do cliente que entrou num ticket novo ficava invisível na
+          // timeline enquanto aparecia no preview do card (que é por contato).
+          // Só existe um não-RESOLVED por (org, contato, canal), então isso
+          // acrescenta no máximo um ticket.
+          //
+          // Ticket aberto: todos os outros do contato/canal.
           ...(viewingResolved
-            ? { status: "RESOLVED" as const, createdAt: { lt: conv.createdAt } }
+            ? {
+                OR: [
+                  {
+                    status: "RESOLVED" as const,
+                    createdAt: { lt: conv.createdAt },
+                  },
+                  { status: { not: "RESOLVED" as const } },
+                ],
+              }
             : {}),
         },
         orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true, createdAt: true },
-        take: viewingResolved ? 5 : 8,
+        // +1 no ramo RESOLVED para o ticket ativo não roubar a vaga de um dos
+        // 5 encerrados anteriores que já apareciam antes desta mudança.
+        take: viewingResolved ? 6 : 8,
       });
       const loaded = await Promise.all(
         prevConvs.map(async (pc) => {

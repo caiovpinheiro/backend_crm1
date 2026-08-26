@@ -5,6 +5,106 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
+
+**Decisão.** Quando a conversa é encerrada SEM "manter atendente" (`conversation.keepAgentOnEnd` off), `updateConversationStatusInDb` agora também: loga `ASSIGNEE_CHANGED` (chat + timeline, "X removida da conversa") e chama `clearContactOwnershipOnClose` — zera `ownerId` dos deals ABERTOS do contato e `assignedToId` do contato, com `OWNER_CHANGED`/`CONTACT_OWNER_CHANGED` nos logs. Guardas: só limpa quem era o responsável removido, e só se nenhuma outra conversa aberta do contato ainda está com ele. O bulk-resolve (worker leads) faz o mesmo por par (contato, atendente).
+
+**Contexto.** Operador removia a atendente ao encerrar, mas o deal seguia com ela no kanban (ex.: Beatriz no deal do Marcelo Pinheiro) e nada aparecia na timeline/chat — o clear só mexia na conversa.
+
+**Alternativas descartadas.** Limpar sempre (sem respeitar keepAgentOnEnd) — quebraria orgs que mantêm o atendente de propósito. Disparar trigger `agent_changed` — efeito colateral fora do pedido. Mexer no `halt-inbound-burst` — lá o assignee é a IA, não humano; a guarda por `clearedUserId` já no-oparia.
+
+**Impacto.** `services/conversations.ts`, `services/deals.ts`, `jobs/leads/bulk-resolve-conversations.job.ts`. Sem mudança de frontend — os tipos de evento já renderizam.
+
+### 2026-08-25 — Bulk move_stage resolve o recorte do board (até 5000)
+
+**Decisão.** `POST /api/deals/bulk` (`move_stage`) aceita o mesmo `scope` da edição de campos (`pipelineId` + status + filtros + stageId opcional). O servidor chama `resolveBoardDealIds` (teto 5000) e enfileira no worker `leads-bulk`. Sem `scope`, o comportamento antigo (IDs explícitos, sync se ≤50) permanece.
+
+**Contexto.** Kanban/lista só carregam ~200 cards por coluna. Mover usava só os IDs visíveis; editar campos já expandia o filtro no servidor. Cruzeiro EAD precisava mover 1000+ leads de uma tag.
+
+**Alternativas descartadas.** Subir `perStage` do board (payload de 540KB já saturava Redis). Mover síncrono de 1000+ (timeout HTTP / pool). Worker novo (já existe `bulk-move-stage`).
+
+**Impacto.** `src/app/api/deals/bulk/route.ts`. Worker inalterado (chunks de 50).
+
+### 2026-08-25 — Cache Redis: circuit breaker + gzip + singleflight
+
+**Decisão.** No cliente de cache (`src/lib/cache/index.ts`): circuit breaker (5 timeouts → 15s sem Redis), `enableOfflineQueue: false`, reconnect no `Command timed out`, `commandTimeout` 2s (era 500ms), gzip de payload ≥8KB, singleflight in-memory no `wrap()`, chave do board hasheada. Não separar Redis de cache vs BullMQ neste passo.
+
+**Contexto.** Produção (`crm-eduit`) inundou warn `[cache] get falhou — fallback memoria` / `Command timed out` em `authz:user:*`, `org_settings_prefix:*`, `inbox_tab_counts:*`. Inbox/kanban travavam. Redis em si estava saudável (~4ms PING interno, 6MB, 295 ops/s). O board cacheava JSON de ~540KB numa conexão ioredis única; `commandTimeout: 500` conta espera na fila, então GETs minúsculos de authz/settings timeoutavam juntos. Timeout do ioredis não cancela o comando no servidor e envenena o pipeline. Sem singleflight local, o fallback disparava N `computeTabCounts` / `computeBoardData` e esgotava o pool Postgres (SELECT 1 chegou a 456ms).
+
+**Alternativas descartadas.** Redis dedicado só para cache (ops extra, não ataca o timeout na conexão da API). Remover cache do board (devolve o stampede de ~13s no Postgres). Subir só o timeout sem circuit/reconnect (pipeline envenenado continua).
+
+**Impacto.** `src/lib/cache/index.ts`, `src/lib/cache/keys.ts`. Após o deploy, reiniciar o container da API se o singleton ioredis já estiver preso.
+
+### 2026-08-25 — Flow JSON 7.3 para publicar na Meta
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Novos publishes usam Flow JSON `7.3` (versão recomendada). `5.0` está frozen desde set/2025 e a Meta devolve 139002/4233046 («versões não disponíveis para publicação»).
+
+---
+
+### 2026-08-25 — Publish de WhatsApp Flow: Form wrapper + slug reservado
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** O Flow JSON v5 passa a embrulhar os inputs num `Form` `name=form` (Footer fora), porque `${form.campo}` sem Form é rejeitado pela Meta (`INVALID_ON_CLICK_ACTION_PAYLOAD`). Chaves reservadas (`none`, `form`, …) são substituídas pelo rótulo. Create+publish na Graph usa 1 tentativa / 45s para não estourar o proxy com HTML 502 e toast «Erro ao publicar.». Nome duplicado na WABA tenta de novo com o shortId.
+
+**Alternativas descartadas.** Dois passos create-then-publish (mais API, mesmo JSON inválido falha igual).
+
+---
+
+### 2026-08-25 — Botão de Flow no node Botões WhatsApp
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Cada opção de `send_whatsapp_interactive` pode ser `kind: action`
+(reply, como hoje) ou `kind: flow` (escolhe um `WhatsappFlowDefinition`
+publicado). O 1º envio continua botões/lista por quantidade. No clique do
+botão Flow o executor envia `interactive.type=flow` na janela 24h, pausa com
+`variables.__awaitingFlow` + `flow_token`, e o `nfm_reply` retoma a aresta
+daquele botão. O mapeamento do formulário no lead permanece no webhook.
+
+**Alternativas descartadas.** Lista nativa aninhada (não reproduz a tela iFood);
+gerar/publicar Flow a partir das opções do node (rejeição da Meta); injetar
+lista dinâmica por contato nesta versão (sem cadastro de endereços).
+
+**Impacto.** `MetaWhatsAppClient.sendInteractiveFlow`, `automation-context`
+(`decideInteractiveMenuInbound`), editor inline do canvas.
+
+---
+
+### 2026-08-26 — Encaminhar formulário WhatsApp Flow (slash + node)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Duas formas de enviar um Flow publicado na janela 24h (`interactive.type=flow`): atalho `/` no composer e o node `send_whatsapp_flow` no grupo Mensagens. GET `/api/whatsapp-flow-definitions/published` é aberto a qualquer membro da org (o GET raiz continua ADMIN/MANAGER). O node pausa até `nfm_reply`; texto livre não avança. Fora da janela 24h o caminho continua sendo template com botão FLOW.
+
+**Alternativas descartadas.** Recolocar Ação/Flow no node Botões (já revertido). Exigir ADMIN para listar publicados (agente não conseguiria usar o `/`).
+
+**Impacto.** `outbound-messaging.sendFlowToConversation`, `POST /api/conversations/:id/flow`, executor `send_whatsapp_flow`, `decideFlowStepInbound`.
+
+---
+
+### 2026-08-26 — Node Botões WhatsApp volta a ser só reply
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Removido `kind: action|flow` do node `send_whatsapp_interactive`. A mistura iFood (Flow + resposta rápida na mesma bolha) já existe em template aprovado (`FLOW` + `QUICK_REPLY`). Na janela 24h a Meta não mistura `interactive.type=button` com `type=flow`; o clique gerava uma segunda bolha `[Flow: …]`.
+
+**Alternativas descartadas.** Manter o seletor no canvas (UX enganosa). Colocar o menu inteiro dentro do Flow (a opção simples também abriria a ficha nativa).
+
+---
+
+### 2026-08-25 — Clique de botão retoma automação mesmo com humano atendendo
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** `processIncomingMessage` só cancela contextos pausados quando há humano atendendo E o inbound é texto livre. Clique de botão/lista (`interactiveId`) e `nfm_reply` (`flowReply`) retomam o passo pausado — senão o disparo manual pela conversa (sempre com assignee humano / hasHumanReply) morre no primeiro clique.
+
+**Alternativas descartadas.** Remover o guard inteiro (salesbot voltaria a falar em cima do consultor). Ignorar só `hasHumanReply` (conversa atribuída a humano ainda quebraria o teste).
+
+---
+
 ### 2026-08-20 — Roster acadêmico não cria departamentos em outros tenants
 
 **Decisão.** `ensureAcademicDepartmentRoster` só cria/sincroniza Acolhimento,

@@ -21,6 +21,7 @@ import {
   isInauguralLinkWindow,
 } from "@/services/ai/inaugural-class-link";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -470,6 +471,22 @@ export async function tryAssignFirstAttendanceAi(args: {
   // Humano no chat SEM reply → libera para a IA (1º atendimento).
   // Herança de responsável antigo não deve bloquear o agente acadêmico.
   if (conv.assignedToId && conv.assignedTo?.type === "HUMAN" && !conv.hasHumanReply) {
+    // ...mas só quando é HERANÇA mesmo. Se o consultor foi atribuído NESTA
+    // conversa (distribuição/transferência), ele fica: a saudação de
+    // `lead_distributed` sai como bot e não marca `hasHumanReply`, então
+    // sem esta checagem o próximo inbound do aluno tirava o dono do ticket.
+    if (
+      await humanWasAssignedInThisConversation(
+        args.conversationId,
+        conv.assignedToId,
+      )
+    ) {
+      logAi("first_attendance_keep_assigned_human", {
+        conversationId: args.conversationId,
+        humanUserId: conv.assignedToId,
+      });
+      return null;
+    }
     logAi("first_attendance_clear_inherited_human", {
       conversationId: args.conversationId,
       humanUserId: conv.assignedToId,

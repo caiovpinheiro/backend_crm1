@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
+import { extractMetaPlaceholderKeys } from "@/lib/meta-whatsapp/operator-template-variables";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
@@ -87,6 +89,57 @@ async function resolveHeaderMediaBuffer(
   throw new Error(
     `URL da mídia de exemplo inválida — use uma URL HTTPS pública ou um caminho de upload interno (/api/storage/... ou /uploads/...): ${trimmed}`,
   );
+}
+
+/**
+ * Marcadores do texto na ordem que a Meta espera no `example`. Posicional é
+ * ordenado pelo número (`{{2}}` antes de `{{10}}`); nomeado mantém a ordem de
+ * aparição, que é a ordem em que o operador leu o texto.
+ */
+function orderedPlaceholderKeys(text: string): string[] {
+  const keys = extractMetaPlaceholderKeys(text);
+  const allNumeric = keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
+  return allNumeric ? [...keys].sort((a, b) => Number(a) - Number(b)) : keys;
+}
+
+/** Mapa `marcador -> exemplo` vindo da tela de criação (`{ "1": "Aux. Logística" }`). */
+function readExampleMap(raw: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string" && v.trim()) out.set(k.trim(), v.trim());
+  }
+  return out;
+}
+
+/**
+ * `example` do componente de texto no formato exigido pela Graph. Sem ele a
+ * Meta rejeita qualquer template que tenha variável.
+ *
+ * POSITIONAL: `{ body_text: [[ "v1", "v2" ]] }` (o corpo é uma matriz — uma
+ * linha por conjunto de exemplos) e `{ header_text: [ "v1" ] }` (o cabeçalho
+ * é plano). NAMED: `{ body_text_named_params: [{ param_name, example }] }`.
+ *
+ * @returns `null` quando o texto não tem marcador — aí o componente vai sem
+ *   `example`, que é o que a Meta espera de um texto fixo.
+ */
+function buildTextExample(
+  kind: "body" | "header",
+  parameterFormat: "POSITIONAL" | "NAMED",
+  keys: string[],
+  examples: Map<string, string>,
+): Record<string, unknown> | null {
+  if (keys.length === 0) return null;
+  if (parameterFormat === "NAMED") {
+    return {
+      [`${kind}_text_named_params`]: keys.map((key) => ({
+        param_name: key,
+        example: examples.get(key) ?? "",
+      })),
+    };
+  }
+  const values = keys.map((key) => examples.get(key) ?? "");
+  return { [`${kind}_text`]: kind === "body" ? [values] : values };
 }
 
 /**
@@ -185,14 +238,40 @@ export async function POST(request: Request) {
       const parameterFormat = b.parameterFormat === "NAMED" ? "NAMED" : "POSITIONAL";
       const components: Record<string, unknown>[] = [];
 
+      // Templates AUTHENTICATION têm corpo fixo da Meta (o `{{1}}` é o código
+      // OTP) e não aceitam `example`; para os demais o exemplo é obrigatório
+      // sempre que houver marcador.
+      const wantsExamples = category !== "AUTHENTICATION";
+      const bodyExamples = readExampleMap(b.bodyExamples);
+      const headerExamples = readExampleMap(b.headerExamples);
+      const headerTextRaw = typeof b.headerText === "string" ? b.headerText.trim() : "";
+      const bodyKeys = wantsExamples ? orderedPlaceholderKeys(bodyText) : [];
+      const headerKeys =
+        wantsExamples && b.headerFormat === "TEXT" ? orderedPlaceholderKeys(headerTextRaw) : [];
+
+      const missingExamples = [
+        ...bodyKeys.filter((k) => !bodyExamples.has(k)).map((k) => `corpo {{${k}}}`),
+        ...headerKeys.filter((k) => !headerExamples.has(k)).map((k) => `cabeçalho {{${k}}}`),
+      ];
+      if (missingExamples.length > 0 && !b.bodyExample && !b.headerExample) {
+        return NextResponse.json(
+          {
+            message: `A Meta rejeita template com variável sem exemplo. Informe um valor de exemplo para: ${missingExamples.join(", ")}.`,
+          },
+          { status: 400 },
+        );
+      }
+
       const headerFormat = typeof b.headerFormat === "string" ? b.headerFormat : "NONE";
       if (headerFormat === "TEXT") {
-        const ht = typeof b.headerText === "string" ? b.headerText.trim() : "";
+        const ht = headerTextRaw;
         if (ht) {
           const hc: Record<string, unknown> = { type: "HEADER", format: "TEXT", text: ht };
-          if (parameterFormat === "NAMED" && b.headerExample && typeof b.headerExample === "object") {
-            hc.example = b.headerExample;
-          }
+          const headerExample =
+            b.headerExample && typeof b.headerExample === "object"
+              ? (b.headerExample as Record<string, unknown>)
+              : buildTextExample("header", parameterFormat, headerKeys, headerExamples);
+          if (headerExample) hc.example = headerExample;
           components.push(hc);
         }
       } else if (headerFormat === "IMAGE" || headerFormat === "VIDEO" || headerFormat === "DOCUMENT") {
@@ -244,9 +323,11 @@ export async function POST(request: Request) {
         });
       } else {
         const compBody: Record<string, unknown> = { type: "BODY", text: bodyText };
-        if (parameterFormat === "NAMED" && b.bodyExample && typeof b.bodyExample === "object") {
-          compBody.example = b.bodyExample;
-        }
+        const bodyExample =
+          b.bodyExample && typeof b.bodyExample === "object"
+            ? (b.bodyExample as Record<string, unknown>)
+            : buildTextExample("body", parameterFormat, bodyKeys, bodyExamples);
+        if (bodyExample) compBody.example = bodyExample;
         components.push(compBody);
 
         const footer = typeof b.footer === "string" ? b.footer.trim() : "";
@@ -274,6 +355,19 @@ export async function POST(request: Request) {
       return NextResponse.json(data, { status: 201 });
     } catch (e: unknown) {
       console.error("[meta-templates] POST", e);
+      // Rejeição de validação da Meta (exemplo faltando, formato de parâmetro
+      // trocado…) precisa chegar legível ao operador, com o `fbtrace_id`.
+      if (isMetaGraphError(e)) {
+        return NextResponse.json(
+          {
+            message: e.toPersistedString(),
+            code: e.code,
+            subcode: e.subcode,
+            fbtraceId: e.fbtraceId,
+          },
+          { status: 502 },
+        );
+      }
       const msg = e instanceof Error ? e.message : "Erro ao criar template na Meta.";
       return NextResponse.json({ message: msg }, { status: 502 });
     }

@@ -661,6 +661,8 @@ function pickAgentCategory(stepType: string): string | null {
     case "send_whatsapp_interactive":
     case "send_whatsapp_list":
       return "interactive";
+    case "send_whatsapp_flow":
+      return "flow";
     case "send_product":
       return "product";
     case "send_email":
@@ -685,6 +687,8 @@ function previewForStep(
       return str(config.body) || null;
     case "send_whatsapp_template":
       return str(config.templateLabel) || str(config.templateName) || null;
+    case "send_whatsapp_flow":
+      return str(config.flowName) || str(config.body) || AGENT_CATEGORY_LABELS.flow;
     case "send_product":
       return str(config.content) || str(config.productName) || null;
     case "send_email":

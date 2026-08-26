@@ -79,6 +79,8 @@ export async function processBulkResolveConversations(
           id: true,
           status: true,
           contactId: true,
+          assignedToId: true,
+          assignedTo: { select: { name: true } },
           contact: { select: { name: true } },
         },
       });
@@ -118,7 +120,58 @@ export async function processBulkResolveConversations(
         });
         chunkSucceeded += toResolve.length;
 
+        // Sem "manter atendente": o updateMany acima zerou assignedToId —
+        // limpa também deal aberto + contato desses responsáveis (mesma
+        // regra do encerramento manual em updateConversationStatusInDb).
+        if (!keepAgent) {
+          const pairs = new Map<string, { contactId: string; userId: string }>();
+          for (const conv of toResolve) {
+            if (conv.contactId && conv.assignedToId) {
+              pairs.set(`${conv.contactId}:${conv.assignedToId}`, {
+                contactId: conv.contactId,
+                userId: conv.assignedToId,
+              });
+            }
+          }
+          if (pairs.size > 0) {
+            const { clearContactOwnershipOnClose } = await import("@/services/deals");
+            for (const { contactId, userId } of pairs.values()) {
+              await clearContactOwnershipOnClose({
+                contactId,
+                clearedUserId: userId,
+                actorUserId: payload.initiatedByUserId ?? null,
+              }).catch((err: unknown) => {
+                chunkLog.warn(
+                  { contactId, clearedUserId: userId, err: truncateErrorMessage(err) },
+                  "clearContactOwnershipOnClose falhou (fire-and-forget)",
+                );
+              });
+            }
+          }
+        }
+
         for (const conv of toResolve) {
+          // Espelha a remoção do atendente no chat/timeline (mesmo evento
+          // do encerramento manual) quando a org não mantém o atendente.
+          if (!keepAgent && conv.assignedToId) {
+            logEvent({
+              type: "ASSIGNEE_CHANGED",
+              entityType: "CONVERSATION",
+              entityId: conv.id,
+              entityLabel: conv.contact?.name ?? null,
+              conversationId: conv.id,
+              contactId: conv.contactId,
+              field: "assignedTo",
+              oldValue: conv.assignedTo?.name ?? null,
+              newValue: null,
+              meta: {
+                fromUserId: conv.assignedToId,
+                toUserId: null,
+                reason: "conversation_closed",
+                source: "bulk-async",
+              },
+            }).catch(() => {});
+          }
           logEvent({
             type: "CONVERSATION_CLOSED",
             entityType: "CONVERSATION",

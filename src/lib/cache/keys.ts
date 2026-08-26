@@ -5,6 +5,8 @@
  * massa sem caca-fantasmas. NAO concatenar strings ad-hoc nas rotas
  * — sempre via builder.
  */
+import { createHash } from "node:crypto";
+
 import { cache } from "./index";
 
 // ── Channel ─────────────────────────────────────────────────────
@@ -138,13 +140,14 @@ export async function invalidateStageMetrics(
 //
 // Cache-aside com TTL curto + stampede-lock colapsa a rajada numa única
 // query por `variant` (visibilidade + status + filtros + paginação/sort).
-// `variant` deve ser um hash estável desses parâmetros (ver deals.ts).
+// Hash da variant: a JSON crua estourava a chave Redis (SCAN/GET lentos).
 export function boardDataKey(
   orgId: string,
   pipelineId: string,
   variant: string,
 ): string {
-  return `board:${orgId}:${pipelineId}:${variant}`;
+  const fp = createHash("sha1").update(variant).digest("hex").slice(0, 20);
+  return `board:${orgId}:${pipelineId}:${fp}`;
 }
 
 /** Invalida TODAS as variantes do board de um pipeline (todos os filtros). */

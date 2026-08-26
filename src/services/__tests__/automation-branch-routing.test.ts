@@ -18,6 +18,10 @@ import {
   matchStaleInteractiveOption,
   readStepRef,
   shouldPersistDelay,
+  decideInteractiveMenuInbound,
+  readAwaitingFlow,
+  shouldResumePausedMenuDespiteHumanAttendance,
+  decideFlowStepInbound,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -476,5 +480,189 @@ describe("matchStaleInteractiveOption — clique em menu anterior (WhatsApp)", (
       "Entrega de Documento",
     );
     expect(hit?.gotoStepId).toBe("docs");
+  });
+});
+
+describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
+  it("sem opts → false", () => {
+    expect(shouldResumePausedMenuDespiteHumanAttendance()).toBe(false);
+  });
+
+  it('interactiveId vazio/"  " → false', () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "" }),
+    ).toBe(false);
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "  " }),
+    ).toBe(false);
+  });
+
+  it('interactiveId "btn_1" → true', () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ interactiveId: "btn_1" }),
+    ).toBe(true);
+  });
+
+  it("flowReply true → true", () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ flowReply: true }),
+    ).toBe(true);
+  });
+
+  it("flowReply false + sem id → false", () => {
+    expect(
+      shouldResumePausedMenuDespiteHumanAttendance({ flowReply: false }),
+    ).toBe(false);
+  });
+});
+
+describe("decideInteractiveMenuInbound — botão retoma goto", () => {
+  const buttons = [
+    { id: "btn_0", title: "Sim", kind: "action", gotoStepId: "step-sim" },
+    {
+      id: "btn_1",
+      title: "Trocar endereço",
+      kind: "flow",
+      flowDefinitionId: "flow-def-1",
+      gotoStepId: "step-depois-flow",
+    },
+  ];
+
+  it("kind flow legado no config segue goto como botão de ação", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Trocar endereço",
+      interactiveId: "btn_1",
+    });
+    expect(d.action).toBe("goto_button");
+    if (d.action === "goto_button") {
+      expect(d.button.gotoStepId).toBe("step-depois-flow");
+    }
+  });
+
+  it("kind action segue goto do botão", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Sim",
+      interactiveId: "btn_0",
+    });
+    expect(d.action).toBe("goto_button");
+    if (d.action === "goto_button") {
+      expect(d.button.gotoStepId).toBe("step-sim");
+    }
+  });
+
+  it("nfm_reply com o mesmo flow_token completa o Flow", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: Rua A",
+      flowReply: true,
+      flowToken: "tok-abc",
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+        gotoStepId: "step-depois-flow",
+      },
+    });
+    expect(d.action).toBe("complete_flow");
+    if (d.action === "complete_flow") expect(d.buttonId).toBe("btn_1");
+  });
+
+  it("nfm_reply sem token da Meta ainda completa (omissão conhecida)", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: Rua A",
+      flowReply: true,
+      flowToken: null,
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+      },
+    });
+    expect(d.action).toBe("complete_flow");
+  });
+
+  it("nfm_reply com token diferente permanece pausado", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Campo: outro",
+      flowReply: true,
+      flowToken: "tok-outro",
+      awaitingFlow: {
+        stepId: "menu",
+        buttonId: "btn_1",
+        flowToken: "tok-abc",
+      },
+    });
+    expect(d.action).toBe("stay");
+  });
+
+  it("texto formatado do Flow sem awaiting cai em no_match (não casa botão)", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Sexo: Masculino",
+      flowReply: true,
+      flowToken: "x",
+    });
+    expect(d.action).toBe("no_match");
+  });
+
+  it("readAwaitingFlow", () => {
+    expect(
+      readAwaitingFlow({
+        __awaitingFlow: { stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" },
+      }),
+    ).toEqual({ stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" });
+    expect(readAwaitingFlow({})).toBeNull();
+  });
+});
+
+describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
+  const awaiting = {
+    stepId: "flow-step",
+    buttonId: "flow",
+    flowToken: "tok-form",
+    gotoStepId: "depois",
+  };
+
+  it("texto livre permanece no passo", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: false,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
+  });
+
+  it("nfm_reply com o mesmo token completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-form",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply sem token da Meta ainda completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply com token diferente permanece", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-outro",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
   });
 });

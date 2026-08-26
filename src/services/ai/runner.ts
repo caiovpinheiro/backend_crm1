@@ -195,8 +195,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           ),
         )
       : "";
+    // Últimos turnos: "quero sim" herda o assunto (portal/AVA) da pergunta anterior.
+    const recentContextForHint = history
+      .slice(-4)
+      .map((m) => m.content)
+      .join("\n");
     const portalAccessHint = isAcademicAttendance
-      ? formatCanonicalPortalAccessHint(args.userMessage)
+      ? formatCanonicalPortalAccessHint(args.userMessage, recentContextForHint)
       : "";
     const retrievalWithModels = [
       retrievalBlock,

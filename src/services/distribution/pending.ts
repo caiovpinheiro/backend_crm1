@@ -30,7 +30,9 @@ import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
+  shouldClearOwnershipOnIneligible,
 } from "@/services/distribution/assignee-eligibility";
+import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 import { executeDistribution } from "./engine";
@@ -258,9 +260,6 @@ export type PendingQueueTrigger =
   | "manual"
   | "scheduled";
 
-/** Teto de segurança por consultor por passagem quando queueLimit=0 (sem limite configurado). */
-const SAFETY_CAP_PER_USER = 25;
-
 /** Debounce / lock in-memory por org (sem schema novo). */
 const drainState = new Map<
   string,
@@ -301,10 +300,7 @@ function liveFreeCapacityForUser(
 ): number {
   const delta = assignedDeltaByUser.get(r.userId) ?? 0;
   const loaded = r.queueCount + delta;
-  // Sem limite configurado: ainda assim não ultrapassa o teto de segurança
-  // por consultor (conta carga atual + o que já entrou nesta passagem).
-  const cap = r.queueLimit > 0 ? r.queueLimit : SAFETY_CAP_PER_USER;
-  return Math.max(0, cap - loaded);
+  return Math.max(0, r.queueLimit - loaded);
 }
 
 function eligibleInDeptScope(
@@ -640,7 +636,12 @@ export async function maybeDistributeNewInboundTicket(input: {
       );
       return;
     }
-    if (check.eligible) {
+    // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
+    // contato já é dele. Offline / fora do expediente seguem liberando.
+    const keepHumanAssignee =
+      check.eligible ||
+      !shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons);
+    if (keepHumanAssignee) {
       // IA herdada: mantém. Humano elegível sem reply nesta conversa:
       // libera p/ 1º atendimento IA (substitui INICIO-PIPE).
       if (!check.isAi) {
@@ -648,6 +649,22 @@ export async function maybeDistributeNewInboundTicket(input: {
           where: { id: input.conversationId },
           select: { hasHumanReply: true },
         });
+        // Herança de ticket antigo pode ir para a IA; quem foi atribuído
+        // NESTA conversa fica (a saudação da distribuição sai como bot e
+        // não marca `hasHumanReply` — não é sinal de "humano não atendeu").
+        if (
+          !conv?.hasHumanReply &&
+          (await humanWasAssignedInThisConversation(
+            input.conversationId,
+            assignee,
+          ))
+        ) {
+          console.warn(
+            "[DBG-e46688 maybeDist] keep_assigned_human",
+            JSON.stringify({ convId: input.conversationId, assignee }),
+          );
+          return;
+        }
         if (!conv?.hasHumanReply) {
           console.warn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",

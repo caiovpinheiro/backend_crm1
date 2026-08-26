@@ -1,8 +1,12 @@
 import { randomBytes } from "crypto";
 
 import { prisma } from "@/lib/prisma";
-import { buildWaFlowJsonString, type CrmFlowScreenInput } from "@/lib/meta-whatsapp/build-static-wa-flow-json";
-import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import {
+  buildWaFlowJsonString,
+  WA_FLOW_JSON_VERSION,
+  type CrmFlowScreenInput,
+} from "@/lib/meta-whatsapp/build-static-wa-flow-json";
+import { isMetaGraphError, type MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   cleanFlowFieldLabel,
   normalizeFlowMatchKey,
@@ -32,9 +36,15 @@ export type FlowDefinitionInputScreen = {
   }[];
 };
 
-function normalizeFieldOptions(options?: string[]): string[] {
+function normalizeFieldOptions(options?: unknown): string[] {
+  if (typeof options === "string") {
+    return options.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  }
   if (!Array.isArray(options)) return [];
-  return options.map((o) => (typeof o === "string" ? o.trim() : "")).filter(Boolean);
+  return options
+    .flatMap((o) => (typeof o === "string" ? o.split(/\r?\n/) : []))
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** Campos do negócio (deal) disponíveis para mapeamento no editor de Flow. */
@@ -85,6 +95,36 @@ export async function listFlowDefinitions() {
       updatedAt: true,
     },
   });
+}
+
+/** Flows publicados com `metaFlowId` — catálogo para agente (/) e node de automação. */
+export async function listPublishedFlowDefinitions() {
+  const rows = await prisma.whatsappFlowDefinition.findMany({
+    where: { status: "PUBLISHED" },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      shortId: true,
+      name: true,
+      metaFlowId: true,
+      publishedAt: true,
+    },
+  });
+  return rows.filter((r) => Boolean(r.metaFlowId?.trim()));
+}
+
+/** Resolve um flow publicado pronto para envio de sessão (`interactive.type=flow`). */
+export async function getPublishedFlowForSend(idOrShortId: string) {
+  const flow = await prisma.whatsappFlowDefinition.findFirst({
+    where: {
+      OR: [{ id: idOrShortId }, { shortId: idOrShortId }],
+      status: "PUBLISHED",
+    },
+    select: { id: true, name: true, metaFlowId: true },
+  });
+  const metaFlowId = flow?.metaFlowId?.trim() || "";
+  if (!flow || !metaFlowId) return null;
+  return { id: flow.id, name: flow.name, metaFlowId };
 }
 
 /**
@@ -351,13 +391,29 @@ export async function publishFlowDefinition(
 
   const flowJson = buildWaFlowJsonString({ screens });
   const categories = [full.flowCategory.trim().toUpperCase() || "LEAD_GENERATION"];
+  const baseName = full.name.slice(0, 512);
+  const uniqueName = `${baseName} ${full.shortId ?? full.id.slice(-6)}`.trim().slice(0, 512);
 
-  const raw = (await metaClient.createFlow({
-    name: full.name.slice(0, 512),
-    categories,
-    flow_json: flowJson,
-    publish: true,
-  })) as MetaCreateFlowResponse;
+  async function createOnMeta(name: string) {
+    return (await metaClient.createFlow({
+      name,
+      categories,
+      flow_json: flowJson,
+      publish: true,
+    })) as MetaCreateFlowResponse;
+  }
+
+  let raw: MetaCreateFlowResponse;
+  try {
+    raw = await createOnMeta(baseName);
+  } catch (e) {
+    const duplicateName =
+      isMetaGraphError(e) &&
+      e.code === 100 &&
+      /unique|already|exist|nome/i.test(`${e.message} ${e.details ?? ""} ${e.userMsg ?? ""}`);
+    if (!duplicateName) throw e;
+    raw = await createOnMeta(uniqueName);
+  }
 
   const validationErrors = Array.isArray(raw.validation_errors) ? raw.validation_errors : [];
   const metaFlowId = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : null;
@@ -378,7 +434,7 @@ export async function publishFlowDefinition(
       status: "PUBLISHED",
       metaFlowId,
       publishedAt: new Date(),
-      metaJsonVersion: "5.0",
+      metaJsonVersion: WA_FLOW_JSON_VERSION,
     },
   });
 
@@ -637,7 +693,7 @@ export async function importFlowFromMeta(
         flowCategory,
         metaFlowId: flowId,
         publishedAt: metaStatus === "DRAFT" ? null : new Date(),
-        metaJsonVersion: "5.0",
+        metaJsonVersion: WA_FLOW_JSON_VERSION,
       },
     });
 
