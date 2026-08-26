@@ -96,6 +96,7 @@ model Organization {
   lossReasons              LossReason[]
   pipelineLossReasons      PipelineLossReason[]
   apiTokens                ApiToken[]
+  integrationWebhooks      IntegrationWebhook[]
   mobileLayoutConfigs      MobileLayoutConfig[]
   userDashboardLayouts     UserDashboardLayout[]
   fieldLayoutConfigs       FieldLayoutConfig[]
@@ -4102,6 +4103,30 @@ model ApiToken {
   @@index([tokenHash])
   @@index([userId])
   @@map("api_tokens")
+}
+
+/// Webhook de saída para integrações (n8n Trigger).
+/// O CRM POSTa o evento em `url` quando `fireTrigger` dispara um tipo
+/// presente em `events` (ou quando `events` contém `*`).
+model IntegrationWebhook {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// URL HTTPS do subscriber (webhook do n8n).
+  url            String
+  /// Tipos de evento (`agent_changed`, `stage_changed`, …) ou `*`.
+  events         String[]
+  /// Segredo HMAC-SHA256 enviado em `X-Eduit-Signature`.
+  secret         String?
+  isActive       Boolean      @default(true)
+  /// Rótulo opcional (ex.: nome do workflow n8n).
+  name           String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, url])
+  @@index([organizationId, isActive])
+  @@map("integration_webhooks")
 }
 
 // ──────────────────────────────────────────────

@@ -1257,6 +1257,18 @@ export async function updateContact(id: string, data: UpdateContactInput) {
         newValue: data.assignedToId ?? null,
         meta: { from: prev.assignedToId, to: data.assignedToId ?? null },
       });
+      // Evento próprio (não reusa agent_changed — esse dispara automações de deal).
+      void import("@/services/automation-triggers")
+        .then(({ fireTrigger }) =>
+          fireTrigger("contact_owner_changed", {
+            contactId: id,
+            data: {
+              fromAssignedToId: prev.assignedToId,
+              toAssignedToId: data.assignedToId ?? null,
+            },
+          }),
+        )
+        .catch(() => {});
     }
   }
 

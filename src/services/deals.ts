@@ -799,6 +799,10 @@ export async function assignDealOwner(
   ownerId: string | null,
 ) {
   const deal = await prisma.$transaction(async (tx) => {
+    const current = await tx.deal.findUnique({
+      where: { id: dealId },
+      select: { ownerId: true },
+    });
     const row = await tx.deal.update({
       where: { id: dealId },
       data: { ownerId },
@@ -810,10 +814,22 @@ export async function assignDealOwner(
       },
     });
     await propagateOwnerToContactAndChat(tx, row.contactId, ownerId);
-    return row;
+    return { ...row, fromOwnerId: current?.ownerId ?? null };
   });
 
   await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
+
+  if (deal.fromOwnerId !== ownerId) {
+    void import("@/services/automation-triggers")
+      .then(({ fireTrigger }) =>
+        fireTrigger("agent_changed", {
+          dealId: deal.id,
+          contactId: deal.contactId ?? undefined,
+          data: { fromOwnerId: deal.fromOwnerId, toOwnerId: ownerId },
+        }),
+      )
+      .catch(() => {});
+  }
 
   return deal;
 }

@@ -5,6 +5,20 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-26 — Webhooks de integração (n8n Trigger)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Tabela `integration_webhooks` + CRUD Bearer (`GET/POST /api/integration-webhooks`, `GET/DELETE /api/integration-webhooks/:id`). `fireTrigger` despacha POST fire-and-forget para as URLs da org que escutam o evento (ou `*`), inclusive quando não há automação interna. `assignDealOwner` passa a disparar `agent_changed` (bulk, distribuição, automação). Troca de responsável do contato dispara `contact_owner_changed` (não reusa `agent_changed`).
+
+**Contexto.** O n8n precisava de um Trigger por evento (primeiro: troca de responsável). O CRM só tinha automações internas — sem inscrição de webhook de saída.
+
+**Alternativas descartadas.** Polling no n8n (atraso + carga). Reusar `agent_changed` no contato (dispararia automações de deal). Endpoint só de `agent_changed` (outros eventos já passam por `fireTrigger`).
+
+**Impacto.** Nova tabela tenant-scoped. Permissões `deal:view` (listar) e `deal:edit` (criar/apagar). Payload: `{ event, occurredAt, organizationId, contactId, dealId, data }`. Header `X-Eduit-Signature: sha256=…` quando há secret.
+
+---
+
 ### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
 
 **Decisão.** Quando a conversa é encerrada SEM "manter atendente" (`conversation.keepAgentOnEnd` off), `updateConversationStatusInDb` agora também: loga `ASSIGNEE_CHANGED` (chat + timeline, "X removida da conversa") e chama `clearContactOwnershipOnClose` — zera `ownerId` dos deals ABERTOS do contato e `assignedToId` do contato, com `OWNER_CHANGED`/`CONTACT_OWNER_CHANGED` nos logs. Guardas: só limpa quem era o responsável removido, e só se nenhuma outra conversa aberta do contato ainda está com ele. O bulk-resolve (worker leads) faz o mesmo por par (contato, atendente).

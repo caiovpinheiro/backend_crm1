@@ -130,6 +130,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "PipelineLossReason",
   "Tabulation",
   "ApiToken",
+  "IntegrationWebhook",
   "MobileLayoutConfig",
   "UserDashboardLayout",
   "WebPushSubscription",
