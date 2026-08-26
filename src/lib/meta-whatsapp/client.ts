@@ -1171,11 +1171,39 @@ export class MetaWhatsAppClient {
     });
   }
 
-  /** Remove template pelo `id` Graph retornado na listagem. */
-  async deleteMessageTemplate(templateGraphId: string): Promise<unknown> {
-    const id = templateGraphId.trim();
-    if (!id) throw new Error("ID do template inválido.");
-    return this.graphFetch(id, { method: "DELETE" });
+  /**
+   * Remove template na coleção da WABA.
+   *
+   * `DELETE /{template_id}` NÃO existe na Graph — devolve
+   * `(#100) Unsupported delete request`, que era a causa do "Erro ao excluir"
+   * na tela de templates. A exclusão é sempre em
+   * `DELETE /{WABA_ID}/message_templates`, e `name` é obrigatório nos dois
+   * modos:
+   *  - só `name`: apaga o template em TODOS os idiomas;
+   *  - `name` + `hsm_id`: apaga apenas aquela versão/idioma.
+   *
+   * @param name Nome canônico do template (campo `name` da listagem).
+   * @param templateGraphId `id` da listagem, enviado como `hsm_id`. Ausente =
+   *   apaga todos os idiomas daquele nome.
+   */
+  async deleteMessageTemplate(args: {
+    name: string;
+    templateGraphId?: string | null;
+  }): Promise<unknown> {
+    const waba = this.wabaOrThrow();
+    const name = args.name?.trim() ?? "";
+    if (!name) {
+      throw new Error(
+        "Meta: nome do template é obrigatório para excluir (a Graph exige `name` em message_templates).",
+      );
+    }
+    const params = new URLSearchParams();
+    params.set("name", name);
+    const hsmId = args.templateGraphId?.trim();
+    if (hsmId) params.set("hsm_id", hsmId);
+    return this.graphFetch(`${waba}/message_templates?${params.toString()}`, {
+      method: "DELETE",
+    });
   }
 
   // ── WhatsApp Flows (Flows API) ─────────────────────────────────
