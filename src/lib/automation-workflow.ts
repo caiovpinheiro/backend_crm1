@@ -131,6 +131,8 @@ export const INBOUND_CHANNEL_TRIGGER_TYPES = new Set([
   "message_received",
   "message_sent",
   "conversation_created",
+  "call_received",
+  "call_made",
 ]);
 
 /** Conexões (`Channel.id`) do gatilho. Vazio = qualquer canal. */
