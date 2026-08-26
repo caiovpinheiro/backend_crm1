@@ -9,6 +9,7 @@ import {
   evaluateTrigger,
   type AutomationJobContext,
 } from "@/services/automations";
+import { dispatchIntegrationWebhooks } from "@/services/integration-webhooks";
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (v !== null && typeof v === "object" && !Array.isArray(v)) {
@@ -465,6 +466,19 @@ async function listActiveAutomationsForTrigger(event: string) {
 export async function fireTrigger(  event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
+  // n8n / integrações: dispara mesmo se não houver automação interna
+  // e mesmo quando o inbound está em atendimento humano.
+  void dispatchIntegrationWebhooks(event, {
+    contactId: context.contactId,
+    dealId: context.dealId,
+    data: context.data,
+  }).catch((err) => {
+    console.warn(
+      "[fireTrigger] integration webhook dispatch failed:",
+      err instanceof Error ? err.message : err,
+    );
+  });
+
   // Guarda só no INBOUND: não responder por cima de atendimento humano.
   // message_sent é ação do agente e não pode ser suprimido por ela.
   if (event === "message_received" && context.contactId) {
