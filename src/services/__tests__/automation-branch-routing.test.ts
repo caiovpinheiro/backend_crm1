@@ -21,6 +21,7 @@ import {
   decideInteractiveMenuInbound,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  decideFlowStepInbound,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -615,5 +616,53 @@ describe("decideInteractiveMenuInbound — botão retoma goto", () => {
       }),
     ).toEqual({ stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" });
     expect(readAwaitingFlow({})).toBeNull();
+  });
+});
+
+describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
+  const awaiting = {
+    stepId: "flow-step",
+    buttonId: "flow",
+    flowToken: "tok-form",
+    gotoStepId: "depois",
+  };
+
+  it("texto livre permanece no passo", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: false,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
+  });
+
+  it("nfm_reply com o mesmo token completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-form",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply sem token da Meta ainda completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply com token diferente permanece", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-outro",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
   });
 });

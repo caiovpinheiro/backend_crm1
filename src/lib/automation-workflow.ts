@@ -75,6 +75,7 @@ export const ACTION_STEP_TYPES = [
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "webhook",
   "delay",
   "condition",
@@ -112,6 +113,7 @@ export const MESSAGE_CHANNEL_STEP_TYPES = [
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "send_product",
   "send_email",
   "question",
@@ -240,6 +242,7 @@ export function stepTypeLabel(t: string): string {
     send_whatsapp_media: "Mídia WhatsApp",
     send_whatsapp_interactive: "Botões WhatsApp",
     send_whatsapp_list: "Lista WhatsApp",
+    send_whatsapp_flow: "Formulário WhatsApp",
     webhook: "Webhook",
     delay: "Atraso",
     condition: "Condição",
@@ -453,6 +456,11 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       const bodyText = c.body ? String(c.body).slice(0, 30) : "";
       return rows > 0 ? `[${rows} itens] ${bodyText}` : bodyText || "Configurar lista";
     }
+    case "send_whatsapp_flow": {
+      const flowName = c.flowName ? String(c.flowName) : "";
+      const bodyText = c.body ? String(c.body).slice(0, 30) : "";
+      return flowName || bodyText || "Selecionar formulário";
+    }
     case "webhook":
       return c.url ? String(c.url).replace(/^https?:\/\//, "").slice(0, 36) : "URL";
     case "delay": {
@@ -591,6 +599,8 @@ export function isStepIncomplete(
         !str(c.button) ||
         !(Array.isArray(c.rows) && c.rows.length > 0)
       );
+    case "send_whatsapp_flow":
+      return !str(c.flowDefinitionId);
     case "send_email":
       return !str(c.to) || !str(c.subject) || !str(c.body);
     case "webhook":
@@ -698,6 +708,21 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         header: "",
         footer: "",
         elseGotoStepId: "",
+        saveToVariable: "",
+        timeoutMs: 86_400_000,
+        timeoutAction: "continue",
+        timeoutGotoStepId: "",
+        failureAction: "stop",
+        failureGotoStepId: "",
+      };
+    case "send_whatsapp_flow":
+      return {
+        flowDefinitionId: "",
+        flowName: "",
+        body: "",
+        flowCta: "Abrir formulário",
+        header: "",
+        footer: "",
         saveToVariable: "",
         timeoutMs: 86_400_000,
         timeoutAction: "continue",

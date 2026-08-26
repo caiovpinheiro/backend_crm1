@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   Prisma,
   type ActivityType,
@@ -70,7 +71,10 @@ import {
   markPausedTtl,
   pausedStepTimeoutMs,
   shouldPersistDelay,
+  AWAITING_FLOW_VAR,
+  readStepRef,
 } from "@/services/automation-context";
+import { getPublishedFlowForSend } from "@/services/whatsapp-flow-definitions";
 import {
   ensureWhatsAppConversationForContact,
   maybeResolveUnansweredOutboundTicket,
@@ -85,6 +89,7 @@ const META_SEND_FAILURE_STEP_TYPES = new Set([
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "question",
 ]);
 
@@ -773,6 +778,7 @@ async function persistPausedContext(
   rt: ChannelBindSource & { automationId: string; contactId?: string | null },
   stepId: string,
   timeoutMs: number | undefined,
+  extraVars?: Record<string, unknown>,
 ): Promise<void> {
   if (!rt.contactId) return;
   const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
@@ -785,6 +791,7 @@ async function persistPausedContext(
     {
       ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
       ...channelBindVars(rt),
+      ...(extraVars ?? {}),
     },
     stepId,
     timeoutMs,
@@ -3642,6 +3649,148 @@ async function executeStep(
       return { skipRemaining: true };
     }
 
+    case "send_whatsapp_flow": {
+      const phoneRaw = readString(cfg, "phone")?.trim() || rt.contact?.phone || "";
+      const digits = phoneRaw.replace(/\D/g, "");
+      const to = digits.length >= 8 ? digits : undefined;
+      const recipient =
+        readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
+      if (!to && !recipient) {
+        throw new MetaSendFailureError("send_whatsapp_flow: sem destino");
+      }
+
+      const flowDefId = readString(cfg, "flowDefinitionId")?.trim();
+      if (!flowDefId) throw new Error("send_whatsapp_flow: formulário obrigatório");
+      const flow = await getPublishedFlowForSend(flowDefId);
+      if (!flow) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_flow: formulário não encontrado ou ainda não publicado na Meta",
+        );
+      }
+
+      const flowVars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const bodyRaw = readString(cfg, "body")?.trim() || `Preencha o formulário: ${flow.name}`;
+      const body = await interpolateMessageVariables(bodyRaw, rt, flowVars);
+      const ctaRaw = readString(cfg, "flowCta")?.trim() || "Abrir formulário";
+      const flowCta = await interpolateMessageVariables(ctaRaw, rt, flowVars);
+
+      const headerRaw = readString(cfg, "header");
+      const footerRaw = readString(cfg, "footer");
+      const header = headerRaw
+        ? await interpolateMessageVariables(headerRaw, rt, flowVars)
+        : headerRaw;
+      const footer = footerRaw
+        ? await interpolateMessageVariables(footerRaw, rt, flowVars)
+        : footerRaw;
+
+      const displayContent = `${body}\n[Flow: ${flowCta}]`;
+      const flowChannelId = resolveOutboundChannelId(cfg, rt);
+      let conversationId: string | undefined;
+      if (rt.contactId) {
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, flowChannelId),
+        );
+        conversationId = conv?.id;
+      }
+      const flowMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+        channelId: flowChannelId,
+      });
+      rt.activeChannelId = flowChannelId;
+      if (!flowMetaClient.configured) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_flow: nenhum canal META_CLOUD_API configurado para esta organização.",
+        );
+      }
+
+      const flowToken = randomUUID();
+      let externalId: string | null = null;
+      try {
+        const sendResult = await flowMetaClient.sendInteractiveFlow(
+          to,
+          body,
+          {
+            flowId: flow.metaFlowId,
+            flowCta,
+            flowToken,
+            flowAction: "navigate",
+          },
+          header,
+          footer,
+          recipient,
+        );
+        externalId = sendResult.messages?.[0]?.id ?? null;
+      } catch (sendErr) {
+        const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
+        log.error(
+          `Envio WhatsApp Flow falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
+        );
+        await persistFailedAutomationOutbound({
+          conversationId,
+          content: displayContent,
+          messageType: "interactive",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+          channelId: flowChannelId,
+        });
+        throw classified;
+      }
+
+      if (conversationId) {
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId,
+            content: displayContent,
+            direction: "out",
+            messageType: "interactive",
+            senderName: rt.automationName ?? "Automação",
+            authorType: "bot",
+            ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
+            externalId,
+            sendStatus: "sent",
+            flowToken,
+            ...(flowChannelId ? { channelId: flowChannelId } : {}),
+          }),
+        });
+        sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
+          conversationId,
+          contactId: rt.contactId ?? undefined,
+          direction: "out",
+          content: displayContent,
+        });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_flow");
+        }
+      }
+
+      const stepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      const FLOW_DEFAULT_TIMEOUT_MS = 86_400_000;
+      const rawTimeout = readNumber(cfg, "timeoutMs");
+      const flowTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : FLOW_DEFAULT_TIMEOUT_MS;
+      if (stepId && rt.contactId) {
+        const nextId = readStepRef(cfg, "nextStepId");
+        await persistPausedContext(rt, stepId, flowTimeoutMs, {
+          [AWAITING_FLOW_VAR]: {
+            stepId,
+            buttonId: "flow",
+            flowToken,
+            ...(nextId ? { gotoStepId: nextId } : {}),
+          },
+        });
+      }
+
+      return { skipRemaining: true };
+    }
+
     case "webhook": {
       const rawUrl = readString(cfg, "url");
       if (!rawUrl) throw new Error("webhook: url obrigatória");
@@ -4492,6 +4641,7 @@ const WA_SEND_STEP_TYPES = new Set([
   "send_whatsapp_media",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "send_product",
   "question",
 ]);
@@ -4501,6 +4651,7 @@ const RETRY_PAUSE_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "wait_for_reply",
 ]);
 
@@ -4987,6 +5138,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   send_whatsapp_media: "Mídia WhatsApp",
   send_whatsapp_interactive: "Botões WhatsApp",
   send_whatsapp_list: "Lista WhatsApp",
+  send_whatsapp_flow: "Formulário WhatsApp",
   send_product: "Enviar produto",
   webhook: "Webhook",
   delay: "Atraso",

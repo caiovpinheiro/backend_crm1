@@ -58,6 +58,7 @@ export const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_list",
+  "send_whatsapp_flow",
   "send_whatsapp_template",
   "send_whatsapp_message",
   "wait_for_reply",
@@ -264,6 +265,24 @@ export function decideInteractiveMenuInbound(input: {
   }
 
   return { action: "no_match" };
+}
+
+export type FlowStepInboundDecision = "complete" | "stay";
+
+/**
+ * Node `send_whatsapp_flow`: só avança com nfm_reply (token casa ou Meta omitiu).
+ * Texto livre permanece no passo para o lead ainda poder enviar o formulário.
+ */
+export function decideFlowStepInbound(input: {
+  flowReply?: boolean;
+  flowToken?: string | null;
+  awaitingFlow?: AwaitingFlowState | null;
+}): FlowStepInboundDecision {
+  if (!input.flowReply) return "stay";
+  const awaiting = input.awaitingFlow;
+  const inboundToken = (input.flowToken ?? "").trim();
+  if (awaiting && inboundToken && inboundToken !== awaiting.flowToken) return "stay";
+  return "complete";
 }
 
 /** Clique de botão/lista ou nfm_reply deve retomar menu pausado mesmo com humano atendendo. */
@@ -685,6 +704,34 @@ export async function processIncomingMessage(
           );
         }
       }
+    } else if (currentStep.type === "send_whatsapp_flow") {
+      const varName = String(config.saveToVariable ?? "lastResponse");
+      const awaiting = readAwaitingFlow(variables);
+      const flowDecision = decideFlowStepInbound({
+        flowReply: Boolean(opts?.flowReply),
+        flowToken: opts?.flowToken,
+        awaitingFlow: awaiting,
+      });
+      if (flowDecision === "stay") {
+        log.info(
+          `send_whatsapp_flow aguardando nfm_reply — auto=${ctx.automation.name} step=${currentStep.id}`,
+        );
+        return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
+      }
+      delete variables[AWAITING_FLOW_VAR];
+      if (opts?.flowPayload && Object.keys(opts.flowPayload).length > 0) {
+        variables = { ...variables, [varName]: opts.flowPayload };
+      } else {
+        variables = { ...variables, [varName]: messageContent };
+      }
+      const storedGoto = (awaiting?.gotoStepId ?? "").trim();
+      nextStepId =
+        storedGoto ||
+        readStepRef(config, "nextStepId") ||
+        linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+      log.info(
+        `Formulário WhatsApp concluído — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
+      );
     } else {
       const varName = String(config.saveToVariable ?? "lastResponse");
       variables = { ...variables, [varName]: messageContent };
@@ -763,7 +810,7 @@ export async function processIncomingMessage(
           log.info(
             `nfm_reply ignorado (token não casa com Flow em aberto) — auto=${ctx.automation.name} step=${currentStep.id}`,
           );
-          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+          return { handled: true, replied: false, automationId: ctx.automationId, contextId: ctx.id };
         } else {
           const staleBtn = matchStaleInteractiveOption(
             ctx.automation.steps,
