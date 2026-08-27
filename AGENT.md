@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+---
+
+### 2026-08-27 — Reset de senha pelo admin destrava o login
+
+**Decisão.** (1) `PATCH /api/users/[id]` com `password` chama `clearLoginLockout(email)` — apaga as falhas das janelas soft (15min) e hard (24h) em `login_attempts`. (2) Outcome `locked` deixou de contar como falha nos thresholds do lockout.
+
+**Contexto.** Usuário com 10+ falhas/24h entrava em hard-lock e o admin não conseguia liberar nem trocando a senha: `checkLockout` roda antes da checagem de senha, então o usuário nunca chegava ao sucesso (que limpa só a janela de 15min), e cada tentativa bloqueada gravava outcome `locked` — que contava como falha e renovava a janela de 24h indefinidamente.
+
+**Alternativas descartadas.** Botão "Desbloquear" sem troca de senha (escopo maior de UI; o fluxo que o admin já tenta é o reset). Manter `locked` contando (preserva o bug). Limpar só a janela soft (não destrava o hard-lock).
+
+**Impacto.** `src/lib/auth/lockout.ts`, `src/app/api/users/[id]/route.ts`. Hard-lock agora expira 24h após a última falha real (não se auto-renova). Sem mudança de frontend.
+
 ### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
 
 **Decisão.** Quando a conversa é encerrada SEM "manter atendente" (`conversation.keepAgentOnEnd` off), `updateConversationStatusInDb` agora também: loga `ASSIGNEE_CHANGED` (chat + timeline, "X removida da conversa") e chama `clearContactOwnershipOnClose` — zera `ownerId` dos deals ABERTOS do contato e `assignedToId` do contato, com `OWNER_CHANGED`/`CONTACT_OWNER_CHANGED` nos logs. Guardas: só limpa quem era o responsável removido, e só se nenhuma outra conversa aberta do contato ainda está com ele. O bulk-resolve (worker leads) faz o mesmo por par (contato, atendente).
