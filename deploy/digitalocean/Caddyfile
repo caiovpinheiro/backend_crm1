@@ -1,0 +1,32 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# Backend. Certificado por HTTP-01, sem necessidade de DNS.
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+}
+
+# Frontend e os subdomínios de tenant. O wildcard obriga desafio DNS-01,
+# por isso o token da API da DigitalOcean e a zona hospedada lá.
+{$APP_DOMAIN}, *.{$APP_DOMAIN} {
+	encode zstd gzip
+
+	tls {
+		dns digitalocean {$DO_AUTH_TOKEN}
+		resolvers 1.1.1.1
+	}
+
+	# O stream de SSE em /api/sse/messages não pode ser bufferizado nem
+	# morto por timeout de leitura.
+	@sse path /api/sse/*
+	reverse_proxy @sse frontend:3000 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+		}
+	}
+
+	reverse_proxy frontend:3000
+}

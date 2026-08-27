@@ -10,7 +10,7 @@ import {
 } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
-import { prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
@@ -30,12 +30,19 @@ import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
+  resolveConversationSearchCandidates,
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
-/** TTL curto: badges e Fila da distribuição precisam acompanhar o inbox. */
-const TAB_COUNTS_CACHE_TTL_SEC = 5;
+/**
+ * Frescura dos badges vem da invalidação (mensagem nova via `sse-bus`,
+ * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
+ * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
+ * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
+ * rede de segurança contra invalidação perdida.
+ */
+const TAB_COUNTS_CACHE_TTL_SEC = 30;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -457,43 +464,30 @@ export async function buildConversationSearchWhere(
   const q = search?.trim() ?? "";
   if (q.length === 0) return null;
 
-  // Agrupa predicados de `contact` / `assignedTo` sob UM join cada.
-  // Vários `{ contact: { campo } }` no OR faziam o Prisma emitir 4–8
-  // LEFT JOINs no mesmo contacts (mesmo contactId) — COUNT/listagem da
-  // inbox ~300–900ms mean no pg_stat (ago/26). Semanticamente idêntico.
+  // O `where` final só toca colunas de `conversations`. Tudo que exige join
+  // (contato, empresa, campos personalizados, título de negócio, responsável)
+  // é resolvido antes em pré-queries indexadas — ver
+  // `resolveConversationSearchCandidates`. Agrupar os predicados por join,
+  // como fazíamos até 26/ago/26, reduziu o número de LEFT JOINs mas manteve
+  // ILIKE cross-table e EXISTS por linha no mesmo OR: 4s por busca em prod.
   const or: Prisma.ConversationWhereInput[] = [
-    {
-      contact: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { phone: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-          { whatsappUsername: { contains: q, mode: "insensitive" } },
-          { source: { contains: q, mode: "insensitive" } },
-          { company: { name: { contains: q, mode: "insensitive" } } },
-          { customFields: { some: { value: { contains: q, mode: "insensitive" } } } },
-          { deals: { some: { title: { contains: q, mode: "insensitive" } } } },
-        ],
-      },
-    },
     { inboxName: { contains: q, mode: "insensitive" } },
-    {
-      assignedTo: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-        ],
-      },
-    },
   ];
+
   // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
   // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
   const digits = q.replace(/\D+/g, "");
-  if (digits.length >= 3) {
-    const contactIds = await findContactIdsByPhoneDigits(digits);
-    if (contactIds.length > 0) {
-      or.push({ contactId: { in: contactIds } });
-    }
+  const [candidates, phoneContactIds] = await Promise.all([
+    resolveConversationSearchCandidates(q),
+    digits.length >= 3 ? findContactIdsByPhoneDigits(digits) : Promise.resolve([]),
+  ]);
+
+  const contactIds = new Set([...candidates.contactIds, ...phoneContactIds]);
+  if (contactIds.size > 0) {
+    or.push({ contactId: { in: [...contactIds] } });
+  }
+  if (candidates.assignedToIds.length > 0) {
+    or.push({ assignedToId: { in: candidates.assignedToIds } });
   }
   // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
   // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
@@ -1550,13 +1544,18 @@ export async function updateConversationStatusInDb(
 
 /**
  * Retorna o proximo `number` sequencial de Conversation na org do
- * contexto atual. Mesmo padrao de `nextContactNumber()` — a Prisma
- * extension escopa o `_max` por org via AsyncLocalStorage. Combinar
- * com retry P2002 na criacao para lidar com corrida entre workers/webhooks.
+ * contexto atual.
+ *
+ * Delega no contador atomico compartilhado (`org_number_counters`) em vez de
+ * fazer `MAX(number) + 1` aqui. Ter dois alocadores para o mesmo model era o
+ * que sobrava de corrida depois do fix de custo: este caminho emitia MAX+1
+ * enquanto a extension de scope emitia pelo contador, e os dois colidiam
+ * entre si. Fonte unica de verdade -> a colisao deixa de existir por
+ * construcao. Ver `allocateOrgNumber` em lib/prisma.ts.
  */
 export async function nextConversationNumber(): Promise<number> {
-  const r = await prisma.conversation.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
+  const orgId = getOrgIdOrThrow();
+  return allocateOrgNumber("Conversation", orgId);
 }
 
 /**

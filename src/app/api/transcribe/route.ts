@@ -13,7 +13,7 @@ import { NextResponse } from "next/server";
 import path from "path";
 import { readFile } from "fs/promises";
 import { withOrgContext } from "@/lib/auth-helpers";
-import { parseStoragePath, storageRoot, mimeFromFilename } from "@/lib/storage/local";
+import { parseStoragePath, readStoredFile, mimeFromFilename } from "@/lib/storage/local";
 
 const GROQ_TRANSCRIPTION_URL =
   "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -25,22 +25,18 @@ async function resolveAudioBytes(
   orgId: string,
 ): Promise<{ buffer: Buffer; mime: string; filename: string } | null> {
   // ── 1. Storage tenant-scoped: /api/storage/<orgId>/<bucket>/<file> ──
+  // Vai pelo dispatcher (readStoredFile) — funciona nos dois backends
+  // (disco local e S3/Spaces) sem saber qual está ativo.
   const storageParsed = parseStoragePath(rawUrl);
   if (storageParsed) {
     if (storageParsed.orgId !== orgId) return null; // cross-tenant guard
-    const abs = path.join(
-      storageRoot(),
+    const stored = await readStoredFile(
       storageParsed.orgId,
       storageParsed.bucket,
       storageParsed.fileName,
     );
-    try {
-      const buffer = await readFile(abs);
-      const mime = mimeFromFilename(storageParsed.fileName);
-      return { buffer, mime, filename: storageParsed.fileName };
-    } catch {
-      return null;
-    }
+    if (!stored) return null;
+    return { buffer: stored.buffer, mime: stored.mimeType, filename: storageParsed.fileName };
   }
 
   // ── 2. Legacy /uploads/… (public/uploads no CWD do backend) ──────────

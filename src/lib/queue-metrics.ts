@@ -22,6 +22,7 @@ import {
   CAMPAIGN_SEND_QUEUE_NAME,
   LEADS_BULK_QUEUE_NAME,
   IMPORT_ETL_QUEUE_NAME,
+  META_WEBHOOK_QUEUE_NAME,
 } from "@/lib/queue";
 
 const QUEUE_NAMES = [
@@ -32,6 +33,7 @@ const QUEUE_NAMES = [
   CAMPAIGN_SEND_QUEUE_NAME,
   LEADS_BULK_QUEUE_NAME,
   IMPORT_ETL_QUEUE_NAME,
+  META_WEBHOOK_QUEUE_NAME,
 ] as const;
 
 type QueueName = (typeof QUEUE_NAMES)[number];

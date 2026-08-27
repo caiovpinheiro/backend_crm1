@@ -4,6 +4,8 @@ import type { Prisma } from "@prisma/client";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import {
+  setContactCustomFieldValuesBulk,
+  setDealCustomFieldValuesBulk,
   upsertContactCustomFieldValues,
   upsertDealCustomFieldValues,
 } from "@/services/custom-fields";
@@ -226,29 +228,57 @@ export async function processBulkUpdateFields(
     let chunkSucceeded = 0;
     let chunkFailed = 0;
 
-    for (const dealId of chunk) {
-      try {
-        await applyDealUpdates(dealId, {
-          dealCustom: validDealUpdates,
-          dealNativePatch,
-          contactCustom: validContactUpdates,
-          contactNativePatch,
-          tagIds: validTagIds,
-          hasContactWork,
-        });
-        chunkSucceeded += 1;
-      } catch (err) {
-        chunkFailed += 1;
+    const bundle: DealUpdateBundle = {
+      dealCustom: validDealUpdates,
+      dealNativePatch,
+      contactCustom: validContactUpdates,
+      contactNativePatch,
+      tagIds: validTagIds,
+      hasContactWork,
+    };
+
+    try {
+      const outcome = await applyChunkUpdates(chunk, bundle);
+      chunkSucceeded = outcome.succeeded;
+      chunkFailed = outcome.failedDealIds.length;
+      const now = new Date().toISOString();
+      for (const dealId of outcome.failedDealIds) {
         chunkErrors.push({
           itemId: dealId,
-          message: truncateErrorMessage(err),
+          message: NO_CONTACT_MESSAGE,
           attempt: job.attemptsMade + 1,
-          at: new Date().toISOString(),
+          at: now,
         });
-        ctx.error(
-          { dealId, err },
-          "Falha aplicando campos/tags a deal",
-        );
+      }
+    } catch (err) {
+      // O lote é all-or-nothing por operação; um erro aqui apaga a
+      // granularidade por-item que a operação em massa reporta. Cai para o
+      // caminho deal-a-deal (idempotente) só neste chunk.
+      ctx.warn(
+        { err, chunkIndex: Math.floor(i / CHUNK_SIZE) },
+        "Lote falhou — reprocessando o chunk deal a deal",
+      );
+      chunkErrors.length = 0;
+      chunkSucceeded = 0;
+      chunkFailed = 0;
+
+      for (const dealId of chunk) {
+        try {
+          await applyDealUpdates(dealId, bundle);
+          chunkSucceeded += 1;
+        } catch (itemErr) {
+          chunkFailed += 1;
+          chunkErrors.push({
+            itemId: dealId,
+            message: truncateErrorMessage(itemErr),
+            attempt: job.attemptsMade + 1,
+            at: new Date().toISOString(),
+          });
+          ctx.error(
+            { dealId, err: itemErr },
+            "Falha aplicando campos/tags a deal",
+          );
+        }
       }
     }
 
@@ -282,12 +312,106 @@ export async function processBulkUpdateFields(
 
 type DealUpdateBundle = {
   dealCustom: { fieldId: string; value: string }[];
-  dealNativePatch: Prisma.DealUpdateInput | null;
+  dealNativePatch: Prisma.DealUpdateManyMutationInput | null;
   contactCustom: { fieldId: string; value: string }[];
-  contactNativePatch: Prisma.ContactUpdateInput | null;
+  contactNativePatch: Prisma.ContactUpdateManyMutationInput | null;
   tagIds: string[];
   hasContactWork: boolean;
 };
+
+const NO_CONTACT_MESSAGE =
+  "Negócio sem contato vinculado — campos de contato não aplicados";
+
+/**
+ * Aplica o bundle a um chunk inteiro com operações em lote. Substitui o
+ * laço deal-a-deal no caminho feliz; o chamador cai de volta em
+ * `applyDealUpdates` se qualquer etapa falhar, para não perder a
+ * granularidade de erro por item.
+ *
+ * A ordem e o escopo espelham `applyDealUpdates`:
+ *   - custom fields e nativos do DEAL valem para todos os deals do chunk,
+ *     inclusive os que não têm contato (lá eles já eram aplicados antes do
+ *     throw);
+ *   - contato e tags só valem para os deals que sobrevivem ao check de
+ *     contato, porque o throw acontecia antes das tags.
+ */
+async function applyChunkUpdates(
+  dealIds: string[],
+  bundle: DealUpdateBundle,
+): Promise<{ succeeded: number; failedDealIds: string[] }> {
+  const {
+    dealCustom,
+    dealNativePatch,
+    contactCustom,
+    contactNativePatch,
+    tagIds,
+    hasContactWork,
+  } = bundle;
+
+  if (dealCustom.length > 0) {
+    await setDealCustomFieldValuesBulk(dealIds, dealCustom);
+  }
+
+  if (dealNativePatch) {
+    await prisma.deal.updateMany({
+      where: { id: { in: dealIds } },
+      data: dealNativePatch,
+    });
+  }
+
+  let taggableDealIds = dealIds;
+  const failedDealIds: string[] = [];
+
+  if (hasContactWork) {
+    // Um findMany para o chunk no lugar de um findUnique por deal.
+    const deals = await prisma.deal.findMany({
+      where: { id: { in: dealIds } },
+      select: { id: true, contactId: true },
+    });
+    const contactByDeal = new Map(deals.map((d) => [d.id, d.contactId]));
+
+    taggableDealIds = [];
+    const contactIds = new Set<string>();
+    for (const dealId of dealIds) {
+      const contactId = contactByDeal.get(dealId) ?? null;
+      if (!contactId) {
+        failedDealIds.push(dealId);
+        continue;
+      }
+      taggableDealIds.push(dealId);
+      contactIds.add(contactId);
+    }
+
+    const uniqueContactIds = [...contactIds];
+    if (uniqueContactIds.length > 0) {
+      if (contactCustom.length > 0) {
+        await setContactCustomFieldValuesBulk(uniqueContactIds, contactCustom);
+      }
+      if (contactNativePatch) {
+        await prisma.contact.updateMany({
+          where: { id: { in: uniqueContactIds } },
+          data: contactNativePatch,
+        });
+      }
+    }
+  }
+
+  if (tagIds.length > 0 && taggableDealIds.length > 0) {
+    // `@@id([dealId, tagId])` + skipDuplicates dão o mesmo efeito do
+    // upsert por tag, em uma query por chunk.
+    await prisma.tagOnDeal.createMany({
+      data: taggableDealIds.flatMap((dealId) =>
+        tagIds.map((tagId) => ({ dealId, tagId })),
+      ),
+      skipDuplicates: true,
+    });
+  }
+
+  return {
+    succeeded: dealIds.length - failedDealIds.length,
+    failedDealIds,
+  };
+}
 
 /**
  * Aplica TODAS as alterações de um único deal. Ordem:
@@ -331,7 +455,7 @@ async function applyDealUpdates(
     });
     const contactId = deal?.contactId ?? null;
     if (!contactId) {
-      throw new Error("Negócio sem contato vinculado — campos de contato não aplicados");
+      throw new Error(NO_CONTACT_MESSAGE);
     }
     if (contactCustom.length > 0) {
       await upsertContactCustomFieldValues(contactId, contactCustom);
@@ -362,9 +486,9 @@ async function applyDealUpdates(
  */
 function buildDealNativePatch(
   native: BulkUpdateFieldsPayload["dealNative"],
-): Prisma.DealUpdateInput | null {
+): Prisma.DealUpdateManyMutationInput | null {
   if (!native) return null;
-  const patch: Prisma.DealUpdateInput = {};
+  const patch: Prisma.DealUpdateManyMutationInput = {};
   if (typeof native.title === "string" && native.title.length > 0) {
     patch.title = native.title;
   }
@@ -387,9 +511,9 @@ function buildDealNativePatch(
  */
 function buildContactNativePatch(
   native: BulkUpdateFieldsPayload["contactNative"],
-): Prisma.ContactUpdateInput | null {
+): Prisma.ContactUpdateManyMutationInput | null {
   if (!native) return null;
-  const patch: Prisma.ContactUpdateInput = {};
+  const patch: Prisma.ContactUpdateManyMutationInput = {};
   if (typeof native.name === "string" && native.name.length > 0) {
     patch.name = native.name;
   }

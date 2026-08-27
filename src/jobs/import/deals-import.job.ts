@@ -12,11 +12,15 @@ import {
 } from "@/lib/deal-import-core";
 import { readTableFromBuffer, upsertImportTag } from "@/lib/import-helpers";
 import { getLogger } from "@/lib/logger";
-import { prismaBase } from "@/lib/prisma-base";
+import { prismaImport } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getCustomFields } from "@/services/custom-fields";
 import { readStoredFile } from "@/lib/storage/local";
-import type { DealImportPayload } from "@/lib/queue";
+import {
+  enqueueImportEtl,
+  IMPORT_ETL_JOB_NAMES,
+  type DealImportPayload,
+} from "@/lib/queue";
 
 import {
   incrementOperationProgress,
@@ -33,6 +37,18 @@ const log = getLogger("worker.etl.deal-import");
  * processar, e atualiza o progresso ao fim de cada chunk.
  */
 const CHUNK_SIZE = 200;
+
+/**
+ * Fatia de linhas que um sub-job processa antes de re-enfileirar a próxima.
+ * Um import grande é um job indivisível de minutos que monopoliza um dos
+ * poucos slots do etl-worker — fatiando e re-enfileirando no FIM da fila, as
+ * orgs intercalam e nenhuma trava as outras. Override via IMPORT_SLICE.
+ */
+const IMPORT_SLICE = (() => {
+  const raw = process.env.IMPORT_SLICE;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2000;
+})();
 
 function chunkSleepMs(): number {
   const raw = process.env.IMPORT_CHUNK_SLEEP_MS;
@@ -59,14 +75,20 @@ export async function processDealsImport(
   job: Job<DealImportPayload>,
 ): Promise<void> {
   const { operationId, organizationId, fileName, originalName } = payload;
-  const ctx = log.child({ operationId, organizationId, jobId: job.id });
+  const offset = payload.offset ?? 0;
+  const isFirstSlice = offset === 0;
+  const ctx = log.child({ operationId, organizationId, jobId: job.id, offset });
 
-  await markOperationStarted(operationId, organizationId);
+  // Só a primeira fatia marca o início (e zera o progresso). Fatias seguintes
+  // continuam somando sobre o progresso acumulado.
+  if (isFirstSlice) {
+    await markOperationStarted(operationId, organizationId);
+  }
 
   // 1. Conteúdo do arquivo: base64 embutido no BulkOperation.payload; fallback disco.
   let fileBuffer: Buffer | null = null;
   try {
-    const op = await prismaBase.bulkOperation.findUnique({
+    const op = await prismaImport.bulkOperation.findUnique({
       where: { id: operationId },
       select: { payload: true },
     });
@@ -187,10 +209,13 @@ export async function processDealsImport(
     // fallback por linha
   }
 
-  // 6. Processa em chunks; pré-carrega contatos do chunk antes do loop.
+  // 6. Processa APENAS a fatia [offset, offset+IMPORT_SLICE) em chunks;
+  // pré-carrega contatos do chunk antes do loop. Se houver mais linhas além
+  // da fatia, re-enfileira a próxima no fim da fila ao final.
+  const sliceEnd = Math.min(offset + IMPORT_SLICE, rows.length);
   const pause = chunkSleepMs();
-  for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
-    const chunk = rows.slice(start, start + CHUNK_SIZE);
+  for (let start = offset; start < sliceEnd; start += CHUNK_SIZE) {
+    const chunk = rows.slice(start, Math.min(start + CHUNK_SIZE, sliceEnd));
 
     try {
       await preloadContactsForChunk(chunk, cache);
@@ -238,6 +263,29 @@ export async function processDealsImport(
     );
 
     if (pause > 0) await sleep(pause);
+  }
+
+  // Há mais linhas além desta fatia? Re-enfileira a próxima no FIM da fila,
+  // cedendo o slot à próxima org (justiça entre tenants). A próxima fatia
+  // re-parseia o arquivo (barato) e continua do offset.
+  if (sliceEnd < rows.length) {
+    const enqueued = await enqueueImportEtl(IMPORT_ETL_JOB_NAMES.dealImport, {
+      ...payload,
+      offset: sliceEnd,
+    });
+    if (!enqueued) {
+      await markOperationFailed(
+        operationId,
+        organizationId,
+        "Redis indisponível ao re-enfileirar a próxima fatia do import.",
+      );
+      return;
+    }
+    ctx.info(
+      { processedUpTo: sliceEnd, totalRows: rows.length },
+      "Fatia concluída — próxima fatia enfileirada",
+    );
+    return;
   }
 
   await markOperationFinished(operationId, organizationId);

@@ -137,7 +137,7 @@ export async function syncUserRoleAssignment(
     update: {},
   });
 
-  await invalidateAuthzForUser(args.userId);
+  await invalidateAuthzForUser(args.organizationId, args.userId);
   return true;
 }
 

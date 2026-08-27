@@ -1,5 +1,6 @@
-import { Worker, type Job } from "bullmq";
+import { Queue, Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
+import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -17,8 +18,8 @@ import {
   type CampaignDispatchPayload,
   type CampaignSendPayload,
   enqueueCampaignSendBulk,
+  enqueueCampaignDispatch,
   enqueueAutomationJob,
-  enqueueBaileysOutbound,
 } from "@/lib/queue";
 import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
@@ -34,11 +35,15 @@ import {
 } from "@/services/campaign-builder/meta-compliance";
 import {
   clampCampaignSendRate,
+  getCampaignOrgCredit,
   getCampaignSendConcurrency,
+  getCampaignSendGlobalRateMax,
   getCampaignSendRateMax,
+  isCampaignPerPhoneSlotEnabled,
+  isCampaignSendRoundRobinEnabled,
+  isCampaignWindowPrefetchEnabled,
 } from "@/lib/campaign-send-rate";
 import {
-  flushCampaignCounters,
   incrementCampaignCounter,
   maybeCompleteCampaign,
 } from "@/lib/campaign-counters";
@@ -48,6 +53,11 @@ import {
 import { randomUUID } from "node:crypto";
 
 const BATCH_SIZE = 500;
+// Fatia de contatos que o dispatch processa antes de se re-enfileirar. Ceder o
+// slot a cada fatia (em vez de enfileirar a campanha inteira) é o que permite
+// outras orgs intercalarem na fila campaign-send — sem isso, as primeiras
+// campanhas despachadas monopolizam a frente da fila (head-of-line blocking).
+const DISPATCH_SLICE = 2000;
 const globalWorker = globalThis as unknown as {
   campaignThrottleRedis?: IORedis;
   campaignRowCache?: Map<string, { row: unknown; at: number }>;
@@ -246,13 +256,12 @@ function getThrottleRedis(): IORedis {
   return globalWorker.campaignThrottleRedis;
 }
 
-async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
+/** Aloca o próximo slot de um token bucket no Redis (mesmo padrão do
+ * throttle por phoneNumberId). Usado também para o rate limit global do
+ * rodízio, que substitui o `limiter` do BullMQ. */
+async function allocateThrottleSlot(key: string, intervalMs: number) {
   const redis = getThrottleRedis();
-  // Defense-in-depth: clamp even if DB still has legacy sendRate=80.
-  const rate = clampCampaignSendRate(sendRate);
-  const intervalMs = Math.max(1, Math.ceil(1000 / rate));
   const now = Date.now();
-  const key = `campaign:meta:throttle:${phoneNumberId}`;
   const slot = await redis.eval(
     `
       local key = KEYS[1]
@@ -276,7 +285,34 @@ async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
   }
 }
 
-async function isWithinMetaWindow(contactId: string, channelId: string): Promise<boolean> {
+async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
+  // Defense-in-depth: clamp even if DB still has legacy sendRate=80.
+  const rate = clampCampaignSendRate(sendRate);
+  const intervalMs = Math.max(1, Math.ceil(1000 / rate));
+  await allocateThrottleSlot(`campaign:meta:throttle:${phoneNumberId}`, intervalMs);
+}
+
+/**
+ * Janela 24h da Meta para envio TEXT. Com o prefetch do claim do rodízio
+ * (CAMPAIGN_WINDOW_PREFETCH, default on), o `prefetchedLastInboundAt` é o
+ * último inbound lido no claim. Mensagens são append-only — o último inbound
+ * só pode ficar MAIS recente entre claim e envio — então se o timestamp do
+ * claim, avaliado AGORA, está dentro da janela, a query ao vivo concordaria:
+ * retorna sem consultar. Fora/ausente (ou caminho FIFO, sem prefetch): checa
+ * ao vivo, cobrindo o inbound que chega entre o claim e o envio.
+ */
+async function isWithinMetaWindow(
+  contactId: string,
+  channelId: string,
+  prefetchedLastInboundAt?: Date | null,
+): Promise<boolean> {
+  if (
+    isCampaignWindowPrefetchEnabled() &&
+    prefetchedLastInboundAt &&
+    isInside24hWindow(prefetchedLastInboundAt)
+  ) {
+    return true;
+  }
   const latestInbound = await prisma.message.findFirst({
     where: {
       conversation: { contactId, channelId },
@@ -291,8 +327,8 @@ async function isWithinMetaWindow(contactId: string, channelId: string): Promise
 // ── Dispatch worker ──────────────────────────────────────
 
 async function handleDispatch(payload: CampaignDispatchPayload) {
-  const { campaignId } = payload;
-  console.info(`[campaign-dispatch] Processing campaign ${campaignId}`);
+  const { campaignId, cursor } = payload;
+  console.info(`[campaign-dispatch] Processing campaign ${campaignId}${cursor ? ` (fatia após ${cursor})` : " (primeira fatia)"}`);
 
   const campaign = await prismaBase.campaign.findUnique({
     where: { id: campaignId },
@@ -310,10 +346,12 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
     return;
   }
 
-  await prisma.campaign.update({
-    where: { id: campaignId },
-    data: { status: "PROCESSING" },
-  });
+  if (campaign.status !== "PROCESSING") {
+    await prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: "PROCESSING" },
+    });
+  }
 
   try {
     const filters: SegmentFilters = campaign.segment
@@ -322,13 +360,20 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
 
     const where = buildContactWhere(filters);
     where.phone = { not: null };
+    // Keyset pagination: estável sob inserts concurrentes e O(1) por fatia
+    // (OFFSET aqui reintroduziria o custo quadrático que matamos no MAX(number)).
+    if (cursor) {
+      where.id = { gt: cursor };
+    }
 
     const contacts = await prisma.contact.findMany({
       where,
       select: { id: true, phone: true, whatsappBsuid: true },
+      orderBy: { id: "asc" },
+      take: DISPATCH_SLICE,
     });
 
-    if (contacts.length === 0) {
+    if (contacts.length === 0 && !cursor) {
       console.warn(`[campaign-dispatch] No contacts for campaign ${campaignId}`);
       await prisma.campaign.update({
         where: { id: campaignId },
@@ -337,10 +382,16 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       return;
     }
 
+    // No modo rodízio (CAMPAIGN_SEND_ROUND_ROBIN, default ligado) o dispatch
+    // NÃO enfileira em campaign-send: o sendWorker reabastece do Postgres por
+    // org em rodízio com crédito — a fila Redis deixa de ser o backlog e
+    // nenhuma org monopoliza o envio. Desligado (rollback), enfileira como
+    // antes e o Worker FIFO consome.
+    const roundRobin = isCampaignSendRoundRobinEnabled();
     let enqueued = 0;
     for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
       const batch = contacts.slice(i, i + BATCH_SIZE);
-      await prisma.campaignRecipient.createMany({
+      const created = await prisma.campaignRecipient.createMany({
         data: batch.map((c) => ({
           organizationId,
           campaignId,
@@ -349,6 +400,13 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
         })),
         skipDuplicates: true,
       });
+
+      if (roundRobin) {
+        // createMany com skipDuplicates devolve só os inseridos — retry de
+        // fatia não infla totalRecipients.
+        enqueued += created.count;
+        continue;
+      }
 
       // 1 findMany + addBulk por lote — evita N× (findUnique + queue.add)
       // que gerava storm de Redis/DB no início do disparo (~2k destinatários).
@@ -380,16 +438,41 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       enqueued += payloads.length;
     }
 
+    // Acumula o total fatiado. A campanha permanece em PROCESSING até a ÚLTIMA
+    // fatia: maybeCompleteCampaign e o sweepStuck só completam quando status =
+    // SENDING, então marcar SENDING antes da hora faria uma campanha ser
+    // concluída no meio (sent+failed >= totalRecipients parcial).
     await prisma.campaign.update({
       where: { id: campaignId },
       data: {
-        status: "SENDING",
-        totalRecipients: contacts.length,
-        startedAt: new Date(),
+        totalRecipients: { increment: enqueued },
+        ...(cursor ? {} : { startedAt: new Date() }),
       },
     });
 
-    console.info(`[campaign-dispatch] Enqueued ${enqueued} send jobs for campaign ${campaignId}`);
+    const hasMore = contacts.length === DISPATCH_SLICE;
+    if (hasMore) {
+      // Re-enfileira a próxima fatia. O re-enqueue vai para o FIM da fila
+      // campaign-dispatch, cedendo o slot à próxima campanha — é o que
+      // intercala as orgs e evita o head-of-line blocking.
+      const nextCursor = contacts[contacts.length - 1].id;
+      await enqueueCampaignDispatch({ campaignId, cursor: nextCursor });
+      console.info(`[campaign-dispatch] Campaign ${campaignId}: fatia de ${enqueued} recipients ${roundRobin ? "criados" : "enfileirada"}, próxima fatia após ${nextCursor}`);
+      return;
+    }
+
+    // Última fatia: agora sim marca SENDING — a partir daqui o mecanismo de
+    // conclusão (maybeCompleteCampaign / sweepStuck) pode agir com segurança.
+    await prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: "SENDING" },
+    });
+
+    console.info(
+      roundRobin
+        ? `[campaign-dispatch] ${enqueued} recipients criados (fatia final) for campaign ${campaignId} — rodízio reabastece do banco`
+        : `[campaign-dispatch] Enqueued ${enqueued} send jobs (fatia final) for campaign ${campaignId}`,
+    );
   } catch (err) {
     console.error(`[campaign-dispatch] Error dispatching campaign ${campaignId}:`, err);
     await prisma.campaign.update({
@@ -401,20 +484,51 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
 
 // ── Send worker ──────────────────────────────────────────
 
-async function handleSend(
+/** Erro tipado: a Meta falhou de forma recuperável e o recipient JÁ foi
+ * devolvido a PENDING dentro do processRecipient. No caminho BullMQ o throw
+ * propaga para o retry com backoff; no rodízio o caller só contabiliza a
+ * tentativa em memória (o recipient é reivindicado de novo num ciclo futuro). */
+class CampaignSendRetryable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CampaignSendRetryable";
+  }
+}
+
+type SendOutcome =
+  | "sent"
+  | "failed"
+  /** Campanha pausada/cancelada/ausente — no rodízio o caller devolve o
+   * recipient a PENDING para a retomada funcionar. */
+  | "skipped_inactive"
+  /** Já enviado (idempotência) — nada a fazer. */
+  | "skipped_duplicate";
+
+type SendAttemptContext = {
+  /** Tentativas já feitas (BullMQ: job.attemptsMade; rodízio: mapa em memória). */
+  attemptsMade: number;
+  maxAttempts: number;
+};
+
+async function processRecipient(
   payload: CampaignSendPayload,
-  job: Job<CampaignSendPayload>,
-) {
+  ctx: SendAttemptContext,
+): Promise<SendOutcome> {
   const { campaignId, recipientId, contactId, contactPhone, contactBsuid } = payload;
+  // Prefetch da janela 24h vindo do claim do rodízio (null = sem inbound no
+  // claim ou prefetch desligado — o check TEXT decide se consulta ao vivo).
+  const prefetchedLastInboundAt = payload.lastInboundAt
+    ? new Date(payload.lastInboundAt)
+    : null;
 
   // Cache curto (5s) — sem isso cada destinatário relê a campanha.
   const campaign = await loadCampaignRow(campaignId);
 
-  if (!campaign) return;
+  if (!campaign) return "skipped_inactive";
 
   if (campaign.status === "PAUSED" || campaign.status === "CANCELLED") {
     console.info(`[campaign-send] Campaign ${campaignId} is ${campaign.status}, skipping recipient ${recipientId}`);
-    return;
+    return "skipped_inactive";
   }
 
   // Idempotência: retry/stall do BullMQ não pode chamar a Meta de novo
@@ -425,7 +539,7 @@ async function handleSend(
     where: { id: recipientId },
     select: { status: true, metaMessageId: true },
   });
-  if (!recipient) return;
+  if (!recipient) return "skipped_duplicate";
   if (
     recipient.status === "SENT" ||
     recipient.status === "DELIVERED" ||
@@ -435,7 +549,7 @@ async function handleSend(
     console.info(
       `[campaign-send] Recipient ${recipientId} já enviado (${recipient.status}), skipping`,
     );
-    return;
+    return "skipped_duplicate";
   }
 
   await prisma.campaignRecipient.update({
@@ -454,6 +568,9 @@ async function handleSend(
       if (campaign.automationId) {
         await enqueueAutomationJob({
           automationId: campaign.automationId,
+          // org já conhecida aqui — poupa o lookup por automationId no
+          // admission control de justiça (lib/automation-fairness.ts).
+          organizationId: campaign.organizationId,
           context: {
             contactId,
             event: "campaign_trigger",
@@ -466,11 +583,11 @@ async function handleSend(
         });
       }
       await markRecipientSent(recipientId, campaignId);
-      return;
+      return "sent";
     }
 
     if (provider === "META_CLOUD_API") {
-      await sendViaMetaCloudApi(campaign, config, contactPhone, contactBsuid, recipientId, campaignId, contactId);
+      await sendViaMetaCloudApi(campaign, config, contactPhone, contactBsuid, recipientId, campaignId, contactId, prefetchedLastInboundAt);
     } else if (provider === "BAILEYS_MD") {
       await sendViaBaileys(campaign, contactPhone, contactId, recipientId, campaignId);
     } else {
@@ -481,15 +598,15 @@ async function handleSend(
       status: "accepted",
       organization: safeLabel(campaign.organizationId),
     });
+    return "sent";
   } catch (err) {
     const errorMsg = formatMetaSendError(err);
     console.error(`[campaign-send] Error for recipient ${recipientId}:`, errorMsg);
     const metaCode = extractMetaRetryCode(errorMsg);
-    const maxAttempts = Math.max(1, Number(job.opts.attempts ?? 1));
     const shouldRetry = shouldRetryCampaignSendError(
       errorMsg,
-      job.attemptsMade,
-      maxAttempts,
+      ctx.attemptsMade,
+      ctx.maxAttempts,
     );
     const windowExpired = isWindowExpiredError(errorMsg);
 
@@ -510,7 +627,7 @@ async function handleSend(
       console.warn(
         `[campaign-send][ALERTA] Retryable Meta error code=${metaCode} campaign=${campaignId} recipient=${recipientId}`,
       );
-      throw err;
+      throw new CampaignSendRetryable(errorMsg);
     }
 
     // Update condicional (status != FAILED) para evitar double-count caso o
@@ -532,9 +649,21 @@ async function handleSend(
       status: "failed",
       organization: safeLabel(campaign.organizationId),
     });
-
-    await checkCampaignCompletion(campaignId);
+    return "failed";
   }
+}
+
+/** Caminho FIFO (rollback, CAMPAIGN_SEND_ROUND_ROBIN=0): o throw de
+ * CampaignSendRetryable propaga para o BullMQ re-tentar com backoff
+ * conforme job.opts.attempts — comportamento histórico preservado. */
+async function handleSend(
+  payload: CampaignSendPayload,
+  job: Job<CampaignSendPayload>,
+) {
+  await processRecipient(payload, {
+    attemptsMade: job.attemptsMade,
+    maxAttempts: Math.max(1, Number(job.opts.attempts ?? 1)),
+  });
 }
 
 async function sendViaMetaCloudApi(
@@ -556,6 +685,7 @@ async function sendViaMetaCloudApi(
   recipientId: string,
   campaignId: string,
   contactId: string,
+  prefetchedLastInboundAt?: Date | null,
 ) {
   // Nunca montar cliente Meta manualmente via `config.accessToken`; usar
   // metaClientFromConfig para garantir decrypt/back-compat centralizados.
@@ -602,7 +732,11 @@ async function sendViaMetaCloudApi(
     );
   } else if (campaign.type === "TEXT") {
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
-    const withinWindow = await isWithinMetaWindow(contactId, campaign.channel.id);
+    const withinWindow = await isWithinMetaWindow(
+      contactId,
+      campaign.channel.id,
+      prefetchedLastInboundAt,
+    );
     if (!withinWindow) {
       throw new Error("META_WINDOW_EXPIRED_24H");
     }
@@ -636,8 +770,6 @@ async function sendViaMetaCloudApi(
       err instanceof Error ? err.message : err,
     );
   }
-
-  await checkCampaignCompletion(campaignId);
 }
 
 /**
@@ -668,6 +800,10 @@ async function persistCampaignOutboundMessage(input: {
     // Campanha TEMPLATE/TEXT: ticket novo só pra histórico do disparo — sem
     // herdar dono (Entrada). Auto-resolve abaixo fecha o ticket em seguida.
     inheritAssignee: false,
+    // Mesma razão do "NÃO publicar SSE" no fim desta função: o
+    // CONVERSATION_CREATED espelhava uma bolha "Conversa #N aberta" (4 queries
+    // + 1 Message) e um publish Redis por destinatário.
+    skipActivityLog: true,
   });
   if (
     ensured.status === "skipped_contact_missing" ||
@@ -740,24 +876,14 @@ async function sendViaBaileys(
   recipientId: string,
   campaignId: string,
 ) {
-  if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
-
-  const conv = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp", waJid: { not: null } },
-    select: { waJid: true },
-  });
-  const to = conv?.waJid ?? phone;
-
-  await enqueueBaileysOutbound({
-    channelId: campaign.channel.id,
-    to,
-    content: campaign.textContent,
-    messageType: "text",
-    conversationId: "",
-    messageId: "",
-  });
-
-  await markRecipientSent(recipientId, campaignId);
+  // Baileys não é usado neste ambiente: as filas baileys-outbound/control não
+  // têm consumidor em produção (entrypoint roteia worker-whatsapp para o
+  // campaign-worker). Enfileirar aqui e marcar SENT reportaria 100% enviado
+  // sem enviar nada. Falhar explicitamente torna o canal mal configurado
+  // visível em vez de produzir sucesso fantasma.
+  throw new Error(
+    "Provider BAILEYS_MD não suportado neste ambiente (sem consumidor nas filas baileys-outbound/control).",
+  );
 }
 
 async function markRecipientSent(recipientId: string, campaignId: string) {
@@ -766,22 +892,22 @@ async function markRecipientSent(recipientId: string, campaignId: string) {
     data: { status: "SENT", sentAt: new Date() },
   });
   incrementCampaignCounter(campaignId, "sentCount");
-  await checkCampaignCompletion(campaignId);
 }
 
-async function checkCampaignCompletion(campaignId: string) {
-  // Sempre flush + check: o sample 1/N deixava ~96% das campanhas presas em
-  // SENDING depois do último destinatário, porque o sweep citado no comentário
-  // antigo nunca existiu e o flush do timer não concluía o status.
-  await checkCampaignCompletionNow(campaignId);
-}
-
-async function checkCampaignCompletionNow(campaignId: string) {
-  // Contadores são bufferizados (campaign-counters) — flusha antes de ler,
-  // senão o check de conclusão enxerga valores defasados.
-  await flushCampaignCounters(campaignId);
-  await maybeCompleteCampaign(campaignId);
-}
+// Não há check de conclusão por mensagem. O antigo `checkCampaignCompletion`
+// forçava `flushCampaignCounters` a cada envio, anulando o buffer de
+// campaign-counters (threshold 50 / janela 2s) e gerando 1 `campaign.update` +
+// 1 `campaign.findUnique` na MESMA row por mensagem — custo e serialização de
+// todos os workers no lock dessa linha.
+//
+// A conclusão continua garantida por dois caminhos, ambos já existentes:
+//   1. `flush()` em campaign-counters chama `maybeCompleteCampaign` sempre que
+//      descarrega sent/failed — inclusive no flush por timer, que é o último
+//      evento da campanha;
+//   2. `sweepStuck` (a cada 30s, abaixo) finaliza qualquer campanha SENDING
+//      cujos contadores persistidos já cobrem `totalRecipients`.
+// Diferente da amostragem 1/N removida antes, aqui nenhum incremento fica sem
+// flush: todo `incrementCampaignCounter` agenda o seu.
 
 // ── Bootstrap ────────────────────────────────────────────
 
@@ -807,6 +933,307 @@ async function resolveCampaignOrgId(campaignId: string): Promise<string | null> 
   // Não cachear miss — campanha pode ter sido criada depois do enqueue.
   if (orgId) cache.set(campaignId, orgId);
   return orgId;
+}
+
+// ── Rodízio com reabastecimento do Postgres ─────────────
+//
+// Substitui o consumo FIFO da fila `campaign-send`: em vez de depender da
+// ordem em que os jobs foram enfileirados (quem enfileira primeiro monopoliza
+// o envio — medido no stress de 23/08: 200 primeiros em wait todos de uma
+// org, 4 orgs com sentCount=0 atrás de 153 mil jobs), um loop contínuo
+// reivindica lotes de recipients PENDING direto no banco, por org, em
+// rodízio com crédito (CAMPAIGN_ORG_CREDIT). O Redis deixa de ser depósito
+// de backlog; o banco é a fila.
+//
+// Justiça: cada ciclo percorre as orgs com pendência em ordem rotativa e
+// reivindica uma fatia igual (teto = crédito) de cada — todas avançam
+// juntas, independente de quem despachou primeiro.
+//
+// Segurança:
+// - Claim atômico: UPDATE ... WHERE id IN (SELECT ... FOR UPDATE OF r SKIP
+//   LOCKED) — dois workers/réplicas nunca pegam o mesmo recipient.
+// - Crash após o claim deixa o recipient em SENDING; o sweepStuck devolve
+//   SENDING antigos (COALESCE(updatedAt, createdAt)) a PENDING.
+// - Idempotência inalterada: processRecipient pula quem já tem metaMessageId
+//   ou status SENT/DELIVERED/READ.
+// - Rate limit global (WHATSAPP_RATE_LIMIT_MAX/DURATION, via token bucket
+//   no Redis) e throttle por phoneNumberId (waitForMetaThrottle) continuam
+//   ativos — o rodízio só muda DE ONDE vêm os recipients, não COMO enviam.
+
+type ClaimedRecipient = {
+  recipientId: string;
+  campaignId: string;
+  contactId: string;
+  contactPhone: string | null;
+  contactBsuid: string | null;
+  /** Último inbound do contato no canal da campanha, lido no claim (só
+   * campanhas TEXT; null nas demais). Alimenta o check da janela 24h sem
+   * query por destinatário. */
+  lastInboundAt: Date | null;
+  /** phoneNumberId do canal da campanha (channels.config->>'phoneNumberId'
+   * — plaintext, não é campo sensível). Dirige o slot de envio por número
+   * (2.4). Null em canal sem config (ex.: Baileys) → cai no teto global. */
+  phoneNumberId: string | null;
+  organizationId: string;
+};
+
+function startRoundRobinSender(opts: {
+  sendConcurrency: number;
+  rateLimitMax: number;
+  rateLimitDuration: number;
+}) {
+  const { sendConcurrency, rateLimitMax, rateLimitDuration } = opts;
+  const orgCredit = getCampaignOrgCredit();
+  // 2.4: slot por phoneNumberId (default on). A válvula global alta protege
+  // o Postgres; o teto real da Meta passa a ser por número. Kill switch:
+  // CAMPAIGN_SEND_PER_PHONE_SLOT=0 volta ao teto global único.
+  const perPhoneSlot = isCampaignPerPhoneSlotEnabled();
+  const globalRateMax = getCampaignSendGlobalRateMax();
+  const maxAttempts = Math.max(1, envPositiveInt("WHATSAPP_MAX_ATTEMPTS", 6));
+  // Buffer local de recipients reivindicados à espera de um runner: mantém
+  // os runners ocupados sem um claim por envio, mas limitado para um crash
+  // não deixar muitos SENDING órfãos (o sweeper os recupera em ~5min).
+  const localBufferMax = Math.max(sendConcurrency * 8, orgCredit);
+  const localQueue: ClaimedRecipient[] = [];
+  // Substitui o attemptsMade do BullMQ: tentativas por recipient em memória.
+  // Perda em crash é tolerável — o recipient volta a PENDING com budget novo
+  // (mesma exposição de um retry BullMQ após flush do Redis).
+  const attemptsByRecipient = new Map<string, number>();
+  let rotation = 0;
+  let orgCache: { orgs: string[]; at: number } = { orgs: [], at: 0 };
+  const stats = { claimed: 0, sent: 0, failed: 0, retried: 0 };
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** Orgs com recipients PENDING — loose index scan (CTE recursiva) sobre
+   * (organizationId, status, id): O(#orgs) por consulta, não O(#pendentes).
+   * Cache de 1s para não repetir a query a cada rodada do refill. */
+  async function listOrgsWithPending(): Promise<string[]> {
+    if (orgCache.orgs.length && Date.now() - orgCache.at < 1_000) {
+      return orgCache.orgs;
+    }
+    const rows = await prismaBase.$queryRaw<{ organizationId: string }[]>`
+      WITH RECURSIVE orgs AS (
+        (SELECT "organizationId"
+           FROM campaign_recipients
+          WHERE status = 'PENDING'
+          ORDER BY "organizationId"
+          LIMIT 1)
+        UNION ALL
+        SELECT (
+          SELECT r."organizationId"
+            FROM campaign_recipients r
+           WHERE r.status = 'PENDING'
+             AND r."organizationId" > o."organizationId"
+           ORDER BY r."organizationId"
+           LIMIT 1
+        )
+        FROM orgs o
+        WHERE o."organizationId" IS NOT NULL
+      )
+      SELECT "organizationId" FROM orgs WHERE "organizationId" IS NOT NULL`;
+    const orgs = rows.map((r) => r.organizationId);
+    orgCache = { orgs, at: Date.now() };
+    return orgs;
+  }
+
+  /** Claim atômico de até `limit` recipients PENDING da org (keyset por id,
+   * sem OFFSET). FOR UPDATE OF r SKIP LOCKED: duas réplicas nunca pegam o
+   * mesmo recipient. O join em campaigns filtra campanhas pausadas/
+   * canceladas — recipient de campanha inativa nem é reivindicado.
+   *
+   * A coluna `lastInboundAt` elimina o N+1 do check de janela 24h (antes:
+   * 1 findFirst em messages por destinatário TEXT no envio). O CASE
+   * restringe o subquery a campanhas TEXT — TEMPLATE/AUTOMATION não usam
+   * janela e recebem NULL sem custo. A semântica replica exatamente a do
+   * findFirst (messages ⋈ conversations por contactId+channelId, direction
+   * 'in', createdAt DESC LIMIT 1) — a coluna denormalizada
+   * conversations.lastInboundAt NÃO serve (fica stale — ver
+   * channel-session.ts). CAMPAIGN_WINDOW_PREFETCH=0 remove o subquery. */
+  async function claimBatch(
+    organizationId: string,
+    limit: number,
+  ): Promise<Omit<ClaimedRecipient, "organizationId">[]> {
+    const lastInboundSelect = isCampaignWindowPrefetchEnabled()
+      ? Prisma.raw(`,
+             (CASE WHEN u."campaignType" = 'TEXT' THEN (
+               SELECT m."createdAt"
+                 FROM messages m
+                 JOIN conversations cv ON cv.id = m."conversationId"
+                WHERE cv."contactId" = u."contactId"
+                  AND cv."channelId" = u."channelId"
+                  AND m.direction = 'in'
+                ORDER BY m."createdAt" DESC
+                LIMIT 1
+             ) END) AS "lastInboundAt"`)
+      : Prisma.raw(`,
+             NULL::timestamptz AS "lastInboundAt"`);
+    return prismaBase.$queryRaw<Omit<ClaimedRecipient, "organizationId">[]>`
+      WITH batch AS (
+        SELECT r.id, c."channelId", c.type AS "campaignType",
+               ch.config->>'phoneNumberId' AS "phoneNumberId"
+          FROM campaign_recipients r
+          JOIN campaigns c ON c.id = r."campaignId"
+          JOIN channels ch ON ch.id = c."channelId"
+         WHERE r."organizationId" = ${organizationId}
+           AND r.status = 'PENDING'
+           AND c.status IN ('SENDING', 'PROCESSING')
+         ORDER BY r.id
+         LIMIT ${limit}::int
+         FOR UPDATE OF r SKIP LOCKED
+      ),
+      upd AS (
+        UPDATE campaign_recipients cr
+           SET status = 'SENDING', "updatedAt" = now()
+          FROM batch
+         WHERE cr.id = batch.id
+        RETURNING cr.id, cr."campaignId", cr."contactId",
+                  batch."channelId", batch."campaignType", batch."phoneNumberId"
+      )
+      SELECT u.id AS "recipientId",
+             u."campaignId",
+             u."contactId",
+             ct.phone AS "contactPhone",
+             ct.whatsapp_bsuid AS "contactBsuid",
+             u."phoneNumberId"
+             ${lastInboundSelect}
+        FROM upd u
+        LEFT JOIN contacts ct ON ct.id = u."contactId"`;
+  }
+
+  async function refill() {
+    for (;;) {
+      try {
+        const room = localBufferMax - localQueue.length;
+        if (room <= 0) {
+          await sleep(25);
+          continue;
+        }
+        const orgs = await listOrgsWithPending();
+        if (orgs.length === 0) {
+          await sleep(500);
+          continue;
+        }
+        // Rodízio: cada ciclo começa a varredura numa org diferente.
+        const start = rotation++ % orgs.length;
+        const ordered = orgs.slice(start).concat(orgs.slice(0, start));
+        // Fatia igual por org nesta rodada (teto = crédito) — é o que faz
+        // todas avançarem juntas em vez de uma drenar o buffer sozinha.
+        const perOrg = Math.max(
+          1,
+          Math.min(orgCredit, Math.floor(room / ordered.length)),
+        );
+        let claimed = 0;
+        for (const org of ordered) {
+          const roomLeft = localBufferMax - localQueue.length;
+          if (roomLeft <= 0) break;
+          const batch = await claimBatch(org, Math.min(perOrg, roomLeft));
+          if (batch.length === 0) continue;
+          claimed += batch.length;
+          for (const b of batch) localQueue.push({ ...b, organizationId: org });
+        }
+        stats.claimed += claimed;
+        if (claimed === 0) {
+          // Lista de orgs estava velha (pendências acabaram) — relê já.
+          orgCache.at = 0;
+          await sleep(300);
+        }
+      } catch (err) {
+        console.warn(
+          "[campaign-rr] refill falhou (retry em 1s):",
+          err instanceof Error ? err.message : err,
+        );
+        await sleep(1_000);
+      }
+    }
+  }
+
+  async function runner() {
+    for (;;) {
+      const item = localQueue.shift();
+      if (!item) {
+        await sleep(25);
+        continue;
+      }
+      try {
+        if (!item.contactPhone) {
+          // Contato perdeu o telefone depois do dispatch — falha explícita
+          // para não travar a conclusão (totalRecipients conta os criados).
+          await prismaBase.campaignRecipient.update({
+            where: { id: item.recipientId },
+            data: { status: "FAILED", errorMessage: "Contato sem telefone no envio." },
+          });
+          incrementCampaignCounter(item.campaignId, "failedCount");
+          stats.failed++;
+          continue;
+        }
+        // Rate limit global — mesmo teto do limiter BullMQ do caminho FIFO.
+        await allocateThrottleSlot(
+          "campaign:send:global-slot",
+          Math.max(1, Math.ceil(rateLimitDuration / rateLimitMax)),
+        );
+        const payload: CampaignSendPayload = {
+          campaignId: item.campaignId,
+          recipientId: item.recipientId,
+          contactId: item.contactId,
+          contactPhone: item.contactPhone,
+          contactBsuid: item.contactBsuid ?? undefined,
+          lastInboundAt: item.lastInboundAt
+            ? item.lastInboundAt.toISOString()
+            : null,
+        };
+        const outcome = await withSystemContext(item.organizationId, () =>
+          processRecipient(payload, {
+            attemptsMade: attemptsByRecipient.get(item.recipientId) ?? 0,
+            maxAttempts,
+          }),
+        );
+        attemptsByRecipient.delete(item.recipientId);
+        if (outcome === "skipped_inactive") {
+          // Campanha pausada/cancelada entre o claim e o envio — devolve a
+          // PENDING para a retomada (resume) funcionar. O join do claim
+          // impede re-claim enquanto a campanha estiver inativa.
+          await prismaBase.campaignRecipient.updateMany({
+            where: { id: item.recipientId, status: "SENDING" },
+            data: { status: "PENDING" },
+          });
+          continue;
+        }
+        if (outcome === "sent") stats.sent++;
+        if (outcome === "failed") stats.failed++;
+      } catch (err) {
+        if (err instanceof CampaignSendRetryable) {
+          // O recipient já voltou a PENDING dentro do processRecipient.
+          attemptsByRecipient.set(
+            item.recipientId,
+            (attemptsByRecipient.get(item.recipientId) ?? 0) + 1,
+          );
+          stats.retried++;
+        } else {
+          // Erro inesperado (DB, bug): o recipient pode ter ficado SENDING —
+          // o sweepStuck devolve a PENDING em até CAMPAIGN_RR_STALE_SENDING_MS.
+          console.error(
+            `[campaign-rr] erro inesperado recipient=${item.recipientId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    }
+  }
+
+  void refill();
+  for (let i = 0; i < sendConcurrency; i++) void runner();
+
+  const statsTimer = setInterval(() => {
+    console.info(
+      `[campaign-rr] claimed=${stats.claimed} sent=${stats.sent} failed=${stats.failed} retried=${stats.retried} buffer=${localQueue.length} attemptsPendentes=${attemptsByRecipient.size}`,
+    );
+  }, 60_000);
+  statsTimer.unref?.();
+
+  console.info(
+    `[campaign-rr] rodízio ativo (concurrency=${sendConcurrency}, orgCredit=${orgCredit}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, buffer=${localBufferMax})`,
+  );
 }
 
 export function startCampaignWorkers() {
@@ -853,31 +1280,59 @@ export function startCampaignWorkers() {
     { connection, concurrency: 2 },
   );
 
-  const sendWorker = new Worker<CampaignSendPayload>(
-    CAMPAIGN_SEND_QUEUE_NAME,
-    async (job: Job<CampaignSendPayload>) => {
-      // orgId da campanha não muda — cache por processo evita 1 read PG por
-      // job (2k destinatários = 2k reads só pra resolver tenant).
-      const orgId = await resolveCampaignOrgId(job.data.campaignId);
-      if (!orgId) {
-        console.warn(`[campaign-send] Campaign ${job.data.campaignId} não encontrada`);
-        return;
+  // Rodízio (default) ou FIFO BullMQ (rollback via CAMPAIGN_SEND_ROUND_ROBIN=0).
+  const roundRobin = isCampaignSendRoundRobinEnabled();
+
+  let sendWorker: Worker<CampaignSendPayload> | null = null;
+  if (roundRobin) {
+    startRoundRobinSender({ sendConcurrency, rateLimitMax, rateLimitDuration });
+    // Backlog pré-rodízio na fila Redis não tem consumidor neste modo — o
+    // loop envia os mesmos recipients via PENDING no banco (idempotente),
+    // então o backlog é só desperdício de memória. Aviso best-effort.
+    void (async () => {
+      try {
+        const q = new Queue(CAMPAIGN_SEND_QUEUE_NAME, {
+          connection: connection.duplicate(),
+        });
+        const counts = await q.getJobCounts("waiting", "delayed");
+        const backlog = counts.waiting + counts.delayed;
+        if (backlog > 0) {
+          console.warn(
+            `[campaign-rr] fila campaign-send tem ${backlog} jobs de backlog sem consumidor (rodízio ativo). Os recipients correspondentes serão enviados via banco; considere obliterar a fila.`,
+          );
+        }
+        await q.close();
+      } catch {
+        /* aviso best-effort */
       }
-      await withSystemContext(orgId, () => handleSend(job.data, job));
-    },
-    {
-      connection: connection.duplicate(),
-      concurrency: sendConcurrency,
-      limiter: { max: rateLimitMax, duration: rateLimitDuration },
-    },
-  );
+    })();
+  } else {
+    sendWorker = new Worker<CampaignSendPayload>(
+      CAMPAIGN_SEND_QUEUE_NAME,
+      async (job: Job<CampaignSendPayload>) => {
+        // orgId da campanha não muda — cache por processo evita 1 read PG por
+        // job (2k destinatários = 2k reads só pra resolver tenant).
+        const orgId = await resolveCampaignOrgId(job.data.campaignId);
+        if (!orgId) {
+          console.warn(`[campaign-send] Campaign ${job.data.campaignId} não encontrada`);
+          return;
+        }
+        await withSystemContext(orgId, () => handleSend(job.data, job));
+      },
+      {
+        connection: connection.duplicate(),
+        concurrency: sendConcurrency,
+        limiter: { max: rateLimitMax, duration: rateLimitDuration },
+      },
+    );
+
+    sendWorker.on("failed", (job, err) => {
+      console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
+    });
+  }
 
   dispatchWorker.on("failed", (job, err) => {
     console.error(`[campaign-dispatch] Job ${job?.id} failed:`, err.message);
-  });
-
-  sendWorker.on("failed", (job, err) => {
-    console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
   });
 
   // Recupera campanhas que já bateram 100% mas ficaram em SENDING (check
@@ -899,6 +1354,67 @@ export function startCampaignWorkers() {
             await maybeCompleteCampaign(c.id);
           }
         }
+
+        // Recupera campanhas travadas em PROCESSING: com o dispatch fatiado, um
+        // worker morto entre fatias deixa a campanha em PROCESSING sem ninguém
+        // re-enfileirar a próxima. Retoma a partir do maior contactId já
+        // enfileirado (keyset), sem reprocessar o que já entrou na fila.
+        const staleProcessingMs = 60_000;
+        const stuck = await prismaBase.campaign.findMany({
+          where: {
+            status: "PROCESSING",
+            updatedAt: { lt: new Date(Date.now() - staleProcessingMs) },
+          },
+          select: { id: true },
+        });
+        for (const c of stuck) {
+          const last = await prismaBase.campaignRecipient.findFirst({
+            where: { campaignId: c.id },
+            orderBy: { contactId: "desc" },
+            select: { contactId: true },
+          });
+          await enqueueCampaignDispatch({ campaignId: c.id, cursor: last?.contactId });
+          console.warn(
+            `[campaign-worker] campanha ${c.id} travada em PROCESSING — re-enfileirando dispatch a partir de ${last?.contactId ?? "início"}`,
+          );
+        }
+
+        // Rodízio: recipients travados em SENDING (worker morreu entre o
+        // claim e o POST) voltam a PENDING. Restrito a campanhas ativas para
+        // usar o índice (campaignId, status) em vez de varrer a tabela. No
+        // modo FIFO quem recupera é o stall detection do BullMQ.
+        if (roundRobin) {
+          const staleSendingMs = envPositiveInt(
+            "CAMPAIGN_RR_STALE_SENDING_MS",
+            5 * 60_000,
+          );
+          const cutoff = new Date(Date.now() - staleSendingMs);
+          const activeCampaigns = await prismaBase.campaign.findMany({
+            where: { status: { in: ["SENDING", "PROCESSING"] } },
+            select: { id: true },
+          });
+          if (activeCampaigns.length > 0) {
+            const recovered = await prismaBase.campaignRecipient.updateMany({
+              where: {
+                campaignId: { in: activeCampaigns.map((c) => c.id) },
+                status: "SENDING",
+                OR: [
+                  { updatedAt: { lt: cutoff } },
+                  { updatedAt: null, createdAt: { lt: cutoff } },
+                ],
+              },
+              data: {
+                status: "PENDING",
+                errorMessage: "Recuperado de SENDING travado (sweep do rodízio)",
+              },
+            });
+            if (recovered.count > 0) {
+              console.warn(
+                `[campaign-worker] ${recovered.count} recipients SENDING travados → PENDING`,
+              );
+            }
+          }
+        }
       } catch (err) {
         console.warn(
           "[campaign-worker] sweep de conclusão falhou:",
@@ -912,7 +1428,9 @@ export function startCampaignWorkers() {
   sweepTimer.unref?.();
 
   console.info(
-    `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
+    roundRobin
+      ? `[campaign-worker] Dispatch worker + rodízio de envio started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, orgCredit=${getCampaignOrgCredit()}, sendRateMax=${getCampaignSendRateMax()})`
+      : `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
   );
 
   return { dispatchWorker, sendWorker };

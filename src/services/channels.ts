@@ -252,6 +252,10 @@ export async function createChannel(data: CreateChannelData): Promise<Channel> {
       phoneNumber: data.phoneNumber?.trim() || null,
     }),
   });
+  // Limpa caches de lookup do webhook Meta (phoneNumberId→org, appSecrets):
+  // cobre o caso de um POST ter cacheado "não mapeado" pouco antes do
+  // onboarding do canal novo.
+  await cache.delPattern("meta_wh:*");
   await logAudit({
     entity: "channel",
     action: "create",
@@ -333,6 +337,9 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
   // poucas por canal.
   await cache.del(channelKey(id));
   await cache.delPattern("wh_ctx:*");
+  // Caches do webhook Meta (phoneNumberId→org e appSecrets por org) —
+  // edição de config pode trocar phoneNumberId/appSecret.
+  await cache.delPattern("meta_wh:*");
   // Sinaliza eventos de connect/disconnect alem de update generico —
   // util pra investigar interrupcoes de canal sem ler diff.
   let action: "update" | "channel_connect" | "channel_disconnect" = "update";
@@ -363,6 +370,7 @@ export async function deleteChannel(id: string): Promise<Channel> {
   const deleted = await prisma.channel.delete({ where: { id } });
   await cache.del(channelKey(id));
   await cache.delPattern("wh_ctx:*");
+  await cache.delPattern("meta_wh:*");
   await logAudit({
     entity: "channel",
     action: "delete",

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getDealById } from "@/services/deals";
 
@@ -18,8 +19,13 @@ function needsName(ref: { id?: string; name?: string } | undefined): boolean {
   return Boolean(ref?.id && (!ref.name || CUID_RE.test(ref.name)));
 }
 
-export async function GET(_req: Request, ctx: Ctx) {
-  return withOrgContext(async () => {
+export async function GET(request: Request, ctx: Ctx) {
+  const authResult = await authenticateApiRequest(request);
+  if (!authResult.ok) return authResult.response;
+
+  return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:view");
+    if (denied) return denied;
   try {
     const { id } = await ctx.params;
     const existing = await getDealById(id);

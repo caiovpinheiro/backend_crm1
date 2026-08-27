@@ -29,7 +29,14 @@ export async function findContactIdsByPhoneDigits(
   const orgId = ctx?.organizationId;
   if (!orgId) return [];
   // Sufixo via reverse(...) LIKE 'rev%' — bate no índice
-  // `contacts_org_phone_digits_rev_idx` (prefixo em btree).
+  // `contacts_org_phone_digits_rev_pattern_idx`.
+  //
+  // O `text_pattern_ops` desse índice não é detalhe: o banco roda em
+  // collation en_US.UTF-8, e nela um btree comum NÃO atende `LIKE 'x%'`.
+  // O índice original (`..._rev_idx`, sem pattern ops) nunca foi usado —
+  // o plano em produção varria os 42k contatos da org aplicando
+  // regexp_replace por linha, 95ms por chamada. Ver migration
+  // 20260826191000_phone_digits_pattern_idx.
   const suffix = digits.length > 11 ? digits.slice(-11) : digits;
   const revPrefix = [...suffix].reverse().join("") + "%";
   const rows = await prisma.$queryRaw<{ id: string }[]>`
@@ -87,6 +94,88 @@ export async function resolveDealSearchCandidates(
     ...new Set([...byFields.map((r) => r.id), ...byCcfv.map((r) => r.contactId)]),
   ];
   return { contactIds, dealIds: byDcfv.map((r) => r.dealId) };
+}
+
+/**
+ * Candidatos da busca do inbox. Mesma estratégia de
+ * `resolveDealSearchCandidates`, aplicada às colunas que a conversa só
+ * alcança por join: contato, empresa, campos personalizados, título de
+ * negócio e responsável.
+ *
+ * Devolver IDs deixa o `where` final de conversas tocando apenas colunas da
+ * própria tabela (`contactId`/`assignedToId` IN + `inboxName` + `number`),
+ * todas cobertas por índice — o planner resolve por BitmapOr. O OR
+ * cross-table anterior misturava ILIKE em contacts/users com EXISTS por
+ * linha em ccfv/deals e custava ~4s por busca no inbox (HAR de 26/ago/26),
+ * contra ~0,4s da busca de negócios com o mesmo termo.
+ *
+ * São seis pré-queries em paralelo, mas cada uma é indexada e curta: o
+ * padrão anterior segurava UMA conexão por ~4s.
+ */
+export async function resolveConversationSearchCandidates(
+  search: string,
+): Promise<{ contactIds: string[]; assignedToIds: string[] }> {
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return { contactIds: [], assignedToIds: [] };
+  const pattern = `%${search}%`;
+
+  const [byFields, byProfile, byCcfv, byDealTitle, byCompany, byUser] =
+    await Promise.all([
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId}
+          AND (name ILIKE ${pattern} OR email ILIKE ${pattern} OR phone ILIKE ${pattern})
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      // Separada da anterior de propósito: `whatsapp_username` e `source` têm
+      // índices trgm PARCIAIS (a maioria dos contatos tem os dois nulos).
+      // Juntar tudo num OR só faria o planner desistir do BitmapOr e varrer
+      // `contacts` inteira.
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId}
+          AND (whatsapp_username ILIKE ${pattern} OR source ILIKE ${pattern})
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ contactId: string }[]>`
+        SELECT "contactId" FROM contact_custom_field_values
+        WHERE "organizationId" = ${orgId} AND value ILIKE ${pattern}
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ contactId: string }[]>`
+        SELECT DISTINCT "contactId" FROM deals
+        WHERE "organizationId" = ${orgId}
+          AND "contactId" IS NOT NULL
+          AND title ILIKE ${pattern}
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT c.id FROM contacts c
+        JOIN companies co ON co.id = c."companyId"
+        WHERE c."organizationId" = ${orgId} AND co.name ILIKE ${pattern}
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      // `users` é pequena (dezenas de linhas por org) — seq scan aqui é mais
+      // barato que manter índice trgm. `organizationId` é nulo só para
+      // super-admin, que nunca é responsável por conversa de tenant.
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM users
+        WHERE "organizationId" = ${orgId}
+          AND (name ILIKE ${pattern} OR email ILIKE ${pattern})
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+    ]);
+
+  const contactIds = [
+    ...new Set([
+      ...byFields.map((r) => r.id),
+      ...byProfile.map((r) => r.id),
+      ...byCcfv.map((r) => r.contactId),
+      ...byDealTitle.map((r) => r.contactId),
+      ...byCompany.map((r) => r.id),
+    ]),
+  ];
+  return { contactIds, assignedToIds: byUser.map((r) => r.id) };
 }
 
 /**

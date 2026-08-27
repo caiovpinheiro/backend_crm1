@@ -63,6 +63,8 @@ export const RATE_LIMIT_PROFILES = {
   "auth.invite": { points: 30, durationSec: 3600 },
   /** Bulk-ops (import contatos, export). 5/min/org. */
   "api.bulk": { points: 5, durationSec: 60 },
+  /** Bearer API tokens (n8n/integrações). 400 req/min/token — mesmo teto do limiter em memória que substitui. */
+  "api.token": { points: 400, durationSec: 60 },
 } as const satisfies Record<string, { points: number; durationSec: number }>;
 
 export type RateLimitProfile = keyof typeof RATE_LIMIT_PROFILES;

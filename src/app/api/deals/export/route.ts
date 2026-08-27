@@ -108,6 +108,15 @@ export async function GET(request: Request) {
       const headers = [...baseHeaders, ...dealCfHeaders, ...contactCfHeaders];
       const delimiter = DEFAULT_CSV_DELIMITER;
 
+      // Lookup de custom field values por lote (`WHERE dealId = ANY(...)`):
+      // restringe às colunas realmente exportadas e ignora valores vazios
+      // (o map em memória trata ausência como "" de qualquer forma). Sem o
+      // filtro a query trazia ~1.900 linhas por lote de 400 deals — 32,9M
+      // linhas na janela do stress sa221601. Quando a org não tem campos da
+      // entidade, o include é omitido e a query nem roda.
+      const dealFieldIds = dealFields.map((f) => f.id);
+      const contactFieldIds = contactFields.map((f) => f.id);
+
       const where: Prisma.DealWhereInput = {
         AND: [
           visibility.dealWhere,
@@ -148,13 +157,31 @@ export async function GET(request: Request) {
                   },
                   owner: { select: { id: true, name: true, email: true } },
                   tags: { include: { tag: { select: { name: true } } } },
-                  customFields: { select: { customFieldId: true, value: true } },
+                  ...(dealFieldIds.length > 0
+                    ? {
+                        customFields: {
+                          where: {
+                            customFieldId: { in: dealFieldIds },
+                            value: { not: "" },
+                          },
+                          select: { customFieldId: true, value: true },
+                        },
+                      }
+                    : {}),
                   contact: {
                     include: {
                       company: { select: { name: true } },
-                      customFields: {
-                        select: { customFieldId: true, value: true },
-                      },
+                      ...(contactFieldIds.length > 0
+                        ? {
+                            customFields: {
+                              where: {
+                                customFieldId: { in: contactFieldIds },
+                                value: { not: "" },
+                              },
+                              select: { customFieldId: true, value: true },
+                            },
+                          }
+                        : {}),
                     },
                   },
                 },
@@ -165,7 +192,10 @@ export async function GET(request: Request) {
               for (const deal of batch) {
                 try {
                   const dealCfMap = new Map(
-                    deal.customFields.map((v) => [v.customFieldId, v.value]),
+                    (deal.customFields ?? []).map((v) => [
+                      v.customFieldId,
+                      v.value,
+                    ]),
                   );
                   const contactCfMap = new Map(
                     (deal.contact?.customFields ?? []).map((v) => [

@@ -5,6 +5,16 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-27 — Bearer em GET /api/deals/:id/timeline
+
+**Decisão.** `GET /api/deals/:id/timeline` passa a aceitar Bearer (`authenticateApiRequest` + `runWithApiUserContext`), além da sessão. Exige `deal:view`. O n8n lê a mesma timeline do painel do negócio.
+
+**Contexto.** A rota só tinha `withOrgContext` (sessão NextAuth). O node de action Timeline > Get Events precisa do token de API.
+
+**Alternativas descartadas.** Endpoint novo só para n8n (duplicaria o contrato `{ id, type, meta, createdAt, user }`). Polling de webhooks.
+
+**Impacto.** 1 rota. Sessão do CRM inalterada (`authenticateApiRequest` faz fallback para `auth()`).
+
 ---
 
 ### 2026-08-27 — Reset de senha pelo admin destrava o login
@@ -16,6 +26,20 @@ documenta **por que** algo foi feito, não **o que**.
 **Alternativas descartadas.** Botão "Desbloquear" sem troca de senha (escopo maior de UI; o fluxo que o admin já tenta é o reset). Manter `locked` contando (preserva o bug). Limpar só a janela soft (não destrava o hard-lock).
 
 **Impacto.** `src/lib/auth/lockout.ts`, `src/app/api/users/[id]/route.ts`. Hard-lock agora expira 24h após a última falha real (não se auto-renova). Sem mudança de frontend.
+
+### 2026-08-26 — Webhooks de integração (n8n Trigger)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Tabela `integration_webhooks` + CRUD Bearer (`GET/POST /api/integration-webhooks`, `GET/DELETE /api/integration-webhooks/:id`). `fireTrigger` despacha POST fire-and-forget para as URLs da org que escutam o evento (ou `*`), inclusive quando não há automação interna. `assignDealOwner` passa a disparar `agent_changed` (bulk, distribuição, automação). Troca de responsável do contato dispara `contact_owner_changed` (não reusa `agent_changed`).
+
+**Contexto.** O n8n precisava de um Trigger por evento (primeiro: troca de responsável). O CRM só tinha automações internas — sem inscrição de webhook de saída.
+
+**Alternativas descartadas.** Polling no n8n (atraso + carga). Reusar `agent_changed` no contato (dispararia automações de deal). Endpoint só de `agent_changed` (outros eventos já passam por `fireTrigger`).
+
+**Impacto.** Nova tabela tenant-scoped. Permissões `deal:view` (listar) e `deal:edit` (criar/apagar). Payload: `{ event, occurredAt, organizationId, contactId, dealId, data }`. Header `X-Eduit-Signature: sha256=…` quando há secret.
+
+---
 
 ### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
 

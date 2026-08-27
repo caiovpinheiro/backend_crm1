@@ -528,6 +528,71 @@ export async function upsertDealCustomFieldValues(
 }
 
 /**
+ * Aplica o MESMO conjunto de valores a vários deals em `values.length + 1`
+ * round-trips, em vez de uma `$transaction` de upserts por deal (que em
+ * lote de 1.000 deals × 3 campos vira ~3.000 statements).
+ *
+ * Estratégia equivalente ao upsert e idempotente:
+ *   1. `createMany(..., skipDuplicates)` insere só os pares que faltam;
+ *   2. um `updateMany` por campo corrige os pares que já existiam com
+ *      valor diferente (`value: { not }` evita escrever à toa).
+ *
+ * A ordem create→update também cobre a corrida em que outra escrita cria
+ * a linha entre as duas etapas: o update posterior fixa o valor final.
+ */
+export async function setDealCustomFieldValuesBulk(
+  dealIds: string[],
+  values: { fieldId: string; value: string }[],
+) {
+  if (dealIds.length === 0 || values.length === 0) return;
+  // Campo repetido no payload: o último vence, igual ao laço de upserts.
+  const valueByField = new Map(values.map((v) => [v.fieldId, v.value]));
+
+  const rows: { dealId: string; customFieldId: string; value: string }[] = [];
+  for (const [customFieldId, value] of valueByField) {
+    for (const dealId of dealIds) rows.push({ dealId, customFieldId, value });
+  }
+
+  await prisma.dealCustomFieldValue.createMany({
+    data: rows.map((r) => withOrgFromCtx(r)),
+    skipDuplicates: true,
+  });
+
+  for (const [customFieldId, value] of valueByField) {
+    await prisma.dealCustomFieldValue.updateMany({
+      where: { dealId: { in: dealIds }, customFieldId, value: { not: value } },
+      data: { value },
+    });
+  }
+}
+
+/** Contraparte de `setDealCustomFieldValuesBulk` para contatos. */
+export async function setContactCustomFieldValuesBulk(
+  contactIds: string[],
+  values: { fieldId: string; value: string }[],
+) {
+  if (contactIds.length === 0 || values.length === 0) return;
+  const valueByField = new Map(values.map((v) => [v.fieldId, v.value]));
+
+  const rows: { contactId: string; customFieldId: string; value: string }[] = [];
+  for (const [customFieldId, value] of valueByField) {
+    for (const contactId of contactIds) rows.push({ contactId, customFieldId, value });
+  }
+
+  await prisma.contactCustomFieldValue.createMany({
+    data: rows.map((r) => withOrgFromCtx(r)),
+    skipDuplicates: true,
+  });
+
+  for (const [customFieldId, value] of valueByField) {
+    await prisma.contactCustomFieldValue.updateMany({
+      where: { contactId: { in: contactIds }, customFieldId, value: { not: value } },
+      data: { value },
+    });
+  }
+}
+
+/**
  * Grava valores de campos personalizados de um deal RECÉM-CRIADO em um único
  * round-trip (`createMany`). Otimização para importação em massa: como o deal
  * acabou de ser criado, não há valores pré-existentes, então não precisamos do
