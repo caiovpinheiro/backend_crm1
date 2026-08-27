@@ -5,6 +5,16 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-27 — Bearer em GET /api/deals/:id/timeline
+
+**Decisão.** `GET /api/deals/:id/timeline` passa a aceitar Bearer (`authenticateApiRequest` + `runWithApiUserContext`), além da sessão. Exige `deal:view`. O n8n lê a mesma timeline do painel do negócio.
+
+**Contexto.** A rota só tinha `withOrgContext` (sessão NextAuth). O node de action Timeline > Get Events precisa do token de API.
+
+**Alternativas descartadas.** Endpoint novo só para n8n (duplicaria o contrato `{ id, type, meta, createdAt, user }`). Polling de webhooks.
+
+**Impacto.** 1 rota. Sessão do CRM inalterada (`authenticateApiRequest` faz fallback para `auth()`).
+
 ---
 
 ### 2026-08-27 — Reset de senha pelo admin destrava o login
