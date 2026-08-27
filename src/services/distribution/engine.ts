@@ -730,8 +730,8 @@ export async function executeDistribution(
       where: { id: input.conversationId },
       select: { assignedToId: true, contactId: true },
     });
+    const contactId = conv?.contactId ?? input.contactId ?? null;
     if (conv?.assignedToId) {
-      const contactId = conv.contactId ?? input.contactId ?? null;
       await prisma.$transaction(async (tx) => {
         await tx.conversation.update({
           where: { id: input.conversationId! },
@@ -748,6 +748,29 @@ export async function executeDistribution(
           });
         }
       });
+    } else if (contactId) {
+      // A conversa já chegou sem responsável — o handoff acadêmico limpa
+      // `assignedToId` antes de chamar o motor. Nesse caminho contato/deal
+      // ainda apontavam para o usuário IA: com fila cheia o lead ia para a
+      // espera com a IA como dono no pipeline e o `syncOwnership` seguinte
+      // devolvia o card para a aba Agente IA. Só limpa quando o dono é IA;
+      // dono humano continua preservado para o motor decidir.
+      const contact = await prisma.contact.findUnique({
+        where: { id: contactId },
+        select: { assignedTo: { select: { type: true } } },
+      });
+      if (contact?.assignedTo?.type === "AI") {
+        await prisma.$transaction(async (tx) => {
+          await tx.contact.update({
+            where: { id: contactId },
+            data: { assignedToId: null },
+          });
+          await tx.deal.updateMany({
+            where: { contactId, status: "OPEN" },
+            data: { ownerId: null },
+          });
+        });
+      }
     }
   }
 

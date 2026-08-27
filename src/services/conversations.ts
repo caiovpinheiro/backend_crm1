@@ -52,6 +52,7 @@ export const INBOX_CATEGORY_TABS = [
   "entrada",
   "esperando",
   "respondidas",
+  "agente_ia",
   "automacao",
   "finalizados",
   "erro",
@@ -331,14 +332,15 @@ function tabToWhere(
     case "entrada":
       // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
       // humano aguardando a 1ª msg dele, OU (3) sem dono após redistribuição
-      // manual com fila cheia (hasHumanReply=true — antes sumia das abas),
-      // OU (4) sem dono, cliente falou por último — mesmo com robô ainda
-      // RUNNING/PAUSED (campanha/salesbot). Aguardando exige assignee +
-      // reply humano; aqui o último inbound é do cliente e o consultor
-      // precisa ver. Com countAgentReplyAsAnswered, “já houve reply”
-      // também inclui hasAgentReply.
+      // manual com fila cheia (hasHumanReply=true — antes sumia das abas).
+      // Aguardando exige assignee + reply humano; aqui o último inbound é do
+      // cliente e o consultor precisa ver. Com countAgentReplyAsAnswered,
+      // “já houve reply” também inclui hasAgentReply.
       // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
       // contexto PIPE pode ainda estar RUNNING por um instante.
+      // Assignee IA NÃO entra aqui: tem aba própria (`agente_ia`). O card
+      // volta para Entrada quando o handoff libera o responsável (fila de
+      // espera) ou atribui um consultor.
       return {
         status: "OPEN",
         hasError: false,
@@ -353,14 +355,6 @@ function tabToWhere(
                 lastInboundAt: { not: null },
               },
               { assignedTo: { is: { type: "HUMAN" } } },
-              // IA assignee + aluno já falou e ainda não teve reply
-              // contável. lastInboundAt (não a última direção) —
-              // campanha/template depois do inbound não devolve o
-              // card pra Automação.
-              {
-                assignedTo: { is: { type: "AI" } },
-                lastInboundAt: { not: null },
-              },
             ],
           },
           {
@@ -372,9 +366,11 @@ function tabToWhere(
     case "esperando":
       // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
       // cliente falou por último (`lastMessageDirection = "in"`).
+      // Só assignee HUMANO: com a IA como responsável o card fica em
+      // `agente_ia` até o handoff.
       return {
         status: "OPEN",
-        assignedToId: { not: null },
+        assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "in",
         hasError: false,
@@ -383,36 +379,39 @@ function tabToWhere(
       // "Respondidas" = já teve atendimento e nós falamos por último
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
+      // Assignee IA fica em `agente_ia`.
       return {
         status: "OPEN",
-        assignedToId: { not: null },
+        assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "out",
         hasError: false,
       };
+    case "agente_ia":
+      // Fila do Agente IA: TODA conversa em aberto cujo responsável é um
+      // usuário `type: AI`, tenha o aluno falado ou não. Sai daqui quando o
+      // handoff atribui um consultor OU libera o responsável (fila de
+      // espera) — em ambos os casos o card cai em Entrada.
+      return {
+        status: "OPEN",
+        hasError: false,
+        assignedTo: { is: { type: "AI" } },
+      };
     case "automacao":
-      // Robô ativo (RUNNING ou PAUSED) sem dono humano e sem nenhuma
-      // resposta do cliente, OU assignee IA ainda no disparo. Quem já
-      // falou (lastInboundAt) vai para Entrada — campanha/template
-      // posterior não devolve o card pra cá. Consultor humano vai para
+      // Robô ativo (RUNNING ou PAUSED) sem dono e sem nenhuma resposta do
+      // cliente. Quem já falou (lastInboundAt) vai para Entrada —
+      // campanha/template posterior não devolve o card pra cá. Assignee IA
+      // tem aba própria (`agente_ia`); consultor humano vai para
       // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
-        OR: [
-          {
-            assignedToId: null,
-            AND: [NEVER_REPLIED],
-            contact: {
-              automationContexts: {
-                some: { status: ACTIVE_AUTOMATION_CTX },
-              },
-            },
+        assignedToId: null,
+        AND: [NEVER_REPLIED],
+        contact: {
+          automationContexts: {
+            some: { status: ACTIVE_AUTOMATION_CTX },
           },
-          {
-            assignedTo: { is: { type: "AI" } },
-            AND: [NEVER_REPLIED],
-          },
-        ],
+        },
       };
     case "finalizados":
       return { status: "RESOLVED" };
