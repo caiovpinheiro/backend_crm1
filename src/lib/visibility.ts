@@ -281,26 +281,27 @@ function permissionsAllowKey(
  * Amplia o `conversationWhere` para filas compartilhadas da Inbox quando o
  * operador tem as chaves correspondentes:
  *   - `inbox:tab:entrada` + `conversation:claim` → pool OPEN não atribuído
- *   - `inbox:tab:automacao` → fila de automação (RUNNING / assignee IA)
+ *   - `inbox:tab:automacao` → fila de automação (contexto RUNNING/PAUSED)
+ *   - `inbox:tab:agente_ia` → fila do Agente IA (assignee `type: AI`)
  *
- * Substitui o legado `sharedInbox` para MEMBER nas filas Entrada/Automação.
+ * Substitui o legado `sharedInbox` para MEMBER nas filas compartilhadas.
  * Seguro combinar com o filtro de aba (`tabToWhere`) — extras só aparecem
  * nas abas cujo predicado as inclui.
  *
  * `base` vazio = irrestrito (ADMIN/MANAGER “all”). Nesse caso NÃO aplicar
- * extras: senão a inbox inteira colapsa só para Entrada/Automação.
+ * extras: senão a inbox inteira colapsa só para as filas compartilhadas.
  *
  * `includeUnassigned` vem de `getVisibilityFilter` e recorta o que estas
- * filas injetam: as duas trazem conversa SEM responsável, então sem esse
- * gate o pool livre reaparecia na Inbox mesmo com o eixo desligado nas
- * permissões — a aba Entrada furava a regra. Assignee IA + inbound do
- * aluno entra no pool da Entrada até a IA responder.
+ * filas injetam: Entrada e Automação trazem conversa SEM responsável, então
+ * sem esse gate o pool livre reaparecia na Inbox mesmo com o eixo desligado
+ * nas permissões. A fila do Agente IA NÃO passa por esse gate: lá o
+ * responsável existe (o usuário IA), não é pool livre.
  */
 export function withInboxQueueVisibility(
   base: Prisma.ConversationWhereInput,
   args: {
     permissions: ReadonlySet<string> | readonly string[];
-    tabs?: Array<"entrada" | "automacao">;
+    tabs?: Array<"entrada" | "automacao" | "agente_ia">;
     includeUnassigned?: boolean;
   },
 ): Prisma.ConversationWhereInput {
@@ -313,7 +314,7 @@ export function withInboxQueueVisibility(
     args.permissions instanceof Set
       ? args.permissions
       : new Set(args.permissions);
-  const tabs = args.tabs ?? (["entrada", "automacao"] as const);
+  const tabs = args.tabs ?? (["entrada", "automacao", "agente_ia"] as const);
   const includeUnassigned = args.includeUnassigned ?? true;
   const extras: Prisma.ConversationWhereInput[] = [];
 
@@ -324,29 +325,34 @@ export function withInboxQueueVisibility(
     permissionsAllowKey(perms, "conversation:claim")
   ) {
     extras.push({ assignedToId: null, status: "OPEN" });
+  }
+
+  if (
+    includeUnassigned &&
+    tabs.includes("automacao") &&
+    permissionsAllowKey(perms, "inbox:tab:automacao")
+  ) {
     extras.push({
       status: "OPEN",
-      assignedTo: { is: { type: "AI" } },
-      lastInboundAt: { not: null },
+      assignedToId: null,
+      contact: {
+        // PAUSED = aguardando reply/botão (campanha) — mesma fila Automação.
+        automationContexts: {
+          some: { status: { in: ["RUNNING", "PAUSED"] } },
+        },
+      },
     });
   }
 
-  if (tabs.includes("automacao") && permissionsAllowKey(perms, "inbox:tab:automacao")) {
-    const automationQueue: Prisma.ConversationWhereInput[] = [
-      { assignedTo: { is: { type: "AI" } } },
-    ];
-    if (includeUnassigned) {
-      automationQueue.unshift({
-        assignedToId: null,
-        contact: {
-          // PAUSED = aguardando reply/botão (campanha) — mesma fila Automação.
-          automationContexts: {
-            some: { status: { in: ["RUNNING", "PAUSED"] } },
-          },
-        },
-      });
-    }
-    extras.push({ status: "OPEN", OR: automationQueue });
+  // Rollout: roles gravadas antes da aba existir não têm a chave nova, mas já
+  // viam essas conversas pelas filas Entrada/Automação. O fallback espelha
+  // `canSeeInboxTab` — sem ele a aba aparecia vazia para o operador.
+  const canSeeAiQueue =
+    permissionsAllowKey(perms, "inbox:tab:agente_ia") ||
+    permissionsAllowKey(perms, "inbox:tab:entrada") ||
+    permissionsAllowKey(perms, "inbox:tab:automacao");
+  if (tabs.includes("agente_ia") && canSeeAiQueue) {
+    extras.push({ status: "OPEN", assignedTo: { is: { type: "AI" } } });
   }
 
   if (extras.length === 0) return base;

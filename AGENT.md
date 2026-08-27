@@ -5,6 +5,20 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-27 — Aba "Agente IA" na Inbox
+
+**Decisão.** Nova categoria `agente_ia` em `INBOX_CATEGORY_TABS`: conversa OPEN, sem erro, com responsável `User.type = AI`. As abas Entrada, Aguardando, Respondidas e Automação passaram a exigir assignee HUMANO (ou nenhum) — o assignee IA saiu delas. Permission `inbox:tab:agente_ia` (migration `20260827180000`) com fallback de rollout para `inbox:tab:entrada` / `inbox:tab:automacao` em `canSeeInboxTab` e `withInboxQueueVisibility`.
+
+**Contexto.** Os leads em atendimento pela IA ficavam espalhados: com inbound caíam em Entrada, sem inbound em Automação. Não havia como ver a fila da IA nem separar o que já é responsabilidade de um consultor.
+
+**Handoff.** O lead sai da aba nos dois desfechos: consultor elegível → Entrada com dono; fila cheia / ninguém elegível → `DistributionPending` e Entrada sem dono. `executeDistribution` (reassign) agora também limpa `Contact.assignedToId` e `Deal.ownerId` quando a conversa já chegou sem responsável mas o dono ainda é o usuário IA — caminho do `executeAcademicDepartmentHandoff`, que zera a conversa antes de chamar o motor. Sem isso o lead ia para a espera com a IA como dono no pipeline e o sync devolvia o card para a aba. Os limites de fila dos consultores não mudaram e não se aplicam à IA.
+
+**Alternativas descartadas.** Filtrar só no frontend (badges e paginação viriam errados; `todos`/permissões são server-side). Reaproveitar a aba Automação (mistura robô de campanha com atendimento da IA). Gate por `includeUnassigned` na fila da IA (lá o responsável existe, não é pool livre).
+
+**Impacto.** `services/conversations.ts`, `lib/visibility.ts`, `lib/authz/{permissions,presets,scope-grants-shared}.ts`, rotas `conversations` e `conversations/bulk`. Exige deploy junto do frontend: o backend rejeita `tab` desconhecida e a aba nova não existe no frontend antigo.
+
+---
+
 ### 2026-08-27 — Bearer em GET /api/deals/:id/timeline
 
 **Decisão.** `GET /api/deals/:id/timeline` passa a aceitar Bearer (`authenticateApiRequest` + `runWithApiUserContext`), além da sessão. Exige `deal:view`. O n8n lê a mesma timeline do painel do negócio.
