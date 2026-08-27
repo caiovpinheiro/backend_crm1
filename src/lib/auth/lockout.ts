@@ -33,12 +33,15 @@ const SOFT_LOCK_START_AT = 5;
  * Outcomes que CONTAM como falha pra fins de lockout.
  * `mfa_required` NAO conta — usuario passou pela senha; so falta o
  * segundo fator (que tem rate-limit proprio na rota MFA).
+ * `locked` NAO conta — e a tentativa ja bloqueada, nao uma falha nova
+ * de credencial. Contar `locked` fazia o hard-lock de 24h se
+ * auto-renovar a cada retry do usuario, e nem o reset de senha do
+ * admin destravava (o admin nao limpa login_attempts).
  */
 const FAILURE_OUTCOMES = new Set([
   "bad_password",
   "bad_mfa",
   "no_user",
-  "locked",
 ]);
 
 export type LoginOutcome =
@@ -198,5 +201,28 @@ export async function clearFailuresOnSuccess(email: string): Promise<void> {
     });
   } catch (err) {
     console.error("[auth/lockout] clearFailuresOnSuccess failed", err);
+  }
+}
+
+/**
+ * Desbloqueio administrativo: remove TODAS as falhas do email (janela
+ * soft de 15min E hard de 24h), sem esperar um login bem-sucedido —
+ * que e impossivel enquanto o hard-lock estiver ativo, ja que o
+ * checkLockout roda antes da checagem de senha.
+ *
+ * Chamado quando um admin reseta a senha do usuario
+ * (PATCH /api/users/[id]). Sem isso, trocar a senha nao destravava a
+ * conta: as falhas antigas seguiam na janela de 24h.
+ */
+export async function clearLoginLockout(email: string): Promise<void> {
+  try {
+    await prismaBase.loginAttempt.deleteMany({
+      where: {
+        email,
+        outcome: { in: Array.from(FAILURE_OUTCOMES) },
+      },
+    });
+  } catch (err) {
+    console.error("[auth/lockout] clearLoginLockout failed", err);
   }
 }

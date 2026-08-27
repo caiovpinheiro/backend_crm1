@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { UserRole } from "@prisma/client";
 
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
+import { clearLoginLockout } from "@/lib/auth/lockout";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { disableTelephony } from "@/services/api4com/provisioning";
@@ -189,6 +190,12 @@ export async function PUT(request: Request, context: RouteContext) {
         void _omit;
         return rest;
       });
+      if (data.hashedPassword) {
+        // Reset administrativo de senha tambem destrava o login: o
+        // hard-lock de 24h (login_attempts) nao pode sobreviver a ele,
+        // senao o admin troca a senha e o usuario segue bloqueado.
+        await clearLoginLockout(user.email);
+      }
       return NextResponse.json(user);
     } catch (e) {
       if (isP2025(e)) {
