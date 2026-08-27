@@ -15,7 +15,11 @@ documenta **por que** algo foi feito, não **o que**.
 
 **Alternativas descartadas.** Filtrar só no frontend (badges e paginação viriam errados; `todos`/permissões são server-side). Reaproveitar a aba Automação (mistura robô de campanha com atendimento da IA). Gate por `includeUnassigned` na fila da IA (lá o responsável existe, não é pool livre).
 
-**Impacto.** `services/conversations.ts`, `lib/visibility.ts`, `lib/authz/{permissions,presets,scope-grants-shared}.ts`, rotas `conversations` e `conversations/bulk`. Exige deploy junto do frontend: o backend rejeita `tab` desconhecida e a aba nova não existe no frontend antigo.
+**Cockpit.** `totals.attendingNow` deixou de ser a soma dos `AIAgentConfig` e passou a contar o mesmo predicado da aba (um `User type = AI` com a config apagada continua na aba e deixaria o KPI menor que o badge). O `hasError: false` entrou no groupBy por agente e na lista de casos `attending_now`, que já usava `u.type = 'AI'`. KPI, modal e badge da aba agora batem.
+
+**Impacto.** `services/conversations.ts`, `lib/visibility.ts`, `lib/authz/{permissions,presets,scope-grants-shared}.ts`, `services/distribution/cockpit.ts`, `services/ai/cockpit-academic-cases.ts`, rotas `conversations` e `conversations/bulk`.
+
+**Ordem de deploy.** Frontend primeiro. `route.ts` não rejeita `tab` desconhecida — `validTabs.has()` cai para `undefined` e a query volta sem filtro de aba. Logo frontend novo + backend velho só mostra a aba nova com a lista de "Todas": feio, nada some. O inverso é o que quebra — backend novo + frontend velho tira as conversas da IA de Entrada/Aguardando/Respondidas/Automação sem ter aba para recebê-las, e elas só aparecem em "Todas".
 
 ---
 

@@ -154,6 +154,9 @@ export async function getCockpitData(): Promise<CockpitData> {
   }
 
   // Atendendo agora por agente (conversas OPEN atribuídas ao user do agente).
+  // `hasError: false` espelha o predicado da aba "Agente IA" da Inbox
+  // (`tabToWhere` case `agente_ia`) — conversa travada em erro vive na aba Erro,
+  // não na fila da IA, e o número do cockpit precisa bater com o badge de lá.
   const agentUserIds = agentConfigs.map((a) => a.userId);
   const attendingRows =
     agentUserIds.length > 0
@@ -161,6 +164,7 @@ export async function getCockpitData(): Promise<CockpitData> {
           by: ["assignedToId"],
           where: {
             status: "OPEN",
+            hasError: false,
             assignedToId: { in: agentUserIds },
           },
           _count: { _all: true },
@@ -195,7 +199,18 @@ export async function getCockpitData(): Promise<CockpitData> {
       (a, b) => b.receivedToday - a.receivedToday || b.queueCount - a.queueCount,
     );
 
-  const attendingNow = agents.reduce((s, a) => s + a.attendingNow, 0);
+  // Total = fila da aba "Agente IA" da Inbox, não a soma dos agentes configurados:
+  // um usuário `type = AI` sem `AIAgentConfig` (config apagada, agente legado)
+  // continua aparecendo na aba, e o KPI ficaria menor que o badge. A lista de
+  // casos (`attending_now`) já usa este mesmo predicado.
+  const attendingNow = await prisma.conversation.count({
+    where: {
+      organizationId: orgId,
+      status: "OPEN",
+      hasError: false,
+      assignedTo: { is: { type: "AI" } },
+    },
+  });
   const academic = await getAcademicCockpitMetrics({
     organizationId: orgId,
     since,
