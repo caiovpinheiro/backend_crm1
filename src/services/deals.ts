@@ -1155,6 +1155,7 @@ export async function moveDeal(
   position: number,
   options?: MoveDealOptions,
 ) {
+  // Mudança de fase (incl. GANHO/PERDIDO) não encerra conversa.
   if (!Number.isInteger(position) || position < 0) {
     throw new Error("INVALID_POSITION");
   }
@@ -1398,6 +1399,8 @@ export type MarkDealTerminalOptions = {
 };
 
 export async function markDealWon(id: string, opts?: MarkDealTerminalOptions) {
+  // Só o negócio. NÃO encerrar conversa: fila segue encerrar + keepAgentOnEnd,
+  // independente de GANHO/PERDIDO.
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
@@ -1426,6 +1429,7 @@ export async function markDealLost(
   lostReason?: string | null,
   opts?: MarkDealTerminalOptions,
 ) {
+  // Só o negócio. NÃO encerrar conversa — ver markDealWon.
   const reason = lostReason?.trim() || null;
 
   const dealPeek = await prisma.deal.findUnique({

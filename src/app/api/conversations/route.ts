@@ -116,6 +116,27 @@ export async function GET(request: Request) {
         windowStateRaw === "open" || windowStateRaw === "closed"
           ? windowStateRaw
           : undefined;
+      const painelRaw = searchParams.get("painel");
+      const painelException =
+        painelRaw === "no_reply" ||
+        painelRaw === "open_24h" ||
+        painelRaw === "unassigned" ||
+        painelRaw === "send_failure"
+          ? painelRaw
+          : undefined;
+      let noReplyBefore: Date | undefined;
+      if (painelException === "no_reply") {
+        const { loadPainelHours } = await import("@/services/painel-hours");
+        const { subtractBusinessMs, parseClockMode } = await import(
+          "@/services/painel-period"
+        );
+        const clock = parseClockMode(searchParams.get("clock"));
+        const now = new Date();
+        noReplyBefore =
+          clock === "elapsed"
+            ? new Date(now.getTime() - 3_600_000)
+            : subtractBusinessMs(now, 3_600_000, await loadPainelHours());
+      }
 
       const filterConditions = buildInboxFilterConditions({
         contactId,
@@ -132,6 +153,8 @@ export async function GET(request: Request) {
         sessionExpiresWithinHours,
         sessionExpiringConversationIds,
         windowState,
+        painelException,
+        noReplyBefore,
       });
 
       if (searchParams.get("counts") === "1") {
@@ -250,6 +273,8 @@ export async function GET(request: Request) {
         sessionExpiresWithinHours,
         sessionExpiringConversationIds,
         windowState,
+        painelException,
+        noReplyBefore,
       });
 
       return NextResponse.json(result);

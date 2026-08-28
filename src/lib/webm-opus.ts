@@ -13,6 +13,8 @@
  */
 
 const ID_SEGMENT = 0x18538067;
+const ID_SEEKHEAD = 0x114d9b74;
+const ID_INFO = 0x1549a966;
 const ID_TRACKS = 0x1654ae6b;
 const ID_TRACK_ENTRY = 0xae;
 const ID_TRACK_NUMBER = 0xd7;
@@ -22,6 +24,8 @@ const ID_CODEC_PRIVATE = 0x63a2;
 const ID_AUDIO = 0xe1;
 const ID_CHANNELS = 0x9f;
 const ID_CLUSTER = 0x1f43b675;
+const ID_CUES = 0x1c53bb6b;
+const ID_TAGS = 0x1254c367;
 const ID_BLOCK_GROUP = 0xa0;
 const ID_SIMPLE_BLOCK = 0xa3;
 const ID_BLOCK = 0xa1;
@@ -29,10 +33,14 @@ const ID_BLOCK = 0xa1;
 /** Elementos em que descemos; o resto é pulado pelo tamanho declarado. */
 const MASTER_IDS = new Set<number>([
   ID_SEGMENT,
+  ID_SEEKHEAD,
+  ID_INFO,
   ID_TRACKS,
   ID_TRACK_ENTRY,
   ID_AUDIO,
   ID_CLUSTER,
+  ID_CUES,
+  ID_TAGS,
   ID_BLOCK_GROUP,
 ]);
 
@@ -245,17 +253,32 @@ export function demuxWebmOpus(buf: Buffer): WebmOpusTrack | null {
   walk(0, buf.length, 0);
 
   const opusTrack = tracks.find(
-    (t) => t.codecId === "A_OPUS" && (t.isAudio || t.channels !== null) && t.codecPrivate,
+    (t) => t.codecId === "A_OPUS" && (t.isAudio || t.channels !== null || t.codecPrivate),
   );
-  if (!opusTrack?.codecPrivate) return null;
-  if (opusTrack.codecPrivate.subarray(0, 8).toString("ascii") !== "OpusHead") return null;
+  if (!opusTrack) return null;
 
   const packets = blocks
     .filter((b) => b.track === opusTrack.number)
     .flatMap((b) => b.frames)
     .filter((f) => f.length > 0);
-  if (packets.length < 2) return null;
+  if (packets.length < 1) return null;
 
-  const channels = opusTrack.codecPrivate[9] ?? opusTrack.channels ?? 1;
-  return { opusHead: opusTrack.codecPrivate, channels, packets };
+  let opusHead = opusTrack.codecPrivate;
+  if (opusHead && opusHead.subarray(0, 8).toString("ascii") !== "OpusHead") opusHead = null;
+  if (!opusHead) opusHead = defaultOpusHead(opusTrack.channels ?? 1);
+
+  const channels = opusHead[9] ?? opusTrack.channels ?? 1;
+  return { opusHead, channels, packets };
+}
+
+function defaultOpusHead(channels: number): Buffer {
+  const b = Buffer.alloc(19);
+  b.write("OpusHead", 0, "ascii");
+  b[8] = 1;
+  b[9] = channels >= 1 && channels <= 2 ? channels : 1;
+  b.writeUInt16LE(312, 10);
+  b.writeUInt32LE(48000, 12);
+  b.writeInt16LE(0, 16);
+  b[18] = 0;
+  return b;
 }

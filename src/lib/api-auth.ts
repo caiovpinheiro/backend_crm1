@@ -3,7 +3,13 @@ import { NextResponse } from "next/server";
 import { logApiAccessAuthReject, logApiAccessCompleted, resolveResponseStatus } from "@/lib/api-access-audit";
 import { auth } from "@/lib/auth";
 import { observeHttpRequest } from "@/lib/metrics";
-import { checkRateLimit, setRateLimitHeaders } from "@/lib/rate-limiter";
+import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
+import {
+  consumeRateLimit,
+  enforceSessionApiRateLimit,
+  type RateLimitDecision,
+} from "@/lib/rate-limit";
+import { logRateLimitReject } from "@/lib/rate-limit-reject-log";
 import { validateToken } from "@/services/api-tokens";
 import {
   enterRequestContext,
@@ -44,14 +50,30 @@ export async function authenticateApiRequest(
     const result = await validateToken(rawToken);
 
     if (result) {
-      const rl = checkRateLimit(`token:${result.tokenHash}`);
+      // Rate limit DISTRIBUÍDO (Redis) por token — o limiter em memória
+      // anterior valia por processo: com N réplicas o teto efetivo era
+      // N×400/min, e um restart zerava a janela.
+      const rl = await consumeRateLimit(`token:${result.tokenHash}`, "api.token");
       if (!rl.allowed) {
-        logApiAccessAuthReject(request, { reason: "bearer_rate_limited", status: 429, via: "bearer" });
+        let route = "";
+        try {
+          route = new URL(request.url).pathname;
+        } catch {
+          route = "";
+        }
+        logRateLimitReject(`token:${result.tokenHash}`, {
+          profile: "api.token",
+          scope: "token",
+          tokenHashPrefix: result.tokenHash.slice(0, 12),
+          route: route || undefined,
+          limit: rl.limit,
+          retryAfterSec: rl.retryAfterSec,
+        });
         const res = NextResponse.json(
           { message: "Limite de requisições excedido. Tente novamente em breve." },
           { status: 429 }
         );
-        setRateLimitHeaders(res.headers, rl);
+        setTokenRateLimitHeaders(res.headers, rl);
         return { ok: false, response: res };
       }
 
@@ -66,6 +88,18 @@ export async function authenticateApiRequest(
         label: result.tokenName ?? "API Token",
         ref: result.tokenId,
       };
+      const bearerUser: ApiUser = {
+        id: result.user.id,
+        name: result.user.name,
+        email: result.user.email,
+        role: result.user.role,
+        organizationId: result.organizationId,
+        isSuperAdmin: result.user.isSuperAdmin,
+        actor: tokenActor,
+      };
+      const orgRpm = await rejectIfOrgRateLimited(request, bearerUser);
+      if (orgRpm) return { ok: false, response: orgRpm };
+
       enterRequestContext({
         organizationId: result.organizationId,
         userId: result.user.id,
@@ -75,15 +109,7 @@ export async function authenticateApiRequest(
 
       return {
         ok: true,
-        user: {
-          id: result.user.id,
-          name: result.user.name,
-          email: result.user.email,
-          role: result.user.role,
-          organizationId: result.organizationId,
-          isSuperAdmin: result.user.isSuperAdmin,
-          actor: tokenActor,
-        },
+        user: bearerUser,
         viaToken: true,
         tokenHash: result.tokenHash,
       };
@@ -126,6 +152,27 @@ export async function authenticateApiRequest(
     };
   }
 
+  const sessionApiUser: ApiUser = {
+    id: sessionUser.id,
+    name: sessionUser.name ?? "",
+    email: sessionUser.email ?? "",
+    role: sessionUser.role ?? "MEMBER",
+    organizationId: sessionUser.organizationId ?? null,
+    isSuperAdmin: Boolean(sessionUser.isSuperAdmin),
+    actor: {
+      type: "HUMAN",
+      label: sessionUser.name ?? sessionUser.email ?? sessionUser.id,
+    },
+  };
+  const sessionRpm = await enforceSessionApiRateLimit({
+    userId: sessionApiUser.id,
+    organizationId: sessionApiUser.organizationId,
+  });
+  if (sessionRpm) return { ok: false, response: sessionRpm };
+
+  const orgRpm = await rejectIfOrgRateLimited(request, sessionApiUser);
+  if (orgRpm) return { ok: false, response: orgRpm };
+
   // ATENCAO: NAO chamar enterRequestContext aqui. Ele usa enterWith()
   // que so se propaga pra continuations FILHAS — quando o handler
   // resume apos `const r = await authenticateApiRequest(req)`, o
@@ -134,29 +181,49 @@ export async function authenticateApiRequest(
   // direto, ou envolva o handler em runWithContext manualmente.
   return {
     ok: true,
-    user: {
-      id: sessionUser.id,
-      name: sessionUser.name ?? "",
-      email: sessionUser.email ?? "",
-      role: sessionUser.role ?? "MEMBER",
-      organizationId: sessionUser.organizationId ?? null,
-      isSuperAdmin: Boolean(sessionUser.isSuperAdmin),
-      actor: {
-        type: "HUMAN",
-        label: sessionUser.name ?? sessionUser.email ?? sessionUser.id,
-      },
-    },
+    user: sessionApiUser,
     viaToken: false,
   };
 }
 
-export function withRateLimitHeaders(
+async function rejectIfOrgRateLimited(
+  request: Request,
+  user: ApiUser,
+): Promise<NextResponse | null> {
+  let pathname = "";
+  try {
+    pathname = new URL(request.url).pathname;
+  } catch {
+    pathname = "";
+  }
+  const res = await enforceOrgApiRateLimit({
+    organizationId: user.organizationId,
+    isSuperAdmin: user.isSuperAdmin,
+    pathname,
+  });
+  // 429 da org já entra em logRateLimitReject (agregado) em enforceOrgApiRateLimit.
+  return res;
+}
+
+function setTokenRateLimitHeaders(
+  headers: Headers,
+  rl: RateLimitDecision
+): void {
+  headers.set("X-RateLimit-Limit", String(rl.limit));
+  headers.set("X-RateLimit-Remaining", String(rl.remaining));
+  headers.set("X-RateLimit-Reset", String(Math.floor(rl.resetAt / 1000)));
+  if (!rl.allowed) {
+    headers.set("Retry-After", String(rl.retryAfterSec));
+  }
+}
+
+export async function withRateLimitHeaders(
   response: NextResponse,
   tokenHash?: string
-): NextResponse {
+): Promise<NextResponse> {
   if (tokenHash) {
-    const rl = checkRateLimit(`token:${tokenHash}`, 400);
-    setRateLimitHeaders(response.headers, rl);
+    const rl = await consumeRateLimit(`token:${tokenHash}`, "api.token");
+    setTokenRateLimitHeaders(response.headers, rl);
   }
   return response;
 }

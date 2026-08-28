@@ -26,7 +26,10 @@ Novo serviço **`worker-meta-webhook`** (prod e dev):
 | Registry | mesma credential GHCR dos outros serviços |
 
 **Env vars** (mesmas do `backend-api`):
-- `DATABASE_URL`, `REDIS_URL` (obrigatórias)
+- `DATABASE_URL`, `REDIS_URL` (obrigatórias) — hostname **`private-*`**
+  (VPC). Hostname sem `private-` ou IP público sai pela internet.
+  Postgres: `…@private-crm1-pg-nyc3-do-user-XXXX.b.db.ondigitalocean.com:25060/…?sslmode=require`.
+  Valkey: `rediss://…@private-crm1-valkey-nyc3-do-user-XXXX.b.db.ondigitalocean.com:25061`.
 - Meta/storage: `STORAGE_ROOT`, `META_*` (o worker baixa mídia inbound)
 - `APP_MODE=worker-meta-webhook`
 - `DB_POOL_MAX=4` (recomendado; default código = 4 para workers não-whatsapp)

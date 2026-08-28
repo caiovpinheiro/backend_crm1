@@ -110,7 +110,7 @@ function buildOggPage(
 }
 
 export function isOggOpus(buf: Buffer): boolean {
-  if (!Buffer.isBuffer(buf) || buf.length < 200) return false;
+  if (!Buffer.isBuffer(buf) || buf.length < 48) return false;
   if (buf.toString("ascii", 0, 4) !== "OggS") return false;
   const head = buf.subarray(0, Math.min(buf.length, 512)).toString("ascii");
   return head.includes("OpusHead");

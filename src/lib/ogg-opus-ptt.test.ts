@@ -157,6 +157,13 @@ describe("demuxWebmOpus", () => {
     expect(track!.channels).toBe(2);
   });
 
+  it("aceita um único pacote Opus (gravação muito curta)", () => {
+    const packets = [opusPacketCode0(31, 40)];
+    const track = demuxWebmOpus(buildWebmOpus(packets));
+    expect(track).not.toBeNull();
+    expect(track!.packets).toHaveLength(1);
+  });
+
   it("rejeita buffer que não é WebM", () => {
     expect(demuxWebmOpus(Buffer.alloc(4096, 0x41))).toBeNull();
   });

@@ -48,6 +48,7 @@ export const LEADS_BULK_JOB_NAMES = {
   bulkUpdateFields: "bulk-update-fields",
   bulkMoveStage: "bulk-move-stage",
   bulkResolveConversations: "bulk-resolve-conversations",
+  bulkAssignConversations: "bulk-assign-conversations",
 } as const;
 export type LeadsBulkJobName =
   (typeof LEADS_BULK_JOB_NAMES)[keyof typeof LEADS_BULK_JOB_NAMES];
@@ -199,10 +200,20 @@ export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
   keepDepartment: boolean;
 };
 
+export type BulkAssignConversationsPayload = LeadsBulkBasePayload & {
+  conversationIds: string[];
+  /** null = remover responsável. */
+  assignedToId: string | null;
+  actorRole: "ADMIN" | "MANAGER" | "MEMBER";
+  canReassignOthers: boolean;
+  canTransfer: boolean;
+};
+
 export type LeadsBulkPayload =
   | BulkUpdateFieldsPayload
   | BulkMoveStagePayload
-  | BulkResolveConversationsPayload;
+  | BulkResolveConversationsPayload
+  | BulkAssignConversationsPayload;
 
 // ── Import ETL payloads ──────────────────────────────────
 //

@@ -19,6 +19,11 @@ import {
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
 import {
+  activeInboxQueueGuardWhere,
+  encerradasTabWhere,
+  withActiveInboxQueueGuard,
+} from "@/lib/inbox-queue-membership";
+import {
   getOrgIdOrNull,
   getOrgIdOrThrow,
   getRequestContext,
@@ -52,9 +57,10 @@ export const INBOX_CATEGORY_TABS = [
 
 export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
 /**
- * `abertas` = TODAS as conversas em aberto (status OPEN), sem subdividir por
- * categoria e excluindo as Resolvidas. Igual a `todos`, é um "super-tab" e não
- * uma categoria (não entra em `INBOX_CATEGORY_TABS`).
+ * `abertas` = conversas em fila ativa (OPEN, sem closedAt), sem
+ * subdividir por categoria. Estágio do funil não entra neste recorte.
+ * Igual a `todos`, é um "super-tab" e não uma categoria (não entra em
+ * `INBOX_CATEGORY_TABS`).
  *
  * `ligar` = fila de trabalho de WhatsApp com opt-in de voz ativo (GRANTED e
  * não expirado). Também não é categoria: a conversa continua em
@@ -110,6 +116,10 @@ export type GetConversationsParams = {
    * lista vazia com badge 233.
    */
   windowState?: "open" | "closed";
+  /** Recorte extra do Painel (AND com a aba; não muda a filiação da fila). */
+  painelException?: "no_reply" | "open_24h" | "unassigned" | "send_failure";
+  /** Limite de lastInboundAt para `painelException=no_reply`. */
+  noReplyBefore?: Date;
 };
 
 const listSelect = {
@@ -332,8 +342,7 @@ function tabToWhere(
       // também inclui hasAgentReply.
       // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
       // contexto PIPE pode ainda estar RUNNING por um instante.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         hasError: false,
         OR: [
           {
@@ -361,36 +370,33 @@ function tabToWhere(
             assignedToId: null,
           },
         ],
-      };
+      });
     case "esperando":
       // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
       // cliente falou por último (`lastMessageDirection = "in"`).
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         assignedToId: { not: null },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "in",
         hasError: false,
-      };
+      });
     case "respondidas":
       // "Respondidas" = já teve atendimento e nós falamos por último
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         assignedToId: { not: null },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "out",
         hasError: false,
-      };
+      });
     case "automacao":
       // Robô ativo (RUNNING ou PAUSED) sem dono humano e sem nenhuma
       // resposta do cliente, OU assignee IA ainda no disparo. Quem já
       // falou (lastInboundAt) vai para Entrada — campanha/template
       // posterior não devolve o card pra cá. Consultor humano vai para
       // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         OR: [
           {
             assignedToId: null,
@@ -406,9 +412,9 @@ function tabToWhere(
             AND: [NEVER_REPLIED],
           },
         ],
-      };
+      });
     case "finalizados":
-      return { status: "RESOLVED" };
+      return encerradasTabWhere();
     case "erro":
       return erroTabWhere();
     default: {
@@ -429,13 +435,12 @@ function tabToWhere(
  * só do badge (e não da lista) recria o 233 zumbi.
  */
 export function erroTabWhere(): Prisma.ConversationWhereInput {
-  return { status: "OPEN", hasError: true };
+  return withActiveInboxQueueGuard({ hasError: true });
 }
 
 /** WhatsApp OPEN com permissão de ligação ativa (permanente ou TTL vigente). */
 export function ligarTabWhere(): Prisma.ConversationWhereInput {
-  return {
-    status: "OPEN",
+  return withActiveInboxQueueGuard({
     channel: "whatsapp",
     hasError: false,
     whatsappCallConsentStatus: "GRANTED",
@@ -443,7 +448,7 @@ export function ligarTabWhere(): Prisma.ConversationWhereInput {
       { whatsappCallConsentExpiresAt: null },
       { whatsappCallConsentExpiresAt: { gt: new Date() } },
     ],
-  };
+  });
 }
 
 /**
@@ -521,7 +526,7 @@ function tabFilterWhere(
     }
     return null;
   }
-  if (tab === "abertas") return { status: "OPEN" };
+  if (tab === "abertas") return activeInboxQueueGuardWhere();
   if (tab === "ligar") return ligarTabWhere();
   return tabToWhere(tab, countAgentReply);
 }
@@ -678,9 +683,25 @@ export function buildInboxFilterConditions(
   );
   if (sourceCond) conditions.push(sourceCond);
   if (params.windowState === "open") {
-    conditions.push({ status: { not: "RESOLVED" } });
+    conditions.push({
+      AND: [{ status: { not: "RESOLVED" } }, { closedAt: null }],
+    });
   } else if (params.windowState === "closed") {
-    conditions.push({ status: "RESOLVED" });
+    conditions.push(encerradasTabWhere());
+  }
+  if (params.painelException === "no_reply") {
+    conditions.push({
+      lastMessageDirection: "in",
+      lastInboundAt: { lte: params.noReplyBefore ?? new Date(Date.now() - 3_600_000) },
+    });
+  } else if (params.painelException === "open_24h") {
+    conditions.push({
+      createdAt: { lte: new Date(Date.now() - 24 * 3_600_000) },
+    });
+  } else if (params.painelException === "unassigned") {
+    conditions.push({ assignedToId: null });
+  } else if (params.painelException === "send_failure") {
+    conditions.push({ hasError: true });
   }
   return conditions;
 }
@@ -785,6 +806,23 @@ export async function getResolvableConversationIds(
     }
   }
   return { ids, skippedIds };
+}
+
+/** IDs que batem no mesmo filtro da lista (aba + busca + visibilidade). */
+export async function getFilteredConversationIds(
+  params: GetConversationsParams,
+  take = 2000,
+): Promise<string[]> {
+  const where = await buildConversationListWhere(
+    await withResolvedSessionFilter(params),
+  );
+  const rows = await prisma.conversation.findMany({
+    where,
+    select: { id: true },
+    take,
+    orderBy: { updatedAt: "desc" },
+  });
+  return rows.map((r) => r.id);
 }
 
 export async function getConversations(
@@ -1100,7 +1138,7 @@ async function computeTabCounts(
     if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
       conditions.push(visibilityWhere);
     }
-    conditions.push({ status: "OPEN" });
+    conditions.push(activeInboxQueueGuardWhere());
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);

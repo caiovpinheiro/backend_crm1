@@ -12,6 +12,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 
 import {
   getRechamadoMetrics,
@@ -160,7 +161,7 @@ export async function getCockpitData(): Promise<CockpitData> {
       ? await prisma.conversation.groupBy({
           by: ["assignedToId"],
           where: {
-            status: "OPEN",
+            ...activeInboxQueueGuardWhere(),
             assignedToId: { in: agentUserIds },
           },
           _count: { _all: true },

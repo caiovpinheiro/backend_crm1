@@ -2,6 +2,8 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
+import { warnPublicDoManagedHosts } from "@/lib/warn-public-do-managed-hosts";
+
 /**
  * Cliente Prisma cru (sem extension de organizationId). Use quando:
  * - A query precisa atravessar orgs (ex.: painel /admin listando todas).
@@ -80,6 +82,7 @@ export async function withPgPoolRetry<T>(
 }
 
 function createPrismaClient() {
+  warnPublicDoManagedHosts();
   // Pool config tunado para multi-tenant SaaS:
   //
   //   - DB_POOL_MAX (default por APP_MODE — ver defaultPoolMax): conexoes

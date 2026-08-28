@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
+import { withActiveInboxQueueGuard } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -35,8 +36,7 @@ export async function GET() {
   const role = r.session.user.role;
   const isAgent = role === "MEMBER";
 
-  const pendingWhere = {
-    status: "OPEN" as const,
+  const pendingWhere = withActiveInboxQueueGuard({
     lastMessageDirection: "in",
     hasAgentReply: false,
     ...(isAgent
@@ -44,7 +44,7 @@ export async function GET() {
           OR: [{ assignedToId: userId }, { assignedToId: null }],
         }
       : {}),
-  };
+  });
 
   const inboundConvWhere = isAgent
     ? { OR: [{ assignedToId: userId }, { assignedToId: null }] }

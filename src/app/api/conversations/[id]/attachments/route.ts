@@ -197,34 +197,36 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
       }
 
-      const mediaType = resolveMediaType(mimeBase);
+      const mediaTypeResolved = resolveMediaType(mimeBase);
+      let mediaType: "image" | "audio" | "video" | "document" = mediaTypeResolved;
       let storeBuffer = buffer;
       let uploadMime = mimeBase;
       let uploadName = fileName;
       let sendAsVoice = false;
+      let audioDelivery: "voice" | "audio" | "document" | null = null;
       let storeExt = fileName.includes(".") ? fileName.split(".").pop()! : mimeBase.split("/").pop() ?? "bin";
 
-      if (mediaType === "audio") {
+      if (mediaTypeResolved === "audio") {
         const inputExt = guessInputExt(mimeBase);
         console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pela Meta`);
         const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
         if (!prepared.ok) {
+          // Único caso restante: buffer vazio. Não aborta mais por FFmpeg.
           console.error(`[meta-attach] preparo de audio falhou: ${prepared.reason}`);
           return NextResponse.json(
-            {
-              message: `Não foi possível preparar o áudio como nota de voz: ${prepared.reason}`,
-              code: "AUDIO_CONVERT_FAILED",
-            },
-            { status: 422 },
+            { message: prepared.reason, code: "AUDIO_CONVERT_FAILED" },
+            { status: 400 },
           );
         }
         storeBuffer = prepared.payload.buffer;
         uploadMime = prepared.payload.mime;
         uploadName = prepared.payload.fileName;
         sendAsVoice = prepared.payload.voice;
-        storeExt = prepared.payload.fileName.split(".").pop() || "ogg";
+        audioDelivery = prepared.payload.delivery;
+        storeExt = prepared.payload.fileName.split(".").pop() || (audioDelivery === "document" ? storeExt : "ogg");
+        if (audioDelivery === "document") mediaType = "document";
         console.log(
-          `[meta-attach] Conversao OK, ${buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+          `[meta-attach] Preparo OK (${audioDelivery}), ${buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
         );
       }
 
@@ -323,6 +325,7 @@ export async function POST(request: Request, context: RouteContext) {
           },
           conversationId: conv.id,
           ...(reopenedConversationId ? { reopenedConversationId } : {}),
+          ...(audioDelivery ? { audioDelivery } : {}),
         }, { status: 201 });
       }
 
@@ -365,7 +368,41 @@ export async function POST(request: Request, context: RouteContext) {
         } catch (err) {
           const errMsg = formatMetaSendError(err);
           console.error("[meta-attach] Falha ao enviar para Meta:", errMsg);
-          metaSendError = errMsg;
+          if (mediaType === "audio") {
+            try {
+              const retryName = uploadName.includes(".") ? uploadName : `${uploadName}.bin`;
+              const mediaId = await metaClient.uploadMedia(
+                storeBuffer,
+                "application/octet-stream",
+                retryName,
+              );
+              const result = await metaClient.sendMediaById(
+                to,
+                mediaId,
+                "document",
+                caption || undefined,
+                retryName,
+                false,
+                recipient,
+              );
+              externalId = result.messages?.[0]?.id ?? null;
+              mediaType = "document";
+              sendAsVoice = false;
+              audioDelivery = "document";
+              metaSendError = null;
+              console.warn(
+                `[meta-attach] Retry como documento OK após falha de áudio | wamid=${externalId}`,
+              );
+            } catch (retryErr) {
+              metaSendError = errMsg;
+              console.error(
+                "[meta-attach] Retry como documento também falhou:",
+                formatMetaSendError(retryErr),
+              );
+            }
+          } else {
+            metaSendError = errMsg;
+          }
         }
       } else if (!metaClient.configured) {
         console.warn(
@@ -445,6 +482,7 @@ export async function POST(request: Request, context: RouteContext) {
         },
         conversationId: conv.id,
         ...(reopenedConversationId ? { reopenedConversationId } : {}),
+        ...(audioDelivery ? { audioDelivery } : {}),
         ...(metaSendError ? { metaError: metaSendError } : {}),
       }, { status: 201 });
     } catch (e: unknown) {
