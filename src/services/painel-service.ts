@@ -9,7 +9,7 @@
 
 import { Prisma } from "@prisma/client";
 
-import { analyticsClient } from "@/lib/analytics";
+import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
@@ -30,8 +30,6 @@ import {
   type PainelDelta,
   type PainelRange,
 } from "@/services/painel-period";
-
-const prisma = analyticsClient();
 
 export type PainelBlock<T> = { ok: true; data: T } | { ok: false; error: string };
 

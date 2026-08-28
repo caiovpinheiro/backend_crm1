@@ -4,7 +4,7 @@
 
 import { Prisma } from "@prisma/client";
 
-import { analyticsClient } from "@/lib/analytics";
+import { prisma } from "@/lib/prisma";
 import { getOrgSetting } from "@/lib/org-settings";
 import {
   DEFAULT_BUSINESS_HOURS,
@@ -12,8 +12,6 @@ import {
   parseBusinessHours,
   type BusinessHours,
 } from "@/services/painel-period";
-
-const prisma = analyticsClient();
 
 export async function loadPainelHours(): Promise<BusinessHours> {
   try {

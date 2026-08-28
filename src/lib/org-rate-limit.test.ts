@@ -111,6 +111,7 @@ describe("org 429", () => {
     expect(res.headers.get("X-RateLimit-Reset")).toBe("1700000012");
     await expect(res.json()).resolves.toEqual({
       error: "rate_limit",
+      message: "Muitas requisições. Tente novamente em instantes.",
       limit: 400,
       retryAfterSec: 12,
     });

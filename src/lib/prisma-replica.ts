@@ -83,6 +83,10 @@ function createReplicaBase(): PrismaClient | null {
       // concorrencia. Ajustar se aparecer "too many clients".
       max: 5,
       idleTimeoutMillis: 30_000,
+      // DEV/EasyPanel often inherits DATABASE_URL_REPLICA from prod
+      // (private hostname). Without a connect timeout the first query
+      // hangs until the proxy returns 502 HTML.
+      connectionTimeoutMillis: 2_000,
     });
     const adapter = new PrismaPg(pool);
     return new PrismaClient({

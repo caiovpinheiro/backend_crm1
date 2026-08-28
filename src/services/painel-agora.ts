@@ -2,15 +2,13 @@
  * Bloco Agora do Painel de Atendimentos. Ignora o seletor de período.
  */
 
-import { analyticsClient } from "@/lib/analytics";
+import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { loadPainelHours, loadPainelSlaMinutes } from "@/services/painel-hours";
 import {
   waitMs,
   type ClockMode,
 } from "@/services/painel-period";
-
-const prisma = analyticsClient();
 
 export type PainelAgora = {
   asOf: string;

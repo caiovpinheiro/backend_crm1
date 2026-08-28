@@ -12,6 +12,9 @@ import {
 } from "@/services/painel-period";
 import { resolvePipelineByPublicRef } from "@/services/pipelines";
 
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
 function csv(value: string | null): string[] {
   return value ? value.split(",").map((s) => s.trim()).filter(Boolean) : [];
 }

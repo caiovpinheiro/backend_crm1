@@ -22,14 +22,26 @@ CREATE INDEX IF NOT EXISTS "deal_stage_daily_snapshots_organizationId_pipelineId
 CREATE INDEX IF NOT EXISTS "deal_stage_daily_snapshots_organizationId_date_idx"
     ON "deal_stage_daily_snapshots"("organizationId", "date");
 
-ALTER TABLE "deal_stage_daily_snapshots"
+DO $$ BEGIN
+  ALTER TABLE "deal_stage_daily_snapshots"
     ADD CONSTRAINT "deal_stage_daily_snapshots_organizationId_fkey"
     FOREIGN KEY ("organizationId") REFERENCES "organizations"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
-ALTER TABLE "deal_stage_daily_snapshots"
+DO $$ BEGIN
+  ALTER TABLE "deal_stage_daily_snapshots"
     ADD CONSTRAINT "deal_stage_daily_snapshots_pipelineId_fkey"
     FOREIGN KEY ("pipelineId") REFERENCES "pipelines"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
-ALTER TABLE "deal_stage_daily_snapshots"
+DO $$ BEGIN
+  ALTER TABLE "deal_stage_daily_snapshots"
     ADD CONSTRAINT "deal_stage_daily_snapshots_stageId_fkey"
     FOREIGN KEY ("stageId") REFERENCES "stages"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;

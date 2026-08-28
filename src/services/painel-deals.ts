@@ -8,8 +8,7 @@
 
 import { Prisma, type DealStatus } from "@prisma/client";
 
-import { analyticsClient } from "@/lib/analytics";
-import { prisma as primary } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { SOURCE_NONE } from "@/services/dashboard";
 import {
@@ -30,8 +29,6 @@ import {
   type PainelDelta,
   type PainelRange,
 } from "@/services/painel-period";
-
-const prisma = analyticsClient();
 
 export type PainelDealFilters = {
   range: PainelRange;
@@ -648,7 +645,7 @@ export async function getPainelEvolution(
   const incompleteLast = periodIncludesToday(f.range.to);
 
   try {
-    const oldestRows = await primary.$queryRaw<{ date: Date }[]>`
+    const oldestRows = await prisma.$queryRaw<{ date: Date }[]>`
       SELECT date FROM deal_stage_daily_snapshots
       WHERE "organizationId" = ${orgId}
         ${pipelineInSql(Prisma.sql`"pipelineId"`, f.pipelineIds)}
@@ -681,7 +678,7 @@ export async function getPainelEvolution(
       stages.length > 0
         ? Prisma.sql`AND "stageId" IN (${Prisma.join(stages.map((s) => s.id))})`
         : Prisma.empty;
-    const rows = await primary.$queryRaw<
+    const rows = await prisma.$queryRaw<
       { date: Date; stageId: string; openCount: number }[]
     >`
       SELECT date, "stageId", "openCount"

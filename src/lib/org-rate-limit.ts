@@ -214,6 +214,7 @@ export function orgRateLimitResponse(decision: OrgRateLimitDecision): NextRespon
   return NextResponse.json(
     {
       error: "rate_limit",
+      message: "Muitas requisições. Tente novamente em instantes.",
       limit: decision.limit,
       retryAfterSec: decision.retryAfterSec,
     },
