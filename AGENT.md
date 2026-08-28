@@ -127,6 +127,28 @@ lista dinâmica por contato nesta versão (sem cadastro de endereços).
 
 ---
 
+### 2026-08-26 — Encaminhar formulário WhatsApp Flow (slash + node)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Duas formas de enviar um Flow publicado na janela 24h (`interactive.type=flow`): atalho `/` no composer e o node `send_whatsapp_flow` no grupo Mensagens. GET `/api/whatsapp-flow-definitions/published` é aberto a qualquer membro da org (o GET raiz continua ADMIN/MANAGER). O node pausa até `nfm_reply`; texto livre não avança. Fora da janela 24h o caminho continua sendo template com botão FLOW.
+
+**Alternativas descartadas.** Recolocar Ação/Flow no node Botões (já revertido). Exigir ADMIN para listar publicados (agente não conseguiria usar o `/`).
+
+**Impacto.** `outbound-messaging.sendFlowToConversation`, `POST /api/conversations/:id/flow`, executor `send_whatsapp_flow`, `decideFlowStepInbound`.
+
+---
+
+### 2026-08-26 — Node Botões WhatsApp volta a ser só reply
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Removido `kind: action|flow` do node `send_whatsapp_interactive`. A mistura iFood (Flow + resposta rápida na mesma bolha) já existe em template aprovado (`FLOW` + `QUICK_REPLY`). Na janela 24h a Meta não mistura `interactive.type=button` com `type=flow`; o clique gerava uma segunda bolha `[Flow: …]`.
+
+**Alternativas descartadas.** Manter o seletor no canvas (UX enganosa). Colocar o menu inteiro dentro do Flow (a opção simples também abriria a ficha nativa).
+
+---
+
 ### 2026-08-25 — Clique de botão retoma automação mesmo com humano atendendo
 
 **Modelo usado.** Cursor Grok 4.6.

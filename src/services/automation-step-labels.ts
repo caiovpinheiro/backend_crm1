@@ -15,6 +15,8 @@ export const STEP_LABELS: Record<string, string> = {
   send_whatsapp_template: "Enviando template",
   send_whatsapp_media: "Enviando mídia",
   send_whatsapp_interactive: "Aguardando escolha do lead",
+  send_whatsapp_list: "Aguardando escolha do lead",
+  send_whatsapp_flow: "Aguardando formulário do lead",
   send_product: "Enviando produto",
   webhook: "Chamando webhook",
   delay: "Em espera (atraso)",

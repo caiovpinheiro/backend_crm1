@@ -97,6 +97,36 @@ export async function listFlowDefinitions() {
   });
 }
 
+/** Flows publicados com `metaFlowId` — catálogo para agente (/) e node de automação. */
+export async function listPublishedFlowDefinitions() {
+  const rows = await prisma.whatsappFlowDefinition.findMany({
+    where: { status: "PUBLISHED" },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      shortId: true,
+      name: true,
+      metaFlowId: true,
+      publishedAt: true,
+    },
+  });
+  return rows.filter((r) => Boolean(r.metaFlowId?.trim()));
+}
+
+/** Resolve um flow publicado pronto para envio de sessão (`interactive.type=flow`). */
+export async function getPublishedFlowForSend(idOrShortId: string) {
+  const flow = await prisma.whatsappFlowDefinition.findFirst({
+    where: {
+      OR: [{ id: idOrShortId }, { shortId: idOrShortId }],
+      status: "PUBLISHED",
+    },
+    select: { id: true, name: true, metaFlowId: true },
+  });
+  const metaFlowId = flow?.metaFlowId?.trim() || "";
+  if (!flow || !metaFlowId) return null;
+  return { id: flow.id, name: flow.name, metaFlowId };
+}
+
 /**
  * Resolve um flow pelo CUID (`id`) ou pelo `shortId` de 8 chars.
  * Aceita ambos para compatibilidade com registros legados sem shortId.

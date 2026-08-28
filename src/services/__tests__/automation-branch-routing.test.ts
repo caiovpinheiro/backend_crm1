@@ -19,9 +19,9 @@ import {
   readStepRef,
   shouldPersistDelay,
   decideInteractiveMenuInbound,
-  isFlowKindButton,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  decideFlowStepInbound,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -516,7 +516,7 @@ describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
   });
 });
 
-describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
+describe("decideInteractiveMenuInbound — botão retoma goto", () => {
   const buttons = [
     { id: "btn_0", title: "Sim", kind: "action", gotoStepId: "step-sim" },
     {
@@ -528,16 +528,15 @@ describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
     },
   ];
 
-  it("kind flow sem nfm_reply dispara envio do Flow", () => {
+  it("kind flow legado no config segue goto como botão de ação", () => {
     const d = decideInteractiveMenuInbound({
       buttons,
       messageContent: "Trocar endereço",
       interactiveId: "btn_1",
     });
-    expect(d.action).toBe("send_flow");
-    if (d.action === "send_flow") {
-      expect(d.buttonId).toBe("btn_1");
-      expect(d.button.flowDefinitionId).toBe("flow-def-1");
+    expect(d.action).toBe("goto_button");
+    if (d.action === "goto_button") {
+      expect(d.button.gotoStepId).toBe("step-depois-flow");
     }
   });
 
@@ -610,15 +609,60 @@ describe("decideInteractiveMenuInbound — botão de ação vs Flow", () => {
     expect(d.action).toBe("no_match");
   });
 
-  it("isFlowKindButton e readAwaitingFlow", () => {
-    expect(isFlowKindButton({ kind: "flow" })).toBe(true);
-    expect(isFlowKindButton({ kind: "action", flowDefinitionId: "x" })).toBe(false);
-    expect(isFlowKindButton({ flowDefinitionId: "x" })).toBe(true);
+  it("readAwaitingFlow", () => {
     expect(
       readAwaitingFlow({
         __awaitingFlow: { stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" },
       }),
     ).toEqual({ stepId: "s", buttonId: "b", flowToken: "t", gotoStepId: "g" });
     expect(readAwaitingFlow({})).toBeNull();
+  });
+});
+
+describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
+  const awaiting = {
+    stepId: "flow-step",
+    buttonId: "flow",
+    flowToken: "tok-form",
+    gotoStepId: "depois",
+  };
+
+  it("texto livre permanece no passo", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: false,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
+  });
+
+  it("nfm_reply com o mesmo token completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-form",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply sem token da Meta ainda completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("complete");
+  });
+
+  it("nfm_reply com token diferente permanece", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-outro",
+        awaitingFlow: awaiting,
+      }),
+    ).toBe("stay");
   });
 });

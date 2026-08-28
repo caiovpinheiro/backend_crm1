@@ -15,7 +15,9 @@
  * service testável fora do runtime de rota.
  */
 
+import { randomUUID } from "node:crypto";
 import type { NextResponse } from "next/server";
+
 
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
@@ -35,6 +37,7 @@ import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-tem
 import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
 import { cancelActiveContextsForContact } from "@/services/automation-context";
+import { getPublishedFlowForSend } from "@/services/whatsapp-flow-definitions";
 import { createConversationEvent } from "@/services/conversation-events";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
@@ -950,6 +953,227 @@ export async function sendInteractiveListToConversation(args: {
         kind: "list",
         button,
         rowTitles: rowTitlesForContent,
+        externalId,
+      },
+    });
+  }
+
+  publishNewMessage(conv, displayContent, saved.createdAt);
+  await afterOutboundSideEffects(
+    conv,
+    args.actor.id,
+    displayContent,
+    args.stopAutomations !== false,
+    outboundChannelId,
+  );
+
+  if (sendError) {
+    return { ok: false, status: 502, message: sendError };
+  }
+
+  return {
+    ok: true,
+    conversationId: conv.id,
+    ...(reopenedConversationId ? { reopenedConversationId } : {}),
+    message: {
+      id: saved.id,
+      content: displayContent,
+      createdAt: saved.createdAt.toISOString(),
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+      externalId,
+    },
+  };
+}
+
+/**
+ * Envia um WhatsApp Flow publicado como mensagem de sessão (janela 24h).
+ * Fora da janela a Graph recusa — aí o caminho é template com botão FLOW.
+ */
+export async function sendFlowToConversation(args: {
+  conversationId: string;
+  actor: OutboundActor;
+  flowDefinitionId: string;
+  body?: string | null;
+  flowCta?: string | null;
+  header?: string | null;
+  footer?: string | null;
+  channelId?: string | null;
+  stopAutomations?: boolean;
+}): Promise<OutboundResult> {
+  const flowDefinitionId = args.flowDefinitionId.trim();
+  if (!flowDefinitionId) {
+    return { ok: false, status: 400, message: "flowDefinitionId é obrigatório." };
+  }
+
+  const flow = await getPublishedFlowForSend(flowDefinitionId);
+  if (!flow) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Formulário não encontrado ou ainda não publicado na Meta.",
+    };
+  }
+
+  const body = (args.body?.trim() || `Preencha o formulário: ${flow.name}`).slice(0, 1024);
+  const flowCta = args.flowCta?.trim() || "Abrir formulário";
+  const header = args.header?.trim() || null;
+  if (header && header.length > 60) {
+    return { ok: false, status: 400, message: "header excede 60 caracteres (limite Meta)." };
+  }
+  const footer = args.footer?.trim() || null;
+  if (footer && footer.length > 60) {
+    return { ok: false, status: 400, message: "footer excede 60 caracteres (limite Meta)." };
+  }
+
+  const found = await getConversationLite(args.conversationId);
+  if (!found) return { ok: false, status: 404, message: "Conversa não encontrada." };
+  if (found.channel !== "whatsapp") {
+    return {
+      ok: false,
+      status: 400,
+      message: `Formulários WhatsApp são exclusivos de WhatsApp (canal da conversa: ${found.channel}).`,
+    };
+  }
+
+  const { conv, reopenedConversationId } = await reopenIfResolved(found);
+
+  const sendDenied = await requireChannelScope(
+    {
+      id: args.actor.id,
+      role: args.actor.role ?? undefined,
+      organizationId: args.actor.organizationId,
+      isSuperAdmin: args.actor.isSuperAdmin,
+    },
+    "send",
+    conv.channelId,
+  );
+  if (sendDenied) return denialToFailure(sendDenied);
+
+  const resolved = await resolveOutboundChannel({
+    conv: {
+      channelId: conv.channelId,
+      channelRef: conv.channelRef,
+      organizationId: conv.organizationId,
+    },
+    user: {
+      id: args.actor.id,
+      role: args.actor.role ?? null,
+      organizationId: args.actor.organizationId,
+      isSuperAdmin: args.actor.isSuperAdmin,
+    },
+    requestedChannelId: args.channelId ?? null,
+  });
+  if (!resolved.ok) return denialToFailure(resolved.response);
+
+  const outboundChannelRef = resolved.channelRef;
+  const outboundChannelId = resolved.channelId;
+  const disconnected = ensureChannelConnected(outboundChannelRef);
+  if (disconnected) return disconnected;
+  if (isBaileysChannel(outboundChannelRef)) {
+    return {
+      ok: false,
+      status: 400,
+      message:
+        "Formulários WhatsApp Flow não são suportados em canais WhatsApp QR (Baileys). Use um template com botão Flow.",
+    };
+  }
+
+  const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
+  const metaClient = metaClientFromConfig(channelConfig);
+  if (!metaClient.configured) {
+    return {
+      ok: false,
+      status: 503,
+      message:
+        "Canal WhatsApp da conversa sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
+    };
+  }
+
+  const target = await getContactWhatsAppTargets(conv.contactId ?? "");
+  if (!target) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Contato sem telefone nem BSUID WhatsApp (Meta).",
+    };
+  }
+  const { to, recipient } = target;
+
+  const senderName = actorName(args.actor);
+  const flowToken = randomUUID();
+  const displayContent = `${body}\n[Flow: ${flowCta}]`;
+
+  const saved = await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId: conv.id,
+      channelId: outboundChannelId ?? undefined,
+      content: displayContent,
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+      flowToken,
+    }),
+  });
+
+  let externalId: string | null = null;
+  let sendError: string | undefined;
+  try {
+    const result = await metaClient.sendInteractiveFlow(
+      to,
+      body,
+      {
+        flowId: flow.metaFlowId,
+        flowCta,
+        flowToken,
+        flowAction: "navigate",
+      },
+      header ?? undefined,
+      footer ?? undefined,
+      recipient,
+    );
+    externalId = result.messages?.[0]?.id ?? null;
+    if (externalId) {
+      await prisma.message
+        .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
+        .catch(() => {});
+    }
+  } catch (e: unknown) {
+    sendError = e instanceof Error ? e.message : "Falha ao enviar formulário pelo WhatsApp.";
+    console.error("[meta-send-flow]", e);
+    await prisma.message
+      .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
+      .catch(() => {});
+  }
+
+  try {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: {
+        lastMessageDirection: "out",
+        hasAgentReply: true,
+        hasError: Boolean(sendError),
+      },
+    });
+  } catch {
+    // colunas opcionais em bases antigas
+  }
+
+  if (!sendError) {
+    void logEvent({
+      type: "MESSAGE_SENT",
+      entityType: "MESSAGE",
+      entityId: saved.id,
+      entityLabel: senderName,
+      conversationId: conv.id,
+      contactId: conv.contactId,
+      meta: {
+        preview: body.slice(0, 200),
+        channel: "WhatsApp",
+        kind: "flow",
+        flowDefinitionId: flow.id,
+        flowName: flow.name,
         externalId,
       },
     });
