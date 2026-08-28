@@ -7,13 +7,27 @@ name: Build & Deploy
 #
 # Setup no GitHub (Settings -> Secrets and variables -> Actions):
 #
+# Mapeamento branch -> ambiente (atual):
+#   main           -> PRODUÇÃO na DigitalOcean (157.245.121.18).
+#                     Tags publicadas: `latest` E `digitalocean`.
+#                     Webhooks disparados: EASYPANEL_WEBHOOK_DO_*
+#   digitalocean   -> mesmo ambiente da DO (branch mantida por compatibilidade).
+#                     Tag `digitalocean`, webhooks EASYPANEL_WEBHOOK_DO_*
+#   qualquer outra -> ambiente dev. Tag `dev`, webhooks EASYPANEL_WEBHOOK_DEV_*
+#
+# Os secrets EASYPANEL_WEBHOOK_PROD* apontam para o EasyPanel do servidor
+# ANTIGO (187.127.27.39) e NÃO são mais disparados por nenhuma branch — aquele
+# host hoje só serve como fallback de storage. Foram mantidos cadastrados para
+# rollback manual, não apague.
+#
 #   Secrets (por ambiente, uma por serviço — API + workers):
-#     EASYPANEL_WEBHOOK_PROD                    serviço API (prod)
-#     EASYPANEL_WEBHOOK_PROD_WORKER_WHATSAPP    worker-whatsapp (prod)
-#     EASYPANEL_WEBHOOK_PROD_WORKER_LEADS       worker-leads (prod)
-#     EASYPANEL_WEBHOOK_PROD_WORKER_ETL         worker-etl (prod)
-#     EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS worker-automations (prod)
-#     EASYPANEL_WEBHOOK_PROD_WORKER_META_WEBHOOK worker-meta-webhook (prod)
+#     EASYPANEL_WEBHOOK_DO_API                  serviço API (produção DO)
+#     EASYPANEL_WEBHOOK_DO_WORKER_WHATSAPP      worker-whatsapp (produção DO)
+#     EASYPANEL_WEBHOOK_DO_WORKER_LEADS         worker-leads (produção DO)
+#     EASYPANEL_WEBHOOK_DO_WORKER_ETL           worker-etl (produção DO)
+#     EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS   worker-automations (produção DO)
+#     EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK  worker-meta-webhook (produção DO)
+#     EASYPANEL_WEBHOOK_PROD*                   servidor antigo — NÃO disparado
 #     EASYPANEL_WEBHOOK_DEV                     serviço API (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP     worker-whatsapp (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_LEADS        worker-leads (dev)
@@ -27,8 +41,11 @@ name: Build & Deploy
 #
 # Setup no Easypanel (por serviço):
 #   Source: Docker Image
-#   Image:  ghcr.io/caiovpinheiro/backend_crm1:latest   (prod)
-#           ghcr.io/caiovpinheiro/backend_crm1:dev      (dev)
+#   Image:  ghcr.io/caiovpinheiro/backend_crm1:latest        (prod DO)
+#           ghcr.io/caiovpinheiro/backend_crm1:digitalocean  (prod DO, alias)
+#           ghcr.io/caiovpinheiro/backend_crm1:dev           (dev)
+#   `latest` e `digitalocean` recebem a MESMA imagem em todo push na main, então
+#   tanto faz qual das duas o serviço referencia.
 #   Registry credentials: crie um GitHub PAT com escopo `read:packages` e
 #     cadastre em Easypanel -> Registries. (Se o pacote estiver public,
 #     nao precisa autenticar.)
@@ -41,7 +58,7 @@ name: Build & Deploy
 
 on:
   push:
-    branches: [main, DEV_BRANCH]
+    branches: [main, DEV_BRANCH, digitalocean]
   workflow_dispatch:
 
 # Cancela runs anteriores da mesma branch quando um push novo chega.
@@ -86,15 +103,40 @@ jobs:
           S_WEBHOOK_DEV_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_ETL }}
           S_WEBHOOK_DEV_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS }}
           S_WEBHOOK_DEV_META: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK }}
+          S_WEBHOOK_DO: ${{ secrets.EASYPANEL_WEBHOOK_DO_API }}
+          S_WEBHOOK_DO_WA: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_WHATSAPP }}
+          S_WEBHOOK_DO_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_LEADS }}
+          S_WEBHOOK_DO_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_ETL }}
+          S_WEBHOOK_DO_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS }}
+          S_WEBHOOK_DO_META: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK }}
         run: |
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
+            # Produção = DigitalOcean. Publica em DUAS tags (`latest` e
+            # `digitalocean`) porque os serviços do EasyPanel da DO podem
+            # referenciar qualquer uma das duas — os arquivos de deploy do repo
+            # (deploy/digitalocean/*) apontam para `latest`, mas a branch de
+            # migração publicava `digitalocean`. Publicar ambas torna o deploy
+            # independente de qual tag está configurada no painel.
+            #
+            # Os webhooks EASYPANEL_WEBHOOK_PROD* (servidor antigo,
+            # 187.127.27.39) NÃO são mais disparados: aquele host hoje serve
+            # apenas como fallback de storage e não deve receber código novo.
+            # As secrets continuam cadastradas de propósito, para eventual
+            # rollback manual — só deixaram de ser chamadas automaticamente.
             TAG=latest
-            WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO $S_WEBHOOK_PROD_META"
+            EXTRA_TAG=digitalocean
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META"
+          elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
+            # Branch de migração DO: publica com a tag da branch e dispara o
+            # redeploy dos serviços do EasyPanel da DO (API + workers).
+            TAG=digitalocean
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META"
           else
             TAG=dev
             WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
+          EXTRA_TAG=$(printf '%s' "${EXTRA_TAG:-}" | tr -d '\r\n')
           # Normaliza: trim de \r\n por webhook e descarta vazios. Saída =
           # lista separada por espaço, um webhook por serviço configurado.
           CLEAN=""
@@ -106,12 +148,23 @@ jobs:
             COUNT=$((COUNT+1))
           done
           CLEAN=$(printf '%s' "$CLEAN" | sed 's/^ //')
+          # Lista final de refs de imagem (uma por linha) consumida direto pelo
+          # build-push-action — evita linha vazia quando não há EXTRA_TAG.
+          IMAGE_REFS="$REGISTRY/$IMAGE_NAME:$TAG"$'\n'"$REGISTRY/$IMAGE_NAME:$GITHUB_SHA"
+          if [ -n "$EXTRA_TAG" ]; then
+            IMAGE_REFS="$IMAGE_REFS"$'\n'"$REGISTRY/$IMAGE_NAME:$EXTRA_TAG"
+          fi
           {
             echo "TAG=$TAG"
+            echo "EXTRA_TAG=$EXTRA_TAG"
             echo "WEBHOOKS=$CLEAN"
+            echo "IMAGE_REFS<<__EOF__"
+            echo "$IMAGE_REFS"
+            echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
           echo "::group::env resolved (values masked)"
-          [ -n "$TAG" ] && echo "TAG=<set>" || echo "TAG=<EMPTY>"
+          [ -n "$TAG" ] && echo "TAG=$TAG" || echo "TAG=<EMPTY>"
+          if [ -n "$EXTRA_TAG" ]; then echo "EXTRA_TAG=$EXTRA_TAG"; fi
           echo "WEBHOOKS_COUNT=$COUNT"
           echo "::endgroup::"
 
@@ -130,9 +183,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Em `main` a lista traz `latest` + `digitalocean` + sha (ver step
+          # "Resolve environment"); nas outras branches, só a tag da branch + sha.
+          tags: ${{ steps.env.outputs.IMAGE_REFS }}
           # Scope por branch + fallback pra main: builds de DEV_BRANCH
           # aproveitam camadas ja cacheadas por main quando o proprio
           # cache esta frio (antes DEV rodava ~5min vs 2min em main).

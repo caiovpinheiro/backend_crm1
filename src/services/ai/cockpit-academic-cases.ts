@@ -138,6 +138,9 @@ export async function getAcademicCockpitCases(args: {
       break;
     }
 
+    // Mesma população da aba "Agente IA" da Inbox (`tabToWhere` case
+    // `agente_ia`): OPEN + sem erro + responsável `type = AI`. O `hasError`
+    // mantém a lista igual ao badge da aba — conversa em erro fica na aba Erro.
     case "attending_now": {
       const [countRow, data] = await Promise.all([
         prismaBase.$queryRaw<[{ n: bigint }]>`
@@ -146,6 +149,7 @@ export async function getAcademicCockpitCases(args: {
           JOIN users u ON u.id = c."assignedToId"
           WHERE c."organizationId" = ${orgId}
             AND c.status = 'OPEN'
+            AND c."hasError" = false
             AND u.type = 'AI'
         `,
         prismaBase.$queryRaw<RawCase[]>`
@@ -159,6 +163,7 @@ export async function getAcademicCockpitCases(args: {
         LEFT JOIN contacts ct ON ct.id = c."contactId"
         WHERE c."organizationId" = ${orgId}
           AND c.status = 'OPEN'
+          AND c."hasError" = false
           AND u.type = 'AI'
         ORDER BY c."updatedAt" DESC
         OFFSET ${offset} LIMIT ${limit}

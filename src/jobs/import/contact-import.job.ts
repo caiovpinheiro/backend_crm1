@@ -8,11 +8,15 @@ import {
 } from "@/lib/contact-import-core";
 import { readTableFromBuffer, upsertImportTag } from "@/lib/import-helpers";
 import { getLogger } from "@/lib/logger";
-import { prismaBase } from "@/lib/prisma-base";
+import { prismaImport } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getCustomFields } from "@/services/custom-fields";
 import { readStoredFile } from "@/lib/storage/local";
-import type { ContactImportPayload } from "@/lib/queue";
+import {
+  enqueueImportEtl,
+  IMPORT_ETL_JOB_NAMES,
+  type ContactImportPayload,
+} from "@/lib/queue";
 
 import {
   incrementOperationProgress,
@@ -26,6 +30,16 @@ const log = getLogger("worker.etl.contact-import");
 
 /** Linhas processadas por lote antes de atualizar o progresso no Postgres. */
 const CHUNK_SIZE = 50;
+
+/**
+ * Fatia de linhas que um sub-job processa antes de re-enfileirar a próxima
+ * (justiça entre tenants — ver deals-import.job.ts). Override via IMPORT_SLICE.
+ */
+const IMPORT_SLICE = (() => {
+  const raw = process.env.IMPORT_SLICE;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2000;
+})();
 
 /**
  * M7 — pausa (ms) entre chunks para aliviar o Postgres compartilhado durante
@@ -56,9 +70,14 @@ export async function processContactImport(
   job: Job<ContactImportPayload>,
 ): Promise<void> {
   const { operationId, organizationId, fileName, originalName } = payload;
-  const ctx = log.child({ operationId, organizationId, jobId: job.id });
+  const offset = payload.offset ?? 0;
+  const isFirstSlice = offset === 0;
+  const ctx = log.child({ operationId, organizationId, jobId: job.id, offset });
 
-  await markOperationStarted(operationId, organizationId);
+  // Só a primeira fatia marca o início; as seguintes continuam o progresso.
+  if (isFirstSlice) {
+    await markOperationStarted(operationId, organizationId);
+  }
 
   // 1. Obtém o conteúdo do arquivo. Preferência: base64 embutido no
   // BulkOperation.payload (banco já compartilhado entre backend e worker) —
@@ -66,7 +85,7 @@ export async function processContactImport(
   // lê do disco (legado, quando o volume é compartilhado).
   let fileBuffer: Buffer | null = null;
   try {
-    const op = await prismaBase.bulkOperation.findUnique({
+    const op = await prismaImport.bulkOperation.findUnique({
       where: { id: operationId },
       select: { payload: true },
     });
@@ -187,7 +206,10 @@ export async function processContactImport(
     chunkErrors = [];
   };
 
-  for (let i = 0; i < rows.length; i++) {
+  // Processa APENAS a fatia [offset, offset+IMPORT_SLICE). Se houver mais
+  // linhas, re-enfileira a próxima fatia no fim da fila ao final.
+  const sliceEnd = Math.min(offset + IMPORT_SLICE, rows.length);
+  for (let i = offset; i < sliceEnd; i++) {
     const rowNumber = i + 2; // +1 cabeçalho, +1 base-1
     let result;
     try {
@@ -220,6 +242,29 @@ export async function processContactImport(
   }
 
   await flush();
+
+  // Há mais linhas? Re-enfileira a próxima fatia no FIM da fila, cedendo o
+  // slot à próxima org. A próxima fatia re-parseia e continua do offset.
+  if (sliceEnd < rows.length) {
+    const enqueued = await enqueueImportEtl(IMPORT_ETL_JOB_NAMES.contactImport, {
+      ...payload,
+      offset: sliceEnd,
+    });
+    if (!enqueued) {
+      await markOperationFailed(
+        operationId,
+        organizationId,
+        "Redis indisponível ao re-enfileirar a próxima fatia do import.",
+      );
+      return;
+    }
+    ctx.info(
+      { processedUpTo: sliceEnd, totalRows: rows.length },
+      "Fatia de contatos concluída — próxima fatia enfileirada",
+    );
+    return;
+  }
+
   await markOperationFinished(operationId, organizationId);
 
   ctx.info({ totalRows: rows.length }, "Importação de contatos concluída");

@@ -329,6 +329,13 @@ const nextAuth = NextAuth({
       }
       return session;
     },
+    async redirect({ url, baseUrl }) {
+      const fn = authConfig.callbacks?.redirect;
+      if (typeof fn === "function") {
+        return fn({ url, baseUrl });
+      }
+      return baseUrl;
+    },
   },
 });
 

@@ -112,7 +112,7 @@ export async function PUT(request: Request, context: RouteContext) {
           assignedById: r.session.user.id,
         });
       });
-      await invalidateAuthzForUser(target.id);
+      await invalidateAuthzForUser(targetOrgId, target.id);
       return NextResponse.json({ ok: true, role: { id: role.id, name: role.name } });
     }
 
@@ -134,7 +134,7 @@ export async function PUT(request: Request, context: RouteContext) {
         },
       });
     });
-    await invalidateAuthzForUser(target.id);
+    await invalidateAuthzForUser(targetOrgId, target.id);
     return NextResponse.json({ ok: true, role: { id: role.id, name: role.name } });
   } catch (e) {
     console.error("[PUT /api/users/[id]/primary-role]", e);

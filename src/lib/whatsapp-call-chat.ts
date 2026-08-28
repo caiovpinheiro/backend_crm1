@@ -59,6 +59,7 @@ function asStr(v: unknown): string {
 /** SDP no webhook `calls` — `session` (oficial) ou `connection.webrtc` (variante Meta). */
 export function extractWhatsappCallSdpSession(
   callObj: Record<string, unknown>,
+  opts?: { defaultSdpType?: string },
 ): { sdp_type: string; sdp: string } | null {
   const sess = asObj(callObj.session);
   let sdpType = asStr(sess.sdp_type);
@@ -66,7 +67,9 @@ export function extractWhatsappCallSdpSession(
   if (!sdp) {
     const webrtc = asObj(asObj(callObj.connection).webrtc);
     sdp = asStr(webrtc.sdp);
-    if (sdp && !sdpType) sdpType = "answer";
+  }
+  if (sdp && !sdpType) {
+    sdpType = opts?.defaultSdpType || "answer";
   }
   if (!sdp || !sdpType) return null;
   return { sdp_type: sdpType, sdp };

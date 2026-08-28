@@ -5,6 +5,60 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-27 — Aba "Agente IA" na Inbox
+
+**Decisão.** Nova categoria `agente_ia` em `INBOX_CATEGORY_TABS`: conversa OPEN, sem erro, com responsável `User.type = AI`. As abas Entrada, Aguardando, Respondidas e Automação passaram a exigir assignee HUMANO (ou nenhum) — o assignee IA saiu delas. Permission `inbox:tab:agente_ia` (migration `20260827180000`) com fallback de rollout para `inbox:tab:entrada` / `inbox:tab:automacao` em `canSeeInboxTab` e `withInboxQueueVisibility`.
+
+**Contexto.** Os leads em atendimento pela IA ficavam espalhados: com inbound caíam em Entrada, sem inbound em Automação. Não havia como ver a fila da IA nem separar o que já é responsabilidade de um consultor.
+
+**Handoff.** O lead sai da aba nos dois desfechos: consultor elegível → Entrada com dono; fila cheia / ninguém elegível → `DistributionPending` e Entrada sem dono. `executeDistribution` (reassign) agora também limpa `Contact.assignedToId` e `Deal.ownerId` quando a conversa já chegou sem responsável mas o dono ainda é o usuário IA — caminho do `executeAcademicDepartmentHandoff`, que zera a conversa antes de chamar o motor. Sem isso o lead ia para a espera com a IA como dono no pipeline e o sync devolvia o card para a aba. Os limites de fila dos consultores não mudaram e não se aplicam à IA.
+
+**Alternativas descartadas.** Filtrar só no frontend (badges e paginação viriam errados; `todos`/permissões são server-side). Reaproveitar a aba Automação (mistura robô de campanha com atendimento da IA). Gate por `includeUnassigned` na fila da IA (lá o responsável existe, não é pool livre).
+
+**Cockpit.** `totals.attendingNow` deixou de ser a soma dos `AIAgentConfig` e passou a contar o mesmo predicado da aba (um `User type = AI` com a config apagada continua na aba e deixaria o KPI menor que o badge). O `hasError: false` entrou no groupBy por agente e na lista de casos `attending_now`, que já usava `u.type = 'AI'`. KPI, modal e badge da aba agora batem.
+
+**Impacto.** `services/conversations.ts`, `lib/visibility.ts`, `lib/authz/{permissions,presets,scope-grants-shared}.ts`, `services/distribution/cockpit.ts`, `services/ai/cockpit-academic-cases.ts`, rotas `conversations` e `conversations/bulk`.
+
+**Ordem de deploy.** Frontend primeiro. `route.ts` não rejeita `tab` desconhecida — `validTabs.has()` cai para `undefined` e a query volta sem filtro de aba. Logo frontend novo + backend velho só mostra a aba nova com a lista de "Todas": feio, nada some. O inverso é o que quebra — backend novo + frontend velho tira as conversas da IA de Entrada/Aguardando/Respondidas/Automação sem ter aba para recebê-las, e elas só aparecem em "Todas".
+
+---
+
+### 2026-08-27 — Bearer em GET /api/deals/:id/timeline
+
+**Decisão.** `GET /api/deals/:id/timeline` passa a aceitar Bearer (`authenticateApiRequest` + `runWithApiUserContext`), além da sessão. Exige `deal:view`. O n8n lê a mesma timeline do painel do negócio.
+
+**Contexto.** A rota só tinha `withOrgContext` (sessão NextAuth). O node de action Timeline > Get Events precisa do token de API.
+
+**Alternativas descartadas.** Endpoint novo só para n8n (duplicaria o contrato `{ id, type, meta, createdAt, user }`). Polling de webhooks.
+
+**Impacto.** 1 rota. Sessão do CRM inalterada (`authenticateApiRequest` faz fallback para `auth()`).
+
+---
+
+### 2026-08-27 — Reset de senha pelo admin destrava o login
+
+**Decisão.** (1) `PATCH /api/users/[id]` com `password` chama `clearLoginLockout(email)` — apaga as falhas das janelas soft (15min) e hard (24h) em `login_attempts`. (2) Outcome `locked` deixou de contar como falha nos thresholds do lockout.
+
+**Contexto.** Usuário com 10+ falhas/24h entrava em hard-lock e o admin não conseguia liberar nem trocando a senha: `checkLockout` roda antes da checagem de senha, então o usuário nunca chegava ao sucesso (que limpa só a janela de 15min), e cada tentativa bloqueada gravava outcome `locked` — que contava como falha e renovava a janela de 24h indefinidamente.
+
+**Alternativas descartadas.** Botão "Desbloquear" sem troca de senha (escopo maior de UI; o fluxo que o admin já tenta é o reset). Manter `locked` contando (preserva o bug). Limpar só a janela soft (não destrava o hard-lock).
+
+**Impacto.** `src/lib/auth/lockout.ts`, `src/app/api/users/[id]/route.ts`. Hard-lock agora expira 24h após a última falha real (não se auto-renova). Sem mudança de frontend.
+
+### 2026-08-26 — Webhooks de integração (n8n Trigger)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Tabela `integration_webhooks` + CRUD Bearer (`GET/POST /api/integration-webhooks`, `GET/DELETE /api/integration-webhooks/:id`). `fireTrigger` despacha POST fire-and-forget para as URLs da org que escutam o evento (ou `*`), inclusive quando não há automação interna. `assignDealOwner` passa a disparar `agent_changed` (bulk, distribuição, automação). Troca de responsável do contato dispara `contact_owner_changed` (não reusa `agent_changed`).
+
+**Contexto.** O n8n precisava de um Trigger por evento (primeiro: troca de responsável). O CRM só tinha automações internas — sem inscrição de webhook de saída.
+
+**Alternativas descartadas.** Polling no n8n (atraso + carga). Reusar `agent_changed` no contato (dispararia automações de deal). Endpoint só de `agent_changed` (outros eventos já passam por `fireTrigger`).
+
+**Impacto.** Nova tabela tenant-scoped. Permissões `deal:view` (listar) e `deal:edit` (criar/apagar). Payload: `{ event, occurredAt, organizationId, contactId, dealId, data }`. Header `X-Eduit-Signature: sha256=…` quando há secret.
+
+---
+
 ### 2026-08-25 — Encerrar conversa limpa responsável do deal/contato
 
 **Decisão.** Quando a conversa é encerrada SEM "manter atendente" (`conversation.keepAgentOnEnd` off), `updateConversationStatusInDb` agora também: loga `ASSIGNEE_CHANGED` (chat + timeline, "X removida da conversa") e chama `clearContactOwnershipOnClose` — zera `ownerId` dos deals ABERTOS do contato e `assignedToId` do contato, com `OWNER_CHANGED`/`CONTACT_OWNER_CHANGED` nos logs. Guardas: só limpa quem era o responsável removido, e só se nenhuma outra conversa aberta do contato ainda está com ele. O bulk-resolve (worker leads) faz o mesmo por par (contato, atendente).

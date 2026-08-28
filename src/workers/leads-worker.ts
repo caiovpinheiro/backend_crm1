@@ -47,6 +47,11 @@ const log = getLogger("worker.leads");
  *     jobs podem rodar em paralelo no MESMO processo worker; isso aumenta
  *     throughput quando há vários BulkOperations pequenos pendentes.
  *   - Cada job processa seus próprios chunks sequencialmente.
+ *   - O pool default de `worker-leads` (10, ver `defaultPoolMax`) cobre a
+ *     concurrency 5 mais o semáforo de efeitos colaterais do
+ *     bulk-move-stage. Ao subir `LEADS_BULK_CONCURRENCY`, suba também
+ *     `DB_POOL_MAX` — pool menor que a demanda faz o job esperar conexão
+ *     na fila interna do pg-pool e falhar por timeout.
  *
  * Retries:
  *   - Configurados no produtor (`enqueueLeadsBulk`).

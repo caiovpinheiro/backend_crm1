@@ -1,0 +1,34 @@
+# Caddyfile do ambiente de staging.
+#
+# Diferença para o de produção: sem wildcard. Os subdomínios de tenant
+# (`{slug}.crm.eduit.com.br`) ainda não estão ativos, então não há motivo
+# para desafio DNS-01 — cada host tira certificado por HTTP-01 sozinho,
+# sem depender de token de DNS nem de mover zona.
+#
+# Quando os tenants entrarem, a saída é `on_demand` TLS aqui, que emite
+# certificado por hostname conforme os slugs aparecem.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# O stream de SSE em /api/sse/messages não pode ser bufferizado nem
+	# morto por timeout de leitura.
+	@sse path /api/sse/*
+	reverse_proxy @sse frontend:3000 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+		}
+	}
+
+	reverse_proxy frontend:3000
+}

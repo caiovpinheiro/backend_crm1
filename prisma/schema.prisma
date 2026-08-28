@@ -96,6 +96,7 @@ model Organization {
   lossReasons              LossReason[]
   pipelineLossReasons      PipelineLossReason[]
   apiTokens                ApiToken[]
+  integrationWebhooks      IntegrationWebhook[]
   mobileLayoutConfigs      MobileLayoutConfig[]
   userDashboardLayouts     UserDashboardLayout[]
   fieldLayoutConfigs       FieldLayoutConfig[]
@@ -4137,6 +4138,30 @@ model ApiToken {
   @@map("api_tokens")
 }
 
+/// Webhook de saída para integrações (n8n Trigger).
+/// O CRM POSTa o evento em `url` quando `fireTrigger` dispara um tipo
+/// presente em `events` (ou quando `events` contém `*`).
+model IntegrationWebhook {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// URL HTTPS do subscriber (webhook do n8n).
+  url            String
+  /// Tipos de evento (`agent_changed`, `stage_changed`, …) ou `*`.
+  events         String[]
+  /// Segredo HMAC-SHA256 enviado em `X-Eduit-Signature`.
+  secret         String?
+  isActive       Boolean      @default(true)
+  /// Rótulo opcional (ex.: nome do workflow n8n).
+  name           String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, url])
+  @@index([organizationId, isActive])
+  @@map("integration_webhooks")
+}
+
 // ──────────────────────────────────────────────
 // Campaigns & Segments
 // ──────────────────────────────────────────────
@@ -4244,7 +4269,12 @@ model CampaignRecipient {
   /// Independente de status (entregue/lido). Idempotente: só seta uma vez.
   repliedAt   DateTime?
 
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
+  /// Base do sweeper de recipients SENDING travados no rodízio
+  /// (campaign-worker): SENDING com updatedAt antigo volta a PENDING.
+  /// Nullable porque linhas antigas não têm valor; o sweeper faz
+  /// COALESCE com createdAt.
+  updatedAt DateTime? @updatedAt
 
   @@unique([campaignId, contactId])
   @@index([organizationId])
@@ -5537,4 +5567,24 @@ model TeamChatNote {
   @@index([roomId, authorId])
   @@index([organizationId])
   @@map("team_chat_notes")
+}
+
+/// Contador atômico do `number` sequencial por (organização, model).
+/// Fonte única de verdade da numeração pública — ver `allocateOrgNumber`
+/// em lib/prisma.ts. Substitui o `MAX(number) + 1`, que era lento (OFFSET
+/// injetado pela extension de scope) e racy entre workers concorrentes.
+///
+/// Acessado exclusivamente via `$queryRaw` num único statement
+/// `INSERT ... ON CONFLICT DO UPDATE`; não há delegate Prisma em uso. Sem
+/// FK para `Organization` de propósito: linha órfã após exclusão de org é
+/// inofensiva (só reserva números que ninguém mais vai pedir) e a FK
+/// acrescentaria contenção no caminho mais quente de escrita do sistema.
+model OrgNumberCounter {
+  organizationId String
+  model          String
+  lastNumber     Int      @default(0)
+  updatedAt      DateTime @default(now())
+
+  @@id([organizationId, model])
+  @@map("org_number_counters")
 }

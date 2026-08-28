@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import {
   ensureWhatsappTemplateHiddenAtColumn,
@@ -248,6 +249,10 @@ export async function POST(request: Request) {
 
       if (b.raw === true && b.payload && typeof b.payload === "object" && !Array.isArray(b.payload)) {
         const data = await metaClient.createMessageTemplate(b.payload as Record<string, unknown>);
+        await invalidateWhatsappTemplateCatalog(
+          session.user.organizationId,
+          metaClient.wabaId,
+        );
         return NextResponse.json(data, { status: 201 });
       }
 
@@ -393,6 +398,11 @@ export async function POST(request: Request) {
       }
 
       const data = await metaClient.createMessageTemplate(payload);
+      // Template novo entra no catálogo da WABA: derruba o cache do inbox.
+      await invalidateWhatsappTemplateCatalog(
+        session.user.organizationId,
+        metaClient.wabaId,
+      );
       return NextResponse.json(data, { status: 201 });
     } catch (e: unknown) {
       console.error("[meta-templates] POST", e);

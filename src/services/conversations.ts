@@ -10,7 +10,7 @@ import {
 } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
-import { prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
@@ -35,12 +35,19 @@ import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
+  resolveConversationSearchCandidates,
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
-/** TTL curto: badges e Fila da distribuição precisam acompanhar o inbox. */
-const TAB_COUNTS_CACHE_TTL_SEC = 5;
+/**
+ * Frescura dos badges vem da invalidação (mensagem nova via `sse-bus`,
+ * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
+ * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
+ * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
+ * rede de segurança contra invalidação perdida.
+ */
+const TAB_COUNTS_CACHE_TTL_SEC = 30;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -50,6 +57,7 @@ export const INBOX_CATEGORY_TABS = [
   "entrada",
   "esperando",
   "respondidas",
+  "agente_ia",
   "automacao",
   "finalizados",
   "erro",
@@ -57,10 +65,9 @@ export const INBOX_CATEGORY_TABS = [
 
 export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
 /**
- * `abertas` = conversas em fila ativa (OPEN, sem closedAt), sem
- * subdividir por categoria. Estágio do funil não entra neste recorte.
- * Igual a `todos`, é um "super-tab" e não uma categoria (não entra em
- * `INBOX_CATEGORY_TABS`).
+ * `abertas` = TODAS as conversas em aberto (status OPEN), sem subdividir por
+ * categoria e excluindo as Resolvidas. Igual a `todos`, é um "super-tab" e não
+ * uma categoria (não entra em `INBOX_CATEGORY_TABS`).
  *
  * `ligar` = fila de trabalho de WhatsApp com opt-in de voz ativo (GRANTED e
  * não expirado). Também não é categoria: a conversa continua em
@@ -116,10 +123,6 @@ export type GetConversationsParams = {
    * lista vazia com badge 233.
    */
   windowState?: "open" | "closed";
-  /** Recorte extra do Painel (AND com a aba; não muda a filiação da fila). */
-  painelException?: "no_reply" | "open_24h" | "unassigned" | "send_failure";
-  /** Limite de lastInboundAt para `painelException=no_reply`. */
-  noReplyBefore?: Date;
 };
 
 const listSelect = {
@@ -334,14 +337,15 @@ function tabToWhere(
     case "entrada":
       // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
       // humano aguardando a 1ª msg dele, OU (3) sem dono após redistribuição
-      // manual com fila cheia (hasHumanReply=true — antes sumia das abas),
-      // OU (4) sem dono, cliente falou por último — mesmo com robô ainda
-      // RUNNING/PAUSED (campanha/salesbot). Aguardando exige assignee +
-      // reply humano; aqui o último inbound é do cliente e o consultor
-      // precisa ver. Com countAgentReplyAsAnswered, “já houve reply”
-      // também inclui hasAgentReply.
+      // manual com fila cheia (hasHumanReply=true — antes sumia das abas).
+      // Aguardando exige assignee + reply humano; aqui o último inbound é do
+      // cliente e o consultor precisa ver. Com countAgentReplyAsAnswered,
+      // “já houve reply” também inclui hasAgentReply.
       // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
       // contexto PIPE pode ainda estar RUNNING por um instante.
+      // Assignee IA NÃO entra aqui: tem aba própria (`agente_ia`). O card
+      // volta para Entrada quando o handoff libera o responsável (fila de
+      // espera) ou atribui um consultor.
       return withActiveInboxQueueGuard({
         hasError: false,
         OR: [
@@ -355,14 +359,6 @@ function tabToWhere(
                 lastInboundAt: { not: null },
               },
               { assignedTo: { is: { type: "HUMAN" } } },
-              // IA assignee + aluno já falou e ainda não teve reply
-              // contável. lastInboundAt (não a última direção) —
-              // campanha/template depois do inbound não devolve o
-              // card pra Automação.
-              {
-                assignedTo: { is: { type: "AI" } },
-                lastInboundAt: { not: null },
-              },
             ],
           },
           {
@@ -374,8 +370,10 @@ function tabToWhere(
     case "esperando":
       // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
       // cliente falou por último (`lastMessageDirection = "in"`).
+      // Só assignee HUMANO: com a IA como responsável o card fica em
+      // `agente_ia` até o handoff.
       return withActiveInboxQueueGuard({
-        assignedToId: { not: null },
+        assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "in",
         hasError: false,
@@ -384,34 +382,36 @@ function tabToWhere(
       // "Respondidas" = já teve atendimento e nós falamos por último
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
+      // Assignee IA fica em `agente_ia`.
       return withActiveInboxQueueGuard({
-        assignedToId: { not: null },
+        assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "out",
         hasError: false,
       });
+    case "agente_ia":
+      // Fila do Agente IA: TODA conversa em aberto cujo responsável é um
+      // usuário `type: AI`, tenha o aluno falado ou não. Sai daqui quando o
+      // handoff atribui um consultor OU libera o responsável (fila de
+      // espera) — em ambos os casos o card cai em Entrada.
+      return withActiveInboxQueueGuard({
+        hasError: false,
+        assignedTo: { is: { type: "AI" } },
+      });
     case "automacao":
-      // Robô ativo (RUNNING ou PAUSED) sem dono humano e sem nenhuma
-      // resposta do cliente, OU assignee IA ainda no disparo. Quem já
-      // falou (lastInboundAt) vai para Entrada — campanha/template
-      // posterior não devolve o card pra cá. Consultor humano vai para
+      // Robô ativo (RUNNING ou PAUSED) sem dono e sem nenhuma resposta do
+      // cliente. Quem já falou (lastInboundAt) vai para Entrada —
+      // campanha/template posterior não devolve o card pra cá. Assignee IA
+      // tem aba própria (`agente_ia`); consultor humano vai para
       // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return withActiveInboxQueueGuard({
-        OR: [
-          {
-            assignedToId: null,
-            AND: [NEVER_REPLIED],
-            contact: {
-              automationContexts: {
-                some: { status: ACTIVE_AUTOMATION_CTX },
-              },
-            },
+        assignedToId: null,
+        AND: [NEVER_REPLIED],
+        contact: {
+          automationContexts: {
+            some: { status: ACTIVE_AUTOMATION_CTX },
           },
-          {
-            assignedTo: { is: { type: "AI" } },
-            AND: [NEVER_REPLIED],
-          },
-        ],
+        },
       });
     case "finalizados":
       return encerradasTabWhere();
@@ -462,43 +462,30 @@ export async function buildConversationSearchWhere(
   const q = search?.trim() ?? "";
   if (q.length === 0) return null;
 
-  // Agrupa predicados de `contact` / `assignedTo` sob UM join cada.
-  // Vários `{ contact: { campo } }` no OR faziam o Prisma emitir 4–8
-  // LEFT JOINs no mesmo contacts (mesmo contactId) — COUNT/listagem da
-  // inbox ~300–900ms mean no pg_stat (ago/26). Semanticamente idêntico.
+  // O `where` final só toca colunas de `conversations`. Tudo que exige join
+  // (contato, empresa, campos personalizados, título de negócio, responsável)
+  // é resolvido antes em pré-queries indexadas — ver
+  // `resolveConversationSearchCandidates`. Agrupar os predicados por join,
+  // como fazíamos até 26/ago/26, reduziu o número de LEFT JOINs mas manteve
+  // ILIKE cross-table e EXISTS por linha no mesmo OR: 4s por busca em prod.
   const or: Prisma.ConversationWhereInput[] = [
-    {
-      contact: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { phone: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-          { whatsappUsername: { contains: q, mode: "insensitive" } },
-          { source: { contains: q, mode: "insensitive" } },
-          { company: { name: { contains: q, mode: "insensitive" } } },
-          { customFields: { some: { value: { contains: q, mode: "insensitive" } } } },
-          { deals: { some: { title: { contains: q, mode: "insensitive" } } } },
-        ],
-      },
-    },
     { inboxName: { contains: q, mode: "insensitive" } },
-    {
-      assignedTo: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-        ],
-      },
-    },
   ];
+
   // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
   // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
   const digits = q.replace(/\D+/g, "");
-  if (digits.length >= 3) {
-    const contactIds = await findContactIdsByPhoneDigits(digits);
-    if (contactIds.length > 0) {
-      or.push({ contactId: { in: contactIds } });
-    }
+  const [candidates, phoneContactIds] = await Promise.all([
+    resolveConversationSearchCandidates(q),
+    digits.length >= 3 ? findContactIdsByPhoneDigits(digits) : Promise.resolve([]),
+  ]);
+
+  const contactIds = new Set([...candidates.contactIds, ...phoneContactIds]);
+  if (contactIds.size > 0) {
+    or.push({ contactId: { in: [...contactIds] } });
+  }
+  if (candidates.assignedToIds.length > 0) {
+    or.push({ assignedToId: { in: candidates.assignedToIds } });
   }
   // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
   // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
@@ -689,20 +676,6 @@ export function buildInboxFilterConditions(
   } else if (params.windowState === "closed") {
     conditions.push(encerradasTabWhere());
   }
-  if (params.painelException === "no_reply") {
-    conditions.push({
-      lastMessageDirection: "in",
-      lastInboundAt: { lte: params.noReplyBefore ?? new Date(Date.now() - 3_600_000) },
-    });
-  } else if (params.painelException === "open_24h") {
-    conditions.push({
-      createdAt: { lte: new Date(Date.now() - 24 * 3_600_000) },
-    });
-  } else if (params.painelException === "unassigned") {
-    conditions.push({ assignedToId: null });
-  } else if (params.painelException === "send_failure") {
-    conditions.push({ hasError: true });
-  }
   return conditions;
 }
 
@@ -806,23 +779,6 @@ export async function getResolvableConversationIds(
     }
   }
   return { ids, skippedIds };
-}
-
-/** IDs que batem no mesmo filtro da lista (aba + busca + visibilidade). */
-export async function getFilteredConversationIds(
-  params: GetConversationsParams,
-  take = 2000,
-): Promise<string[]> {
-  const where = await buildConversationListWhere(
-    await withResolvedSessionFilter(params),
-  );
-  const rows = await prisma.conversation.findMany({
-    where,
-    select: { id: true },
-    take,
-    orderBy: { updatedAt: "desc" },
-  });
-  return rows.map((r) => r.id);
 }
 
 export async function getConversations(
@@ -1138,7 +1094,7 @@ async function computeTabCounts(
     if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
       conditions.push(visibilityWhere);
     }
-    conditions.push(activeInboxQueueGuardWhere());
+    conditions.push({ status: "OPEN" });
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
@@ -1588,13 +1544,18 @@ export async function updateConversationStatusInDb(
 
 /**
  * Retorna o proximo `number` sequencial de Conversation na org do
- * contexto atual. Mesmo padrao de `nextContactNumber()` — a Prisma
- * extension escopa o `_max` por org via AsyncLocalStorage. Combinar
- * com retry P2002 na criacao para lidar com corrida entre workers/webhooks.
+ * contexto atual.
+ *
+ * Delega no contador atomico compartilhado (`org_number_counters`) em vez de
+ * fazer `MAX(number) + 1` aqui. Ter dois alocadores para o mesmo model era o
+ * que sobrava de corrida depois do fix de custo: este caminho emitia MAX+1
+ * enquanto a extension de scope emitia pelo contador, e os dois colidiam
+ * entre si. Fonte unica de verdade -> a colisao deixa de existir por
+ * construcao. Ver `allocateOrgNumber` em lib/prisma.ts.
  */
 export async function nextConversationNumber(): Promise<number> {
-  const r = await prisma.conversation.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
+  const orgId = getOrgIdOrThrow();
+  return allocateOrgNumber("Conversation", orgId);
 }
 
 /**

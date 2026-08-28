@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { cloneMessageTemplatesBetweenClients } from "@/lib/meta-whatsapp/clone-message-templates";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 
@@ -81,6 +82,15 @@ export async function POST(request: Request) {
         target: target.client,
         skipNames,
       });
+
+      // O clone escreve na WABA de destino; o catálogo dela em cache ficou
+      // velho. A de origem não muda.
+      if (report.created.length > 0) {
+        await invalidateWhatsappTemplateCatalog(
+          session.user.organizationId,
+          report.targetWabaId,
+        );
+      }
 
       return NextResponse.json({
         sourceChannelId: source.channelId,

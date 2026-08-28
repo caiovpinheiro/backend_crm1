@@ -12,7 +12,10 @@ import {
   findContactIdByEmailCI,
   findUserIdByEmailCI,
 } from "@/lib/import-helpers";
-import { prisma } from "@/lib/prisma";
+// ETL: roda no pool dedicado de import (lock_timeout=3s, pool max=4) —
+// ver src/lib/prisma-import.ts. O nome `prisma` é mantido para não
+// reescrever o corpo do arquivo.
+import { prismaImportScoped as prisma } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
   createContact,

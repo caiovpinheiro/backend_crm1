@@ -20,6 +20,7 @@ const FILTER_TABS = new Set<InboxTab>([
   "entrada",
   "esperando",
   "respondidas",
+  "agente_ia",
   "automacao",
   "finalizados",
   "erro",

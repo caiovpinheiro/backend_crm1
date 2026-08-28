@@ -162,6 +162,7 @@ export async function getCockpitData(): Promise<CockpitData> {
           by: ["assignedToId"],
           where: {
             ...activeInboxQueueGuardWhere(),
+            hasError: false,
             assignedToId: { in: agentUserIds },
           },
           _count: { _all: true },
@@ -196,7 +197,18 @@ export async function getCockpitData(): Promise<CockpitData> {
       (a, b) => b.receivedToday - a.receivedToday || b.queueCount - a.queueCount,
     );
 
-  const attendingNow = agents.reduce((s, a) => s + a.attendingNow, 0);
+  // Total = fila da aba "Agente IA" da Inbox, não a soma dos agentes configurados:
+  // um usuário `type = AI` sem `AIAgentConfig` (config apagada, agente legado)
+  // continua aparecendo na aba, e o KPI ficaria menor que o badge. A lista de
+  // casos (`attending_now`) já usa este mesmo predicado.
+  const attendingNow = await prisma.conversation.count({
+    where: {
+      organizationId: orgId,
+      ...activeInboxQueueGuardWhere(),
+      hasError: false,
+      assignedTo: { is: { type: "AI" } },
+    },
+  });
   const academic = await getAcademicCockpitMetrics({
     organizationId: orgId,
     since,

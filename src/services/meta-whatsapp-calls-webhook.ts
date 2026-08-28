@@ -284,7 +284,10 @@ export async function processMetaWhatsappCallsWebhook(
     const errorsPayload =
       callErrors.length > 0 ? callErrors : valueErrors.length > 0 ? valueErrors : undefined;
 
-    const sessionPayload = extractWhatsappCallSdpSession(c) ?? undefined;
+    const sessionPayload =
+      extractWhatsappCallSdpSession(c, {
+        defaultSdpType: direction === "USER_INITIATED" ? "offer" : "answer",
+      }) ?? undefined;
     const errorsJson: Prisma.InputJsonValue | undefined =
       sessionPayload || errorsPayload
         ? ({
@@ -386,7 +389,7 @@ export async function processMetaWhatsappCallsWebhook(
         durationSec,
         startDate,
         endDate,
-        agentName: direction === "BUSINESS_INITIATED" ? agentName : undefined,
+        agentName,
         pickedUp,
         rejected,
       });

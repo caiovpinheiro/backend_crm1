@@ -4,7 +4,10 @@ import {
   findContactIdByEmailCI,
   findUserIdByEmailCI,
 } from "@/lib/import-helpers";
-import { prisma } from "@/lib/prisma";
+// ETL: roda no pool dedicado de import (lock_timeout=3s, pool max=4) —
+// ver src/lib/prisma-import.ts. O nome `prisma` é mantido para não
+// reescrever o corpo do arquivo.
+import { prismaImportScoped as prisma } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, updateContact } from "@/services/contacts";
 import { upsertDealCustomFieldValues } from "@/services/custom-fields";
@@ -105,6 +108,15 @@ export type DealImportCache = {
   /** lower(email) → contactId */
   contactByEmail: Map<string, string>;
   contactByPhone: Map<string, string>;
+  /**
+   * stageId → próxima `position` a usar num deal CRIADO naquele estágio.
+   * Resolvido 1× por estágio (MAX(position)) e incrementado em memória —
+   * sem isso cada linha criada rodava um aggregate por linha (2.852 calls
+   * num import de 5 mil linhas, stress sa221601). Posição é float de
+   * ordenação (sem unique): dois imports concorrentes no mesmo estágio
+   * podem empatar posição — empate de ordenação tolerável, sem violação.
+   */
+  nextPositionByStage: Map<string, number>;
 };
 
 export function newDealImportCache(): DealImportCache {
@@ -116,7 +128,30 @@ export function newDealImportCache(): DealImportCache {
     contactByExternalId: new Map(),
     contactByEmail: new Map(),
     contactByPhone: new Map(),
+    nextPositionByStage: new Map(),
   };
+}
+
+/**
+ * Próxima `position` livre do estágio para criação em lote. O MAX vai ao
+ * banco 1× por estágio por import; as demais linhas incrementam em memória.
+ */
+async function takeNextStagePosition(
+  stageId: string,
+  cache: DealImportCache,
+): Promise<number> {
+  const cached = cache.nextPositionByStage.get(stageId);
+  if (cached !== undefined) {
+    cache.nextPositionByStage.set(stageId, cached + 1);
+    return cached;
+  }
+  const agg = await prisma.deal.aggregate({
+    where: { stageId },
+    _max: { position: true },
+  });
+  const next = (agg._max.position ?? -1) + 1;
+  cache.nextPositionByStage.set(stageId, next + 1);
+  return next;
 }
 
 const stageKey = (pipeline: string, stage: string) =>
@@ -669,11 +704,15 @@ export async function processDealRow(
       let externalForCreate: string | null | undefined = undefined;
       if (externalPatch !== undefined) externalForCreate = externalPatch;
       else if (resolved.target.externalId !== undefined) externalForCreate = resolved.target.externalId;
+      // Posição explícita do contador por estágio em memória — evita o
+      // MAX(position) por linha dentro do createDeal.
+      const position = await takeNextStagePosition(stageId, cache);
       const d = await createDeal({
         ...(resolved.target.id ? { id: resolved.target.id } : {}),
         externalId: externalForCreate === undefined ? undefined : externalForCreate,
         title,
         stageId,
+        position,
         value,
         status: statusRaw && isValidDealStatus(statusRaw) ? statusRaw : undefined,
         expectedClose,

@@ -83,6 +83,41 @@ export async function invalidateUser(id: string): Promise<void> {
   await cache.del(userKey(id));
 }
 
+// ── Catálogo de templates da Graph (WABA) ───────────────────────
+//
+// GET /api/whatsapp-template-configs/agent-enabled pagina
+// `message_templates` da Graph pra enriquecer os templates com botões,
+// variáveis e Flow. Era um Map no processo com TTL de 60s: frio a cada
+// deploy, não compartilhado entre réplicas e expirando a cada minuto —
+// ~2,2s por abertura de conversa medidos em produção.
+//
+// A chave é por org + WABA. O `organizationId` entra por isolamento
+// (o catálogo é dado de um tenant e não pode vazar entre orgs — ver o
+// alerta em `resolve-templates-client.ts`), e o `wabaId` porque o
+// catálogo é propriedade da WABA: uma org com dois canais na mesma WABA
+// compartilha o cache, e dois canais em WABAs distintas não se misturam.
+
+export function whatsappTemplateCatalogKey(orgId: string, wabaId: string): string {
+  return `wa_tpl_catalog:${orgId}:${wabaId}`;
+}
+
+/** Sem `wabaId`, limpa o catálogo de todas as WABAs da org. */
+export async function invalidateWhatsappTemplateCatalog(
+  orgId: string | null | undefined,
+  wabaId?: string | null,
+): Promise<void> {
+  if (!orgId) return;
+  try {
+    if (wabaId && wabaId.trim().length > 0) {
+      await cache.del(whatsappTemplateCatalogKey(orgId, wabaId.trim()));
+    } else {
+      await cache.delPattern(`wa_tpl_catalog:${orgId}:*`);
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ── Inbox tab counts ────────────────────────────────────────────
 //
 // GET /api/conversations?counts=1 — COUNT por aba é caro em orgs
@@ -99,6 +134,46 @@ export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * Mesma coalescência do board (leading + trailing), aplicada aos badges.
+ *
+ * Sem isto, mensagem nova não invalidava os counts e a frescura dependia só
+ * do TTL — que precisava ser curto (5s) e perdia a corrida contra o refetch
+ * que o SSE dispara ~1s depois, fazendo ~metade das chamadas recomputar a
+ * agregação (1,2-2,3s medidos em produção). Com invalidação no path da
+ * mensagem, o TTL pode ser longo sem defasar o badge.
+ */
+const TAB_COUNTS_INVALIDATION_WINDOW_MS = 3_000;
+
+const tabCountsInvalidationWindows = new Map<
+  string,
+  { timer: ReturnType<typeof setTimeout>; again: boolean }
+>();
+
+export function scheduleTabCountsInvalidation(orgId: string | null | undefined): void {
+  if (!orgId) return;
+
+  const open = tabCountsInvalidationWindows.get(orgId);
+  if (open) {
+    open.again = true;
+    return;
+  }
+
+  void invalidateInboxTabCounts(orgId);
+
+  const slot = {
+    again: false,
+    timer: setTimeout(() => {
+      tabCountsInvalidationWindows.delete(orgId);
+      if (slot.again) scheduleTabCountsInvalidation(orgId);
+    }, TAB_COUNTS_INVALIDATION_WINDOW_MS),
+  };
+  if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
+    slot.timer.unref();
+  }
+  tabCountsInvalidationWindows.set(orgId, slot);
 }
 
 // ── Pipelines / Stages (config raramente muda) ──────────────────

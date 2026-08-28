@@ -3,7 +3,7 @@ import type { Job } from "bullmq";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEvent } from "@/services/deals";
+import { createDealEventsMany, type DealEventInput } from "@/services/deals";
 import type { BulkMoveStagePayload } from "@/lib/queue";
 
 import {
@@ -22,8 +22,8 @@ const log = getLogger("jobs.leads.bulk-move-stage");
  *   1. Lê o estado atual dos deals (stageId antigo).
  *   2. Filtra os que precisam mover (stageId !== target) — idempotência.
  *   3. Aplica `updateMany` para o subset que muda (1 query, atômica).
- *   4. Para cada deal alterado: emite DealEvent + fireTrigger
- *      fire-and-forget (mantém o padrão do service síncrono atual).
+ *   4. Emite os DealEvents do chunk em um `createMany` e roda os
+ *      fireTriggers com no máximo `SIDE_EFFECT_CONCURRENCY` em voo.
  *
  * Por que não `prisma.$transaction` em torno do `updateMany`?
  *   - `updateMany` é atômico por si só no Postgres.
@@ -33,6 +33,39 @@ const log = getLogger("jobs.leads.bulk-move-stage");
  *     — são side effects de auditoria/automação, não bloqueiam a operação.
  */
 const CHUNK_SIZE = 50;
+
+/**
+ * Efeitos colaterais (fireTrigger) em voo por chunk. O worker-leads roda
+ * com concurrency 5 sobre um pool de 10 conexões; 2-3 em voo por job deixa
+ * margem para a query principal do chunk e para os outros jobs.
+ */
+const SIDE_EFFECT_CONCURRENCY = 3;
+
+/**
+ * Executa as tasks com no máximo `limit` em voo, na ordem da lista.
+ * Nunca rejeita: efeito colateral que falha não pode derrubar o chunk.
+ */
+async function runWithConcurrency(
+  tasks: (() => Promise<void>)[],
+  limit: number,
+): Promise<void> {
+  if (tasks.length === 0) return;
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, tasks.length) },
+    async () => {
+      while (cursor < tasks.length) {
+        const task = tasks[cursor++];
+        try {
+          await task();
+        } catch {
+          // Já logado pelo próprio task; aqui é só a rede de segurança.
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+}
 
 /**
  * Handler do job `bulk-move-stage` da fila `leads-bulk`.
@@ -45,11 +78,11 @@ const CHUNK_SIZE = 50;
  *     garantindo que retries não causem efeitos colaterais.
  *
  * Cuidado 7 — DealEvent e fireTrigger:
- *   - DealEvent: emitido fire-and-forget por deal ALTERADO (não no noop).
+ *   - DealEvent: emitido por deal ALTERADO (não no noop), em lote por chunk.
  *   - fireTrigger: idem — só dispara em mudança real de stage.
  *   - Logs com operationId, dealId, fromStageId, toStageId em cada caso.
  *   - Erros em DealEvent/fireTrigger são logados mas não falham a operação
- *     (continuam fire-and-forget como no helper síncrono `moveDeal`).
+ *     (best-effort como no helper síncrono `moveDeal`).
  */
 export async function processBulkMoveStage(
   payload: BulkMoveStagePayload,
@@ -171,42 +204,70 @@ export async function processBulkMoveStage(
         });
         chunkSucceeded += toMove.length;
 
-        // DealEvent + fireTrigger fire-and-forget (padrão herdado do
-        // POST /api/deals/bulk síncrono). Falhas são logadas mas não
-        // bloqueiam o progresso da operação.
+        // Efeitos colaterais do chunk. Antes eram disparados por deal sem
+        // await: 50 deals × (2 inserts + findMany de automações + avaliação
+        // de condições) saíam todos de uma vez sobre um pool pequeno, o que
+        // explica os timeouts intermitentes num handler que parece enxuto.
+        // Agora os eventos viram um createMany e os gatilhos passam por um
+        // semáforo. Falhas continuam apenas logadas.
+        const events: DealEventInput[] = [];
+        const triggers: (() => Promise<void>)[] = [];
+
         for (const deal of toMove) {
-          createDealEvent(deal.id, initiatedByUserId, "STAGE_CHANGED", {
-            from: { id: deal.stageId, name: deal.stage.name },
-            to: { id: targetStage.id, name: targetStage.name },
-          }).catch((err: unknown) => {
-            chunkLog.warn(
-              { dealId: deal.id, err: truncateErrorMessage(err) },
-              "createDealEvent falhou (fire-and-forget)",
-            );
+          events.push({
+            dealId: deal.id,
+            userId: initiatedByUserId,
+            type: "STAGE_CHANGED",
+            meta: {
+              from: { id: deal.stageId, name: deal.stage.name },
+              to: { id: targetStage.id, name: targetStage.name },
+            },
           });
 
-          fireTrigger("stage_changed", {
-            dealId: deal.id,
-            data: { fromStageId: deal.stageId, toStageId: targetStageId },
-          }).catch((err: unknown) => {
-            chunkLog.warn(
-              { dealId: deal.id, err: truncateErrorMessage(err) },
-              "fireTrigger stage_changed falhou (fire-and-forget)",
-            );
-          });
+          triggers.push(() =>
+            fireTrigger("stage_changed", {
+              dealId: deal.id,
+              data: { fromStageId: deal.stageId, toStageId: targetStageId },
+            }).catch((err: unknown) => {
+              chunkLog.warn(
+                { dealId: deal.id, err: truncateErrorMessage(err) },
+                "fireTrigger stage_changed falhou (fire-and-forget)",
+              );
+            }),
+          );
 
           if (deal.status !== syncedStatus) {
-            createDealEvent(deal.id, initiatedByUserId, "STATUS_CHANGED", {
-              from: deal.status,
-              to: syncedStatus,
-            }).catch(() => {});
+            events.push({
+              dealId: deal.id,
+              userId: initiatedByUserId,
+              type: "STATUS_CHANGED",
+              meta: { from: deal.status, to: syncedStatus },
+            });
             if (syncedStatus === "WON") {
-              fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+              triggers.push(() =>
+                fireTrigger("deal_won", {
+                  dealId: deal.id,
+                  data: { fromStatus: deal.status },
+                }).catch(() => {}),
+              );
             } else if (syncedStatus === "LOST") {
-              fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+              triggers.push(() =>
+                fireTrigger("deal_lost", {
+                  dealId: deal.id,
+                  data: { fromStatus: deal.status },
+                }).catch(() => {}),
+              );
             }
           }
         }
+
+        await createDealEventsMany(events).catch((err: unknown) => {
+          chunkLog.warn(
+            { err: truncateErrorMessage(err) },
+            "createDealEventsMany falhou (best-effort)",
+          );
+        });
+        await runWithConcurrency(triggers, SIDE_EFFECT_CONCURRENCY);
       }
 
       chunkLog.info(

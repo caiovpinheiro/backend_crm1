@@ -12,8 +12,6 @@
  *
  * @see docs/storage-tenancy.md
  */
-import { open, stat } from "fs/promises";
-
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
@@ -21,7 +19,8 @@ import {
   mimeFromFilename,
   parseStoragePath,
   readStoredFile,
-  resolveStoragePath,
+  readStoredFileRange,
+  statStoredFile,
 } from "@/lib/storage/local";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
@@ -78,16 +77,20 @@ async function tryUpstreamFallback(
   }
 
   const cookieHeader = request.headers.get("cookie") ?? "";
-  const cookieNames = cookieHeader
-    ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
-    : [];
   const sessionToken = extractSessionToken(cookieHeader);
 
-  console.log(
-    `[storage] upstream fallback: cookies recebidos=[${cookieNames.join(",")}] sessionToken=${sessionToken ? sessionToken.slice(0, 20) + "..." : "AUSENTE"}`,
-  );
-
-  if (!sessionToken) return null;
+  if (!sessionToken) {
+    // Só o caso de falha é logado. O log anterior era incondicional e
+    // imprimia um prefixo do JWT a cada arquivo servido — com a mídia
+    // histórica toda passando por aqui, é ruído e material de sessão no log.
+    const cookieNames = cookieHeader
+      ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
+      : [];
+    console.warn(
+      `[storage] upstream fallback sem sessao: cookies recebidos=[${cookieNames.join(",")}]`,
+    );
+    return null;
+  }
 
   // Forwarda o cookie ORIGINAL inteiro + duplica o JWT sob os 4 nomes que
   // NextAuth v4/v5 conhece (com e sem __Secure-). Isso cobre qualquer
@@ -100,19 +103,27 @@ async function tryUpstreamFallback(
   ];
   const upstreamCookie = [cookieHeader, ...variants].filter(Boolean).join("; ");
 
+  const upstreamHeaders: Record<string, string> = {
+    cookie: upstreamCookie,
+    // Algumas verificações de NextAuth checam Host/Origin/Referer.
+    host: new URL(base).host,
+  };
+  // Repassa o Range. Sem isso o upstream devolve 200 com o arquivo inteiro e
+  // o `<video controls>` não inicia — o mesmo motivo que levou o caminho
+  // local a suportar Range (ver comentário no GET).
+  const range = request.headers.get("range");
+  if (range) upstreamHeaders.range = range;
+
   const upstreamUrl = `${base}/api/storage/${joined}`;
   try {
     const upstream = await fetch(upstreamUrl, {
-      headers: {
-        cookie: upstreamCookie,
-        // Algumas verificações de NextAuth checam Host/Origin/Referer.
-        host: new URL(base).host,
-      },
+      headers: upstreamHeaders,
       cache: "no-store",
       redirect: "follow",
     });
 
-    if (!upstream.ok) {
+    // `ok` cobre 200-299, o que inclui o 206 de resposta parcial.
+    if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "(no body)");
       console.warn(
         `[storage] upstream fallback ${upstream.status} para ${joined}: ${errBody.slice(0, 200)}`,
@@ -120,18 +131,27 @@ async function tryUpstreamFallback(
       return null;
     }
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    console.log(`[storage] upstream fallback OK (${buf.length}b) para ${joined}`);
-    return new Response(buf, {
-      status: 200,
-      headers: {
-        "Content-Type":
-          upstream.headers.get("content-type") ?? "application/octet-stream",
-        "Content-Length": String(buf.length),
-        "Cache-Control": "private, max-age=300",
-        "X-Storage-Source": "upstream-fallback",
-      },
-    });
+    // Encaminha o corpo como stream. Bufferizar em `Buffer` segurava o
+    // arquivo inteiro na memória do processo da API a cada request — com
+    // vídeos antigos e vários operadores simultâneos, isso derruba a API.
+    const out = new Headers();
+    for (const name of [
+      "content-type",
+      "content-length",
+      "content-range",
+      "accept-ranges",
+      "last-modified",
+      "etag",
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) out.set(name, value);
+    }
+    if (!out.has("content-type")) out.set("content-type", "application/octet-stream");
+    if (!out.has("accept-ranges")) out.set("accept-ranges", "bytes");
+    out.set("Cache-Control", "private, max-age=300");
+    out.set("X-Storage-Source", "upstream-fallback");
+
+    return new Response(upstream.body, { status: upstream.status, headers: out });
   } catch (err) {
     console.warn("[storage] upstream fallback erro:", err);
     return null;
@@ -167,22 +187,18 @@ export async function GET(request: Request, context: RouteContext) {
   // 16/jul/26 — Suporte a HTTP Range. Sem isso, `<video controls>` do
   // HTML5 nao inicia a reproducao (Safari/iOS falham sempre; Chrome
   // tolera arquivos pequenos e trava em vídeos maiores). Estrategia:
-  //  1. `stat()` pra descobrir tamanho antes de ler o disco.
+  //  1. `statStoredFile()` pra descobrir tamanho antes de ler (fs.stat
+  //     no driver local; HeadObject no driver s3).
   //  2. Se o request trouxer `Range: bytes=start-end`, responde 206
-  //     com apenas o slice via `fs.open().read()` — evita carregar
-  //     video de 50MB inteiro na RAM.
+  //     com apenas o slice via `readStoredFileRange()` — no driver s3 o
+  //     Range é repassado ao GetObject, então vídeo de 50MB nunca é
+  //     carregado inteiro na RAM em nenhum dos backends.
   //  3. Sem Range, mantem o comportamento antigo (200 + full body),
   //     preservando imagem/audio/doc.
   // A validacao de auth ja foi feita acima; aqui e' so I/O + headers.
-  let fileStat;
-  try {
-    const abs = resolveStoragePath(parsed.orgId, parsed.bucket, parsed.fileName);
-    fileStat = await stat(abs);
-  } catch {
-    fileStat = null;
-  }
+  const fileStat = await statStoredFile(parsed.orgId, parsed.bucket, parsed.fileName);
 
-  if (fileStat?.isFile()) {
+  if (fileStat) {
     const total = fileStat.size;
     const mimeType = mimeFromFilename(parsed.fileName);
     const rangeHeader = request.headers.get("range");
@@ -205,27 +221,28 @@ export async function GET(request: Request, context: RouteContext) {
           });
         }
 
-        const chunkSize = end - start + 1;
-        const buffer = Buffer.alloc(chunkSize);
-        const abs = resolveStoragePath(parsed.orgId, parsed.bucket, parsed.fileName);
-        const fh = await open(abs, "r");
-        try {
-          await fh.read(buffer, 0, chunkSize, start);
-        } finally {
-          await fh.close();
+        const chunk = await readStoredFileRange(
+          parsed.orgId,
+          parsed.bucket,
+          parsed.fileName,
+          start,
+          end,
+        );
+        if (chunk) {
+          return new Response(new Uint8Array(chunk.buffer), {
+            status: 206,
+            headers: {
+              "Content-Type": mimeType,
+              "Content-Length": String(chunk.buffer.length),
+              "Content-Range": `bytes ${start}-${end}/${total}`,
+              "Accept-Ranges": "bytes",
+              "Cache-Control": "private, max-age=300",
+              "X-Storage-Tenant": parsed.orgId,
+            },
+          });
         }
-
-        return new Response(new Uint8Array(buffer), {
-          status: 206,
-          headers: {
-            "Content-Type": mimeType,
-            "Content-Length": String(chunkSize),
-            "Content-Range": `bytes ${start}-${end}/${total}`,
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=300",
-            "X-Storage-Tenant": parsed.orgId,
-          },
-        });
+        // Corrida: o arquivo sumiu entre o stat e o read (ou erro
+        // transitório no backend) — cai no fluxo full-body/404 abaixo.
       }
       // Range malformado: cai no fluxo full-body abaixo (comportamento
       // permissivo — alguns clients mandam ranges esquisitos).

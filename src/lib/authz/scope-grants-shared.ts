@@ -11,6 +11,7 @@ export type InboxTab =
   | "entrada"
   | "esperando"
   | "respondidas"
+  | "agente_ia"
   | "automacao"
   | "finalizados"
   | "erro"
@@ -28,6 +29,7 @@ export const INBOX_TAB_BAR_ORDER: readonly Exclude<InboxTab, "abertas">[] = [
   "esperando",
   "respondidas",
   "ligar",
+  "agente_ia",
   "automacao",
   "finalizados",
   "erro",
@@ -673,6 +675,7 @@ const INBOX_TAB_PERMISSION_KEYS: Record<Exclude<InboxTab, "abertas">, string> = 
   esperando: "inbox:tab:esperando",
   respondidas: "inbox:tab:respondidas",
   ligar: "inbox:tab:ligar",
+  agente_ia: "inbox:tab:agente_ia",
   automacao: "inbox:tab:automacao",
   finalizados: "inbox:tab:finalizados",
   erro: "inbox:tab:erro",
@@ -691,6 +694,7 @@ const LEGACY_INBOX_TAB_REQUIRED_PERMISSION: Record<
   esperando: "conversation:view",
   respondidas: "conversation:view",
   ligar: "conversation:view",
+  agente_ia: "conversation:view",
   automacao: "conversation:view",
   finalizados: "conversation:view",
   erro: "conversation:view",
@@ -731,6 +735,16 @@ function memberTabAllowedByPermissions(
         permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.ligar) ||
         permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.esperando) ||
         permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.respondidas)
+      );
+    }
+    // Rollout: antes da aba existir, as conversas com a IA como responsável
+    // apareciam em Entrada/Automação. Roles gravadas antes disso continuam
+    // enxergando a fila pelas chaves antigas.
+    if (tab === "agente_ia") {
+      return (
+        permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.agente_ia) ||
+        permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.entrada) ||
+        permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS.automacao)
       );
     }
     return permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS[tab]);

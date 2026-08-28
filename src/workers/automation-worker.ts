@@ -8,8 +8,15 @@ import {
 } from "@/lib/queue-connection";
 import {
   AUTOMATION_JOBS_QUEUE_NAME,
+  addAutomationJobNow,
+  getAutomationQueue,
   type AutomationJobPayload,
 } from "@/lib/queue";
+import {
+  isAutomationFairnessEnabled,
+  releaseAutomationSlot,
+  sweepAutomationFairness,
+} from "@/lib/automation-fairness";
 import { withSystemContext } from "@/lib/webhook-context";
 import { runAutomationInline } from "@/services/automation-executor";
 
@@ -51,25 +58,44 @@ async function processAutomationJob(job: Job<AutomationJobPayload>): Promise<voi
     attempt: job.attemptsMade + 1,
   });
 
-  const automation = await prismaBase.automation.findUnique({
-    where: { id: automationId },
-    select: { organizationId: true },
-  });
+  // Justiça por org: o slot da org (admission control) é liberado apenas no
+  // fim TERMINAL do job — sucesso ou falha sem retries restantes. Falha
+  // retryável mantém o slot: o job continua de posse do BullMQ (delayed).
+  const fairOrgId = job.data.organizationId;
+  const releaseFairSlot = async (terminal: boolean) => {
+    if (!terminal || !fairOrgId) return;
+    await releaseAutomationSlot(fairOrgId, job.id, (p, jobId) =>
+      addAutomationJobNow(p, jobId),
+    );
+  };
+  const maxAttempts = Math.max(1, Number(job.opts.attempts ?? 1));
 
-  if (!automation) {
-    jobCtx.warn("Automação não encontrada — descartando job");
-    // Não re-throw: retries não vão recuperar um ID inexistente.
-    return;
+  try {
+    const automation = await prismaBase.automation.findUnique({
+      where: { id: automationId },
+      select: { organizationId: true },
+    });
+
+    if (!automation) {
+      jobCtx.warn("Automação não encontrada — descartando job");
+      // Não re-throw: retries não vão recuperar um ID inexistente.
+      await releaseFairSlot(true);
+      return;
+    }
+
+    jobCtx.info(
+      { organizationId: automation.organizationId },
+      "Processando job de automação",
+    );
+
+    await withSystemContext(automation.organizationId, async () => {
+      await runAutomationInline({ ...job.data, attemptsMade: job.attemptsMade });
+    });
+    await releaseFairSlot(true);
+  } catch (err) {
+    await releaseFairSlot(job.attemptsMade + 1 >= maxAttempts);
+    throw err;
   }
-
-  jobCtx.info(
-    { organizationId: automation.organizationId },
-    "Processando job de automação",
-  );
-
-  await withSystemContext(automation.organizationId, async () => {
-    await runAutomationInline({ ...job.data, attemptsMade: job.attemptsMade });
-  });
 }
 
 export function startAutomationWorker() {
@@ -96,6 +122,28 @@ export function startAutomationWorker() {
     processAutomationJob,
     { connection, concurrency, limiter },
   );
+
+  // Sweeper da justiça por org: reconcilia os slots de inflight com o estado
+  // real no BullMQ e re-pumpa backlogs (cura crash entre admit/release).
+  // Roda INCONDICIONALMENTE: com fairness desligada (rollback) ele ainda
+  // drena o backlog Redis residual do período ligado; sem backlog é no-op
+  // (SMEMBERS vazio). Intervalo fixo de 15s.
+  const sweep = () => {
+    const queue = getAutomationQueue();
+    if (!queue) return;
+    void sweepAutomationFairness(queue, (p, jobId) =>
+      addAutomationJobNow(p, jobId),
+    ).catch((err) => {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "Sweep do admission control falhou",
+      );
+    });
+  };
+  sweep();
+  const sweepTimer = setInterval(sweep, 15_000);
+  sweepTimer.unref?.();
+  log.info({ fairness: isAutomationFairnessEnabled() }, "automation fairness sweeper ativo (15s)");
 
   worker.on("completed", (job) => {
     log.info(

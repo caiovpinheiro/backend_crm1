@@ -1,6 +1,6 @@
 import IORedis from "ioredis";
 
-import { scheduleBoardInvalidation } from "@/lib/cache/keys";
+import { scheduleBoardInvalidation, scheduleTabCountsInvalidation } from "@/lib/cache/keys";
 import { metrics, safeLabel } from "@/lib/metrics";
 
 /**
@@ -181,6 +181,15 @@ class SseBus {
     // board. Esses ticks acompanham o TTL / o poll de 30s.
     if (event === "new_message") {
       scheduleBoardInvalidation(orgId);
+    }
+
+    // Os badges das abas seguem a mesma lógica do board: o cliente refaz
+    // `?counts=1` ~1s depois destes eventos. Invalidar aqui garante que esse
+    // refetch encontre o cache limpo, em vez de recomputar a agregação por
+    // acaso de TTL. `conversation_updated` cobre transferência, troca de
+    // responsável e mudança de status — tudo que move conversa entre abas.
+    if (event === "new_message" || event === "conversation_updated") {
+      scheduleTabCountsInvalidation(orgId);
     }
 
     const envelope: SseEventEnvelope = { organizationId: orgId, data };

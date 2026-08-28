@@ -37,9 +37,29 @@
  *     Em produção (container) recomenda-se `/app/storage` montado
  *     como volume persistente separado de `public/uploads` legacy.
  *
+ * Kill switch de backend (STORAGE_DRIVER)
+ * ───────────────────────────────────────
+ * Este módulo é um DISPATCHER: a interface pública (`saveFile`,
+ * `readStoredFile`, `statStoredFile`, `readStoredFileRange`,
+ * `buildPublicUrl`, `parseStoragePath`, `resolveStoragePath`) é única e
+ * o backend concreto é escolhido por env:
+ *
+ *   STORAGE_DRIVER=local  (default) → disco local em STORAGE_ROOT
+ *                                     (comportamento histórico).
+ *   STORAGE_DRIVER=s3               → bucket S3-compatible (DigitalOcean
+ *                                     Spaces), implementado em `./s3.ts`
+ *                                     e carregado lazy (o SDK AWS só entra
+ *                                     em memória com o driver ativo).
+ *
+ * Com `s3`, `resolveStoragePath`/`storageRoot` não têm significado (não há
+ * disco) — só o backend local os usa. `buildPublicUrl` continua gerando
+ * `/api/storage/<org>/<bucket>/<file>` em ambos: o gateway autenticado é
+ * quem serve os bytes, preservando o isolamento multi-tenant (o bucket
+ * nunca é exposto por URL pública).
+ *
  * @see docs/storage-tenancy.md
  */
-import { mkdir, readFile, stat, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import path from "path";
 
 export const BUCKETS = [
@@ -240,15 +260,101 @@ export type SaveFileOptions = {
 export type SaveFileResult = {
   /** URL relativa pública (pro DB e pro client). */
   url: string;
-  /** Path absoluto no disco. Use só para logs/debug. */
+  /** Path absoluto no disco (driver local) ou ref `s3://…` (driver s3). Use só para logs/debug. */
   absolutePath: string;
 };
+
+export type ReadFileResult = {
+  buffer: Buffer;
+  mimeType: string;
+  size: number;
+};
+
+/** Metadata mínima de um objeto armazenado (usada pelo gateway p/ Range). */
+export type StoredFileStat = {
+  size: number;
+};
+
+// ─── Dispatcher de backend (kill switch) ────────────────────────────────
+
+export type StorageDriver = "local" | "s3";
+
+/**
+ * Backend ativo. Default `local` (comportamento histórico) — qualquer
+ * valor diferente de "s3" cai no disco local, então voltar é só remover
+ * a env (sem rebuild de lógica).
+ */
+export function storageDriver(): StorageDriver {
+  return process.env.STORAGE_DRIVER?.trim().toLowerCase() === "s3" ? "s3" : "local";
+}
 
 /**
  * Salva um arquivo no storage tenant-scoped. Cria diretórios
  * intermediários conforme necessário. **Sobrescreve** se já existir.
  */
 export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    return s3.saveFile(opts);
+  }
+  return saveFileLocal(opts);
+}
+
+/**
+ * Lê um arquivo do storage. Devolve null se não encontrado. Caller é
+ * responsável por validar a autorização (sessão pertence ao orgId)
+ * ANTES de chamar — esta função é puramente de I/O.
+ */
+export async function readStoredFile(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+): Promise<ReadFileResult | null> {
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    return s3.readStoredFile(orgId, bucket, fileName);
+  }
+  return readStoredFileLocal(orgId, bucket, fileName);
+}
+
+/**
+ * Tamanho do arquivo sem baixar o conteúdo (fs.stat / HeadObject).
+ * Devolve null se não encontrado.
+ */
+export async function statStoredFile(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+): Promise<StoredFileStat | null> {
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    return s3.statStoredFile(orgId, bucket, fileName);
+  }
+  return statStoredFileLocal(orgId, bucket, fileName);
+}
+
+/**
+ * Lê o slice [start, end] (inclusive) — usado pelo gateway para HTTP 206
+ * (Range) de vídeo/áudio. No driver s3 o Range é repassado ao GetObject
+ * (não baixa o objeto inteiro). `size` no resultado é o tamanho do slice.
+ */
+export async function readStoredFileRange(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+  start: number,
+  end: number,
+): Promise<ReadFileResult | null> {
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    return s3.readStoredFileRange(orgId, bucket, fileName, start, end);
+  }
+  return readStoredFileRangeLocal(orgId, bucket, fileName, start, end);
+}
+
+// ─── Backend local (disco) ──────────────────────────────────────────────
+
+async function saveFileLocal(opts: SaveFileOptions): Promise<SaveFileResult> {
   assertBucket(opts.bucket);
   const absolutePath = resolveStoragePath(opts.orgId, opts.bucket, opts.fileName);
   await mkdir(path.dirname(absolutePath), { recursive: true });
@@ -259,18 +365,7 @@ export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
   };
 }
 
-export type ReadFileResult = {
-  buffer: Buffer;
-  mimeType: string;
-  size: number;
-};
-
-/**
- * Lê um arquivo do storage. Devolve null se não encontrado. Caller é
- * responsável por validar a autorização (sessão pertence ao orgId)
- * ANTES de chamar — esta função é puramente de I/O.
- */
-export async function readStoredFile(
+async function readStoredFileLocal(
   orgId: string,
   bucket: StorageBucket,
   fileName: string,
@@ -288,6 +383,58 @@ export async function readStoredFile(
     return {
       buffer,
       size: s.size,
+      mimeType: mimeFromFilename(fileName),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function statStoredFileLocal(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+): Promise<StoredFileStat | null> {
+  let absolutePath: string;
+  try {
+    absolutePath = resolveStoragePath(orgId, bucket, fileName);
+  } catch {
+    return null;
+  }
+  try {
+    const s = await stat(absolutePath);
+    if (!s.isFile()) return null;
+    return { size: s.size };
+  } catch {
+    return null;
+  }
+}
+
+async function readStoredFileRangeLocal(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+  start: number,
+  end: number,
+): Promise<ReadFileResult | null> {
+  let absolutePath: string;
+  try {
+    absolutePath = resolveStoragePath(orgId, bucket, fileName);
+  } catch {
+    return null;
+  }
+  try {
+    const chunkSize = end - start + 1;
+    const buffer = Buffer.alloc(chunkSize);
+    const fh = await open(absolutePath, "r");
+    try {
+      await fh.read(buffer, 0, chunkSize, start);
+    } finally {
+      await fh.close();
+    }
+    return {
+      buffer,
+      size: chunkSize,
       mimeType: mimeFromFilename(fileName),
     };
   } catch {

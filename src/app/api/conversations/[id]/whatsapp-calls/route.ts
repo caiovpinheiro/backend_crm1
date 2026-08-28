@@ -13,6 +13,7 @@ import {
   sessionFromCallEventErrorsJson,
 } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
+import { sseBus } from "@/lib/sse-bus";
 import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
 
 export const maxDuration = 30;
@@ -81,6 +82,7 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     const answerFor = new URL(request.url).searchParams.get("answerFor")?.trim() || "";
+    const offerFor = new URL(request.url).searchParams.get("offerFor")?.trim() || "";
 
     const items = await prisma.whatsappCallEvent.findMany({
       where: { conversationId: id },
@@ -100,26 +102,35 @@ export async function GET(request: Request, context: RouteContext) {
       },
     });
 
-    if (!answerFor) {
+    if (!answerFor && !offerFor) {
       return NextResponse.json({ items });
     }
 
-    const sdpRows = await prisma.whatsappCallEvent.findMany({
-      where: { metaCallId: answerFor },
-      orderBy: { createdAt: "desc" },
-      take: 8,
-      select: { errorsJson: true, eventKind: true },
-    });
-    let pendingAnswer: { sdp_type: string; sdp: string } | null = null;
-    for (const row of sdpRows) {
-      const sess = sessionFromCallEventErrorsJson(row.errorsJson);
-      if (sess && sess.sdp_type.toLowerCase() === "answer") {
-        pendingAnswer = sess;
-        break;
+    async function findSession(
+      metaCallId: string,
+      want: "answer" | "offer",
+    ): Promise<{ sdp_type: string; sdp: string } | null> {
+      const sdpRows = await prisma.whatsappCallEvent.findMany({
+        where: { metaCallId },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+        select: { errorsJson: true, eventKind: true },
+      });
+      for (const row of sdpRows) {
+        const sess = sessionFromCallEventErrorsJson(row.errorsJson);
+        if (sess && sess.sdp_type.toLowerCase() === want) {
+          return sess;
+        }
       }
+      return null;
     }
 
-    return NextResponse.json({ items, pendingAnswer });
+    let pendingAnswer: { sdp_type: string; sdp: string } | null = null;
+    let pendingOffer: { sdp_type: string; sdp: string } | null = null;
+    if (answerFor) pendingAnswer = await findSession(answerFor, "answer");
+    if (offerFor) pendingOffer = await findSession(offerFor, "offer");
+
+    return NextResponse.json({ items, pendingAnswer, pendingOffer });
     } catch (e) {
       console.error(e);
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
@@ -300,8 +311,44 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Combinação action/session inválida." }, { status: 400 });
     }
 
-    const bizOpaque = str(b.biz_opaque_callback_data) || undefined;
+    const bizOpaque =
+      str(b.biz_opaque_callback_data) ||
+      (() => {
+        const uid = session.user?.id;
+        if (!uid) return undefined;
+        const display =
+          typeof session.user.name === "string" && session.user.name.trim()
+            ? session.user.name.trim()
+            : (session.user.email ?? "Agente");
+        return buildCallBizOpaquePayload(uid, display);
+      })();
     const result = await metaClient.acceptCall(callId, sessionSdp, bizOpaque);
+    try {
+      const phoneNumberId = channelPhoneNumberId(conv.channelRef?.config);
+      await prisma.whatsappCallEvent.create({
+        data: withOrgFromCtx({
+          metaCallId: callId,
+          phoneNumberId: phoneNumberId || "unknown",
+          direction: "USER_INITIATED",
+          eventKind: "signaling",
+          signalingStatus: "ACCEPTED",
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          bizOpaque: bizOpaque || null,
+        }),
+      });
+      sseBus.publish("whatsapp_call", {
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        callId,
+        event: "accepted_by_agent",
+        direction: "USER_INITIATED",
+        signalingStatus: "ACCEPTED",
+      });
+    } catch (e) {
+      console.warn("[whatsapp-calls] persist accept:", e);
+    }
     return NextResponse.json(result);
     } catch (e) {
       console.error(e);
