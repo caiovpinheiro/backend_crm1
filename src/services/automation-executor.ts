@@ -5138,7 +5138,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   send_whatsapp_media: "Mídia WhatsApp",
   send_whatsapp_interactive: "Botões WhatsApp",
   send_whatsapp_list: "Lista WhatsApp",
-  send_whatsapp_flow: "Formulário WhatsApp",
+  send_whatsapp_flow: "Formulário FLOW",
   send_product: "Enviar produto",
   webhook: "Webhook",
   delay: "Atraso",

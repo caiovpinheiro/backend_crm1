@@ -244,7 +244,7 @@ export function stepTypeLabel(t: string): string {
     send_whatsapp_media: "Mídia WhatsApp",
     send_whatsapp_interactive: "Botões WhatsApp",
     send_whatsapp_list: "Lista WhatsApp",
-    send_whatsapp_flow: "Formulário WhatsApp",
+    send_whatsapp_flow: "Formulário FLOW",
     webhook: "Webhook",
     delay: "Atraso",
     condition: "Condição",
