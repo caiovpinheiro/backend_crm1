@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { cache } from "@/lib/cache";
 import { getClientIp, withRateLimit } from "@/lib/rate-limit";
 import { prismaBase } from "@/lib/prisma-base";
 
@@ -14,6 +15,17 @@ import { prismaBase } from "@/lib/prisma-base";
  */
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
+/**
+ * Cache curto (60s) da resposta positiva "org existe e está ACTIVE".
+ * Clientes sem cookie de tenant (app mobile/WebView, scripts) chamavam
+ * esta rota em TODA request — storm de 28/ago/26. Só cacheamos sucesso:
+ * slug inexistente segue consultando o banco (signup de org nova não
+ * pode herdar um 404 cacheado). Suspensão de org leva até 60s para
+ * refletir aqui — trade-off aceito (suspensão nunca é urgente ao segundo).
+ */
+const ORG_CACHE_TTL_SEC = 60;
+type ActiveOrgBySlug = { slug: string; name: string };
 
 export async function GET(request: Request) {
   const ip = getClientIp(request);
@@ -33,12 +45,20 @@ export async function GET(request: Request) {
     );
   }
 
-  const org = await prismaBase.organization.findUnique({
-    where: { slug },
-    select: { slug: true, name: true, status: true },
-  });
+  const cacheKey = `org_active_slug:${slug}`;
+  let org = await cache.get<ActiveOrgBySlug>(cacheKey);
+  if (org === undefined) {
+    const row = await prismaBase.organization.findUnique({
+      where: { slug },
+      select: { slug: true, name: true, status: true },
+    });
+    if (row && row.status === "ACTIVE") {
+      org = { slug: row.slug, name: row.name };
+      await cache.set(cacheKey, org, ORG_CACHE_TTL_SEC);
+    }
+  }
 
-  if (!org || org.status !== "ACTIVE") {
+  if (!org) {
     return NextResponse.json(
       { message: "Organização não encontrada.", code: "ORG_NOT_FOUND" },
       { status: 404, headers: rl.headers },
