@@ -247,8 +247,9 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
  * A rota `POST /api/conversations/bulk` já aplicou o filtro de visibilidade,
  * validou a tabulação (mesma folha das automações / encerramento individual)
  * e leu as org settings — o handler recebe ids efetivos + flags saneadas.
- * Conversas de outro departamento que ainda exigem tabulação ficam em
- * `skipped` na resposta da rota (não entram neste payload).
+ * Com folha no request, todas as selecionadas entram (a tabulação vale
+ * para o lote). Sem folha, conversas que ainda exigem tabulação ficam em
+ * `skipped` na resposta da rota (não entram neste payload), salvo ADMIN.
  */
 export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
   /** IDs das conversas a encerrar (já filtradas por visibilidade + tabulação). */

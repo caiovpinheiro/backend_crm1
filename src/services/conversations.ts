@@ -743,12 +743,10 @@ async function withResolvedSessionFilter(
  * pelo "selecionar todas do filtro → Encerrar". Aplica o MESMO `where` da
  * lista, mas restringe a `status != RESOLVED` (já resolvidas são no-op) e
  * separa as que estão em departamento com tabulação obrigatória no
- * encerramento (`requireTabulationOnClose`) e NÃO casam com a tabulação
- * escolhida no lote (`tabulationDepartmentId`).
+ * encerramento (`requireTabulationOnClose`) quando o lote NÃO traz folha.
  *
- * Com `tabulationDepartmentId`: conversas daquele departamento entram no
- * lote (a folha já foi validada na rota). Outros depts que exigem
- * tabulação continuam em `skippedIds`.
+ * Com `tabulationDepartmentId` (folha no request): todas entram — a
+ * tabulação escolhida vale para o lote inteiro, inclusive outros depts.
  *
  * Sem tabulação: `allowCloseWithoutTabulation` (ADMIN / super-admin)
  * inclui todos; não-admin pulam os depts que exigem tabulação.
@@ -758,6 +756,8 @@ export async function getResolvableConversationIds(
   opts?: {
     allowCloseWithoutTabulation?: boolean;
     tabulationDepartmentId?: string | null;
+    /** Folha válida no request — inclui o lote inteiro, qualquer dept. */
+    hasChosenTabulation?: boolean;
   },
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
   const baseWhere = await buildConversationListWhere(
@@ -779,14 +779,11 @@ export async function getResolvableConversationIds(
   const ids: string[] = [];
   const skippedIds: string[] = [];
   const skipTabulationFilter = opts?.allowCloseWithoutTabulation === true;
-  const tabDept = opts?.tabulationDepartmentId ?? null;
+  const hasChosenTabulation =
+    opts?.hasChosenTabulation === true || Boolean(opts?.tabulationDepartmentId);
   for (const r of rows) {
     const requires = !!r.department?.requireTabulationOnClose;
-    if (!requires || skipTabulationFilter) {
-      ids.push(r.id);
-      continue;
-    }
-    if (tabDept && r.departmentId === tabDept) {
+    if (hasChosenTabulation || !requires || skipTabulationFilter) {
       ids.push(r.id);
       continue;
     }
@@ -1672,7 +1669,7 @@ export async function withConversationNumberRetry<T>(
 }
 
 /** Lotes até este tamanho fecham na API — não dependem do leads-worker. */
-export const BULK_RESOLVE_SYNC_LIMIT = 50;
+export const BULK_RESOLVE_SYNC_LIMIT = 100;
 
 export type BulkResolveTabulation = {
   tabulationId: string;
@@ -1712,9 +1709,7 @@ export async function resolveConversationsInline(params: {
     });
     if (!conv || conv.status === "RESOLVED") continue;
 
-    const applyTab =
-      Boolean(tab) &&
-      (!conv.departmentId || conv.departmentId === tab!.departmentId);
+    const applyTab = Boolean(tab);
 
     const row = await updateConversationStatusInDb(id, "RESOLVED", {
       tabulationId: applyTab && tab ? tab.tabulationId : undefined,

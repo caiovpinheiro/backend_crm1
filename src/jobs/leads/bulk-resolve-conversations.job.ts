@@ -35,8 +35,8 @@ const CHUNK_SIZE = 50;
  *
  * A rota produtora (`POST /api/conversations/bulk`) já:
  *   - aplicou o filtro de visibilidade do usuário nos ids;
- *   - validou a tabulação (folha da org) e excluiu depts que exigem
- *     tabulação e não casam com `tabulationDepartmentId`;
+ *   - validou a tabulação (folha da org); com folha, o lote já inclui
+ *     todas as selecionadas (a mesma tabulação fecha o lote inteiro);
  *   - leu as org settings keepAgent/keepDepartment.
  * Aqui confiamos no payload saneado — não relemos settings (evita acesso a
  * org-settings fora de RequestContext no worker).
@@ -127,41 +127,17 @@ export async function processBulkResolveConversations(
           ...(keepAgent ? {} : { assignedToId: null }),
           ...(keepDepartment ? {} : { departmentId: null }),
         };
-        const applyTab =
-          Boolean(tabulationId) &&
-          Boolean(tabulationDepartmentId);
-        const withTab = applyTab
-          ? toResolve.filter(
-              (c) =>
-                !c.departmentId || c.departmentId === tabulationDepartmentId,
-            )
-          : [];
-        const withoutTab = applyTab
-          ? toResolve.filter(
-              (c) =>
-                c.departmentId && c.departmentId !== tabulationDepartmentId,
-            )
-          : toResolve;
-
-        if (withTab.length > 0) {
-          await prisma.conversation.updateMany({
-            where: {
-              id: { in: withTab.map((c) => c.id) },
-              status: { not: "RESOLVED" },
-            },
-            data: { ...closePatch, tabulationId },
-          });
-        }
-        if (withoutTab.length > 0) {
-          await prisma.conversation.updateMany({
-            where: {
-              id: { in: withoutTab.map((c) => c.id) },
-              status: { not: "RESOLVED" },
-            },
-            data: closePatch,
-          });
-        }
-        const tabulatedIds = new Set(withTab.map((c) => c.id));
+        const applyTab = Boolean(tabulationId);
+        await prisma.conversation.updateMany({
+          where: {
+            id: { in: toResolve.map((c) => c.id) },
+            status: { not: "RESOLVED" },
+          },
+          data: applyTab ? { ...closePatch, tabulationId } : closePatch,
+        });
+        const tabulatedIds = new Set(
+          applyTab ? toResolve.map((c) => c.id) : [],
+        );
         chunkSucceeded += toResolve.length;
 
         const { sseBus } = await import("@/lib/sse-bus");

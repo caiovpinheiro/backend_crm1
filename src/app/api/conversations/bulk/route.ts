@@ -40,9 +40,10 @@ const FILTER_TABS = new Set<InboxTab>([
  * `resolve` (Encerrar): processado de forma ASSÍNCRONA pelo `leads-worker`
  * (fila `leads-bulk`, mesma infra dos bulk de Deals). A rota:
  *   1. aplica o filtro de visibilidade do usuário;
- *   2. valida `tabulationId` (mesma folha das automações / encerramento
- *      individual) e inclui no lote as conversas daquele departamento;
- *      outros depts que exigem tabulação entram em `skipped`;
+ *   2. valida `tabulationId` (folha da org). Com folha, aplica a tabulação
+ *      e encerra TODAS as selecionadas (não rejeita depois por departamento).
+ *      Sem folha, ADMIN / super-admin encerram sem tabular; não-admin
+ *      deixam em `skipped` as que exigem tabulação;
  *   3. lê as org settings keepAgent/keepDepartment;
  *   4. cria um `BulkOperation` (PENDING) e enfileira o job;
  *   5. responde 202 com `operationId` — o frontend pollar via
@@ -142,8 +143,8 @@ export async function POST(request: Request) {
             );
           }
           // Sem folha: ADMIN / super-admin ainda podem encerrar sem tabular
-          // (conversas sem departamento / dept que não exige). Com folha,
-          // o departamento da tabulação entra no lote.
+          // (mesmo bypass do lote antigo). Com folha, a tabulação entra em
+          // TODAS as selecionadas — não filtrar por departamento da folha.
           const allowCloseWithoutTabulation =
             !chosenTab && (isAdmin(session) || isSuperAdmin(session));
           const skipAutomations =
@@ -186,25 +187,23 @@ export async function POST(request: Request) {
               {
                 allowCloseWithoutTabulation,
                 tabulationDepartmentId: chosenTab?.departmentId ?? null,
+                hasChosenTabulation: Boolean(chosenTab),
               },
             );
             targetIds = resolved.ids;
             skippedIds = resolved.skippedIds;
           } else {
             const selectedIds = ids as string[];
-            // Sem tabulação: departamentos que exigem tabulação NÃO entram
-            // (exceto ADMIN sem folha). Com folha: só pulamos outros depts
-            // que ainda exigem tabulação — o departamento da folha entra.
+            // Sem tabulação e sem bypass de admin: depts que exigem
+            // tabulação ficam de fora. Com folha, ninguém é pulado — a
+            // mesma tabulação fecha o lote inteiro.
             skippedIds = [];
             let candidateIds = selectedIds;
-            if (!allowCloseWithoutTabulation) {
+            if (!chosenTab && !allowCloseWithoutTabulation) {
               const skippedRows = await prisma.conversation.findMany({
                 where: scopedWhere(selectedIds, {
                   status: { not: "RESOLVED" },
                   department: { is: { requireTabulationOnClose: true } },
-                  ...(chosenTab
-                    ? { NOT: { departmentId: chosenTab.departmentId } }
-                    : {}),
                 }),
                 select: { id: true },
               });
