@@ -10,7 +10,7 @@ import {
   type BoardSortField,
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
-import { getPipelineMeta } from "@/services/pipelines";
+import { getPipelineMeta, resolvePipelineByPublicRef } from "@/services/pipelines";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -74,10 +74,13 @@ async function getBoardStagesOnly(pipelineId: string) {
 export async function GET(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
-      const { id: pipelineId } = await context.params;
-      if (!pipelineId) {
+      const { id: rawRef } = await context.params;
+      if (!rawRef) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
+
+      const resolved = await resolvePipelineByPublicRef(rawRef);
+      const pipelineId = resolved?.id ?? rawRef;
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const url = new URL(request.url);
@@ -86,7 +89,7 @@ export async function GET(request: Request, context: RouteContext) {
       // Meta + scope + (visibility só se for board completo) em paralelo —
       // antes eram awaits em série somando round-trips.
       const [meta, scopeDenied, visibility] = await Promise.all([
-        getPipelineMeta(pipelineId),
+        resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
         requirePipelineScope(session.user, "view", pipelineId),
         view === "stages"
           ? Promise.resolve(null)
@@ -142,15 +145,18 @@ export async function GET(request: Request, context: RouteContext) {
 export async function POST(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
-      const { id: pipelineId } = await context.params;
-      if (!pipelineId) {
+      const { id: rawRef } = await context.params;
+      if (!rawRef) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
+
+      const resolved = await resolvePipelineByPublicRef(rawRef);
+      const pipelineId = resolved?.id ?? rawRef;
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
 
       const [meta, scopeDenied, visibility] = await Promise.all([
-        getPipelineMeta(pipelineId),
+        resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
         requirePipelineScope(session.user, "view", pipelineId),
         getVisibilityFilter(user),
       ]);

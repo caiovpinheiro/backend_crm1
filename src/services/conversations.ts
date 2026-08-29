@@ -743,15 +743,22 @@ async function withResolvedSessionFilter(
  * pelo "selecionar todas do filtro → Encerrar". Aplica o MESMO `where` da
  * lista, mas restringe a `status != RESOLVED` (já resolvidas são no-op) e
  * separa as que estão em departamento com tabulação obrigatória no
- * encerramento (`requireTabulationOnClose`), que NÃO podem ser encerradas em
- * massa por não-admin (precisam de tabulação individual).
+ * encerramento (`requireTabulationOnClose`) e NÃO casam com a tabulação
+ * escolhida no lote (`tabulationDepartmentId`).
  *
- * ADMIN / super-admin: `allowCloseWithoutTabulation` inclui essas conversas
- * nos ids (override de tabulação só no bulk).
+ * Com `tabulationDepartmentId`: conversas daquele departamento entram no
+ * lote (a folha já foi validada na rota). Outros depts que exigem
+ * tabulação continuam em `skippedIds`.
+ *
+ * Sem tabulação: `allowCloseWithoutTabulation` (ADMIN / super-admin)
+ * inclui todos; não-admin pulam os depts que exigem tabulação.
  */
 export async function getResolvableConversationIds(
   params: GetConversationsParams,
-  opts?: { allowCloseWithoutTabulation?: boolean },
+  opts?: {
+    allowCloseWithoutTabulation?: boolean;
+    tabulationDepartmentId?: string | null;
+  },
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
   const baseWhere = await buildConversationListWhere(
     await withResolvedSessionFilter(params),
@@ -764,6 +771,7 @@ export async function getResolvableConversationIds(
     where: openWhere,
     select: {
       id: true,
+      departmentId: true,
       department: { select: { requireTabulationOnClose: true } },
     },
   });
@@ -771,14 +779,34 @@ export async function getResolvableConversationIds(
   const ids: string[] = [];
   const skippedIds: string[] = [];
   const skipTabulationFilter = opts?.allowCloseWithoutTabulation === true;
+  const tabDept = opts?.tabulationDepartmentId ?? null;
   for (const r of rows) {
-    if (!skipTabulationFilter && r.department?.requireTabulationOnClose) {
-      skippedIds.push(r.id);
-    } else {
+    const requires = !!r.department?.requireTabulationOnClose;
+    if (!requires || skipTabulationFilter) {
       ids.push(r.id);
+      continue;
     }
+    if (tabDept && r.departmentId === tabDept) {
+      ids.push(r.id);
+      continue;
+    }
+    skippedIds.push(r.id);
   }
   return { ids, skippedIds };
+}
+
+/** IDs que casam com o filtro da listagem — usado no bulk assign "todas do filtro". */
+export async function getFilteredConversationIds(
+  params: GetConversationsParams,
+): Promise<string[]> {
+  const where = await buildConversationListWhere(
+    await withResolvedSessionFilter(params),
+  );
+  const rows = await prisma.conversation.findMany({
+    where,
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
 }
 
 export async function getConversations(

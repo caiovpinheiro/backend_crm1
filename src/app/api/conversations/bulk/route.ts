@@ -14,6 +14,7 @@ import {
   getResolvableConversationIds,
   type InboxTab,
 } from "@/services/conversations";
+import { resolveTabulationForStep } from "@/services/tabulations";
 
 /** Abas válidas para o encerramento "todas do filtro" (paridade com a listagem). */
 const FILTER_TABS = new Set<InboxTab>([
@@ -37,8 +38,9 @@ const FILTER_TABS = new Set<InboxTab>([
  * `resolve` (Encerrar): processado de forma ASSÍNCRONA pelo `leads-worker`
  * (fila `leads-bulk`, mesma infra dos bulk de Deals). A rota:
  *   1. aplica o filtro de visibilidade do usuário;
- *   2. remove ids de departamentos que exigem tabulação ao encerrar (`skipped`)
- *      — ADMIN / super-admin podem encerrar em massa sem tabular;
+ *   2. valida `tabulationId` (mesma folha das automações / encerramento
+ *      individual) e inclui no lote as conversas daquele departamento;
+ *      outros depts que exigem tabulação entram em `skipped`;
  *   3. lê as org settings keepAgent/keepDepartment;
  *   4. cria um `BulkOperation` (PENDING) e enfileira o job;
  *   5. responde 202 com `operationId` — o frontend pollar via
@@ -90,6 +92,10 @@ export async function POST(request: Request) {
           sessionExpiresWithinHours?: number;
           windowState?: "open" | "closed";
         };
+        /** Folha do modal de tabulação (mesmo id do encerramento individual). */
+        tabulationId?: string | null;
+        /** ADMIN: não dispara automações de `conversation_tabulated`. */
+        skipAutomations?: boolean;
       };
       const { ids, action, allInFilter } = body;
 
@@ -116,10 +122,31 @@ export async function POST(request: Request) {
 
           let targetIds: string[];
           let skippedIds: string[];
-          // Override de tabulação só no bulk: ADMIN (e super-admin) encerram
-          // sem tabular. Não-admin continua pulando esses depts.
+          const rawTab =
+            typeof body.tabulationId === "string" ? body.tabulationId.trim() : "";
+          const chosenTab = rawTab
+            ? await resolveTabulationForStep({
+                organizationId: user.organizationId,
+                tabulationId: rawTab,
+              })
+            : null;
+          if (rawTab && !chosenTab) {
+            return NextResponse.json(
+              {
+                message: "Tabulação inválida ou inativa para esta organização.",
+                code: "TABULATION_INVALID",
+              },
+              { status: 400 },
+            );
+          }
+          // Sem folha: ADMIN / super-admin ainda podem encerrar sem tabular
+          // (conversas sem departamento / dept que não exige). Com folha,
+          // o departamento da tabulação entra no lote.
           const allowCloseWithoutTabulation =
-            isAdmin(session) || isSuperAdmin(session);
+            !chosenTab && (isAdmin(session) || isSuperAdmin(session));
+          const skipAutomations =
+            body.skipAutomations === true &&
+            (isAdmin(session) || isSuperAdmin(session));
 
           if (allInFilter) {
             // "Todas do filtro": resolve os alvos server-side com o MESMO where
@@ -154,15 +181,18 @@ export async function POST(request: Request) {
                 sessionExpiresWithinHours: f.sessionExpiresWithinHours,
                 windowState: f.windowState,
               },
-              { allowCloseWithoutTabulation },
+              {
+                allowCloseWithoutTabulation,
+                tabulationDepartmentId: chosenTab?.departmentId ?? null,
+              },
             );
             targetIds = resolved.ids;
             skippedIds = resolved.skippedIds;
           } else {
             const selectedIds = ids as string[];
-            // Não-admin: departamentos que exigem tabulação NÃO entram no bulk
-            // (o encerramento individual colhe a tabulação). Devolvemos a lista
-            // pra UI avisar "encerre individualmente".
+            // Sem tabulação: departamentos que exigem tabulação NÃO entram
+            // (exceto ADMIN sem folha). Com folha: só pulamos outros depts
+            // que ainda exigem tabulação — o departamento da folha entra.
             skippedIds = [];
             let candidateIds = selectedIds;
             if (!allowCloseWithoutTabulation) {
@@ -170,6 +200,9 @@ export async function POST(request: Request) {
                 where: scopedWhere(selectedIds, {
                   status: { not: "RESOLVED" },
                   department: { is: { requireTabulationOnClose: true } },
+                  ...(chosenTab
+                    ? { NOT: { departmentId: chosenTab.departmentId } }
+                    : {}),
                 }),
                 select: { id: true },
               });
@@ -202,7 +235,18 @@ export async function POST(request: Request) {
               type: "CONVERSATION_BULK_RESOLVE",
               status: "PENDING",
               total: targetIds.length,
-              payload: { conversationIds: targetIds, keepAgent, keepDepartment },
+              payload: {
+                conversationIds: targetIds,
+                keepAgent,
+                keepDepartment,
+                ...(chosenTab
+                  ? {
+                      tabulationId: chosenTab.tabulationId,
+                      tabulationDepartmentId: chosenTab.departmentId,
+                    }
+                  : {}),
+                ...(skipAutomations ? { skipAutomations: true } : {}),
+              },
               createdById: user.id,
             },
             select: { id: true },
@@ -215,6 +259,16 @@ export async function POST(request: Request) {
             conversationIds: targetIds,
             keepAgent,
             keepDepartment,
+            ...(chosenTab
+              ? {
+                  tabulationId: chosenTab.tabulationId,
+                  tabulationDepartmentId: chosenTab.departmentId,
+                  tabulationName: chosenTab.name,
+                  tabulationNumber: chosenTab.number,
+                  tabulationAncestorIds: chosenTab.ancestorIds,
+                }
+              : {}),
+            ...(skipAutomations ? { skipAutomations: true } : {}),
           });
 
           if (!job) {
