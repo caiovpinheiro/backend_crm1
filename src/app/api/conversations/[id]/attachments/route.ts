@@ -396,7 +396,7 @@ export async function POST(request: Request, context: RouteContext) {
         let delivery: "voice" | "audio" | "document" | null = null;
         let queuedMetaError: string | null = null;
         if (!job) {
-          console.warn("[meta-attach] Redis indisponível — upload+send síncrono na API");
+          console.warn("[meta-attach] enqueue falhou (jobId/queue) — upload+send síncrono na API");
           try {
             const result = await processMetaAttach(jobPayload);
             sendStatus = result.sendStatus;

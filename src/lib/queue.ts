@@ -733,8 +733,9 @@ function getMetaAttachQueue(): Queue<MetaAttachPayload> | null {
 
 /**
  * Enfileira upload Graph + envio Cloud API de um anexo já persistido.
- * `jobId = meta-attach:${messageId}` deduplica retries do produtor.
- * Retorna `null` se Redis indisponível — o caller faz fallback síncrono.
+ * `jobId = meta-attach-${messageId}` deduplica retries do produtor.
+ * BullMQ rejeita `:` em custom jobId — usar hífen.
+ * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller faz fallback síncrono.
  */
 export async function enqueueMetaAttach(payload: MetaAttachPayload) {
   const queue = getMetaAttachQueue();
@@ -744,13 +745,21 @@ export async function enqueueMetaAttach(payload: MetaAttachPayload) {
   }
   const attempts = readPositiveInt(process.env.META_ATTACH_MAX_ATTEMPTS, 3);
   const backoffDelay = readPositiveInt(process.env.META_ATTACH_BACKOFF_DELAY, 2000);
-  return queue.add("process", payload, {
-    jobId: `meta-attach:${payload.messageId}`,
-    removeOnComplete: true,
-    removeOnFail: { count: 1000 },
-    attempts,
-    backoff: { type: "exponential", delay: backoffDelay },
-  });
+  try {
+    return await queue.add("process", payload, {
+      jobId: `meta-attach-${payload.messageId}`,
+      removeOnComplete: true,
+      removeOnFail: { count: 1000 },
+      attempts,
+      backoff: { type: "exponential", delay: backoffDelay },
+    });
+  } catch (err) {
+    console.warn(
+      "[queue] falha ao enfileirar meta-attach — caller deve fazer fallback síncrono:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
@@ -767,8 +776,9 @@ function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
 
 /**
  * Enfileira sendText Graph de uma mensagem de texto já persistida (`pending`).
- * `jobId = meta-outbound:${messageId}` deduplica retries do produtor.
- * Retorna `null` se Redis indisponível — o caller faz fallback síncrono.
+ * `jobId = meta-outbound-${messageId}` deduplica retries do produtor.
+ * BullMQ rejeita `:` em custom jobId — usar hífen.
+ * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller faz fallback síncrono.
  */
 export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
   const queue = getMetaOutboundQueue();
@@ -780,7 +790,7 @@ export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
   const backoffDelay = readPositiveInt(process.env.META_OUTBOUND_BACKOFF_DELAY, 2000);
   try {
     return await queue.add("process", payload, {
-      jobId: `meta-outbound:${payload.messageId}`,
+      jobId: `meta-outbound-${payload.messageId}`,
       removeOnComplete: true,
       removeOnFail: { count: 1000 },
       attempts,
