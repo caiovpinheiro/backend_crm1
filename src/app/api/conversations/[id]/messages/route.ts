@@ -387,13 +387,10 @@ export async function GET(request: Request, context: RouteContext) {
           rows: pRows,
         });
         remaining -= pRows.length;
-        // Sem `before` (prefetch ao abrir o card): só o ticket anterior
-        // mais recente, capado pelo budget. Atravessar todos os tickets
-        // até encher o budget virava dump (ex.: 8 tickets curtos).
-        if (!beforeDate) {
-          if (i < prevConvs.length - 1) hasOlderTickets = true;
-          break;
-        }
+        // Uma fatia = um ticket (prefetch e scroll-up). Atravessar o
+        // resto até encher o budget virava dump (ex.: 8 tickets curtos).
+        if (i < prevConvs.length - 1) hasOlderTickets = true;
+        break;
       }
       historyTickets = loaded.reverse();
     }
