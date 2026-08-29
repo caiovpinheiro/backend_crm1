@@ -11,7 +11,11 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgSettingBool } from "@/lib/org-settings";
-import { logEvent, withAutomationOriginMeta } from "@/services/activity-log";
+import {
+  logEvent,
+  userIdForFk,
+  withAutomationOriginMeta,
+} from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { cache } from "@/lib/cache";
@@ -134,6 +138,7 @@ export async function createDealEventsMany(
       meta,
       columns: deriveDealEventColumns(meta),
       metaJson: withAutomationOriginMeta(meta),
+      userId: userIdForFk(e.userId),
     };
   });
 
@@ -142,7 +147,7 @@ export async function createDealEventsMany(
       data: rows.map((r) =>
         withOrgFromCtx({
           dealId: r.input.dealId,
-          userId: r.input.userId,
+          userId: r.userId,
           type: r.input.type,
           meta: r.metaJson,
         }),
@@ -213,6 +218,10 @@ export function createDealEvent(
   // `deal_events` legado quando o deal nao tem activity_events.
   const metaJson = withAutomationOriginMeta(meta);
   const { field, oldValue, newValue } = deriveDealEventColumns(meta);
+  // Placeholders do worker (`"system"` via withSystemContext) e ids que
+  // não existem em `users` quebram `deal_events_userId_fkey`. Schema
+  // permite null — não inventar user.
+  const safeUserId = userIdForFk(userId);
 
   // Fire-and-forget para o novo log — falhas nao afetam o legado.
   void logEvent({
@@ -228,7 +237,9 @@ export function createDealEvent(
   });
 
   return prisma.dealEvent
-    .create({ data: withOrgFromCtx({ dealId, userId, type, meta: metaJson }) })
+    .create({
+      data: withOrgFromCtx({ dealId, userId: safeUserId, type, meta: metaJson }),
+    })
     .catch(() =>
       prisma.dealEvent.create({
         data: withOrgFromCtx({ dealId, userId: null, type, meta: metaJson }),
@@ -1036,7 +1047,7 @@ export async function clearContactOwnershipOnClose(args: {
 
   const fromName = contact?.assignedTo?.name ?? null;
   for (const deal of deals) {
-    createDealEvent(deal.id, actorUserId, "OWNER_CHANGED", {
+    createDealEvent(deal.id, userIdForFk(actorUserId), "OWNER_CHANGED", {
       from: deal.owner ? { id: deal.owner.id, name: deal.owner.name } : null,
       to: null,
       source: "conversation_closed",

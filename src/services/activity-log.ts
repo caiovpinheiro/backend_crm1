@@ -78,6 +78,30 @@ export type LogEventInput = {
   actor?: ContextActor;
 };
 
+/**
+ * `withSystemContext` / webhook / cron gravam placeholders (`"system"`,
+ * `"webhook"`, `"cron"`) em `RequestContext.userId`. Esses valores NÃO
+ * existem em `users` — passar pra FK (`deal_events.userId`,
+ * `activity_events.actorUserId`) estoura P2003.
+ *
+ * Não inventa user. Null/vazio/placeholder → `null` (schema permite).
+ */
+export function userIdForFk(
+  raw: string | null | undefined,
+): string | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (
+    !trimmed ||
+    trimmed === "system" ||
+    trimmed === "webhook" ||
+    trimmed === "cron"
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 /// Default seguro: se o contexto nao trouxer ator, infere a partir do
 /// userId. Mantem a auditoria minimamente util mesmo em call-sites
 /// que ainda nao foram migrados pra popular `actor`.
@@ -92,29 +116,22 @@ function resolveActor(input: LogEventInput): {
   const ctx = getRequestContext();
   const ctxActor = override ?? getActorContext();
 
-  // userId real = nao e placeholder de webhook/system/cron
-  const rawUserId = ctx?.userId;
-  const isSyntheticUserId =
-    !rawUserId ||
-    rawUserId === "system" ||
-    rawUserId === "webhook" ||
-    rawUserId === "cron";
-  const userIdForFk = isSyntheticUserId ? null : rawUserId ?? null;
+  const safeUserId = userIdForFk(ctx?.userId);
 
   if (ctxActor) {
     return {
       actorType: ctxActor.type as ActorType,
-      actorUserId: userIdForFk,
+      actorUserId: safeUserId,
       actorLabel: ctxActor.label ?? null,
       actorSublabel: ctxActor.sublabel ?? null,
       actorRef: ctxActor.ref ?? null,
     };
   }
 
-  if (userIdForFk) {
+  if (safeUserId) {
     return {
       actorType: "HUMAN" as ActorType,
-      actorUserId: userIdForFk,
+      actorUserId: safeUserId,
       actorLabel: null,
       actorSublabel: null,
       actorRef: null,

@@ -29,7 +29,7 @@ import {
   getRequestContext,
 } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { logEvent } from "@/services/activity-log";
+import { logEvent, userIdForFk } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
@@ -1534,7 +1534,7 @@ export async function updateConversationStatusInDb(
       await clearContactOwnershipOnClose({
         contactId: closeContactId,
         clearedUserId: clearedAssignee.id,
-        actorUserId: getRequestContext()?.userId ?? null,
+        actorUserId: userIdForFk(getRequestContext()?.userId),
       }).catch(() => {});
     }
   }
