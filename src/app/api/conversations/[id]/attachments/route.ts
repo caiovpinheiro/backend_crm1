@@ -10,8 +10,10 @@ import {
   mimeFromExtension,
   prepareWhatsAppAudio,
 } from "@/lib/audio-convert";
+import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { enqueueMetaAttach } from "@/lib/queue";
 import { metaWhatsApp, metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
@@ -151,6 +153,7 @@ export async function POST(request: Request, context: RouteContext) {
       if (!resolved.ok) return resolved.response;
       const outboundChannelRef = resolved.channelRef;
       const outboundChannelId = resolved.channelId;
+      const useBaileys = isBaileysChannel(outboundChannelRef);
 
       // Bloqueio duro de envio humano fora da janela de 24h em canal Meta
       // Cloud API (mídia também é envio livre) — mesmo critério do POST
@@ -206,7 +209,10 @@ export async function POST(request: Request, context: RouteContext) {
       let audioDelivery: "voice" | "audio" | "document" | null = null;
       let storeExt = fileName.includes(".") ? fileName.split(".").pop()! : mimeBase.split("/").pop() ?? "bin";
 
-      if (mediaTypeResolved === "audio") {
+      // Meta Cloud API: remux WebM→Ogg fica no worker-whatsapp (fila
+      // meta-attach). Baileys ainda remuxa aqui — o outbound-consumer
+      // não prepara áudio.
+      if (mediaTypeResolved === "audio" && useBaileys) {
         const inputExt = guessInputExt(mimeBase);
         console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pela Meta`);
         const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
@@ -244,8 +250,6 @@ export async function POST(request: Request, context: RouteContext) {
       const publicUrl = saved.url;
 
       // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
-
-      const useBaileys = isBaileysChannel(outboundChannelRef);
 
       let metaSendError: string | null = null;
       let externalId: string | null = null;
@@ -343,6 +347,118 @@ export async function POST(request: Request, context: RouteContext) {
       // qual número da org enviar (caso `outboundChannelId != conv.channelId`).
       const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
       const metaClient = metaClientFromConfig(channelConfig);
+
+      // Áudio Meta: persiste original + mensagem pending e devolve 201.
+      // Remux WebM/Opus → Ogg/Opus e o POST Graph rodam no worker-whatsapp.
+      if (mediaTypeResolved === "audio" && metaClient.configured && (to || recipient)) {
+        const looksLikeVoice =
+          mimeBase.startsWith("audio/webm") ||
+          mimeBase.startsWith("audio/ogg") ||
+          mimeBase === "audio/opus";
+        const pendingType = looksLikeVoice ? "ptt" : "audio";
+        const displayContent = caption || "";
+
+        const msgRow = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId: conv.id,
+            channelId: outboundChannelId ?? undefined,
+            content: displayContent,
+            direction: "out",
+            messageType: pendingType,
+            senderName,
+            mediaUrl: publicUrl,
+            sendStatus: "pending",
+          }),
+        });
+
+        try {
+          await prisma.conversation.update({
+            where: { id: conv.id },
+            data: {
+              lastMessageDirection: "out",
+              hasAgentReply: true,
+              hasHumanReply: true,
+              hasError: false,
+            },
+          });
+        } catch { /* columns may not exist yet */ }
+
+        try {
+          sseBus.publish("new_message", {
+            organizationId: conv.organizationId,
+            conversationId: conv.id,
+            contactId: conv.contactId,
+            direction: "out",
+            content: displayContent,
+            timestamp: msgRow.createdAt,
+          });
+        } catch {
+          // best-effort
+        }
+
+        cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
+          console.warn(
+            "[scheduled-messages] falha ao cancelar apos envio de anexo:",
+            err,
+          ),
+        );
+
+        const jobPayload = {
+          conversationId: conv.id,
+          messageId: msgRow.id,
+          organizationId: conv.organizationId,
+          originalName: fileName,
+          mime: mimeBase,
+          caption,
+        };
+        const job = await enqueueMetaAttach(jobPayload);
+        let sendStatus = "pending";
+        let storedType = pendingType;
+        let delivery: "voice" | "audio" | "document" | null = null;
+        let queuedMetaError: string | null = null;
+        if (!job) {
+          console.warn("[meta-attach] Redis indisponível — remux+send síncrono na API");
+          try {
+            const result = await processMetaAttach(jobPayload);
+            sendStatus = result.sendStatus;
+            storedType = result.messageType;
+            delivery = result.audioDelivery;
+            queuedMetaError = result.metaError;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : "Falha no envio de áudio";
+            await prisma.message
+              .updateMany({
+                where: { id: msgRow.id, sendStatus: "pending" },
+                data: { sendStatus: "failed", sendError: errMsg },
+              })
+              .catch(() => {});
+            await prisma.conversation
+              .update({ where: { id: conv.id }, data: { hasError: true } })
+              .catch(() => {});
+            sendStatus = "failed";
+            queuedMetaError = errMsg;
+          }
+        }
+
+        return NextResponse.json({
+          message: {
+            id: msgRow.id,
+            content: displayContent,
+            createdAt: msgRow.createdAt.toISOString(),
+            direction: "out",
+            messageType: storedType,
+            senderName,
+            mediaUrl: publicUrl,
+            sendStatus,
+            status: sendStatus === "failed" ? "FAILED" : sendStatus === "sent" ? "SENT" : "PENDING",
+            channelId: outboundChannelId ?? null,
+          },
+          conversationId: conv.id,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
+          ...(delivery ? { audioDelivery: delivery } : {}),
+          ...(queuedMetaError ? { metaError: queuedMetaError } : {}),
+        }, { status: 201 });
+      }
 
       if (metaClient.configured && (to || recipient)) {
         try {
