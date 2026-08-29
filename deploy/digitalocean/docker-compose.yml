@@ -100,13 +100,22 @@ services:
 
   worker-whatsapp:
     <<: *backend
-    # Envio de campanha. Sob carga total (stress 23/08) usou ~140% de CPU —
-    # 2.5 era folga excessiva que roubava CPU do inbound e da API. 2.0 sustenta
-    # o throughput medido com folga sem asfixiar os demais.
+    # Inbox Meta: texto + mídia (remux) + sweepers de sessão. Sem blast.
+    cpus: 1.0
+    mem_limit: 768m
+    environment:
+      APP_MODE: worker-whatsapp
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-campaigns:
+    <<: *backend
+    # Disparo de campanha CRM. Sob carga total (stress 23/08) usou ~140% de CPU.
     cpus: 2.0
     mem_limit: 1g
     environment:
-      APP_MODE: worker-whatsapp
+      APP_MODE: worker-campaigns
     depends_on:
       api:
         condition: service_healthy

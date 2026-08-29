@@ -145,6 +145,8 @@ export function startAutomationWorker() {
   const sweepTimer = setInterval(sweep, 15_000);
   sweepTimer.unref?.();
   log.info({ fairness: isAutomationFairnessEnabled() }, "automation fairness sweeper ativo (15s)");
+  // Único dono do timeout wait_for_reply / continueFromStep quando
+  // AUTOMATION_WORKER_MODE=external (a API não sobe este sweeper).
   startTimeoutSweeper();
 
   worker.on("completed", (job) => {

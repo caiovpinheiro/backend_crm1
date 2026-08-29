@@ -241,23 +241,29 @@ export const sseBus = new SseBus();
 // This runs server-side only (sse-bus is never imported by client components).
 let _bootstrapped = false;
 
+function resolveAppMode(): string {
+  return (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
+}
+
+function isAutomationWorkerExternal(): boolean {
+  return (process.env.AUTOMATION_WORKER_MODE ?? "").trim().toLowerCase() === "external";
+}
+
 /** Durante `next build`, o Next define NEXT_PHASE=phase-production-build; não há DB real no container de build. */
 function shouldSkipBackgroundServices(): boolean {
-  // Os sweepers de fundo (timeout de automação, inatividade da IA, mensagens
-  // agendadas, presença, expiração de sessão) são projetados para rodar em UM
-  // único processo — a API. Quando um worker BullMQ (APP_MODE=worker-*) importa
-  // sse-bus transitivamente (ex.: campaign-worker → whatsapp-conversation),
-  // ele NÃO deve subir os sweepers: caso contrário o mesmo automationContext
-  // expirado é varrido por vários processos ao mesmo tempo, processando o
-  // timeout em duplicidade (mensagem/handoff/encerramento repetidos). APP_MODE
-  // ausente (ex.: `next dev` local) mantém o comportamento atual (roda).
-  const appMode = process.env.APP_MODE?.trim();
-  const isWorkerProcess = Boolean(appMode) && appMode !== "api";
-  return (
-    process.env.NEXT_PHASE === "phase-production-build" ||
-    process.env.CRM_SKIP_BACKGROUND_SERVERS === "1" ||
-    isWorkerProcess
-  );
+  // Sweepers rodam em UM processo só. Em produção (workers externos):
+  //   - APP_MODE=api NÃO sobe nenhum (senão duplica wait_for_reply / sessão).
+  //   - worker-automation sobe o timeout (startTimeoutSweeper no próprio worker).
+  //   - worker-whatsapp sobe o restante via startWhatsappOwnedSweepers().
+  //   - worker-campaigns NÃO sobe sweepers de sessão (só campanha).
+  // Import transitivo de sse-bus num worker-* NÃO deve auto-iniciar nada.
+  // Dev local (APP_MODE=api/ausente, AUTOMATION_WORKER_MODE ≠ external)
+  // mantém o bootstrap na API.
+  if (process.env.NEXT_PHASE === "phase-production-build") return true;
+  if (process.env.CRM_SKIP_BACKGROUND_SERVERS === "1") return true;
+  const appMode = resolveAppMode();
+  if (appMode !== "api") return true;
+  return isAutomationWorkerExternal();
 }
 
 function bootstrapBackgroundServices() {
@@ -265,6 +271,16 @@ function bootstrapBackgroundServices() {
   _bootstrapped = true;
 
   if (shouldSkipBackgroundServices()) {
+    if (
+      resolveAppMode() === "api" &&
+      isAutomationWorkerExternal() &&
+      process.env.NEXT_PHASE !== "phase-production-build" &&
+      process.env.CRM_SKIP_BACKGROUND_SERVERS !== "1"
+    ) {
+      console.info(
+        "[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)",
+      );
+    }
     return;
   }
 
@@ -276,19 +292,18 @@ function bootstrapBackgroundServices() {
   setTimeout(() => startBackgroundSweepers(), bootDelayMs);
 }
 
-function startBackgroundSweepers() {
-  import("@/services/automation-context")
-    .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
-    .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
-
+/**
+ * Sweepers de sessão WhatsApp, presença, agendadas, IA e push.
+ * Chamado pelo `worker-whatsapp`. Timeout de automação NÃO entra aqui —
+ * fica só no `worker-automation`. worker-campaigns não chama isto.
+ */
+export function startWhatsappOwnedSweepers() {
   import("@/services/system-presence")
     .then(({ startSystemPresenceSweeper }) => startSystemPresenceSweeper())
     .catch((e) =>
       console.error("[sse-bus] failed to start system-presence sweeper:", e),
     );
 
-  // Sweeper independente do de presença — fecha SystemActivitySession vencidas
-  // (uso real). NÃO interfere no fluxo de presença ao vivo acima.
   import("@/services/system-activity")
     .then(({ startSystemActivitySweeper }) => startSystemActivitySweeper())
     .catch((e) =>
@@ -326,5 +341,13 @@ function startBackgroundSweepers() {
     .catch((e) =>
       console.error("[sse-bus] failed to start activity-alert push sweeper:", e),
     );
+}
+
+function startBackgroundSweepers() {
+  import("@/services/automation-context")
+    .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
+    .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
+
+  startWhatsappOwnedSweepers();
 }
 bootstrapBackgroundServices();

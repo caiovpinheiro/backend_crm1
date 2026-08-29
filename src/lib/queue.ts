@@ -16,11 +16,18 @@ export const CAMPAIGN_SEND_QUEUE_NAME = "campaign-send" as const;
  */
 export const META_WEBHOOK_QUEUE_NAME = "meta-webhook-events" as const;
 /**
- * Remux WebM/Opus → Ogg/Opus + envio Cloud API de áudio do inbox.
- * A API (`APP_MODE=api`) só persiste o arquivo original e cria a
- * mensagem `pending`; o `worker-whatsapp` (campaign-worker) consome.
+ * Upload Graph + sendMediaById de anexo do inbox (áudio/imagem/vídeo/doc).
+ * Áudio ainda remuxa WebM/Opus → Ogg/Opus no worker. A API
+ * (`APP_MODE=api`) só persiste o arquivo original e cria a mensagem
+ * `pending`; o `worker-whatsapp` (campaign-worker) consome.
  */
 export const META_ATTACH_QUEUE_NAME = "meta-attach" as const;
+/**
+ * Texto livre Meta do inbox (Graph sendText). A API persiste a mensagem
+ * `pending` e enfileira; o `worker-whatsapp` consome. Fallback síncrono
+ * se Redis estiver down (mesmo padrão de meta-attach).
+ */
+export const META_OUTBOUND_QUEUE_NAME = "meta-outbound" as const;
 /**
  * Fila de operações em massa sobre Deals (bulk update de custom fields,
  * bulk move de stage). Foi nomeada `leads-bulk` (não `deals-bulk`) por
@@ -96,6 +103,9 @@ export type BaileysOutboundPayload = {
   messageType: string;
   conversationId: string;
   messageId: string;
+  /** MIME original (áudio: remux no outbound-consumer). */
+  mime?: string;
+  originalName?: string;
 };
 
 export type BaileysControlPayload = {
@@ -130,7 +140,9 @@ export type MetaWebhookJobPayload = {
   organizationId: string;
 };
 
-/** Job de remux + envio Meta de anexo de áudio (inbox). */
+export type MetaAttachKind = "audio" | "image" | "video" | "document";
+
+/** Job de upload Graph + envio Meta de anexo do inbox. */
 export type MetaAttachPayload = {
   conversationId: string;
   /** Message.id persistido pela API (anexo = mensagem com mediaUrl). */
@@ -140,6 +152,21 @@ export type MetaAttachPayload = {
   originalName: string;
   mime: string;
   caption: string;
+  /** Ausente em jobs antigos de áudio — inferido do mime. */
+  kind?: MetaAttachKind;
+};
+
+/** Job de envio de texto livre Meta do inbox (Graph sendText). */
+export type MetaOutboundPayload = {
+  conversationId: string;
+  messageId: string;
+  organizationId: string;
+  contactId: string;
+  content: string;
+  channelId?: string | null;
+  replyContextWamid?: string | null;
+  waJid?: string | null;
+  senderName?: string | null;
 };
 
 // ── Leads bulk payloads ──────────────────────────────────
@@ -308,6 +335,7 @@ const globalForQueue = globalThis as unknown as {
   importEtlQueue?: Queue<ContactImportPayload>;
   metaWebhookQueue?: Queue<MetaWebhookJobPayload>;
   metaAttachQueue?: Queue<MetaAttachPayload>;
+  metaOutboundQueue?: Queue<MetaOutboundPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -704,7 +732,7 @@ function getMetaAttachQueue(): Queue<MetaAttachPayload> | null {
 }
 
 /**
- * Enfileira remux + envio Cloud API de um áudio já persistido.
+ * Enfileira upload Graph + envio Cloud API de um anexo já persistido.
  * `jobId = meta-attach:${messageId}` deduplica retries do produtor.
  * Retorna `null` se Redis indisponível — o caller faz fallback síncrono.
  */
@@ -718,6 +746,40 @@ export async function enqueueMetaAttach(payload: MetaAttachPayload) {
   const backoffDelay = readPositiveInt(process.env.META_ATTACH_BACKOFF_DELAY, 2000);
   return queue.add("process", payload, {
     jobId: `meta-attach:${payload.messageId}`,
+    removeOnComplete: true,
+    removeOnFail: { count: 1000 },
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+  });
+}
+
+function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.metaOutboundQueue) {
+    globalForQueue.metaOutboundQueue = new Queue<MetaOutboundPayload>(
+      META_OUTBOUND_QUEUE_NAME,
+      { connection: redis },
+    );
+  }
+  return globalForQueue.metaOutboundQueue;
+}
+
+/**
+ * Enfileira sendText Graph de uma mensagem de texto já persistida (`pending`).
+ * `jobId = meta-outbound:${messageId}` deduplica retries do produtor.
+ * Retorna `null` se Redis indisponível — o caller faz fallback síncrono.
+ */
+export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
+  const queue = getMetaOutboundQueue();
+  if (!queue) {
+    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-outbound");
+    return null;
+  }
+  const attempts = readPositiveInt(process.env.META_OUTBOUND_MAX_ATTEMPTS, 3);
+  const backoffDelay = readPositiveInt(process.env.META_OUTBOUND_BACKOFF_DELAY, 2000);
+  return queue.add("process", payload, {
+    jobId: `meta-outbound:${payload.messageId}`,
     removeOnComplete: true,
     removeOnFail: { count: 1000 },
     attempts,

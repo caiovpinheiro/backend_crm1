@@ -170,6 +170,8 @@ type SendMediaOpts = {
   messageType: string;
   caption?: string;
   waJid?: string | null;
+  mime?: string;
+  originalName?: string;
 };
 
 /**
@@ -195,7 +197,7 @@ export async function sendWhatsAppMedia(opts: SendMediaOpts): Promise<SendTextRe
     }
 
     try {
-      await enqueueBaileysOutbound({
+      const job = await enqueueBaileysOutbound({
         channelId: opts.channelRef.id,
         to: targetJid,
         content: opts.caption ?? "",
@@ -203,7 +205,16 @@ export async function sendWhatsAppMedia(opts: SendMediaOpts): Promise<SendTextRe
         messageType: opts.messageType,
         conversationId: opts.conversationId,
         messageId: opts.messageId,
+        mime: opts.mime,
+        originalName: opts.originalName,
       });
+      if (!job) {
+        return {
+          externalId: null,
+          failed: true,
+          error: "Redis indisponível — não foi possível enfileirar envio Baileys.",
+        };
+      }
       return { externalId: null, failed: false, error: null };
     } catch (err) {
       const error = formatMetaSendError(err);
