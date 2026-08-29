@@ -29,6 +29,7 @@ export async function getDraftById(id: string, actor: Actor) {
       name: true,
       type: true,
       channelId: true,
+      useLastConversationChannel: true,
       segmentId: true,
       filters: true,
       templateName: true,
@@ -53,7 +54,10 @@ export async function createDraft(organizationId: string, createdById: string, p
       organizationId,
       name: patch.name ?? "Nova campanha",
       type: patch.type ?? "TEMPLATE",
-      channelId: patch.channelId ?? "",
+      useLastConversationChannel: patch.useLastConversationChannel ?? false,
+      ...(patch.useLastConversationChannel || !patch.channelId
+        ? {}
+        : { channelId: patch.channelId }),
       createdById,
       segmentId: patch.segmentId || null,
       filters: (patch.filters as Prisma.InputJsonValue | undefined) ?? undefined,
@@ -81,7 +85,15 @@ export async function updateDraft(id: string, patch: DraftPatch, actor: Actor) {
   const data: Prisma.CampaignUpdateInput = {};
   if (patch.name !== undefined) data.name = patch.name;
   if (patch.type !== undefined) data.type = patch.type;
-  if (patch.channelId !== undefined) data.channel = { connect: { id: patch.channelId } };
+  if (patch.useLastConversationChannel === true) {
+    data.useLastConversationChannel = true;
+    data.channel = { disconnect: true };
+  } else if (patch.channelId) {
+    data.useLastConversationChannel = false;
+    data.channel = { connect: { id: patch.channelId } };
+  } else if (patch.useLastConversationChannel === false) {
+    data.useLastConversationChannel = false;
+  }
   if (patch.segmentId !== undefined) data.segment = patch.segmentId ? { connect: { id: patch.segmentId } } : { disconnect: true };
   if (patch.filters !== undefined) data.filters = patch.filters as Prisma.InputJsonValue;
   if (patch.templateName !== undefined) data.templateName = patch.templateName || null;
@@ -127,8 +139,13 @@ export async function launchDraft(id: string, actor: Actor) {
     throw new Error("FORBIDDEN_DRAFT_ACCESS");
   }
   if (campaign.status !== "DRAFT") throw new Error("Apenas rascunhos podem ser lançados.");
-  if (campaign.channel.status !== "CONNECTED") {
-    throw new Error("Canal selecionado não está conectado.");
+  if (!campaign.useLastConversationChannel) {
+    if (!campaign.channelId || !campaign.channel) {
+      throw new Error("Canal é obrigatório para campanha com canal fixo.");
+    }
+    if (campaign.channel.status !== "CONNECTED") {
+      throw new Error("Canal selecionado não está conectado.");
+    }
   }
   if (!campaign.segmentId && !campaign.filters) {
     throw new Error("Selecione um segmento ou configure filtros.");

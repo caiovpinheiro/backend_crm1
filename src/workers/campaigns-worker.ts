@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
-import { Prisma } from "@prisma/client";
+import { Prisma, type ChannelProvider } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -85,6 +85,96 @@ async function loadCampaignRow(campaignId: string): Promise<CampaignRow> {
   const row = await loadCampaignRowUncached(campaignId);
   cache.set(campaignId, { row, at: Date.now() });
   return row;
+}
+
+type SendChannel = {
+  id: string;
+  provider: ChannelProvider;
+  config: unknown;
+};
+
+/** Falha permanente: sem canal resolvível para este destinatário. */
+class CampaignChannelUnresolved extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CampaignChannelUnresolved";
+  }
+}
+
+async function loadActiveOrgChannel(
+  organizationId: string,
+  channelId: string,
+): Promise<SendChannel> {
+  const channel = await prisma.channel.findFirst({
+    where: { id: channelId, organizationId },
+    select: { id: true, provider: true, config: true, status: true },
+  });
+  if (!channel) {
+    throw new CampaignChannelUnresolved(
+      "Canal da última conversa indisponível nesta organização.",
+    );
+  }
+  if (channel.status !== "CONNECTED") {
+    throw new CampaignChannelUnresolved(
+      "Canal da última conversa não está conectado.",
+    );
+  }
+  return { id: channel.id, provider: channel.provider, config: channel.config };
+}
+
+/**
+ * Última conversa do contato na org (última Message, fallback updatedAt)
+ * com canal ativo. Não cruza organização.
+ */
+async function findLastConversationChannel(
+  organizationId: string,
+  contactId: string,
+): Promise<SendChannel> {
+  const lastMessage = await prisma.message.findFirst({
+    where: {
+      organizationId,
+      conversation: { organizationId, contactId },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      conversation: { select: { channelId: true, organizationId: true } },
+    },
+  });
+
+  let channelId =
+    lastMessage?.conversation.organizationId === organizationId
+      ? lastMessage.conversation.channelId
+      : null;
+
+  if (!channelId) {
+    const convo = await prisma.conversation.findFirst({
+      where: { organizationId, contactId, channelId: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      select: { channelId: true },
+    });
+    channelId = convo?.channelId ?? null;
+  }
+
+  if (!channelId) {
+    throw new CampaignChannelUnresolved(
+      "Sem conversa anterior para resolver o canal de envio.",
+    );
+  }
+
+  return loadActiveOrgChannel(organizationId, channelId);
+}
+
+async function resolveSendChannel(
+  campaign: NonNullable<CampaignRow>,
+  contactId: string,
+): Promise<SendChannel> {
+  if (campaign.useLastConversationChannel) {
+    return findLastConversationChannel(campaign.organizationId, contactId);
+  }
+  if (!campaign.channel) {
+    throw new CampaignChannelUnresolved("Campanha sem canal de envio.");
+  }
+  return campaign.channel;
 }
 
 // ── Template preparation cache ───────────────────────────
@@ -557,11 +647,13 @@ async function processRecipient(
     data: { status: "SENDING" },
   });
 
+  let sendChannel: SendChannel | null = null;
   try {
-    const provider = campaign.channel.provider;
+    sendChannel = await resolveSendChannel(campaign, contactId);
+    const provider = sendChannel.provider;
     const config = getDecryptedChannelConfig({
-      provider: campaign.channel.provider,
-      config: campaign.channel.config,
+      provider: sendChannel.provider,
+      config: sendChannel.config,
     });
 
     if (campaign.type === "AUTOMATION") {
@@ -574,11 +666,9 @@ async function processRecipient(
           context: {
             contactId,
             event: "campaign_trigger",
-            // channelId: canal escolhido no wizard da campanha. Sem ele o
-            // executor resolvia pela conversa do contato — que pode estar
-            // num canal DISCONNECTED (token invalidado pela Meta), falhando
-            // o disparo em massa. O executor lê em `rt.activeChannelId`.
-            data: { campaignId, recipientId, channelId: campaign.channelId },
+            // channelId efetivo deste destinatário (fixo da campanha ou
+            // último canal conversado). O executor lê em `rt.activeChannelId`.
+            data: { campaignId, recipientId, channelId: sendChannel.id },
           },
         });
       }
@@ -587,7 +677,17 @@ async function processRecipient(
     }
 
     if (provider === "META_CLOUD_API") {
-      await sendViaMetaCloudApi(campaign, config, contactPhone, contactBsuid, recipientId, campaignId, contactId, prefetchedLastInboundAt);
+      await sendViaMetaCloudApi(
+        campaign,
+        config,
+        contactPhone,
+        contactBsuid,
+        recipientId,
+        campaignId,
+        contactId,
+        sendChannel.id,
+        prefetchedLastInboundAt,
+      );
     } else if (provider === "BAILEYS_MD") {
       await sendViaBaileys(campaign, contactPhone, contactId, recipientId, campaignId);
     } else {
@@ -600,10 +700,15 @@ async function processRecipient(
     });
     return "sent";
   } catch (err) {
-    const errorMsg = formatMetaSendError(err);
+    const errorMsg =
+      err instanceof CampaignChannelUnresolved
+        ? err.message
+        : formatMetaSendError(err);
     console.error(`[campaign-send] Error for recipient ${recipientId}:`, errorMsg);
     const metaCode = extractMetaRetryCode(errorMsg);
-    const shouldRetry = shouldRetryCampaignSendError(
+    const shouldRetry =
+      !(err instanceof CampaignChannelUnresolved) &&
+      shouldRetryCampaignSendError(
       errorMsg,
       ctx.attemptsMade,
       ctx.maxAttempts,
@@ -645,7 +750,7 @@ async function processRecipient(
       incrementCampaignCounter(campaignId, "failedCount");
     }
     metrics.messages.outbound.inc({
-      channel_provider: campaign.channel.provider,
+      channel_provider: sendChannel?.provider ?? campaign.channel?.provider ?? "unknown",
       status: "failed",
       organization: safeLabel(campaign.organizationId),
     });
@@ -677,7 +782,6 @@ async function sendViaMetaCloudApi(
     templateComponents: unknown;
     textContent: string | null;
     sendRate: number;
-    channel: { id: string };
   },
   config: Record<string, unknown>,
   phone: string,
@@ -685,6 +789,7 @@ async function sendViaMetaCloudApi(
   recipientId: string,
   campaignId: string,
   contactId: string,
+  sendChannelId: string,
   prefetchedLastInboundAt?: Date | null,
 ) {
   // Nunca montar cliente Meta manualmente via `config.accessToken`; usar
@@ -734,7 +839,7 @@ async function sendViaMetaCloudApi(
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
     const withinWindow = await isWithinMetaWindow(
       contactId,
-      campaign.channel.id,
+      sendChannelId,
       prefetchedLastInboundAt,
     );
     if (!withinWindow) {
@@ -756,7 +861,7 @@ async function sendViaMetaCloudApi(
   try {
     await persistCampaignOutboundMessage({
       contactId,
-      channelId: campaign.channel.id,
+      channelId: sendChannelId,
       campaignName: campaign.name,
       content,
       messageType,
@@ -870,7 +975,7 @@ async function persistCampaignOutboundMessage(input: {
 }
 
 async function sendViaBaileys(
-  campaign: { textContent: string | null; channel: { id: string } },
+  campaign: { textContent: string | null },
   phone: string,
   contactId: string,
   recipientId: string,
@@ -1073,7 +1178,7 @@ function startRoundRobinSender(opts: {
                ch.config->>'phoneNumberId' AS "phoneNumberId"
           FROM campaign_recipients r
           JOIN campaigns c ON c.id = r."campaignId"
-          JOIN channels ch ON ch.id = c."channelId"
+          LEFT JOIN channels ch ON ch.id = c."channelId"
          WHERE r."organizationId" = ${organizationId}
            AND r.status = 'PENDING'
            AND c.status IN ('SENDING', 'PROCESSING')

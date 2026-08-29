@@ -31,11 +31,19 @@ export async function POST(
       );
     }
 
-    if (campaign.channel.status !== "CONNECTED") {
-      return NextResponse.json(
-        { message: "O canal selecionado não está conectado." },
-        { status: 409 },
-      );
+    if (!campaign.useLastConversationChannel) {
+      if (!campaign.channelId || !campaign.channel) {
+        return NextResponse.json(
+          { message: "Canal é obrigatório para campanha com canal fixo." },
+          { status: 400 },
+        );
+      }
+      if (campaign.channel.status !== "CONNECTED") {
+        return NextResponse.json(
+          { message: "O canal selecionado não está conectado." },
+          { status: 409 },
+        );
+      }
     }
 
     if (!campaign.segmentId && !campaign.filters) {

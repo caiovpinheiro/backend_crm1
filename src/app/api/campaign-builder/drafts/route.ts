@@ -75,7 +75,7 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
-      if (!parsed.data.channelId) {
+      if (!parsed.data.useLastConversationChannel && !parsed.data.channelId) {
         return NextResponse.json(
           { error: { code: "CHANNEL_REQUIRED", message: "Canal é obrigatório para criar rascunho." } },
           { status: 400 },

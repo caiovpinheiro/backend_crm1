@@ -102,7 +102,9 @@ export async function getCampaignById(id: string) {
 export type CreateCampaignInput = {
   name: string;
   type: CampaignType;
-  channelId: string;
+  /** Obrigatório quando `useLastConversationChannel` é false. */
+  channelId?: string | null;
+  useLastConversationChannel?: boolean;
   segmentId?: string;
   filters?: SegmentFilters;
   templateName?: string;
@@ -116,11 +118,13 @@ export type CreateCampaignInput = {
 };
 
 export async function createCampaign(input: CreateCampaignInput) {
+  const useLast = Boolean(input.useLastConversationChannel);
   return prisma.campaign.create({
     data: withOrgFromCtx({
       name: input.name,
       type: input.type,
-      channelId: input.channelId,
+      useLastConversationChannel: useLast,
+      channelId: useLast ? null : input.channelId,
       segmentId: input.segmentId ?? null,
       filters: input.filters
         ? (input.filters as unknown as Prisma.InputJsonValue)
@@ -150,7 +154,15 @@ export async function updateCampaign(
   const patch: Prisma.CampaignUpdateInput = {};
   if (data.name !== undefined) patch.name = data.name;
   if (data.type !== undefined) patch.type = data.type;
-  if (data.channelId !== undefined) patch.channel = { connect: { id: data.channelId } };
+  if (data.useLastConversationChannel === true) {
+    patch.useLastConversationChannel = true;
+    patch.channel = { disconnect: true };
+  } else if (data.channelId) {
+    patch.useLastConversationChannel = false;
+    patch.channel = { connect: { id: data.channelId } };
+  } else if (data.useLastConversationChannel === false) {
+    patch.useLastConversationChannel = false;
+  }
   if (data.segmentId !== undefined)
     patch.segment = data.segmentId ? { connect: { id: data.segmentId } } : { disconnect: true };
   if (data.filters !== undefined)

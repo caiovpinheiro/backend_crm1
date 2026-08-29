@@ -47,15 +47,17 @@ export async function POST(request: Request) {
         return NextResponse.json({ message: "Tipo de campanha inválido." }, { status: 400 });
       }
 
-      const channelId = typeof body.channelId === "string" ? body.channelId : "";
-      if (!channelId) {
+      const useLastConversationChannel = body.useLastConversationChannel === true;
+      const channelId = typeof body.channelId === "string" ? body.channelId.trim() : "";
+      if (!useLastConversationChannel && !channelId) {
         return NextResponse.json({ message: "Canal é obrigatório." }, { status: 400 });
       }
 
       const input: CreateCampaignInput = {
         name,
         type: type as CreateCampaignInput["type"],
-        channelId,
+        channelId: useLastConversationChannel ? null : channelId,
+        useLastConversationChannel,
         createdById: session.user.id,
         segmentId: typeof body.segmentId === "string" ? body.segmentId : undefined,
         filters: body.filters as never,
