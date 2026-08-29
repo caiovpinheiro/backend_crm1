@@ -43,6 +43,9 @@ export async function PUT(
     if (typeof body.name === "string") data.name = body.name.trim();
     if (typeof body.type === "string") data.type = body.type;
     if (typeof body.channelId === "string") data.channelId = body.channelId;
+    if (typeof body.useLastConversationChannel === "boolean") {
+      data.useLastConversationChannel = body.useLastConversationChannel;
+    }
     if (typeof body.segmentId === "string") data.segmentId = body.segmentId;
     if (body.filters !== undefined) data.filters = body.filters;
     if (typeof body.templateName === "string") data.templateName = body.templateName;
