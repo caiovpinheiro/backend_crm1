@@ -1,5 +1,6 @@
 /**
- * Remux WebM/Opus → Ogg/Opus + envio WhatsApp Cloud API.
+ * Upload Graph + sendMediaById de anexo do inbox (áudio/imagem/vídeo/doc).
+ * Áudio: remux WebM/Opus → Ogg/Opus antes do POST.
  *
  * Roda no `worker-whatsapp` (campaign-worker). A API só persiste o
  * arquivo original e cria a mensagem `pending`.
@@ -11,7 +12,7 @@ import { guessInputExt, prepareWhatsAppAudio } from "@/lib/audio-convert";
 import { getDecryptedChannelConfig } from "@/lib/channels/config";
 import { formatMetaSendError, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
-import type { MetaAttachPayload } from "@/lib/queue";
+import type { MetaAttachKind, MetaAttachPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
 import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
@@ -26,6 +27,16 @@ export type MetaAttachResult = {
 };
 
 const TERMINAL_OK = new Set(["sent", "delivered", "read"]);
+
+function resolveKind(payload: MetaAttachPayload): MetaAttachKind {
+  if (payload.kind) return payload.kind;
+  const mime = payload.mime ?? "";
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime) return "document";
+  return "audio";
+}
 
 function publishStatus(
   organizationId: string,
@@ -135,12 +146,14 @@ export async function processMetaAttach(
     },
   });
 
+  const kind = resolveKind(payload);
+
   if (!msg) {
     return {
       sendStatus: "failed",
       audioDelivery: null,
       metaError: "Mensagem não encontrada.",
-      messageType: "audio",
+      messageType: kind,
       externalId: null,
     };
   }
@@ -158,7 +171,9 @@ export async function processMetaAttach(
 
   const storedPath = msg.mediaUrl ? parseStoragePath(msg.mediaUrl) : null;
   if (!storedPath || storedPath.orgId !== payload.organizationId) {
-    return markFailed(payload, "Arquivo de áudio não encontrado no storage.");
+    return markFailed(payload, "Arquivo não encontrado no storage.", {
+      messageType: kind,
+    });
   }
 
   const stored = await readStoredFile(
@@ -167,33 +182,39 @@ export async function processMetaAttach(
     storedPath.fileName,
   );
   if (!stored?.buffer.length) {
-    return markFailed(payload, "Arquivo de áudio vazio ou ilegível.");
+    return markFailed(payload, "Arquivo vazio ou ilegível.", { messageType: kind });
   }
 
-  const inputExt = guessInputExt(payload.mime);
-  console.log(
-    `[meta-attach] Convertendo audio ${payload.mime} (.${inputExt}) para formato aceito pela Meta`,
-  );
-  const prepared = await prepareWhatsAppAudio(
-    stored.buffer,
-    inputExt,
-    payload.originalName,
-  );
-  if (!prepared.ok) {
-    return markFailed(payload, prepared.reason);
+  let mediaType: "image" | "audio" | "video" | "document" = kind;
+  let sendAsVoice = false;
+  let audioDelivery: MetaAttachResult["audioDelivery"] = null;
+  let uploadMime = payload.mime || stored.mimeType || "application/octet-stream";
+  let uploadName = payload.originalName || storedPath.fileName;
+  let storeBuffer = stored.buffer;
+
+  if (kind === "audio") {
+    const inputExt = guessInputExt(payload.mime);
+    console.log(
+      `[meta-attach] Convertendo audio ${payload.mime} (.${inputExt}) para formato aceito pela Meta`,
+    );
+    const prepared = await prepareWhatsAppAudio(
+      stored.buffer,
+      inputExt,
+      payload.originalName,
+    );
+    if (!prepared.ok) {
+      return markFailed(payload, prepared.reason);
+    }
+    mediaType = prepared.payload.delivery === "document" ? "document" : "audio";
+    sendAsVoice = prepared.payload.voice;
+    audioDelivery = prepared.payload.delivery;
+    uploadMime = prepared.payload.mime;
+    uploadName = prepared.payload.fileName;
+    storeBuffer = prepared.payload.buffer;
+    console.log(
+      `[meta-attach] Preparo OK (${audioDelivery}), ${stored.buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+    );
   }
-
-  let mediaType: "audio" | "document" =
-    prepared.payload.delivery === "document" ? "document" : "audio";
-  let sendAsVoice = prepared.payload.voice;
-  let audioDelivery = prepared.payload.delivery;
-  const uploadMime = prepared.payload.mime;
-  const uploadName = prepared.payload.fileName;
-  const storeBuffer = prepared.payload.buffer;
-
-  console.log(
-    `[meta-attach] Preparo OK (${audioDelivery}), ${stored.buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
-  );
 
   const channelId = msg.channelId ?? msg.conversation.channelId;
   const channel = channelId

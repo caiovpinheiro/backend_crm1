@@ -17,6 +17,8 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
+import { enqueueMetaOutbound } from "@/lib/queue";
+import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
 import {
   platformFromConversationChannel,
@@ -1038,6 +1040,12 @@ export async function POST(request: Request, context: RouteContext) {
     const localOnly = !useBaileys && !metaClient.configured;
 
     if (!useBaileys && !localOnly) {
+      if (!conv.contactId) {
+        return NextResponse.json(
+          { message: "Contato sem telefone nem BSUID WhatsApp (Meta)." },
+          { status: 400 }
+        );
+      }
       const waTarget = await getContactWhatsAppTargets(conv.contactId);
       if (!waTarget) {
         return NextResponse.json(
@@ -1057,11 +1065,17 @@ export async function POST(request: Request, context: RouteContext) {
         senderName,
         replyToId: replyParentInternalId,
         replyToPreview,
-        ...(localOnly ? { sendStatus: "sent" } : {}),
+        ...(localOnly ? { sendStatus: "sent" } : !useBaileys ? { sendStatus: "pending" } : {}),
       }),
     });
 
     if (!useBaileys && !localOnly) {
+      if (!conv.contactId) {
+        return NextResponse.json(
+          { message: "Contato sem telefone nem BSUID WhatsApp (Meta)." },
+          { status: 400 }
+        );
+      }
       const lastInbound = await prisma.message.findFirst({
         where: { conversationId: conv.id, direction: "in", externalId: { not: null } },
         orderBy: { createdAt: "desc" },
@@ -1070,6 +1084,108 @@ export async function POST(request: Request, context: RouteContext) {
       if (lastInbound?.externalId) {
         metaClient.sendTypingIndicator(lastInbound.externalId).catch(() => {});
       }
+
+      try {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            hasHumanReply: true,
+            hasError: false,
+          },
+        });
+      } catch { /* columns may not exist yet */ }
+
+      void import("@/services/distribution/pending")
+        .then((m) =>
+          m.scheduleProcessPendingDistributionQueue({
+            trigger: "capacity_released",
+            delayMs: 400,
+          }),
+        )
+        .catch(() => {});
+
+      void stopAutomationsAfterHumanReply(conv.contactId);
+
+      try {
+        sseBus.publish("new_message", {
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          direction: "out",
+          content,
+          timestamp: saved.createdAt,
+        });
+      } catch {
+        // best-effort
+      }
+
+      cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
+        (err) =>
+          console.warn(
+            "[scheduled-messages] falha ao cancelar apos envio manual:",
+            err,
+          ),
+      );
+      cancelAiReplyDebounce(conv.id, "human_outbound");
+
+      const outboundPayload = {
+        conversationId: conv.id,
+        messageId: saved.id,
+        organizationId: conv.organizationId,
+        contactId: conv.contactId,
+        content,
+        channelId: outboundChannelId ?? null,
+        replyContextWamid,
+        waJid: conv.waJid,
+        senderName,
+      };
+      const job = await enqueueMetaOutbound(outboundPayload);
+      let sendStatus = "pending";
+      let externalId: string | null = null;
+      let sendErrorMsg: string | undefined;
+      if (!job) {
+        console.warn("[meta-outbound] Redis indisponível — sendText síncrono na API");
+        try {
+          const result = await processMetaOutbound(outboundPayload);
+          sendStatus = result.sendStatus;
+          externalId = result.externalId;
+          sendErrorMsg = result.metaError ?? undefined;
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : "Falha no envio de texto";
+          await prisma.message
+            .updateMany({
+              where: { id: saved.id, sendStatus: "pending" },
+              data: { sendStatus: "failed", sendError: errMsg },
+            })
+            .catch(() => {});
+          await prisma.conversation
+            .update({ where: { id: conv.id }, data: { hasError: true } })
+            .catch(() => {});
+          sendStatus = "failed";
+          sendErrorMsg = errMsg;
+        }
+      }
+
+      return NextResponse.json({
+        message: {
+          id: externalId ?? saved.id,
+          content,
+          createdAt: saved.createdAt.toISOString(),
+          direction: "out",
+          messageType: "text",
+          senderName,
+          replyToId: replyParentInternalId,
+          replyToPreview,
+          sendStatus,
+          status: sendStatus === "failed" ? "FAILED" : sendStatus === "sent" ? "SENT" : "PENDING",
+          channelId: outboundChannelId ?? null,
+        } satisfies InboxMessageDto,
+        conversationId: conv.id,
+        ...(reopenedConversationId ? { reopenedConversationId } : {}),
+        ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
+      }, { status: 201 });
     }
 
     const sendResult = localOnly

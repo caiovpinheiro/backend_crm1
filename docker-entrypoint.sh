@@ -119,9 +119,11 @@ fi
 #                         Isola event loop + pool Prisma da inbox. EasyPanel:
 #                         clone do serviço API, APP_MODE=api-public. No compose
 #                         DO, o Caddy manda `Authorization: Bearer` pra cá.
-# - worker-whatsapp     → worker BullMQ que consome campaign-dispatch + campaign-send
-#                         (script único: src/workers/campaign-worker.ts; sem reescrever
-#                         lógica de envio Meta)
+# - worker-whatsapp     → inbox Meta: meta-attach + meta-outbound + sweepers
+#                         de sessão/presença/agendadas/IA/push (campaign-worker.ts)
+# - worker-campaigns    → disparo de campanha CRM: campaign-dispatch, rodízio
+#                         Postgres (ou campaign-send se CAMPAIGN_SEND_ROUND_ROBIN=0)
+#                         e sweeps de campanha travada / recipients stale
 # - worker-leads        → worker BullMQ que consome leads-bulk
 #                         (operações em massa de Deals com BulkOperation tracking)
 # - worker-etl          → worker BullMQ que consome import-etl
@@ -139,8 +141,12 @@ case "$APP_MODE" in
     exec node server.js
     ;;
   worker-whatsapp)
-    echo "[entrypoint] starting WhatsApp worker (campaign-worker)..."
+    echo "[entrypoint] starting WhatsApp inbox worker (meta-attach + meta-outbound)..."
     exec node dist/workers/campaign-worker.js
+    ;;
+  worker-campaigns)
+    echo "[entrypoint] starting campaigns worker (dispatch + rodízio)..."
+    exec node dist/workers/campaigns-worker.js
     ;;
   worker-leads)
     echo "[entrypoint] starting Leads worker..."
@@ -160,7 +166,7 @@ case "$APP_MODE" in
     ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
+    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
     exit 1
     ;;
 esac

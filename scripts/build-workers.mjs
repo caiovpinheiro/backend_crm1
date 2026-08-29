@@ -119,8 +119,10 @@ const aliasAtPlugin = {
 };
 
 const entries = [
-  // WhatsApp / campanhas — worker existente, sem mudanças de lógica.
+  // Inbox WhatsApp Meta (meta-attach + meta-outbound + sweepers).
   "src/workers/campaign-worker.ts",
+  // Disparo de campanha CRM (dispatch + rodízio / campaign-send).
+  "src/workers/campaigns-worker.ts",
   // Leads (Deals) — worker novo.
   "src/workers/leads-worker.ts",
   // ETL — importação de contatos via arquivo (CSV/XLSX).

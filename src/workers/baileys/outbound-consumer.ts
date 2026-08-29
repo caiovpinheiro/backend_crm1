@@ -3,6 +3,7 @@ import IORedis from "ioredis";
 import path from "path";
 import fs from "fs/promises";
 
+import { guessInputExt, prepareWhatsAppAudio } from "@/lib/audio-convert";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import {
@@ -25,7 +26,17 @@ export function startOutboundConsumer(
   const worker = new Worker<BaileysOutboundPayload>(
     BAILEYS_OUTBOUND_QUEUE_NAME,
     async (job: Job<BaileysOutboundPayload>) => {
-      const { channelId, to, content, mediaUrl, replyTo, messageType, messageId } = job.data;
+      const {
+        channelId,
+        to,
+        content,
+        mediaUrl,
+        replyTo,
+        messageType,
+        messageId,
+        mime: payloadMime,
+        originalName,
+      } = job.data;
 
       const session = manager.getSession(channelId);
       if (!session?.socket) {
@@ -80,12 +91,61 @@ export function startOutboundConsumer(
             break;
           case "audio":
           case "ptt": {
-            const isPtt = messageType === "ptt";
-            waContent = {
-              audio: mediaPayload,
-              mimetype: isPtt ? "audio/ogg; codecs=opus" : (detectedMime.startsWith("audio/") ? detectedMime : "audio/mpeg"),
-              ptt: isPtt,
-            };
+            let audioBuffer = buffer;
+            let audioMime = detectedMime.startsWith("audio/")
+              ? detectedMime
+              : "audio/mpeg";
+            let isPtt = messageType === "ptt";
+            let sendAsDocument = false;
+            let documentMime = detectedMime;
+
+            if (buffer?.length) {
+              const inputMime = payloadMime || detectedMime;
+              const prepared = await prepareWhatsAppAudio(
+                buffer,
+                guessInputExt(inputMime),
+                originalName || mediaUrl.split("/").pop() || "audio.webm",
+              );
+              if (!prepared.ok) {
+                await markFailed(messageId, prepared.reason);
+                throw new Error(prepared.reason);
+              }
+              audioBuffer = prepared.payload.buffer;
+              audioMime = prepared.payload.mime;
+              isPtt = prepared.payload.voice;
+              sendAsDocument = prepared.payload.delivery === "document";
+              documentMime = prepared.payload.mime;
+              const nextType = sendAsDocument
+                ? "document"
+                : isPtt
+                  ? "ptt"
+                  : "audio";
+              if (nextType !== messageType) {
+                await prismaBase.message
+                  .update({
+                    where: { id: messageId },
+                    data: { messageType: nextType },
+                  })
+                  .catch(() => {});
+              }
+              console.log(
+                `[baileys-outbound] áudio preparado (${prepared.payload.delivery}) ${buffer.length} -> ${audioBuffer.length} bytes`,
+              );
+            }
+
+            if (sendAsDocument && audioBuffer) {
+              waContent = {
+                document: audioBuffer,
+                mimetype: documentMime,
+                fileName: originalName || mediaUrl.split("/").pop() || "audio.bin",
+              };
+            } else {
+              waContent = {
+                audio: audioBuffer ?? mediaPayload,
+                mimetype: isPtt ? "audio/ogg; codecs=opus" : audioMime,
+                ptt: isPtt,
+              };
+            }
             break;
           }
           case "sticker":
