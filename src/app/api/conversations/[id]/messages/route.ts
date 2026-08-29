@@ -238,11 +238,10 @@ export async function GET(request: Request, context: RouteContext) {
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const before = url.searchParams.get("before");
-    const includeHistory = url.searchParams.get("history") === "1" && !before;
+    const includeHistory = url.searchParams.get("history") === "1";
 
-    // Cold path: sem probe de tickets anteriores. O frontend só pede
-    // history=1 no scroll-up; o findFirst extra competia com a 1ª página
-    // e atrasava o painel (ficava branco).
+    // Cold path: sem probe de tickets anteriores. history=1 só no scroll-up,
+    // em fatias (budget + before) — não compete com a 1ª página.
     const [pinnedBundle, convSession, rowsDesc] = await Promise.all([
       (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
         try {
@@ -275,23 +274,24 @@ export async function GET(request: Request, context: RouteContext) {
         }
       })(),
       getConversationSession(conv),
-      findMessagesSafe({
-        where: {
-          conversationId: conv.id,
-          ...(before ? { createdAt: { lt: new Date(before) } } : {}),
-        },
-        orderBy: { createdAt: "desc" },
-        take: limit,
-      }),
+      includeHistory
+        ? Promise.resolve([] as MsgRow[])
+        : findMessagesSafe({
+            where: {
+              conversationId: conv.id,
+              ...(before ? { createdAt: { lt: new Date(before) } } : {}),
+            },
+            orderBy: { createdAt: "desc" },
+            take: limit,
+          }),
     ]);
 
-    const hasMore = rowsDesc.length === limit;
+    const hasMore = includeHistory ? false : rowsDesc.length === limit;
     let hasOlderTickets = false;
-    const historyBudgetRaw = url.searchParams.get("budget");
-    const historyBudget =
-      includeHistory && historyBudgetRaw
-        ? Math.min(80, Math.max(8, Number(historyBudgetRaw) || 28))
-        : null;
+    const historyBudget = includeHistory
+      ? Math.min(40, Math.max(8, Number(url.searchParams.get("budget") || limit) || 25))
+      : null;
+    const beforeDate = before ? new Date(before) : null;
     const pinnedNoteId = pinnedBundle.pinnedNoteId;
     const pinnedMessageIds = pinnedBundle.pinnedMessageIds;
     const lastInboundAt = convSession.lastInboundAt;
@@ -345,56 +345,37 @@ export async function GET(request: Request, context: RouteContext) {
         select: { id: true, number: true, closedAt: true, createdAt: true },
         // +1 no ramo RESOLVED para o ticket ativo não roubar a vaga de um dos
         // 5 encerrados anteriores que já apareciam antes desta mudança.
-        take: viewingResolved ? 6 : 8,
+        take: 40,
       });
-      if (historyBudget) {
-        // Preenche ~1 tela: tickets mais recentes primeiro, para no budget.
-        let remaining = historyBudget;
-        const loaded: HistoryTicket[] = [];
-        for (let i = 0; i < prevConvs.length; i++) {
-          if (remaining <= 0) {
-            hasOlderTickets = true;
-            break;
-          }
-          const pc = prevConvs[i];
-          const pRows = await findMessagesSafe({
-            where: { conversationId: pc.id },
-            orderBy: { createdAt: "desc" },
-            take: remaining,
-          });
-          if (pRows.length === remaining) hasOlderTickets = true;
-          pRows.reverse();
-          loaded.push({
-            id: pc.id,
-            number: pc.number,
-            closedAt: pc.closedAt,
-            createdAt: pc.createdAt,
-            rows: pRows,
-          });
-          remaining -= pRows.length;
+      let remaining = historyBudget ?? 25;
+      const loaded: HistoryTicket[] = [];
+      for (let i = 0; i < prevConvs.length; i++) {
+        if (remaining <= 0) {
+          hasOlderTickets = true;
+          break;
         }
-        if (loaded.length < prevConvs.length) hasOlderTickets = true;
-        historyTickets = loaded.reverse();
-      } else {
-        const loaded = await Promise.all(
-          prevConvs.map(async (pc) => {
-            const pRows = await findMessagesSafe({
-              where: { conversationId: pc.id },
-              orderBy: { createdAt: "desc" },
-              take: 40,
-            });
-            pRows.reverse();
-            return {
-              id: pc.id,
-              number: pc.number,
-              closedAt: pc.closedAt,
-              createdAt: pc.createdAt,
-              rows: pRows,
-            };
-          }),
-        );
-        historyTickets = loaded.reverse();
+        const pc = prevConvs[i];
+        const pRows = await findMessagesSafe({
+          where: {
+            conversationId: pc.id,
+            ...(beforeDate ? { createdAt: { lt: beforeDate } } : {}),
+          },
+          orderBy: { createdAt: "desc" },
+          take: remaining,
+        });
+        if (pRows.length === 0) continue;
+        if (pRows.length === remaining) hasOlderTickets = true;
+        pRows.reverse();
+        loaded.push({
+          id: pc.id,
+          number: pc.number,
+          closedAt: pc.closedAt,
+          createdAt: pc.createdAt,
+          rows: pRows,
+        });
+        remaining -= pRows.length;
       }
+      historyTickets = loaded.reverse();
     }
 
     const outSenderNames = Array.from(
