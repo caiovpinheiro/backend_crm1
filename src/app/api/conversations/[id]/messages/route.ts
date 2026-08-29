@@ -240,9 +240,21 @@ export async function GET(request: Request, context: RouteContext) {
     const before = url.searchParams.get("before");
     const includeHistory = url.searchParams.get("history") === "1";
 
-    // Cold path: sem probe de tickets anteriores. history=1 só no scroll-up,
-    // em fatias (budget + before) — não compete com a 1ª página.
-    const [pinnedBundle, convSession, rowsDesc] = await Promise.all([
+    const olderTicketsProbe =
+      !includeHistory && !before && conv.contactId
+        ? prisma.conversation.findFirst({
+            where: {
+              contactId: conv.contactId,
+              id: { not: conv.id },
+              ...(conv.channel ? { channel: conv.channel } : {}),
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null);
+
+    // Cold path: 1ª página + probe barato (só pra saber se o scroll-up
+    // deve pedir history). history=1 em fatias, só no gesto do operador.
+    const [pinnedBundle, convSession, rowsDesc, olderTicket] = await Promise.all([
       (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
         try {
           const pins = await prisma.pinnedMessage.findMany({
@@ -284,10 +296,11 @@ export async function GET(request: Request, context: RouteContext) {
             orderBy: { createdAt: "desc" },
             take: limit,
           }),
+      olderTicketsProbe,
     ]);
 
     const hasMore = includeHistory ? false : rowsDesc.length === limit;
-    let hasOlderTickets = false;
+    let hasOlderTickets = !includeHistory && Boolean(olderTicket);
     const historyBudget = includeHistory
       ? Math.min(40, Math.max(8, Number(url.searchParams.get("budget") || limit) || 25))
       : null;
