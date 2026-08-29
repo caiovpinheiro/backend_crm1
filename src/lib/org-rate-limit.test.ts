@@ -9,7 +9,10 @@ import {
   orgRpmKey,
   resetOrgRpmMemoryForTests,
 } from "@/lib/org-rate-limit";
-import { DEFAULT_ORG_RATE_LIMIT_RPM } from "@/lib/org-rate-limit-config";
+import {
+  DEFAULT_ORG_RATE_LIMIT_RPM,
+  isInboxHotSessionPath,
+} from "@/lib/org-rate-limit-config";
 
 afterEach(() => {
   resetOrgRpmMemoryForTests();
@@ -30,8 +33,17 @@ describe("org RPM config", () => {
     else process.env.ORG_RATE_LIMIT_RPM = prev;
   });
 
-  it("chave canônica org:{id}:rpm", () => {
-    expect(orgRpmKey("org_abc")).toBe("org:org_abc:rpm");
+  it("chave isolada por lane", () => {
+    expect(orgRpmKey("org_abc")).toBe("org:org_abc:rpm:token");
+    expect(orgRpmKey("org_abc", "token")).toBe("org:org_abc:rpm:token");
+    expect(orgRpmKey("org_abc", "session")).toBe("org:org_abc:rpm:session");
+  });
+
+  it("marca GET quentes do inbox", () => {
+    expect(isInboxHotSessionPath("/api/conversations")).toBe(true);
+    expect(isInboxHotSessionPath("/api/conversations/abc/messages")).toBe(true);
+    expect(isInboxHotSessionPath("/api/conversations/abc")).toBe(false);
+    expect(isInboxHotSessionPath("/api/contacts")).toBe(false);
   });
 
   it("isenta webhooks, health, cron e auth", () => {
@@ -84,6 +96,31 @@ describe("consumeOrgRpm (memória)", () => {
     expect(nextWindow.remaining).toBe(limit - 1);
   });
 
+  it("isola buckets session e token da mesma org", async () => {
+    const now = Date.now();
+    const token = await consumeOrgRpm("org-lane", {
+      store: "memory",
+      now,
+      limit: 1,
+      lane: "token",
+    });
+    const session = await consumeOrgRpm("org-lane", {
+      store: "memory",
+      now,
+      limit: 1,
+      lane: "session",
+    });
+    const token2 = await consumeOrgRpm("org-lane", {
+      store: "memory",
+      now,
+      limit: 1,
+      lane: "token",
+    });
+    expect(token.allowed).toBe(true);
+    expect(session.allowed).toBe(true);
+    expect(token2.allowed).toBe(false);
+  });
+
   it("isola buckets por organização", async () => {
     const now = Date.now();
     const a = await consumeOrgRpm("org-a", { store: "memory", now, limit: 1 });
@@ -117,11 +154,12 @@ describe("org 429", () => {
     });
   });
 
-  it("enforce isenta super-admin, sem org e webhook", async () => {
+  it("enforce isenta super-admin, sem org, webhook e sessão", async () => {
     expect(
       await enforceOrgApiRateLimit({
         organizationId: "org-x",
         isSuperAdmin: true,
+        viaToken: true,
       }),
     ).toBeNull();
     expect(await enforceOrgApiRateLimit({ organizationId: null })).toBeNull();
@@ -129,6 +167,14 @@ describe("org 429", () => {
       await enforceOrgApiRateLimit({
         organizationId: "org-x",
         pathname: "/api/webhooks/meta",
+        viaToken: true,
+      }),
+    ).toBeNull();
+    expect(
+      await enforceOrgApiRateLimit({
+        organizationId: "org-x",
+        pathname: "/api/conversations/abc/messages",
+        viaToken: false,
       }),
     ).toBeNull();
   });

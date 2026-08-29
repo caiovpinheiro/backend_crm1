@@ -106,7 +106,7 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
   }
 
   // Per-credential (cookie): bloqueia loop de render no frontend (~15 req/s).
-  // Org RPM (abaixo) é teto extra — 400/org não substitui este bucket.
+  // Org RPM abaixo só vale pra Bearer — sessão não compete com n8n.
   const sessionRpm = await enforceSessionApiRateLimit({
     userId: session.user.id,
     organizationId: session.user.organizationId,
@@ -118,6 +118,7 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
   const orgRpm = await enforceOrgApiRateLimit({
     organizationId: session.user.organizationId,
     isSuperAdmin: session.user.isSuperAdmin,
+    viaToken: false,
   });
   if (orgRpm) {
     // 429 da org já entra em logRateLimitReject (agregado) em enforceOrgApiRateLimit.

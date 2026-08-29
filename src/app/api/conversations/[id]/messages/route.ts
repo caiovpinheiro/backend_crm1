@@ -650,18 +650,20 @@ export async function POST(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
-    // Rate-limit por organização: 600 req/min/org. Cobre tanto API token
-    // (integrações) quanto sessão de operador. Se um cliente quiser jogar
-    // 1k msgs/min, usa /campaigns que fila por outro caminho.
-    const userOrgId =
-      (authResult.user as { organizationId?: string | null }).organizationId ?? null;
-    const rl = await withRateLimit({
-      route: "/api/conversations/:id/messages",
-      profile: "api.default",
-      scope: "org",
-      id: userOrgId,
-    });
-    if (!rl.ok) return rl.response;
+    // Bearer/integração: teto de org isolado. Sessão já tem api.session
+    // (600/user) — não misturar com o RPM da API de fora.
+    if (authResult.viaToken) {
+      const userOrgId =
+        (authResult.user as { organizationId?: string | null }).organizationId ??
+        null;
+      const rl = await withRateLimit({
+        route: "/api/conversations/:id/messages",
+        profile: "api.default",
+        scope: "org",
+        id: userOrgId,
+      });
+      if (!rl.ok) return rl.response;
+    }
 
     return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
