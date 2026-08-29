@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("logRateLimitReject", () => {
-  it("100 rejeições do mesmo IP em 10s geram 1 linha com count=100", () => {
+  it("100 rejeições do mesmo IP em 10s geram 1 linha (1ª da janela)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-28T20:00:00.000Z"));
     const lines = capture();
@@ -38,33 +38,32 @@ describe("logRateLimitReject", () => {
         profile: "auth.public",
         scope: "ip",
         ip: "203.0.113.9",
-        route: "/api/auth/tenant-lookup",
+        route: "organization.by-slug",
         limit: 10,
         retryAfterSec: 50,
       });
     }
 
-    expect(lines).toHaveLength(0);
-
-    vi.advanceTimersByTime(RATE_LIMIT_REJECT_LOG_WINDOW_MS);
-
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({
       event: "rate_limit_rejected",
       key: "ip:203.0.113.9",
-      count: 100,
+      count: 1,
       blockedSince: "2026-08-28T20:00:00.000Z",
       windowMs: 10_000,
       profile: "auth.public",
       scope: "ip",
       ip: "203.0.113.9",
-      route: "/api/auth/tenant-lookup",
+      route: "organization.by-slug",
       limit: 10,
       retryAfterSec: 50,
     });
+
+    vi.advanceTimersByTime(RATE_LIMIT_REJECT_LOG_WINDOW_MS);
+    expect(lines).toHaveLength(1);
   });
 
-  it("flush da janela seguinte acumula só o intervalo novo e preserva blockedSince", () => {
+  it("janela seguinte volta a emitir 1 linha (não acumula o flood anterior)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-28T20:00:00.000Z"));
     const lines = capture();
@@ -76,12 +75,10 @@ describe("logRateLimitReject", () => {
     for (let i = 0; i < 15; i += 1) {
       logRateLimitReject("ip:203.0.113.9", { ip: "203.0.113.9", scope: "ip" });
     }
-    vi.advanceTimersByTime(RATE_LIMIT_REJECT_LOG_WINDOW_MS);
 
     expect(lines).toHaveLength(2);
-    expect(lines[0].count).toBe(100);
-    expect(lines[1].count).toBe(15);
-    expect(lines[1].blockedSince).toBe("2026-08-28T20:00:00.000Z");
+    expect(lines[0].count).toBe(1);
+    expect(lines[1].count).toBe(1);
   });
 
   it("chaves distintas não se misturam", () => {
@@ -122,9 +119,12 @@ describe("logRateLimitReject", () => {
     logRateLimitReject("ip:1.1.1.1", { ip: "1.1.1.1" });
     logRateLimitReject("ip:2.2.2.2", { ip: "2.2.2.2" });
     logRateLimitReject("ip:3.3.3.3", { ip: "3.3.3.3" });
-    expect(lines).toHaveLength(1);
-    expect(lines[0].key).toBe("ip:1.1.1.1");
-    expect(lines[0].count).toBe(2);
+    expect(lines.map((l) => l.key)).toEqual([
+      "ip:1.1.1.1",
+      "ip:2.2.2.2",
+      "ip:3.3.3.3",
+    ]);
+    expect(lines[0].count).toBe(1);
     flushRateLimitRejectLogs();
     expect(lines.map((l) => l.key)).toEqual([
       "ip:1.1.1.1",

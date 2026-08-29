@@ -245,10 +245,10 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
  * Encerramento (resolve) em massa de conversas do inbox.
  *
  * A rota `POST /api/conversations/bulk` já aplicou o filtro de visibilidade,
- * removeu os ids de departamentos que exigem tabulação ao encerrar (`skipped`)
- * quando o operador não é ADMIN, e leu as org settings — o handler recebe
- * apenas ids efetivos + flags saneadas e roda o `updateMany` em chunks
- * (sem reler settings fora de RequestContext).
+ * validou a tabulação (mesma folha das automações / encerramento individual)
+ * e leu as org settings — o handler recebe ids efetivos + flags saneadas.
+ * Conversas de outro departamento que ainda exigem tabulação ficam em
+ * `skipped` na resposta da rota (não entram neste payload).
  */
 export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
   /** IDs das conversas a encerrar (já filtradas por visibilidade + tabulação). */
@@ -257,6 +257,17 @@ export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
   keepAgent: boolean;
   /** Manter departamento vinculado ao encerrar (`conversation.keepDepartmentOnEnd`). */
   keepDepartment: boolean;
+  /**
+   * Folha escolhida no modal de tabulação (mesmo id de
+   * `tabulate_conversation` / encerramento individual).
+   */
+  tabulationId?: string | null;
+  tabulationDepartmentId?: string | null;
+  tabulationName?: string | null;
+  tabulationNumber?: number | null;
+  tabulationAncestorIds?: string[];
+  /** ADMIN / super-admin: não dispara `conversation_tabulated`. */
+  skipAutomations?: boolean;
 };
 
 export type BulkAssignConversationsPayload = LeadsBulkBasePayload & {
@@ -391,20 +402,31 @@ export function getAutomationQueue(): Queue<AutomationJobPayload> | null {
   return getQueue();
 }
 
+function readAutomationWorkerMode(): string {
+  return (process.env.AUTOMATION_WORKER_MODE ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^["']|["']$/g, "");
+}
+
+function readAppMode(): string {
+  return (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
+}
+
 export async function enqueueAutomationJob(payload: AutomationJobPayload) {
-  const workerMode = process.env.AUTOMATION_WORKER_MODE?.trim().toLowerCase();
-  debugInfo(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode ?? "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event}`);
+  const workerMode = readAutomationWorkerMode();
+  debugInfo(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode || "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event} appMode=${readAppMode()}`);
 
   if (workerMode === "external") {
     const queue = getQueue();
     if (!queue) {
-      // Em modo external a API NÃO deve executar automações pesadas inline
-      // (evita sobrecarregar o processo HTTP). Falhar de forma controlada.
-      const err = new Error(
-        `[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — não executando inline (automationId=${payload.automationId})`,
+      // Redis down: mesmo padrão de meta-outbound — fallback sync pra
+      // não perder o disparo. Com Redis no ar a API só enfileira.
+      console.warn(
+        `[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — fallback inline (automationId=${payload.automationId})`,
       );
-      console.error(err.message);
-      throw err;
+      await executeAutomationDirect(payload);
+      return null;
     }
 
     // Justiça por org (default ligado; AUTOMATION_FAIRNESS=0 = rollback pro
@@ -444,6 +466,17 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
 }
 
 async function executeAutomationDirect(payload: AutomationJobPayload) {
+  // fireTrigger na API (APP_MODE=api) + worker externo: Graph/template
+  // não pode rodar neste processo. Reenfileira se a fila estiver de pé.
+  if (readAutomationWorkerMode() === "external" && readAppMode() === "api") {
+    const queue = getQueue();
+    if (queue) {
+      console.warn(
+        `[queue] executeAutomationDirect bloqueado na API — reenfileirando ${payload.automationId}`,
+      );
+      return addAutomationJobNow(payload);
+    }
+  }
   const { runAutomationInline } = await import("@/services/automation-executor");
   await runAutomationInline(payload);
 }

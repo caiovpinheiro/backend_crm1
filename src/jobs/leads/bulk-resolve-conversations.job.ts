@@ -4,6 +4,8 @@ import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { invalidateInboxTabCounts } from "@/lib/cache/keys";
 import { logEvent } from "@/services/activity-log";
+import { fireTrigger } from "@/services/automation-triggers";
+import { tabulationLogMeta } from "@/services/tabulations";
 import type { BulkResolveConversationsPayload } from "@/lib/queue";
 
 import {
@@ -33,8 +35,8 @@ const CHUNK_SIZE = 50;
  *
  * A rota produtora (`POST /api/conversations/bulk`) já:
  *   - aplicou o filtro de visibilidade do usuário nos ids;
- *   - removeu ids de departamentos que exigem tabulação (não-admin);
- *     ADMIN / super-admin entram no payload mesmo sem tabular;
+ *   - validou a tabulação (folha da org) e excluiu depts que exigem
+ *     tabulação e não casam com `tabulationDepartmentId`;
  *   - leu as org settings keepAgent/keepDepartment.
  * Aqui confiamos no payload saneado — não relemos settings (evita acesso a
  * org-settings fora de RequestContext no worker).
@@ -43,7 +45,19 @@ export async function processBulkResolveConversations(
   payload: BulkResolveConversationsPayload,
   job: Job<BulkResolveConversationsPayload>,
 ): Promise<void> {
-  const { operationId, organizationId, conversationIds, keepAgent, keepDepartment } = payload;
+  const {
+    operationId,
+    organizationId,
+    conversationIds,
+    keepAgent,
+    keepDepartment,
+    tabulationId,
+    tabulationDepartmentId,
+    tabulationName,
+    tabulationNumber,
+    tabulationAncestorIds,
+    skipAutomations,
+  } = payload;
   const ctx = log.child({
     operationId,
     organizationId,
@@ -79,6 +93,7 @@ export async function processBulkResolveConversations(
           id: true,
           status: true,
           contactId: true,
+          departmentId: true,
           assignedToId: true,
           assignedTo: { select: { name: true } },
           contact: { select: { name: true } },
@@ -105,19 +120,48 @@ export async function processBulkResolveConversations(
       chunkSucceeded += noOps.length; // já encerrada = sucesso idempotente.
 
       if (toResolve.length > 0) {
-        await prisma.conversation.updateMany({
-          where: {
-            id: { in: toResolve.map((c) => c.id) },
-            status: { not: "RESOLVED" }, // defesa contra concorrência
-          },
-          data: {
-            status: "RESOLVED",
-            closedAt: new Date(),
-            hasError: false,
-            ...(keepAgent ? {} : { assignedToId: null }),
-            ...(keepDepartment ? {} : { departmentId: null }),
-          },
-        });
+        const closePatch = {
+          status: "RESOLVED" as const,
+          closedAt: new Date(),
+          hasError: false,
+          ...(keepAgent ? {} : { assignedToId: null }),
+          ...(keepDepartment ? {} : { departmentId: null }),
+        };
+        const applyTab =
+          Boolean(tabulationId) &&
+          Boolean(tabulationDepartmentId);
+        const withTab = applyTab
+          ? toResolve.filter(
+              (c) =>
+                !c.departmentId || c.departmentId === tabulationDepartmentId,
+            )
+          : [];
+        const withoutTab = applyTab
+          ? toResolve.filter(
+              (c) =>
+                c.departmentId && c.departmentId !== tabulationDepartmentId,
+            )
+          : toResolve;
+
+        if (withTab.length > 0) {
+          await prisma.conversation.updateMany({
+            where: {
+              id: { in: withTab.map((c) => c.id) },
+              status: { not: "RESOLVED" },
+            },
+            data: { ...closePatch, tabulationId },
+          });
+        }
+        if (withoutTab.length > 0) {
+          await prisma.conversation.updateMany({
+            where: {
+              id: { in: withoutTab.map((c) => c.id) },
+              status: { not: "RESOLVED" },
+            },
+            data: closePatch,
+          });
+        }
+        const tabulatedIds = new Set(withTab.map((c) => c.id));
         chunkSucceeded += toResolve.length;
 
         // Sem "manter atendente": o updateMany acima zerou assignedToId —
@@ -172,6 +216,9 @@ export async function processBulkResolveConversations(
               },
             }).catch(() => {});
           }
+          const appliedTabulation = tabulatedIds.has(conv.id)
+            ? tabulationId
+            : null;
           logEvent({
             type: "CONVERSATION_CLOSED",
             entityType: "CONVERSATION",
@@ -182,13 +229,81 @@ export async function processBulkResolveConversations(
             field: "status",
             oldValue: conv.status,
             newValue: "RESOLVED",
-            meta: { from: conv.status, to: "RESOLVED", source: "bulk-async" },
+            meta: {
+              from: conv.status,
+              to: "RESOLVED",
+              source: "bulk-async",
+              ...(appliedTabulation ? { tabulationId: appliedTabulation } : {}),
+              ...(skipAutomations ? { skipAutomations: true } : {}),
+            },
           }).catch((err: unknown) => {
             chunkLog.warn(
               { conversationId: conv.id, err: truncateErrorMessage(err) },
               "logEvent CONVERSATION_CLOSED falhou (fire-and-forget)",
             );
           });
+
+          if (
+            appliedTabulation &&
+            tabulationName != null &&
+            tabulationNumber != null
+          ) {
+            logEvent({
+              type: "CONVERSATION_TABULATED",
+              entityType: "CONVERSATION",
+              entityId: conv.id,
+              entityLabel: conv.contact?.name ?? null,
+              conversationId: conv.id,
+              contactId: conv.contactId,
+              meta: tabulationLogMeta(
+                {
+                  tabulationId: appliedTabulation,
+                  ancestorIds: tabulationAncestorIds ?? [],
+                  departmentId: tabulationDepartmentId,
+                  name: tabulationName,
+                  number: tabulationNumber,
+                },
+                { source: "bulk-async" },
+              ),
+            }).catch((err: unknown) => {
+              chunkLog.warn(
+                { conversationId: conv.id, err: truncateErrorMessage(err) },
+                "logEvent CONVERSATION_TABULATED falhou (fire-and-forget)",
+              );
+            });
+          }
+
+          if (!skipAutomations) {
+            void (async () => {
+              let dealId: string | undefined;
+              if (conv.contactId) {
+                const deal = await prisma.deal.findFirst({
+                  where: { contactId: conv.contactId, status: "OPEN" },
+                  orderBy: { createdAt: "desc" },
+                  select: { id: true },
+                });
+                dealId = deal?.id;
+              }
+              await fireTrigger("conversation_tabulated", {
+                contactId: conv.contactId ?? undefined,
+                dealId,
+                data: {
+                  tabulationId: appliedTabulation,
+                  ancestorIds: appliedTabulation
+                    ? (tabulationAncestorIds ?? [])
+                    : [],
+                  departmentId:
+                    conv.departmentId ?? tabulationDepartmentId ?? null,
+                  conversationId: conv.id,
+                },
+              });
+            })().catch((err: unknown) => {
+              chunkLog.warn(
+                { conversationId: conv.id, err: truncateErrorMessage(err) },
+                "fireTrigger conversation_tabulated falhou (fire-and-forget)",
+              );
+            });
+          }
         }
       }
 
