@@ -22,8 +22,34 @@
  *
  * @see docs/read-replica.md
  */
-import { prismaReplica } from "@/lib/prisma-replica";
+import { prisma } from "@/lib/prisma";
+import {
+  isReplicaActive,
+  isReplicaTripped,
+  prismaReplica,
+  tripReplica,
+} from "@/lib/prisma-replica";
 
-export function analyticsClient() {
-  return prismaReplica;
+type AnalyticsDb = typeof prisma;
+
+const analyticsProxy = new Proxy({} as AnalyticsDb, {
+  get(_target, prop) {
+    const client: AnalyticsDb =
+      !isReplicaActive() || isReplicaTripped() ? prisma : prismaReplica;
+    const value = Reflect.get(client as object, prop, client);
+    return typeof value === "function" ? value.bind(client) : value;
+  },
+});
+
+export function analyticsClient(): AnalyticsDb {
+  return analyticsProxy;
+}
+
+export { tripReplica };
+
+export function isReplicaConnectionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|connect|can't reach|P1001|P1017/i.test(
+    msg,
+  );
 }

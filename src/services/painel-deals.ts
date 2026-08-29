@@ -8,7 +8,7 @@
 
 import { Prisma, type DealStatus } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { SOURCE_NONE } from "@/services/dashboard";
 import {
@@ -29,6 +29,11 @@ import {
   type PainelDelta,
   type PainelRange,
 } from "@/services/painel-period";
+
+/** Replica when healthy; primary if unset or tripped after a connect timeout. */
+function db() {
+  return analyticsClient();
+}
 
 export type PainelDealFilters = {
   range: PainelRange;
@@ -216,7 +221,7 @@ function exceptionHref(
 }
 
 async function loadStages(pipelineIds: string[]) {
-  return prisma.stage.findMany({
+  return db().stage.findMany({
     where: pipelineIds.length
       ? { pipelineId: { in: pipelineIds } }
       : { pipeline: { archivedAt: null } },
@@ -249,16 +254,16 @@ export async function getPainelDealsKpis(
     closedAt: { gte: f.range.from, lte: f.range.to },
   };
   const [wonAgg, lostAgg, prevWonAgg, prevLostAgg, openAgg] = await Promise.all([
-    prisma.deal.aggregate({
+    db().deal.aggregate({
       where: and(structural, wonCond),
       _sum: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    db().deal.aggregate({
       where: and(structural, lostCond),
       _count: true,
     }),
-    prisma.deal.aggregate({
+    db().deal.aggregate({
       where: and(structural, {
         status: "WON" as DealStatus,
         closedAt: { gte: prev.from, lte: prev.to },
@@ -266,14 +271,14 @@ export async function getPainelDealsKpis(
       _sum: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    db().deal.aggregate({
       where: and(structural, {
         status: "LOST" as DealStatus,
         closedAt: { gte: prev.from, lte: prev.to },
       }),
       _count: true,
     }),
-    prisma.deal.aggregate({
+    db().deal.aggregate({
       where: and(structural, { status: "OPEN" as DealStatus }),
       _sum: { value: true },
       _count: true,
@@ -424,7 +429,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
 
   const todayStart = parseDay(dayKeyFromDate(new Date()), false)!;
 
-  const entered = await prisma.$queryRaw<
+  const entered = await db().$queryRaw<
     {
       dealId: string;
       stageId: string;
@@ -517,7 +522,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     bucket.byUser.set(ownerKey, user);
   }
 
-  const laterEntries = await prisma.$queryRaw<
+  const laterEntries = await db().$queryRaw<
     { dealId: string; stageId: string; enteredAt: Date }[]
   >(Prisma.sql`
     SELECT e."dealId" AS "dealId",
@@ -554,7 +559,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     }
   }
   const users = ownerIds.size
-    ? await prisma.user.findMany({
+    ? await db().user.findMany({
         where: { id: { in: [...ownerIds] } },
         select: { id: true, name: true },
       })
@@ -645,7 +650,7 @@ export async function getPainelEvolution(
   const incompleteLast = periodIncludesToday(f.range.to);
 
   try {
-    const oldestRows = await prisma.$queryRaw<{ date: Date }[]>`
+    const oldestRows = await db().$queryRaw<{ date: Date }[]>`
       SELECT date FROM deal_stage_daily_snapshots
       WHERE "organizationId" = ${orgId}
         ${pipelineInSql(Prisma.sql`"pipelineId"`, f.pipelineIds)}
@@ -678,7 +683,7 @@ export async function getPainelEvolution(
       stages.length > 0
         ? Prisma.sql`AND "stageId" IN (${Prisma.join(stages.map((s) => s.id))})`
         : Prisma.empty;
-    const rows = await prisma.$queryRaw<
+    const rows = await db().$queryRaw<
       { date: Date; stageId: string; openCount: number }[]
     >`
       SELECT date, "stageId", "openCount"
@@ -759,23 +764,23 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
   };
 
   const [users, won, lost, open] = await Promise.all([
-    prisma.user.findMany({
+    db().user.findMany({
       where: { organizationId: orgId, type: "HUMAN", isSuperAdmin: false },
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
-    prisma.deal.groupBy({
+    db().deal.groupBy({
       by: ["ownerId"],
       where: and(structural, wonCond),
       _count: { _all: true },
       _sum: { value: true },
     }),
-    prisma.deal.groupBy({
+    db().deal.groupBy({
       by: ["ownerId"],
       where: and(structural, lostCond),
       _count: { _all: true },
     }),
-    prisma.deal.groupBy({
+    db().deal.groupBy({
       by: ["ownerId"],
       where: and(structural, { status: "OPEN" as DealStatus }),
       _count: { _all: true },
@@ -814,7 +819,7 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
 
 export async function getPainelSources(f: PainelDealFilters): Promise<PainelSourceRow[]> {
   const structural = await structuralWhere(f);
-  const won = await prisma.deal.findMany({
+  const won = await db().deal.findMany({
     where: and(structural, {
       status: "WON" as DealStatus,
       closedAt: { gte: f.range.from, lte: f.range.to },
@@ -858,7 +863,7 @@ export async function getPainelDealExceptions(
   const open = { status: "OPEN" as DealStatus };
 
   const [noTask, stalled, overdue, emptyValue] = await Promise.all([
-    prisma.deal
+    db().deal
       .count({
         where: and(structural, {
           ...open,
@@ -869,13 +874,13 @@ export async function getPainelDealExceptions(
         console.error("[painel/deals] no_task", e);
         return 0;
       }),
-    prisma.deal.count({
+    db().deal.count({
       where: and(structural, { ...open, updatedAt: { lt: stalledBefore } }),
     }),
-    prisma.deal.count({
+    db().deal.count({
       where: and(structural, { ...open, expectedClose: { lt: todayStart } }),
     }),
-    prisma.deal.count({
+    db().deal.count({
       where: and(structural, { ...open, value: { lte: 0 } }),
     }),
   ]);
@@ -884,7 +889,7 @@ export async function getPainelDealExceptions(
   const onlyId = primaryPipelineId(f);
   if (f.pipelineIds.length === 1 && onlyId) {
     try {
-      const pipe = await prisma.pipeline.findUnique({
+      const pipe = await db().pipeline.findUnique({
         where: { id: onlyId },
         select: { id: true, number: true },
       });
@@ -925,7 +930,7 @@ export async function getPainelCustomFieldCards(
 ): Promise<PainelCustomFieldCard[]> {
   if (!fieldIds.length) return [];
   const orgId = getOrgIdOrThrow();
-  const fields = await prisma.customField.findMany({
+  const fields = await db().customField.findMany({
     where: { id: { in: fieldIds }, organizationId: orgId, entity: "deal" },
     select: { id: true, label: true, type: true },
   });
@@ -937,7 +942,7 @@ export async function getPainelCustomFieldCards(
       { closedAt: { gte: f.range.from, lte: f.range.to } },
     ],
   };
-  const values = await prisma.dealCustomFieldValue.findMany({
+  const values = await db().dealCustomFieldValue.findMany({
     where: {
       organizationId: orgId,
       customFieldId: { in: fields.map((x) => x.id) },
@@ -994,6 +999,18 @@ async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
   try {
     return { ok: true, data: await fn() };
   } catch (e) {
+    if (isReplicaConnectionError(e)) {
+      tripReplica();
+      try {
+        return { ok: true, data: await fn() };
+      } catch (retryErr) {
+        console.error("[painel/deals]", retryErr);
+        return {
+          ok: false,
+          error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
+        };
+      }
+    }
     console.error("[painel/deals]", e);
     return {
       ok: false,

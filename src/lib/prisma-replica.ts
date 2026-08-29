@@ -141,5 +141,16 @@ export const prismaReplica = getReplicaScoped();
  * monitoring.
  */
 export function isReplicaActive(): boolean {
-  return REPLICA_URL.length > 0 && Boolean(globalForReplica.prismaReplicaBase);
+  return REPLICA_URL.length > 0 && Boolean(getReplicaBase());
+}
+
+let replicaTrippedUntil = 0;
+
+/** After a connect timeout, send analytics to primary for a minute. */
+export function tripReplica(ms = 60_000): void {
+  replicaTrippedUntil = Date.now() + Math.max(1_000, ms);
+}
+
+export function isReplicaTripped(): boolean {
+  return Date.now() < replicaTrippedUntil;
 }

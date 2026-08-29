@@ -263,17 +263,43 @@ export type GetDealsParams = {
   allowedPipelineIds?: string[] | null;
   /** Mesma engine do POST /board — filtros avançados (tags, datas, custom…). */
   advancedFilters?: AdvancedDealFilters;
+  /**
+   * Incremental sync: só deals com `updatedAt >=`. Integrações devem
+   * paginar isto em vez de N× GET /api/deals/:id.
+   */
+  updatedSince?: Date;
 };
 
 const listInclude = {
-  contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+  contact: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      avatarUrl: true,
+      source: true,
+      tags: {
+        select: { tag: { select: { id: true, name: true, color: true } } },
+      },
+    },
+  },
+  tags: {
+    select: { tag: { select: { id: true, name: true, color: true } } },
+  },
+  customFields: {
+    select: { customFieldId: true, value: true },
+  },
   stage: {
     select: {
       id: true,
       name: true,
+      slug: true,
+      number: true,
       position: true,
       color: true,
       pipelineId: true,
+      pipeline: { select: { id: true, name: true, slug: true, number: true } },
     },
   },
   owner: { select: { id: true, name: true, email: true, avatarUrl: true } },
@@ -347,6 +373,10 @@ export async function getDeals(params: GetDealsParams = {}) {
     for (const c of advConditions) conditions.push(c);
   }
 
+  if (params.updatedSince) {
+    conditions.push({ updatedAt: { gte: params.updatedSince } });
+  }
+
   const where: Prisma.DealWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
 
@@ -368,6 +398,25 @@ export async function getDeals(params: GetDealsParams = {}) {
   return { items, total, page, perPage };
 }
 
+type NestedTag = { tag: { id: string; name: string; color: string | null } };
+
+/** Tags no shape `{ id, name, color }` — mesmo do GET /deals/:id. */
+export function flattenDealListItem<
+  T extends {
+    tags?: NestedTag[] | null;
+    contact?: { tags?: NestedTag[] | null } | null;
+  },
+>(deal: T) {
+  const flatten = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
+  return {
+    ...deal,
+    tags: flatten(deal.tags),
+    contact: deal.contact
+      ? { ...deal.contact, tags: flatten(deal.contact.tags) }
+      : deal.contact,
+  };
+}
+
 const detailInclude = {
   contact: {
     select: {
@@ -387,6 +436,7 @@ const detailInclude = {
       // aqui: o enum e OPEN, RESOLVED, PENDING, SNOOZED — RESOLVED nao fica
       // por ultimo — e `closedAt` e nulo em ~5.6k linhas RESOLVED legadas).
       conversations: {
+        take: 20,
         orderBy: [
           { updatedAt: "desc" as const },
           { createdAt: "desc" as const },
