@@ -17,6 +17,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -593,7 +594,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   }
 
   // #region agent log
-  console.warn(
+  debugWarn(
     "[DBG-e46688 maybeDist] entry",
     JSON.stringify({
       convId: input.conversationId,
@@ -611,7 +612,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       contactId: input.contactId,
     });
     if (keptHumanId) {
-      console.warn(
+      debugWarn(
         "[DBG-e46688 maybeDist] keep_human_after_automation_close",
         JSON.stringify({
           convId: input.conversationId,
@@ -631,7 +632,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     const check = await isAssigneeCurrentlyEligible(assignee);
     // AI owner: keep regardless of eligible flag — first-attendance guard handles post-handoff.
     if (check.isAi) {
-      console.warn(
+      debugWarn(
         "[DBG-e46688 maybeDist] keep_ai_assignee",
         JSON.stringify({ convId: input.conversationId, assignee }),
       );
@@ -660,14 +661,14 @@ export async function maybeDistributeNewInboundTicket(input: {
             assignee,
           ))
         ) {
-          console.warn(
+          debugWarn(
             "[DBG-e46688 maybeDist] keep_assigned_human",
             JSON.stringify({ convId: input.conversationId, assignee }),
           );
           return;
         }
         if (!conv?.hasHumanReply) {
-          console.warn(
+          debugWarn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",
             JSON.stringify({
               convId: input.conversationId,
@@ -688,7 +689,7 @@ export async function maybeDistributeNewInboundTicket(input: {
           }
           assignee = null;
         } else {
-          console.warn(
+          debugWarn(
             "[DBG-e46688 maybeDist] keep_eligible_assignee",
             JSON.stringify({
               convId: input.conversationId,
@@ -699,7 +700,7 @@ export async function maybeDistributeNewInboundTicket(input: {
           return;
         }
       } else {
-        console.warn(
+        debugWarn(
           "[DBG-e46688 maybeDist] keep_eligible_assignee",
           JSON.stringify({
             convId: input.conversationId,
@@ -710,7 +711,7 @@ export async function maybeDistributeNewInboundTicket(input: {
         return;
       }
     } else {
-      console.warn(
+      debugWarn(
         "[DBG-e46688 maybeDist] clear_ineligible_assignee",
         JSON.stringify({
           convId: input.conversationId,
@@ -742,7 +743,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       assignedToId: assignee,
     });
     if (aiUserId) {
-      console.warn(
+      debugWarn(
         "[DBG-e46688 maybeDist] first_attendance_ai",
         JSON.stringify({
           convId: input.conversationId,
@@ -758,7 +759,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   try {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
     // #region agent log
-    console.warn(
+    debugWarn(
       "[DBG-e46688 maybeDist] widget check",
       JSON.stringify({ widgetActive, convId: input.conversationId }),
     );
@@ -772,7 +773,7 @@ export async function maybeDistributeNewInboundTicket(input: {
         select: { id: true },
       });
       if (!alreadyQueued) {
-        console.warn(
+        debugWarn(
           "[DBG-e46688 maybeDist] skip autoOnInbound=false",
           JSON.stringify({ convId: input.conversationId }),
         );
@@ -808,7 +809,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       allowOrgWideFallback: false,
     });
     // #region agent log
-    console.warn(
+    debugWarn(
       "[DBG-e46688 maybeDist] result",
       JSON.stringify({
         convId: input.conversationId,
@@ -825,7 +826,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   } catch (e) {
     console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
     // #region agent log
-    console.warn(
+    debugWarn(
       "[DBG-e46688 maybeDist] threw",
       JSON.stringify({
         convId: input.conversationId,
@@ -894,7 +895,7 @@ export async function processPendingDistributionQueue(opts: {
   state.running = true;
   try {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
-    console.warn(
+    debugWarn(
       "[DBG-e46688 retry] widget check",
       JSON.stringify({
         widgetActive,
@@ -1120,7 +1121,7 @@ export async function processPendingDistributionQueue(opts: {
             reassign: true,
             allowOrgWideFallback: false,
           });
-          console.warn(
+          debugWarn(
             "[DBG-e46688 retry] executeDistribution",
             JSON.stringify({
               convId: it.id,
