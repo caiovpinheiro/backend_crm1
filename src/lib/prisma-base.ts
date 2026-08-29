@@ -43,6 +43,7 @@ function appMode(): string {
  * job inteiro.
  *
  * - api: 20 (inbox/pipeline/board sob carga)
+ * - api-public: 10 (Bearer/n8n — pool próprio; saturar aqui não drena o da inbox)
  * - worker-whatsapp: 16 (rodízio de campanha com CAMPAIGN_SEND_CONCURRENCY
  *   runners: o tempo do runner é dominado por espera de throttle/HTTP Meta,
  *   mas cada envio faz ~4-6 queries curtas; 16 conexões cobrem o duty cycle
@@ -56,12 +57,13 @@ function appMode(): string {
  * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas
  *   por linha)
  *
- * Soma dos defaults com 1 réplica de cada: 20 + 16 + 16 + 10 + 6 + 4 = 72,
+ * Soma dos defaults com 1 réplica de cada: 20 + 10 + 16 + 16 + 10 + 6 + 4 = 82,
  * contra ~197 conexões disponíveis no Postgres gerenciado (4 vCPU/8 GB).
- * Sobram ~125 para réplicas, migrations e sessões de manutenção.
+ * Sobram ~115 para réplicas, migrations e sessões de manutenção.
  */
 function defaultPoolMax(): number {
   const mode = appMode();
+  if (mode === "api-public") return 10;
   if (!mode.startsWith("worker")) return 20;
   if (mode === "worker-whatsapp") return 16;
   if (mode === "worker-meta-webhook") return 16;

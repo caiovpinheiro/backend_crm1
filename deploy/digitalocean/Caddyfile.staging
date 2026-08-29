@@ -14,6 +14,11 @@
 
 {$API_DOMAIN} {
 	encode zstd gzip
+
+	# Integração (n8n / token) → processo isolado. Cookie/sessão → api.
+	@bearer header_regexp Authorization (?i)^Bearer\s+
+	reverse_proxy @bearer api-public:3000
+
 	reverse_proxy api:3000
 }
 

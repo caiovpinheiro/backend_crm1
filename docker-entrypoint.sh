@@ -113,7 +113,12 @@ fi
 
 # Roteamento APP_MODE → processo a iniciar.
 #
-# - api                 → Next.js standalone server (comportamento histórico)
+# - api                 → Next.js (sessão do operador). Único que aplica migrate.
+# - api-public          → Next.js irmão (Bearer / n8n). Mesma imagem, sem
+#                         migrate e sem sweepers (sse-bus só sobe em APP_MODE=api).
+#                         Isola event loop + pool Prisma da inbox. EasyPanel:
+#                         clone do serviço API, APP_MODE=api-public. No compose
+#                         DO, o Caddy manda `Authorization: Bearer` pra cá.
 # - worker-whatsapp     → worker BullMQ que consome campaign-dispatch + campaign-send
 #                         (script único: src/workers/campaign-worker.ts; sem reescrever
 #                         lógica de envio Meta)
@@ -127,6 +132,10 @@ fi
 case "$APP_MODE" in
   api)
     echo "[entrypoint] starting Next.js standalone server..."
+    exec node server.js
+    ;;
+  api-public)
+    echo "[entrypoint] starting Next.js public API (Bearer/n8n, sem migrate)..."
     exec node server.js
     ;;
   worker-whatsapp)
@@ -151,7 +160,7 @@ case "$APP_MODE" in
     ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
+    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
     exit 1
     ;;
 esac
