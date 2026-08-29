@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getContactActiveContexts } from "@/services/automation-context";
-import { STEP_LABELS } from "@/services/automation-step-labels";
+import { labelForActiveStep } from "@/services/automation-step-labels";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -37,7 +37,9 @@ export async function GET(_req: Request, ctx: Ctx) {
           automationId: c.automationId,
           name: c.automation.name,
           status: c.status as "RUNNING" | "PAUSED",
-          stepLabel: step ? (STEP_LABELS[step.type] ?? step.type) : null,
+          stepLabel: step
+            ? labelForActiveStep(step.type, c.timeoutAt)
+            : null,
           timeoutAt: c.timeoutAt ? c.timeoutAt.toISOString() : null,
           updatedAt: c.updatedAt.toISOString(),
         };

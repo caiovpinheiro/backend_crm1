@@ -34,3 +34,20 @@ export const STEP_LABELS: Record<string, string> = {
   check_agent_status: "Verificando status do agente",
   execute_distribution: "Distribuindo lead",
 };
+
+const SEND_TYPES_THAT_PAUSE = new Set([
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+]);
+
+/** Rótulo do passo atual no painel de robôs. Envio com cronômetro = espera. */
+export function labelForActiveStep(
+  type: string,
+  timeoutAt: Date | string | null,
+): string {
+  if (timeoutAt && SEND_TYPES_THAT_PAUSE.has(type)) {
+    return "Aguardando resposta do lead";
+  }
+  return STEP_LABELS[type] ?? type;
+}

@@ -19,6 +19,7 @@ import {
 } from "@/lib/automation-fairness";
 import { withSystemContext } from "@/lib/webhook-context";
 import { runAutomationInline } from "@/services/automation-executor";
+import { startTimeoutSweeper } from "@/services/automation-context";
 
 const log = getLogger("worker.automations");
 
@@ -144,6 +145,7 @@ export function startAutomationWorker() {
   const sweepTimer = setInterval(sweep, 15_000);
   sweepTimer.unref?.();
   log.info({ fairness: isAutomationFairnessEnabled() }, "automation fairness sweeper ativo (15s)");
+  startTimeoutSweeper();
 
   worker.on("completed", (job) => {
     log.info(
