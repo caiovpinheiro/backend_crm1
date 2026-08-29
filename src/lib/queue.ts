@@ -778,13 +778,24 @@ export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
   }
   const attempts = readPositiveInt(process.env.META_OUTBOUND_MAX_ATTEMPTS, 3);
   const backoffDelay = readPositiveInt(process.env.META_OUTBOUND_BACKOFF_DELAY, 2000);
-  return queue.add("process", payload, {
-    jobId: `meta-outbound:${payload.messageId}`,
-    removeOnComplete: true,
-    removeOnFail: { count: 1000 },
-    attempts,
-    backoff: { type: "exponential", delay: backoffDelay },
-  });
+  try {
+    return await queue.add("process", payload, {
+      jobId: `meta-outbound:${payload.messageId}`,
+      removeOnComplete: true,
+      removeOnFail: { count: 1000 },
+      attempts,
+      backoff: { type: "exponential", delay: backoffDelay },
+    });
+  } catch (err) {
+    // Contrato: null → caller faz sendText síncrono. Sem isso, add()
+    // throw vira 500 depois da mensagem já persistida como pending
+    // (toast "erro ao enviar" + relógio eterno se o worker não pegar).
+    console.warn(
+      "[queue] falha ao enfileirar meta-outbound — caller deve fazer fallback síncrono:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 // ── Helpers privados ─────────────────────────────────────
