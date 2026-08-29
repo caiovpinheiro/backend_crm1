@@ -3,9 +3,8 @@
  *
  * Conta
  * ─────
- * Requisições autenticadas do CRM com `organizationId` resolvido:
- * sessão NextAuth (`requireAuth` e derivados), Bearer/API token e
- * `withApiAuthContext` (inclui API pública autenticada).
+ * Requisições **Bearer** com `organizationId` (`org:{id}:rpm:token`).
+ * Sessão NextAuth não entra — teto é `api.session` (600/user).
  *
  * Não conta
  * ─────────
@@ -19,9 +18,12 @@
  * Choke point: `requireAuth` + `authenticateApiRequest` — um consume
  * por request autenticada, não por rota.
  *
- * Store: Redis ZSET (`org:{organizationId}:rpm`) quando `REDIS_URL`
+ * Store: Redis ZSET (`org:{id}:rpm:token` / `:session`) quando `REDIS_URL`
  * existe; senão Map in-memory **por processo** (N réplicas = N×teto).
  * Override: `ORG_RATE_LIMIT_RPM` (default 400).
+ *
+ * Sessão NextAuth não consome o bucket de token — já tem `api.session`
+ * (600/user). GET quentes do inbox também ficam de fora.
  */
 
 import { NextResponse } from "next/server";
@@ -33,6 +35,7 @@ import {
   isOrgRpmExemptPath,
   orgRpmKey,
   ORG_RATE_LIMIT_WINDOW_MS,
+  type OrgRpmLane,
 } from "@/lib/org-rate-limit-config";
 import { getRateLimitRedis } from "@/lib/rate-limit";
 import {
@@ -83,6 +86,8 @@ export type ConsumeOrgRpmOpts = {
   windowMs?: number;
   /** Força memória (testes / sem Redis). Default: Redis se `REDIS_URL`. */
   store?: "memory" | "auto";
+  /** Default `token` — sessão e Bearer não compartilham o mesmo ZSET. */
+  lane?: OrgRpmLane;
 };
 
 let warnedMemory = false;
@@ -115,8 +120,9 @@ function consumeMemory(
   now: number,
   limit: number,
   windowMs: number,
+  lane: OrgRpmLane,
 ): OrgRateLimitDecision {
-  const result = checkRateLimit(orgRpmKey(organizationId), limit, windowMs, now);
+  const result = checkRateLimit(orgRpmKey(organizationId, lane), limit, windowMs, now);
   return toDecision(
     result.allowed,
     result.limit,
@@ -145,7 +151,7 @@ function parseLua(raw: unknown, limit: number, now: number): OrgRateLimitDecisio
 }
 
 /**
- * Consome 1 ponto do bucket `org:{id}:rpm` (sliding window).
+ * Consome 1 ponto do bucket `org:{id}:rpm:{lane}` (sliding window).
  * Falha de Redis → fail-open (não derruba a API).
  */
 export async function consumeOrgRpm(
@@ -155,6 +161,7 @@ export async function consumeOrgRpm(
   const now = opts.now ?? Date.now();
   const limit = opts.limit ?? getOrgRateLimitRpm();
   const windowMs = opts.windowMs ?? ORG_RATE_LIMIT_WINDOW_MS;
+  const lane = opts.lane ?? "token";
 
   if (useMemoryStore(opts.store)) {
     if (!warnedMemory && opts.store !== "memory") {
@@ -163,7 +170,7 @@ export async function consumeOrgRpm(
         "ORG RPM in-memory — REDIS_URL ausente; teto vale por processo, não entre réplicas",
       );
     }
-    return consumeMemory(organizationId, now, limit, windowMs);
+    return consumeMemory(organizationId, now, limit, windowMs, lane);
   }
 
   const redis = getRateLimitRedis();
@@ -174,10 +181,10 @@ export async function consumeOrgRpm(
         "ORG RPM in-memory — Redis indisponível; teto vale por processo",
       );
     }
-    return consumeMemory(organizationId, now, limit, windowMs);
+    return consumeMemory(organizationId, now, limit, windowMs, lane);
   }
 
-  const key = orgRpmKey(organizationId);
+  const key = orgRpmKey(organizationId, lane);
   const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
   try {
     const raw = await redis.eval(
@@ -224,25 +231,31 @@ export function orgRateLimitResponse(decision: OrgRateLimitDecision): NextRespon
 
 /**
  * Retorna 429 se a org estourou o teto; `null` se isento ou dentro do limite.
+ *
+ * Sessão (`viaToken !== true`): não cobra org — já tem `api.session` por
+ * usuário. GET quentes do inbox (lista, counts, mensagens) ficam nesse
+ * ramo e não tocam `org:{id}:rpm:token`. Bearer: só o bucket de token.
  */
 export async function enforceOrgApiRateLimit(opts: {
   organizationId: string | null | undefined;
   isSuperAdmin?: boolean;
   pathname?: string;
+  viaToken?: boolean;
 }): Promise<NextResponse | null> {
   if (opts.isSuperAdmin) return null;
   if (opts.pathname && isOrgRpmExemptPath(opts.pathname)) return null;
+  if (opts.viaToken !== true) return null;
   const organizationId = opts.organizationId?.trim();
   if (!organizationId) return null;
 
-  const decision = await consumeOrgRpm(organizationId);
+  const decision = await consumeOrgRpm(organizationId, { lane: "token" });
   if (decision.allowed) return null;
 
   metrics.errors.inc({
     scope: "rate-limit",
-    kind: safeLabel("org.rpm"),
+    kind: safeLabel("org.rpm.token"),
   });
-  logRateLimitReject(`org:${organizationId}`, {
+  logRateLimitReject(`org:${organizationId}:token`, {
     profile: "org.rpm",
     scope: "org",
     organizationId,
@@ -261,6 +274,7 @@ export function resetOrgRpmMemoryForTests(): void {
 
 export {
   getOrgRateLimitRpm,
+  isInboxHotSessionPath,
   isOrgRpmExemptPath,
   orgRpmKey,
 } from "@/lib/org-rate-limit-config";

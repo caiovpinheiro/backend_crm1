@@ -1,6 +1,6 @@
 name: crm1
 
-# Base compartilhada pelos 6 processos do backend. Todos usam a mesma
+# Base compartilhada pelos 7 processos do backend. Todos usam a mesma
 # imagem e se diferenciam por APP_MODE, igual ao EasyPanel.
 x-backend: &backend
   image: ${BACKEND_IMAGE:-ghcr.io/caiovpinheiro/backend_crm1:latest}
@@ -42,6 +42,7 @@ services:
       - caddy_config:/config
     depends_on:
       - api
+      - api-public
       - frontend
 
   frontend:
@@ -64,6 +65,28 @@ services:
     mem_limit: 1536m
     environment:
       APP_MODE: api
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # Bearer / n8n. Mesma imagem, sem migrate. Caddy manda Authorization: Bearer
+  # pra cá — saturar este processo não compete com o event loop da inbox.
+  api-public:
+    <<: *backend
+    cpus: 0.75
+    mem_limit: 768m
+    environment:
+      APP_MODE: api-public
+    depends_on:
+      api:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD

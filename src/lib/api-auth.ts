@@ -97,7 +97,7 @@ export async function authenticateApiRequest(
         isSuperAdmin: result.user.isSuperAdmin,
         actor: tokenActor,
       };
-      const orgRpm = await rejectIfOrgRateLimited(request, bearerUser);
+      const orgRpm = await rejectIfOrgRateLimited(request, bearerUser, true);
       if (orgRpm) return { ok: false, response: orgRpm };
 
       enterRequestContext({
@@ -170,7 +170,7 @@ export async function authenticateApiRequest(
   });
   if (sessionRpm) return { ok: false, response: sessionRpm };
 
-  const orgRpm = await rejectIfOrgRateLimited(request, sessionApiUser);
+  const orgRpm = await rejectIfOrgRateLimited(request, sessionApiUser, false);
   if (orgRpm) return { ok: false, response: orgRpm };
 
   // ATENCAO: NAO chamar enterRequestContext aqui. Ele usa enterWith()
@@ -189,6 +189,7 @@ export async function authenticateApiRequest(
 async function rejectIfOrgRateLimited(
   request: Request,
   user: ApiUser,
+  viaToken: boolean,
 ): Promise<NextResponse | null> {
   let pathname = "";
   try {
@@ -200,6 +201,7 @@ async function rejectIfOrgRateLimited(
     organizationId: user.organizationId,
     isSuperAdmin: user.isSuperAdmin,
     pathname,
+    viaToken,
   });
   // 429 da org já entra em logRateLimitReject (agregado) em enforceOrgApiRateLimit.
   return res;
