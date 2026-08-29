@@ -4,7 +4,13 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
+import {
+  createDeal,
+  createDealEvent,
+  flattenDealListItem,
+  getDeals,
+  isValidDealStatus,
+} from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 
 function parseIntParam(v: string | null, fallback: number) {
@@ -37,6 +43,18 @@ export async function GET(request: Request) {
     const contactPhone = searchParams.get("contactPhone") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
+    const updatedSinceRaw = searchParams.get("updatedSince")?.trim();
+    let updatedSince: Date | undefined;
+    if (updatedSinceRaw) {
+      const parsed = new Date(updatedSinceRaw);
+      if (Number.isNaN(parsed.getTime())) {
+        return NextResponse.json(
+          { message: "updatedSince inválido. Use ISO-8601." },
+          { status: 400 },
+        );
+      }
+      updatedSince = parsed;
+    }
     // Filtros avançados (mesmo shape do kanban) — JSON em `filters` ou base64url em `f`.
     let advancedFilters = parseAdvancedDealFilters(
       (() => {
@@ -84,13 +102,14 @@ export async function GET(request: Request) {
       visibilityWhere: visibility.dealWhere,
       allowedPipelineIds,
       advancedFilters: Object.keys(advancedFilters).length > 0 ? advancedFilters : undefined,
+      updatedSince,
     });
 
     const items = await Promise.all(
       result.items.map(async (deal) => {
         const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
         if (stageDenied) return null;
-        return deal;
+        return flattenDealListItem(deal);
       }),
     );
     return NextResponse.json({ ...result, items: items.filter(Boolean) });

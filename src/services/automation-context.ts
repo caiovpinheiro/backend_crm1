@@ -1206,6 +1206,46 @@ export function interpolateVariables(template: string, variables: Record<string,
   );
 }
 
+const STALE_NO_TIMER_MS = 2 * 60 * 1000;
+
+/**
+ * Contextos RUNNING sem `timeoutAt` são vazamento: o motor só persiste
+ * espera com timer (TTL de 24h ou timeout do canvas). Sem isso a trava
+ * de reentrada prende a automação no contato ("Aguardando Resposta"
+ * parada em Enviando mensagem).
+ */
+export async function sweepStaleRunningContexts(): Promise<number> {
+  const cutoff = new Date(Date.now() - STALE_NO_TIMER_MS);
+  const leaked = await prismaBase.automationContext.findMany({
+    where: {
+      status: "RUNNING",
+      timeoutAt: null,
+      updatedAt: { lte: cutoff },
+    },
+    select: { id: true, organizationId: true },
+    take: 100,
+  });
+  let closed = 0;
+  for (const ctx of leaked) {
+    try {
+      await withSystemContext(ctx.organizationId, async () => {
+        const row = await prisma.automationContext.update({
+          where: { id: ctx.id },
+          data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
+        });
+        publishAutomationState(row);
+      });
+      closed++;
+    } catch (err) {
+      console.error(
+        `[automation-context] sweepStaleRunningContexts error for ${ctx.id}:`,
+        err,
+      );
+    }
+  }
+  return closed;
+}
+
 export async function sweepExpiredTimeouts(): Promise<number> {
   // Worker cross-tenant: lista contextos expirados de TODAS as orgs
   // usando prismaBase (sem scope). Cada processamento entra em seu
@@ -1216,7 +1256,7 @@ export async function sweepExpiredTimeouts(): Promise<number> {
       timeoutAt: { not: null, lte: new Date() },
     },
     select: { id: true, organizationId: true },
-    take: 50,
+    take: 100,
   });
   let processed = 0;
   for (const ctx of expired) {
@@ -1227,7 +1267,8 @@ export async function sweepExpiredTimeouts(): Promise<number> {
       console.error(`[automation-context] sweepExpiredTimeouts error for ${ctx.id}:`, err);
     }
   }
-  return processed;
+  const stale = await sweepStaleRunningContexts();
+  return processed + stale;
 }
 
 let _sweepInterval: ReturnType<typeof setInterval> | null = null;

@@ -4,46 +4,10 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getContactActiveContexts } from "@/services/automation-context";
+import { labelForActiveStep } from "@/services/automation-step-labels";
 import { getConversationLite } from "@/services/conversations";
 
 type RouteContext = { params: Promise<{ id: string }> };
-
-/**
- * Labels pt-BR dos tipos de step (subset do STEP_TYPE_LABELS do executor;
- * duplicado aqui de propósito pra rota não importar o executor inteiro,
- * que carrega BullMQ/Meta client como side effect).
- */
-const STEP_LABELS: Record<string, string> = {
-  send_email: "Enviando e-mail",
-  move_stage: "Movendo estágio",
-  assign_owner: "Atribuindo responsável",
-  add_tag: "Adicionando tag",
-  remove_tag: "Removendo tag",
-  update_field: "Atualizando campo",
-  create_activity: "Criando atividade",
-  send_whatsapp_message: "Enviando mensagem",
-  send_whatsapp_template: "Enviando template",
-  send_whatsapp_media: "Enviando mídia",
-  send_whatsapp_interactive: "Aguardando escolha do lead",
-  send_whatsapp_list: "Aguardando escolha do lead",
-  send_whatsapp_flow: "Aguardando formulário do lead",
-  send_product: "Enviando produto",
-  webhook: "Chamando webhook",
-  delay: "Em espera (atraso)",
-  condition: "Avaliando condição",
-  update_lead_score: "Atualizando lead score",
-  question: "Aguardando resposta do lead",
-  wait_for_reply: "Aguardando resposta do lead",
-  set_variable: "Definindo variável",
-  goto: "Redirecionando fluxo",
-  finish: "Finalizando",
-  create_deal: "Criando negócio",
-  finish_conversation: "Encerrando conversa",
-  tabulate_conversation: "Tabulando conversa",
-  business_hours: "Verificando horário",
-  check_agent_status: "Verificando status do agente",
-  execute_distribution: "Distribuindo lead",
-};
 
 export type ActiveAutomationDto = {
   contextId: string;
@@ -95,7 +59,9 @@ export async function GET(request: Request, context: RouteContext) {
           automationId: ctx.automationId,
           name: ctx.automation.name,
           status: ctx.status as "RUNNING" | "PAUSED",
-          stepLabel: step ? (STEP_LABELS[step.type] ?? step.type) : null,
+          stepLabel: step
+            ? labelForActiveStep(step.type, ctx.timeoutAt)
+            : null,
           timeoutAt: ctx.timeoutAt ? ctx.timeoutAt.toISOString() : null,
           updatedAt: ctx.updatedAt.toISOString(),
         };

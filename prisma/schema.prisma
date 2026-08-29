@@ -1518,6 +1518,7 @@ model Deal {
   @@index([organizationId, contactId])
   @@index([organizationId, ownerId])
   @@index([organizationId, createdAt])
+  @@index([organizationId, updatedAt])
   @@index([organizationId, stageId, status])
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
