@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { recordPresenceTransition } from "@/lib/agent-presence";
+import { debugWarn } from "@/lib/debug-log";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -65,7 +66,7 @@ export async function PUT(req: Request, ctx: Ctx) {
 
       const statusChanged = !existing || existing.status !== status;
       // #region agent log
-      console.warn(
+      debugWarn(
         "[DBG-e46688 status-put] entry",
         JSON.stringify({
           paramUserId: id,
@@ -87,7 +88,7 @@ export async function PUT(req: Request, ctx: Ctx) {
         // Best-effort — nunca derruba a atualização de status.
         if (status === "ONLINE") {
           // #region agent log
-          console.warn(
+          debugWarn(
             "[DBG-e46688 status-put] before retry",
             JSON.stringify({
               paramUserId: id,
@@ -101,7 +102,7 @@ export async function PUT(req: Request, ctx: Ctx) {
               userId: id,
             });
             // #region agent log
-            console.warn(
+            debugWarn(
               "[DBG-e46688 status-put] retry result",
               JSON.stringify({
                 paramUserId: id,
@@ -123,7 +124,7 @@ export async function PUT(req: Request, ctx: Ctx) {
               e instanceof Error ? e.message : e,
             );
             // #region agent log
-            console.warn(
+            debugWarn(
               "[DBG-e46688 status-put] retry threw",
               JSON.stringify({
                 paramUserId: id,

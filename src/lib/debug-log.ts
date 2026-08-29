@@ -24,3 +24,8 @@ export function debugLog(...args: unknown[]): void {
 export function debugInfo(...args: unknown[]): void {
   if (isVerboseLogging()) console.info(...args);
 }
+
+/** console.warn condicional — só emite quando `isVerboseLogging()`. */
+export function debugWarn(...args: unknown[]): void {
+  if (isVerboseLogging()) console.warn(...args);
+}
