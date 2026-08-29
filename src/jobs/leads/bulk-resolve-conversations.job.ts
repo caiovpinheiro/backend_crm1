@@ -164,6 +164,18 @@ export async function processBulkResolveConversations(
         const tabulatedIds = new Set(withTab.map((c) => c.id));
         chunkSucceeded += toResolve.length;
 
+        const { sseBus } = await import("@/lib/sse-bus");
+        for (const conv of toResolve) {
+          try {
+            sseBus.publish("conversation_updated", {
+              organizationId,
+              conversationId: conv.id,
+            });
+          } catch {
+            /* best-effort */
+          }
+        }
+
         // Sem "manter atendente": o updateMany acima zerou assignedToId —
         // limpa também deal aberto + contato desses responsáveis (mesma
         // regra do encerramento manual em updateConversationStatusInDb).
