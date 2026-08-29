@@ -1146,7 +1146,7 @@ export async function POST(request: Request, context: RouteContext) {
       let externalId: string | null = null;
       let sendErrorMsg: string | undefined;
       if (!job) {
-        console.warn("[meta-outbound] Redis indisponível — sendText síncrono na API");
+        console.warn("[meta-outbound] enqueue falhou (jobId/queue) — sendText síncrono na API");
         try {
           const result = await processMetaOutbound(outboundPayload);
           sendStatus = result.sendStatus;
