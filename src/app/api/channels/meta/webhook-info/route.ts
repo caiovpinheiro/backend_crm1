@@ -123,27 +123,43 @@ export async function POST(request: Request) {
     // Cria canal pra que o handshake Meta encontre o webhookId no banco.
     // Credenciais reais entram depois (manual-cloud / instagram/manual)
     // e movem status pra CONNECTED.
-    const channel = await createChannel({
-      name:
-        name ||
-        (channelKind === "INSTAGRAM"
-          ? "Nova conexao Instagram"
-          : "Nova conexao WhatsApp"),
-      type: channelKind,
-      provider:
-        channelKind === "INSTAGRAM" ? "META_INSTAGRAM_LOGIN" : "META_CLOUD_API",
-      config: {
+    try {
+      const channel = await createChannel({
+        name:
+          name ||
+          (channelKind === "INSTAGRAM"
+            ? "Nova conexao Instagram"
+            : "Nova conexao WhatsApp"),
+        type: channelKind,
+        provider:
+          channelKind === "INSTAGRAM"
+            ? "META_INSTAGRAM_LOGIN"
+            : "META_CLOUD_API",
+        config: {
+          webhookId,
+          verifyToken,
+          ...(channelKind === "INSTAGRAM" ? { platform: "instagram" } : {}),
+        },
+      });
+
+      return buildResponse(request, {
         webhookId,
         verifyToken,
-        ...(channelKind === "INSTAGRAM" ? { platform: "instagram" } : {}),
-      },
-    });
-
-    return buildResponse(request, {
-      webhookId,
-      verifyToken,
-      channelId: channel.id,
-    });
+        channelId: channel.id,
+      });
+    } catch (e: unknown) {
+      // Sem este catch a excecao sobe pro Next, que responde 500 com corpo
+      // VAZIO — o cliente estoura em `res.json()` ("Unexpected end of JSON
+      // input") e a causa real (KEYRING_SECRET ausente, migration faltando,
+      // Redis fora) nunca chega ao operador.
+      console.error("webhook-info: falha ao pre-criar canal:", e);
+      const msg =
+        e instanceof Error ? e.message : "Erro ao pre-criar canal Meta.";
+      return NextResponse.json(
+        { message: msg, code: "CHANNEL_PRECREATE_FAILED" },
+        { status: 500 },
+      );
+    }
   });
 }
 

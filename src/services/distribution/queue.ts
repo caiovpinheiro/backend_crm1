@@ -22,6 +22,7 @@ import {
   inboxCardGroupKey,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
+import { withActiveInboxQueueGuard } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 
 function addCard(
@@ -65,8 +66,7 @@ export async function getQueueCounts(
     scopeDeptIds.length > 0 ? { departmentId: { in: scopeDeptIds } } : {};
 
   const rows = await prisma.conversation.findMany({
-    where: {
-      status: "OPEN",
+    where: withActiveInboxQueueGuard({
       assignedToId: { in: userIds },
       hasError: false,
       ...deptFilter,
@@ -79,7 +79,7 @@ export async function getQueueCounts(
           ],
         },
       ],
-    },
+    }),
     select: {
       id: true,
       assignedToId: true,

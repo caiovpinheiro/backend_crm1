@@ -11,6 +11,7 @@ import {
   countAgentReplyAsAnswered,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
+import { withActiveInboxQueueGuard } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 import { assignConversationAssignedTo } from "@/services/conversations";
 import { scheduleProcessPendingDistributionQueue } from "./pending";
@@ -45,30 +46,29 @@ async function queueWhere(
   scope: RedistributeQueueScope,
 ): Promise<Prisma.ConversationWhereInput> {
   const countAgent = await countAgentReplyAsAnswered();
-  const base: Prisma.ConversationWhereInput = {
-    status: "OPEN",
-    assignedToId: sourceUserId,
-    hasError: false,
-  };
+  const assigned = { assignedToId: sourceUserId, hasError: false };
   if (scope === "entrada") {
-    return { ...base, ...noCountableReplyWhere(countAgent) };
+    return withActiveInboxQueueGuard({
+      ...assigned,
+      ...noCountableReplyWhere(countAgent),
+    });
   }
   if (scope === "aguardando") {
-    return {
-      ...base,
+    return withActiveInboxQueueGuard({
+      ...assigned,
       AND: [countableReplyWhere(countAgent)],
       lastMessageDirection: "in",
-    };
+    });
   }
-  return {
-    ...base,
+  return withActiveInboxQueueGuard({
+    ...assigned,
     OR: [
       noCountableReplyWhere(countAgent),
       {
         AND: [countableReplyWhere(countAgent), { lastMessageDirection: "in" }],
       },
     ],
-  };
+  });
 }
 
 export async function redistributeResponsibleQueue(

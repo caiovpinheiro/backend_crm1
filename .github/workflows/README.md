@@ -75,6 +75,14 @@ As envs `DATABASE_URL`, `REDIS_URL`, `META_APP_SECRET`,
 continuam configuradas em **App → Environment** dentro do Easypanel.
 Trocar de Git pra Docker Image **não afeta essas envs**.
 
+Em produção DigitalOcean, `DATABASE_URL` / `REDIS_URL` (e replica, se
+houver) devem usar o hostname **`private-*`** (VPC) com TLS
+(`sslmode=require` / `rediss://`). Hostname sem `private-` ou IP público
+sai pela internet — só para acesso externo ocasional, nunca a partir dos
+droplets. Exemplo (placeholders):
+`private-crm1-pg-nyc3-do-user-XXXX.b.db.ondigitalocean.com:25060`,
+`private-crm1-valkey-nyc3-do-user-XXXX.b.db.ondigitalocean.com:25061`.
+
 ### 6) Prisma migrate
 
 Se o `docker-entrypoint.sh` já roda `prisma migrate deploy` no start

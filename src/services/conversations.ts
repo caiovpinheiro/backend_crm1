@@ -19,6 +19,11 @@ import {
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
 import {
+  activeInboxQueueGuardWhere,
+  encerradasTabWhere,
+  withActiveInboxQueueGuard,
+} from "@/lib/inbox-queue-membership";
+import {
   getOrgIdOrNull,
   getOrgIdOrThrow,
   getRequestContext,
@@ -341,8 +346,7 @@ function tabToWhere(
       // Assignee IA NÃO entra aqui: tem aba própria (`agente_ia`). O card
       // volta para Entrada quando o handoff libera o responsável (fila de
       // espera) ou atribui um consultor.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         hasError: false,
         OR: [
           {
@@ -362,49 +366,45 @@ function tabToWhere(
             assignedToId: null,
           },
         ],
-      };
+      });
     case "esperando":
       // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
       // cliente falou por último (`lastMessageDirection = "in"`).
       // Só assignee HUMANO: com a IA como responsável o card fica em
       // `agente_ia` até o handoff.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "in",
         hasError: false,
-      };
+      });
     case "respondidas":
       // "Respondidas" = já teve atendimento e nós falamos por último
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
       // Assignee IA fica em `agente_ia`.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         assignedTo: { is: { type: "HUMAN" } },
         AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "out",
         hasError: false,
-      };
+      });
     case "agente_ia":
       // Fila do Agente IA: TODA conversa em aberto cujo responsável é um
       // usuário `type: AI`, tenha o aluno falado ou não. Sai daqui quando o
       // handoff atribui um consultor OU libera o responsável (fila de
       // espera) — em ambos os casos o card cai em Entrada.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         hasError: false,
         assignedTo: { is: { type: "AI" } },
-      };
+      });
     case "automacao":
       // Robô ativo (RUNNING ou PAUSED) sem dono e sem nenhuma resposta do
       // cliente. Quem já falou (lastInboundAt) vai para Entrada —
       // campanha/template posterior não devolve o card pra cá. Assignee IA
       // tem aba própria (`agente_ia`); consultor humano vai para
       // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
-      return {
-        status: "OPEN",
+      return withActiveInboxQueueGuard({
         assignedToId: null,
         AND: [NEVER_REPLIED],
         contact: {
@@ -412,9 +412,9 @@ function tabToWhere(
             some: { status: ACTIVE_AUTOMATION_CTX },
           },
         },
-      };
+      });
     case "finalizados":
-      return { status: "RESOLVED" };
+      return encerradasTabWhere();
     case "erro":
       return erroTabWhere();
     default: {
@@ -435,13 +435,12 @@ function tabToWhere(
  * só do badge (e não da lista) recria o 233 zumbi.
  */
 export function erroTabWhere(): Prisma.ConversationWhereInput {
-  return { status: "OPEN", hasError: true };
+  return withActiveInboxQueueGuard({ hasError: true });
 }
 
 /** WhatsApp OPEN com permissão de ligação ativa (permanente ou TTL vigente). */
 export function ligarTabWhere(): Prisma.ConversationWhereInput {
-  return {
-    status: "OPEN",
+  return withActiveInboxQueueGuard({
     channel: "whatsapp",
     hasError: false,
     whatsappCallConsentStatus: "GRANTED",
@@ -449,7 +448,7 @@ export function ligarTabWhere(): Prisma.ConversationWhereInput {
       { whatsappCallConsentExpiresAt: null },
       { whatsappCallConsentExpiresAt: { gt: new Date() } },
     ],
-  };
+  });
 }
 
 /**
@@ -514,7 +513,7 @@ function tabFilterWhere(
     }
     return null;
   }
-  if (tab === "abertas") return { status: "OPEN" };
+  if (tab === "abertas") return activeInboxQueueGuardWhere();
   if (tab === "ligar") return ligarTabWhere();
   return tabToWhere(tab, countAgentReply);
 }
@@ -671,9 +670,11 @@ export function buildInboxFilterConditions(
   );
   if (sourceCond) conditions.push(sourceCond);
   if (params.windowState === "open") {
-    conditions.push({ status: { not: "RESOLVED" } });
+    conditions.push({
+      AND: [{ status: { not: "RESOLVED" } }, { closedAt: null }],
+    });
   } else if (params.windowState === "closed") {
-    conditions.push({ status: "RESOLVED" });
+    conditions.push(encerradasTabWhere());
   }
   return conditions;
 }

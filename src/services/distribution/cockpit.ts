@@ -12,6 +12,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 
 import {
   getRechamadoMetrics,
@@ -154,16 +155,13 @@ export async function getCockpitData(): Promise<CockpitData> {
   }
 
   // Atendendo agora por agente (conversas OPEN atribuídas ao user do agente).
-  // `hasError: false` espelha o predicado da aba "Agente IA" da Inbox
-  // (`tabToWhere` case `agente_ia`) — conversa travada em erro vive na aba Erro,
-  // não na fila da IA, e o número do cockpit precisa bater com o badge de lá.
   const agentUserIds = agentConfigs.map((a) => a.userId);
   const attendingRows =
     agentUserIds.length > 0
       ? await prisma.conversation.groupBy({
           by: ["assignedToId"],
           where: {
-            status: "OPEN",
+            ...activeInboxQueueGuardWhere(),
             hasError: false,
             assignedToId: { in: agentUserIds },
           },
@@ -206,7 +204,7 @@ export async function getCockpitData(): Promise<CockpitData> {
   const attendingNow = await prisma.conversation.count({
     where: {
       organizationId: orgId,
-      status: "OPEN",
+      ...activeInboxQueueGuardWhere(),
       hasError: false,
       assignedTo: { is: { type: "AI" } },
     },

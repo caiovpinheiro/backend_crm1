@@ -374,6 +374,11 @@ export type AdvancedDealFilters = {
    */
   conversationStatus?: "open" | "closed";
   lastMessageDirection?: "in" | "out";
+
+  /** Exceções do Painel → lista filtrada do pipeline. */
+  exception?: "no_task" | "stalled" | "overdue" | "empty_value";
+  /** Dias sem movimento para `exception=stalled`. Padrão 7. */
+  stalledDays?: number;
 };
 
 /**
@@ -771,6 +776,34 @@ export async function buildDealWhereFromFilters(
     }
   }
 
+  const exception = filters.exception;
+  if (exception) {
+    conditions.push({ status: "OPEN" });
+    const now = new Date();
+    if (exception === "no_task") {
+      conditions.push({
+        activities: { none: { completed: false, scheduledAt: { gte: now } } },
+      });
+    } else if (exception === "stalled") {
+      const days =
+        typeof filters.stalledDays === "number" &&
+        Number.isFinite(filters.stalledDays) &&
+        filters.stalledDays > 0 &&
+        filters.stalledDays <= 365
+          ? Math.round(filters.stalledDays)
+          : 7;
+      conditions.push({
+        updatedAt: { lt: new Date(now.getTime() - days * 86_400_000) },
+      });
+    } else if (exception === "overdue") {
+      const start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+      conditions.push({ expectedClose: { lt: start } });
+    } else if (exception === "empty_value") {
+      conditions.push({ value: { lte: 0 } });
+    }
+  }
+
   return conditions;
 }
 
@@ -936,6 +969,22 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   }
   if (o.lastMessageDirection === "in" || o.lastMessageDirection === "out") {
     out.lastMessageDirection = o.lastMessageDirection;
+  }
+
+  if (
+    o.exception === "no_task" ||
+    o.exception === "stalled" ||
+    o.exception === "overdue" ||
+    o.exception === "empty_value"
+  ) {
+    out.exception = o.exception;
+  }
+  {
+    const n = Number(o.stalledDays);
+    if (Number.isFinite(n)) {
+      const days = Math.round(n);
+      if (days > 0 && days <= 365) out.stalledDays = days;
+    }
   }
 
   return out;

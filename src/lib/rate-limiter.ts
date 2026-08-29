@@ -1,5 +1,10 @@
-const DEFAULT_LIMIT = 400;
-const DEFAULT_WINDOW_MS = 60_000;
+import {
+  DEFAULT_ORG_RATE_LIMIT_RPM,
+  ORG_RATE_LIMIT_WINDOW_MS,
+} from "@/lib/org-rate-limit-config";
+
+const DEFAULT_LIMIT = DEFAULT_ORG_RATE_LIMIT_RPM;
+const DEFAULT_WINDOW_MS = ORG_RATE_LIMIT_WINDOW_MS;
 const CLEANUP_INTERVAL = 120_000;
 
 type BucketEntry = {
@@ -39,14 +44,19 @@ export type RateLimitResult = {
  *
  * @param windowMs Janela em ms; default 60s.
  */
+export function resetRateLimitMemory(): void {
+  buckets.clear();
+  lastCleanup = 0;
+}
+
 export function checkRateLimit(
   key: string,
   limit: number = DEFAULT_LIMIT,
   windowMs: number = DEFAULT_WINDOW_MS,
+  now: number = Date.now(),
 ): RateLimitResult {
   cleanup();
 
-  const now = Date.now();
   const cutoff = now - windowMs;
 
   let entry = buckets.get(key);

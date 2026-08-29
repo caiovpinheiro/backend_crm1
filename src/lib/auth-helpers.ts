@@ -8,6 +8,8 @@ import {
   resolveResponseStatus,
 } from "@/lib/api-access-audit";
 import { observeHttpRequest } from "@/lib/metrics";
+import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
+import { enforceSessionApiRateLimit } from "@/lib/rate-limit";
 import { auth } from "./auth";
 import {
   loadAuthzContext,
@@ -101,6 +103,25 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
         { status: 401 },
       ),
     };
+  }
+
+  // Per-credential (cookie): bloqueia loop de render no frontend (~15 req/s).
+  // Org RPM (abaixo) é teto extra — 400/org não substitui este bucket.
+  const sessionRpm = await enforceSessionApiRateLimit({
+    userId: session.user.id,
+    organizationId: session.user.organizationId,
+  });
+  if (sessionRpm) {
+    return { ok: false, response: sessionRpm };
+  }
+
+  const orgRpm = await enforceOrgApiRateLimit({
+    organizationId: session.user.organizationId,
+    isSuperAdmin: session.user.isSuperAdmin,
+  });
+  if (orgRpm) {
+    // 429 da org já entra em logRateLimitReject (agregado) em enforceOrgApiRateLimit.
+    return { ok: false, response: orgRpm };
   }
 
   // Ativa o RequestContext logo apos resolver a session. enterWith()

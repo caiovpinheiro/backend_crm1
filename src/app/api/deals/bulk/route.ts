@@ -282,6 +282,7 @@ export async function POST(request: Request) {
             id: true,
             stageId: true,
             status: true,
+            contactId: true,
             stage: {
               select: {
                 name: true,

@@ -8,8 +8,11 @@ export type ChannelSessionInfo = {
   expiresAt: Date | null;
 };
 
-function sessionFromLastInbound(lastInboundAt: Date | null): ChannelSessionInfo {
-  const diffMs = lastInboundAt ? Date.now() - lastInboundAt.getTime() : null;
+export function sessionFromLastInbound(
+  lastInboundAt: Date | null,
+  now = Date.now(),
+): ChannelSessionInfo {
+  const diffMs = lastInboundAt ? now - lastInboundAt.getTime() : null;
   const active = diffMs !== null ? diffMs < SESSION_WINDOW_MS : false;
   const expiresAt = lastInboundAt
     ? new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS)
@@ -100,7 +103,17 @@ function inboundAfterReset(
 async function lastInboundOnChannel(
   contactId: string,
   channelId: string,
+  opts?: { conversationId?: string },
 ): Promise<Date | null> {
+  const ticketInbound =
+    opts?.conversationId != null
+      ? [
+          {
+            conversationId: opts.conversationId,
+            OR: [{ channelId }, { channelId: null }],
+          },
+        ]
+      : [];
   const [lastInMsg, channel] = await Promise.all([
     prisma.message.findFirst({
       where: {
@@ -111,6 +124,7 @@ async function lastInboundOnChannel(
             OR: [
               { channelId },
               { AND: [{ channelId: null }, { conversation: { channelId } }] },
+              ...ticketInbound,
             ],
           },
         ],
@@ -141,7 +155,9 @@ export async function getConversationSession(conv: {
   lastInboundAt?: Date | null;
 }): Promise<ChannelSessionInfo> {
   if (conv.contactId && conv.channelId) {
-    return getContactChannelSession(conv.contactId, conv.channelId);
+    return getContactChannelSession(conv.contactId, conv.channelId, {
+      conversationId: conv.id,
+    });
   }
 
   const lastInMsg = await prisma.message.findFirst({
@@ -174,7 +190,8 @@ export async function getConversationSession(conv: {
 export async function getContactChannelSession(
   contactId: string,
   channelId: string,
+  opts?: { conversationId?: string },
 ): Promise<ChannelSessionInfo> {
-  const lastInboundAt = await lastInboundOnChannel(contactId, channelId);
+  const lastInboundAt = await lastInboundOnChannel(contactId, channelId, opts);
   return sessionFromLastInbound(lastInboundAt);
 }

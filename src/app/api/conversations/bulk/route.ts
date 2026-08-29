@@ -3,12 +3,14 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 
 import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
-import { getVisibilityFilter } from "@/lib/visibility";
+import { checkPermission } from "@/lib/authz";
+import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
-import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
+import { getVisibilityFilter } from "@/lib/visibility";
 import {
+  getFilteredConversationIds,
   getResolvableConversationIds,
   type InboxTab,
 } from "@/services/conversations";
@@ -66,6 +68,7 @@ export async function POST(request: Request) {
       const body = (await request.json()) as {
         ids?: string[];
         action?: string;
+        assignedToId?: string | null;
         /** true = encerrar TODAS as conversas do filtro atual (todas as páginas). */
         allInFilter?: boolean;
         /** Aba atual (usada só quando `allInFilter`). */
@@ -258,6 +261,159 @@ export async function POST(request: Request) {
                 "Reabertura em massa não é suportada no modo ticket. Reabra individualmente pelo kebab da conversa.",
             },
             { status: 400 },
+          );
+        }
+        case "assign": {
+          if (!user.organizationId) {
+            return NextResponse.json(
+              { message: "Operação requer contexto de organização." },
+              { status: 403 },
+            );
+          }
+
+          const authzInput = {
+            userId: user.id,
+            organizationId: user.organizationId,
+            isSuperAdmin: isSuperAdmin(session),
+          };
+          const [canReassignOthers, canTransfer] = await Promise.all([
+            checkPermission(authzInput, "conversation:reassign_others"),
+            checkPermission(authzInput, "conversation:transfer"),
+          ]);
+          if (!canReassignOthers && !canTransfer) {
+            return NextResponse.json(
+              { message: "Sem permissão para reatribuir conversas." },
+              { status: 403 },
+            );
+          }
+
+          let newAssigneeId: string | null;
+          if (body.assignedToId === null || body.assignedToId === undefined) {
+            newAssigneeId = null;
+          } else if (
+            typeof body.assignedToId === "string" &&
+            body.assignedToId.trim() !== ""
+          ) {
+            newAssigneeId = body.assignedToId.trim();
+          } else {
+            return NextResponse.json(
+              { message: "assignedToId inválido." },
+              { status: 400 },
+            );
+          }
+
+          if (newAssigneeId) {
+            const target = await prisma.user.findFirst({
+              where: { id: newAssigneeId, organizationId: user.organizationId },
+              select: { id: true, type: true },
+            });
+            if (!target || target.type !== "HUMAN") {
+              return NextResponse.json(
+                { message: "Responsável não encontrado nesta organização." },
+                { status: 400 },
+              );
+            }
+          }
+
+          let targetIds: string[];
+          if (allInFilter) {
+            const tab =
+              body.tab && FILTER_TABS.has(body.tab as InboxTab)
+                ? (body.tab as InboxTab)
+                : undefined;
+            const allowedChannelIds = await listAllowedChannelIds({
+              id: user.id,
+              role: user.role,
+              organizationId: user.organizationId,
+            });
+            const f = body.filters ?? {};
+            targetIds = await getFilteredConversationIds({
+              tab,
+              search: body.search,
+              visibilityWhere: conversationWhere ?? undefined,
+              allowedChannelIds,
+              ownerId: f.ownerId,
+              ownerIds: f.ownerIds,
+              withoutOwner: f.withoutOwner,
+              channel: f.channel,
+              channelIds: f.channelIds,
+              stageId: f.stageId,
+              stageIds: f.stageIds,
+              tagIds: f.tagIds,
+              sources: f.sources,
+              withoutSource: f.withoutSource,
+              sessionExpiresWithinHours: f.sessionExpiresWithinHours,
+              windowState: f.windowState,
+            });
+          } else {
+            const selectedIds = ids as string[];
+            const rows = await prisma.conversation.findMany({
+              where: scopedWhere(selectedIds, {}),
+              select: { id: true },
+            });
+            targetIds = rows.map((c) => c.id);
+          }
+
+          if (targetIds.length === 0) {
+            return NextResponse.json({ updated: 0, skipped: [] });
+          }
+
+          const operation = await prisma.bulkOperation.create({
+            data: {
+              type: "CONVERSATION_BULK_ASSIGN",
+              status: "PENDING",
+              total: targetIds.length,
+              payload: { conversationIds: targetIds, assignedToId: newAssigneeId },
+              createdById: user.id,
+            },
+            select: { id: true },
+          });
+
+          const job = await enqueueLeadsBulk(
+            LEADS_BULK_JOB_NAMES.bulkAssignConversations,
+            {
+              operationId: operation.id,
+              organizationId: user.organizationId,
+              initiatedByUserId: user.id,
+              conversationIds: targetIds,
+              assignedToId: newAssigneeId,
+              actorRole: user.role,
+              canReassignOthers,
+              canTransfer,
+            },
+          );
+
+          if (!job) {
+            await prisma.bulkOperation.update({
+              where: { id: operation.id },
+              data: {
+                status: "FAILED",
+                finishedAt: new Date(),
+                errors: [
+                  {
+                    itemId: "__operation__",
+                    message: "Fila de jobs indisponível (Redis offline)",
+                    attempt: 0,
+                    at: new Date().toISOString(),
+                  },
+                ],
+              },
+            });
+            return NextResponse.json(
+              { message: "Fila de jobs indisponível.", operationId: operation.id },
+              { status: 503 },
+            );
+          }
+
+          return NextResponse.json(
+            {
+              message: "Reatribuição em massa enfileirada.",
+              operationId: operation.id,
+              total: targetIds.length,
+              skipped: [],
+              action: "assign",
+            },
+            { status: 202 },
           );
         }
         default:

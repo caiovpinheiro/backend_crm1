@@ -9,6 +9,7 @@ import {
 import {
   LEADS_BULK_JOB_NAMES,
   LEADS_BULK_QUEUE_NAME,
+  type BulkAssignConversationsPayload,
   type BulkMoveStagePayload,
   type BulkResolveConversationsPayload,
   type BulkUpdateFieldsPayload,
@@ -16,6 +17,7 @@ import {
 } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 
+import { processBulkAssignConversations } from "@/jobs/leads/bulk-assign-conversations.job";
 import { processBulkMoveStage } from "@/jobs/leads/bulk-move-stage.job";
 import { processBulkResolveConversations } from "@/jobs/leads/bulk-resolve-conversations.job";
 import { processBulkUpdateFields } from "@/jobs/leads/bulk-update-fields.job";
@@ -144,6 +146,12 @@ async function dispatch(job: Job<LeadsBulkPayload>): Promise<void> {
       await processBulkResolveConversations(
         job.data as BulkResolveConversationsPayload,
         job as Job<BulkResolveConversationsPayload>,
+      );
+      return;
+    case LEADS_BULK_JOB_NAMES.bulkAssignConversations:
+      await processBulkAssignConversations(
+        job.data as BulkAssignConversationsPayload,
+        job as Job<BulkAssignConversationsPayload>,
       );
       return;
     default: {

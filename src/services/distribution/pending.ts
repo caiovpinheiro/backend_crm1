@@ -18,6 +18,7 @@
 import { Prisma } from "@prisma/client";
 
 import { getOrgSettingBool } from "@/lib/org-settings";
+import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 import {
   getOrgIdOrNull,
@@ -73,7 +74,7 @@ export interface PendingDistributionView {
  * responsável humano e PRECISA ser distribuído (desde que já tenha inbound).
  */
 export const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
-  status: "OPEN",
+  ...activeInboxQueueGuardWhere(),
   assignedToId: null,
   lastInboundAt: { not: null },
 };
@@ -110,7 +111,7 @@ export async function getWaitingQueueWhere(): Promise<Prisma.ConversationWhereIn
   if (await isDistributionAutoOnInbound()) return ABERTA_SEM_RESPONSAVEL;
   const ids = await listExplicitPendingConversationIds();
   if (ids.length === 0) return { id: { equals: "__no_distribution_pending__" } };
-  return { id: { in: ids }, status: "OPEN", assignedToId: null };
+  return { id: { in: ids }, ...activeInboxQueueGuardWhere(), assignedToId: null };
 }
 
 export async function getPendingDistributions(): Promise<
@@ -149,7 +150,7 @@ export async function getPendingDistributions(): Promise<
               ? [
                   {
                     id: { in: manualConvIds },
-                    status: "OPEN" as const,
+                    ...activeInboxQueueGuardWhere(),
                     assignedToId: null,
                   },
                 ]
@@ -160,7 +161,7 @@ export async function getPendingDistributions(): Promise<
         ? { id: { equals: "__no_distribution_pending__" } }
         : {
             id: { in: explicitIds },
-            status: "OPEN",
+            ...activeInboxQueueGuardWhere(),
             assignedToId: null,
           },
     orderBy: { createdAt: "asc" },
@@ -479,7 +480,7 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
   const stillActive = await prisma.conversation.findMany({
     where: {
       id: { in: convIds },
-      status: "OPEN",
+      ...activeInboxQueueGuardWhere(),
       OR: [
         { assignedToId: null },
         // Handoff fora do expediente: IA segura o chat até haver elegível.
@@ -520,7 +521,7 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
 
   const unanswered = await prisma.conversation.findMany({
     where: {
-      status: "OPEN",
+      ...activeInboxQueueGuardWhere(),
       assignedToId: null,
       lastInboundAt: null,
     },
@@ -1066,7 +1067,7 @@ export async function processPendingDistributionQueue(opts: {
           ...(explicitPendingIds
             ? { id: { in: explicitPendingIds } }
             : { lastInboundAt: { not: null } }),
-          status: "OPEN",
+          ...activeInboxQueueGuardWhere(),
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },

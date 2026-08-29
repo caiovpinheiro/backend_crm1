@@ -2026,6 +2026,7 @@ async function executeStep(
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
       await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
+      // Só sincroniza Deal.status. NÃO encerrar conversa: fila ≠ funil.
       // Loga STAGE_CHANGED na timeline do negócio (paridade com o move
       // manual/kanban/bulk). Antes o move por automação não registrava o
       // evento — só disparava o trigger encadeado abaixo.
@@ -3245,7 +3246,7 @@ async function executeStep(
           }
 
           const fName = filename || resolvedFileName;
-          const mType = mediaType as "image" | "audio" | "video" | "document";
+          let mType = mediaType as "image" | "audio" | "video" | "document";
           let uploadBuffer = buffer;
           let uploadMime = mimeType;
           let uploadName = fName;
@@ -3260,13 +3261,14 @@ async function executeStep(
             );
             if (!prepared.ok) {
               throw new MetaSendFailureError(
-                `send_whatsapp_media: falha ao preparar áudio como nota de voz — ${prepared.reason}`,
+                `send_whatsapp_media: falha ao preparar áudio — ${prepared.reason}`,
               );
             }
             uploadBuffer = prepared.payload.buffer;
             uploadMime = prepared.payload.mime;
             uploadName = prepared.payload.fileName;
             sendAsVoice = prepared.payload.voice;
+            if (prepared.payload.delivery === "document") mType = "document";
           }
 
           const metaMediaId = await mediaMetaClient.uploadMedia(uploadBuffer, uploadMime, uploadName);

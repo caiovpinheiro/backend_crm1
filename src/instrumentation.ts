@@ -38,4 +38,16 @@ export async function register() {
   } catch (err) {
     console.warn("[instrumentation] secrets.prefetch falhou:", err);
   }
+
+  // VPC hygiene: avisa hostname público DigitalOcean (sem private-).
+  // Módulo só parseia URL + console.warn — sem pg/ioredis/prisma.
+  // Idempotente com o hook em prisma-base.ts (workers).
+  try {
+    const { warnPublicDoManagedHosts } = await import(
+      "@/lib/warn-public-do-managed-hosts"
+    );
+    warnPublicDoManagedHosts();
+  } catch (err) {
+    console.warn("[instrumentation] warn-public-do-managed-hosts falhou:", err);
+  }
 }

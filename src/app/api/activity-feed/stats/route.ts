@@ -20,7 +20,9 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
  * Resposta:
  *   {
  *     totals: { total, byActorType: {...}, byEntityType: {...}, byType: [{ type, count }] },
- *     timeline: [{ day: "2026-06-05", count }]
+ *     timeline: [{ day: "2026-06-05", count }],
+ *     timelineByActor: [{ day, HUMAN, AI, AUTOMATION, INTEGRATION, SYSTEM }],
+ *     hourly: [{ hour: 0..23, count }]
  *   }
  */
 export async function GET(req: Request) {
@@ -32,6 +34,21 @@ export async function GET(req: Request) {
 
 /** A session achatada de auth-helpers não é exportada; deriva do helper. */
 type OrgSession = Parameters<Parameters<typeof withOrgContext>[0]>[0];
+
+function eachUtcDay(from: Date, to: Date): string[] {
+  const days: string[] = [];
+  const cursor = new Date(
+    Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()),
+  );
+  const end = new Date(
+    Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()),
+  );
+  while (cursor <= end) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
+}
 
 async function handle(req: Request, session: OrgSession) {
   try {
@@ -52,37 +69,112 @@ async function handle(req: Request, session: OrgSession) {
       ? new Date(dateFromRaw)
       : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-    const [byActor, byEntity, byType, timeline, totalRow] = await Promise.all([
-      prisma.activityEvent.groupBy({
-        by: ["actorType"],
-        where: { organizationId: orgId, occurredAt: { gte: dateFrom, lte: dateTo } },
-        _count: { _all: true },
-      }),
-      prisma.activityEvent.groupBy({
-        by: ["entityType"],
-        where: { organizationId: orgId, occurredAt: { gte: dateFrom, lte: dateTo } },
-        _count: { _all: true },
-      }),
-      prisma.activityEvent.groupBy({
-        by: ["type"],
-        where: { organizationId: orgId, occurredAt: { gte: dateFrom, lte: dateTo } },
-        _count: { _all: true },
-        orderBy: { _count: { type: "desc" } },
-        take: 20,
-      }),
-      prisma.$queryRaw<{ day: Date; count: bigint }[]>(Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day, COUNT(*)::bigint AS count
+    const [byActor, byEntity, byType, timelineRows, hourlyRows, totalRow] =
+      await Promise.all([
+        prisma.activityEvent.groupBy({
+          by: ["actorType"],
+          where: {
+            organizationId: orgId,
+            occurredAt: { gte: dateFrom, lte: dateTo },
+          },
+          _count: { _all: true },
+        }),
+        prisma.activityEvent.groupBy({
+          by: ["entityType"],
+          where: {
+            organizationId: orgId,
+            occurredAt: { gte: dateFrom, lte: dateTo },
+          },
+          _count: { _all: true },
+        }),
+        prisma.activityEvent.groupBy({
+          by: ["type"],
+          where: {
+            organizationId: orgId,
+            occurredAt: { gte: dateFrom, lte: dateTo },
+          },
+          _count: { _all: true },
+          orderBy: { _count: { type: "desc" } },
+          take: 20,
+        }),
+        prisma.$queryRaw<{ day: Date; actorType: string; count: bigint }[]>(
+          Prisma.sql`
+        SELECT date_trunc('day', "occurredAt") AS day,
+               "actorType",
+               COUNT(*)::bigint AS count
+        FROM "activity_events"
+        WHERE "organizationId" = ${orgId}
+          AND "occurredAt" >= ${dateFrom}
+          AND "occurredAt" <= ${dateTo}
+        GROUP BY 1, 2
+        ORDER BY 1 ASC
+      `,
+        ),
+        prisma.$queryRaw<{ hour: number; count: bigint }[]>(Prisma.sql`
+        SELECT EXTRACT(HOUR FROM ("occurredAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hour,
+               COUNT(*)::bigint AS count
         FROM "activity_events"
         WHERE "organizationId" = ${orgId}
           AND "occurredAt" >= ${dateFrom}
           AND "occurredAt" <= ${dateTo}
         GROUP BY 1
-        ORDER BY 1 ASC
+        ORDER BY 1
       `),
-      prisma.activityEvent.count({
-        where: { organizationId: orgId, occurredAt: { gte: dateFrom, lte: dateTo } },
-      }),
-    ]);
+        prisma.activityEvent.count({
+          where: {
+            organizationId: orgId,
+            occurredAt: { gte: dateFrom, lte: dateTo },
+          },
+        }),
+      ]);
+
+    const ACTORS = [
+      "HUMAN",
+      "AI",
+      "AUTOMATION",
+      "INTEGRATION",
+      "SYSTEM",
+    ] as const;
+
+    const byDay = new Map<string, Record<(typeof ACTORS)[number], number>>();
+    for (const row of timelineRows) {
+      const day = row.day.toISOString().slice(0, 10);
+      const actor = (ACTORS as readonly string[]).includes(row.actorType)
+        ? (row.actorType as (typeof ACTORS)[number])
+        : "SYSTEM";
+      const bucket =
+        byDay.get(day) ??
+        ({
+          HUMAN: 0,
+          AI: 0,
+          AUTOMATION: 0,
+          INTEGRATION: 0,
+          SYSTEM: 0,
+        } satisfies Record<(typeof ACTORS)[number], number>);
+      bucket[actor] += Number(row.count);
+      byDay.set(day, bucket);
+    }
+
+    const emptyActors = () => ({
+      HUMAN: 0,
+      AI: 0,
+      AUTOMATION: 0,
+      INTEGRATION: 0,
+      SYSTEM: 0,
+    });
+
+    const timelineByActor = eachUtcDay(dateFrom, dateTo).map((day) => {
+      const counts = byDay.get(day) ?? emptyActors();
+      return { day, ...counts };
+    });
+
+    const hourlyMap = new Map(
+      hourlyRows.map((r) => [Number(r.hour), Number(r.count)]),
+    );
+    const hourly = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      count: hourlyMap.get(hour) ?? 0,
+    }));
 
     return NextResponse.json({
       window: { from: dateFrom.toISOString(), to: dateTo.toISOString() },
@@ -96,10 +188,13 @@ async function handle(req: Request, session: OrgSession) {
         ),
         byType: byType.map((r) => ({ type: r.type, count: r._count._all })),
       },
-      timeline: timeline.map((r) => ({
-        day: r.day.toISOString().slice(0, 10),
-        count: Number(r.count),
+      timeline: timelineByActor.map((r) => ({
+        day: r.day,
+        count:
+          r.HUMAN + r.AI + r.AUTOMATION + r.INTEGRATION + r.SYSTEM,
       })),
+      timelineByActor,
+      hourly,
     });
   } catch (e) {
     return NextResponse.json(

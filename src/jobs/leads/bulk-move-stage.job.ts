@@ -149,6 +149,7 @@ export async function processBulkMoveStage(
           id: true,
           stageId: true,
           status: true,
+          contactId: true,
           stage: { select: { name: true } },
         },
       });

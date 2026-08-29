@@ -80,7 +80,7 @@ export function startOutboundConsumer(
             break;
           case "audio":
           case "ptt": {
-            const isPtt = messageType === "ptt" || ext === "ogg" || ext === "opus";
+            const isPtt = messageType === "ptt";
             waContent = {
               audio: mediaPayload,
               mimetype: isPtt ? "audio/ogg; codecs=opus" : (detectedMime.startsWith("audio/") ? detectedMime : "audio/mpeg"),

@@ -169,6 +169,7 @@ model Organization {
   teamChatMessages         TeamChatMessage[]
   teamChatNotes            TeamChatNote[]
   activityAlertStates      ActivityAlertState[]
+  dealStageDailySnapshots  DealStageDailySnapshot[]
 
   @@index([status])
   @@map("organizations")
@@ -1398,6 +1399,7 @@ model Pipeline {
   channels             Channel[]
   /// Motivos de perda vinculados a este funil (ordem = position).
   pipelineLossReasons  PipelineLossReason[]
+  stageDailySnapshots  DealStageDailySnapshot[]
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
   /// Soft-archive: "apagar pipeline" no CRM seta isso em vez de DELETE —
@@ -1436,6 +1438,7 @@ model Stage {
   pipelineId String
   pipeline   Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
   deals      Deal[]
+  dailySnapshots DealStageDailySnapshot[]
 
   @@unique([pipelineId, position])
   @@unique([pipelineId, slug])
@@ -1527,6 +1530,28 @@ enum DealStatus {
   OPEN
   WON
   LOST
+}
+
+/// Snapshot diário de negócios OPEN por etapa. Alimenta a evolução empilhada
+/// do Painel — o estado atual não reconstrói o passado.
+model DealStageDailySnapshot {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pipelineId     String
+  pipeline       Pipeline     @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  stageId        String
+  stage          Stage        @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  /// Dia civil America/Sao_Paulo, gravado como date.
+  date           DateTime     @db.Date
+  openCount      Int
+  openValue      Decimal      @default(0) @db.Decimal(14, 2)
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, stageId, date])
+  @@index([organizationId, pipelineId, date])
+  @@index([organizationId, date])
+  @@map("deal_stage_daily_snapshots")
 }
 
 // ──────────────────────────────────────────────
@@ -4833,6 +4858,8 @@ enum BulkOperationType {
   DEAL_IMPORT
   /// Encerra (resolve) múltiplas conversas em massa — processada pelo leads-worker.
   CONVERSATION_BULK_RESOLVE
+  /// Reatribui ou remove o responsável de várias conversas — leads-worker.
+  CONVERSATION_BULK_ASSIGN
 }
 
 enum BulkOperationStatus {

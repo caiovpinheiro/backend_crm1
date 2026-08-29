@@ -55,6 +55,8 @@ export type FFmpegCapabilities = {
   /** `libopus` presente na lista de encoders — obrigatório para transcodar PTT. */
   libopus: boolean;
   libmp3lame: boolean;
+  /** Encoder `aac` nativo (quase todo build, inclusive ffmpeg-static). */
+  aac: boolean;
 };
 
 let _caps: FFmpegCapabilities | undefined;
@@ -79,12 +81,13 @@ export function ffmpegCapabilities(): FFmpegCapabilities {
       bin,
       libopus: /\blibopus\b/.test(out),
       libmp3lame: /\blibmp3lame\b/.test(out),
+      aac: /(^|\s)aac\s/m.test(out) || /\baac\b/.test(out),
     };
   } catch {
-    _caps = { available: false, bin, libopus: false, libmp3lame: false };
+    _caps = { available: false, bin, libopus: false, libmp3lame: false, aac: false };
   }
   console.log(
-    `[audio-convert] ffmpeg=${_caps.available ? _caps.bin : "AUSENTE"} libopus=${_caps.libopus} libmp3lame=${_caps.libmp3lame}`,
+    `[audio-convert] ffmpeg=${_caps.available ? _caps.bin : "AUSENTE"} libopus=${_caps.libopus} libmp3lame=${_caps.libmp3lame} aac=${_caps.aac}`,
   );
   return _caps;
 }
@@ -95,75 +98,111 @@ const OGG_MAGIC = Buffer.from([0x4f, 0x67, 0x67, 0x53]); // "OggS"
 
 /**
  * Voice message Meta: OGG + OPUS, mono. 16 kHz / 20 ms / voip replica o PTT nativo.
- * 48 kHz e remux/experimental opus o iOS recusa.
+ * 48 kHz e remux/experimental opus o iOS recusa — mas tentamos 48k e copy
+ * ANTES de desistir: alguns WebM do Chrome só sobrevivem ao remux/`-ar 48000`.
  */
 function getConversionStrategies(): { label: string; args: string[] }[] {
   const caps = ffmpegCapabilities();
-  if (caps.available && !caps.libopus) {
-    // Build sem libopus: o encoder `opus` nativo é experimental (exige
-    // `-strict -2`) e gera Opus válido. Não é o ideal, mas é infinitamente
-    // melhor que falhar o envio — sem Opus não existe nota de voz na Meta.
-    return [
+  const strategies: { label: string; args: string[] }[] = [
+    {
+      label: "copy remux ogg (opus já no webm)",
+      args: ["-c:a", "copy", "-map_metadata", "-1", "-f", "ogg"],
+    },
+  ];
+
+  if (caps.libopus) {
+    strategies.push(
       {
-        label: "opus nativo (experimental, sem libopus)",
+        label: "libopus 48k voip",
         args: [
-          "-c:a", "opus",
-          "-strict", "-2",
+          "-c:a", "libopus",
           "-ac", "1",
           "-ar", "48000",
           "-b:a", "24k",
+          "-application", "voip",
           "-map_metadata", "-1",
           "-f", "ogg",
         ],
       },
-    ];
+      {
+        label: "libopus 16k voip 20ms",
+        args: [
+          "-c:a", "libopus",
+          "-ac", "1",
+          "-ar", "16000",
+          "-b:a", "24k",
+          "-application", "voip",
+          "-frame_duration", "20",
+          "-map_metadata", "-1",
+          "-f", "ogg",
+        ],
+      },
+      {
+        label: "libopus 16k voip",
+        args: [
+          "-c:a", "libopus",
+          "-ac", "1",
+          "-ar", "16000",
+          "-b:a", "24k",
+          "-application", "voip",
+          "-map_metadata", "-1",
+          "-f", "ogg",
+        ],
+      },
+    );
   }
-  return [
-    {
-      label: "libopus 16k voip 20ms",
-      args: [
-        "-c:a", "libopus",
-        "-ac", "1",
-        "-ar", "16000",
-        "-b:a", "24k",
-        "-application", "voip",
-        "-frame_duration", "20",
-        "-map_metadata", "-1",
-        "-f", "ogg",
-      ],
-    },
-    {
-      label: "libopus 16k voip",
-      args: [
-        "-c:a", "libopus",
-        "-ac", "1",
-        "-ar", "16000",
-        "-b:a", "24k",
-        "-application", "voip",
-        "-map_metadata", "-1",
-        "-f", "ogg",
-      ],
-    },
-  ];
+
+  strategies.push({
+    label: "opus nativo (experimental)",
+    args: [
+      "-c:a", "opus",
+      "-strict", "-2",
+      "-ac", "1",
+      "-ar", "48000",
+      "-b:a", "24k",
+      "-map_metadata", "-1",
+      "-f", "ogg",
+    ],
+  });
+
+  return strategies;
 }
 
-function runFFmpeg(bin: string, args: string[], timeoutMs = 30_000): Promise<{ ok: boolean; stderr: string }> {
+function ffmpegInputArgs(inputPath: string, inputExt: string): string[] {
+  const args = [
+    "-hide_banner",
+    "-nostdin",
+    "-fflags", "+genpts+igndts+discardcorrupt",
+    "-analyzeduration", "15M",
+    "-probesize", "15M",
+  ];
+  if (inputExt === "webm") args.push("-f", "webm");
+  args.push("-i", inputPath);
+  return args;
+}
+
+function runFFmpeg(bin: string, args: string[], timeoutMs = 20_000): Promise<{ ok: boolean; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout: timeoutMs }, (error, _stdout, stderr) => {
-      if (error) {
-        resolve({ ok: false, stderr: stderr?.slice(-500) ?? error.message });
-      } else {
-        resolve({ ok: true, stderr: stderr ?? "" });
-      }
-    });
+    execFile(
+      bin,
+      args,
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      (error, _stdout, stderr) => {
+        const errText = (stderr || "").toString();
+        if (error) {
+          const msg = error.killed ? "timeout" : error.message;
+          resolve({ ok: false, stderr: (errText.slice(-800) || msg) });
+        } else {
+          resolve({ ok: true, stderr: errText });
+        }
+      },
+    );
   });
 }
 
 /**
  * Converts any audio buffer to OGG/Opus via FFmpeg.
- * Só reencoda com libopus. Remux/experimental opus não entram mais:
- * o iOS recusa o PTT mesmo com OggS válido.
- * Returns the converted buffer, or null if libopus falhar.
+ * Returns the converted buffer, or null if every strategy fails.
  */
 export async function convertToOgg(
   inputBuffer: Buffer,
@@ -181,15 +220,16 @@ export async function convertToOgg(
 
     const bin = getFFmpeg();
     const strategies = getConversionStrategies();
+    const inputArgs = ffmpegInputArgs(inputPath, inputExt);
 
     for (const strategy of strategies) {
-      const fullArgs = ["-i", inputPath, "-vn", ...strategy.args, "-y", outputPath];
+      const fullArgs = [...inputArgs, "-vn", ...strategy.args, "-y", outputPath];
       console.log(`[ffmpeg] Tentando ${strategy.label}: ${bin} ${fullArgs.join(" ")}`);
 
-      const { ok, stderr } = await runFFmpeg(bin, fullArgs);
+      const { ok, stderr } = await runFFmpeg(bin, fullArgs, 20_000);
 
       if (!ok) {
-        console.warn(`[ffmpeg] Estrategia "${strategy.label}" falhou: ${stderr.slice(-200)}`);
+        console.warn(`[ffmpeg] Estrategia "${strategy.label}" falhou: ${stderr.slice(-300)}`);
         await unlink(outputPath).catch(() => {});
         continue;
       }
@@ -207,11 +247,18 @@ export async function convertToOgg(
         continue;
       }
 
+      const channels = oggOpusChannels(result);
+      if (channels !== null && channels !== 1) {
+        console.warn(`[ffmpeg] Estrategia "${strategy.label}" gerou Opus ${channels}ch — PTT exige mono`);
+        await unlink(outputPath).catch(() => {});
+        continue;
+      }
+
       console.log(`[ffmpeg] Conversao OK via "${strategy.label}": ${inputBuffer.length} -> ${result.length} bytes`);
       return result;
     }
 
-    console.error("[audio-convert] Todas as estrategias de conversao falharam");
+    console.error("[audio-convert] Todas as estrategias de conversao PTT falharam");
     return null;
   } catch (err) {
     console.error("[audio-convert] FFmpeg conversion error:", err instanceof Error ? err.message : err);
@@ -254,7 +301,7 @@ export async function convertToMp3(
 
     const bin = getFFmpeg();
     const args = [
-      "-i", inputPath,
+      ...ffmpegInputArgs(inputPath, inputExt),
       "-vn",
       "-acodec", "libmp3lame",
       "-ar", "44100",
@@ -289,6 +336,66 @@ export async function convertToMp3(
   }
 }
 
+/**
+ * Converte para AAC em MP4/M4A — formato `audio/mp4` da Cloud API (áudio
+ * comum, não PTT). O encoder `aac` nativo existe em praticamente todo
+ * ffmpeg, inclusive o `ffmpeg-static` que costuma vir sem libopus/lame.
+ */
+export async function convertToM4a(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.m4a`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+
+    const bin = getFFmpeg();
+    const args = [
+      ...ffmpegInputArgs(inputPath, inputExt),
+      "-vn",
+      "-c:a", "aac",
+      "-b:a", "64k",
+      "-ac", "1",
+      "-ar", "44100",
+      "-movflags", "+faststart",
+      "-y",
+      outputPath,
+    ];
+
+    console.log(`[ffmpeg] Convertendo pra M4A: ${bin} ${args.join(" ")}`);
+    const { ok, stderr } = await runFFmpeg(bin, args, 20_000);
+
+    if (!ok) {
+      console.warn(`[ffmpeg] Conversao M4A falhou: ${stderr.slice(-300)}`);
+      return null;
+    }
+    if (!existsSync(outputPath)) {
+      console.warn("[ffmpeg] M4A nao foi gerado");
+      return null;
+    }
+
+    const result = await readFile(outputPath);
+    if (result.length < 16 || result.toString("ascii", 4, 8) !== "ftyp") {
+      console.warn("[ffmpeg] M4A gerado sem ftyp — descartado");
+      return null;
+    }
+    console.log(`[ffmpeg] Conversao M4A OK: ${inputBuffer.length} -> ${result.length} bytes`);
+    return result;
+  } catch (err) {
+    console.error("[audio-convert] M4A conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
 function guessInputExtFromBuffer(buf: Buffer, mimeBase: string): string {
   if (buf.length >= 4 && buf.subarray(0, 4).equals(OGG_MAGIC)) return "ogg";
   if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
@@ -302,11 +409,14 @@ function guessInputExtFromBuffer(buf: Buffer, mimeBase: string): string {
   return guessInputExt(mimeBase);
 }
 
+export type AudioDelivery = "voice" | "audio" | "document";
+
 export type WhatsAppAudioPayload = {
   buffer: Buffer;
   mime: string;
   fileName: string;
   voice: boolean;
+  delivery: AudioDelivery;
 };
 
 function withAudioExt(name: string, ext: string): string {
@@ -317,6 +427,53 @@ function withAudioExt(name: string, ext: string): string {
 export type PrepareAudioResult =
   | { ok: true; payload: WhatsAppAudioPayload }
   | { ok: false; reason: string };
+
+function payload(
+  buffer: Buffer,
+  mime: string,
+  fileName: string,
+  delivery: AudioDelivery,
+): WhatsAppAudioPayload {
+  return { buffer, mime, fileName, voice: delivery === "voice", delivery };
+}
+
+/** MIME aceitos pela Cloud API como `type: audio` sem `voice: true`. */
+const WHATSAPP_PLAIN_AUDIO_MIME = new Set([
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/amr",
+  "audio/ogg",
+  "audio/ogg; codecs=opus",
+  "audio/opus",
+]);
+
+function asPlainAudio(
+  buffer: Buffer,
+  mime: string,
+  fileName: string,
+): PrepareAudioResult | null {
+  if (!buffer.length || buffer.length > WHATSAPP_AUDIO_MAX_BYTES) return null;
+  const base = mime.split(";")[0].trim().toLowerCase();
+  if (!WHATSAPP_PLAIN_AUDIO_MIME.has(base) && !WHATSAPP_PLAIN_AUDIO_MIME.has(mime.toLowerCase())) {
+    return null;
+  }
+  const uploadMime =
+    base === "audio/ogg" || base === "audio/opus" ? WHATSAPP_VOICE_MIME : mime;
+  return { ok: true, payload: payload(buffer, uploadMime, fileName, "audio") };
+}
+
+function asDocument(buffer: Buffer, _mime: string, fileName: string): PrepareAudioResult {
+  return {
+    ok: true,
+    payload: payload(
+      buffer,
+      "application/octet-stream",
+      fileName || "audio.bin",
+      "document",
+    ),
+  };
+}
 
 /** Aplica o layout de nota de voz nativa e valida o resultado final. */
 function finalizeVoiceOgg(ogg: Buffer, originalName: string): PrepareAudioResult {
@@ -342,33 +499,27 @@ function finalizeVoiceOgg(ogg: Buffer, originalName: string): PrepareAudioResult
 
   return {
     ok: true,
-    payload: {
-      buffer: packed,
-      mime: WHATSAPP_VOICE_MIME,
-      fileName: withAudioExt(originalName, "ogg"),
-      voice: true,
-    },
+    payload: payload(packed, WHATSAPP_VOICE_MIME, withAudioExt(originalName, "ogg"), "voice"),
   };
 }
 
 /**
- * Áudio de saída WhatsApp (Cloud API e Baileys) — mensagem de voz, nunca document.
+ * Áudio de saída WhatsApp (Cloud API e Baileys).
  *
- * Meta (audio-messages):
- *   - Voice: .ogg OPUS, mono, `voice: true`. Outro codec/container falha transcrição.
- *   - MIME: `audio/ogg; codecs=opus` (base `audio/ogg` não é suportado).
- *   - Extensão .ogg tem que bater com o MIME.
- *   - Máx. 16 MB. Ícone de play só até 512 KB.
+ * Primário: nota de voz Ogg/Opus (`voice: true` / PTT).
+ * Fallback obrigatório: se a conversão PTT falhar por qualquer motivo,
+ * envia áudio tocável (m4a/mp3/ogg) ou, por último, documento — o agente
+ * nunca fica bloqueado com toast vermelho de FFmpeg.
  *
- * Ordem das estratégias:
- *   1. Já é Ogg/Opus → só reempacota. Zero dependência externa.
- *   2. WebM/Opus (todo `MediaRecorder` de Chromium/Firefox) → troca de
- *      container em JS puro. Lossless e também sem depender de ffmpeg — este é
- *      o caminho de 99% das notas de voz gravadas no CRM.
- *   3. Qualquer outro container/codec (mp3, m4a, wav, amr) → transcode Opus
- *      via ffmpeg, que aqui é a única etapa que precisa do binário.
- *
- * Sem fallback AAC/MP3: isso vira "basic audio" (arquivo AUD-… + fone).
+ * Ordem:
+ *   1. Já é Ogg/Opus mono → reempacota (sem ffmpeg).
+ *   2. WebM/Opus mono (MediaRecorder) → remux JS WebM→Ogg (sem ffmpeg).
+ *   3. FFmpeg: copy remux, libopus 48k/16k, opus experimental.
+ *   4. FFmpeg AAC/M4A (áudio comum).
+ *   5. FFmpeg MP3.
+ *   6. Ogg remuxado (mesmo estéreo) como áudio sem PTT.
+ *   7. Original se já for mpeg/mp4/aac/amr/ogg.
+ *   8. Documento com o arquivo original.
  */
 export async function prepareWhatsAppAudio(
   inputBuffer: Buffer,
@@ -377,56 +528,111 @@ export async function prepareWhatsAppAudio(
 ): Promise<PrepareAudioResult> {
   if (!inputBuffer.length) return { ok: false, reason: "Arquivo de áudio vazio." };
 
-  const ext = guessInputExtFromBuffer(inputBuffer, mimeFromExtension(inputExt) || `audio/${inputExt}`);
+  const sourceMime = mimeFromExtension(inputExt) || `audio/${inputExt}`;
+  const ext = guessInputExtFromBuffer(inputBuffer, sourceMime);
+  let pttReason = "não foi possível gerar Ogg/Opus";
+  let remuxedOgg: Buffer | null = null;
 
   if (isOggOpus(inputBuffer)) {
     console.log("[audio-convert] entrada já é Ogg/Opus — reempacotando sem transcode");
     const direct = finalizeVoiceOgg(inputBuffer, originalName);
     if (direct.ok) return direct;
+    pttReason = direct.reason;
+    remuxedOgg = inputBuffer;
     console.warn(`[audio-convert] reempacote direto rejeitado: ${direct.reason}`);
   }
 
   if (ext === "webm") {
     const track = demuxWebmOpus(inputBuffer);
-    if (track && track.channels === 1) {
+    if (track) {
       try {
         const remuxed = muxOggOpus(track.opusHead, track.packets);
+        remuxedOgg = remuxed;
         console.log(
-          `[audio-convert] remux WebM/Opus -> Ogg/Opus sem ffmpeg: ${inputBuffer.length} -> ${remuxed.length} bytes (${track.packets.length} pacotes)`,
+          `[audio-convert] remux WebM/Opus -> Ogg/Opus sem ffmpeg: ${inputBuffer.length} -> ${remuxed.length} bytes (${track.packets.length} pacotes, ch=${track.channels})`,
         );
-        const result = finalizeVoiceOgg(remuxed, originalName);
-        if (result.ok) return result;
-        console.warn(`[audio-convert] remux rejeitado: ${result.reason}`);
+        if (track.channels === 1) {
+          const result = finalizeVoiceOgg(remuxed, originalName);
+          if (result.ok) return result;
+          pttReason = result.reason;
+          console.warn(`[audio-convert] remux rejeitado como PTT: ${result.reason}`);
+        } else {
+          pttReason = `WebM/Opus com ${track.channels} canais — precisa transcode pra mono`;
+          console.log(`[audio-convert] ${pttReason}`);
+        }
       } catch (err) {
-        console.warn(
-          "[audio-convert] remux WebM/Opus falhou, caindo pro ffmpeg:",
-          err instanceof Error ? err.message : err,
-        );
+        pttReason = err instanceof Error ? err.message : "remux WebM falhou";
+        console.warn("[audio-convert] remux WebM/Opus falhou, caindo pro ffmpeg:", pttReason);
       }
-    } else if (track) {
-      console.log(`[audio-convert] WebM/Opus com ${track.channels} canais — transcodando pra mono`);
+    } else {
+      pttReason = "demultiplexador JS não leu Opus neste WebM";
+      console.warn(`[audio-convert] ${pttReason} — caindo pro ffmpeg`);
     }
   }
 
   const caps = ffmpegCapabilities();
-  if (!caps.available) {
-    return {
-      ok: false,
-      reason: `Formato ${ext} exige transcode e o FFmpeg não está instalado no servidor.`,
-    };
-  }
-
-  const ogg = await convertToOgg(inputBuffer, ext);
-  if (!ogg || !isOggOpus(ogg)) {
-    return {
-      ok: false,
-      reason: caps.libopus
+  if (caps.available) {
+    const ogg = await convertToOgg(inputBuffer, ext);
+    if (ogg && isOggOpus(ogg)) {
+      const finalized = finalizeVoiceOgg(ogg, originalName);
+      if (finalized.ok) return finalized;
+      pttReason = finalized.reason;
+      remuxedOgg = remuxedOgg ?? ogg;
+      console.warn(`[audio-convert] ffmpeg PTT rejeitado: ${finalized.reason}`);
+    } else {
+      pttReason = caps.libopus
         ? `FFmpeg não conseguiu converter este ${ext} para Ogg/Opus.`
-        : "FFmpeg instalado sem libopus — não é possível gerar Ogg/Opus para nota de voz.",
-    };
+        : "FFmpeg instalado sem libopus — não é possível gerar Ogg/Opus para nota de voz.";
+      console.warn(`[audio-convert] ${pttReason} — tentando áudio comum`);
+    }
+  } else {
+    pttReason = `Formato ${ext} exige transcode e o FFmpeg não está instalado no servidor.`;
+    console.warn(`[audio-convert] ${pttReason} — tentando áudio comum / documento`);
   }
 
-  return finalizeVoiceOgg(ogg, originalName);
+  if (caps.available && caps.aac) {
+    const m4a = await convertToM4a(inputBuffer, ext);
+    if (m4a) {
+      console.log("[audio-convert] fallback M4A/AAC (não é nota de voz)");
+      return {
+        ok: true,
+        payload: payload(m4a, "audio/mp4", withAudioExt(originalName, "m4a"), "audio"),
+      };
+    }
+  }
+
+  if (caps.available && caps.libmp3lame) {
+    const mp3 = await convertToMp3(inputBuffer, ext);
+    if (mp3) {
+      console.log("[audio-convert] fallback MP3 (não é nota de voz)");
+      return {
+        ok: true,
+        payload: payload(mp3, "audio/mpeg", withAudioExt(originalName, "mp3"), "audio"),
+      };
+    }
+  }
+
+  if (remuxedOgg && remuxedOgg.length <= WHATSAPP_AUDIO_MAX_BYTES) {
+    console.log("[audio-convert] fallback Ogg/Opus sem PTT");
+    const plain = asPlainAudio(remuxedOgg, WHATSAPP_VOICE_MIME, withAudioExt(originalName, "ogg"));
+    if (plain) return plain;
+  }
+
+  const originalMime =
+    mimeFromExtension(ext) || mimeFromExtension(inputExt) || sourceMime;
+  const originalNameWithExt = originalName.includes(".")
+    ? originalName
+    : withAudioExt(originalName, ext === "bin" ? "webm" : ext);
+  const plainOriginal = asPlainAudio(inputBuffer, originalMime, originalNameWithExt);
+  if (plainOriginal) {
+    console.log(`[audio-convert] fallback original ${originalMime} (não é nota de voz)`);
+    return plainOriginal;
+  }
+
+  console.warn(
+    `[audio-convert] PTT e áudio comum falharam (${pttReason}) — enviando como documento`,
+  );
+  return asDocument(inputBuffer, originalMime.startsWith("audio/") ? originalMime : "application/octet-stream", originalNameWithExt);
 }
 
 /**
