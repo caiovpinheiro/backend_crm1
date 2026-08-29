@@ -47,6 +47,39 @@ import { logRateLimitReject } from "@/lib/rate-limit-reject-log";
 
 const log = getLogger("rate-limit");
 
+/** Janela em que erros de Redis "not writeable" viram 1 warn, não 1 error/request. */
+const REDIS_UNAVAILABLE_LOG_WINDOW_MS = 15_000;
+let lastRedisUnavailableLogAt = 0;
+let redisUnavailableHits = 0;
+
+function isRedisOfflineError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /isn't writeable|enableOfflineQueue|ECONNREFUSED|ETIMEDOUT|Connection is closed/i.test(
+    msg,
+  );
+}
+
+/** Fail-open permanece; só reduz spam no boot/reconnect. */
+export function logRedisUnavailableOnce(
+  err: unknown,
+  msg: string,
+  extra?: Record<string, unknown>,
+): void {
+  redisUnavailableHits += 1;
+  const now = Date.now();
+  const offline = isRedisOfflineError(err);
+  if (offline && now - lastRedisUnavailableLogAt < REDIS_UNAVAILABLE_LOG_WINDOW_MS) {
+    return;
+  }
+  lastRedisUnavailableLogAt = now;
+  const payload = { err, ...extra, sampledHits: redisUnavailableHits, failOpen: true };
+  if (offline) {
+    log.warn(payload, msg);
+  } else {
+    log.error(payload, msg);
+  }
+}
+
 /** Default do perfil `api.session`. Override: `SESSION_RATE_LIMIT_RPM`. */
 export const DEFAULT_SESSION_RATE_LIMIT_RPM = 600;
 
@@ -133,7 +166,7 @@ function getRedisOrNull(): import("ioredis").Redis | null {
       lazyConnect: false,
     });
     sharedRedis!.on("error", (err: Error) => {
-      log.warn({ err }, "Redis rate-limit indisponível — fallback memória");
+      logRedisUnavailableOnce(err, "Redis rate-limit indisponível — fallback memória");
     });
     return sharedRedis;
   } catch (err) {
@@ -220,10 +253,11 @@ export async function consumeRateLimit(
     if (err instanceof Error && !("remainingPoints" in err)) {
       // Fail-open de propósito: fail-closed travaria todos os usuários se o
       // Redis cair. Não inverter o default sem teto memória conservador +
-      // circuito. Log alto pra o alerta de infra pegar a janela sem teto.
-      log.error(
-        { err, profile, key, failOpen: true },
+      // circuito. Durante reconnect (boot) um warn amostrado basta.
+      logRedisUnavailableOnce(
+        err,
         "Rate-limit infra error — FAIL-OPEN (pedido permitido). Redis down não deve derrubar a API.",
+        { profile, key },
       );
       metrics.errors.inc({
         scope: "rate-limit",

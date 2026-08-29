@@ -189,7 +189,10 @@ function getClient(): IORedisClient | null {
       },
     });
     redis.on("error", (err) => {
-      log.warn({ err }, "[cache] redis client error (continuando com fallback)");
+      if (Date.now() - lastCircuitLogAt > 5_000) {
+        lastCircuitLogAt = Date.now();
+        log.warn({ err }, "[cache] redis client error (continuando com fallback)");
+      }
       if (isTimeoutError(err)) resetClient();
     });
     return redis;

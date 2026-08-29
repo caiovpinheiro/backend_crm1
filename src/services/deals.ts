@@ -7,7 +7,7 @@ import {
 
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { allocateOrgNumber, prisma, type ScopedTx } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrg, withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgSettingBool } from "@/lib/org-settings";
@@ -222,8 +222,10 @@ export function createDealEvent(
   // não existem em `users` quebram `deal_events_userId_fkey`. Schema
   // permite null — não inventar user.
   const safeUserId = userIdForFk(userId);
+  const orgId = getOrgIdOrNull();
 
   // Fire-and-forget para o novo log — falhas nao afetam o legado.
+  // Snapshot do orgId agora: `void logEvent` pode correr depois do ALS.
   void logEvent({
     type,
     entityType: "DEAL",
@@ -233,16 +235,21 @@ export function createDealEvent(
     oldValue,
     newValue,
     meta,
+    organizationId: orgId,
     ...(actorOverride ? { actor: actorOverride } : {}),
   });
 
+  if (!orgId) {
+    return Promise.resolve();
+  }
+
   return prisma.dealEvent
     .create({
-      data: withOrgFromCtx({ dealId, userId: safeUserId, type, meta: metaJson }),
+      data: withOrg({ dealId, userId: safeUserId, type, meta: metaJson }, orgId),
     })
     .catch(() =>
       prisma.dealEvent.create({
-        data: withOrgFromCtx({ dealId, userId: null, type, meta: metaJson }),
+        data: withOrg({ dealId, userId: null, type, meta: metaJson }, orgId),
       }),
     );
 }

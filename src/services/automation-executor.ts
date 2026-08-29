@@ -2442,6 +2442,20 @@ async function executeStep(
         resolvedTagId = tag.id;
       }
       if (!resolvedTagId) throw new Error("add_tag: tagId ou tagName obrigatório");
+      const orgIdForTag = getOrgIdOrNull();
+      const tagInOrg = await prisma.tag.findFirst({
+        where: {
+          id: resolvedTagId,
+          ...(orgIdForTag ? { organizationId: orgIdForTag } : {}),
+        },
+        select: { id: true },
+      });
+      if (!tagInOrg) {
+        log.warn(
+          `add_tag: tag ${resolvedTagId} inexistente ou fora da org — pulando (não derruba o fluxo)`,
+        );
+        return {};
+      }
       await prisma.tagOnContact.upsert({
         where: { contactId_tagId: { contactId: targetContactId, tagId: resolvedTagId } },
         create: { contactId: targetContactId, tagId: resolvedTagId },
@@ -2465,11 +2479,22 @@ async function executeStep(
           })
           .then((d) => d?.id));
       if (targetDealId) {
-        await prisma.tagOnDeal.upsert({
-          where: { dealId_tagId: { dealId: targetDealId, tagId: resolvedTagId } },
-          create: { dealId: targetDealId, tagId: resolvedTagId },
-          update: {},
-        });
+        try {
+          await prisma.tagOnDeal.upsert({
+            where: { dealId_tagId: { dealId: targetDealId, tagId: resolvedTagId } },
+            create: { dealId: targetDealId, tagId: resolvedTagId },
+            update: {},
+          });
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code === "P2003") {
+            log.warn(
+              `add_tag: FK tag/deal ausente (deal=${targetDealId} tag=${resolvedTagId}) — pulando`,
+            );
+          } else {
+            throw err;
+          }
+        }
       }
       return {};
     }

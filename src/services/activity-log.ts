@@ -9,7 +9,7 @@
  * Caracteristicas:
  *   - Fire-and-forget: nunca derruba a request principal. Erros sao
  *     logados em console.warn e suprimidos.
- *   - Org-scoped: usa `withOrgFromCtx`, herdando a org da extension.
+ *   - Org-scoped: `organizationId` explícito ou herdado do RequestContext.
  *   - Idempotente em relacao ao ator: se nao houver `actor` no contexto,
  *     deriva um default sensato (HUMAN se houver `userId` real, SYSTEM
  *     caso contrario).
@@ -21,7 +21,7 @@ import type { ActorType, EventEntityType, Prisma } from "@prisma/client";
 
 import { getAutomationOrigin } from "@/lib/automation-origin";
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrg } from "@/lib/prisma-helpers";
 import {
   getActorContext,
   getRequestContext,
@@ -76,6 +76,10 @@ export type LogEventInput = {
   /// (ex.: worker de automation que recebe o actor por payload),
   /// pode forcar aqui em vez de mexer no RequestContext.
   actor?: ContextActor;
+
+  /// Org explícita — use quando o caller está fora de `withOrgContext`
+  /// ou o ALS pode já ter sido encerrado (ex.: `void logEvent` após delete).
+  organizationId?: string | null;
 };
 
 /**
@@ -176,26 +180,37 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   try {
     const actor = resolveActor(input);
     const metaJson = withAutomationOriginMeta(input.meta);
+    const orgId =
+      input.organizationId ?? getRequestContext()?.organizationId ?? null;
+    if (!orgId) {
+      throw new Error(
+        "[withOrgFromCtx] RequestContext sem organizationId. " +
+          "Envolva o handler em withOrgContext ou passe organizationId.",
+      );
+    }
 
     await prisma.activityEvent.create({
-      data: withOrgFromCtx({
-        type: input.type,
-        entityType: input.entityType,
-        entityId: input.entityId,
-        entityLabel: input.entityLabel ?? null,
-        dealId: input.dealId ?? null,
-        contactId: input.contactId ?? null,
-        conversationId: input.conversationId ?? null,
-        actorType: actor.actorType,
-        actorUserId: actor.actorUserId,
-        actorLabel: actor.actorLabel,
-        actorSublabel: actor.actorSublabel,
-        actorRef: actor.actorRef,
-        field: input.field ?? null,
-        oldValue: input.oldValue ?? null,
-        newValue: input.newValue ?? null,
-        meta: metaJson,
-      }),
+      data: withOrg(
+        {
+          type: input.type,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          entityLabel: input.entityLabel ?? null,
+          dealId: input.dealId ?? null,
+          contactId: input.contactId ?? null,
+          conversationId: input.conversationId ?? null,
+          actorType: actor.actorType,
+          actorUserId: actor.actorUserId,
+          actorLabel: actor.actorLabel,
+          actorSublabel: actor.actorSublabel,
+          actorRef: actor.actorRef,
+          field: input.field ?? null,
+          oldValue: input.oldValue ?? null,
+          newValue: input.newValue ?? null,
+          meta: metaJson,
+        },
+        orgId,
+      ),
     });
     await mirrorConversationChatEvent({
       type: input.type,

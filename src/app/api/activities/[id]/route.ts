@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { deleteActivity, getActivityById, isValidActivityType, updateActivity } from "@/services/activities";
 import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
@@ -22,28 +22,28 @@ function viewerFromSession(user: {
   };
 }
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
 
-    const { id } = await context.params;
-    if (!id) {
-      return NextResponse.json({ message: "ID inválido." }, { status: 400 });
-    }
+    return await runWithApiUserContext(authResult.user, async () => {
+      const { id } = await context.params;
+      if (!id) {
+        return NextResponse.json({ message: "ID inválido." }, { status: 400 });
+      }
 
-    const activity = await getActivityById(id);
-    if (!activity) {
-      return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
-    }
+      const activity = await getActivityById(id);
+      if (!activity) {
+        return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+      }
 
-    if (!(await canAccessActivity(viewerFromSession(session.user as never), activity))) {
-      return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
-    }
+      if (!(await canAccessActivity(viewerFromSession(authResult.user), activity))) {
+        return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+      }
 
-    return NextResponse.json(activity);
+      return NextResponse.json(activity);
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao buscar atividade." }, { status: 500 });
@@ -52,11 +52,10 @@ export async function GET(_request: Request, context: RouteContext) {
 
 export async function PUT(request: Request, context: RouteContext) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -80,7 +79,7 @@ export async function PUT(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
     }
 
-    if (!(await canAccessActivity(viewerFromSession(session.user as never), existing))) {
+    if (!(await canAccessActivity(viewerFromSession(authResult.user), existing))) {
       return NextResponse.json({ message: "Sem permissão para editar esta tarefa." }, { status: 403 });
     }
 
@@ -164,7 +163,8 @@ export async function PUT(request: Request, context: RouteContext) {
       const targetDealId = typeof b.dealId === "string" ? b.dealId : existing.dealId;
       const targetContactId =
         typeof b.contactId === "string" ? b.contactId : existing.contactId;
-      const uid = session.user.id as string;
+      const uid = authResult.user.id;
+      const orgId = existing.organizationId ?? authResult.user.organizationId;
 
       // Emissor granular de eventos de tarefa. Antes só logávamos quando
       // havia deal (createDealEvent), e com um único ACTIVITY_UPDATED
@@ -199,6 +199,7 @@ export async function PUT(request: Request, context: RouteContext) {
             oldValue: oldV ?? null,
             newValue: newV ?? null,
             meta,
+            organizationId: orgId,
           });
         }
       };
@@ -284,6 +285,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       throw err;
     }
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e) {
@@ -299,13 +301,12 @@ export async function PUT(request: Request, context: RouteContext) {
   }
 }
 
-export async function DELETE(_request: Request, context: RouteContext) {
+export async function DELETE(request: Request, context: RouteContext) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -316,13 +317,14 @@ export async function DELETE(_request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
     }
 
-    if (!(await canAccessActivity(viewerFromSession(session.user as never), existing))) {
+    if (!(await canAccessActivity(viewerFromSession(authResult.user), existing))) {
       return NextResponse.json({ message: "Sem permissão para excluir esta tarefa." }, { status: 403 });
     }
 
     await deleteActivity(id);
 
-    const uid = session.user.id as string;
+    const uid = authResult.user.id;
+    const orgId = existing.organizationId ?? authResult.user.organizationId;
     if (existing.dealId) {
       createDealEvent(existing.dealId, uid, "ACTIVITY_DELETED", {
         title: existing.title,
@@ -337,10 +339,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
         entityLabel: existing.title,
         contactId: existing.contactId ?? null,
         meta: { title: existing.title, activityType: existing.type },
+        organizationId: orgId,
       });
     }
 
     return NextResponse.json({ ok: true });
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
