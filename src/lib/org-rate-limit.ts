@@ -37,7 +37,7 @@ import {
   ORG_RATE_LIMIT_WINDOW_MS,
   type OrgRpmLane,
 } from "@/lib/org-rate-limit-config";
-import { getRateLimitRedis } from "@/lib/rate-limit";
+import { getRateLimitRedis, logRedisUnavailableOnce } from "@/lib/rate-limit";
 import {
   logRateLimitReject,
   resetRateLimitRejectLogForTests,
@@ -198,7 +198,7 @@ export async function consumeOrgRpm(
     );
     return parseLua(raw, limit, now);
   } catch (err) {
-    log.error({ err, key }, "ORG RPM Redis error — fail-open");
+    logRedisUnavailableOnce(err, "ORG RPM Redis error — fail-open", { key });
     return toDecision(true, limit, limit, 0, now);
   }
 }

@@ -70,41 +70,35 @@ export async function recordHeartbeat(params: {
     return { sessionId: open?.id ?? "", created: false };
   }
 
-  // Sem sessão aberta: cria uma. Rely no partial unique index para
-  // race condition (duas abas em paralelo no primeiro ping).
-  try {
-    const created = await prismaBase.systemUsageSession.create({
-      data: {
-        userId,
-        organizationId,
-        startedAt: at,
-        lastHeartbeatAt: at,
-      },
-      select: { id: true },
-    });
+  // Sem sessão aberta: INSERT … ON CONFLICT no partial unique
+  // (`system_usage_sessions_open_per_user_uq`). Dois pings em paralelo
+  // no primeiro heartbeat não podem gerar P2002/23505 — o perdedor
+  // reusa a sessão e só o insert emite SSE.
+  const id = crypto.randomUUID();
+  const rows = await prismaBase.$queryRaw<
+    Array<{ id: string; created: boolean }>
+  >`
+    INSERT INTO "system_usage_sessions"
+      ("id", "organizationId", "userId", "startedAt", "lastHeartbeatAt", "endedAt", "createdAt", "updatedAt")
+    VALUES
+      (${id}, ${organizationId}, ${userId}, ${at}, ${at}, NULL, ${at}, ${at})
+    ON CONFLICT ("userId") WHERE ("endedAt" IS NULL)
+    DO UPDATE SET
+      "lastHeartbeatAt" = EXCLUDED."lastHeartbeatAt",
+      "updatedAt" = EXCLUDED."updatedAt"
+    RETURNING "id", (xmax = 0) AS created
+  `;
+  const row = rows[0];
+  if (row?.created) {
     sseBus.publish("system_presence_update", {
       organizationId,
       userId,
       systemOnline: true,
       lastSeenAt: at.toISOString(),
     });
-    return { sessionId: created.id, created: true };
-  } catch (err) {
-    // Race: outro ping criou primeiro (P2002 no partial unique).
-    // Faz update por segurança e retorna sem criar SSE duplicado.
-    if ((err as { code?: string }).code === "P2002") {
-      await prismaBase.systemUsageSession.updateMany({
-        where: { userId, organizationId, endedAt: null },
-        data: { lastHeartbeatAt: at },
-      });
-      const open = await prismaBase.systemUsageSession.findFirst({
-        where: { userId, organizationId, endedAt: null },
-        select: { id: true },
-      });
-      return { sessionId: open?.id ?? "", created: false };
-    }
-    throw err;
+    return { sessionId: row.id, created: true };
   }
+  return { sessionId: row?.id ?? "", created: false };
 }
 
 /**

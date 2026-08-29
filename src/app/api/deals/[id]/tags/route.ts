@@ -53,9 +53,9 @@ export async function POST(request: Request, ctx: Ctx) {
         return NextResponse.json({ message: "tagId ou tagName obrigatório." }, { status: 400 });
       }
 
+      const orgId = getOrgIdOrThrow();
       let resolvedTagId = tagId;
       if (!resolvedTagId) {
-        const orgId = getOrgIdOrThrow();
         const existingTag = await prisma.tag.findUnique({
           where: { organizationId_name: { organizationId: orgId, name: tagName } },
         });
@@ -70,6 +70,14 @@ export async function POST(request: Request, ctx: Ctx) {
             data: withOrgFromCtx({ name: tagName, color: tagColor || undefined }),
           });
           resolvedTagId = tag.id;
+        }
+      } else {
+        const tagInOrg = await prisma.tag.findFirst({
+          where: { id: resolvedTagId, organizationId: orgId },
+          select: { id: true },
+        });
+        if (!tagInOrg) {
+          return NextResponse.json({ message: "Tag não encontrada." }, { status: 404 });
         }
       }
 
@@ -97,6 +105,10 @@ export async function POST(request: Request, ctx: Ctx) {
       await invalidateDealBoardCache(existing);
       return NextResponse.json({ ok: true });
     } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code === "P2003") {
+        return NextResponse.json({ message: "Tag não encontrada." }, { status: 404 });
+      }
       return NextResponse.json({ message: e instanceof Error ? e.message : "Erro." }, { status: 500 });
     }
   });
