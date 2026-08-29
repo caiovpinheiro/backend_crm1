@@ -71,8 +71,8 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   },
   {
     key: "team-chat",
-    title: "Rely",
-    href: "/rely",
+    title: "Bwipo Chat",
+    href: "/bwipo-chat",
     locked: false,
     requiredPermission: "nav:team-chat",
   },
