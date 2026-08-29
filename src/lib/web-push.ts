@@ -24,9 +24,11 @@ import { prisma } from "@/lib/prisma";
  */
 
 let configured = false;
+let checked = false;
 
 function ensureConfigured(): boolean {
-  if (configured) return true;
+  if (checked) return configured;
+  checked = true;
   const publicKey = process.env.VAPID_PUBLIC_KEY?.trim();
   const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
   const subject =
