@@ -1670,3 +1670,140 @@ export async function withConversationNumberRetry<T>(
     )
   );
 }
+
+/** Lotes até este tamanho fecham na API — não dependem do leads-worker. */
+export const BULK_RESOLVE_SYNC_LIMIT = 50;
+
+export type BulkResolveTabulation = {
+  tabulationId: string;
+  departmentId: string;
+  name: string;
+  number: number;
+  ancestorIds: string[];
+};
+
+/**
+ * Encerra conversas no processo HTTP (mesmo caminho do kebab individual).
+ * Usado no bulk quando o lote cabe no limite — o toast "ok" só sai depois
+ * do status RESOLVED + closedAt no banco, sem esperar Redis/worker.
+ */
+export async function resolveConversationsInline(params: {
+  ids: string[];
+  keepAgent: boolean;
+  keepDepartment: boolean;
+  tabulation?: BulkResolveTabulation | null;
+  skipAutomations?: boolean;
+}): Promise<{ updated: number }> {
+  const tab = params.tabulation ?? null;
+  let updated = 0;
+
+  for (const id of params.ids) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        contactId: true,
+        departmentId: true,
+        organizationId: true,
+        externalId: true,
+        contact: { select: { id: true } },
+      },
+    });
+    if (!conv || conv.status === "RESOLVED") continue;
+
+    const applyTab =
+      Boolean(tab) &&
+      (!conv.departmentId || conv.departmentId === tab!.departmentId);
+
+    const row = await updateConversationStatusInDb(id, "RESOLVED", {
+      tabulationId: applyTab && tab ? tab.tabulationId : undefined,
+      clearAssignedTo: !params.keepAgent,
+      clearDepartment: !params.keepDepartment,
+    });
+
+    await logEvent({
+      type: "CONVERSATION_CLOSED",
+      entityType: "CONVERSATION",
+      entityId: id,
+      entityLabel: row.externalId ?? null,
+      conversationId: id,
+      contactId: conv.contactId,
+      field: "status",
+      oldValue: conv.status,
+      newValue: "RESOLVED",
+      meta: {
+        from: conv.status,
+        to: "RESOLVED",
+        source: "bulk-sync",
+        ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
+        ...(params.skipAutomations ? { skipAutomations: true } : {}),
+      },
+    });
+
+    if (applyTab && tab) {
+      const { tabulationLogMeta } = await import("@/services/tabulations");
+      void logEvent({
+        type: "CONVERSATION_TABULATED",
+        entityType: "CONVERSATION",
+        entityId: id,
+        entityLabel: row.externalId ?? null,
+        conversationId: id,
+        contactId: conv.contactId,
+        meta: tabulationLogMeta(
+          {
+            tabulationId: tab.tabulationId,
+            ancestorIds: tab.ancestorIds,
+            departmentId: tab.departmentId,
+            name: tab.name,
+            number: tab.number,
+          },
+          { source: "bulk-sync" },
+        ),
+      });
+    }
+
+    if (!params.skipAutomations) {
+      void (async () => {
+        const { fireTrigger } = await import("@/services/automation-triggers");
+        let dealId: string | undefined;
+        if (conv.contactId) {
+          const deal = await prisma.deal.findFirst({
+            where: { contactId: conv.contactId, status: "OPEN" },
+            orderBy: { createdAt: "desc" },
+            select: { id: true },
+          });
+          dealId = deal?.id;
+        }
+        await fireTrigger("conversation_tabulated", {
+          contactId: conv.contactId ?? undefined,
+          dealId,
+          data: {
+            tabulationId: applyTab && tab ? tab.tabulationId : null,
+            ancestorIds: applyTab && tab ? tab.ancestorIds : [],
+            departmentId: conv.departmentId ?? tab?.departmentId ?? null,
+            conversationId: id,
+          },
+        });
+      })().catch(() => {});
+    }
+
+    try {
+      sseBus.publish("conversation_updated", {
+        organizationId: conv.organizationId,
+        conversationId: id,
+      });
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId: conv.organizationId,
+        conversationId: id,
+        type: "CONVERSATION_CLOSED",
+      });
+    } catch {
+      /* best-effort */
+    }
+
+    updated += 1;
+  }
+
+  return { updated };
+}

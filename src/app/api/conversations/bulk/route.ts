@@ -10,8 +10,10 @@ import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
+  BULK_RESOLVE_SYNC_LIMIT,
   getFilteredConversationIds,
   getResolvableConversationIds,
+  resolveConversationsInline,
   type InboxTab,
 } from "@/services/conversations";
 import { resolveTabulationForStep } from "@/services/tabulations";
@@ -229,6 +231,31 @@ export async function POST(request: Request) {
             getOrgSettingBool("conversation.keepAgentOnEnd", false),
             getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
           ]);
+
+          // Lote pequeno: fecha aqui (mesmo update do kebab). Sem worker,
+          // o enqueue devolvia 202 + toast "ok" e as conversas ficavam OPEN.
+          if (targetIds.length <= BULK_RESOLVE_SYNC_LIMIT) {
+            const { updated } = await resolveConversationsInline({
+              ids: targetIds,
+              keepAgent,
+              keepDepartment,
+              tabulation: chosenTab
+                ? {
+                    tabulationId: chosenTab.tabulationId,
+                    departmentId: chosenTab.departmentId,
+                    name: chosenTab.name,
+                    number: chosenTab.number,
+                    ancestorIds: chosenTab.ancestorIds,
+                  }
+                : null,
+              skipAutomations,
+            });
+            return NextResponse.json({
+              updated,
+              skipped: skippedIds,
+              action: "resolve",
+            });
+          }
 
           const operation = await prisma.bulkOperation.create({
             data: {
