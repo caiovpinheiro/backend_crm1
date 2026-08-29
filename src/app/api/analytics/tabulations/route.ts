@@ -9,6 +9,24 @@ function parseDate(raw: string | null): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** CSV, chave repetida, ou singular (`actorUserId` / `departmentId`). */
+function parseIdList(sp: URLSearchParams, ...keys: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of keys) {
+    for (const raw of sp.getAll(key)) {
+      for (const part of raw.split(",")) {
+        const id = part.trim();
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          out.push(id);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * `withOrgContext` (runWithContext) e nao `requireManager` (enterWith): o
  * servico chama `getOrgIdOrThrow()`, e o contexto ativado por enterWith nao
@@ -33,8 +51,8 @@ export async function GET(request: Request) {
         parseDate(searchParams.get("from")) ??
         new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       const to = parseDate(searchParams.get("to")) ?? now;
-      const actorUserId = searchParams.get("actorUserId");
-      const departmentId = searchParams.get("departmentId");
+      const actorUserIds = parseIdList(searchParams, "actorUserIds", "actorUserId");
+      const departmentIds = parseIdList(searchParams, "departmentIds", "departmentId");
       const tabulationId = searchParams.get("tabulationId");
       const page = Number(searchParams.get("page") ?? "1");
       const perPage = Number(searchParams.get("perPage") ?? "25");
@@ -42,8 +60,10 @@ export async function GET(request: Request) {
       const data = await getTabulationAnalytics({
         from,
         to,
-        actorUserId: actorUserId || null,
-        departmentId: departmentId || null,
+        actorUserIds,
+        departmentIds,
+        actorUserId: actorUserIds[0] ?? null,
+        departmentId: departmentIds[0] ?? null,
         tabulationId: tabulationId || null,
         page: Number.isFinite(page) ? page : 1,
         perPage: Number.isFinite(perPage) ? perPage : 25,

@@ -7,11 +7,29 @@ export type TabulationAnalyticsFilters = {
   from: Date;
   to: Date;
   actorUserId?: string | null;
+  actorUserIds?: string[] | null;
   departmentId?: string | null;
+  departmentIds?: string[] | null;
   tabulationId?: string | null;
   page?: number;
   perPage?: number;
 };
+
+function uniqueIds(...groups: Array<string | string[] | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const group of groups) {
+    const list = Array.isArray(group) ? group : group ? [group] : [];
+    for (const raw of list) {
+      const id = raw.trim();
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+  }
+  return out;
+}
 
 export type TabulationAnalyticsRow = {
   id: string;
@@ -175,6 +193,8 @@ export async function getTabulationAnalytics(
   const orgId = getOrgIdOrThrow();
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(100, Math.max(1, filters.perPage ?? 25));
+  const actorUserIds = uniqueIds(filters.actorUserIds, filters.actorUserId);
+  const departmentIds = uniqueIds(filters.departmentIds, filters.departmentId);
 
   // Agregação no Postgres. A versão anterior puxava até 5000 eventos e
   // contava em memória: acima disso o "total" simplesmente parava de crescer,
@@ -185,11 +205,15 @@ export async function getTabulationAnalytics(
     Prisma.sql`"occurredAt" >= ${filters.from}`,
     Prisma.sql`"occurredAt" <= ${filters.to}`,
   ];
-  if (filters.actorUserId) {
-    conds.push(Prisma.sql`"actorUserId" = ${filters.actorUserId}`);
+  if (actorUserIds.length === 1) {
+    conds.push(Prisma.sql`"actorUserId" = ${actorUserIds[0]}`);
+  } else if (actorUserIds.length > 1) {
+    conds.push(Prisma.sql`"actorUserId" IN (${Prisma.join(actorUserIds)})`);
   }
-  if (filters.departmentId) {
-    conds.push(Prisma.sql`meta->>'departmentId' = ${filters.departmentId}`);
+  if (departmentIds.length === 1) {
+    conds.push(Prisma.sql`meta->>'departmentId' = ${departmentIds[0]}`);
+  } else if (departmentIds.length > 1) {
+    conds.push(Prisma.sql`meta->>'departmentId' IN (${Prisma.join(departmentIds)})`);
   }
   if (filters.tabulationId) {
     conds.push(Prisma.sql`meta->>'tabulationId' = ${filters.tabulationId}`);
@@ -197,9 +221,15 @@ export async function getTabulationAnalytics(
   const whereSql = Prisma.join(conds, " AND ");
 
   const metaAnd: Prisma.ActivityEventWhereInput[] = [];
-  if (filters.departmentId) {
+  if (departmentIds.length === 1) {
     metaAnd.push({
-      meta: { path: ["departmentId"], equals: filters.departmentId },
+      meta: { path: ["departmentId"], equals: departmentIds[0] },
+    });
+  } else if (departmentIds.length > 1) {
+    metaAnd.push({
+      OR: departmentIds.map((id) => ({
+        meta: { path: ["departmentId"], equals: id },
+      })),
     });
   }
   if (filters.tabulationId) {
@@ -239,7 +269,11 @@ export async function getTabulationAnalytics(
         organizationId: orgId,
         type: "CONVERSATION_TABULATED",
         occurredAt: { gte: filters.from, lte: filters.to },
-        ...(filters.actorUserId ? { actorUserId: filters.actorUserId } : {}),
+        ...(actorUserIds.length === 1
+          ? { actorUserId: actorUserIds[0] }
+          : actorUserIds.length > 1
+            ? { actorUserId: { in: actorUserIds } }
+            : {}),
         ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
       },
       orderBy: { occurredAt: "desc" },
