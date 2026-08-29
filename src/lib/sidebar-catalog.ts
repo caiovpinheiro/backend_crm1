@@ -54,7 +54,7 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
     requiredWidgetSlug: "smart_distribution",
   },
   { key: "logs", title: "Logs", href: "/logs", locked: false },
-  { key: "widgets", title: "Widgets", href: "/widgets", locked: false },
+  { key: "widgets", title: "Integrações", href: "/widgets", locked: false },
   {
     key: "job-openings",
     title: "Vagas",
