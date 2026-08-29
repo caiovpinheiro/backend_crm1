@@ -15,12 +15,15 @@ import {
 import {
   CAMPAIGN_DISPATCH_QUEUE_NAME,
   CAMPAIGN_SEND_QUEUE_NAME,
+  META_ATTACH_QUEUE_NAME,
   type CampaignDispatchPayload,
   type CampaignSendPayload,
+  type MetaAttachPayload,
   enqueueCampaignSendBulk,
   enqueueCampaignDispatch,
   enqueueAutomationJob,
 } from "@/lib/queue";
+import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
@@ -1427,13 +1430,73 @@ export function startCampaignWorkers() {
   const sweepTimer = setInterval(sweepStuck, 30_000);
   sweepTimer.unref?.();
 
+  // Remux + envio de áudio do inbox (WebM/Opus → Ogg/Opus). Concurrency
+  // baixa: o remux JS é CPU-bound (1MB+ / 1000+ pacotes). Não compete
+  // com o rate limit de campanha — fila e worker separados.
+  const attachConcurrency = envPositiveInt("META_ATTACH_CONCURRENCY", 2);
+  const attachWorker = new Worker<MetaAttachPayload>(
+    META_ATTACH_QUEUE_NAME,
+    async (job: Job<MetaAttachPayload>) => {
+      await withSystemContext(job.data.organizationId, () =>
+        processMetaAttach(job.data),
+      );
+    },
+    { connection: connection.duplicate(), concurrency: attachConcurrency },
+  );
+  attachWorker.on("failed", (job, err) => {
+    console.error(
+      `[meta-attach] job ${job?.id} falhou (attempt ${job?.attemptsMade}):`,
+      err instanceof Error ? err.message : err,
+    );
+    if (!job?.data) return;
+    const attempts = job.opts.attempts ?? 1;
+    if (job.attemptsMade < attempts) return;
+    const error =
+      err instanceof Error ? err.message : "Falha no remux/envio de áudio";
+    void withSystemContext(job.data.organizationId, async () => {
+      const updated = await prisma.message
+        .updateMany({
+          where: { id: job.data.messageId, sendStatus: "pending" },
+          data: { sendStatus: "failed", sendError: error },
+        })
+        .catch(() => null);
+      if (updated && updated.count > 0) {
+        await prisma.conversation
+          .update({
+            where: { id: job.data.conversationId },
+            data: { hasError: true },
+          })
+          .catch(() => {});
+        const { sseBus } = await import("@/lib/sse-bus");
+        try {
+          sseBus.publish("message_status", {
+            organizationId: job.data.organizationId,
+            conversationId: job.data.conversationId,
+            messageId: job.data.messageId,
+            internalId: job.data.messageId,
+            status: "failed",
+            error,
+          });
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+  });
+  attachWorker.on("completed", (job) => {
+    console.info(`[meta-attach] job ${job.id} concluído`);
+  });
+
   console.info(
     roundRobin
       ? `[campaign-worker] Dispatch worker + rodízio de envio started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, orgCredit=${getCampaignOrgCredit()}, sendRateMax=${getCampaignSendRateMax()})`
       : `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
   );
+  console.info(
+    `[campaign-worker] meta-attach worker started (concurrency=${attachConcurrency})`,
+  );
 
-  return { dispatchWorker, sendWorker };
+  return { dispatchWorker, sendWorker, attachWorker };
 }
 
 if (require.main === module) {

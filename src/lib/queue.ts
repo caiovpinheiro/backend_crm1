@@ -16,6 +16,12 @@ export const CAMPAIGN_SEND_QUEUE_NAME = "campaign-send" as const;
  */
 export const META_WEBHOOK_QUEUE_NAME = "meta-webhook-events" as const;
 /**
+ * Remux WebM/Opus → Ogg/Opus + envio Cloud API de áudio do inbox.
+ * A API (`APP_MODE=api`) só persiste o arquivo original e cria a
+ * mensagem `pending`; o `worker-whatsapp` (campaign-worker) consome.
+ */
+export const META_ATTACH_QUEUE_NAME = "meta-attach" as const;
+/**
  * Fila de operações em massa sobre Deals (bulk update de custom fields,
  * bulk move de stage). Foi nomeada `leads-bulk` (não `deals-bulk`) por
  * convenção de produto — no falar do usuário do CRM "lead" e "deal" se
@@ -122,6 +128,18 @@ export type MetaWebhookJobPayload = {
   metaWebhookEventId: string;
   /** Tenant — evita query extra no worker antes de withSystemContext. */
   organizationId: string;
+};
+
+/** Job de remux + envio Meta de anexo de áudio (inbox). */
+export type MetaAttachPayload = {
+  conversationId: string;
+  /** Message.id persistido pela API (anexo = mensagem com mediaUrl). */
+  messageId: string;
+  organizationId: string;
+  /** Nome original do arquivo (extensão / fallback de documento). */
+  originalName: string;
+  mime: string;
+  caption: string;
 };
 
 // ── Leads bulk payloads ──────────────────────────────────
@@ -289,6 +307,7 @@ const globalForQueue = globalThis as unknown as {
   leadsBulkQueue?: Queue<LeadsBulkPayload>;
   importEtlQueue?: Queue<ContactImportPayload>;
   metaWebhookQueue?: Queue<MetaWebhookJobPayload>;
+  metaAttachQueue?: Queue<MetaAttachPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -665,6 +684,40 @@ export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
   const backoffDelay = readPositiveInt(process.env.META_WEBHOOK_BACKOFF_DELAY, 2000);
   return queue.add("process", payload, {
     jobId: payload.metaWebhookEventId,
+    removeOnComplete: true,
+    removeOnFail: { count: 1000 },
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+  });
+}
+
+function getMetaAttachQueue(): Queue<MetaAttachPayload> | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.metaAttachQueue) {
+    globalForQueue.metaAttachQueue = new Queue<MetaAttachPayload>(
+      META_ATTACH_QUEUE_NAME,
+      { connection: redis },
+    );
+  }
+  return globalForQueue.metaAttachQueue;
+}
+
+/**
+ * Enfileira remux + envio Cloud API de um áudio já persistido.
+ * `jobId = meta-attach:${messageId}` deduplica retries do produtor.
+ * Retorna `null` se Redis indisponível — o caller faz fallback síncrono.
+ */
+export async function enqueueMetaAttach(payload: MetaAttachPayload) {
+  const queue = getMetaAttachQueue();
+  if (!queue) {
+    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-attach");
+    return null;
+  }
+  const attempts = readPositiveInt(process.env.META_ATTACH_MAX_ATTEMPTS, 3);
+  const backoffDelay = readPositiveInt(process.env.META_ATTACH_BACKOFF_DELAY, 2000);
+  return queue.add("process", payload, {
+    jobId: `meta-attach:${payload.messageId}`,
     removeOnComplete: true,
     removeOnFail: { count: 1000 },
     attempts,
