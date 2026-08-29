@@ -252,8 +252,8 @@ export async function GET(request: Request, context: RouteContext) {
           })
         : Promise.resolve(null);
 
-    // Cold path: 1ª página + probe barato (só pra saber se o scroll-up
-    // deve pedir history). history=1 em fatias, só no gesto do operador.
+    // Cold path: 1ª página + probe barato (só pra saber se o prefetch/
+    // scroll-up deve pedir history). history=1 sem `before` = 1 ticket.
     const [pinnedBundle, convSession, rowsDesc, olderTicket] = await Promise.all([
       (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
         try {
@@ -387,6 +387,13 @@ export async function GET(request: Request, context: RouteContext) {
           rows: pRows,
         });
         remaining -= pRows.length;
+        // Sem `before` (prefetch ao abrir o card): só o ticket anterior
+        // mais recente, capado pelo budget. Atravessar todos os tickets
+        // até encher o budget virava dump (ex.: 8 tickets curtos).
+        if (!beforeDate) {
+          if (i < prevConvs.length - 1) hasOlderTickets = true;
+          break;
+        }
       }
       historyTickets = loaded.reverse();
     }
