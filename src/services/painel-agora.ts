@@ -2,7 +2,7 @@
  * Bloco Agora do Painel de Atendimentos. Ignora o seletor de período.
  */
 
-import { prisma } from "@/lib/prisma";
+import { analyticsClient } from "@/lib/analytics";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { loadPainelHours, loadPainelSlaMinutes } from "@/services/painel-hours";
 import {
@@ -41,7 +41,7 @@ export async function getPainelAgora(
     agentsOnline,
     agentsTotal,
   ] = await Promise.all([
-    prisma.conversation.count({
+    analyticsClient().conversation.count({
       where: {
         status: { not: "RESOLVED" },
         closedAt: null,
@@ -49,7 +49,7 @@ export async function getPainelAgora(
         hasError: false,
       },
     }),
-    prisma.conversation.count({
+    analyticsClient().conversation.count({
       where: {
         status: { not: "RESOLVED" },
         closedAt: null,
@@ -58,7 +58,7 @@ export async function getPainelAgora(
         hasError: false,
       },
     }),
-    prisma.conversation.findFirst({
+    analyticsClient().conversation.findFirst({
       where: {
         status: { not: "RESOLVED" },
         closedAt: null,
@@ -74,13 +74,13 @@ export async function getPainelAgora(
         assignedTo: { select: { name: true } },
       },
     }),
-    prisma.agentStatus.count({
+    analyticsClient().agentStatus.count({
       where: {
         status: "ONLINE",
         user: { type: "HUMAN", organizationId: orgId },
       },
     }),
-    prisma.user.count({
+    analyticsClient().user.count({
       where: { organizationId: orgId, type: "HUMAN", isSuperAdmin: false },
     }),
   ]);

@@ -9,7 +9,7 @@
 
 import { Prisma } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
@@ -174,8 +174,15 @@ const MAX_CONNECTION_SERIES = 6;
 const REPLY_RANGE_MAX_MS = 90 * 24 * 60 * 60 * 1000;
 /** Subsequent waits: last 14d of the range, capped inbound rows. */
 const SUBSEQUENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
-const SUBSEQUENT_INBOUND_CAP = 4_000;
-const FIRST_REPLY_CONV_CAP = 20_000;
+const SUBSEQUENT_INBOUND_CAP = 1_500;
+const SUBSEQUENT_OUT_CAP = 3_000;
+const FIRST_REPLY_CONV_CAP = 3_000;
+const CLOSED_ROWS_CAP = 4_000;
+
+/** Replica when healthy; primary if unset or tripped after a connect timeout. */
+function db() {
+  return analyticsClient();
+}
 
 function clampRangeFromEnd(range: PainelRange, maxMs: number): PainelRange {
   const span = range.to.getTime() - range.from.getTime();
@@ -242,16 +249,28 @@ function fillDailyPoints(
   });
 }
 
-function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
-  return fn()
-    .then((data) => ({ ok: true as const, data }))
-    .catch((e) => {
-      console.error("[painel/service]", e);
-      return {
-        ok: false as const,
-        error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
-      };
-    });
+async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
+  try {
+    return { ok: true, data: await fn() };
+  } catch (e) {
+    if (isReplicaConnectionError(e)) {
+      tripReplica();
+      try {
+        return { ok: true, data: await fn() };
+      } catch (retryErr) {
+        console.error("[painel/service]", retryErr);
+        return {
+          ok: false,
+          error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
+        };
+      }
+    }
+    console.error("[painel/service]", e);
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
+    };
+  }
 }
 
 type ReplyPair = {
@@ -299,7 +318,7 @@ async function firstReplyPairs(
   from: Date,
   to: Date,
 ): Promise<ReplyPair[]> {
-  const rows = await prisma.$queryRaw<
+  const rows = await db().$queryRaw<
     {
       conversationId: string;
       inAt: Date;
@@ -369,7 +388,7 @@ async function subsequentReplyPairs(
   from: Date,
   to: Date,
 ): Promise<ReplyPair[]> {
-  const rows = await prisma.$queryRaw<
+  const rows = await db().$queryRaw<
     {
       conversationId: string;
       inAt: Date;
@@ -404,9 +423,12 @@ async function subsequentReplyPairs(
         AND m."isPrivate" = false
         AND m."organizationId" = ${orgId}
         AND m."createdAt" >= ${from}
+        AND m."createdAt" <= ${to}
         AND EXISTS (
           SELECT 1 FROM inbound i WHERE i."conversationId" = m."conversationId"
         )
+      ORDER BY m."createdAt" DESC
+      LIMIT ${SUBSEQUENT_OUT_CAP}
     ),
     events AS (
       SELECT
@@ -466,7 +488,7 @@ async function loadStartRows(
   from: Date,
   to: Date,
 ): Promise<StartRow[]> {
-  return prisma.$queryRaw<StartRow[]>(Prisma.sql`
+  return db().$queryRaw<StartRow[]>(Prisma.sql`
     WITH convs AS MATERIALIZED (
       SELECT conv.id, conv."createdAt", conv."departmentId", conv."assignedToId"
       FROM conversations conv
@@ -498,7 +520,7 @@ async function loadStartRows(
 }
 
 async function loadClosedRows(range: PainelRange): Promise<ClosedRow[]> {
-  return prisma.conversation.findMany({
+  return db().conversation.findMany({
     where: {
       status: "RESOLVED",
       OR: [
@@ -506,6 +528,8 @@ async function loadClosedRows(range: PainelRange): Promise<ClosedRow[]> {
         { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
       ],
     },
+    orderBy: { closedAt: "desc" },
+    take: CLOSED_ROWS_CAP,
     select: {
       id: true,
       createdAt: true,
@@ -523,13 +547,11 @@ async function loadSharedServiceMetrics(
   const orgId = getOrgIdOrThrow();
   const replyRange = clampRangeFromEnd(range, REPLY_RANGE_MAX_MS);
   const subRange = clampRangeFromEnd(range, SUBSEQUENT_WINDOW_MS);
-  const [firstPairs, subsequentRaw, startRows, closed, hours] = await Promise.all([
-    firstReplyPairs(orgId, replyRange.from, replyRange.to),
-    subsequentReplyPairs(orgId, subRange.from, subRange.to),
-    loadStartRows(orgId, replyRange.from, replyRange.to),
-    loadClosedRows(replyRange),
-    loadPainelHours(),
-  ]);
+  const hours = await loadPainelHours();
+  const firstPairs = await firstReplyPairs(orgId, replyRange.from, replyRange.to);
+  const subsequentRaw = await subsequentReplyPairs(orgId, subRange.from, subRange.to);
+  const startRows = await loadStartRows(orgId, replyRange.from, replyRange.to);
+  const closed = await loadClosedRows(replyRange);
   const firstKeys = new Set(
     firstPairs.map((p) => `${p.conversationId}:${p.inAt.getTime()}`),
   );
@@ -556,8 +578,8 @@ export async function getPainelVolume(
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
 
-  const [countRow, messageRow, startedByDay, finishedByDay] = await Promise.all([
-    prisma.$queryRaw<
+  const [countRow, startedByDay, finishedByDay] = await Promise.all([
+    db().$queryRaw<
       {
         started: bigint;
         finished: bigint;
@@ -636,15 +658,7 @@ export async function getPainelVolume(
           )
         )
     `),
-    prisma.$queryRaw<{ messagesIn: bigint; messagesOut: bigint }[]>(Prisma.sql`
-      SELECT
-        COUNT(*) FILTER (WHERE m.direction = 'in' AND m."isPrivate" = false)::bigint AS "messagesIn",
-        COUNT(*) FILTER (WHERE m.direction = 'out' AND m."isPrivate" = false)::bigint AS "messagesOut"
-      FROM messages m
-      WHERE m."organizationId" = ${orgId}
-        AND m."createdAt" >= ${range.from} AND m."createdAt" <= ${range.to}
-    `),
-    prisma.$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
+    db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
       SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
@@ -652,7 +666,7 @@ export async function getPainelVolume(
         AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
       GROUP BY 1
     `),
-    prisma.$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
+    db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
       SELECT (COALESCE(conv."closedAt", conv."updatedAt") AT TIME ZONE 'America/Sao_Paulo')::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
@@ -666,7 +680,6 @@ export async function getPainelVolume(
 
   void clock;
   const c = countRow[0];
-  const m = messageRow[0];
   const started = Number(c?.started ?? 0);
   const finished = Number(c?.finished ?? 0);
   const stillOpen = Number(c?.stillOpen ?? 0);
@@ -677,8 +690,10 @@ export async function getPainelVolume(
   const prevStillOpen = Number(c?.prevStillOpen ?? 0);
   const prevOpenStarted = Number(c?.prevOpenStarted ?? 0);
   const prevOpenWaiting = Number(c?.prevOpenWaiting ?? 0);
-  const messagesIn = Number(m?.messagesIn ?? 0);
-  const messagesOut = Number(m?.messagesOut ?? 0);
+  // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
+  // conversations; the chart subtitle omits message totals when they are 0.
+  const messagesIn = 0;
+  const messagesOut = 0;
   const startMap = new Map(startedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
   const finMap = new Map(finishedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
   const todayKey = dayKeyFromDate(new Date());
@@ -790,7 +805,7 @@ export async function getPainelHeatmap(range: PainelRange): Promise<PainelHeatma
   const orgId = getOrgIdOrThrow();
   const days = eachDayKey(range.from, range.to);
   const occ = weekdayOccurrences(days);
-  const rows = await prisma.$queryRaw<
+  const rows = await db().$queryRaw<
     { dow: number; h: number; c: bigint; deptId: string | null; deptName: string | null }[]
   >(Prisma.sql`
     SELECT EXTRACT(DOW FROM conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
@@ -871,7 +886,7 @@ export async function getPainelAttendants(
     "Conta para os dois: cada conversa entra na carga de todo atendente que a recebeu (atribuição atual + distribuição). Não é só quem finalizou.";
 
   const [loadRows, stillOpenRows, finishedRows] = await Promise.all([
-    prisma.$queryRaw<{ userId: string; conversationId: string }[]>(Prisma.sql`
+    db().$queryRaw<{ userId: string; conversationId: string }[]>(Prisma.sql`
     SELECT DISTINCT x."userId", x."conversationId" FROM (
       SELECT conv."assignedToId" AS "userId", conv.id AS "conversationId"
       FROM conversations conv
@@ -892,7 +907,7 @@ export async function getPainelAttendants(
         AND l."createdAt" >= ${range.from} AND l."createdAt" <= ${range.to}
     ) x
   `),
-    prisma.conversation.groupBy({
+    db().conversation.groupBy({
       by: ["assignedToId"],
       where: {
         ...openWhere(),
@@ -901,7 +916,7 @@ export async function getPainelAttendants(
       },
       _count: { _all: true },
     }),
-    prisma.conversation.groupBy({
+    db().conversation.groupBy({
       by: ["assignedToId"],
       where: {
         status: "RESOLVED",
@@ -953,7 +968,7 @@ export async function getPainelAttendants(
     ...finishedMap.keys(),
   ]);
   const users = userIds.size
-    ? await prisma.user.findMany({
+    ? await db().user.findMany({
         where: { id: { in: [...userIds] } },
         select: { id: true, name: true },
       })
@@ -1013,7 +1028,7 @@ async function firstResponseByKey(
 
   const countRows =
     group === "channel"
-      ? await prisma.$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
+      ? await db().$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
           SELECT COALESCE(NULLIF(conv.channel, ''), 'outros') AS key,
                  COUNT(*)::bigint AS c
           FROM conversations conv
@@ -1022,7 +1037,7 @@ async function firstResponseByKey(
             AND conv."createdAt" <= ${range.to}
           GROUP BY 1
         `)
-      : await prisma.$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
+      : await db().$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
           SELECT conv."tabulationId" AS key,
                  COUNT(*)::bigint AS c
           FROM conversations conv
@@ -1083,7 +1098,7 @@ export async function getPainelChannels(
     .slice(0, 12);
 
   // Relabel motivos from the extra field we stored.
-  const labeled = await prisma.tabulation.findMany({
+  const labeled = await db().tabulation.findMany({
     where: { id: { in: motivos.map((m) => m.key) } },
     select: { id: true, name: true },
   });
@@ -1107,7 +1122,7 @@ export async function getPainelByDepartment(
   const todayKey = dayKeyFromDate(new Date());
 
   const [daily, counts] = await Promise.all([
-    prisma.$queryRaw<{ d: Date; deptId: string | null; deptName: string | null; c: bigint }[]>(
+    db().$queryRaw<{ d: Date; deptId: string | null; deptName: string | null; c: bigint }[]>(
       Prisma.sql`
         SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
                conv."departmentId" AS "deptId",
@@ -1120,7 +1135,7 @@ export async function getPainelByDepartment(
         GROUP BY 1, 2, 3
       `,
     ),
-    prisma.$queryRaw<
+    db().$queryRaw<
       {
         deptId: string | null;
         deptName: string | null;
@@ -1247,7 +1262,7 @@ export async function getPainelConnections(range: PainelRange): Promise<PainelCo
   const days = eachDayKey(range.from, range.to);
   const todayKey = dayKeyFromDate(new Date());
 
-  const rows = await prisma.$queryRaw<
+  const rows = await db().$queryRaw<
     {
       d: Date;
       chId: string | null;
@@ -1365,7 +1380,7 @@ export async function getPainelServiceExceptions(
   const open24hBefore = new Date(now.getTime() - 24 * 3_600_000);
 
   const [noReply, open24h, unassigned, sendFailure] = await Promise.all([
-    prisma.conversation.count({
+    db().conversation.count({
       where: {
         ...openWhere(),
         lastMessageDirection: "in",
@@ -1373,16 +1388,16 @@ export async function getPainelServiceExceptions(
         hasError: false,
       },
     }),
-    prisma.conversation.count({
+    db().conversation.count({
       where: {
         ...openWhere(),
         createdAt: { lte: open24hBefore },
       },
     }),
-    prisma.conversation.count({
+    db().conversation.count({
       where: { ...openWhere(), assignedToId: null },
     }),
-    prisma.conversation.count({
+    db().conversation.count({
       where: { ...openWhere(), hasError: true },
     }),
   ]);
