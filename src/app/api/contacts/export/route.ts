@@ -144,6 +144,9 @@ export async function GET(request: Request) {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Cache-Control": "no-store",
+          "X-Export-Total": String(rows.length),
+          "Access-Control-Expose-Headers":
+            "Content-Disposition, X-Export-Total",
         },
       });
     });

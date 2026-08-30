@@ -56,6 +56,7 @@ export async function GET(request: Request) {
         "sku",
         "name",
         "description",
+        "kind",
         "type",
         "price",
         "unit",
@@ -75,6 +76,7 @@ export async function GET(request: Request) {
           sku: p.sku ?? "",
           name: p.name,
           description: p.description ?? "",
+          kind: p.kind,
           type: p.type,
           price: p.price != null ? p.price.toString() : "0",
           unit: p.unit,
@@ -100,6 +102,9 @@ export async function GET(request: Request) {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Cache-Control": "no-store",
+          "X-Export-Total": String(products.length),
+          "Access-Control-Expose-Headers":
+            "Content-Disposition, X-Export-Total",
         },
       });
     });
