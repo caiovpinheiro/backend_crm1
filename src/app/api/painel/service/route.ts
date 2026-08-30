@@ -7,6 +7,9 @@ import {
 } from "@/services/painel-service";
 import { computePainelRange, parseClockMode } from "@/services/painel-period";
 
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   return withOrgContext(async () => {
     try {
