@@ -18,6 +18,7 @@ import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -592,17 +593,23 @@ export async function handleBaileysMessage(
 
     if (!msgCreated) return;
 
+    const inboundAt = new Date();
     await prisma.conversation.update({
       where: { id: conversation.id },
       data: {
         unreadCount: { increment: 1 },
-        lastInboundAt: new Date(),
         lastMessageDirection: "in",
         hasAgentReply: false,
         hasError: false,
         updatedAt: new Date(),
       },
     }).catch(() => {});
+    await touchInbound({ conversationId: conversation.id, at: inboundAt }).catch((err) =>
+      warnTouchInboundFailed(err, {
+        conversationId: conversation.id,
+        channel: conversation.channel ?? "whatsapp",
+      }),
+    );
 
     // Cliente respondeu: cancela qualquer mensagem agendada pendente.
     cancelPendingForConversation(conversation.id, "client_reply").catch(
