@@ -170,6 +170,18 @@ const PLATFORM_COLORS: Record<string, string> = {
   WEBCHAT: "var(--color-primary-dark)",
 };
 const MAX_CONNECTION_SERIES = 6;
+/** First-reply / close metrics: full selected range, but never more than 90d. */
+const REPLY_RANGE_MAX_MS = 90 * 24 * 60 * 60 * 1000;
+/** Subsequent waits: last 14d of the range, capped inbound rows. */
+const SUBSEQUENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const SUBSEQUENT_INBOUND_CAP = 4_000;
+const FIRST_REPLY_CONV_CAP = 20_000;
+
+function clampRangeFromEnd(range: PainelRange, maxMs: number): PainelRange {
+  const span = range.to.getTime() - range.from.getTime();
+  if (span <= maxMs) return range;
+  return { from: new Date(range.to.getTime() - maxMs), to: range.to };
+}
 
 function openWhere(): Prisma.ConversationWhereInput {
   return { status: { not: "RESOLVED" }, closedAt: null };
@@ -249,6 +261,8 @@ type ReplyPair = {
   isFirst: boolean;
   departmentId: string | null;
   assignedToId: string | null;
+  channel: string | null;
+  tabulationId: string | null;
 };
 
 type StartRow = {
@@ -276,11 +290,11 @@ type SharedServiceMetrics = {
 };
 
 /**
- * Uma varredura por conversa do período — sem LATERAL por inbound.
- * `is_first` não varre o histórico inteiro (DISTINCT ON em toda inbound
- * da conversa); só pergunta se já existia inbound antes do período.
+ * Uma linha por conversa: primeiro inbound do período (se for o primeiro
+ * da vida) + próximo out humano. LATERAL é por conversa (índice
+ * conversationId+createdAt), não por mensagem — 90d não varre o chat inteiro.
  */
-async function firstHumanReplyPairs(
+async function firstReplyPairs(
   orgId: string,
   from: Date,
   to: Date,
@@ -290,42 +304,129 @@ async function firstHumanReplyPairs(
       conversationId: string;
       inAt: Date;
       outAt: Date;
-      is_first: number;
       departmentId: string | null;
       assignedToId: string | null;
+      channel: string | null;
+      tabulationId: string | null;
     }[]
   >(Prisma.sql`
-    WITH inbound AS (
+    WITH candidates AS MATERIALIZED (
       SELECT
-        m."conversationId" AS "conversationId",
-        m."createdAt" AS "inAt",
+        conv.id AS "conversationId",
         conv."departmentId" AS "departmentId",
-        conv."assignedToId" AS "assignedToId"
-      FROM messages m
-      INNER JOIN conversations conv ON conv.id = m."conversationId"
-      WHERE m.direction = 'in'
-        AND m."isPrivate" = false
-        AND m."organizationId" = ${orgId}
-        AND m."createdAt" >= ${from}
-        AND m."createdAt" <= ${to}
+        conv."assignedToId" AS "assignedToId",
+        conv.channel AS channel,
+        conv."tabulationId" AS "tabulationId"
+      FROM conversations conv
+      WHERE conv."organizationId" = ${orgId}
+        AND conv."createdAt" <= ${to}
+        AND (
+          conv."lastInboundAt" >= ${from}
+          OR (conv."createdAt" >= ${from} AND conv."createdAt" <= ${to})
+        )
+      ORDER BY conv."lastInboundAt" DESC NULLS LAST
+      LIMIT ${FIRST_REPLY_CONV_CAP}
     ),
-    first_in_period AS (
-      SELECT i."conversationId" AS "conversationId", MIN(i."inAt") AS period_first
-      FROM inbound i
-      GROUP BY i."conversationId"
-    ),
-    had_prior AS (
-      SELECT c."conversationId"
-      FROM (SELECT DISTINCT i."conversationId" FROM inbound i) c
-      WHERE EXISTS (
-        SELECT 1
+    first_in AS (
+      SELECT
+        c."conversationId",
+        c."departmentId",
+        c."assignedToId",
+        c.channel,
+        c."tabulationId",
+        i."inAt"
+      FROM candidates c
+      INNER JOIN LATERAL (
+        SELECT m."createdAt" AS "inAt"
         FROM messages m
         WHERE m."conversationId" = c."conversationId"
           AND m.direction = 'in'
           AND m."isPrivate" = false
           AND m."organizationId" = ${orgId}
-          AND m."createdAt" < ${from}
+          AND m."createdAt" >= ${from}
+          AND m."createdAt" <= ${to}
+        ORDER BY m."createdAt"
+        LIMIT 1
+      ) i ON true
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM messages p
+        WHERE p."conversationId" = c."conversationId"
+          AND p.direction = 'in'
+          AND p."isPrivate" = false
+          AND p."organizationId" = ${orgId}
+          AND p."createdAt" < ${from}
       )
+    )
+    SELECT
+      f."conversationId",
+      f."inAt",
+      o."outAt",
+      f."departmentId",
+      f."assignedToId",
+      f.channel,
+      f."tabulationId"
+    FROM first_in f
+    INNER JOIN LATERAL (
+      SELECT m."createdAt" AS "outAt"
+      FROM messages m
+      WHERE m."conversationId" = f."conversationId"
+        AND m.direction = 'out'
+        AND m."authorType" = 'human'::"MessageAuthorType"
+        AND m."isPrivate" = false
+        AND m."organizationId" = ${orgId}
+        AND m."createdAt" > f."inAt"
+      ORDER BY m."createdAt"
+      LIMIT 1
+    ) o ON true
+  `);
+  return rows.map((r) => ({
+    conversationId: r.conversationId,
+    inAt: r.inAt,
+    outAt: r.outAt,
+    isFirst: true,
+    departmentId: r.departmentId,
+    assignedToId: r.assignedToId,
+    channel: r.channel,
+    tabulationId: r.tabulationId,
+  }));
+}
+
+/**
+ * Amostra de respostas seguintes: só a janela recente + teto de inbounds.
+ * Mediana/média continuam as mesmas métricas; não varre 90d de messages.
+ */
+async function subsequentReplyPairs(
+  orgId: string,
+  from: Date,
+  to: Date,
+): Promise<ReplyPair[]> {
+  const rows = await prisma.$queryRaw<
+    {
+      conversationId: string;
+      inAt: Date;
+      outAt: Date;
+      departmentId: string | null;
+      assignedToId: string | null;
+    }[]
+  >(Prisma.sql`
+    WITH inbound AS MATERIALIZED (
+      SELECT * FROM (
+        SELECT
+          m."conversationId" AS "conversationId",
+          m."createdAt" AS "inAt",
+          conv."departmentId" AS "departmentId",
+          conv."assignedToId" AS "assignedToId"
+        FROM messages m
+        INNER JOIN conversations conv ON conv.id = m."conversationId"
+        WHERE m.direction = 'in'
+          AND m."isPrivate" = false
+          AND m."organizationId" = ${orgId}
+          AND m."createdAt" >= ${from}
+          AND m."createdAt" <= ${to}
+        ORDER BY m."createdAt" DESC
+        LIMIT ${SUBSEQUENT_INBOUND_CAP}
+      ) x
     ),
     outs AS (
       SELECT m."conversationId" AS "conversationId", m."createdAt" AS "outAt"
@@ -374,15 +475,9 @@ async function firstHumanReplyPairs(
       f."conversationId",
       f."inAt",
       f.next_out AS "outAt",
-      CASE
-        WHEN hp."conversationId" IS NULL AND f."inAt" = fp.period_first THEN 1
-        ELSE 0
-      END AS is_first,
       f."departmentId",
       f."assignedToId"
     FROM filled f
-    LEFT JOIN first_in_period fp ON fp."conversationId" = f."conversationId"
-    LEFT JOIN had_prior hp ON hp."conversationId" = f."conversationId"
     WHERE f.kind_ord = 0
       AND f.next_out IS NOT NULL
   `);
@@ -390,9 +485,11 @@ async function firstHumanReplyPairs(
     conversationId: r.conversationId,
     inAt: r.inAt,
     outAt: r.outAt,
-    isFirst: Number(r.is_first) === 1,
+    isFirst: false,
     departmentId: r.departmentId,
     assignedToId: r.assignedToId,
+    channel: null,
+    tabulationId: null,
   }));
 }
 
@@ -402,23 +499,33 @@ async function loadStartRows(
   to: Date,
 ): Promise<StartRow[]> {
   return prisma.$queryRaw<StartRow[]>(Prisma.sql`
+    WITH convs AS MATERIALIZED (
+      SELECT conv.id, conv."createdAt", conv."departmentId", conv."assignedToId"
+      FROM conversations conv
+      WHERE conv."organizationId" = ${orgId}
+        AND conv."createdAt" >= ${from}
+        AND conv."createdAt" <= ${to}
+      ORDER BY conv."createdAt" DESC
+      LIMIT ${FIRST_REPLY_CONV_CAP}
+    )
     SELECT
       conv.id AS "conversationId",
       conv."createdAt" AS "createdAt",
-      MIN(m."createdAt") AS "firstHumanAt",
+      o."firstHumanAt" AS "firstHumanAt",
       conv."departmentId" AS "departmentId",
       conv."assignedToId" AS "assignedToId"
-    FROM conversations conv
-    INNER JOIN messages m
-      ON m."conversationId" = conv.id
-      AND m.direction = 'out'
-      AND m."authorType" = 'human'::"MessageAuthorType"
-      AND m."isPrivate" = false
-      AND m."organizationId" = ${orgId}
-    WHERE conv."organizationId" = ${orgId}
-      AND conv."createdAt" >= ${from}
-      AND conv."createdAt" <= ${to}
-    GROUP BY conv.id, conv."createdAt", conv."departmentId", conv."assignedToId"
+    FROM convs conv
+    INNER JOIN LATERAL (
+      SELECT m."createdAt" AS "firstHumanAt"
+      FROM messages m
+      WHERE m."conversationId" = conv.id
+        AND m.direction = 'out'
+        AND m."authorType" = 'human'::"MessageAuthorType"
+        AND m."isPrivate" = false
+        AND m."organizationId" = ${orgId}
+      ORDER BY m."createdAt"
+      LIMIT 1
+    ) o ON true
   `);
 }
 
@@ -446,13 +553,22 @@ async function loadSharedServiceMetrics(
   range: PainelRange,
 ): Promise<SharedServiceMetrics> {
   const orgId = getOrgIdOrThrow();
-  const [pairs, startRows, closed, hours] = await Promise.all([
-    firstHumanReplyPairs(orgId, range.from, range.to),
-    loadStartRows(orgId, range.from, range.to),
-    loadClosedRows(range),
+  const replyRange = clampRangeFromEnd(range, REPLY_RANGE_MAX_MS);
+  const subRange = clampRangeFromEnd(range, SUBSEQUENT_WINDOW_MS);
+  const [firstPairs, subsequentRaw, startRows, closed, hours] = await Promise.all([
+    firstReplyPairs(orgId, replyRange.from, replyRange.to),
+    subsequentReplyPairs(orgId, subRange.from, subRange.to),
+    loadStartRows(orgId, replyRange.from, replyRange.to),
+    loadClosedRows(replyRange),
     loadPainelHours(),
   ]);
-  return { pairs, startRows, closed, hours };
+  const firstKeys = new Set(
+    firstPairs.map((p) => `${p.conversationId}:${p.inAt.getTime()}`),
+  );
+  const subsequent = subsequentRaw.filter(
+    (p) => !firstKeys.has(`${p.conversationId}:${p.inAt.getTime()}`),
+  );
+  return { pairs: [...firstPairs, ...subsequent], startRows, closed, hours };
 }
 
 function statsFromMs(values: number[]): PainelTimeStat {
@@ -920,44 +1036,50 @@ async function firstResponseByKey(
   hours: BusinessHours,
   group: "channel" | "tabulation",
 ): Promise<Map<string, { count: number; firstMs: number[] }>> {
+  const orgId = getOrgIdOrThrow();
   const firstByConv = new Map<string, number>();
   for (const p of pairs) {
     if (!p.isFirst) continue;
     firstByConv.set(p.conversationId, waitMs(p.inAt, p.outAt, clock, hours));
   }
 
-  if (group === "channel") {
-    const convs = await prisma.conversation.findMany({
-      where: { createdAt: { gte: range.from, lte: range.to } },
-      select: { id: true, channel: true },
-    });
-    const map = new Map<string, { count: number; firstMs: number[] }>();
-    for (const c of convs) {
-      const key = c.channel || "outros";
-      const b = map.get(key) ?? { count: 0, firstMs: [] };
-      b.count += 1;
-      const fr = firstByConv.get(c.id);
-      if (fr != null) b.firstMs.push(fr);
-      map.set(key, b);
-    }
-    return map;
+  const countRows =
+    group === "channel"
+      ? await prisma.$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
+          SELECT COALESCE(NULLIF(conv.channel, ''), 'outros') AS key,
+                 COUNT(*)::bigint AS c
+          FROM conversations conv
+          WHERE conv."organizationId" = ${orgId}
+            AND conv."createdAt" >= ${range.from}
+            AND conv."createdAt" <= ${range.to}
+          GROUP BY 1
+        `)
+      : await prisma.$queryRaw<{ key: string; c: bigint }[]>(Prisma.sql`
+          SELECT conv."tabulationId" AS key,
+                 COUNT(*)::bigint AS c
+          FROM conversations conv
+          WHERE conv."organizationId" = ${orgId}
+            AND conv."createdAt" >= ${range.from}
+            AND conv."createdAt" <= ${range.to}
+            AND conv."tabulationId" IS NOT NULL
+          GROUP BY 1
+        `);
+
+  const map = new Map<string, { count: number; firstMs: number[] }>();
+  for (const r of countRows) {
+    if (!r.key) continue;
+    map.set(r.key, { count: Number(r.c), firstMs: [] });
   }
 
-  const convs = await prisma.conversation.findMany({
-    where: {
-      createdAt: { gte: range.from, lte: range.to },
-      tabulationId: { not: null },
-    },
-    select: { id: true, tabulation: { select: { id: true, name: true } } },
-  });
-  const map = new Map<string, { count: number; firstMs: number[] }>();
-  for (const c of convs) {
-    if (!c.tabulation) continue;
-    const key = c.tabulation.id;
+  for (const p of pairs) {
+    if (!p.isFirst) continue;
+    const key =
+      group === "channel" ? p.channel || "outros" : p.tabulationId;
+    if (!key) continue;
+    const fr = firstByConv.get(p.conversationId);
+    if (fr == null) continue;
     const b = map.get(key) ?? { count: 0, firstMs: [] };
-    b.count += 1;
-    const fr = firstByConv.get(c.id);
-    if (fr != null) b.firstMs.push(fr);
+    b.firstMs.push(fr);
     map.set(key, b);
   }
   return map;
