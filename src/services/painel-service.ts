@@ -316,66 +316,34 @@ async function firstReplyPairs(
         conv."departmentId" AS "departmentId",
         conv."assignedToId" AS "assignedToId",
         conv.channel AS channel,
-        conv."tabulationId" AS "tabulationId"
+        conv."tabulationId" AS "tabulationId",
+        conv."firstInboundAt" AS "inAt"
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
-        AND conv."createdAt" <= ${to}
-        AND (
-          conv."lastInboundAt" >= ${from}
-          OR (conv."createdAt" >= ${from} AND conv."createdAt" <= ${to})
-        )
-      ORDER BY conv."lastInboundAt" DESC NULLS LAST
+        AND conv."firstInboundAt" IS NOT NULL
+        AND conv."firstInboundAt" >= ${from}
+        AND conv."firstInboundAt" <= ${to}
+      ORDER BY conv."firstInboundAt" DESC
       LIMIT ${FIRST_REPLY_CONV_CAP}
-    ),
-    first_in AS (
-      SELECT
-        c."conversationId",
-        c."departmentId",
-        c."assignedToId",
-        c.channel,
-        c."tabulationId",
-        i."inAt"
-      FROM candidates c
-      INNER JOIN LATERAL (
-        SELECT m."createdAt" AS "inAt"
-        FROM messages m
-        WHERE m."conversationId" = c."conversationId"
-          AND m.direction = 'in'
-          AND m."isPrivate" = false
-          AND m."organizationId" = ${orgId}
-          AND m."createdAt" >= ${from}
-          AND m."createdAt" <= ${to}
-        ORDER BY m."createdAt"
-        LIMIT 1
-      ) i ON true
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM messages p
-        WHERE p."conversationId" = c."conversationId"
-          AND p.direction = 'in'
-          AND p."isPrivate" = false
-          AND p."organizationId" = ${orgId}
-          AND p."createdAt" < ${from}
-      )
     )
     SELECT
-      f."conversationId",
-      f."inAt",
+      c."conversationId",
+      c."inAt",
       o."outAt",
-      f."departmentId",
-      f."assignedToId",
-      f.channel,
-      f."tabulationId"
-    FROM first_in f
+      c."departmentId",
+      c."assignedToId",
+      c.channel,
+      c."tabulationId"
+    FROM candidates c
     INNER JOIN LATERAL (
       SELECT m."createdAt" AS "outAt"
       FROM messages m
-      WHERE m."conversationId" = f."conversationId"
+      WHERE m."conversationId" = c."conversationId"
         AND m.direction = 'out'
         AND m."authorType" = 'human'::"MessageAuthorType"
         AND m."isPrivate" = false
         AND m."organizationId" = ${orgId}
-        AND m."createdAt" > f."inAt"
+        AND m."createdAt" > c."inAt"
       ORDER BY m."createdAt"
       LIMIT 1
     ) o ON true
