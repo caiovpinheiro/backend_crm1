@@ -10,6 +10,7 @@
 import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
+import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
@@ -1420,11 +1421,13 @@ export async function getPainelService(
     error: msg,
   });
 
+  const replicaOk = isReplicaActive() && !isReplicaTripped();
   const needReplyMetrics =
-    want.has("tempo") ||
-    want.has("attendants") ||
-    want.has("byDepartment") ||
-    want.has("channels");
+    replicaOk &&
+    (want.has("tempo") ||
+      want.has("attendants") ||
+      want.has("byDepartment") ||
+      want.has("channels"));
   const sharedPromise = needReplyMetrics
     ? loadSharedServiceMetrics(range)
     : Promise.resolve(null);
@@ -1452,13 +1455,13 @@ export async function getPainelService(
   const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
       withShared(want.has("tempo"), (shared) => getPainelTempo(range, clock, shared)),
-      want.has("heatmap")
+      want.has("heatmap") && replicaOk
         ? wrap(() => getPainelHeatmap(range))
         : Promise.resolve(omit<PainelHeatmap>()),
       withShared(want.has("byDepartment"), (shared) =>
         getPainelByDepartment(range, clock, shared),
       ),
-      want.has("connections")
+      want.has("connections") && replicaOk
         ? wrap(() => getPainelConnections(range))
         : Promise.resolve(omit<PainelConnections>()),
       withShared(want.has("attendants"), (shared) =>
