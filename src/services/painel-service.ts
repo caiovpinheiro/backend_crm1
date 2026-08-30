@@ -26,6 +26,7 @@ import {
   round2,
   subtractBusinessMs,
   waitMs,
+  type BusinessHours,
   type ClockMode,
   type PainelDelta,
   type PainelRange,
@@ -241,69 +242,137 @@ function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
     });
 }
 
+type ReplyPair = {
+  conversationId: string;
+  inAt: Date;
+  outAt: Date;
+  isFirst: boolean;
+  departmentId: string | null;
+  assignedToId: string | null;
+};
+
+type StartRow = {
+  conversationId: string;
+  createdAt: Date;
+  firstHumanAt: Date;
+  departmentId: string | null;
+  assignedToId: string | null;
+};
+
+type ClosedRow = {
+  id: string;
+  createdAt: Date;
+  closedAt: Date | null;
+  updatedAt: Date;
+  assignedToId: string | null;
+  departmentId: string | null;
+};
+
+type SharedServiceMetrics = {
+  pairs: ReplyPair[];
+  startRows: StartRow[];
+  closed: ClosedRow[];
+  hours: BusinessHours;
+};
+
+/**
+ * Uma varredura por conversa do período — sem LATERAL por inbound e sem
+ * NOT EXISTS correlacionado (era o custo de ~3 min quando rodava 5x).
+ */
 async function firstHumanReplyPairs(
   orgId: string,
   from: Date,
   to: Date,
-): Promise<
-  {
-    conversationId: string;
-    inAt: Date;
-    outAt: Date;
-    isFirst: boolean;
-    departmentId: string | null;
-    assignedToId: string | null;
-  }[]
-> {
+): Promise<ReplyPair[]> {
   const rows = await prisma.$queryRaw<
     {
       conversationId: string;
       inAt: Date;
       outAt: Date;
-      rn: bigint;
       is_first: number;
       departmentId: string | null;
       assignedToId: string | null;
     }[]
   >(Prisma.sql`
-    SELECT x."conversationId", x."inAt", x."outAt", x.rn, x.is_first,
-           x."departmentId", x."assignedToId" FROM (
+    WITH inbound AS (
       SELECT
-        m_in."conversationId" AS "conversationId",
-        m_in."createdAt" AS "inAt",
-        m_out."createdAt" AS "outAt",
+        m."conversationId" AS "conversationId",
+        m."createdAt" AS "inAt",
         conv."departmentId" AS "departmentId",
-        conv."assignedToId" AS "assignedToId",
-        ROW_NUMBER() OVER (
-          PARTITION BY m_in."conversationId" ORDER BY m_in."createdAt" ASC
-        ) AS rn,
-        CASE WHEN NOT EXISTS (
-          SELECT 1 FROM messages m0
-          WHERE m0."conversationId" = m_in."conversationId"
-            AND m0.direction = 'in'
-            AND m0."isPrivate" = false
-            AND m0."createdAt" < m_in."createdAt"
-        ) THEN 1 ELSE 0 END AS is_first
-      FROM messages m_in
-      INNER JOIN conversations conv ON conv.id = m_in."conversationId"
-      INNER JOIN LATERAL (
-        SELECT m2."createdAt"
-        FROM messages m2
-        WHERE m2."conversationId" = m_in."conversationId"
-          AND m2.direction = 'out'
-          AND m2."authorType" = 'human'::"MessageAuthorType"
-          AND m2."isPrivate" = false
-          AND m2."createdAt" > m_in."createdAt"
-          AND m2."organizationId" = ${orgId}
-        ORDER BY m2."createdAt" ASC
-        LIMIT 1
-      ) m_out ON true
-      WHERE m_in.direction = 'in'
-        AND m_in."isPrivate" = false
-        AND m_in."organizationId" = ${orgId}
-        AND m_in."createdAt" >= ${from}
-        AND m_in."createdAt" <= ${to}
-    ) x
+        conv."assignedToId" AS "assignedToId"
+      FROM messages m
+      INNER JOIN conversations conv ON conv.id = m."conversationId"
+      WHERE m.direction = 'in'
+        AND m."isPrivate" = false
+        AND m."organizationId" = ${orgId}
+        AND m."createdAt" >= ${from}
+        AND m."createdAt" <= ${to}
+    ),
+    first_ever AS (
+      SELECT DISTINCT ON (m."conversationId")
+        m."conversationId" AS "conversationId",
+        m."createdAt" AS first_in_at
+      FROM messages m
+      INNER JOIN inbound i ON i."conversationId" = m."conversationId"
+      WHERE m.direction = 'in'
+        AND m."isPrivate" = false
+        AND m."organizationId" = ${orgId}
+      ORDER BY m."conversationId", m."createdAt" ASC
+    ),
+    outs AS (
+      SELECT m."conversationId" AS "conversationId", m."createdAt" AS "outAt"
+      FROM messages m
+      WHERE m.direction = 'out'
+        AND m."authorType" = 'human'::"MessageAuthorType"
+        AND m."isPrivate" = false
+        AND m."organizationId" = ${orgId}
+        AND m."createdAt" >= ${from}
+        AND EXISTS (
+          SELECT 1 FROM inbound i WHERE i."conversationId" = m."conversationId"
+        )
+    ),
+    events AS (
+      SELECT
+        i."conversationId",
+        i."inAt" AS ts,
+        0 AS kind_ord,
+        i."inAt",
+        NULL::timestamptz AS "outAt",
+        i."departmentId",
+        i."assignedToId"
+      FROM inbound i
+      UNION ALL
+      SELECT
+        o."conversationId",
+        o."outAt",
+        1,
+        NULL::timestamptz,
+        o."outAt",
+        NULL,
+        NULL
+      FROM outs o
+    ),
+    filled AS (
+      SELECT
+        e.*,
+        MIN(e."outAt") OVER (
+          PARTITION BY e."conversationId"
+          ORDER BY e.ts, e.kind_ord
+          ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
+        ) AS next_out
+      FROM events e
+    )
+    SELECT
+      f."conversationId",
+      f."inAt",
+      f.next_out AS "outAt",
+      CASE WHEN fe.first_in_at = f."inAt" THEN 1 ELSE 0 END AS is_first,
+      f."departmentId",
+      f."assignedToId"
+    FROM filled f
+    LEFT JOIN first_ever fe ON fe."conversationId" = f."conversationId"
+    WHERE f.kind_ord = 0
+      AND f.next_out IS NOT NULL
   `);
   return rows.map((r) => ({
     conversationId: r.conversationId,
@@ -319,47 +388,59 @@ async function loadStartRows(
   orgId: string,
   from: Date,
   to: Date,
-): Promise<
-  {
-    conversationId: string;
-    createdAt: Date;
-    firstHumanAt: Date;
-    departmentId: string | null;
-    assignedToId: string | null;
-  }[]
-> {
-  const rows = await prisma.$queryRaw<
-    {
-      conversationId: string;
-      createdAt: Date;
-      firstHumanAt: Date;
-      departmentId: string | null;
-      assignedToId: string | null;
-    }[]
-  >(Prisma.sql`
+): Promise<StartRow[]> {
+  return prisma.$queryRaw<StartRow[]>(Prisma.sql`
     SELECT
       conv.id AS "conversationId",
       conv."createdAt" AS "createdAt",
-      m_out."createdAt" AS "firstHumanAt",
+      MIN(m."createdAt") AS "firstHumanAt",
       conv."departmentId" AS "departmentId",
       conv."assignedToId" AS "assignedToId"
     FROM conversations conv
-    INNER JOIN LATERAL (
-      SELECT m2."createdAt"
-      FROM messages m2
-      WHERE m2."conversationId" = conv.id
-        AND m2.direction = 'out'
-        AND m2."authorType" = 'human'::"MessageAuthorType"
-        AND m2."isPrivate" = false
-        AND m2."organizationId" = ${orgId}
-      ORDER BY m2."createdAt" ASC
-      LIMIT 1
-    ) m_out ON true
+    INNER JOIN messages m
+      ON m."conversationId" = conv.id
+      AND m.direction = 'out'
+      AND m."authorType" = 'human'::"MessageAuthorType"
+      AND m."isPrivate" = false
+      AND m."organizationId" = ${orgId}
     WHERE conv."organizationId" = ${orgId}
       AND conv."createdAt" >= ${from}
       AND conv."createdAt" <= ${to}
+    GROUP BY conv.id, conv."createdAt", conv."departmentId", conv."assignedToId"
   `);
-  return rows;
+}
+
+async function loadClosedRows(range: PainelRange): Promise<ClosedRow[]> {
+  return prisma.conversation.findMany({
+    where: {
+      status: "RESOLVED",
+      OR: [
+        { closedAt: { gte: range.from, lte: range.to } },
+        { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
+      ],
+    },
+    select: {
+      id: true,
+      createdAt: true,
+      closedAt: true,
+      updatedAt: true,
+      assignedToId: true,
+      departmentId: true,
+    },
+  });
+}
+
+async function loadSharedServiceMetrics(
+  range: PainelRange,
+): Promise<SharedServiceMetrics> {
+  const orgId = getOrgIdOrThrow();
+  const [pairs, startRows, closed, hours] = await Promise.all([
+    firstHumanReplyPairs(orgId, range.from, range.to),
+    loadStartRows(orgId, range.from, range.to),
+    loadClosedRows(range),
+    loadPainelHours(),
+  ]);
+  return { pairs, startRows, closed, hours };
 }
 
 function statsFromMs(values: number[]): PainelTimeStat {
@@ -535,27 +616,12 @@ export async function getPainelVolume(
 export async function getPainelTempo(
   range: PainelRange,
   clock: ClockMode,
+  shared: SharedServiceMetrics,
 ): Promise<PainelTempo> {
-  const orgId = getOrgIdOrThrow();
-  const bh = await loadPainelHours();
+  const { pairs, startRows, closed, hours: bh } = shared;
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
   const todayKey = dayKeyFromDate(new Date());
-
-  const [pairs, startRows, closed] = await Promise.all([
-    firstHumanReplyPairs(orgId, range.from, range.to),
-    loadStartRows(orgId, range.from, range.to),
-    prisma.conversation.findMany({
-      where: {
-        status: "RESOLVED",
-        OR: [
-          { closedAt: { gte: range.from, lte: range.to } },
-          { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
-        ],
-      },
-      select: { createdAt: true, closedAt: true, updatedAt: true },
-    }),
-  ]);
 
   const firstMs: number[] = [];
   const subMs: number[] = [];
@@ -693,13 +759,14 @@ export async function getPainelHeatmap(range: PainelRange): Promise<PainelHeatma
 export async function getPainelAttendants(
   range: PainelRange,
   clock: ClockMode,
+  shared: SharedServiceMetrics,
 ): Promise<{ rows: PainelAttendantRow[]; attribution: string }> {
   const orgId = getOrgIdOrThrow();
-  const bh = await loadPainelHours();
+  const { pairs, startRows, closed, hours: bh } = shared;
   const attribution =
     "Conta para os dois: cada conversa entra na carga de todo atendente que a recebeu (atribuição atual + distribuição). Não é só quem finalizou.";
 
-  const [loadRows, stillOpenRows, pairs, startRows, closed, finishedRows] = await Promise.all([
+  const [loadRows, stillOpenRows, finishedRows] = await Promise.all([
     prisma.$queryRaw<{ userId: string; conversationId: string }[]>(Prisma.sql`
     SELECT DISTINCT x."userId", x."conversationId" FROM (
       SELECT conv."assignedToId" AS "userId", conv.id AS "conversationId"
@@ -729,24 +796,6 @@ export async function getPainelAttendants(
         assignedTo: { is: { type: "HUMAN" } },
       },
       _count: { _all: true },
-    }),
-    firstHumanReplyPairs(orgId, range.from, range.to),
-    loadStartRows(orgId, range.from, range.to),
-    prisma.conversation.findMany({
-      where: {
-        status: "RESOLVED",
-        OR: [
-          { closedAt: { gte: range.from, lte: range.to } },
-          { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
-        ],
-      },
-      select: {
-        id: true,
-        createdAt: true,
-        closedAt: true,
-        updatedAt: true,
-        assignedToId: true,
-      },
     }),
     prisma.conversation.groupBy({
       by: ["assignedToId"],
@@ -845,17 +894,16 @@ export async function getPainelAttendants(
 }
 
 async function firstResponseByKey(
-  orgId: string,
+  pairs: ReplyPair[],
   range: PainelRange,
   clock: ClockMode,
+  hours: BusinessHours,
   group: "channel" | "tabulation",
 ): Promise<Map<string, { count: number; firstMs: number[] }>> {
-  const bh = await loadPainelHours();
-  const pairs = await firstHumanReplyPairs(orgId, range.from, range.to);
   const firstByConv = new Map<string, number>();
   for (const p of pairs) {
     if (!p.isFirst) continue;
-    firstByConv.set(p.conversationId, waitMs(p.inAt, p.outAt, clock, bh));
+    firstByConv.set(p.conversationId, waitMs(p.inAt, p.outAt, clock, hours));
   }
 
   if (group === "channel") {
@@ -898,11 +946,11 @@ async function firstResponseByKey(
 export async function getPainelChannels(
   range: PainelRange,
   clock: ClockMode,
+  shared: SharedServiceMetrics,
 ): Promise<{ channels: PainelChannelRow[]; motivos: PainelMotivoRow[] }> {
-  const orgId = getOrgIdOrThrow();
   const [byChannel, byMotivo] = await Promise.all([
-    firstResponseByKey(orgId, range, clock, "channel"),
-    firstResponseByKey(orgId, range, clock, "tabulation"),
+    firstResponseByKey(shared.pairs, range, clock, shared.hours, "channel"),
+    firstResponseByKey(shared.pairs, range, clock, shared.hours, "tabulation"),
   ]);
 
   const channels: PainelChannelRow[] = [...byChannel.entries()]
@@ -940,14 +988,15 @@ export async function getPainelChannels(
 export async function getPainelByDepartment(
   range: PainelRange,
   clock: ClockMode,
+  shared: SharedServiceMetrics,
 ): Promise<PainelByDepartment> {
   const orgId = getOrgIdOrThrow();
-  const bh = await loadPainelHours();
+  const { pairs, startRows, closed, hours: bh } = shared;
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
   const todayKey = dayKeyFromDate(new Date());
 
-  const [daily, counts, pairs, startRows, closed] = await Promise.all([
+  const [daily, counts] = await Promise.all([
     prisma.$queryRaw<{ d: Date; deptId: string | null; deptName: string | null; c: bigint }[]>(
       Prisma.sql`
         SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
@@ -983,23 +1032,6 @@ export async function getPainelByDepartment(
         AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
       GROUP BY 1, 2
     `),
-    firstHumanReplyPairs(orgId, range.from, range.to),
-    loadStartRows(orgId, range.from, range.to),
-    prisma.conversation.findMany({
-      where: {
-        status: "RESOLVED",
-        OR: [
-          { closedAt: { gte: range.from, lte: range.to } },
-          { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
-        ],
-      },
-      select: {
-        departmentId: true,
-        createdAt: true,
-        closedAt: true,
-        updatedAt: true,
-      },
-    }),
   ]);
 
   const totals = new Map<string, { label: string; started: number }>();
@@ -1314,6 +1346,29 @@ export async function getPainelService(
     error: msg,
   });
 
+  const needReplyMetrics =
+    want.has("tempo") ||
+    want.has("attendants") ||
+    want.has("byDepartment") ||
+    want.has("channels");
+  const sharedPromise = needReplyMetrics
+    ? loadSharedServiceMetrics(range)
+    : Promise.resolve(null);
+
+  const withShared = <T,>(
+    needed: boolean,
+    fn: (shared: SharedServiceMetrics) => Promise<T>,
+  ): Promise<PainelBlock<T>> => {
+    if (!needed) return Promise.resolve(omit<T>());
+    return sharedPromise.then(
+      (shared) => (shared ? wrap(() => fn(shared)) : Promise.resolve(omit<T>())),
+      (e) => {
+        console.error("[painel/service]", e);
+        return omit<T>(e instanceof Error ? e.message : "Falha ao carregar este bloco.");
+      },
+    );
+  };
+
   const [agora, volume, tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
       want.has("agora")
@@ -1322,26 +1377,22 @@ export async function getPainelService(
       want.has("volume")
         ? wrap(() => getPainelVolume(range, clock))
         : Promise.resolve(omit<PainelVolume>()),
-      want.has("tempo")
-        ? wrap(() => getPainelTempo(range, clock))
-        : Promise.resolve(omit<PainelTempo>()),
+      withShared(want.has("tempo"), (shared) => getPainelTempo(range, clock, shared)),
       want.has("heatmap")
         ? wrap(() => getPainelHeatmap(range))
         : Promise.resolve(omit<PainelHeatmap>()),
-      want.has("byDepartment")
-        ? wrap(() => getPainelByDepartment(range, clock))
-        : Promise.resolve(omit<PainelByDepartment>()),
+      withShared(want.has("byDepartment"), (shared) =>
+        getPainelByDepartment(range, clock, shared),
+      ),
       want.has("connections")
         ? wrap(() => getPainelConnections(range))
         : Promise.resolve(omit<PainelConnections>()),
-      want.has("attendants")
-        ? wrap(() => getPainelAttendants(range, clock))
-        : Promise.resolve(omit<{ rows: PainelAttendantRow[]; attribution: string }>()),
-      want.has("channels")
-        ? wrap(() => getPainelChannels(range, clock))
-        : Promise.resolve(
-            omit<{ channels: PainelChannelRow[]; motivos: PainelMotivoRow[] }>(),
-          ),
+      withShared(want.has("attendants"), (shared) =>
+        getPainelAttendants(range, clock, shared),
+      ),
+      withShared(want.has("channels"), (shared) =>
+        getPainelChannels(range, clock, shared),
+      ),
       want.has("exceptions")
         ? wrap(() => getPainelServiceExceptions(clock))
         : Promise.resolve(omit<PainelServiceException[]>()),
