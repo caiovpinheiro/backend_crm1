@@ -2750,6 +2750,8 @@ model Conversation {
   unreadCount            Int                @default(0)
   lastReadAt             DateTime?
   lastInboundAt          DateTime?
+  /// Primeira inbound deste conversationId (semântica A / ticket). NULL até o primeiro inbound.
+  firstInboundAt         DateTime? @db.Timestamp
   lastMessageDirection   String?
   hasAgentReply          Boolean            @default(false)
   /// TRUE assim que um agente HUMANO responde a conversa (envio manual pelo

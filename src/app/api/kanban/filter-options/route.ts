@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { userOrgFilter, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
 /**
  * Metadados para alimentar o painel de filtros do Kanban em uma única chamada.
@@ -11,7 +12,8 @@ import { prisma } from "@/lib/prisma";
 export async function GET() {
   return withOrgContext(async (session) => {
     try {
-      const [pipelines, users, tags, customFields, sources, lossReasonCatalog, usedLostReasons] = await Promise.all([
+      const orgId = getOrgIdOrThrow();
+      const [pipelines, users, tags, customFields, sourceRows, lossReasonCatalog] = await Promise.all([
         prisma.pipeline.findMany({
           where: { archivedAt: null },
           orderBy: { name: "asc" },
@@ -52,25 +54,17 @@ export async function GET() {
           orderBy: { label: "asc" },
           select: { id: true, name: true, label: true, type: true, options: true, entity: true },
         }),
-        prisma.contact.findMany({
-          where: { AND: [{ source: { not: null } }, { source: { not: "" } }] },
-          distinct: ["source"],
-          select: { source: true },
-          orderBy: { source: "asc" },
-          take: 200,
-        }),
-        // Motivos de perda: catálogo configurado + motivos livres ("Outro…")
-        // já usados em deals — união alimenta o filtro por motivo.
+        prisma.$queryRaw<{ source: string }[]>`
+          SELECT DISTINCT source FROM contacts
+          WHERE "organizationId" = ${orgId}
+            AND source IS NOT NULL
+            AND source <> ''
+          LIMIT 200
+        `,
         prisma.lossReason.findMany({
           where: { isActive: true },
           orderBy: { position: "asc" },
           select: { label: true },
-        }),
-        prisma.deal.findMany({
-          where: { lostReason: { not: null } },
-          distinct: ["lostReason"],
-          select: { lostReason: true },
-          take: 200,
         }),
       ]);
 
@@ -78,12 +72,7 @@ export async function GET() {
       const contactCustomFields = customFields.filter((cf) => cf.entity === "contact");
 
       const lossReasons = Array.from(
-        new Set([
-          ...lossReasonCatalog.map((r) => r.label),
-          ...usedLostReasons
-            .map((d) => d.lostReason)
-            .filter((r): r is string => !!r?.trim()),
-        ]),
+        new Set(lossReasonCatalog.map((r) => r.label).filter((r) => !!r.trim())),
       );
 
       return NextResponse.json({
@@ -92,7 +81,7 @@ export async function GET() {
         tags,
         dealCustomFields,
         contactCustomFields,
-        sources: sources
+        sources: sourceRows
           .map((s) => s.source?.trim())
           .filter((s): s is string => !!s)
           .sort((a, b) => a.localeCompare(b, "pt-BR")),

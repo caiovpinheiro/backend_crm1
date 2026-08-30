@@ -29,6 +29,7 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
+import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
@@ -370,6 +371,15 @@ async function processEvent(
       createdAt: timestamp,
     }),
   });
+
+  // TODO(inbox-ig): este ingest ainda não incrementa unread nem seta
+  // lastMessageDirection — bug de UX separado; não misturar com firstInboundAt.
+  await touchInbound({ conversationId: conversation.id, at: timestamp }).catch((err) =>
+    warnTouchInboundFailed(err, {
+      conversationId: conversation.id,
+      channel: conversation.channel ?? platform,
+    }),
+  );
 
   try {
     sseBus.publish("new_message", {

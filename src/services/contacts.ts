@@ -9,10 +9,7 @@ import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
-import {
-  findContactIdsByPhoneDigits,
-  findCustomFieldMatchesByDigits,
-} from "@/services/kanban-filters";
+import { resolveContactSearchCandidates } from "@/services/kanban-filters";
 
 const log = getLogger("contacts-service");
 
@@ -111,6 +108,14 @@ export type GetContactsParams = {
   sortOrder?: "asc" | "desc";
 };
 
+function idsLengthForCappedSearch(where: Prisma.ContactWhereInput): number {
+  const id = where.id;
+  if (id && typeof id === "object" && "in" in id && Array.isArray(id.in)) {
+    return id.in.length;
+  }
+  return 0;
+}
+
 const assignedToSelect = {
   id: true,
   name: true,
@@ -130,38 +135,24 @@ export async function getContacts(params: GetContactsParams = {}) {
 
   const search = params.search?.trim();
   const where: Prisma.ContactWhereInput = {};
+  let searchCapped = false;
 
   if (search) {
-    const or: Prisma.ContactWhereInput[] = [
-      { name: { contains: search, mode: "insensitive" } },
-      { email: { contains: search, mode: "insensitive" } },
-      { phone: { contains: search, mode: "insensitive" } },
-      {
-        customFields: {
-          some: {
-            value: { contains: search, mode: "insensitive" },
-          },
-        },
-      },
-    ];
-    // Parcial por dígitos: "11945" encontra "+5511945…" sem precisar de +/DDI.
-    // Também casa CPF/RGM salvo com máscara ("123.456.789-00") quando o
-    // operador digita só números.
-    const digits = search.replace(/\D+/g, "");
-    if (digits.length >= 3) {
-      const [phoneIds, cfMatches] = await Promise.all([
-        findContactIdsByPhoneDigits(digits),
-        findCustomFieldMatchesByDigits(digits),
-      ]);
-      const ids = [...new Set([...phoneIds, ...cfMatches.contactIds])];
-      if (ids.length > 0) {
-        or.push({ id: { in: ids } });
-      }
-      if (cfMatches.dealIds.length > 0) {
-        or.push({ deals: { some: { id: { in: cfMatches.dealIds } } } });
-      }
+    const orgId = getOrgIdOrThrow();
+    const { ids, capped } = await resolveContactSearchCandidates(search);
+    searchCapped = capped;
+    if (ids.length === 0) {
+      return {
+        items: [],
+        total: 0,
+        page,
+        perPage,
+        totalPages: 1,
+        hasMore: false,
+      };
     }
-    where.OR = or;
+    where.organizationId = orgId;
+    where.id = { in: ids };
   }
 
   if (params.customFieldFilters && params.customFieldFilters.length > 0) {
@@ -315,7 +306,9 @@ export async function getContacts(params: GetContactsParams = {}) {
         customFields: { select: { customFieldId: true, value: true } },
       },
     }),
-    prisma.contact.count({ where }),
+    searchCapped
+      ? Promise.resolve(idsLengthForCappedSearch(where))
+      : prisma.contact.count({ where }),
   ]);
 
   await enrichContactsWithUserAvatarFallback(rawItems);
@@ -402,6 +395,7 @@ export async function getContacts(params: GetContactsParams = {}) {
     page,
     perPage,
     totalPages: Math.ceil(total / perPage) || 1,
+    hasMore: searchCapped,
   };
 }
 

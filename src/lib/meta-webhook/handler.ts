@@ -20,6 +20,7 @@ import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { cache } from "@/lib/cache";
+import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 
 /**
  * Scope multi-tenancy do webhook. Quando presente:
@@ -3048,13 +3049,13 @@ export async function processMetaWebhookPayload(
               log.warn("Falha ao atualizar consent de ligação (não-fatal):", err);
             }
 
+            const inboundAt = parsed.timestamp ?? new Date();
             try {
               await prisma.conversation.update({
                 where: { id: conversation.id },
                 data: {
                   updatedAt: new Date(),
                   unreadCount: { increment: 1 },
-                  lastInboundAt: parsed.timestamp ?? new Date(),
                   lastMessageDirection: "in",
                   hasAgentReply: false,
                   // Cliente respondeu → sai da fila Erro (fase adequada).
@@ -3069,12 +3070,17 @@ export async function processMetaWebhookPayload(
                 data: {
                   updatedAt: new Date(),
                   unreadCount: { increment: 1 },
-                  lastInboundAt: parsed.timestamp ?? new Date(),
                   lastMessageDirection: "in",
                   hasError: false,
                 },
               }).catch(() => {});
             }
+            await touchInbound({ conversationId: conversation.id, at: inboundAt }).catch((err) =>
+              warnTouchInboundFailed(err, {
+                conversationId: conversation.id,
+                channel: conversation.channel ?? "whatsapp",
+              }),
+            );
 
             try {
               sseBus.publish("new_message", {
