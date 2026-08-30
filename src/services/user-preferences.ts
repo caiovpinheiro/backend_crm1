@@ -104,11 +104,23 @@ export function normalizeSidebar(
   return { items };
 }
 
+function parseSidebarItemsJson(
+  raw: { items?: unknown } | unknown[] | null | undefined,
+): SidebarItemPreference[] | null {
+  if (!raw) return null;
+  const items = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { items?: unknown }).items)
+      ? (raw as { items: unknown[] }).items
+      : null;
+  if (!items) return null;
+  return items as SidebarItemPreference[];
+}
+
 /**
  * Le todos os `sidebarItems` dos Roles atribuidos ao usuario. A sidebar
- * efetiva do usuario e' derivada aqui — a decisao (14/jul/26) foi mover
- * essa preferencia de UserPreference (per-user) para Role (per-papel),
- * gerenciada pelo admin em /settings/permissions. Ver AGENT.md.
+ * efetiva comeca por essa uniao (teto do papel). O usuario ainda pode
+ * reordenar/ocultar itens liberados via `UserPreference.sidebar`.
  *
  * Retorna array de "layers" (uma por role com sidebarItems nao-null),
  * cada layer preservando a ordem original salva. `mergeSidebarLayers`
@@ -130,17 +142,11 @@ async function readRoleSidebarLayers(
 
   const layers: SidebarItemPreference[][] = [];
   for (const a of assignments) {
-    const raw = a.role?.sidebarItems as { items?: unknown } | unknown[] | null | undefined;
-    if (!raw) continue;
-    // O admin salva no shape { items: [...] } (mesmo do UserPreference antigo)
-    // mas aceitamos array cru para tolerar edicoes manuais no banco.
-    const items = Array.isArray(raw)
-      ? raw
-      : Array.isArray((raw as { items?: unknown }).items)
-        ? (raw as { items: unknown[] }).items
-        : null;
+    const items = parseSidebarItemsJson(
+      a.role?.sidebarItems as { items?: unknown } | unknown[] | null | undefined,
+    );
     if (!items) continue;
-    layers.push(items as SidebarItemPreference[]);
+    layers.push(items);
   }
   return layers;
 }
@@ -174,18 +180,137 @@ function mergeSidebarLayers(
   }));
 }
 
+async function getRoleSidebarBase(
+  userId: string,
+  availableKeys: Set<string>,
+): Promise<SidebarPreferences> {
+  const layers = await readRoleSidebarLayers(userId);
+  return normalizeSidebar(mergeSidebarLayers(layers), availableKeys);
+}
+
+async function readUserSidebarOverlay(
+  userId: string,
+): Promise<SidebarItemPreference[] | null> {
+  const pref = await prisma.userPreference.findUnique({
+    where: { userId },
+    select: { sidebar: true },
+  });
+  return parseSidebarItemsJson(
+    pref?.sidebar as { items?: unknown } | unknown[] | null | undefined,
+  );
+}
+
 /**
- * Retorna a preferencia de sidebar do usuario, ja normalizada contra o
- * catalogo atual. Fonte: uniao dos `sidebarItems` de todos os roles do
- * usuario. Se nenhum role tem override, devolve o padrao do catalogo.
+ * Aplica o overlay pessoal por cima do teto do papel:
+ *  - ordem do usuario primeiro, depois itens novos do papel;
+ *  - usuario pode ocultar (exceto locked);
+ *  - usuario NAO pode reexibir o que o papel escondeu.
  */
+export function applyUserSidebarOverlay(
+  rolePrefs: SidebarPreferences,
+  overlay: SidebarItemPreference[],
+): SidebarPreferences {
+  const roleMap = new Map(rolePrefs.items.map((it) => [it.key, it]));
+  const overlayMap = new Map<string, SidebarItemPreference>();
+  for (const it of overlay) {
+    if (!it || typeof it.key !== "string") continue;
+    if (!roleMap.has(it.key)) continue;
+    if (overlayMap.has(it.key)) continue;
+    overlayMap.set(it.key, it);
+  }
+
+  const orderedKeys = [...overlayMap.values()]
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((it) => it.key);
+
+  for (const it of rolePrefs.items) {
+    if (!orderedKeys.includes(it.key)) orderedKeys.push(it.key);
+  }
+
+  return {
+    items: orderedKeys.map((key, idx) => {
+      const locked = SIDEBAR_LOCKED_KEYS.has(key);
+      const roleEnabled = roleMap.get(key)?.enabled ?? true;
+      const userEnabled = overlayMap.get(key)?.enabled ?? true;
+      return {
+        key,
+        enabled: locked ? true : roleEnabled && userEnabled,
+        order: idx + 1,
+      };
+    }),
+  };
+}
+
+export interface SidebarPreferenceBundle {
+  sidebar: SidebarPreferences;
+  roleSidebar: SidebarPreferences;
+}
+
+/**
+ * Sidebar efetiva do usuario: uniao dos roles (teto) + overlay pessoal
+ * em `UserPreference.sidebar` (ordem e ocultacao). Sem overlay, devolve
+ * so o papel / catalogo.
+ */
+export async function getSidebarPreferenceBundle(
+  userId: string,
+  availableKeys: Set<string> = computeAvailableKeys(),
+): Promise<SidebarPreferenceBundle> {
+  const roleSidebar = await getRoleSidebarBase(userId, availableKeys);
+  const overlay = await readUserSidebarOverlay(userId);
+  return {
+    roleSidebar,
+    sidebar: overlay
+      ? applyUserSidebarOverlay(roleSidebar, overlay)
+      : roleSidebar,
+  };
+}
+
+/** Preferencia efetiva (nav). Equivale a `getSidebarPreferenceBundle().sidebar`. */
 export async function getSidebarPreferences(
   userId: string,
   availableKeys: Set<string> = computeAvailableKeys(),
 ): Promise<SidebarPreferences> {
-  const layers = await readRoleSidebarLayers(userId);
-  const merged = mergeSidebarLayers(layers);
-  return normalizeSidebar(merged, availableKeys);
+  const bundle = await getSidebarPreferenceBundle(userId, availableKeys);
+  return bundle.sidebar;
+}
+
+/**
+ * Salva o overlay pessoal. Normaliza contra o catalogo + permissoes;
+ * o teto do papel e reaplicado na leitura.
+ */
+export async function saveSidebarPreferences(
+  userId: string,
+  inputItems: SidebarItemPreference[],
+  availableKeys: Set<string> = computeAvailableKeys(),
+): Promise<SidebarPreferenceBundle> {
+  const roleSidebar = await getRoleSidebarBase(userId, availableKeys);
+  const normalized = normalizeSidebar(inputItems, availableKeys);
+  const sidebarJson = normalized as unknown as Prisma.InputJsonValue;
+
+  await prisma.userPreference.upsert({
+    where: { userId },
+    update: { sidebar: sidebarJson },
+    create: { userId, sidebar: sidebarJson },
+  });
+
+  return {
+    roleSidebar,
+    sidebar: applyUserSidebarOverlay(roleSidebar, normalized.items),
+  };
+}
+
+/** Apaga o overlay pessoal — a nav volta ao menu do papel. */
+export async function clearSidebarPreferences(
+  userId: string,
+  availableKeys: Set<string> = computeAvailableKeys(),
+): Promise<SidebarPreferenceBundle> {
+  await prisma.userPreference.upsert({
+    where: { userId },
+    update: { sidebar: Prisma.DbNull },
+    create: { userId },
+  });
+  const roleSidebar = await getRoleSidebarBase(userId, availableKeys);
+  return { roleSidebar, sidebar: roleSidebar };
 }
 
 /**

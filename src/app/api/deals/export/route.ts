@@ -131,6 +131,9 @@ export async function GET(request: Request) {
       const filename = `negocios${filtered ? "-filtrado" : ""}-${stamp}.csv`;
       const encoder = new TextEncoder();
 
+      const rawTotal = await prisma.deal.count({ where });
+      const exportTotal = Math.min(rawTotal, MAX_ROWS);
+
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const write = (s: string) => controller.enqueue(encoder.encode(s));
@@ -279,6 +282,9 @@ export async function GET(request: Request) {
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Cache-Control": "no-store",
           "X-Content-Type-Options": "nosniff",
+          "X-Export-Total": String(exportTotal),
+          "Access-Control-Expose-Headers":
+            "Content-Disposition, X-Export-Total",
         },
       });
     });

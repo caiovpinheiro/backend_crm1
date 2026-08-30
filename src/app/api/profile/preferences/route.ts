@@ -1,11 +1,8 @@
 /**
  * GET /api/profile/preferences
- * Preferencias pessoais do usuario autenticado: `sidebar`, `dashboard`
- * e `appearance`. Se nunca salvou, retorna o padrao (catalogo / theme null).
- *
- * Tambem devolve `availableKeys`: o conjunto de keys de sidebar liberadas
- * para o usuario (gateadas por permission + widgets ativos da org). O
- * frontend usa essa lista para nunca renderizar/auto-anexar itens gateados.
+ * Preferencias pessoais: `sidebar` (papel + overlay), `dashboard`,
+ * `appearance`. Tambem devolve `roleSidebar` (teto do papel) e
+ * `availableKeys` (permission + widgets ativos).
  */
 
 import { NextResponse } from "next/server";
@@ -17,7 +14,7 @@ import {
   computeAvailableKeys,
   getAppearancePreferences,
   getDashboardPreferences,
-  getSidebarPreferences,
+  getSidebarPreferenceBundle,
 } from "@/services/user-preferences";
 
 export async function GET() {
@@ -34,13 +31,14 @@ export async function GET() {
         (slug) => activeSlugs.has(slug),
       );
 
-      const [sidebar, dashboard, appearance] = await Promise.all([
-        getSidebarPreferences(session.user.id, availableKeys),
+      const [sidebarBundle, dashboard, appearance] = await Promise.all([
+        getSidebarPreferenceBundle(session.user.id, availableKeys),
         getDashboardPreferences(session.user.id),
         getAppearancePreferences(session.user.id),
       ]);
       return NextResponse.json({
-        sidebar,
+        sidebar: sidebarBundle.sidebar,
+        roleSidebar: sidebarBundle.roleSidebar,
         dashboard,
         appearance,
         availableKeys: [...availableKeys],
