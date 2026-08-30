@@ -97,6 +97,98 @@ export async function resolveDealSearchCandidates(
 }
 
 /**
+ * Candidatos da busca do diretório de contatos. ILIKE de name/email/phone
+ * em queries separadas para o GIN trgm (OR na mesma cláusula faz o planner
+ * desistir do índice). Campos customizados e, se o termo tiver dígitos,
+ * telefone normalizado + valores/deals por dígitos — tudo vira `id IN`.
+ */
+export async function resolveContactSearchCandidates(
+  search: string,
+): Promise<{ ids: string[]; capped: boolean }> {
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return { ids: [], capped: false };
+  const pattern = `%${search}%`;
+  const digits = search.replace(/\D+/g, "");
+
+  const [byName, byEmail, byPhone, byCcfv, phoneIds, cfMatches] =
+    await Promise.all([
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId} AND name ILIKE ${pattern}
+        ORDER BY "createdAt" DESC
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId} AND email ILIKE ${pattern}
+        ORDER BY "createdAt" DESC
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId} AND phone ILIKE ${pattern}
+        ORDER BY "createdAt" DESC
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ contactId: string }[]>`
+        SELECT v."contactId"
+        FROM contact_custom_field_values v
+        INNER JOIN contacts c ON c.id = v."contactId"
+        WHERE v."organizationId" = ${orgId} AND v.value ILIKE ${pattern}
+        ORDER BY c."createdAt" DESC
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      digits.length >= 3
+        ? findContactIdsByPhoneDigits(digits)
+        : Promise.resolve([] as string[]),
+      digits.length >= 3
+        ? findCustomFieldMatchesByDigits(digits)
+        : Promise.resolve({ dealIds: [] as string[], contactIds: [] as string[] }),
+    ]);
+
+  const idSet = new Set<string>([
+    ...byName.map((r) => r.id),
+    ...byEmail.map((r) => r.id),
+    ...byPhone.map((r) => r.id),
+    ...byCcfv.map((r) => r.contactId),
+    ...phoneIds,
+    ...cfMatches.contactIds,
+  ]);
+
+  if (cfMatches.dealIds.length > 0) {
+    const fromDeals = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT DISTINCT "contactId" AS id FROM deals
+      WHERE "organizationId" = ${orgId}
+        AND id = ANY(${cfMatches.dealIds})
+        AND "contactId" IS NOT NULL
+    `;
+    for (const r of fromDeals) {
+      if (r.id) idSet.add(r.id);
+    }
+  }
+
+  if (idSet.size === 0) return { ids: [], capped: false };
+
+  const unionIds = [...idSet];
+  const ranked = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM contacts
+    WHERE "organizationId" = ${orgId}
+      AND id = ANY(${unionIds})
+    ORDER BY "createdAt" DESC
+    LIMIT ${SEARCH_CANDIDATE_CAP}
+  `;
+  const sourceHitCap =
+    byName.length >= SEARCH_CANDIDATE_CAP ||
+    byEmail.length >= SEARCH_CANDIDATE_CAP ||
+    byPhone.length >= SEARCH_CANDIDATE_CAP ||
+    byCcfv.length >= SEARCH_CANDIDATE_CAP;
+  return {
+    ids: ranked.map((r) => r.id),
+    capped: sourceHitCap || unionIds.length > SEARCH_CANDIDATE_CAP,
+  };
+}
+
+/**
  * Candidatos da busca do inbox. Mesma estratégia de
  * `resolveDealSearchCandidates`, aplicada às colunas que a conversa só
  * alcança por join: contato, empresa, campos personalizados, título de

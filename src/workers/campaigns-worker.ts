@@ -1111,9 +1111,9 @@ function startRoundRobinSender(opts: {
 
   /** Orgs com recipients PENDING — loose index scan (CTE recursiva) sobre
    * (organizationId, status, id): O(#orgs) por consulta, não O(#pendentes).
-   * Cache de 1s para não repetir a query a cada rodada do refill. */
+   * Cache de 3s para não repetir a query a cada rodada do refill. */
   async function listOrgsWithPending(): Promise<string[]> {
-    if (orgCache.orgs.length && Date.now() - orgCache.at < 1_000) {
+    if (orgCache.orgs.length && Date.now() - orgCache.at < 3_000) {
       return orgCache.orgs;
     }
     const rows = await prismaBase.$queryRaw<{ organizationId: string }[]>`
@@ -1215,7 +1215,7 @@ function startRoundRobinSender(opts: {
         }
         const orgs = await listOrgsWithPending();
         if (orgs.length === 0) {
-          await sleep(500);
+          await sleep(3_000);
           continue;
         }
         // Rodízio: cada ciclo começa a varredura numa org diferente.

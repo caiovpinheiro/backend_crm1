@@ -45,9 +45,10 @@ import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/servic
  * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
  * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
  * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
- * rede de segurança contra invalidação perdida.
+ * rede de segurança contra invalidação perdida. 90s reduz recomputo
+ * das badges quando o SSE dispara refetch em rajada.
  */
-const TAB_COUNTS_CACHE_TTL_SEC = 30;
+const TAB_COUNTS_CACHE_TTL_SEC = 90;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -958,30 +959,397 @@ const TAB_LIST = INBOX_TAB_LIST;
  * (...)`) — um único COUNT escalar, sem trazer os grupos para memória
  * (o org maior tem 28k grupos; `groupBy` custaria MBs por aba).
  *
- * Contato x contato+canal: a lista agrupa por `contactId::channel`, mas em
- * produção `count(DISTINCT contactId) == count(DISTINCT (contactId, channel))`
- * em TODAS as orgs (um contato não tem tickets em canais diferentes), logo
- * contato distinto casa exatamente com a quantidade de cards.
+ * Contato x contato+canal: a lista agrupa por `contactId::channel`. Em
+ * `dnawork` os dois COUNTs divergem (3 cards a mais no par) — o badge
+ * usa a mesma chave da lista, não só `contactId`.
  *
  * `collapseByContact = false` (filtro por `contactId`) espelha a lista quando
  * ela NÃO colapsa: aí cada ticket é um card e contamos linhas.
  */
+type AssigneeIdsByType = { HUMAN: string[]; AI: string[] };
+
+async function loadAssigneeIdsByType(): Promise<AssigneeIdsByType> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return { HUMAN: [], AI: [] };
+  const rows = await prisma.user.findMany({
+    where: { organizationId: orgId, type: { in: ["HUMAN", "AI"] } },
+    select: { id: true, type: true },
+  });
+  const HUMAN: string[] = [];
+  const AI: string[] = [];
+  for (const r of rows) {
+    if (r.type === "AI") AI.push(r.id);
+    else HUMAN.push(r.id);
+  }
+  return { HUMAN, AI };
+}
+
+function rewriteAssignedToType(
+  where: Prisma.ConversationWhereInput,
+  byType: AssigneeIdsByType,
+): Prisma.ConversationWhereInput {
+  const assignedTo = where.assignedTo as { is?: { type?: string } } | undefined;
+  const type = assignedTo?.is?.type;
+  const out: Prisma.ConversationWhereInput = { ...where };
+  if (type === "HUMAN" || type === "AI") {
+    delete out.assignedTo;
+    out.assignedToId = { in: byType[type] };
+  }
+  if (where.AND) {
+    const and = Array.isArray(where.AND) ? where.AND : [where.AND];
+    out.AND = and.map((w) =>
+      w && typeof w === "object"
+        ? rewriteAssignedToType(w as Prisma.ConversationWhereInput, byType)
+        : w,
+    );
+  }
+  if (where.OR) {
+    out.OR = where.OR.map((w) => rewriteAssignedToType(w, byType));
+  }
+  if (where.NOT) {
+    const not = where.NOT;
+    if (Array.isArray(not)) {
+      out.NOT = not.map((w) => rewriteAssignedToType(w, byType));
+    } else if (typeof not === "object") {
+      out.NOT = rewriteAssignedToType(not, byType);
+    }
+  }
+  return out;
+}
+
+function sqlIn(column: Prisma.Sql, values: unknown[]): Prisma.Sql {
+  if (values.length === 0) return Prisma.sql`FALSE`;
+  return Prisma.sql`${column} IN (${Prisma.join(values)})`;
+}
+
+function sqlScalar(
+  column: Prisma.Sql,
+  value: unknown,
+  enumCast?: string,
+): Prisma.Sql | null {
+  if (value === null) return Prisma.sql`${column} IS NULL`;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return enumCast
+      ? Prisma.sql`${column} = ${value}::${Prisma.raw(`"${enumCast}"`)}`
+      : Prisma.sql`${column} = ${value}`;
+  }
+  if (typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if ("in" in v) {
+    const arr = Array.isArray(v.in) ? v.in : [];
+    if (arr.length === 0) return Prisma.sql`FALSE`;
+    if (enumCast) {
+      return Prisma.sql`${column} IN (${Prisma.join(
+        arr.map((x) => Prisma.sql`${x}::${Prisma.raw(`"${enumCast}"`)}`),
+      )})`;
+    }
+    return sqlIn(column, arr);
+  }
+  if ("not" in v) {
+    if (v.not === null) return Prisma.sql`${column} IS NOT NULL`;
+    if (typeof v.not === "string" || typeof v.not === "number" || typeof v.not === "boolean") {
+      return enumCast
+        ? Prisma.sql`${column} <> ${v.not}::${Prisma.raw(`"${enumCast}"`)}`
+        : Prisma.sql`${column} <> ${v.not}`;
+    }
+    if (v.not && typeof v.not === "object" && "in" in (v.not as object)) {
+      const arr = Array.isArray((v.not as { in: unknown[] }).in)
+        ? (v.not as { in: unknown[] }).in
+        : [];
+      if (arr.length === 0) return Prisma.sql`TRUE`;
+      return Prisma.sql`${column} NOT IN (${Prisma.join(arr)})`;
+    }
+    return null;
+  }
+  if ("equals" in v) {
+    if (v.equals === null) return Prisma.sql`${column} IS NULL`;
+    return enumCast
+      ? Prisma.sql`${column} = ${v.equals}::${Prisma.raw(`"${enumCast}"`)}`
+      : Prisma.sql`${column} = ${v.equals}`;
+  }
+  if ("contains" in v && typeof v.contains === "string") {
+    return Prisma.sql`${column} ILIKE ${`%${v.contains}%`}`;
+  }
+  const parts: Prisma.Sql[] = [];
+  if ("gt" in v) parts.push(Prisma.sql`${column} > ${v.gt}`);
+  if ("gte" in v) parts.push(Prisma.sql`${column} >= ${v.gte}`);
+  if ("lt" in v) parts.push(Prisma.sql`${column} < ${v.lt}`);
+  if ("lte" in v) parts.push(Prisma.sql`${column} <= ${v.lte}`);
+  if (parts.length === 0) return null;
+  return Prisma.join(parts, " AND ");
+}
+
+function sqlContactFilter(
+  contact: Prisma.ContactWhereInput,
+  orgId: string,
+): Prisma.Sql | null {
+  const parts: Prisma.Sql[] = [];
+  const push = (sql: Prisma.Sql | null) => {
+    if (sql) parts.push(sql);
+    return sql !== null;
+  };
+
+  if (contact.OR) {
+    const orParts: Prisma.Sql[] = [];
+    for (const branch of contact.OR) {
+      const s = sqlContactFilter(branch, orgId);
+      if (!s) return null;
+      orParts.push(s);
+    }
+    if (orParts.length > 0) parts.push(Prisma.sql`(${Prisma.join(orParts, " OR ")})`);
+  }
+  if (contact.AND) {
+    const and = Array.isArray(contact.AND) ? contact.AND : [contact.AND];
+    for (const branch of and) {
+      if (!branch || typeof branch !== "object") continue;
+      const s = sqlContactFilter(branch as Prisma.ContactWhereInput, orgId);
+      if (!s) return null;
+      parts.push(s);
+    }
+  }
+
+  if (contact.assignedToId !== undefined) {
+    if (!push(sqlScalar(Prisma.sql`ct."assignedToId"`, contact.assignedToId))) return null;
+  }
+  if (contact.source !== undefined) {
+    if (!push(sqlScalar(Prisma.sql`ct.source`, contact.source))) return null;
+  }
+
+  const deals = contact.deals as { some?: Prisma.DealWhereInput } | undefined;
+  if (deals?.some) {
+    const d = deals.some;
+    const dParts: Prisma.Sql[] = [
+      Prisma.sql`d."contactId" = c."contactId"`,
+      Prisma.sql`d."organizationId" = ${orgId}`,
+    ];
+    if (d.stageId !== undefined) {
+      const s = sqlScalar(Prisma.sql`d."stageId"`, d.stageId);
+      if (!s) return null;
+      dParts.push(s);
+    }
+    if (d.ownerId !== undefined) {
+      const s = sqlScalar(Prisma.sql`d."ownerId"`, d.ownerId);
+      if (!s) return null;
+      dParts.push(s);
+    }
+    const extraKeys = Object.keys(d).filter((k) => !["stageId", "ownerId"].includes(k));
+    if (extraKeys.length > 0) return null;
+    parts.push(Prisma.sql`EXISTS (SELECT 1 FROM deals d WHERE ${Prisma.join(dParts, " AND ")})`);
+  }
+
+  const tags = contact.tags as { some?: { tagId?: unknown } } | undefined;
+  if (tags?.some) {
+    const tagId = tags.some.tagId;
+    const s = sqlScalar(Prisma.sql`toc."tagId"`, tagId);
+    if (!s) return null;
+    parts.push(
+      Prisma.sql`EXISTS (SELECT 1 FROM tags_on_contacts toc WHERE toc."contactId" = c."contactId" AND ${s})`,
+    );
+  }
+
+  const ctxs = contact.automationContexts as {
+    some?: { status?: unknown };
+  } | undefined;
+  if (ctxs?.some) {
+    const status = ctxs.some.status;
+    const s = sqlScalar(Prisma.sql`ac.status`, status, "AutomationCtxStatus");
+    if (!s) return null;
+    parts.push(
+      Prisma.sql`EXISTS (
+        SELECT 1 FROM automation_contexts ac
+        WHERE ac."contactId" = c."contactId"
+          AND ac."organizationId" = ${orgId}
+          AND ${s}
+      )`,
+    );
+  }
+
+  const isRel = (contact as { is?: Prisma.ContactWhereInput }).is;
+  if (isRel) {
+    const inner = sqlContactFilter(isRel, orgId);
+    if (!inner) return null;
+    parts.push(inner);
+  }
+
+  const used = new Set([
+    "OR",
+    "AND",
+    "assignedToId",
+    "source",
+    "deals",
+    "tags",
+    "automationContexts",
+    "is",
+  ]);
+  if (Object.keys(contact).some((k) => !used.has(k) && contact[k as keyof Prisma.ContactWhereInput] !== undefined)) {
+    return null;
+  }
+  if (parts.length === 0) return Prisma.sql`TRUE`;
+  return Prisma.sql`EXISTS (
+    SELECT 1 FROM contacts ct
+    WHERE ct.id = c."contactId"
+      AND ct."organizationId" = ${orgId}
+      AND ${Prisma.join(parts, " AND ")}
+  )`;
+}
+
+function sqlConversationWhere(
+  where: Prisma.ConversationWhereInput,
+  orgId: string,
+): Prisma.Sql | null {
+  const parts: Prisma.Sql[] = [];
+
+  if (where.AND) {
+    const and = Array.isArray(where.AND) ? where.AND : [where.AND];
+    for (const branch of and) {
+      if (!branch || typeof branch !== "object") continue;
+      const s = sqlConversationWhere(branch as Prisma.ConversationWhereInput, orgId);
+      if (!s) return null;
+      parts.push(s);
+    }
+  }
+  if (where.OR) {
+    const orParts: Prisma.Sql[] = [];
+    for (const branch of where.OR) {
+      const s = sqlConversationWhere(branch, orgId);
+      if (!s) return null;
+      orParts.push(s);
+    }
+    if (orParts.length > 0) parts.push(Prisma.sql`(${Prisma.join(orParts, " OR ")})`);
+  }
+  if (where.NOT) {
+    const not = Array.isArray(where.NOT) ? { AND: where.NOT } : where.NOT;
+    const s = sqlConversationWhere(not, orgId);
+    if (!s) return null;
+    parts.push(Prisma.sql`NOT (${s})`);
+  }
+
+  const scalars: Array<[keyof Prisma.ConversationWhereInput, Prisma.Sql, string?]> = [
+    ["organizationId", Prisma.sql`c."organizationId"`],
+    ["id", Prisma.sql`c.id`],
+    ["contactId", Prisma.sql`c."contactId"`],
+    ["assignedToId", Prisma.sql`c."assignedToId"`],
+    ["channelId", Prisma.sql`c."channelId"`],
+    ["channel", Prisma.sql`c.channel`],
+    ["status", Prisma.sql`c.status`, "ConversationStatus"],
+    ["closedAt", Prisma.sql`c."closedAt"`],
+    ["hasError", Prisma.sql`c."hasError"`],
+    ["hasHumanReply", Prisma.sql`c."hasHumanReply"`],
+    ["hasAgentReply", Prisma.sql`c."hasAgentReply"`],
+    ["lastInboundAt", Prisma.sql`c."lastInboundAt"`],
+    ["lastMessageDirection", Prisma.sql`c."lastMessageDirection"`],
+    ["inboxName", Prisma.sql`c."inboxName"`],
+    ["number", Prisma.sql`c.number`],
+    ["departmentId", Prisma.sql`c."departmentId"`],
+    ["whatsappCallConsentStatus", Prisma.sql`c."whatsappCallConsentStatus"`, "WhatsappCallConsentStatus"],
+    ["whatsappCallConsentExpiresAt", Prisma.sql`c."whatsappCallConsentExpiresAt"`],
+  ];
+
+  for (const [key, col, enumCast] of scalars) {
+    if (where[key] === undefined) continue;
+    const s = sqlScalar(col, where[key], enumCast);
+    if (!s) return null;
+    parts.push(s);
+  }
+
+  if (where.assignedTo) {
+    const assignedTo = where.assignedTo as { is?: { type?: string } };
+    const type = assignedTo.is?.type;
+    if (type !== "HUMAN" && type !== "AI") return null;
+    parts.push(
+      Prisma.sql`EXISTS (
+        SELECT 1 FROM users u
+        WHERE u.id = c."assignedToId"
+          AND u.type = ${type}::"UserType"
+      )`,
+    );
+  }
+
+  if (where.contact) {
+    const contactBag = where.contact as Prisma.ContactWhereInput & {
+      is?: Prisma.ContactWhereInput;
+    };
+    const contactWhere =
+      contactBag.is && !("source" in contactBag)
+        ? contactBag.is
+        : contactBag;
+    const s = sqlContactFilter(contactWhere, orgId);
+    if (!s) return null;
+    if (where.contactId === null) {
+      parts.push(Prisma.sql`(c."contactId" IS NULL OR ${s})`);
+    } else {
+      parts.push(s);
+    }
+  }
+
+  const known = new Set([
+    "AND",
+    "OR",
+    "NOT",
+    "organizationId",
+    "id",
+    "contactId",
+    "assignedToId",
+    "channelId",
+    "channel",
+    "status",
+    "closedAt",
+    "hasError",
+    "hasHumanReply",
+    "hasAgentReply",
+    "lastInboundAt",
+    "lastMessageDirection",
+    "inboxName",
+    "number",
+    "departmentId",
+    "whatsappCallConsentStatus",
+    "whatsappCallConsentExpiresAt",
+    "assignedTo",
+    "contact",
+  ]);
+  if (
+    Object.keys(where).some(
+      (k) => !known.has(k) && where[k as keyof Prisma.ConversationWhereInput] !== undefined,
+    )
+  ) {
+    return null;
+  }
+  if (parts.length === 0) return Prisma.sql`TRUE`;
+  return Prisma.join(parts, " AND ");
+}
+
 async function countConversationsLikeList(
   conditions: Prisma.ConversationWhereInput[],
   collapseByContact: boolean,
+  assigneeIdsByType?: AssigneeIdsByType,
 ): Promise<number> {
+  const byType = assigneeIdsByType ?? (await loadAssigneeIdsByType());
+  const collapsed = conditions.map((c) => rewriteAssignedToType(c, byType));
   const where: Prisma.ConversationWhereInput =
-    conditions.length > 0 ? { AND: conditions } : {};
+    collapsed.length > 0 ? { AND: collapsed } : {};
   if (!collapseByContact) return prisma.conversation.count({ where });
 
-  // A extension de org injeta `organizationId` só na raiz (aqui, em
-  // `contacts`); replicamos no filtro aninhado para manter o escopo da
-  // contagem anterior (`prisma.conversation.count`) idêntico.
   const orgId = getOrgIdOrNull();
-  const someWhere: Prisma.ConversationWhereInput = orgId
-    ? { AND: [...conditions, { organizationId: orgId }] }
-    : where;
-  return prisma.contact.count({ where: { conversations: { some: someWhere } } });
+  if (!orgId) return prisma.conversation.count({ where });
+
+  const scoped: Prisma.ConversationWhereInput = {
+    AND: [...collapsed, { organizationId: orgId }],
+  };
+  const sql = sqlConversationWhere(scoped, orgId);
+  if (!sql) {
+    return prisma.contact.count({
+      where: { conversations: { some: scoped } },
+    });
+  }
+  const rows = await prisma.$queryRaw<[{ n: number }]>`
+    SELECT COUNT(DISTINCT CASE
+      WHEN c."contactId" IS NULL THEN 'id:' || c.id
+      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+    END)::int AS n
+    FROM conversations c
+    WHERE ${sql}
+  `;
+  return rows[0]?.n ?? 0;
 }
 
 async function countTodosTab(
@@ -992,6 +1360,7 @@ async function countTodosTab(
   searchWhere?: Prisma.ConversationWhereInput | null,
   countAgentReply = false,
   collapseByContact = true,
+  assigneeIdsByType?: AssigneeIdsByType,
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
@@ -1009,7 +1378,7 @@ async function countTodosTab(
     conditions.push(...filterConditions);
   }
   if (searchWhere) conditions.push(searchWhere);
-  return countConversationsLikeList(conditions, collapseByContact);
+  return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
 }
 
 export async function getTabCounts(
@@ -1032,7 +1401,7 @@ export async function getTabCounts(
     scopeFp = createHash("sha1")
       .update(
         JSON.stringify({
-          k: 3,
+          k: 4,
           v: visibilityWhere ?? null,
           m: todosMemberCategoryTabs ?? null,
           c: allowedChannelIds ?? null,
@@ -1078,7 +1447,14 @@ async function computeTabCounts(
 ): Promise<Record<InboxTab, number>> {
   const extra = filterConditions ?? [];
   const searchWhere = await buildConversationSearchWhere(search);
-  const countAgentReply = await countAgentReplyAsAnswered();
+  const [countAgentReply, assigneeIdsByType] = await Promise.all([
+    countAgentReplyAsAnswered(),
+    loadAssigneeIdsByType(),
+  ]);
+  const visibilityCollapsed =
+    visibilityWhere && Object.keys(visibilityWhere).length > 0
+      ? rewriteAssignedToType(visibilityWhere, assigneeIdsByType)
+      : visibilityWhere;
 
   // Abas "leves" (OPEN + filtros estreitos) vs "pesadas" (RESOLVED / OR amplo).
   // finalizados + todos ainda rodam no mesmo batch, mas o cache.wrap acima
@@ -1086,8 +1462,8 @@ async function computeTabCounts(
   const lightTabs = TAB_LIST.filter((t) => t !== "finalizados");
   const countTab = async (tab: InboxCategoryTab) => {
     const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
-      conditions.push(visibilityWhere);
+    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
+      conditions.push(visibilityCollapsed);
     }
     conditions.push(tabToWhere(tab, countAgentReply));
     if (allowedChannelIds) {
@@ -1095,7 +1471,7 @@ async function computeTabCounts(
     }
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact);
+    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
   };
 
   // Sequencial de propósito: 8 COUNT em paralelo (cold load) esgotava o
@@ -1106,35 +1482,36 @@ async function computeTabCounts(
   }
   const finalizados = await countTab("finalizados");
   const todos = await countTodosTab(
-    visibilityWhere,
+    visibilityCollapsed,
     todosMemberCategoryTabs ?? null,
     allowedChannelIds,
     extra,
     searchWhere,
     countAgentReply,
     collapseByContact,
+    assigneeIdsByType,
   );
   const abertas = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
-      conditions.push(visibilityWhere);
+    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
+      conditions.push(visibilityCollapsed);
     }
     conditions.push({ status: "OPEN" });
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact);
+    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
   })();
   const ligar = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
-      conditions.push(visibilityWhere);
+    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
+      conditions.push(visibilityCollapsed);
     }
     conditions.push(ligarTabWhere());
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact);
+    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
   })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
