@@ -22,7 +22,6 @@ import {
   painelDelta,
   parseDay,
   periodIncludesToday,
-  previousPeriod,
   round2,
   subtractBusinessMs,
   waitMs,
@@ -574,89 +573,42 @@ export async function getPainelVolume(
   clock: ClockMode,
 ): Promise<PainelVolume> {
   const orgId = getOrgIdOrThrow();
-  const prev = previousPeriod(range.from, range.to);
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
 
-  const [countRow, startedByDay, finishedByDay] = await Promise.all([
+  const [createdRow, finishedRow, startedByDay, finishedByDay] = await Promise.all([
     db().$queryRaw<
       {
         started: bigint;
-        finished: bigint;
         stillOpen: bigint;
         openStarted: bigint;
         openWaiting: bigint;
-        prevStarted: bigint;
-        prevFinished: bigint;
-        prevStillOpen: bigint;
-        prevOpenStarted: bigint;
-        prevOpenWaiting: bigint;
       }[]
     >(Prisma.sql`
       SELECT
+        COUNT(*)::bigint AS started,
         COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
-        )::bigint AS started,
-        COUNT(*) FILTER (
-          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
-            AND (
-              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to})
-              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${range.from} AND conv."updatedAt" <= ${range.to})
-            )
-        )::bigint AS finished,
-        COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+          WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
         )::bigint AS "stillOpen",
         COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+          WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
             AND conv."hasHumanReply" = true
         )::bigint AS "openStarted",
         COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+          WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
             AND conv."hasHumanReply" = false
-        )::bigint AS "openWaiting",
-        COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
-        )::bigint AS "prevStarted",
-        COUNT(*) FILTER (
-          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
-            AND (
-              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${prev.from} AND conv."closedAt" <= ${prev.to})
-              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${prev.from} AND conv."updatedAt" <= ${prev.to})
-            )
-        )::bigint AS "prevFinished",
-        COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
-        )::bigint AS "prevStillOpen",
-        COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
-            AND conv."hasHumanReply" = true
-        )::bigint AS "prevOpenStarted",
-        COUNT(*) FILTER (
-          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
-            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
-            AND conv."hasHumanReply" = false
-        )::bigint AS "prevOpenWaiting"
+        )::bigint AS "openWaiting"
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
-        AND (
-          (conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to})
-          OR (conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to})
-          OR (
-            conv.status = 'RESOLVED'::"ConversationStatus"
-            AND (
-              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to})
-              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${range.from} AND conv."updatedAt" <= ${range.to})
-              OR (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${prev.from} AND conv."closedAt" <= ${prev.to})
-              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${prev.from} AND conv."updatedAt" <= ${prev.to})
-            )
-          )
-        )
+        AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+    `),
+    db().$queryRaw<{ finished: bigint }[]>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS finished
+      FROM conversations conv
+      WHERE conv."organizationId" = ${orgId}
+        AND conv.status = 'RESOLVED'::"ConversationStatus"
+        AND conv."closedAt" IS NOT NULL
+        AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to}
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
       SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
@@ -667,29 +619,26 @@ export async function getPainelVolume(
       GROUP BY 1
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
-      SELECT (COALESCE(conv."closedAt", conv."updatedAt") AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+      SELECT (conv."closedAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
         AND conv.status = 'RESOLVED'::"ConversationStatus"
-        AND COALESCE(conv."closedAt", conv."updatedAt") >= ${range.from}
-        AND COALESCE(conv."closedAt", conv."updatedAt") <= ${range.to}
+        AND conv."closedAt" IS NOT NULL
+        AND conv."closedAt" >= ${range.from}
+        AND conv."closedAt" <= ${range.to}
       GROUP BY 1
     `),
   ]);
 
   void clock;
-  const c = countRow[0];
+  const c = createdRow[0];
   const started = Number(c?.started ?? 0);
-  const finished = Number(c?.finished ?? 0);
+  const finished = Number(finishedRow[0]?.finished ?? 0);
   const stillOpen = Number(c?.stillOpen ?? 0);
   const openStarted = Number(c?.openStarted ?? 0);
   const openWaiting = Number(c?.openWaiting ?? 0);
-  const prevStarted = Number(c?.prevStarted ?? 0);
-  const prevFinished = Number(c?.prevFinished ?? 0);
-  const prevStillOpen = Number(c?.prevStillOpen ?? 0);
-  const prevOpenStarted = Number(c?.prevOpenStarted ?? 0);
-  const prevOpenWaiting = Number(c?.prevOpenWaiting ?? 0);
+  const hiddenDelta = painelDelta(0, 0, 0);
   // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
   // conversations; the chart subtitle omits message totals when they are 0.
   const messagesIn = 0;
@@ -707,23 +656,23 @@ export async function getPainelVolume(
   return {
     started: {
       value: started,
-      delta: painelDelta(started, prevStarted, prevStarted),
+      delta: hiddenDelta,
     },
     finished: {
       value: finished,
-      delta: painelDelta(finished, prevFinished, prevFinished),
+      delta: hiddenDelta,
     },
     stillOpen: {
       value: stillOpen,
-      delta: painelDelta(stillOpen, prevStillOpen, prevStillOpen),
+      delta: hiddenDelta,
     },
     openStarted: {
       value: openStarted,
-      delta: painelDelta(openStarted, prevOpenStarted, prevOpenStarted),
+      delta: hiddenDelta,
     },
     openWaiting: {
       value: openWaiting,
-      delta: painelDelta(openWaiting, prevOpenWaiting, prevOpenWaiting),
+      delta: hiddenDelta,
     },
     messagesIn,
     messagesOut,
@@ -1494,14 +1443,14 @@ export async function getPainelService(
     );
   };
 
-  const [agora, volume, tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
+  const agora = want.has("agora")
+    ? await wrap(() => getPainelAgora(clock))
+    : omit<PainelAgora>();
+  const volume = want.has("volume")
+    ? await wrap(() => getPainelVolume(range, clock))
+    : omit<PainelVolume>();
+  const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
-      want.has("agora")
-        ? wrap(() => getPainelAgora(clock))
-        : Promise.resolve(omit<PainelAgora>()),
-      want.has("volume")
-        ? wrap(() => getPainelVolume(range, clock))
-        : Promise.resolve(omit<PainelVolume>()),
       withShared(want.has("tempo"), (shared) => getPainelTempo(range, clock, shared)),
       want.has("heatmap")
         ? wrap(() => getPainelHeatmap(range))
