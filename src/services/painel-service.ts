@@ -276,8 +276,9 @@ type SharedServiceMetrics = {
 };
 
 /**
- * Uma varredura por conversa do período — sem LATERAL por inbound e sem
- * NOT EXISTS correlacionado (era o custo de ~3 min quando rodava 5x).
+ * Uma varredura por conversa do período — sem LATERAL por inbound.
+ * `is_first` não varre o histórico inteiro (DISTINCT ON em toda inbound
+ * da conversa); só pergunta se já existia inbound antes do período.
  */
 async function firstHumanReplyPairs(
   orgId: string,
@@ -308,16 +309,23 @@ async function firstHumanReplyPairs(
         AND m."createdAt" >= ${from}
         AND m."createdAt" <= ${to}
     ),
-    first_ever AS (
-      SELECT DISTINCT ON (m."conversationId")
-        m."conversationId" AS "conversationId",
-        m."createdAt" AS first_in_at
-      FROM messages m
-      INNER JOIN inbound i ON i."conversationId" = m."conversationId"
-      WHERE m.direction = 'in'
-        AND m."isPrivate" = false
-        AND m."organizationId" = ${orgId}
-      ORDER BY m."conversationId", m."createdAt" ASC
+    first_in_period AS (
+      SELECT i."conversationId" AS "conversationId", MIN(i."inAt") AS period_first
+      FROM inbound i
+      GROUP BY i."conversationId"
+    ),
+    had_prior AS (
+      SELECT c."conversationId"
+      FROM (SELECT DISTINCT i."conversationId" FROM inbound i) c
+      WHERE EXISTS (
+        SELECT 1
+        FROM messages m
+        WHERE m."conversationId" = c."conversationId"
+          AND m.direction = 'in'
+          AND m."isPrivate" = false
+          AND m."organizationId" = ${orgId}
+          AND m."createdAt" < ${from}
+      )
     ),
     outs AS (
       SELECT m."conversationId" AS "conversationId", m."createdAt" AS "outAt"
@@ -366,11 +374,15 @@ async function firstHumanReplyPairs(
       f."conversationId",
       f."inAt",
       f.next_out AS "outAt",
-      CASE WHEN fe.first_in_at = f."inAt" THEN 1 ELSE 0 END AS is_first,
+      CASE
+        WHEN hp."conversationId" IS NULL AND f."inAt" = fp.period_first THEN 1
+        ELSE 0
+      END AS is_first,
       f."departmentId",
       f."assignedToId"
     FROM filled f
-    LEFT JOIN first_ever fe ON fe."conversationId" = f."conversationId"
+    LEFT JOIN first_in_period fp ON fp."conversationId" = f."conversationId"
+    LEFT JOIN had_prior hp ON hp."conversationId" = f."conversationId"
     WHERE f.kind_ord = 0
       AND f.next_out IS NOT NULL
   `);
@@ -460,100 +472,94 @@ export async function getPainelVolume(
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
 
-  const [
-    started,
-    finished,
-    stillOpen,
-    openStarted,
-    openWaiting,
-    prevStarted,
-    prevFinished,
-    prevStillOpen,
-    prevOpenStarted,
-    prevOpenWaiting,
-    messagesIn,
-    messagesOut,
-    startedByDay,
-    finishedByDay,
-  ] = await Promise.all([
-    prisma.conversation.count({
-      where: { createdAt: { gte: range.from, lte: range.to } },
-    }),
-    prisma.conversation.count({
-      where: {
-        status: "RESOLVED",
-        OR: [
-          { closedAt: { gte: range.from, lte: range.to } },
-          { closedAt: null, updatedAt: { gte: range.from, lte: range.to } },
-        ],
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: range.from, lte: range.to },
-        ...openWhere(),
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: range.from, lte: range.to },
-        ...openWhere(),
-        hasHumanReply: true,
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: range.from, lte: range.to },
-        ...openWhere(),
-        hasHumanReply: false,
-      },
-    }),
-    prisma.conversation.count({
-      where: { createdAt: { gte: prev.from, lte: prev.to } },
-    }),
-    prisma.conversation.count({
-      where: {
-        status: "RESOLVED",
-        OR: [
-          { closedAt: { gte: prev.from, lte: prev.to } },
-          { closedAt: null, updatedAt: { gte: prev.from, lte: prev.to } },
-        ],
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: prev.from, lte: prev.to },
-        ...openWhere(),
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: prev.from, lte: prev.to },
-        ...openWhere(),
-        hasHumanReply: true,
-      },
-    }),
-    prisma.conversation.count({
-      where: {
-        createdAt: { gte: prev.from, lte: prev.to },
-        ...openWhere(),
-        hasHumanReply: false,
-      },
-    }),
-    prisma.message.count({
-      where: {
-        direction: "in",
-        isPrivate: false,
-        createdAt: { gte: range.from, lte: range.to },
-      },
-    }),
-    prisma.message.count({
-      where: {
-        direction: "out",
-        isPrivate: false,
-        createdAt: { gte: range.from, lte: range.to },
-      },
-    }),
+  const [countRow, messageRow, startedByDay, finishedByDay] = await Promise.all([
+    prisma.$queryRaw<
+      {
+        started: bigint;
+        finished: bigint;
+        stillOpen: bigint;
+        openStarted: bigint;
+        openWaiting: bigint;
+        prevStarted: bigint;
+        prevFinished: bigint;
+        prevStillOpen: bigint;
+        prevOpenStarted: bigint;
+        prevOpenWaiting: bigint;
+      }[]
+    >(Prisma.sql`
+      SELECT
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+        )::bigint AS started,
+        COUNT(*) FILTER (
+          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
+            AND (
+              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to})
+              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${range.from} AND conv."updatedAt" <= ${range.to})
+            )
+        )::bigint AS finished,
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+        )::bigint AS "stillOpen",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+            AND conv."hasHumanReply" = true
+        )::bigint AS "openStarted",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+            AND conv."hasHumanReply" = false
+        )::bigint AS "openWaiting",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
+        )::bigint AS "prevStarted",
+        COUNT(*) FILTER (
+          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
+            AND (
+              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${prev.from} AND conv."closedAt" <= ${prev.to})
+              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${prev.from} AND conv."updatedAt" <= ${prev.to})
+            )
+        )::bigint AS "prevFinished",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+        )::bigint AS "prevStillOpen",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+            AND conv."hasHumanReply" = true
+        )::bigint AS "prevOpenStarted",
+        COUNT(*) FILTER (
+          WHERE conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to}
+            AND conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
+            AND conv."hasHumanReply" = false
+        )::bigint AS "prevOpenWaiting"
+      FROM conversations conv
+      WHERE conv."organizationId" = ${orgId}
+        AND (
+          (conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to})
+          OR (conv."createdAt" >= ${prev.from} AND conv."createdAt" <= ${prev.to})
+          OR (
+            conv.status = 'RESOLVED'::"ConversationStatus"
+            AND (
+              (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to})
+              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${range.from} AND conv."updatedAt" <= ${range.to})
+              OR (conv."closedAt" IS NOT NULL AND conv."closedAt" >= ${prev.from} AND conv."closedAt" <= ${prev.to})
+              OR (conv."closedAt" IS NULL AND conv."updatedAt" >= ${prev.from} AND conv."updatedAt" <= ${prev.to})
+            )
+          )
+        )
+    `),
+    prisma.$queryRaw<{ messagesIn: bigint; messagesOut: bigint }[]>(Prisma.sql`
+      SELECT
+        COUNT(*) FILTER (WHERE m.direction = 'in' AND m."isPrivate" = false)::bigint AS "messagesIn",
+        COUNT(*) FILTER (WHERE m.direction = 'out' AND m."isPrivate" = false)::bigint AS "messagesOut"
+      FROM messages m
+      WHERE m."organizationId" = ${orgId}
+        AND m."createdAt" >= ${range.from} AND m."createdAt" <= ${range.to}
+    `),
     prisma.$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
       SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
              COUNT(*)::bigint AS c
@@ -575,6 +581,20 @@ export async function getPainelVolume(
   ]);
 
   void clock;
+  const c = countRow[0];
+  const m = messageRow[0];
+  const started = Number(c?.started ?? 0);
+  const finished = Number(c?.finished ?? 0);
+  const stillOpen = Number(c?.stillOpen ?? 0);
+  const openStarted = Number(c?.openStarted ?? 0);
+  const openWaiting = Number(c?.openWaiting ?? 0);
+  const prevStarted = Number(c?.prevStarted ?? 0);
+  const prevFinished = Number(c?.prevFinished ?? 0);
+  const prevStillOpen = Number(c?.prevStillOpen ?? 0);
+  const prevOpenStarted = Number(c?.prevOpenStarted ?? 0);
+  const prevOpenWaiting = Number(c?.prevOpenWaiting ?? 0);
+  const messagesIn = Number(m?.messagesIn ?? 0);
+  const messagesOut = Number(m?.messagesOut ?? 0);
   const startMap = new Map(startedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
   const finMap = new Map(finishedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
   const todayKey = dayKeyFromDate(new Date());
