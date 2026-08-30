@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+import { analyticsClient } from "@/lib/analytics";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
 export type TabulationAnalyticsFilters = {
@@ -121,7 +121,7 @@ async function buildPathMap(
   if (tabulationIds.length === 0) return map;
 
   const orgId = getOrgIdOrThrow();
-  const rows = await prisma.tabulation.findMany({
+  const rows = await analyticsClient().tabulation.findMany({
     where: { organizationId: orgId, id: { in: tabulationIds } },
     select: {
       id: true,
@@ -143,7 +143,7 @@ async function buildPathMap(
     }
   }
   if (missingParents.size > 0) {
-    const parents = await prisma.tabulation.findMany({
+    const parents = await analyticsClient().tabulation.findMany({
       where: { organizationId: orgId, id: { in: [...missingParents] } },
       select: { id: true, name: true, number: true, parentId: true, departmentId: true },
     });
@@ -156,7 +156,7 @@ async function buildPathMap(
         if (r.parentId && !byId.has(r.parentId)) more.add(r.parentId);
       }
       if (more.size === 0) break;
-      const extra = await prisma.tabulation.findMany({
+      const extra = await analyticsClient().tabulation.findMany({
         where: { organizationId: orgId, id: { in: [...more] } },
         select: { id: true, name: true, number: true, parentId: true, departmentId: true },
       });
@@ -239,7 +239,7 @@ export async function getTabulationAnalytics(
   }
 
   const [totals, tabRows, userRows, pageItems] = await Promise.all([
-    prisma.$queryRaw<
+    analyticsClient().$queryRaw<
       { total: bigint; distinct_tabulations: bigint; distinct_users: bigint }[]
     >(Prisma.sql`
       SELECT COUNT(*)::bigint AS total,
@@ -248,7 +248,7 @@ export async function getTabulationAnalytics(
       FROM "activity_events"
       WHERE ${whereSql}
     `),
-    prisma.$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+    analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
       SELECT meta->>'tabulationId' AS id, COUNT(*)::bigint AS count
       FROM "activity_events"
       WHERE ${whereSql} AND meta->>'tabulationId' IS NOT NULL
@@ -256,7 +256,7 @@ export async function getTabulationAnalytics(
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
-    prisma.$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+    analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
       SELECT "actorUserId" AS id, COUNT(*)::bigint AS count
       FROM "activity_events"
       WHERE ${whereSql} AND "actorUserId" IS NOT NULL
@@ -264,7 +264,7 @@ export async function getTabulationAnalytics(
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
-    prisma.activityEvent.findMany({
+    analyticsClient().activityEvent.findMany({
       where: {
         organizationId: orgId,
         type: "CONVERSATION_TABULATED",
@@ -298,7 +298,7 @@ export async function getTabulationAnalytics(
 
   const userNames = new Map<string, string>();
   if (userRows.length > 0) {
-    const users = await prisma.user.findMany({
+    const users = await analyticsClient().user.findMany({
       where: { id: { in: userRows.map((r) => r.id) } },
       select: { id: true, name: true },
     });
@@ -326,7 +326,7 @@ export async function getTabulationAnalytics(
   ];
   const depts =
     deptIds.length > 0
-      ? await prisma.department.findMany({
+      ? await analyticsClient().department.findMany({
           where: { organizationId: orgId, id: { in: deptIds } },
           select: { id: true, name: true },
         })
