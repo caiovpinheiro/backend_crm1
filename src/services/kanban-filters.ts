@@ -11,6 +11,10 @@
 
 import type { DealStatus, Prisma } from "@prisma/client";
 
+import {
+  metaSessionWindowWhere,
+  metaWhatsappConversationWhere,
+} from "@/lib/meta-session-window";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
 
@@ -462,9 +466,11 @@ export type AdvancedDealFilters = {
   /**
    * Filtros de conversa do contato (via Contact.conversations.some).
    * `conversationStatus`: "open" = alguma conversa não resolvida / "closed" = alguma resolvida.
+   * `windowState`: janela 24h da Meta (WhatsApp Cloud), não é status RESOLVED.
    * `lastMessageDirection`: "out" = última msg nossa / "in" = última msg do cliente.
    */
   conversationStatus?: "open" | "closed";
+  windowState?: "open" | "closed";
   lastMessageDirection?: "in" | "out";
 
   /** Exceções do Painel → lista filtrada do pipeline. */
@@ -832,6 +838,27 @@ export async function buildDealWhereFromFilters(
     }
   }
 
+  // Janela 24h da Meta (WhatsApp Cloud). "Aberta" = contato tem ticket
+  // com inbound < 24h; "fechada" = tem WhatsApp Meta e nenhum ticket aberto.
+  if (filters.windowState === "open") {
+    conditions.push({
+      contact: {
+        is: { conversations: { some: metaSessionWindowWhere("open") } },
+      },
+    });
+  } else if (filters.windowState === "closed") {
+    conditions.push({
+      contact: {
+        is: {
+          conversations: {
+            some: metaWhatsappConversationWhere(),
+            none: metaSessionWindowWhere("open"),
+          },
+        },
+      },
+    });
+  }
+
   // Custom fields (Deal)
   if (filters.dealCustomFields && filters.dealCustomFields.length > 0) {
     const names = filters.dealCustomFields.map((f) => f.name.trim()).filter(Boolean);
@@ -1058,6 +1085,9 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
 
   if (o.conversationStatus === "open" || o.conversationStatus === "closed") {
     out.conversationStatus = o.conversationStatus;
+  }
+  if (o.windowState === "open" || o.windowState === "closed") {
+    out.windowState = o.windowState;
   }
   if (o.lastMessageDirection === "in" || o.lastMessageDirection === "out") {
     out.lastMessageDirection = o.lastMessageDirection;
