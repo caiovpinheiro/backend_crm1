@@ -459,10 +459,10 @@ export async function statStoredFile(
 }
 
 /**
- * Existência no mesmo driver do GET /api/storage (stat + probe de 1 byte).
- * HeadObject/stat podem falhar enquanto GetObject/read ainda servem o arquivo;
- * reuse tem que seguir o mesmo critério, senão o browser consegue o GET e o
- * POST reuseUrl 404.
+ * Existência no mesmo critério do GET /api/storage: stat, probe de 1 byte,
+ * depois o GetObject/read cheio. Head e Range podem falhar no compat
+ * (Spaces) enquanto o GET sem Range ainda serve — típico em imagem
+ * pequena. Sem o read cheio o browser/GET passa e o POST reuseUrl 404.
  */
 export async function existsStoredFile(
   orgId: string,
@@ -472,7 +472,9 @@ export async function existsStoredFile(
   const st = await statStoredFile(orgId, bucket, fileName);
   if (st) return true;
   const probe = await readStoredFileRange(orgId, bucket, fileName, 0, 0);
-  return probe != null;
+  if (probe) return true;
+  const full = await readStoredFile(orgId, bucket, fileName);
+  return full != null;
 }
 
 function resolveLegacyUploadsAbs(relative: string): string | null {
@@ -532,28 +534,32 @@ export async function locateReusableStoredObject(
     };
   }
 
-  const isBareLegacy = Boolean(resolved.legacyRelative && !resolved.legacyRelative.includes("/"));
-  if (isBareLegacy) {
-    for (const bucket of REUSE_BUCKETS) {
-      if (bucket === resolved.bucket) continue;
-      if (await existsStoredFile(resolved.orgId, bucket, resolved.fileName)) {
-        return {
-          url: buildPublicUrl(resolved.orgId, bucket, resolved.fileName),
-          orgId: resolved.orgId,
-          bucket,
-          fileName: resolved.fileName,
-        };
-      }
+  // Filename já validado e org-owned: tenta os outros buckets de reuse
+  // (URL canônica pode apontar automation-media enquanto o objeto está
+  // em attachments) e o volume legado `public/uploads/<file>`.
+  for (const bucket of REUSE_BUCKETS) {
+    if (bucket === resolved.bucket) continue;
+    if (await existsStoredFile(resolved.orgId, bucket, resolved.fileName)) {
+      return {
+        url: buildPublicUrl(resolved.orgId, bucket, resolved.fileName),
+        orgId: resolved.orgId,
+        bucket,
+        fileName: resolved.fileName,
+      };
     }
   }
 
-  if (resolved.legacyRelative && (await legacyUploadsFileExists(resolved.legacyRelative))) {
+  const legacyCandidates = new Set<string>();
+  if (resolved.legacyRelative) legacyCandidates.add(resolved.legacyRelative);
+  legacyCandidates.add(resolved.fileName);
+  for (const relative of legacyCandidates) {
+    if (!(await legacyUploadsFileExists(relative))) continue;
     return {
-      url: `/uploads/${resolved.legacyRelative}`,
+      url: `/uploads/${relative}`,
       orgId: resolved.orgId,
       bucket: resolved.bucket,
       fileName: resolved.fileName,
-      legacyRelative: resolved.legacyRelative,
+      legacyRelative: relative,
     };
   }
 

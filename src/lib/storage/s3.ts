@@ -214,9 +214,10 @@ function sizeFromContentRange(value: string | undefined): number | null {
 
 /**
  * Tamanho do objeto sem baixar o corpo. HeadObject primeiro; se o
- * compat (Spaces) omitir ContentLength, negar HEAD, ou falhar com
- * algo que não é 404, confirma com GetObject Range — o mesmo I/O que
- * o GET /api/storage usa quando o stat falha e o read passa.
+ * compat (Spaces) omitir ContentLength, negar HEAD, 404 em HEAD de
+ * objeto que o GET serve, ou falhar, confirma com GetObject Range —
+ * o mesmo I/O que o GET /api/storage usa quando o stat falha e o
+ * read passa. Não tratar Head 404 como miss definitivo.
  */
 export async function statStoredFile(
   orgId: string,
@@ -237,7 +238,6 @@ export async function statStoredFile(
     // seguiria para GetObject. Não tratar como miss.
     return { size: size ?? 0 };
   } catch (err) {
-    if (isNotFound(err)) return null;
     log.warn({ err, key }, "storage-s3: HeadObject falhou, tentando GetObject range");
     try {
       const ranged = await client.send(
