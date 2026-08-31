@@ -464,10 +464,9 @@ export async function statStoredFile(
 }
 
 /**
- * Existência barata: Head/stat + disco local. Não baixa o body inteiro
- * (vídeo de modelo no reuse não pode esperar GetObject cheio × N keys).
- * JPEG flake (Head 404 / GET 200) é coberto por `locateReusableStoredObject`
- * no key canônico + ListObjects do stem.
+ * Existência barata: Head/stat + disco local. No S3, `statStoredFile`
+ * cai em GetObject sem Range e aborta o body (Head/Range 404 flake) —
+ * não baixa o mp4 inteiro.
  */
 export async function existsStoredFile(
   orgId: string,
@@ -517,6 +516,50 @@ export function reuseFileNameAliases(fileName: string): string[] {
 }
 
 export const LOCATE_REUSE_DEADLINE_MS = 800;
+/** mp4 no Spaces: Head/List podem atrasar; GetObject cheio estoura 800ms. */
+export const LOCATE_REUSE_VIDEO_DEADLINE_MS = 4_000;
+
+const VIDEO_REUSE_EXTS = new Set(["mp4", "webm", "mov", "3gp"]);
+
+export function isReusableVideoFileName(fileName: string): boolean {
+  const idx = fileName.lastIndexOf(".");
+  if (idx <= 0 || idx === fileName.length - 1) return false;
+  return VIDEO_REUSE_EXTS.has(fileName.slice(idx + 1).toLowerCase());
+}
+
+export function locateReuseDeadlineMs(fileName: string): number {
+  return isReusableVideoFileName(fileName)
+    ? LOCATE_REUSE_VIDEO_DEADLINE_MS
+    : LOCATE_REUSE_DEADLINE_MS;
+}
+
+/** Primeiro valor não-nulo — não espera as promises lentas (GetObject de mp4). */
+export function firstNonNull<T>(tasks: Promise<T | null>[]): Promise<T | null> {
+  if (tasks.length === 0) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let remaining = tasks.length;
+    let settled = false;
+    for (const task of tasks) {
+      task.then(
+        (value) => {
+          if (settled) return;
+          if (value != null) {
+            settled = true;
+            resolve(value);
+            return;
+          }
+          remaining -= 1;
+          if (remaining === 0) resolve(null);
+        },
+        () => {
+          if (settled) return;
+          remaining -= 1;
+          if (remaining === 0) resolve(null);
+        },
+      );
+    }
+  });
+}
 
 function withDeadline<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise((resolve) => {
@@ -575,7 +618,8 @@ export async function readLegacyUploadsFile(
 
 /**
  * Confirma que o objeto do reuseUrl existe no driver ativo (S3 ou disco).
- * Probes em paralelo + teto de 800ms: miss real não pode prender o send.
+ * Probes em paralelo; devolve no primeiro hit (não espera GetObject cheio).
+ * Teto 800ms (imagem) / 4s (vídeo). Miss real não pode prender o send.
  * Se o URL era `/uploads/<file>` sem bucket, tenta os outros buckets de
  * reuse. Se só existir no volume legado `public/uploads`, devolve essa URL
  * (workers Baileys / meta-attach já leem `/uploads/...`).
@@ -587,7 +631,7 @@ export async function locateReusableStoredObject(
   if (opts?.deadlineMs === null) {
     return locateReusableStoredObjectInner(resolved);
   }
-  const ms = opts?.deadlineMs ?? LOCATE_REUSE_DEADLINE_MS;
+  const ms = opts?.deadlineMs ?? locateReuseDeadlineMs(resolved.fileName);
   return withDeadline(locateReusableStoredObjectInner(resolved), ms, null);
 }
 
@@ -596,20 +640,6 @@ async function locateReusableStoredObjectInner(
 ): Promise<OrgOwnedReuseUrl | null> {
   const names = reuseFileNameAliases(resolved.fileName);
   const buckets = [resolved.bucket, ...[...REUSE_BUCKETS].filter((b) => b !== resolved.bucket)];
-
-  // GetObject canônico em paralelo com Heads: Spaces às vezes Head/Range
-  // 404 em JPEG que o GET sem Range serve.
-  const canonicalRead = readStoredFile(resolved.orgId, resolved.bucket, resolved.fileName).then(
-    (file) =>
-      file
-        ? ({
-            url: buildPublicUrl(resolved.orgId, resolved.bucket, resolved.fileName),
-            orgId: resolved.orgId,
-            bucket: resolved.bucket,
-            fileName: resolved.fileName,
-          } satisfies OrgOwnedReuseUrl)
-        : null,
-  );
 
   const probes = buckets.flatMap((bucket) =>
     names.map(async (fileName) => {
@@ -623,13 +653,17 @@ async function locateReusableStoredObjectInner(
     }),
   );
 
-  const probeHits = await Promise.all([canonicalRead, ...probes]);
-  const probeHit = probeHits.find((hit): hit is OrgOwnedReuseUrl => hit != null);
+  const probeHit = await firstNonNull(probes);
   if (probeHit) return probeHit;
 
   if (storageDriver() === "s3") {
     const s3 = await import("./s3");
-    const listed = await s3.findOrgObjectByStem(resolved.orgId, [...REUSE_BUCKETS], resolved.fileName);
+    const listOnce = () =>
+      s3.findOrgObjectByStem(resolved.orgId, [...REUSE_BUCKETS], resolved.fileName);
+    let listed = await listOnce();
+    if (!listed && isReusableVideoFileName(resolved.fileName)) {
+      listed = await listOnce();
+    }
     if (listed) {
       return {
         url: buildPublicUrl(resolved.orgId, listed.bucket, listed.fileName),

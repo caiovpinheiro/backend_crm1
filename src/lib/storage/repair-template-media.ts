@@ -6,7 +6,7 @@
  * URL arbitrária (SSRF):
  *   1. buckets de reuse + alias jpg/jpeg + ListObjects do stem
  *   2. STORAGE_ROOT local e public/uploads
- *   3. STORAGE_FALLBACK_URL GET (700ms) — host legado via env
+ *   3. STORAGE_FALLBACK_URL GET (700ms / 15s p/ mp4) — host legado via env
  *
  * Se recuperou: saveFile na key canônica (automation-media ou o bucket
  * original). Atualiza URL legado `/uploads/...` para `/api/storage/...`.

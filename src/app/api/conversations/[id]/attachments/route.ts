@@ -5,7 +5,11 @@ import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
-import { mimeFromExtension } from "@/lib/audio-convert";
+import {
+  mimeFromExtension,
+  WHATSAPP_VIDEO_MAX_BYTES,
+  WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
+} from "@/lib/audio-convert";
 import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -20,6 +24,7 @@ import {
   resolveOrgOwnedReuseUrl,
   reuseFileNameAliases,
   saveFile,
+  statStoredFile,
   type OrgOwnedReuseUrl,
 } from "@/lib/storage/local";
 import { readUpstreamFallbackBytes } from "@/lib/storage/upstream-fallback";
@@ -193,17 +198,16 @@ async function parseAttachmentRequest(
         ),
       };
     }
-    const reuseStarted = Date.now();
     let resolved = await locateReusableStoredObject(parsedReuse);
-    if (!resolved && Date.now() - reuseStarted < 600) {
+    if (!resolved) {
       const fromTemplate = await locateFromTemplateRow(orgId, parsedReuse);
       if (fromTemplate) resolved = fromTemplate;
     }
-    if (!resolved && Date.now() - reuseStarted < 700) {
+    if (!resolved) {
       // GET /api/storage ainda 200 via STORAGE_FALLBACK_URL (arquivo só
       // no backend legado). Reuse só via Spaces — 404. Importa o body
-      // para a key canônica e segue por referência. Timeout curto: em
-      // prod a env costuma estar vazia e não pode prender o send.
+      // para a key canônica e segue por referência. Env vazia retorna
+      // imediatamente. Vídeo: 15s (700ms não baixa mp4).
       const cookie = request.headers.get("cookie");
       const names = reuseFileNameAliases(parsedReuse.fileName);
       let imported: Buffer | null = null;
@@ -217,6 +221,21 @@ async function parseAttachmentRequest(
         }
       }
       if (imported) {
+        if (
+          imported.length > WHATSAPP_VIDEO_MAX_BYTES &&
+          resolveMime("", importName).startsWith("video/")
+        ) {
+          return {
+            ok: false,
+            response: NextResponse.json(
+              {
+                message: WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
+                code: "WHATSAPP_VIDEO_TOO_LARGE",
+              },
+              { status: 413 },
+            ),
+          };
+        }
         const saved = await saveFile({
           orgId: parsedReuse.orgId,
           bucket: parsedReuse.bucket,
@@ -261,6 +280,21 @@ async function parseAttachmentRequest(
         ? rec.fileName.trim().slice(0, 255)
         : resolved.fileName;
     const mimeBase = resolveMime("", fileName);
+    if (mimeBase.startsWith("video/") && !resolved.legacyRelative) {
+      const st = await statStoredFile(resolved.orgId, resolved.bucket, resolved.fileName);
+      if (st && st.size > WHATSAPP_VIDEO_MAX_BYTES) {
+        return {
+          ok: false,
+          response: NextResponse.json(
+            {
+              message: WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
+              code: "WHATSAPP_VIDEO_TOO_LARGE",
+            },
+            { status: 413 },
+          ),
+        };
+      }
+    }
     if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
       return {
         ok: false,

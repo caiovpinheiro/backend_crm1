@@ -8,13 +8,19 @@
  * Também é o fallback síncrono quando Redis está indisponível — o
  * caller (rota de attachments) já está em RequestContext.
  */
-import { guessInputExt, prepareWhatsAppAudio } from "@/lib/audio-convert";
+import {
+  guessInputExt,
+  prepareWhatsAppAudio,
+  WHATSAPP_VIDEO_MAX_BYTES,
+  WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
+} from "@/lib/audio-convert";
 import { getDecryptedChannelConfig } from "@/lib/channels/config";
 import { formatMetaSendError, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import type { MetaAttachKind, MetaAttachPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
 import {
+  mimeFromFilename,
   parseStoragePath,
   readLegacyUploadsFile,
   readStoredFile,
@@ -204,6 +210,16 @@ export async function processMetaAttach(
   let uploadMime = payload.mime || stored.mimeType || "application/octet-stream";
   let uploadName = payload.originalName || storedFileName;
   let storeBuffer = stored.buffer;
+
+  if (kind === "video") {
+    if (!uploadMime.startsWith("video/")) {
+      const fromName = mimeFromFilename(uploadName);
+      uploadMime = fromName.startsWith("video/") ? fromName : "video/mp4";
+    }
+    if (storeBuffer.length > WHATSAPP_VIDEO_MAX_BYTES) {
+      return markFailed(payload, WHATSAPP_VIDEO_TOO_LARGE_MESSAGE, { messageType: "video" });
+    }
+  }
 
   if (kind === "audio") {
     const inputExt = guessInputExt(payload.mime);

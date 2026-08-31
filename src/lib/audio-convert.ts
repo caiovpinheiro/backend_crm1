@@ -16,6 +16,10 @@ import { demuxWebmOpus } from "@/lib/webm-opus";
 export const WHATSAPP_VOICE_MIME = "audio/ogg; codecs=opus";
 /** Limite Cloud API para áudio. */
 export const WHATSAPP_AUDIO_MAX_BYTES = 16 * 1024 * 1024;
+/** Limite Cloud API para vídeo (mesmo teto de 16 MB). */
+export const WHATSAPP_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
+export const WHATSAPP_VIDEO_TOO_LARGE_MESSAGE =
+  "Vídeo acima do limite de 16 MB da WhatsApp Cloud API. Compacte o arquivo ou envie um vídeo menor.";
 
 function resolveFFmpeg(): string {
   // Preferimos o ffmpeg DO SISTEMA (apt-get install ffmpeg) ao binário do
