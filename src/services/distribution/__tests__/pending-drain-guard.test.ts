@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
+  fruitlessCooldownIsArmed,
   fruitlessPassNeedsCooldown,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
+  shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "../pending-drain-guard";
 
@@ -36,13 +38,24 @@ describe("pending drain guard", () => {
     );
   });
 
-  it("lets real eligibility / queue growth / manual / cron clear the cooldown", () => {
+  it("lets real eligibility / queue growth / manual clear the cooldown — not cron", () => {
     expect(triggerClearsFruitlessCooldown("agent_online")).toBe(true);
     expect(triggerClearsFruitlessCooldown("agent_eligible")).toBe(true);
     expect(triggerClearsFruitlessCooldown("new_item")).toBe(true);
     expect(triggerClearsFruitlessCooldown("manual")).toBe(true);
-    expect(triggerClearsFruitlessCooldown("scheduled")).toBe(true);
+    expect(triggerClearsFruitlessCooldown("scheduled")).toBe(false);
     expect(triggerClearsFruitlessCooldown("capacity_released")).toBe(false);
+  });
+
+  it("keeps cron a no-op while the last pass was fruitless", () => {
+    expect(fruitlessCooldownIsArmed(null)).toBe(false);
+    expect(fruitlessCooldownIsArmed("NO_ELIGIBLE_RESPONSIBLE")).toBe(true);
+    expect(shouldSkipScheduledFruitlessCooldown("scheduled", true)).toBe(true);
+    expect(shouldSkipScheduledFruitlessCooldown("scheduled", false)).toBe(
+      false,
+    );
+    expect(shouldSkipScheduledFruitlessCooldown("manual", true)).toBe(false);
+    expect(shouldSkipScheduledFruitlessCooldown("new_item", true)).toBe(false);
   });
 
   it("arms cooldown after skip or 0 assigns with remaining pending", () => {

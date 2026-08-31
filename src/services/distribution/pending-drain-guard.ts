@@ -15,21 +15,38 @@ export function shouldSkipCapacityReleasedCooldown(
   return trigger === "capacity_released" && now < cooldownUntil;
 }
 
-/** Agente ficou elegível, fila cresceu, manual ou cron — não o outbound. */
+/** Agente ficou elegível, fila cresceu ou manual — não cron nem outbound. */
 export function triggerClearsFruitlessCooldown(trigger: string): boolean {
   return (
     trigger === "agent_online" ||
     trigger === "agent_eligible" ||
     trigger === "new_item" ||
-    trigger === "manual" ||
-    trigger === "scheduled"
+    trigger === "manual"
   );
+}
+
+/**
+ * Cron (`scheduled`) não fura passagem vazia. Fica no-op até um gatilho
+ * real (`agent_online` / `agent_eligible` / `new_item` / `manual`).
+ */
+export function shouldSkipScheduledFruitlessCooldown(
+  trigger: string,
+  fruitlessArmed: boolean,
+): boolean {
+  return trigger === "scheduled" && fruitlessArmed;
+}
+
+/** Última passagem armou o cooldown (reason fica até um gatilho real limpar). */
+export function fruitlessCooldownIsArmed(
+  cooldownReason: string | null,
+): boolean {
+  return cooldownReason != null;
 }
 
 /**
  * Passagem vazia não agenda `setTimeout` para o fim da janela.
  * O `retryInMs` do log é só o restante do cooldown — a próxima varredura
- * vem de `agent_online` / `agent_eligible` / `new_item` / `manual` / cron.
+ * vem de `agent_online` / `agent_eligible` / `new_item` / `manual`.
  */
 export function shouldScheduleRetryOnCooldownSkip(): boolean {
   return false;
