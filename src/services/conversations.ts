@@ -32,6 +32,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { logEvent, userIdForFk } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
+import { metaSessionWindowWhere } from "@/lib/meta-session-window";
 import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
@@ -119,9 +120,9 @@ export type GetConversationsParams = {
   /** IDs resolvidos pelo agregador contato+canal antes de montar o where. */
   sessionExpiringConversationIds?: string[];
   /**
-   * Filtro de status da UI (Aberta/Fechada). Tem de ir no mesmo `where`
-   * da lista, dos badges e do bulk — se ficar só no cliente, Erro mostra
-   * lista vazia com badge 233.
+   * Janela 24h da Meta (WhatsApp Cloud): aberta = lastInboundAt < 24h,
+   * fechada = sem inbound ou inbound vencido. Não é status RESOLVED.
+   * Tem de ir no mesmo `where` da lista, dos badges e do bulk.
    */
   windowState?: "open" | "closed";
 };
@@ -670,12 +671,8 @@ export function buildInboxFilterConditions(
     params.withoutSource,
   );
   if (sourceCond) conditions.push(sourceCond);
-  if (params.windowState === "open") {
-    conditions.push({
-      AND: [{ status: { not: "RESOLVED" } }, { closedAt: null }],
-    });
-  } else if (params.windowState === "closed") {
-    conditions.push(encerradasTabWhere());
+  if (params.windowState === "open" || params.windowState === "closed") {
+    conditions.push(metaSessionWindowWhere(params.windowState));
   }
   return conditions;
 }
