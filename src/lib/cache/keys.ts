@@ -145,7 +145,7 @@ export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
  * agregação (1,2-2,3s medidos em produção). Com invalidação no path da
  * mensagem, o TTL pode ser longo sem defasar o badge.
  */
-const TAB_COUNTS_INVALIDATION_WINDOW_MS = 3_000;
+const TAB_COUNTS_INVALIDATION_WINDOW_MS = 15_000;
 
 const tabCountsInvalidationWindows = new Map<
   string,
