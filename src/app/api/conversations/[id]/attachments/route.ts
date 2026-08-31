@@ -18,8 +18,10 @@ import {
   locateReusableStoredObject,
   mimeFromFilename,
   resolveOrgOwnedReuseUrl,
+  reuseFileNameAliases,
   saveFile,
 } from "@/lib/storage/local";
+import { readUpstreamFallbackBytes } from "@/lib/storage/upstream-fallback";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -136,7 +138,44 @@ async function parseAttachmentRequest(
         ),
       };
     }
-    const resolved = await locateReusableStoredObject(parsedReuse);
+    let resolved = await locateReusableStoredObject(parsedReuse);
+    if (!resolved) {
+      // GET /api/storage ainda 200 via STORAGE_FALLBACK_URL (arquivo só
+      // no backend legado). Reuse só via Spaces — 404. Importa o body
+      // para a key canônica e segue por referência.
+      const cookie = request.headers.get("cookie");
+      const names = reuseFileNameAliases(parsedReuse.fileName);
+      let imported: Buffer | null = null;
+      let importName = parsedReuse.fileName;
+      for (const fileName of names) {
+        const joined = `${parsedReuse.orgId}/${parsedReuse.bucket}/${fileName}`;
+        imported = await readUpstreamFallbackBytes(joined, cookie);
+        if (imported) {
+          importName = fileName;
+          break;
+        }
+      }
+      if (imported) {
+        const saved = await saveFile({
+          orgId: parsedReuse.orgId,
+          bucket: parsedReuse.bucket,
+          fileName: importName,
+          buffer: imported,
+        });
+        console.warn(
+          "[attachments] reuse imported from STORAGE_FALLBACK_URL",
+          parsedReuse.orgId,
+          parsedReuse.bucket,
+          importName,
+        );
+        resolved = {
+          url: saved.url,
+          orgId: parsedReuse.orgId,
+          bucket: parsedReuse.bucket,
+          fileName: importName,
+        };
+      }
+    }
     if (!resolved) {
       console.warn(
         "[attachments] reuse miss",

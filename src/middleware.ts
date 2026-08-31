@@ -309,6 +309,9 @@ export const config = {
   // grande não deve passar pelo buffer do middleware. Auth já roda na rota.
   matcher: [
     "/uploads/:path*",
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads|api/academic-records/upload|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // .jpg no fim do path era excluído do catch-all — GET /api/storage/…jpg
+    // saía sem CORS e o fetch do modelo (api.bwipo.com) virava ERR_FAILED.
+    "/api/storage/:path*",
+    "/((?!_next/static|_next/image|favicon.ico|api/uploads|api/academic-records/upload|(?!api/).*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
