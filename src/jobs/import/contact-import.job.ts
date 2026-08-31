@@ -20,6 +20,7 @@ import {
 
 import {
   incrementOperationProgress,
+  isOperationCancelled,
   markOperationFailed,
   markOperationFinished,
   markOperationStarted,
@@ -236,12 +237,21 @@ export async function processContactImport(
 
     if (chunkProcessed >= CHUNK_SIZE) {
       await flush();
+      if (await isOperationCancelled(operationId, organizationId)) {
+        ctx.info("Importação cancelada — interrompendo fatia");
+        return;
+      }
       const pause = chunkSleepMs();
       if (pause > 0) await sleep(pause);
     }
   }
 
   await flush();
+
+  if (await isOperationCancelled(operationId, organizationId)) {
+    ctx.info("Importação cancelada — não re-enfileira a próxima fatia");
+    return;
+  }
 
   // Há mais linhas? Re-enfileira a próxima fatia no FIM da fila, cedendo o
   // slot à próxima org. A próxima fatia re-parseia e continua do offset.

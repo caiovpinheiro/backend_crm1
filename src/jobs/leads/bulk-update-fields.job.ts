@@ -1,6 +1,7 @@
 import type { Job } from "bullmq";
 import type { Prisma } from "@prisma/client";
 
+import { invalidateOrgBoards } from "@/lib/cache/keys";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import {
@@ -14,6 +15,7 @@ import type { BulkUpdateFieldsPayload } from "@/lib/queue";
 import {
   type BulkOperationErrorEntry,
   incrementOperationProgress,
+  isOperationCancelled,
   markOperationFailed,
   markOperationFinished,
   markOperationStarted,
@@ -223,6 +225,13 @@ export async function processBulkUpdateFields(
   // BullMQ retry do job inteiro.
   const dealsToProcess = [...existingDealIds];
   for (let i = 0; i < dealsToProcess.length; i += CHUNK_SIZE) {
+    if (await isOperationCancelled(operationId, organizationId)) {
+      ctx.info("Operação cancelada — interrompendo chunks restantes");
+      if (validTagIds.length > 0) {
+        await invalidateOrgBoards(organizationId);
+      }
+      return;
+    }
     const chunk = dealsToProcess.slice(i, i + CHUNK_SIZE);
     const chunkErrors: BulkOperationErrorEntry[] = [];
     let chunkSucceeded = 0;
@@ -302,6 +311,20 @@ export async function processBulkUpdateFields(
       },
       "Chunk concluído",
     );
+
+    if (await isOperationCancelled(operationId, organizationId)) {
+      ctx.info("Operação cancelada — interrompendo chunks restantes");
+      if (validTagIds.length > 0) {
+        await invalidateOrgBoards(organizationId);
+      }
+      return;
+    }
+  }
+
+  if (validTagIds.length > 0) {
+    // Sem isso o GET /board devolve o cache stale e o funil parece
+    // não ter recebido as tags (TTL ~30s).
+    await invalidateOrgBoards(organizationId);
   }
 
   await markOperationFinished(operationId, organizationId);
@@ -405,6 +428,28 @@ async function applyChunkUpdates(
       ),
       skipDuplicates: true,
     });
+
+    // Inbox/contato leem TagOnContact. Sem isso o funil até atualiza
+    // (depois do purge do board) e a ficha do lead parece sem tag.
+    const tagged = await prisma.deal.findMany({
+      where: { id: { in: taggableDealIds }, contactId: { not: null } },
+      select: { contactId: true },
+    });
+    const contactIds = [
+      ...new Set(
+        tagged
+          .map((d) => d.contactId)
+          .filter((id): id is string => typeof id === "string"),
+      ),
+    ];
+    if (contactIds.length > 0) {
+      await prisma.tagOnContact.createMany({
+        data: contactIds.flatMap((contactId) =>
+          tagIds.map((tagId) => ({ contactId, tagId })),
+        ),
+        skipDuplicates: true,
+      });
+    }
   }
 
   return {
@@ -475,6 +520,21 @@ async function applyDealUpdates(
         update: {},
         create: { dealId, tagId },
       });
+    }
+    const taggedDeal = await prisma.deal.findUnique({
+      where: { id: dealId },
+      select: { contactId: true },
+    });
+    if (taggedDeal?.contactId) {
+      for (const tagId of tagIds) {
+        await prisma.tagOnContact.upsert({
+          where: {
+            contactId_tagId: { contactId: taggedDeal.contactId, tagId },
+          },
+          update: {},
+          create: { contactId: taggedDeal.contactId, tagId },
+        });
+      }
     }
   }
 }

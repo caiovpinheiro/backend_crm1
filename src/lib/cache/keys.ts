@@ -240,6 +240,10 @@ export async function invalidateBoardData(
  * cria (webhook, envio manual, automação, IA) conhece a conversa — não o
  * pipeline do negócio. Varrer por org evita um lookup extra no hot path.
  */
+export async function invalidateOrgBoards(orgId: string): Promise<void> {
+  await purgeOrgBoards(orgId);
+}
+
 async function purgeOrgBoards(orgId: string): Promise<void> {
   try {
     await cache.delPattern(`board:${orgId}:*`);

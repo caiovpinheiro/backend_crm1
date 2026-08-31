@@ -668,6 +668,30 @@ export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
   return queue.add(jobName, payload, opts);
 }
 
+/**
+ * Remove jobs ainda na fila (waiting/delayed) desta BulkOperation.
+ * Job já ativo para no próximo chunk via `isOperationCancelled`.
+ */
+export async function removeQueuedBulkJobs(operationId: string): Promise<number> {
+  let removed = 0;
+  const queues = [getLeadsBulkQueue(), getImportEtlQueue()];
+  for (const queue of queues) {
+    if (!queue) continue;
+    const jobs = await queue.getJobs(["wait", "waiting", "delayed", "paused"]);
+    for (const job of jobs) {
+      if (job.data && (job.data as { operationId?: string }).operationId === operationId) {
+        try {
+          await job.remove();
+          removed += 1;
+        } catch {
+          /* job pode ter virado active entre o list e o remove */
+        }
+      }
+    }
+  }
+  return removed;
+}
+
 // ── Import ETL queue ─────────────────────────────────────
 
 function getImportEtlQueue(): Queue<ContactImportPayload> | null {

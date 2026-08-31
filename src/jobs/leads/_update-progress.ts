@@ -136,6 +136,50 @@ export async function markOperationFinished(
   });
 }
 
+/** True se o usuário cancelou no meio do job — o handler deve parar. */
+export async function isOperationCancelled(
+  operationId: string,
+  organizationId: string,
+): Promise<boolean> {
+  const op = await prismaBase.bulkOperation.findUnique({
+    where: { id: operationId },
+    select: { status: true, organizationId: true },
+  });
+  return (
+    !!op &&
+    op.organizationId === organizationId &&
+    op.status === "CANCELLED"
+  );
+}
+
+/** Marca PENDING/PROCESSING como CANCELLED. Idempotente. */
+export async function markOperationCancelled(
+  operationId: string,
+  organizationId: string,
+  reason = "Cancelado pelo usuário",
+): Promise<boolean> {
+  const result = await prismaBase.bulkOperation.updateMany({
+    where: {
+      id: operationId,
+      organizationId,
+      status: { in: ["PENDING", "PROCESSING"] },
+    },
+    data: {
+      status: "CANCELLED",
+      finishedAt: new Date(),
+      errors: [
+        {
+          itemId: "__operation__",
+          message: reason.slice(0, 500),
+          attempt: 0,
+          at: new Date().toISOString(),
+        },
+      ] as unknown as Prisma.InputJsonValue,
+    },
+  });
+  return result.count > 0;
+}
+
 /**
  * Marca a operação como FAILED com motivo explícito — usar quando o
  * handler falha antes de processar qualquer item (validação, payload

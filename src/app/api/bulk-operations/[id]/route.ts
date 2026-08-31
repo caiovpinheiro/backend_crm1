@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { markOperationCancelled } from "@/jobs/leads/_update-progress";
 import { prisma } from "@/lib/prisma";
+import { removeQueuedBulkJobs } from "@/lib/queue";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -78,6 +80,58 @@ export async function GET(_req: Request, ctx: Ctx) {
       startedAt: op.startedAt,
       finishedAt: op.finishedAt,
       payload: op.payload,
+    });
+  });
+}
+
+/**
+ * POST /api/bulk-operations/[id]
+ * Cancela uma operação ainda PENDING/PROCESSING.
+ */
+export async function POST(_req: Request, ctx: Ctx) {
+  return withOrgContext(async (session) => {
+    const { id } = await ctx.params;
+    const orgId = (session.user as { organizationId?: string | null }).organizationId;
+    if (!orgId) {
+      return NextResponse.json({ message: "Operação requer organização." }, { status: 403 });
+    }
+
+    const op = await prisma.bulkOperation.findUnique({
+      where: { id },
+      select: { id: true, status: true, organizationId: true },
+    });
+    if (!op) {
+      return NextResponse.json({ message: "Operação não encontrada." }, { status: 404 });
+    }
+
+    if (
+      op.status === "COMPLETED" ||
+      op.status === "PARTIAL" ||
+      op.status === "FAILED" ||
+      op.status === "CANCELLED"
+    ) {
+      return NextResponse.json({
+        message: "Operação já finalizada.",
+        id: op.id,
+        status: op.status,
+      });
+    }
+
+    const cancelled = await markOperationCancelled(id, orgId);
+    if (cancelled) {
+      await removeQueuedBulkJobs(id).catch(() => 0);
+    }
+
+    const fresh = await prisma.bulkOperation.findUnique({
+      where: { id },
+      select: { id: true, status: true, processed: true, total: true },
+    });
+    return NextResponse.json({
+      message: cancelled ? "Operação cancelada." : "Não foi possível cancelar.",
+      id: fresh?.id ?? id,
+      status: fresh?.status ?? op.status,
+      processed: fresh?.processed ?? 0,
+      total: fresh?.total ?? 0,
     });
   });
 }
