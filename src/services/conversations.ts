@@ -52,6 +52,13 @@ import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/servic
  */
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
 
+/**
+ * 1ª página de Encerradas: em vez de DISTINCT ON em todo o histórico
+ * RESOLVED, varre só os N tickets mais recentes e colapsa esse recorte.
+ * 2000 cobre ~50 cards únicos mesmo com vários encerramentos por número.
+ */
+const COLLAPSE_FIRST_PAGE_SCAN = 2_000;
+
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
 
@@ -932,8 +939,35 @@ async function findCollapsedConversationPage(args: {
         ? cursorAfterColSql(sortCol, args.cursor, args.sortOrder)
         : Prisma.sql`TRUE`;
       try {
+        const firstPageCollapse =
+          args.collapse && !args.cursor && skip === 0;
         const rows = args.collapse
-          ? await prisma.$queryRaw<{ id: string }[]>`
+          ? firstPageCollapse
+            ? await prisma.$queryRaw<{ id: string }[]>`
+                SELECT reps.id
+                FROM (
+                  SELECT DISTINCT ON (inner_c.grp)
+                    inner_c.id,
+                    inner_c.sort_val
+                  FROM (
+                    SELECT
+                      c.id,
+                      ${sortCol} AS sort_val,
+                      CASE
+                        WHEN c."contactId" IS NULL THEN 'id:' || c.id
+                        ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+                      END AS grp
+                    FROM conversations c
+                    WHERE ${sql}
+                    ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+                    LIMIT ${COLLAPSE_FIRST_PAGE_SCAN}
+                  ) inner_c
+                  ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
+                ) reps
+                ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
+                LIMIT ${args.take}
+              `
+            : await prisma.$queryRaw<{ id: string }[]>`
               SELECT reps.id
               FROM (
                 SELECT DISTINCT ON (inner_c.grp)
@@ -1134,15 +1168,15 @@ async function hydrateConversationsByIds(
 }
 
 /**
- * DISTINCT ON (contato+canal) só é necessário quando o recorte inclui
- * tickets RESOLVED (vários por número). Filas OPEN já são 1:1 pelo
- * índice `conversations_active_contact_channel`.
+ * DISTINCT ON (contato+canal) materializa TODOS os grupos antes do
+ * LIMIT — 5s+ na 1ª página de `todos` (OPEN+RESOLVED da org). Filas
+ * OPEN já são 1:1 (`conversations_active_contact_channel`). `todos` e
+ * o picker sem aba usam ORDER BY + LIMIT; o FE já colapsa o card.
+ * Só Encerradas ainda colapsa (N tickets RESOLVED por número).
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
-  const tab = params.tab;
-  if (!tab || tab === "todos" || tab === "finalizados") return true;
-  return false;
+  return params.tab === "finalizados";
 }
 
 export async function getConversations(
@@ -1166,12 +1200,9 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
 
-  // Colapso por CONTATO+CANAL só onde há histórico RESOLVED no mesmo
-  // grupo (finalizados / todos / sem aba). Filas OPEN já têm unique
-  // parcial (org, contact, channel) WHERE status <> RESOLVED — DISTINCT
-  // ON sobre o tab inteiro era o 5s+ da 1ª página. COUNT DISTINCT saiu
-  // daqui (badges em GET ?counts=1). OFFSET só se o cliente velho mandar
-  // `page` sem `cursor`.
+  // Colapso SQL só em Encerradas. `todos` / sem aba / filas OPEN:
+  // ORDER BY + LIMIT (1ª página). COUNT DISTINCT ficou no GET ?counts=1.
+  // OFFSET só se o cliente velho mandar `page` sem `cursor`.
   const collapse = listNeedsContactChannelCollapse(params);
   const { ids: windowIds, hasMore, knownTotal } = await findCollapsedConversationPage({
     where,
@@ -1844,16 +1875,16 @@ async function tryComputeTabCountsOneSql(args: {
       }]
     >`
       SELECT
-        ${tabCountExpr(entrada, collapse)} AS entrada,
-        ${tabCountExpr(esperando, collapse)} AS esperando,
-        ${tabCountExpr(respondidas, collapse)} AS respondidas,
-        ${tabCountExpr(agenteIa, collapse)} AS agente_ia,
-        ${tabCountExpr(automacao, collapse)} AS automacao,
+        ${tabCountExpr(entrada, false)} AS entrada,
+        ${tabCountExpr(esperando, false)} AS esperando,
+        ${tabCountExpr(respondidas, false)} AS respondidas,
+        ${tabCountExpr(agenteIa, false)} AS agente_ia,
+        ${tabCountExpr(automacao, false)} AS automacao,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
-        ${tabCountExpr(erro, collapse)} AS erro,
+        ${tabCountExpr(erro, false)} AS erro,
         ${tabCountExpr(todos, collapse)} AS todos,
-        ${tabCountExpr(abertas, collapse)} AS abertas,
-        ${tabCountExpr(ligar, collapse)} AS ligar
+        ${tabCountExpr(abertas, false)} AS abertas,
+        ${tabCountExpr(ligar, false)} AS ligar
       FROM conversations c
       WHERE ${sharedSql}
     `;
@@ -1924,7 +1955,11 @@ async function computeTabCounts(
     }
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
+    return countConversationsLikeList(
+      conditions,
+      collapseByContact && tab === "finalizados",
+      assigneeIdsByType,
+    );
   };
 
   const lightResults: Array<readonly [InboxCategoryTab, number]> = [];
@@ -1951,7 +1986,7 @@ async function computeTabCounts(
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
+    return countConversationsLikeList(conditions, false, assigneeIdsByType);
   })();
   const ligar = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
@@ -1962,7 +1997,7 @@ async function computeTabCounts(
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
+    return countConversationsLikeList(conditions, false, assigneeIdsByType);
   })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
