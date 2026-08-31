@@ -448,7 +448,8 @@ export async function getAutomations(params: GetAutomationsParams = {}) {
       where,
       skip,
       take: perPage,
-      orderBy: [{ updatedAt: "desc" }],
+      // Listagem sempre da mais recente à mais antiga (criação).
+      orderBy: [{ createdAt: "desc" }],
       select: automationListSelect,
     }),
     prisma.automation.count({ where }),
@@ -706,7 +707,7 @@ export async function getAgentAutomations(): Promise<AgentAutomationItem[]> {
       active: true,
       OR: [{ triggerType: "manual" }, { allowManualRun: true }],
     },
-    orderBy: [{ updatedAt: "desc" }],
+    orderBy: [{ createdAt: "desc" }],
     select: {
       id: true,
       name: true,
