@@ -24,6 +24,7 @@ import {
   parseStoragePath,
   readLegacyUploadsFile,
   readStoredFile,
+  resolveOutboundAttachmentMime,
 } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -156,7 +157,7 @@ export async function processMetaAttach(
     },
   });
 
-  const kind = resolveKind(payload);
+  let kind = resolveKind(payload);
 
   if (!msg) {
     return {
@@ -204,10 +205,21 @@ export async function processMetaAttach(
     return markFailed(payload, "Arquivo vazio ou ilegível.", { messageType: kind });
   }
 
+  const classifiedMime = resolveOutboundAttachmentMime({
+    rawType: payload.mime || stored.mimeType,
+    fileNames: [payload.originalName, storedFileName],
+  });
+  if (classifiedMime.startsWith("video/") && kind === "audio") {
+    kind = "video";
+  }
+
   let mediaType: "image" | "audio" | "video" | "document" = kind;
   let sendAsVoice = false;
   let audioDelivery: MetaAttachResult["audioDelivery"] = null;
-  let uploadMime = payload.mime || stored.mimeType || "application/octet-stream";
+  let uploadMime =
+    classifiedMime !== "application/octet-stream"
+      ? classifiedMime
+      : payload.mime || stored.mimeType || "application/octet-stream";
   let uploadName = payload.originalName || storedFileName;
   let storeBuffer = stored.buffer;
 

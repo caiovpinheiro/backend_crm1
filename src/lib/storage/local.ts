@@ -137,6 +137,75 @@ export function mimeFromFilename(fileName: string): string {
   return EXT_TO_MIME[ext] ?? "application/octet-stream";
 }
 
+const OUTBOUND_VIDEO_EXTS = new Set(["mp4", "mov", "3gp", "m4v"]);
+
+function fileNameExt(fileName: string): string {
+  const idx = fileName.lastIndexOf(".");
+  if (idx < 0 || idx === fileName.length - 1) return "";
+  return fileName.slice(idx + 1).toLowerCase();
+}
+
+function whatsappMediaHint(fileName: string): "video" | "image" | "audio" | null {
+  const n = fileName.toLowerCase();
+  if (n.includes("whatsapp video")) return "video";
+  if (n.includes("whatsapp image")) return "image";
+  if (n.includes("whatsapp audio") || n.includes("whatsapp ptt")) return "audio";
+  return null;
+}
+
+/**
+ * MIME de anexo outbound (reuse de modelo / upload sem blob type).
+ * `.mp4` e "WhatsApp Video …" são sempre vídeo — nunca `audio/mp4`.
+ * `mimeFromExtension` em audio-convert mapeia mp4→audio/mp4 (ffmpeg) e
+ * não pode ser reusado aqui.
+ */
+export function resolveOutboundAttachmentMime(opts: {
+  rawType?: string | null;
+  fileNames?: Array<string | null | undefined>;
+}): string {
+  const names = (opts.fileNames ?? [])
+    .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+    .map((n) => n.trim());
+
+  for (const name of names) {
+    const ext = fileNameExt(name);
+    if (OUTBOUND_VIDEO_EXTS.has(ext) || whatsappMediaHint(name) === "video") {
+      const fromName = mimeFromFilename(name);
+      return fromName.startsWith("video/") ? fromName : "video/mp4";
+    }
+  }
+
+  const raw = (opts.rawType ?? "").split(";")[0].trim().toLowerCase();
+  if (raw && raw !== "application/octet-stream") {
+    if (raw === "video") return "video/mp4";
+    if (raw.startsWith("video/")) return raw;
+    if (raw === "image") return "image/jpeg";
+    if (raw.startsWith("image/")) return raw;
+    if (raw === "audio") {
+      for (const name of names) {
+        const fromName = mimeFromFilename(name);
+        if (fromName.startsWith("audio/")) return fromName;
+      }
+      return "audio/ogg";
+    }
+    if (raw.startsWith("audio/")) return raw;
+    if (raw.startsWith("application/") || raw.startsWith("text/")) return raw;
+  }
+
+  for (const name of names) {
+    const fromName = mimeFromFilename(name);
+    if (fromName !== "application/octet-stream") return fromName;
+  }
+
+  for (const name of names) {
+    const hint = whatsappMediaHint(name);
+    if (hint === "image") return "image/jpeg";
+    if (hint === "audio") return "audio/ogg";
+  }
+
+  return raw && raw !== "application/octet-stream" ? raw : "application/octet-stream";
+}
+
 /**
  * Diretório raiz absoluto de storage. Lê `STORAGE_ROOT` da env ou usa
  * `<cwd>/storage` como default.
