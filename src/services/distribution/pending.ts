@@ -28,6 +28,7 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   clearOwnershipForRedistribution,
@@ -87,32 +88,55 @@ export async function isDistributionAutoOnInbound(): Promise<boolean> {
   return getOrgSettingBool(AUTO_ON_INBOUND_KEY, true);
 }
 
-async function listExplicitPendingConversationIds(): Promise<string[]> {
-  const rows = await prisma.distributionPending.findMany({
-    where: { status: "PENDING", conversationId: { not: null } },
-    select: { conversationId: true },
-    take: 5000,
-  });
-  return [
-    ...new Set(
-      rows
-        .map((r) => r.conversationId)
-        .filter((id): id is string => Boolean(id)),
-    ),
-  ];
-}
-
 /**
- * Filtro da fila de espera.
- * - autoOnInbound true: toda conversa OPEN sem responsável (com inbound).
- * - false: só quem já passou por execute_distribution / redistribuição
- *   manual / IA e ficou em DistributionPending.
+ * Filtro da fila de espera: toda conversa OPEN sem responsável (com inbound).
+ * `autoOnInbound=false` só deixava de CRIAR pending sozinho — se a drenagem
+ * também ignorar esses cards, o aluno fica em Entrada até o dia seguinte.
  */
 export async function getWaitingQueueWhere(): Promise<Prisma.ConversationWhereInput> {
-  if (await isDistributionAutoOnInbound()) return ABERTA_SEM_RESPONSAVEL;
-  const ids = await listExplicitPendingConversationIds();
-  if (ids.length === 0) return { id: { equals: "__no_distribution_pending__" } };
-  return { id: { in: ids }, ...activeInboxQueueGuardWhere(), assignedToId: null };
+  return ABERTA_SEM_RESPONSAVEL;
+}
+
+/** Garante linha na fila de espera sem redistribuir (não tira a IA). */
+async function ensureConversationInWaitingQueue(args: {
+  conversationId: string;
+  contactId: string | null;
+  triggerSource: string;
+}): Promise<void> {
+  if (!args.contactId) return;
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return;
+  const existing = await prisma.distributionPending.findFirst({
+    where: {
+      status: "PENDING",
+      OR: [
+        { conversationId: args.conversationId },
+        { contactId: args.contactId },
+      ],
+    },
+    select: { id: true },
+  });
+  if (existing) {
+    await prisma.distributionPending.update({
+      where: { id: existing.id },
+      data: {
+        conversationId: args.conversationId,
+        lastAttemptAt: new Date(),
+      },
+    });
+    return;
+  }
+  await prisma.distributionPending.create({
+    data: {
+      organizationId: orgId,
+      contactId: args.contactId,
+      conversationId: args.conversationId,
+      triggerSource: args.triggerSource,
+      status: "PENDING",
+      attempts: 1,
+      lastAttemptAt: new Date(),
+    },
+  });
 }
 
 export async function getPendingDistributions(): Promise<
@@ -120,8 +144,6 @@ export async function getPendingDistributions(): Promise<
 > {
   // Limpa pendências de quem só recebeu template e nunca respondeu.
   await purgeUnansweredFromPendingQueue().catch(() => 0);
-
-  const autoOnInbound = await isDistributionAutoOnInbound();
 
   // Inclui também conversas OPEN sem dono enfileiradas MANUALMENTE mesmo
   // sem lastInboundAt (redistribuição p/ depto com fila cheia).
@@ -138,33 +160,21 @@ export async function getPendingDistributions(): Promise<
     .map((p) => p.conversationId)
     .filter((id): id is string => Boolean(id));
 
-  const explicitIds = autoOnInbound
-    ? []
-    : await listExplicitPendingConversationIds();
-
   const items = await prisma.conversation.findMany({
-    where: autoOnInbound
-      ? {
-          OR: [
-            ABERTA_SEM_RESPONSAVEL,
-            ...(manualConvIds.length > 0
-              ? [
-                  {
-                    id: { in: manualConvIds },
-                    ...activeInboxQueueGuardWhere(),
-                    assignedToId: null,
-                  },
-                ]
-              : []),
-          ],
-        }
-      : explicitIds.length === 0
-        ? { id: { equals: "__no_distribution_pending__" } }
-        : {
-            id: { in: explicitIds },
-            ...activeInboxQueueGuardWhere(),
-            assignedToId: null,
-          },
+    where: {
+      OR: [
+        ABERTA_SEM_RESPONSAVEL,
+        ...(manualConvIds.length > 0
+          ? [
+              {
+                id: { in: manualConvIds },
+                ...activeInboxQueueGuardWhere(),
+                assignedToId: null,
+              },
+            ]
+          : []),
+      ],
+    },
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
@@ -636,6 +646,15 @@ export async function maybeDistributeNewInboundTicket(input: {
         "[DBG-e46688 maybeDist] keep_ai_assignee",
         JSON.stringify({ convId: input.conversationId, assignee }),
       );
+      // Fora do expediente a IA pode falar, mas o lead entra na espera
+      // para distribuir quando o primeiro consultor ficar elegível.
+      if (!isHumanAttendanceWindowOpen()) {
+        await ensureConversationInWaitingQueue({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          triggerSource: "SYSTEM",
+        }).catch(() => null);
+      }
       return;
     }
     // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
@@ -750,6 +769,13 @@ export async function maybeDistributeNewInboundTicket(input: {
           aiUserId,
         }),
       );
+      if (!isHumanAttendanceWindowOpen()) {
+        await ensureConversationInWaitingQueue({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          triggerSource: "SYSTEM",
+        }).catch(() => null);
+      }
       return;
     }
   } catch (e) {
@@ -766,20 +792,8 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #endregion
     if (!widgetActive) return;
 
-    const autoOnInbound = await isDistributionAutoOnInbound();
-    if (!autoOnInbound) {
-      const alreadyQueued = await prisma.distributionPending.findFirst({
-        where: { status: "PENDING", contactId: input.contactId },
-        select: { id: true },
-      });
-      if (!alreadyQueued) {
-        debugWarn(
-          "[DBG-e46688 maybeDist] skip autoOnInbound=false",
-          JSON.stringify({ convId: input.conversationId }),
-        );
-        return;
-      }
-    }
+    // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
+    // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.
 
     const remapped = await prisma.distributionPending.updateMany({
       where: { status: "PENDING", contactId: input.contactId },
@@ -906,11 +920,6 @@ export async function processPendingDistributionQueue(opts: {
     if (!widgetActive) {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
-
-    const autoOnInbound = await isDistributionAutoOnInbound();
-    const explicitPendingIds = autoOnInbound
-      ? null
-      : await listExplicitPendingConversationIds();
 
     let cancelledOrphans = 0;
     try {
@@ -1058,16 +1067,9 @@ export async function processPendingDistributionQueue(opts: {
         .map((p) => p.conversationId)
         .filter((id): id is string => Boolean(id));
 
-      // autoOnInbound=false: só drena quem já foi pedido à distribuição
-      // (automação / IA / redistribuição manual). Senão o cron puxa a
-      // aba Entrada inteira sem execute_distribution.
-      if (explicitPendingIds && explicitPendingIds.length === 0) return;
-
       const items = await prisma.conversation.findMany({
         where: {
-          ...(explicitPendingIds
-            ? { id: { in: explicitPendingIds } }
-            : { lastInboundAt: { not: null } }),
+          lastInboundAt: { not: null },
           ...activeInboxQueueGuardWhere(),
           departmentId: departmentId === null ? null : departmentId,
           OR: [

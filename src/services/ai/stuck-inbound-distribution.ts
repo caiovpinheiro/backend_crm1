@@ -98,12 +98,14 @@ async function listStuckInbound(args: {
       ch."phoneNumber" AS channel_phone,
       ch.config AS channel_config
     FROM "conversations" c
-    JOIN "users" u ON u.id = c."assignedToId"
-    JOIN "ai_agent_configs" a ON a."userId" = u.id
+    LEFT JOIN "users" u ON u.id = c."assignedToId"
+    LEFT JOIN "ai_agent_configs" a ON a."userId" = u.id
     LEFT JOIN "contacts" ct ON ct.id = c."contactId"
     LEFT JOIN "channels" ch ON ch.id = c."channelId"
-    WHERE u.type = 'AI'
-      AND a.active = true
+    WHERE (
+        (u.type = 'AI' AND a.active = true)
+        OR c."assignedToId" IS NULL
+      )
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
       AND c."contactId" IS NOT NULL
