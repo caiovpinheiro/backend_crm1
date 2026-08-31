@@ -177,21 +177,40 @@ export async function readStoredFile(
     return null;
   }
   const { client, bucket: bucketName } = getS3();
-  try {
-    const out = await client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
-    if (!out.Body) return null;
-    const buffer = Buffer.from(await out.Body.transformToByteArray());
-    return {
-      buffer,
-      size: out.ContentLength ?? buffer.length,
-      mimeType: mimeFromFilename(fileName),
-    };
-  } catch (err) {
-    if (isNotFound(err)) return null;
-    log.error({ err, key }, "storage-s3: falha ao ler objeto");
-    countError("read");
-    return null;
+  // Duas tentativas: Spaces às vezes devolve GetObject sem Body / stream
+  // quebrado em JPEG pequeno (Head/Range já 404) enquanto o retry serve.
+  // GET /api/storage e o POST reuseUrl passam por aqui — o mesmo read.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const out = await client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+      if (!out.Body) {
+        log.warn({ key, attempt }, "storage-s3: GetObject sem Body");
+        if (attempt === 0) continue;
+        return null;
+      }
+      const buffer = Buffer.from(await out.Body.transformToByteArray());
+      if (!buffer.length && (contentLengthToSize(out.ContentLength) ?? 0) > 0) {
+        log.warn({ key, attempt, contentLength: out.ContentLength }, "storage-s3: GetObject body vazio");
+        if (attempt === 0) continue;
+        return null;
+      }
+      return {
+        buffer,
+        size: out.ContentLength ?? buffer.length,
+        mimeType: mimeFromFilename(fileName),
+      };
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      if (attempt === 0) {
+        log.warn({ err, key }, "storage-s3: GetObject falhou, tentando de novo");
+        continue;
+      }
+      log.error({ err, key }, "storage-s3: falha ao ler objeto");
+      countError("read");
+      return null;
+    }
   }
+  return null;
 }
 
 function contentLengthToSize(value: unknown): number | null {
