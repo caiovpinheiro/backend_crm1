@@ -6,7 +6,6 @@ import { getContactChannelSession, getConversationSession } from "@/lib/channel-
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
-  mimeFromExtension,
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
 } from "@/lib/audio-convert";
@@ -20,8 +19,8 @@ import { sseBus } from "@/lib/sse-bus";
 import {
   generateFileName,
   locateReusableStoredObject,
-  mimeFromFilename,
   resolveOrgOwnedReuseUrl,
+  resolveOutboundAttachmentMime,
   reuseFileNameAliases,
   saveFile,
   statStoredFile,
@@ -75,21 +74,11 @@ function resolveMediaType(mime: string): "image" | "audio" | "video" | "document
 }
 
 /**
- * Derive a reliable MIME from both the raw blob type and filename extension.
- * Some browsers/runtimes lose the blob MIME during FormData transport.
+ * Derive a reliable MIME from blob type + filename(s).
+ * `.mp4` / "WhatsApp Video" are video — never audio/mp4 from audio-convert.
  */
-function resolveMime(rawType: string, fileName: string): string {
-  const blobMime = rawType?.split(";")[0].trim();
-  if (blobMime && blobMime !== "application/octet-stream") return blobMime;
-
-  const ext = fileName.includes(".") ? fileName.split(".").pop()! : "";
-  const fromExt = mimeFromExtension(ext);
-  if (fromExt) return fromExt;
-
-  const fromName = mimeFromFilename(fileName);
-  if (fromName && fromName !== "application/octet-stream") return fromName;
-
-  return blobMime || "application/octet-stream";
+function resolveMime(rawType: string, ...fileNames: string[]): string {
+  return resolveOutboundAttachmentMime({ rawType, fileNames });
 }
 
 type AttachmentSource =
@@ -223,7 +212,7 @@ async function parseAttachmentRequest(
       if (imported) {
         if (
           imported.length > WHATSAPP_VIDEO_MAX_BYTES &&
-          resolveMime("", importName).startsWith("video/")
+          resolveMime("", importName, parsedReuse.fileName).startsWith("video/")
         ) {
           return {
             ok: false,
@@ -279,7 +268,18 @@ async function parseAttachmentRequest(
       typeof rec.fileName === "string" && rec.fileName.trim()
         ? rec.fileName.trim().slice(0, 255)
         : resolved.fileName;
-    const mimeBase = resolveMime("", fileName);
+    const clientMime =
+      typeof rec.mimeType === "string"
+        ? rec.mimeType
+        : typeof rec.mediaType === "string"
+          ? rec.mediaType
+          : "";
+    const mimeBase = resolveMime(
+      clientMime,
+      fileName,
+      resolved.fileName,
+      parsedReuse.fileName,
+    );
     if (mimeBase.startsWith("video/") && !resolved.legacyRelative) {
       const st = await statStoredFile(resolved.orgId, resolved.bucket, resolved.fileName);
       if (st && st.size > WHATSAPP_VIDEO_MAX_BYTES) {

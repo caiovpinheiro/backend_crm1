@@ -7,6 +7,7 @@ import {
   LOCATE_REUSE_DEADLINE_MS,
   LOCATE_REUSE_VIDEO_DEADLINE_MS,
   resolveOrgOwnedReuseUrl,
+  resolveOutboundAttachmentMime,
   reuseFileNameAliases,
 } from "@/lib/storage/local";
 
@@ -105,6 +106,68 @@ describe("resolveOrgOwnedReuseUrl", () => {
     expect(resolveOrgOwnedReuseUrl("/uploads/../etc/passwd", ORG)).toBeNull();
     expect(resolveOrgOwnedReuseUrl("/uploads/branding/logo.png", ORG)).toBeNull();
     expect(resolveOrgOwnedReuseUrl("/uploads/a/b/c.mp4", ORG)).toBeNull();
+  });
+});
+
+describe("resolveOutboundAttachmentMime", () => {
+  it("trata WhatsApp Video .mp4 e key .mp4 como vídeo, nunca audio/mp4", () => {
+    expect(
+      resolveOutboundAttachmentMime({
+        fileNames: ["WhatsApp Video 2026-08-31 at 12.00.00.mp4"],
+      }),
+    ).toBe("video/mp4");
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "audio/mp4",
+        fileNames: ["WhatsApp Video 2026-08-31 at 12.00.00.mp4"],
+      }),
+    ).toBe("video/mp4");
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "",
+        fileNames: ["WhatsApp Video 2026-08-31 at 12.00.00.mp4", "auto_1.mp4"],
+      }),
+    ).toBe("video/mp4");
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "audio/mpeg",
+        fileNames: ["nota.mp3", "auto_1785341950642_f7nyxi.mp4"],
+      }),
+    ).toBe("video/mp4");
+  });
+
+  it("preserva áudio real (ogg/opus/mp3/m4a)", () => {
+    expect(
+      resolveOutboundAttachmentMime({ fileNames: ["WhatsApp Audio 2026.ogg"] }),
+    ).toBe("audio/ogg");
+    expect(resolveOutboundAttachmentMime({ fileNames: ["voz.opus"] })).toBe(
+      "audio/opus",
+    );
+    expect(resolveOutboundAttachmentMime({ fileNames: ["musica.mp3"] })).toBe(
+      "audio/mpeg",
+    );
+    expect(resolveOutboundAttachmentMime({ fileNames: ["clip.m4a"] })).toBe("audio/mp4");
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "audio/ogg; codecs=opus",
+        fileNames: ["ptt.ogg"],
+      }),
+    ).toBe("audio/ogg");
+  });
+
+  it("aceita mediaType/mimeType de modelo (video sem extensão no display)", () => {
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "video",
+        fileNames: ["Apresentação"],
+      }),
+    ).toBe("video/mp4");
+    expect(
+      resolveOutboundAttachmentMime({
+        rawType: "video/mp4",
+        fileNames: ["Apresentação"],
+      }),
+    ).toBe("video/mp4");
   });
 });
 
