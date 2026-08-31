@@ -2045,8 +2045,13 @@ export async function withConversationNumberRetry<T>(
   );
 }
 
-/** Lotes até este tamanho fecham na API — não dependem do leads-worker. */
-export const BULK_RESOLVE_SYNC_LIMIT = 100;
+/**
+ * Lotes até este tamanho fecham na API com updateMany — não dependem do
+ * leads-worker. O teto antigo (100) mandava 107 "Respondidas" pra fila:
+ * o toast saía 202 e as conversas ficavam OPEN se o worker não consumisse.
+ */
+export const BULK_RESOLVE_SYNC_LIMIT = 2000;
+const BULK_RESOLVE_CHUNK = 50;
 
 export type BulkResolveTabulation = {
   tabulationId: string;
@@ -2057,9 +2062,8 @@ export type BulkResolveTabulation = {
 };
 
 /**
- * Encerra conversas no processo HTTP (mesmo caminho do kebab individual).
- * Usado no bulk quando o lote cabe no limite — o toast "ok" só sai depois
- * do status RESOLVED + closedAt no banco, sem esperar Redis/worker.
+ * Encerra conversas com updateMany (status RESOLVED + closedAt).
+ * O toast de sucesso só deve sair depois desta persistência.
  */
 export async function resolveConversationsInline(params: {
   ids: string[];
@@ -2067,13 +2071,25 @@ export async function resolveConversationsInline(params: {
   keepDepartment: boolean;
   tabulation?: BulkResolveTabulation | null;
   skipAutomations?: boolean;
-}): Promise<{ updated: number }> {
+}): Promise<{ updated: number; missing: number }> {
   const tab = params.tabulation ?? null;
+  const applyTab = Boolean(tab);
   let updated = 0;
+  let missing = 0;
+  const source = "bulk-sync";
+  const closePatch = {
+    status: "RESOLVED" as const,
+    closedAt: new Date(),
+    hasError: false,
+    ...(params.keepAgent ? {} : { assignedToId: null }),
+    ...(params.keepDepartment ? {} : { departmentId: null }),
+    ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
+  };
 
-  for (const id of params.ids) {
-    const conv = await prisma.conversation.findUnique({
-      where: { id },
+  for (let i = 0; i < params.ids.length; i += BULK_RESOLVE_CHUNK) {
+    const chunkIds = params.ids.slice(i, i + BULK_RESOLVE_CHUNK);
+    const convs = await prisma.conversation.findMany({
+      where: { id: { in: chunkIds } },
       select: {
         id: true,
         status: true,
@@ -2081,101 +2097,164 @@ export async function resolveConversationsInline(params: {
         departmentId: true,
         organizationId: true,
         externalId: true,
-        contact: { select: { id: true } },
+        assignedToId: true,
+        assignedTo: { select: { name: true } },
+        contact: { select: { name: true } },
       },
     });
-    if (!conv || conv.status === "RESOLVED") continue;
+    const found = new Set(convs.map((c) => c.id));
+    missing += chunkIds.filter((id) => !found.has(id)).length;
+    const toResolve = convs.filter((c) => c.status !== "RESOLVED");
+    if (toResolve.length === 0) continue;
 
-    const applyTab = Boolean(tab);
-
-    const row = await updateConversationStatusInDb(id, "RESOLVED", {
-      tabulationId: applyTab && tab ? tab.tabulationId : undefined,
-      clearAssignedTo: !params.keepAgent,
-      clearDepartment: !params.keepDepartment,
-    });
-
-    await logEvent({
-      type: "CONVERSATION_CLOSED",
-      entityType: "CONVERSATION",
-      entityId: id,
-      entityLabel: row.externalId ?? null,
-      conversationId: id,
-      contactId: conv.contactId,
-      field: "status",
-      oldValue: conv.status,
-      newValue: "RESOLVED",
-      meta: {
-        from: conv.status,
-        to: "RESOLVED",
-        source: "bulk-sync",
-        ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
-        ...(params.skipAutomations ? { skipAutomations: true } : {}),
+    await prisma.conversation.updateMany({
+      where: {
+        id: { in: toResolve.map((c) => c.id) },
+        status: { not: "RESOLVED" },
       },
+      data: closePatch,
     });
+    updated += toResolve.length;
 
-    if (applyTab && tab) {
-      const { tabulationLogMeta } = await import("@/services/tabulations");
-      void logEvent({
-        type: "CONVERSATION_TABULATED",
-        entityType: "CONVERSATION",
-        entityId: id,
-        entityLabel: row.externalId ?? null,
-        conversationId: id,
-        contactId: conv.contactId,
-        meta: tabulationLogMeta(
-          {
-            tabulationId: tab.tabulationId,
-            ancestorIds: tab.ancestorIds,
-            departmentId: tab.departmentId,
-            name: tab.name,
-            number: tab.number,
-          },
-          { source: "bulk-sync" },
-        ),
-      });
-    }
-
-    if (!params.skipAutomations) {
-      void (async () => {
-        const { fireTrigger } = await import("@/services/automation-triggers");
-        let dealId: string | undefined;
-        if (conv.contactId) {
-          const deal = await prisma.deal.findFirst({
-            where: { contactId: conv.contactId, status: "OPEN" },
-            orderBy: { createdAt: "desc" },
-            select: { id: true },
+    if (!params.keepAgent) {
+      const pairs = new Map<string, { contactId: string; userId: string }>();
+      for (const conv of toResolve) {
+        if (conv.contactId && conv.assignedToId) {
+          pairs.set(`${conv.contactId}:${conv.assignedToId}`, {
+            contactId: conv.contactId,
+            userId: conv.assignedToId,
           });
-          dealId = deal?.id;
         }
-        await fireTrigger("conversation_tabulated", {
-          contactId: conv.contactId ?? undefined,
-          dealId,
-          data: {
-            tabulationId: applyTab && tab ? tab.tabulationId : null,
-            ancestorIds: applyTab && tab ? tab.ancestorIds : [],
-            departmentId: conv.departmentId ?? tab?.departmentId ?? null,
-            conversationId: id,
+      }
+      if (pairs.size > 0) {
+        const { clearContactOwnershipOnClose } = await import("@/services/deals");
+        for (const { contactId, userId } of pairs.values()) {
+          await clearContactOwnershipOnClose({
+            contactId,
+            clearedUserId: userId,
+            actorUserId: userIdForFk(getRequestContext()?.userId),
+          }).catch(() => {});
+        }
+      }
+    }
+
+    const { tabulationLogMeta } = applyTab
+      ? await import("@/services/tabulations")
+      : { tabulationLogMeta: null };
+
+    for (const conv of toResolve) {
+      if (!params.keepAgent && conv.assignedToId) {
+        void logEvent({
+          type: "ASSIGNEE_CHANGED",
+          entityType: "CONVERSATION",
+          entityId: conv.id,
+          entityLabel: conv.contact?.name ?? conv.externalId ?? null,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          field: "assignedTo",
+          oldValue: conv.assignedTo?.name ?? null,
+          newValue: null,
+          meta: {
+            fromUserId: conv.assignedToId,
+            toUserId: null,
+            reason: "conversation_closed",
+            source,
           },
-        });
-      })().catch(() => {});
-    }
-
-    try {
-      sseBus.publish("conversation_updated", {
-        organizationId: conv.organizationId,
-        conversationId: id,
-      });
-      sseBus.publish("conversation_timeline_updated", {
-        organizationId: conv.organizationId,
-        conversationId: id,
+        }).catch(() => {});
+      }
+      void logEvent({
         type: "CONVERSATION_CLOSED",
-      });
-    } catch {
-      /* best-effort */
-    }
+        entityType: "CONVERSATION",
+        entityId: conv.id,
+        entityLabel: conv.contact?.name ?? conv.externalId ?? null,
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        field: "status",
+        oldValue: conv.status,
+        newValue: "RESOLVED",
+        meta: {
+          from: conv.status,
+          to: "RESOLVED",
+          source,
+          ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
+          ...(params.skipAutomations ? { skipAutomations: true } : {}),
+        },
+      }).catch(() => {});
 
-    updated += 1;
+      if (applyTab && tab && tabulationLogMeta) {
+        void logEvent({
+          type: "CONVERSATION_TABULATED",
+          entityType: "CONVERSATION",
+          entityId: conv.id,
+          entityLabel: conv.contact?.name ?? conv.externalId ?? null,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          meta: tabulationLogMeta(
+            {
+              tabulationId: tab.tabulationId,
+              ancestorIds: tab.ancestorIds,
+              departmentId: tab.departmentId,
+              name: tab.name,
+              number: tab.number,
+            },
+            { source },
+          ),
+        }).catch(() => {});
+      }
+
+      if (!params.skipAutomations) {
+        void (async () => {
+          const { fireTrigger } = await import("@/services/automation-triggers");
+          let dealId: string | undefined;
+          if (conv.contactId) {
+            const deal = await prisma.deal.findFirst({
+              where: { contactId: conv.contactId, status: "OPEN" },
+              orderBy: { createdAt: "desc" },
+              select: { id: true },
+            });
+            dealId = deal?.id;
+          }
+          await fireTrigger("conversation_tabulated", {
+            contactId: conv.contactId ?? undefined,
+            dealId,
+            data: {
+              tabulationId: applyTab && tab ? tab.tabulationId : null,
+              ancestorIds: applyTab && tab ? tab.ancestorIds : [],
+              departmentId: conv.departmentId ?? tab?.departmentId ?? null,
+              conversationId: conv.id,
+            },
+          });
+        })().catch(() => {});
+      }
+
+      try {
+        sseBus.publish("conversation_updated", {
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+        });
+        sseBus.publish("conversation_timeline_updated", {
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          type: "CONVERSATION_CLOSED",
+        });
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
-  return { updated };
+  if (updated > 0) {
+    const orgId = getOrgIdOrNull();
+    if (orgId) void invalidateInboxTabCounts(orgId);
+    void import("@/services/distribution/pending")
+      .then((m) =>
+        m.scheduleProcessPendingDistributionQueue({
+          trigger: "capacity_released",
+          delayMs: 400,
+        }),
+      )
+      .catch(() => {});
+  }
+
+  return { updated, missing };
 }
