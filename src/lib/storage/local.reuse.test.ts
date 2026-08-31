@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+
+import { resolveOrgOwnedReuseUrl } from "@/lib/storage/local";
+
+const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
+const OTHER = "clxxxxxxxxxxxxxxxxxxxxxxx";
+
+describe("resolveOrgOwnedReuseUrl", () => {
+  it("aceita /api/storage/<org>/automation-media/<file> da mesma org", () => {
+    const got = resolveOrgOwnedReuseUrl(
+      `/api/storage/${ORG}/automation-media/auto_1784899629445_x7741m.mp4`,
+      ORG,
+    );
+    expect(got).toEqual({
+      url: `/api/storage/${ORG}/automation-media/auto_1784899629445_x7741m.mp4`,
+      orgId: ORG,
+      bucket: "automation-media",
+      fileName: "auto_1784899629445_x7741m.mp4",
+    });
+  });
+
+  it("aceita URL absoluta cujo pathname é /api/storage/...", () => {
+    const got = resolveOrgOwnedReuseUrl(
+      `https://api.bwipo.com/api/storage/${ORG}/attachments/att_1.jpg`,
+      ORG,
+    );
+    expect(got?.bucket).toBe("attachments");
+    expect(got?.fileName).toBe("att_1.jpg");
+    expect(got?.orgId).toBe(ORG);
+  });
+
+  it("rejeita org diferente (sem SSRF / tenant escape)", () => {
+    expect(
+      resolveOrgOwnedReuseUrl(`/api/storage/${OTHER}/automation-media/x.mp4`, ORG),
+    ).toBeNull();
+  });
+
+  it("rejeita bucket fora da whitelist de reuse", () => {
+    expect(
+      resolveOrgOwnedReuseUrl(`/api/storage/${ORG}/branding/logo.png`, ORG),
+    ).toBeNull();
+    expect(
+      resolveOrgOwnedReuseUrl(`/api/storage/${ORG}/avatars/u.jpg`, ORG),
+    ).toBeNull();
+  });
+
+  it("rejeita esquemas perigosos e URL externa que não é storage", () => {
+    expect(resolveOrgOwnedReuseUrl("https://evil.example/secret.mp4", ORG)).toBeNull();
+    expect(resolveOrgOwnedReuseUrl("data:video/mp4;base64,xxxx", ORG)).toBeNull();
+    expect(resolveOrgOwnedReuseUrl("//evil.example/x.mp4", ORG)).toBeNull();
+    expect(resolveOrgOwnedReuseUrl("file:///etc/passwd", ORG)).toBeNull();
+  });
+
+  it("mapeia /uploads/<file> para automation-media da org", () => {
+    const got = resolveOrgOwnedReuseUrl("/uploads/auto_old.mp4", ORG);
+    expect(got).toMatchObject({
+      orgId: ORG,
+      bucket: "automation-media",
+      fileName: "auto_old.mp4",
+      legacyRelative: "auto_old.mp4",
+    });
+    expect(got?.url).toBe(`/api/storage/${ORG}/automation-media/auto_old.mp4`);
+  });
+
+  it("mapeia /uploads/<reuse-bucket>/<file>", () => {
+    const got = resolveOrgOwnedReuseUrl("/uploads/attachments/att_1.jpg", ORG);
+    expect(got).toMatchObject({
+      bucket: "attachments",
+      fileName: "att_1.jpg",
+      legacyRelative: "attachments/att_1.jpg",
+    });
+  });
+
+  it("rejeita /uploads/ com traversal ou bucket proibido", () => {
+    expect(resolveOrgOwnedReuseUrl("/uploads/../etc/passwd", ORG)).toBeNull();
+    expect(resolveOrgOwnedReuseUrl("/uploads/branding/logo.png", ORG)).toBeNull();
+    expect(resolveOrgOwnedReuseUrl("/uploads/a/b/c.mp4", ORG)).toBeNull();
+  });
+});

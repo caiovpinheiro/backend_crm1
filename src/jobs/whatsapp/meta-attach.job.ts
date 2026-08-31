@@ -14,7 +14,11 @@ import { formatMetaSendError, metaClientFromConfig } from "@/lib/meta-whatsapp/c
 import { prisma } from "@/lib/prisma";
 import type { MetaAttachKind, MetaAttachPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
-import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
+import {
+  parseStoragePath,
+  readLegacyUploadsFile,
+  readStoredFile,
+} from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 
@@ -170,18 +174,27 @@ export async function processMetaAttach(
   }
 
   const storedPath = msg.mediaUrl ? parseStoragePath(msg.mediaUrl) : null;
-  if (!storedPath || storedPath.orgId !== payload.organizationId) {
-    return markFailed(payload, "Arquivo não encontrado no storage.", {
-      messageType: kind,
-    });
+  let stored: { buffer: Buffer; mimeType: string } | null = null;
+  let storedFileName = storedPath?.fileName ?? payload.originalName ?? "file";
+
+  if (storedPath && storedPath.orgId === payload.organizationId) {
+    stored = await readStoredFile(
+      storedPath.orgId,
+      storedPath.bucket,
+      storedPath.fileName,
+    );
+  } else if (msg.mediaUrl?.startsWith("/uploads/") || msg.mediaUrl?.startsWith("/api/uploads/")) {
+    const relative = msg.mediaUrl.replace(/^\/api/, "").replace(/^\/uploads\//, "");
+    stored = await readLegacyUploadsFile(relative);
+    storedFileName = relative.split("/").pop() || storedFileName;
   }
 
-  const stored = await readStoredFile(
-    storedPath.orgId,
-    storedPath.bucket,
-    storedPath.fileName,
-  );
   if (!stored?.buffer.length) {
+    if (!storedPath || storedPath.orgId !== payload.organizationId) {
+      return markFailed(payload, "Arquivo não encontrado no storage.", {
+        messageType: kind,
+      });
+    }
     return markFailed(payload, "Arquivo vazio ou ilegível.", { messageType: kind });
   }
 
@@ -189,7 +202,7 @@ export async function processMetaAttach(
   let sendAsVoice = false;
   let audioDelivery: MetaAttachResult["audioDelivery"] = null;
   let uploadMime = payload.mime || stored.mimeType || "application/octet-stream";
-  let uploadName = payload.originalName || storedPath.fileName;
+  let uploadName = payload.originalName || storedFileName;
   let storeBuffer = stored.buffer;
 
   if (kind === "audio") {
