@@ -582,8 +582,13 @@ export async function readLegacyUploadsFile(
  */
 export async function locateReusableStoredObject(
   resolved: OrgOwnedReuseUrl,
+  opts?: { deadlineMs?: number | null },
 ): Promise<OrgOwnedReuseUrl | null> {
-  return withDeadline(locateReusableStoredObjectInner(resolved), LOCATE_REUSE_DEADLINE_MS, null);
+  if (opts?.deadlineMs === null) {
+    return locateReusableStoredObjectInner(resolved);
+  }
+  const ms = opts?.deadlineMs ?? LOCATE_REUSE_DEADLINE_MS;
+  return withDeadline(locateReusableStoredObjectInner(resolved), ms, null);
 }
 
 async function locateReusableStoredObjectInner(

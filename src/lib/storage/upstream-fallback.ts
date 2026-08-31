@@ -4,12 +4,24 @@
  * Quando o objeto não está no Spaces/disco, o gateway tenta
  * STORAGE_FALLBACK_URL (backend legado com o arquivo em /app/storage).
  * Reuse precisa do mesmo read — senão GET 200 e POST reuseUrl 404.
+ *
+ * Ops: defina TEMPORARIAMENTE no EasyPanel se os bytes ainda estão no
+ * host legado `banco-backend-crm.6tqx2r.easypanel.host` ou no volume
+ * antigo da API. Só este host (env) é chamado — nunca a URL crua do
+ * modelo (SSRF). Remova a env depois do repair em massa.
  */
+
+import { parseStoragePath } from "@/lib/storage/local";
 
 function getFallbackBase(): string | null {
   const raw = process.env.STORAGE_FALLBACK_URL?.trim();
   if (!raw) return null;
   return raw.replace(/\/$/, "");
+}
+
+/** True se STORAGE_FALLBACK_URL está definida (repair / diagnóstico). */
+export function storageFallbackConfigured(): boolean {
+  return getFallbackBase() != null;
 }
 
 function extractSessionToken(cookieHeader: string | null): string | null {
@@ -116,8 +128,11 @@ export async function readUpstreamFallbackBytes(
 ): Promise<Buffer | null> {
   const base = getFallbackBase();
   if (!base) return null;
-  const headers = buildUpstreamHeaders(cookieHeader ?? "", null);
-  if (!headers) return null;
+  // Só org/bucket/file já parseados — nunca a URL crua do cliente.
+  if (!parseStoragePath(joined)) return null;
+  const headers = buildUpstreamHeaders(cookieHeader ?? "", null) ?? {
+    host: new URL(base).host,
+  };
   try {
     const upstream = await fetch(`${base}/api/storage/${joined}`, {
       headers,
