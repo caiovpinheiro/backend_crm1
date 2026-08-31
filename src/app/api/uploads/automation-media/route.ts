@@ -9,7 +9,7 @@ import {
   sniffVideoMime,
   type SniffedMime,
 } from "@/lib/file-sniff";
-import { generateFileName, saveFile } from "@/lib/storage/local";
+import { generateFileName, saveFile, storageDriver } from "@/lib/storage/local";
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
 
@@ -92,6 +92,12 @@ export async function POST(request: Request) {
       fileName: safeName,
       buffer,
     });
+    console.info(
+      "[automation-media] saved",
+      storageDriver(),
+      saved.absolutePath,
+      buffer.length,
+    );
     return NextResponse.json({ url: saved.url, fileName: origName, mimeType: mime });
   } catch (e) {
     console.error("[automation-media] upload error:", e);

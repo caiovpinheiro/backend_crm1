@@ -46,7 +46,9 @@ describe("resolveOrgOwnedReuseUrl", () => {
     expect(reuseFileNameAliases("auto_1.jpeg")).toEqual(
       expect.arrayContaining(["auto_1.jpeg", "auto_1.jpg"]),
     );
-    expect(reuseFileNameAliases("clip.mp4")).toEqual(["clip.mp4"]);
+    expect(reuseFileNameAliases("clip.mp4")).toEqual(
+      expect.arrayContaining(["clip.mp4", "clip.MP4"]),
+    );
   });
 
   it("rejeita org diferente (sem SSRF / tenant escape)", () => {

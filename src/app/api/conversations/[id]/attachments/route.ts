@@ -20,6 +20,7 @@ import {
   resolveOrgOwnedReuseUrl,
   reuseFileNameAliases,
   saveFile,
+  type OrgOwnedReuseUrl,
 } from "@/lib/storage/local";
 import { readUpstreamFallbackBytes } from "@/lib/storage/upstream-fallback";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
@@ -106,6 +107,60 @@ function readChannelId(raw: unknown): string | null {
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
+function urlsFromTemplateAttachments(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const url = (item as { url?: unknown }).url;
+    if (typeof url === "string" && url.trim()) out.push(url.trim());
+  }
+  return out;
+}
+
+/** Outra URL gravada no modelo (path legado / bucket diferente). */
+async function locateFromTemplateRow(
+  orgId: string,
+  parsedReuse: OrgOwnedReuseUrl,
+): Promise<OrgOwnedReuseUrl | null> {
+  const fileName = parsedReuse.fileName;
+  const rows = await prisma.messageTemplate.findMany({
+    where: {
+      organizationId: orgId,
+      OR: [
+        { mediaUrl: parsedReuse.url },
+        { mediaUrl: { contains: fileName } },
+      ],
+    },
+    select: { mediaUrl: true, attachments: true },
+    take: 8,
+  });
+  const seen = new Set<string>([parsedReuse.url]);
+  for (const row of rows) {
+    const candidates = [
+      ...(typeof row.mediaUrl === "string" ? [row.mediaUrl] : []),
+      ...urlsFromTemplateAttachments(row.attachments),
+    ];
+    for (const raw of candidates) {
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+      const parsed = resolveOrgOwnedReuseUrl(raw, orgId);
+      if (!parsed) continue;
+      const hit = await locateReusableStoredObject(parsed);
+      if (hit) {
+        console.warn(
+          "[attachments] reuse via template row",
+          orgId,
+          hit.bucket,
+          hit.fileName,
+        );
+        return hit;
+      }
+    }
+  }
+  return null;
+}
+
 async function parseAttachmentRequest(
   request: Request,
   orgId: string,
@@ -138,11 +193,17 @@ async function parseAttachmentRequest(
         ),
       };
     }
+    const reuseStarted = Date.now();
     let resolved = await locateReusableStoredObject(parsedReuse);
-    if (!resolved) {
+    if (!resolved && Date.now() - reuseStarted < 600) {
+      const fromTemplate = await locateFromTemplateRow(orgId, parsedReuse);
+      if (fromTemplate) resolved = fromTemplate;
+    }
+    if (!resolved && Date.now() - reuseStarted < 700) {
       // GET /api/storage ainda 200 via STORAGE_FALLBACK_URL (arquivo só
       // no backend legado). Reuse só via Spaces — 404. Importa o body
-      // para a key canônica e segue por referência.
+      // para a key canônica e segue por referência. Timeout curto: em
+      // prod a env costuma estar vazia e não pode prender o send.
       const cookie = request.headers.get("cookie");
       const names = reuseFileNameAliases(parsedReuse.fileName);
       let imported: Buffer | null = null;
@@ -186,7 +247,11 @@ async function parseAttachmentRequest(
       return {
         ok: false,
         response: NextResponse.json(
-          { message: "Arquivo não encontrado no storage." },
+          {
+            message:
+              "Mídia do modelo não está no storage. Abra o modelo e envie o arquivo de novo.",
+            code: "TEMPLATE_MEDIA_MISSING",
+          },
           { status: 404 },
         ),
       };

@@ -437,7 +437,10 @@ export async function readStoredFile(
 ): Promise<ReadFileResult | null> {
   if (storageDriver() === "s3") {
     const s3 = await import("./s3");
-    return s3.readStoredFile(orgId, bucket, fileName);
+    const fromS3 = await s3.readStoredFile(orgId, bucket, fileName);
+    if (fromS3) return fromS3;
+    // Mesmo pod ainda pode ter o arquivo se o upload caiu em disco.
+    return readStoredFileLocal(orgId, bucket, fileName);
   }
   return readStoredFileLocal(orgId, bucket, fileName);
 }
@@ -453,35 +456,48 @@ export async function statStoredFile(
 ): Promise<StoredFileStat | null> {
   if (storageDriver() === "s3") {
     const s3 = await import("./s3");
-    return s3.statStoredFile(orgId, bucket, fileName);
+    const fromS3 = await s3.statStoredFile(orgId, bucket, fileName);
+    if (fromS3) return fromS3;
+    return statStoredFileLocal(orgId, bucket, fileName);
   }
   return statStoredFileLocal(orgId, bucket, fileName);
 }
 
 /**
- * Existência no mesmo critério do GET /api/storage quando serve o body
- * (imagem não manda Range): GetObject/read cheio primeiro. Head e Range
- * no compat (Spaces) 404-am JPEG pequeno enquanto o GET sem Range 200.
- * Stat só como confirmação se o read falhar (stream vazio / retry esgotado).
+ * Existência barata: Head/stat + disco local. Não baixa o body inteiro
+ * (vídeo de modelo no reuse não pode esperar GetObject cheio × N keys).
+ * JPEG flake (Head 404 / GET 200) é coberto por `locateReusableStoredObject`
+ * no key canônico + ListObjects do stem.
  */
 export async function existsStoredFile(
   orgId: string,
   bucket: StorageBucket,
   fileName: string,
 ): Promise<boolean> {
-  const full = await readStoredFile(orgId, bucket, fileName);
-  if (full != null) return true;
-  const st = await statStoredFile(orgId, bucket, fileName);
-  if (st) return true;
-  const probe = await readStoredFileRange(orgId, bucket, fileName, 0, 0);
-  return probe != null;
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    if (await s3.probeStoredFile(orgId, bucket, fileName)) return true;
+    return (await statStoredFileLocal(orgId, bucket, fileName)) != null;
+  }
+  return (await statStoredFileLocal(orgId, bucket, fileName)) != null;
 }
+
+const EXT_ALIASES: Record<string, readonly string[]> = {
+  jpg: ["jpeg", "JPEG", "JPG"],
+  jpeg: ["jpg", "JPG", "JPEG"],
+  png: ["PNG"],
+  gif: ["GIF"],
+  webp: ["WEBP"],
+  mp4: ["MP4"],
+  webm: ["WEBM"],
+  mov: ["MOV"],
+  pdf: ["PDF"],
+};
 
 /**
  * Variantes de filename org-owned para o mesmo objeto. JPEG de modelo
  * costuma gravar `auto_….jpg` (sniff → ext `jpg`) enquanto o cliente
- * manda `….jpeg`, ou o contrário no Spaces. Sem alias o GET/reuse
- * batem em keys diferentes.
+ * manda `….jpeg`. Vídeo pode estar como `.MP4`.
  */
 export function reuseFileNameAliases(fileName: string): string[] {
   const names = [fileName];
@@ -490,8 +506,7 @@ export function reuseFileNameAliases(fileName: string): string[] {
   const base = fileName.slice(0, idx);
   const ext = fileName.slice(idx + 1);
   const lower = ext.toLowerCase();
-  const swap =
-    lower === "jpg" ? ["jpeg", "JPEG", "JPG"] : lower === "jpeg" ? ["jpg", "JPG", "JPEG"] : [];
+  const swap = EXT_ALIASES[lower] ?? (ext !== lower ? [lower] : []);
   for (const alt of swap) {
     const candidate = `${base}.${alt}`;
     if (candidate !== fileName && isValidFileName(candidate) && !names.includes(candidate)) {
@@ -499,6 +514,24 @@ export function reuseFileNameAliases(fileName: string): string[] {
     }
   }
   return names;
+}
+
+export const LOCATE_REUSE_DEADLINE_MS = 800;
+
+function withDeadline<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
 }
 
 function resolveLegacyUploadsAbs(relative: string): string | null {
@@ -542,6 +575,7 @@ export async function readLegacyUploadsFile(
 
 /**
  * Confirma que o objeto do reuseUrl existe no driver ativo (S3 ou disco).
+ * Probes em paralelo + teto de 800ms: miss real não pode prender o send.
  * Se o URL era `/uploads/<file>` sem bucket, tenta os outros buckets de
  * reuse. Se só existir no volume legado `public/uploads`, devolve essa URL
  * (workers Baileys / meta-attach já leem `/uploads/...`).
@@ -549,47 +583,74 @@ export async function readLegacyUploadsFile(
 export async function locateReusableStoredObject(
   resolved: OrgOwnedReuseUrl,
 ): Promise<OrgOwnedReuseUrl | null> {
+  return withDeadline(locateReusableStoredObjectInner(resolved), LOCATE_REUSE_DEADLINE_MS, null);
+}
+
+async function locateReusableStoredObjectInner(
+  resolved: OrgOwnedReuseUrl,
+): Promise<OrgOwnedReuseUrl | null> {
   const names = reuseFileNameAliases(resolved.fileName);
+  const buckets = [resolved.bucket, ...[...REUSE_BUCKETS].filter((b) => b !== resolved.bucket)];
 
-  for (const fileName of names) {
-    if (await existsStoredFile(resolved.orgId, resolved.bucket, fileName)) {
+  // GetObject canônico em paralelo com Heads: Spaces às vezes Head/Range
+  // 404 em JPEG que o GET sem Range serve.
+  const canonicalRead = readStoredFile(resolved.orgId, resolved.bucket, resolved.fileName).then(
+    (file) =>
+      file
+        ? ({
+            url: buildPublicUrl(resolved.orgId, resolved.bucket, resolved.fileName),
+            orgId: resolved.orgId,
+            bucket: resolved.bucket,
+            fileName: resolved.fileName,
+          } satisfies OrgOwnedReuseUrl)
+        : null,
+  );
+
+  const probes = buckets.flatMap((bucket) =>
+    names.map(async (fileName) => {
+      if (!(await existsStoredFile(resolved.orgId, bucket, fileName))) return null;
       return {
-        url: buildPublicUrl(resolved.orgId, resolved.bucket, fileName),
+        url: buildPublicUrl(resolved.orgId, bucket, fileName),
         orgId: resolved.orgId,
-        bucket: resolved.bucket,
+        bucket,
         fileName,
-      };
-    }
-  }
+      } satisfies OrgOwnedReuseUrl;
+    }),
+  );
 
-  // Filename já validado e org-owned: tenta os outros buckets de reuse
-  // (URL canônica pode apontar automation-media enquanto o objeto está
-  // em attachments) e o volume legado `public/uploads/<file>`.
-  for (const bucket of REUSE_BUCKETS) {
-    if (bucket === resolved.bucket) continue;
-    for (const fileName of names) {
-      if (await existsStoredFile(resolved.orgId, bucket, fileName)) {
-        return {
-          url: buildPublicUrl(resolved.orgId, bucket, fileName),
-          orgId: resolved.orgId,
-          bucket,
-          fileName,
-        };
-      }
+  const probeHits = await Promise.all([canonicalRead, ...probes]);
+  const probeHit = probeHits.find((hit): hit is OrgOwnedReuseUrl => hit != null);
+  if (probeHit) return probeHit;
+
+  if (storageDriver() === "s3") {
+    const s3 = await import("./s3");
+    const listed = await s3.findOrgObjectByStem(resolved.orgId, [...REUSE_BUCKETS], resolved.fileName);
+    if (listed) {
+      return {
+        url: buildPublicUrl(resolved.orgId, listed.bucket, listed.fileName),
+        orgId: resolved.orgId,
+        bucket: listed.bucket,
+        fileName: listed.fileName,
+      };
     }
   }
 
   const legacyCandidates = new Set<string>();
   if (resolved.legacyRelative) legacyCandidates.add(resolved.legacyRelative);
   for (const fileName of names) legacyCandidates.add(fileName);
-  for (const relative of legacyCandidates) {
-    if (!(await legacyUploadsFileExists(relative))) continue;
+  const legacyHits = await Promise.all(
+    [...legacyCandidates].map(async (relative) =>
+      (await legacyUploadsFileExists(relative)) ? relative : null,
+    ),
+  );
+  const legacy = legacyHits.find((hit): hit is string => hit != null);
+  if (legacy) {
     return {
-      url: `/uploads/${relative}`,
+      url: `/uploads/${legacy}`,
       orgId: resolved.orgId,
       bucket: resolved.bucket,
       fileName: resolved.fileName,
-      legacyRelative: relative,
+      legacyRelative: legacy,
     };
   }
 
@@ -610,7 +671,9 @@ export async function readStoredFileRange(
 ): Promise<ReadFileResult | null> {
   if (storageDriver() === "s3") {
     const s3 = await import("./s3");
-    return s3.readStoredFileRange(orgId, bucket, fileName, start, end);
+    const fromS3 = await s3.readStoredFileRange(orgId, bucket, fileName, start, end);
+    if (fromS3) return fromS3;
+    return readStoredFileRangeLocal(orgId, bucket, fileName, start, end);
   }
   return readStoredFileRangeLocal(orgId, bucket, fileName, start, end);
 }
