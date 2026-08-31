@@ -10,7 +10,9 @@ import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
+  BULK_ASSIGN_SYNC_LIMIT,
   BULK_RESOLVE_SYNC_LIMIT,
+  assignConversationsInline,
   getFilteredConversationIds,
   getResolvableConversationIds,
   resolveConversationsInline,
@@ -48,6 +50,10 @@ const FILTER_TABS = new Set<InboxTab>([
  *   3. lê as org settings keepAgent/keepDepartment;
  *   4. lote pequeno: responde 200 com `updated` depois do persist;
  *      lote grande: cria `BulkOperation` e enfileira o job (202 + operationId).
+ *
+ * `assign` (Reatribuir / Remover responsável): mesmo padrão — lotes até
+ * `BULK_ASSIGN_SYNC_LIMIT` persistem na API via `assignConversationsInline`.
+ * Só acima disso enfileira o `leads-worker`.
  */
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
@@ -432,6 +438,28 @@ export async function POST(request: Request) {
 
           if (targetIds.length === 0) {
             return NextResponse.json({ updated: 0, skipped: [] });
+          }
+
+          // Lote pequeno: persiste aqui (mesmo assign do kebab). Sem worker,
+          // o enqueue devolvia 202 + toast "ok" e o responsável não mudava.
+          if (targetIds.length <= BULK_ASSIGN_SYNC_LIMIT) {
+            const { updated, skipped } = await assignConversationsInline({
+              ids: targetIds,
+              assignedToId: newAssigneeId,
+              actor: {
+                id: user.id,
+                role: user.role,
+                canReassignOthers,
+                canTransfer,
+              },
+              organizationId: user.organizationId,
+              source: "bulk-sync",
+            });
+            return NextResponse.json({
+              updated,
+              skipped,
+              action: "assign",
+            });
           }
 
           const operation = await prisma.bulkOperation.create({

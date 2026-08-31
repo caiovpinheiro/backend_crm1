@@ -1719,6 +1719,124 @@ export async function assignConversationAssignedTo(
 }
 
 /**
+ * Lotes até este tamanho reatribuem na API (mesmo `assignConversationAssignedTo`
+ * do kebab). Acima disso a rota enfileira o leads-worker — o toast de sucesso
+ * só deve sair depois do persist, nunca no 202.
+ */
+export const BULK_ASSIGN_SYNC_LIMIT = 2000;
+
+/**
+ * Reatribui / remove responsável conversa a conversa, com o mesmo RBAC e
+ * sincronização contato+negócios do assign individual. O toast de sucesso
+ * só deve sair depois desta persistência.
+ */
+export async function assignConversationsInline(params: {
+  ids: string[];
+  assignedToId: string | null;
+  actor: {
+    id: string;
+    role: AppUserRole;
+    canReassignOthers?: boolean;
+    canTransfer?: boolean;
+  };
+  organizationId: string;
+  source?: string;
+}): Promise<{ updated: number; skipped: string[] }> {
+  const skipped: string[] = [];
+  let updated = 0;
+  const source = params.source ?? "bulk-sync";
+  const actorId = params.actor.id;
+  const { cancelAiReplyDebounce } = await import(
+    "@/services/ai/inbound-debounce"
+  );
+  const { createDealEvent } = await import("@/services/deals");
+
+  for (const conversationId of params.ids) {
+    try {
+      const prev = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: {
+          assignedToId: true,
+          contactId: true,
+          externalId: true,
+          assignedTo: { select: { id: true, name: true } },
+        },
+      });
+      const result = await assignConversationAssignedTo(
+        conversationId,
+        params.assignedToId,
+        params.actor,
+      );
+      if (!result.ok) {
+        skipped.push(conversationId);
+        continue;
+      }
+      updated += 1;
+      const nextId = result.conversation.assignedToId ?? null;
+      if ((prev?.assignedToId ?? null) === nextId) continue;
+
+      cancelAiReplyDebounce(conversationId, "assignee_changed");
+      const fromName = prev?.assignedTo?.name ?? null;
+      const toName = result.conversation.assignedTo?.name ?? null;
+      if (prev?.contactId) {
+        const deals = await prisma.deal.findMany({
+          where: { contactId: prev.contactId, status: "OPEN" },
+          select: { id: true },
+        });
+        await Promise.all(
+          deals.map((d) =>
+            createDealEvent(d.id, actorId, "ASSIGNEE_CHANGED", {
+              conversationId,
+              from: prev.assignedToId
+                ? { id: prev.assignedToId, name: fromName }
+                : null,
+              to: nextId ? { id: nextId, name: toName } : null,
+            }).catch(() => undefined),
+          ),
+        );
+      }
+      await logEvent({
+        type: "ASSIGNEE_CHANGED",
+        entityType: "CONVERSATION",
+        entityId: conversationId,
+        entityLabel: result.conversation.externalId ?? null,
+        conversationId,
+        contactId: result.conversation.contactId ?? null,
+        field: "assignedTo",
+        oldValue: fromName,
+        newValue: toName,
+        meta: {
+          fromUserId: prev?.assignedToId ?? null,
+          toUserId: nextId,
+          source,
+        },
+      }).catch(() => undefined);
+      try {
+        sseBus.publish("conversation_updated", {
+          organizationId: params.organizationId,
+          conversationId,
+        });
+        sseBus.publish("conversation_timeline_updated", {
+          organizationId: params.organizationId,
+          conversationId,
+          type: "ASSIGNEE_CHANGED",
+        });
+      } catch {
+        /* best-effort */
+      }
+    } catch {
+      skipped.push(conversationId);
+    }
+  }
+
+  if (updated > 0) {
+    void invalidateInboxTabCounts(params.organizationId);
+  }
+
+  return { updated, skipped };
+}
+
+/**
  * Reabre uma conversa RESOLVED como NOVO ticket (regra "reabrir = novo id").
  * Se ja existe um ticket ativo pro contato+canal (ex.: um inbound reabriu
  * antes), reusa; caso contrario cria um novo, tratando a corrida do indice
