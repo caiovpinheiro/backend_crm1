@@ -5,6 +5,20 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-31 — Bearer só em api-public + 240 rpm/org
+
+**Decisão.** Token `eduit_…` válido em produção só é aceito quando `APP_MODE=api-public`. Na API privada (`APP_MODE=api`) devolve 401 `bearer_requires_public_api` apontando `API_PUBLIC_BASE_URL` (default `https://integrations.bwipo.com`). Teto Bearer por org: 240 req/min (`TOKEN_ORG_RATE_LIMIT_RPM`), bucket Redis `org:{id}:rpm:token`. Sessão/inbox inalteradas (`api.session` 600/user; `ORG_RATE_LIMIT_RPM` 400 não vale para Bearer).
+
+**Contexto.** Integrações (n8n e tokens de org) saturavam o event loop da inbox. O host `integrations.bwipo.com` já isolou o processo; faltava recusar Bearer no host antigo e baixar o teto de 400 → 240 por org (soma de todos os tokens).
+
+**Alternativas descartadas.** Recusar qualquer header Bearer na API privada (quebraria fallback sessão + token inválido do cockpit). Baixar `ORG_RATE_LIMIT_RPM` global (apertaria perfis que não são n8n). URL por subdomínio de org (a org já vem do token).
+
+**Escape.** `ALLOW_BEARER_ON_PRIVATE_API=1` e `NODE_ENV !== production` continuam aceitando Bearer (dev local / rollback).
+
+**Impacto.** `authenticateApiRequest`, lane token do org RPM, perfil `api.token`. Meta/webhooks/cron/sessão não passam por esse caminho.
+
+---
+
 ### 2026-08-27 — Aba "Agente IA" na Inbox
 
 **Decisão.** Nova categoria `agente_ia` em `INBOX_CATEGORY_TABS`: conversa OPEN, sem erro, com responsável `User.type = AI`. As abas Entrada, Aguardando, Respondidas e Automação passaram a exigir assignee HUMANO (ou nenhum) — o assignee IA saiu delas. Permission `inbox:tab:agente_ia` (migration `20260827180000`) com fallback de rollout para `inbox:tab:entrada` / `inbox:tab:automacao` em `canSeeInboxTab` e `withInboxQueueVisibility`.

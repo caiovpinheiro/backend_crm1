@@ -4,6 +4,7 @@ import {
   consumeOrgRpm,
   enforceOrgApiRateLimit,
   getOrgRateLimitRpm,
+  getTokenOrgRateLimitRpm,
   isOrgRpmExemptPath,
   orgRateLimitResponse,
   orgRpmKey,
@@ -11,6 +12,7 @@ import {
 } from "@/lib/org-rate-limit";
 import {
   DEFAULT_ORG_RATE_LIMIT_RPM,
+  DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM,
   isInboxHotSessionPath,
 } from "@/lib/org-rate-limit-config";
 
@@ -31,6 +33,18 @@ describe("org RPM config", () => {
     expect(getOrgRateLimitRpm()).toBe(DEFAULT_ORG_RATE_LIMIT_RPM);
     if (prev === undefined) delete process.env.ORG_RATE_LIMIT_RPM;
     else process.env.ORG_RATE_LIMIT_RPM = prev;
+  });
+
+  it("usa 240 por padrão na lane token e aceita TOKEN_ORG_RATE_LIMIT_RPM", () => {
+    const prev = process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    delete process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    expect(getTokenOrgRateLimitRpm()).toBe(DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM);
+    process.env.TOKEN_ORG_RATE_LIMIT_RPM = "180";
+    expect(getTokenOrgRateLimitRpm()).toBe(180);
+    process.env.TOKEN_ORG_RATE_LIMIT_RPM = "0";
+    expect(getTokenOrgRateLimitRpm()).toBe(DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM);
+    if (prev === undefined) delete process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    else process.env.TOKEN_ORG_RATE_LIMIT_RPM = prev;
   });
 
   it("chave isolada por lane", () => {
@@ -94,6 +108,18 @@ describe("consumeOrgRpm (memória)", () => {
     });
     expect(nextWindow.allowed).toBe(true);
     expect(nextWindow.remaining).toBe(limit - 1);
+  });
+
+  it("lane token sem limit explícito usa 240", async () => {
+    const prev = process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    delete process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    const organizationId = `org-token-default-${Date.now()}`;
+    const t0 = 1_700_000_100_000;
+    const first = await consumeOrgRpm(organizationId, { store: "memory", now: t0 });
+    expect(first.limit).toBe(DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM);
+    expect(first.allowed).toBe(true);
+    if (prev === undefined) delete process.env.TOKEN_ORG_RATE_LIMIT_RPM;
+    else process.env.TOKEN_ORG_RATE_LIMIT_RPM = prev;
   });
 
   it("isola buckets session e token da mesma org", async () => {
