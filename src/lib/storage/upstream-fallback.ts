@@ -77,6 +77,7 @@ export async function tryUpstreamFallback(
       headers,
       cache: "no-store",
       redirect: "follow",
+      signal: AbortSignal.timeout(700),
     });
     if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "(no body)");
@@ -122,6 +123,7 @@ export async function readUpstreamFallbackBytes(
       headers,
       cache: "no-store",
       redirect: "follow",
+      signal: AbortSignal.timeout(700),
     });
     if (!upstream.ok) return null;
     const buf = Buffer.from(await upstream.arrayBuffer());

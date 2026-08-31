@@ -21,6 +21,7 @@ import {
   parseStoragePath,
   readStoredFile,
   readStoredFileRange,
+  reuseFileNameAliases,
   statStoredFile,
 } from "@/lib/storage/local";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
@@ -147,6 +148,27 @@ export async function GET(request: Request, context: RouteContext) {
         headers: {
           "Content-Type": file.mimeType,
           "Content-Length": String(file.size),
+          "Cache-Control": "private, max-age=300",
+          "Accept-Ranges": "bytes",
+          "X-Storage-Tenant": parsed.orgId,
+        },
+      }),
+    );
+  }
+
+  const aliasReads = reuseFileNameAliases(parsed.fileName)
+    .filter((name) => name !== parsed.fileName)
+    .map((name) => readStoredFile(parsed.orgId, parsed.bucket, name));
+  const aliasHits = aliasReads.length ? await Promise.all(aliasReads) : [];
+  const aliasFile = aliasHits.find((hit) => hit != null);
+  if (aliasFile) {
+    return withStorageCors(
+      request,
+      new Response(new Uint8Array(aliasFile.buffer), {
+        status: 200,
+        headers: {
+          "Content-Type": aliasFile.mimeType,
+          "Content-Length": String(aliasFile.size),
           "Cache-Control": "private, max-age=300",
           "Accept-Ranges": "bytes",
           "X-Storage-Tenant": parsed.orgId,

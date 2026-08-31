@@ -28,6 +28,7 @@
 import {
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   S3Client,
   type S3ServiceException,
 } from "@aws-sdk/client-s3";
@@ -151,12 +152,81 @@ export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
     countError("save");
     throw err;
   }
+  const confirmed = await probeStoredFile(opts.orgId, opts.bucket, opts.fileName);
+  if (!confirmed) {
+    log.error({ key }, "storage-s3: upload.done sem objeto confirmado");
+    countError("save_unconfirmed");
+    throw new Error("storage-s3: arquivo não ficou disponível no Spaces após o upload");
+  }
   return {
     url: buildPublicUrl(opts.orgId, opts.bucket, opts.fileName),
     // Não há disco — devolvemos a referência s3:// para logs/debug
     // (campo documentado como "só para logs/debug" no contrato).
     absolutePath: `s3://${bucket}/${key}`,
   };
+}
+
+/** Head (ou Get range) — existência sem baixar o body. */
+export async function probeStoredFile(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+): Promise<boolean> {
+  const st = await statStoredFile(orgId, bucket, fileName);
+  return st != null;
+}
+
+function fileStem(fileName: string): string {
+  const idx = fileName.lastIndexOf(".");
+  return idx > 0 ? fileName.slice(0, idx) : fileName;
+}
+
+export type ListedOrgObject = {
+  bucket: StorageBucket;
+  fileName: string;
+};
+
+/**
+ * Lista keys da org cujo filename começa com o stem (`auto_ts_rand`).
+ * Só prefixo `<orgId>/<bucket>/` — sem escape de tenant.
+ */
+export async function findOrgObjectByStem(
+  orgId: string,
+  buckets: readonly StorageBucket[],
+  fileName: string,
+): Promise<ListedOrgObject | null> {
+  if (!isValidOrgId(orgId) || !isValidFileName(fileName)) return null;
+  const stem = fileStem(fileName);
+  if (stem.length < 4) return null;
+  const { client, bucket: bucketName } = getS3();
+
+  const searches = buckets.map(async (mediaBucket) => {
+    const prefix = `${orgId}/${mediaBucket}/${stem}`;
+    try {
+      const out = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          MaxKeys: 8,
+        }),
+      );
+      for (const obj of out.Contents ?? []) {
+        const key = obj.Key;
+        if (!key) continue;
+        const parts = key.split("/");
+        if (parts.length !== 3) continue;
+        const [o, b, name] = parts;
+        if (o !== orgId || b !== mediaBucket || !isValidFileName(name)) continue;
+        return { bucket: mediaBucket, fileName: name };
+      }
+    } catch (err) {
+      log.warn({ err, prefix }, "storage-s3: ListObjects falhou");
+    }
+    return null;
+  });
+
+  const found = await Promise.all(searches);
+  return found.find((hit): hit is ListedOrgObject => hit != null) ?? null;
 }
 
 /**
