@@ -37,21 +37,17 @@ const FILTER_TABS = new Set<InboxTab>([
  *
  * Ações em massa sobre conversas do inbox.
  *
- * `resolve` (Encerrar): processado de forma ASSÍNCRONA pelo `leads-worker`
- * (fila `leads-bulk`, mesma infra dos bulk de Deals). A rota:
+ * `resolve` (Encerrar): lotes até `BULK_RESOLVE_SYNC_LIMIT` fecham na API
+ * (updateMany + RESOLVED/closedAt). Só acima disso enfileira o
+ * `leads-worker`. A rota:
  *   1. aplica o filtro de visibilidade do usuário;
  *   2. valida `tabulationId` (folha da org). Com folha, aplica a tabulação
  *      e encerra TODAS as selecionadas (não rejeita depois por departamento).
  *      Sem folha, ADMIN / super-admin encerram sem tabular; não-admin
  *      deixam em `skipped` as que exigem tabulação;
  *   3. lê as org settings keepAgent/keepDepartment;
- *   4. cria um `BulkOperation` (PENDING) e enfileira o job;
- *   5. responde 202 com `operationId` — o frontend pollar via
- *      GET /api/bulk-operations/[id].
- *
- * Motivo do async: em produção a API e o worker são deploys separados; o
- * encerramento síncrono de muitas conversas estourava (timeout / erro),
- * então a operação pesada foi movida pro worker dedicado.
+ *   4. lote pequeno: responde 200 com `updated` depois do persist;
+ *      lote grande: cria `BulkOperation` e enfileira o job (202 + operationId).
  */
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
