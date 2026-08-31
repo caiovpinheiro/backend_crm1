@@ -219,6 +219,15 @@ export async function GET(request: Request) {
         : undefined;
       const page = parseIntParam(searchParams.get("page"), 1);
       const perPage = parseIntParam(searchParams.get("perPage"), 30);
+      const cursorRaw = searchParams.get("cursor");
+      const cursor =
+        typeof cursorRaw === "string" && cursorRaw.trim().length > 0
+          ? cursorRaw.trim()
+          : undefined;
+      const idsRaw = searchParams.get("ids") ?? "";
+      const ids = idsRaw
+        ? idsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
 
       const sortByRaw = searchParams.get("sortBy") ?? undefined;
       const sortBy = sortByRaw && validSortBy.has(sortByRaw)
@@ -259,6 +268,8 @@ export async function GET(request: Request) {
         search,
         page,
         perPage,
+        cursor,
+        ids,
         visibilityWhere: conversationWhere,
         ownerId,
         ownerIds,

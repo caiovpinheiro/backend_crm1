@@ -240,6 +240,7 @@ export async function GET(request: Request, context: RouteContext) {
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const before = url.searchParams.get("before");
+    const after = url.searchParams.get("after");
     const includeHistory = url.searchParams.get("history") === "1";
 
     const olderTicketsProbe =
@@ -293,7 +294,11 @@ export async function GET(request: Request, context: RouteContext) {
         : findMessagesSafe({
             where: {
               conversationId: conv.id,
-              ...(before ? { createdAt: { lt: new Date(before) } } : {}),
+              ...(before
+                ? { createdAt: { lt: new Date(before) } }
+                : after
+                  ? { createdAt: { gt: new Date(after) } }
+                  : {}),
             },
             orderBy: { createdAt: "desc" },
             take: limit,

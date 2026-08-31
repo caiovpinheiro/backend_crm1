@@ -15,6 +15,7 @@ import { prisma } from "@/lib/prisma";
  *
  * Query params:
  *   - cursor  string (opcional, formato `${occurredAtMs}_${id}`)
+ *   - after   alias de `cursor` (Kommo: created_at gt)
  *   - limit   int (default 50, max 200)
  *   - type    string ou csv (filtra tipos de evento)
  *
@@ -95,7 +96,7 @@ export async function GET(req: Request, context: RouteContext) {
         MAX_LIMIT,
         Math.max(1, Number(sp.get("limit") ?? DEFAULT_LIMIT) | 0 || DEFAULT_LIMIT),
       );
-      const cursor = parseCursor(sp.get("cursor"));
+      const cursor = parseCursor(sp.get("cursor") ?? sp.get("after"));
       const types = parseCsv(sp.get("type"));
 
       const conv = await prisma.conversation.findUnique({
