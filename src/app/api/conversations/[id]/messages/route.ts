@@ -27,7 +27,7 @@ import {
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
-import { cancelActiveContextsForContact } from "@/services/automation-context";
+import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
@@ -46,7 +46,7 @@ async function stopAutomationsAfterHumanReply(
 ): Promise<void> {
   if (!contactId) return;
   try {
-    await cancelActiveContextsForContact(contactId);
+    await cancelActiveContextsForContactIfAny(contactId);
   } catch (err) {
     console.warn("[automation] cancel after human reply:", err);
   }

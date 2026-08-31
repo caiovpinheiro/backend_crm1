@@ -36,7 +36,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
-import { cancelActiveContextsForContact } from "@/services/automation-context";
+import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
 import { getPublishedFlowForSend } from "@/services/whatsapp-flow-definitions";
 import { createConversationEvent } from "@/services/conversation-events";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
@@ -1541,7 +1541,7 @@ async function afterOutboundSideEffects(
 ): Promise<void> {
   if (stopAutomations && conv.contactId) {
     try {
-      await cancelActiveContextsForContact(conv.contactId);
+      await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
       console.warn("[automation] cancel after outbound:", err);
     }

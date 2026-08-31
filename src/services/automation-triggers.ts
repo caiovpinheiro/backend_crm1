@@ -9,7 +9,10 @@ import {
   evaluateTrigger,
   type AutomationJobContext,
 } from "@/services/automations";
-import { dispatchIntegrationWebhooks } from "@/services/integration-webhooks";
+import {
+  dispatchIntegrationWebhooks,
+  hasIntegrationWebhooks,
+} from "@/services/integration-webhooks";
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (v !== null && typeof v === "object" && !Array.isArray(v)) {
@@ -434,6 +437,8 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
  * demorar até 10s pra refletir em gatilhos — aceitável.
  */
 const TRIGGER_LIST_CACHE_TTL_MS = 10_000;
+/** Existência de automação ativa por org+evento. 45s de staleness (faixa 30–60s). */
+const TRIGGER_EXISTS_CACHE_TTL_MS = 45_000;
 const globalForTriggers = globalThis as unknown as {
   triggerAutomationCache?: Map<
     string,
@@ -447,11 +452,55 @@ const globalForTriggers = globalThis as unknown as {
       at: number;
     }
   >;
+  triggerExistsCache?: Map<string, { exists: boolean; at: number }>;
 };
 
+function triggerCacheKey(event: string): string {
+  return `${getOrgIdOrNull() ?? "global"}:${event}`;
+}
+
+function rememberAutomationExists(key: string, exists: boolean): void {
+  const cache = (globalForTriggers.triggerExistsCache ??= new Map());
+  cache.set(key, { exists, at: Date.now() });
+}
+
+/**
+ * Probe barato + cache in-process: a org tem automação ativa neste gatilho?
+ * Reusa a lista em cache (10s) quando ainda está quente.
+ */
+export async function hasActiveAutomations(event: string): Promise<boolean> {
+  const key = triggerCacheKey(event);
+
+  const existsCache = (globalForTriggers.triggerExistsCache ??= new Map());
+  const existsHit = existsCache.get(key);
+  if (existsHit && Date.now() - existsHit.at < TRIGGER_EXISTS_CACHE_TTL_MS) {
+    return existsHit.exists;
+  }
+
+  const listHit = globalForTriggers.triggerAutomationCache?.get(key);
+  if (listHit && Date.now() - listHit.at < TRIGGER_LIST_CACHE_TTL_MS) {
+    const exists = listHit.rows.length > 0;
+    rememberAutomationExists(key, exists);
+    return exists;
+  }
+
+  const row = await prisma.automation.findFirst({
+    where: { active: true, triggerType: event },
+    select: { id: true },
+  });
+  const exists = row != null;
+  rememberAutomationExists(key, exists);
+  return exists;
+}
+
+/** @internal testes */
+export function resetTriggerExistenceCachesForTests(): void {
+  globalForTriggers.triggerExistsCache?.clear();
+  globalForTriggers.triggerAutomationCache?.clear();
+}
+
 async function listActiveAutomationsForTrigger(event: string) {
-  const orgId = getOrgIdOrNull() ?? "global";
-  const key = `${orgId}:${event}`;
+  const key = triggerCacheKey(event);
   const cache = (globalForTriggers.triggerAutomationCache ??= new Map());
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TRIGGER_LIST_CACHE_TTL_MS) return hit.rows;
@@ -460,24 +509,37 @@ async function listActiveAutomationsForTrigger(event: string) {
     select: { id: true, name: true, triggerType: true, triggerConfig: true },
   });
   cache.set(key, { rows, at: Date.now() });
+  rememberAutomationExists(key, rows.length > 0);
   return rows;
 }
 
 export async function fireTrigger(  event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
+  // Fast-path: org sem webhook e sem automação neste evento — não paga
+  // findMany de hooks, fetch HTTP, lista de automações nem enrich.
+  const [hasWebhooks, hasAutomations] = await Promise.all([
+    hasIntegrationWebhooks(event),
+    hasActiveAutomations(event),
+  ]);
+  if (!hasWebhooks && !hasAutomations) return;
+
   // n8n / integrações: dispara mesmo se não houver automação interna
   // e mesmo quando o inbound está em atendimento humano.
-  void dispatchIntegrationWebhooks(event, {
-    contactId: context.contactId,
-    dealId: context.dealId,
-    data: context.data,
-  }).catch((err) => {
-    console.warn(
-      "[fireTrigger] integration webhook dispatch failed:",
-      err instanceof Error ? err.message : err,
-    );
-  });
+  if (hasWebhooks) {
+    void dispatchIntegrationWebhooks(event, {
+      contactId: context.contactId,
+      dealId: context.dealId,
+      data: context.data,
+    }).catch((err) => {
+      console.warn(
+        "[fireTrigger] integration webhook dispatch failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
+  }
+
+  if (!hasAutomations) return;
 
   // Guarda só no INBOUND: não responder por cima de atendimento humano.
   // message_sent é ação do agente e não pode ser suprimido por ela.

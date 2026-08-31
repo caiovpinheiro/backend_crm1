@@ -25,6 +25,60 @@ const KNOWN_EVENTS = new Set<string>(INTEGRATION_WEBHOOK_EVENTS);
 
 const DISPATCH_TIMEOUT_MS = 8_000;
 
+/** Existência de webhook por org+evento. 45s: ativar um hook pode atrasar até isso. */
+const WEBHOOK_EXISTS_CACHE_TTL_MS = 45_000;
+const globalForWebhooks = globalThis as unknown as {
+  webhookExistsCache?: Map<string, { exists: boolean; at: number }>;
+};
+
+function webhookExistsCache(): Map<string, { exists: boolean; at: number }> {
+  return (globalForWebhooks.webhookExistsCache ??= new Map());
+}
+
+function invalidateWebhookExistsCache(): void {
+  globalForWebhooks.webhookExistsCache?.clear();
+}
+
+/**
+ * Probe barato + cache in-process: a org tem webhook ativo pra `event` (ou `*`)?
+ * Sem org no request context → false (dispatch também no-op).
+ */
+export async function hasIntegrationWebhooks(event: string): Promise<boolean> {
+  const organizationId = getOrgIdOrNull();
+  if (!organizationId) return false;
+
+  const key = `${organizationId}:${event}`;
+  const cache = webhookExistsCache();
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < WEBHOOK_EXISTS_CACHE_TTL_MS) return hit.exists;
+
+  let exists = false;
+  try {
+    const row = await prisma.integrationWebhook.findFirst({
+      where: {
+        isActive: true,
+        OR: [{ events: { has: event } }, { events: { has: "*" } }],
+      },
+      select: { id: true },
+    });
+    exists = row != null;
+  } catch (err) {
+    console.warn(
+      "[integration-webhooks] exists check failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+
+  cache.set(key, { exists, at: Date.now() });
+  return exists;
+}
+
+/** @internal testes */
+export function resetWebhookExistsCacheForTests(): void {
+  invalidateWebhookExistsCache();
+}
+
 export type IntegrationWebhookRecord = {
   id: string;
   url: string;
@@ -131,12 +185,14 @@ export async function createIntegrationWebhook(input: {
       isActive: true,
     },
   });
+  invalidateWebhookExistsCache();
   return { ...publicShape(row), secret };
 }
 
 export async function deleteIntegrationWebhook(id: string): Promise<boolean> {
   try {
     await prisma.integrationWebhook.delete({ where: { id } });
+    invalidateWebhookExistsCache();
     return true;
   } catch {
     return false;

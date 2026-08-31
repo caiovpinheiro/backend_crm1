@@ -519,6 +519,32 @@ export async function cancelContext(contextId: string) {
   return row;
 }
 
+/**
+ * Probe barato: existe contexto RUNNING/PAUSED deste contato?
+ * Sem include de steps — só `id`. Usado no outbound humano pra não pagar
+ * `getContactActiveContexts` (findMany + steps) quando não há robô ativo.
+ */
+export async function hasActiveContextsForContact(
+  contactId: string,
+): Promise<boolean> {
+  const row = await prisma.automationContext.findFirst({
+    where: { contactId, status: { in: ["RUNNING", "PAUSED"] } },
+    select: { id: true },
+  });
+  return row != null;
+}
+
+/**
+ * Igual a `cancelActiveContextsForContact`, mas só dispara o caminho
+ * completo se o probe barato achar contexto vivo.
+ */
+export async function cancelActiveContextsForContactIfAny(
+  contactId: string,
+): Promise<number> {
+  if (!(await hasActiveContextsForContact(contactId))) return 0;
+  return cancelActiveContextsForContact(contactId);
+}
+
 /** Cancela todos os contextos RUNNING/PAUSED do contato (humano assumiu). */
 export async function cancelActiveContextsForContact(
   contactId: string,
