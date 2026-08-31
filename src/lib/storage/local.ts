@@ -250,6 +250,73 @@ export function parseStoragePath(input: string): {
   return { orgId: orgIdRaw, bucket: bucketRaw as StorageBucket, fileName };
 }
 
+/**
+ * Buckets que um agente pode reutilizar por referência (send-by-reference).
+ * Só mídia org-owned — exclui branding, avatars, exports e imports.
+ */
+const REUSE_BUCKETS: ReadonlySet<StorageBucket> = new Set([
+  "attachments",
+  "automation-media",
+  "inbound-media",
+  "recordings",
+]);
+
+/**
+ * Extrai o pathname `/api/storage/...` de um reuseUrl.
+ * Nunca faz fetch — só parse. Rejeita esquemas perigosos e URLs externas
+ * que não sejam path de storage (defesa SSRF / tenant escape).
+ */
+function extractStoragePathFromReuseUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/^(data|blob|javascript|file|ftp):/i.test(trimmed)) return null;
+  if (trimmed.startsWith("//")) return null;
+
+  let pathOnly = trimmed;
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      pathOnly = new URL(trimmed).pathname;
+    } catch {
+      return null;
+    }
+  }
+
+  if (!pathOnly.startsWith(URL_PREFIX)) return null;
+  return pathOnly;
+}
+
+export type OrgOwnedReuseUrl = {
+  url: string;
+  orgId: string;
+  bucket: StorageBucket;
+  fileName: string;
+};
+
+/**
+ * Valida um reuseUrl contra a org da conversa. Só aceita
+ * `/api/storage/<orgId>/<bucket>/<file>` (ou URL absoluta cujo pathname
+ * seja isso) da org esperada. Devolve a URL canônica do storage — nunca
+ * a URL crua do cliente.
+ */
+export function resolveOrgOwnedReuseUrl(
+  raw: string,
+  expectedOrgId: string,
+): OrgOwnedReuseUrl | null {
+  if (!isValidOrgId(expectedOrgId)) return null;
+  const pathOnly = extractStoragePathFromReuseUrl(raw);
+  if (!pathOnly) return null;
+  const parsed = parseStoragePath(pathOnly);
+  if (!parsed) return null;
+  if (parsed.orgId !== expectedOrgId) return null;
+  if (!REUSE_BUCKETS.has(parsed.bucket)) return null;
+  return {
+    url: buildPublicUrl(parsed.orgId, parsed.bucket, parsed.fileName),
+    orgId: parsed.orgId,
+    bucket: parsed.bucket,
+    fileName: parsed.fileName,
+  };
+}
+
 export type SaveFileOptions = {
   orgId: string;
   bucket: StorageBucket;
