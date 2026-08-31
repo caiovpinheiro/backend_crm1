@@ -3,6 +3,7 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
+import { getLogger } from "@/lib/logger";
 import { inboxTabCountsKey, invalidateInboxTabCounts } from "@/lib/cache/keys";
 import {
   resolveConversationId,
@@ -191,6 +192,7 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   tags: ConversationTag[];
 };
 
+/** Detalhe (GET :id). A lista usa a coluna + irmãos, sem join em messages. */
 async function lastInboundBatch(
   conversationIds: string[]
 ): Promise<Map<string, Date>> {
@@ -220,6 +222,36 @@ async function lastInboundBatch(
   }
   await applyChannelSessionResetToInboundMap(conversationIds, map);
   return map;
+}
+
+/**
+ * Lista: preenche `lastInboundAt` nulo (ticket reaberto sem inbound) com o
+ * MAX denormalizado dos irmãos contato+canal — sem tocar em `messages`.
+ */
+async function fillMissingLastInboundFromSiblings(
+  rows: { id: string; contactId: string | null; lastInboundAt: Date | null }[],
+  map: Map<string, Date>,
+): Promise<void> {
+  const missingIds = rows
+    .filter((r) => r.contactId && !map.has(r.id))
+    .map((r) => r.id);
+  if (missingIds.length === 0) return;
+  const orgId = getOrgIdOrThrow();
+  const siblingRows = await prisma.$queryRaw<{ conversationId: string; lastIn: Date }[]>`
+    SELECT c.id AS "conversationId", MAX(c2."lastInboundAt") AS "lastIn"
+    FROM conversations c
+    JOIN conversations c2
+      ON c2."contactId" = c."contactId"
+     AND c2.channel = c.channel
+     AND c2."organizationId" = c."organizationId"
+     AND c2."lastInboundAt" IS NOT NULL
+    WHERE c.id = ANY(${missingIds})
+      AND c."organizationId" = ${orgId}
+    GROUP BY c.id
+  `;
+  for (const r of siblingRows) {
+    if (r.lastIn) map.set(r.conversationId, r.lastIn);
+  }
 }
 
 /** Inbound anterior à troca de phoneNumberId/WABA não reabre a janela 24h. */
@@ -804,6 +836,148 @@ export async function getFilteredConversationIds(
   return rows.map((r) => r.id);
 }
 
+function listSortColumnSql(
+  sortBy: "updatedAt" | "createdAt" | "unreadCount",
+): Prisma.Sql {
+  if (sortBy === "createdAt") return Prisma.sql`c."createdAt"`;
+  if (sortBy === "unreadCount") return Prisma.sql`c."unreadCount"`;
+  return Prisma.sql`c."updatedAt"`;
+}
+
+type CollapsedConversationPage = {
+  /** Até `take` IDs a partir de `skip` (já colapsados). */
+  ids: string[];
+  hasMore: boolean;
+  /** Total exato quando a varredura esgotou o conjunto colapsado. */
+  knownTotal: number | null;
+};
+
+/**
+ * Uma página colapsada por contato+canal em SQL (`DISTINCT ON`).
+ * Fallback: scan em lotes Prisma se o `where` não traduzir.
+ */
+async function findCollapsedConversationPage(args: {
+  where: Prisma.ConversationWhereInput;
+  collapse: boolean;
+  sortBy: "updatedAt" | "createdAt" | "unreadCount";
+  sortOrder: "asc" | "desc";
+  skip: number;
+  take: number;
+}): Promise<CollapsedConversationPage> {
+  const orgId = getOrgIdOrNull();
+  if (orgId) {
+    const scoped: Prisma.ConversationWhereInput = {
+      AND: [args.where, { organizationId: orgId }],
+    };
+    const sql = sqlConversationWhere(scoped, orgId);
+    if (sql) {
+      const sortCol = listSortColumnSql(args.sortBy);
+      const sortDir = args.sortOrder === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+      try {
+        const rows = args.collapse
+          ? await prisma.$queryRaw<{ id: string }[]>`
+              SELECT reps.id
+              FROM (
+                SELECT DISTINCT ON (inner_c.grp)
+                  inner_c.id,
+                  inner_c.sort_val
+                FROM (
+                  SELECT
+                    c.id,
+                    ${sortCol} AS sort_val,
+                    CASE
+                      WHEN c."contactId" IS NULL THEN 'id:' || c.id
+                      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+                    END AS grp
+                  FROM conversations c
+                  WHERE ${sql}
+                ) inner_c
+                ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}
+              ) reps
+              ORDER BY reps.sort_val ${sortDir}
+              LIMIT ${args.take} OFFSET ${args.skip}
+            `
+          : await prisma.$queryRaw<{ id: string }[]>`
+              SELECT c.id
+              FROM conversations c
+              WHERE ${sql}
+              ORDER BY ${sortCol} ${sortDir}
+              LIMIT ${args.take} OFFSET ${args.skip}
+            `;
+        const ids = rows.map((r) => r.id);
+        const hasMore = ids.length === args.take;
+        const emptyPastEnd = args.skip > 0 && ids.length === 0;
+        return {
+          ids,
+          hasMore,
+          knownTotal: hasMore || emptyPastEnd ? null : args.skip + ids.length,
+        };
+      } catch (err) {
+        getLogger("conversations").warn(
+          { err },
+          "collapsed list SQL failed — falling back to JS scan",
+        );
+      }
+    }
+  }
+  return scanCollapsedRepIdsJs(args);
+}
+
+async function scanCollapsedRepIdsJs(args: {
+  where: Prisma.ConversationWhereInput;
+  collapse: boolean;
+  sortBy: "updatedAt" | "createdAt" | "unreadCount";
+  sortOrder: "asc" | "desc";
+  skip: number;
+  take: number;
+}): Promise<CollapsedConversationPage> {
+  const needReps = args.skip + args.take;
+  const BATCH = 500;
+  const HARD_CAP = 8_000;
+  const seenGroups = new Set<string>();
+  const repIds: string[] = [];
+  let scanned = 0;
+  let exhausted = false;
+  const orderBy: Prisma.ConversationOrderByWithRelationInput = {
+    [args.sortBy]: args.sortOrder,
+  };
+
+  while (repIds.length < needReps && scanned < HARD_CAP) {
+    const batch = await prisma.conversation.findMany({
+      where: args.where,
+      orderBy,
+      select: { id: true, contactId: true, channel: true },
+      skip: scanned,
+      take: Math.min(BATCH, HARD_CAP - scanned),
+    });
+    if (batch.length === 0) {
+      exhausted = true;
+      break;
+    }
+    scanned += batch.length;
+    if (batch.length < BATCH) exhausted = true;
+
+    for (const r of batch) {
+      const groupKey =
+        args.collapse && r.contactId ? inboxCardGroupKey(r) : `id:${r.id}`;
+      if (seenGroups.has(groupKey)) continue;
+      seenGroups.add(groupKey);
+      repIds.push(r.id);
+      if (repIds.length >= needReps) break;
+    }
+    if (exhausted) break;
+  }
+
+  const ids = repIds.slice(args.skip, args.skip + args.take);
+  const capped = !exhausted && scanned >= HARD_CAP;
+  const hasMore = ids.length === args.take || (capped && ids.length > 0);
+  return {
+    ids,
+    hasMore,
+    knownTotal: exhausted && !capped ? repIds.length : null,
+  };
+}
+
 export async function getConversations(
   params: GetConversationsParams = {}
 ): Promise<{
@@ -825,77 +999,33 @@ export async function getConversations(
 
   const sortBy = params.sortBy ?? "updatedAt";
   const sortOrder = params.sortOrder ?? "desc";
-  const orderBy: Prisma.ConversationOrderByWithRelationInput = { [sortBy]: sortOrder };
 
   // Colapso por CONTATO+CANAL (1 card por numero — modelo de ticket).
   // Reabrir uma conversa encerrada gera um NOVO id (ticket B); o ticket A
-  // (RESOLVED) nao pode aparecer como um segundo card do mesmo numero. Como
-  // os filtros dinamicos (tab/visibilidade/tags/sources/busca) sao objetos
-  // Prisma complexos, evitamos traduzir tudo pra SQL cru: buscamos os IDs
-  // que casam com o `where` NA ORDEM pedida (payload minimo) e colapsamos
-  // em memoria pegando o REPRESENTANTE = primeiro da ordem por grupo. Com
-  // `orderBy` = updatedAt desc (default), o primeiro e' o ticket ativo/mais
-  // recente (os RESOLVED antigos ficam congelados, pois qualquer nova msg
-  // reabre como ticket novo). Historico dos tickets antigos segue acessivel
-  // na timeline continua do chat. Paginamos a lista colapsada e hidratamos
-  // so a pagina com o `listSelect` completo. Ver frontend use-conversations.
-  //
-  // Performance (ago/26): carregar TODOS os IDs da org em memoria fazia
-  // GET /api/conversations levar 5–8s. Varremos em lotes ate cobrir a
-  // pagina pedida (+1 pra saber se ha mais) e, se ainda houver linhas,
-  // estimamos `total` pelo teto conservador (repIds + restantes brutos)
-  // so pra infinite scroll nao parar cedo demais.
+  // (RESOLVED) nao pode aparecer como um segundo card do mesmo numero.
+  // Representante = primeiro da ordem por grupo (updatedAt desc = ativo).
+  // Uma query DISTINCT ON (+1 pra hasMore). COUNT DISTINCT do tab inteiro
+  // saiu daqui — badges ficam em GET ?counts=1 (Redis 90s).
   const collapse = !params.contactId;
-  const needReps = skip + perPage + 1;
-  const BATCH = 500;
-  const HARD_CAP = 8_000;
-  const seenGroups = new Set<string>();
-  const repIds: string[] = [];
-  let scanned = 0;
-  let exhausted = false;
-
-  while (repIds.length < needReps && scanned < HARD_CAP) {
-    const batch = await prisma.conversation.findMany({
-      where,
-      orderBy,
-      select: { id: true, contactId: true, channel: true },
-      skip: scanned,
-      take: Math.min(BATCH, HARD_CAP - scanned),
-    });
-    if (batch.length === 0) {
-      exhausted = true;
-      break;
-    }
-    scanned += batch.length;
-    if (batch.length < BATCH) exhausted = true;
-
-    for (const r of batch) {
-      const groupKey =
-        collapse && r.contactId ? inboxCardGroupKey(r) : `id:${r.id}`;
-      if (seenGroups.has(groupKey)) continue;
-      seenGroups.add(groupKey);
-      repIds.push(r.id);
-      if (repIds.length >= needReps) break;
-    }
-    if (exhausted) break;
-  }
-
-  const pageIds = repIds.slice(skip, skip + perPage);
-  // hasMore vem do scan +1 — NÃO do total. O sentinela `skip+perPage+1`
-  // nunca pode ser o total exibido (1ª página = 26 vs badge 421).
-  const hasMore = repIds.length > skip + perPage || (!exhausted && scanned >= HARD_CAP);
-  // Total EXATO — o mesmo COUNT das badges (`countConversationsLikeList`),
-  // em TODAS as abas (Entrada, Automação, Erro, …).
-  const [total, hydrated] = await Promise.all([
-    countConversationsLikeList(
-      Object.keys(where).length > 0 ? [where] : [],
-      collapse,
-    ),
-    prisma.conversation.findMany({
-      where: { id: { in: pageIds } },
-      select: listSelect,
-    }),
+  const { ids: windowIds, hasMore, knownTotal } = await findCollapsedConversationPage({
+    where,
+    collapse,
+    sortBy,
+    sortOrder,
+    skip,
+    take: perPage + 1,
+  });
+  const pageIds = windowIds.slice(0, perPage);
+  const [cachedTotal, hydrated] = await Promise.all([
+    knownTotal == null ? peekCachedTabTotal(params, collapse) : Promise.resolve(null),
+    pageIds.length === 0
+      ? Promise.resolve([])
+      : prisma.conversation.findMany({
+          where: { id: { in: pageIds } },
+          select: listSelect,
+        }),
   ]);
+  const total = knownTotal ?? cachedTotal ?? skip + perPage + 1;
   // Reordena para preservar a ordem paginada de `pageIds` (o `in` nao
   // garante ordem). Evita cards "pulando" de posicao entre paginas.
   const byIdRow = new Map(hydrated.map((r) => [r.id, r]));
@@ -904,10 +1034,20 @@ export async function getConversations(
     .filter((r): r is (typeof hydrated)[number] => r !== undefined);
 
   const convIds = rows.map((r) => r.id);
-  const [previewMap, lastInboundMap] = await Promise.all([
-    lastMessagePreviewsBatch(convIds),
-    lastInboundBatch(convIds),
-  ]);
+  const previewMap = await lastMessagePreviewsBatch(convIds);
+  const lastInboundMap = new Map<string, Date>();
+  for (const row of rows) {
+    if (row.lastInboundAt) lastInboundMap.set(row.id, row.lastInboundAt);
+  }
+  await fillMissingLastInboundFromSiblings(
+    rows.map((r) => ({
+      id: r.id,
+      contactId: r.contact?.id ?? null,
+      lastInboundAt: r.lastInboundAt,
+    })),
+    lastInboundMap,
+  );
+  await applyChannelSessionResetToInboundMap(convIds, lastInboundMap);
 
   await enrichContactsWithUserAvatarFallback(
     rows.map((r) => r.contact).filter((c): c is NonNullable<typeof c> => c !== null),
@@ -926,9 +1066,8 @@ export async function getConversations(
     }
     return {
       ...row,
-      // Batch = inbound do contato+canal (mesma regra do GET messages).
-      // Sem entrada no map → sem inbound real; NÃO cair no denormalizado
-      // (pode estar stale e esconder "Expirada" no card).
+      // Janela 24h do card: coluna denormalizada (+ irmão se o ticket
+      // reaberto nasceu sem inbound). Sem join em messages na lista.
       lastInboundAt: lastInboundMap.get(row.id) ?? null,
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
@@ -1378,6 +1517,60 @@ async function countTodosTab(
   return countConversationsLikeList(conditions, collapseByContact, assigneeIdsByType);
 }
 
+function inboxTabCountsScopeFp(args: {
+  visibilityWhere?: Prisma.ConversationWhereInput;
+  todosMemberCategoryTabs?: InboxCategoryTab[] | null;
+  allowedChannelIds?: string[] | null;
+  filterConditions?: Prisma.ConversationWhereInput[];
+  search?: string | null;
+  collapseByContact: boolean;
+}): string | null {
+  try {
+    return createHash("sha1")
+      .update(
+        JSON.stringify({
+          k: 4,
+          v: args.visibilityWhere ?? null,
+          m: args.todosMemberCategoryTabs ?? null,
+          c: args.allowedChannelIds ?? null,
+          f: args.filterConditions ?? [],
+          s: args.search?.trim() || null,
+          g: args.collapseByContact,
+        }),
+      )
+      .digest("hex")
+      .slice(0, 20);
+  } catch {
+    return null;
+  }
+}
+
+/** Peek do Redis das badges — não recomputa COUNT no miss. */
+async function peekCachedTabTotal(
+  params: GetConversationsParams,
+  collapse: boolean,
+): Promise<number | null> {
+  const tab = params.tab;
+  if (!tab) return null;
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return null;
+  const fp = inboxTabCountsScopeFp({
+    visibilityWhere: params.visibilityWhere,
+    todosMemberCategoryTabs: params.todosCategoryTabs ?? null,
+    allowedChannelIds: params.allowedChannelIds,
+    filterConditions: buildInboxFilterConditions(params),
+    search: params.search,
+    collapseByContact: collapse,
+  });
+  if (!fp) return null;
+  const cached = await cache.get<Record<InboxTab, number>>(
+    inboxTabCountsKey(orgId, fp),
+  );
+  if (!cached) return null;
+  const n = cached[tab];
+  return typeof n === "number" && n >= 0 ? n : null;
+}
+
 export async function getTabCounts(
   visibilityWhere?: Prisma.ConversationWhereInput,
   /** `null` = ADMIN/MANAGER (todas as conversas visíveis). Array = MEMBER (OR das categorias). */
@@ -1393,23 +1586,15 @@ export async function getTabCounts(
   collapseByContact = true,
 ): Promise<Record<InboxTab, number>> {
   const orgId = getOrgIdOrNull() ?? "noorg";
-  let scopeFp: string;
-  try {
-    scopeFp = createHash("sha1")
-      .update(
-        JSON.stringify({
-          k: 4,
-          v: visibilityWhere ?? null,
-          m: todosMemberCategoryTabs ?? null,
-          c: allowedChannelIds ?? null,
-          f: filterConditions ?? [],
-          s: search?.trim() || null,
-          g: collapseByContact,
-        }),
-      )
-      .digest("hex")
-      .slice(0, 20);
-  } catch {
+  const scopeFp = inboxTabCountsScopeFp({
+    visibilityWhere,
+    todosMemberCategoryTabs,
+    allowedChannelIds,
+    filterConditions,
+    search,
+    collapseByContact,
+  });
+  if (!scopeFp) {
     return computeTabCounts(
       visibilityWhere,
       todosMemberCategoryTabs,
