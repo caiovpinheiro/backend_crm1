@@ -11,7 +11,18 @@
  * modelo (SSRF). Remova a env depois do repair em massa.
  */
 
-import { parseStoragePath } from "@/lib/storage/local";
+import { isReusableVideoFileName, parseStoragePath } from "@/lib/storage/local";
+
+export const STORAGE_FALLBACK_TIMEOUT_MS = 700;
+export const STORAGE_FALLBACK_VIDEO_TIMEOUT_MS = 15_000;
+
+function fallbackTimeoutMs(joined: string): number {
+  const parsed = parseStoragePath(joined);
+  const fileName = parsed?.fileName ?? joined.split("/").pop() ?? "";
+  return isReusableVideoFileName(fileName)
+    ? STORAGE_FALLBACK_VIDEO_TIMEOUT_MS
+    : STORAGE_FALLBACK_TIMEOUT_MS;
+}
 
 function getFallbackBase(): string | null {
   const raw = process.env.STORAGE_FALLBACK_URL?.trim();
@@ -89,7 +100,7 @@ export async function tryUpstreamFallback(
       headers,
       cache: "no-store",
       redirect: "follow",
-      signal: AbortSignal.timeout(700),
+      signal: AbortSignal.timeout(fallbackTimeoutMs(joined)),
     });
     if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "(no body)");
@@ -121,10 +132,11 @@ export async function tryUpstreamFallback(
   }
 }
 
-/** Buffer do mesmo upstream (imagens de modelo — sem Range). */
+/** Buffer do mesmo upstream (sem Range). Vídeo: 15s; demais: 700ms. */
 export async function readUpstreamFallbackBytes(
   joined: string,
   cookieHeader: string | null,
+  opts?: { timeoutMs?: number },
 ): Promise<Buffer | null> {
   const base = getFallbackBase();
   if (!base) return null;
@@ -133,12 +145,13 @@ export async function readUpstreamFallbackBytes(
   const headers = buildUpstreamHeaders(cookieHeader ?? "", null) ?? {
     host: new URL(base).host,
   };
+  const timeoutMs = opts?.timeoutMs ?? fallbackTimeoutMs(joined);
   try {
     const upstream = await fetch(`${base}/api/storage/${joined}`, {
       headers,
       cache: "no-store",
       redirect: "follow",
-      signal: AbortSignal.timeout(700),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!upstream.ok) return null;
     const buf = Buffer.from(await upstream.arrayBuffer());

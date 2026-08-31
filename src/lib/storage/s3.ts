@@ -301,6 +301,59 @@ function sizeFromContentRange(value: string | undefined): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+/** Aborta o body do GetObject — existência não pode baixar o mp4 inteiro. */
+function abortS3Body(body: unknown): void {
+  if (!body || typeof body !== "object") return;
+  const stream = body as {
+    destroy?: (err?: Error) => void;
+    cancel?: () => void | Promise<void>;
+  };
+  try {
+    if (typeof stream.destroy === "function") {
+      stream.destroy();
+      return;
+    }
+    if (typeof stream.cancel === "function") {
+      void stream.cancel();
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+async function confirmGetObjectExists(
+  client: S3Client,
+  bucketName: string,
+  key: string,
+): Promise<StoredFileStat | null> {
+  // Duas tentativas: mesmo flake JPEG (GetObject vazio / 404 transitório).
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const out = await client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+      if (!out.Body) {
+        if (attempt === 0) continue;
+        return null;
+      }
+      const size = contentLengthToSize(out.ContentLength) ?? 0;
+      abortS3Body(out.Body);
+      return { size: size > 0 ? size : 1 };
+    } catch (err) {
+      if (isNotFound(err)) {
+        if (attempt === 0) continue;
+        return null;
+      }
+      if (attempt === 0) {
+        log.warn({ err, key }, "storage-s3: GetObject existência falhou, tentando de novo");
+        continue;
+      }
+      log.error({ err, key }, "storage-s3: falha no GetObject de existência");
+      countError("stat");
+      return null;
+    }
+  }
+  return null;
+}
+
 /**
  * Tamanho do objeto sem baixar o corpo. HeadObject primeiro; se o
  * compat (Spaces) omitir ContentLength, negar HEAD, 404 em HEAD de
@@ -342,10 +395,10 @@ export async function statStoredFile(
         0;
       return { size };
     } catch (rangeErr) {
-      if (isNotFound(rangeErr)) return null;
-      log.error({ err: rangeErr, key }, "storage-s3: falha no HeadObject e no GetObject range");
-      countError("stat");
-      return null;
+      // Head/Range 404 em objeto que o GET sem Range serve (JPEG e mp4).
+      // Não tratar Range 404 como miss — confirma com GetObject e aborta o body.
+      log.warn({ err: rangeErr, key }, "storage-s3: GetObject range falhou, tentando GetObject sem Range");
+      return confirmGetObjectExists(client, bucketName, key);
     }
   }
 }

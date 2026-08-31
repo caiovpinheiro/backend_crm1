@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveOrgOwnedReuseUrl, reuseFileNameAliases } from "@/lib/storage/local";
+import {
+  firstNonNull,
+  isReusableVideoFileName,
+  locateReuseDeadlineMs,
+  LOCATE_REUSE_DEADLINE_MS,
+  LOCATE_REUSE_VIDEO_DEADLINE_MS,
+  resolveOrgOwnedReuseUrl,
+  reuseFileNameAliases,
+} from "@/lib/storage/local";
 
 const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
 const OTHER = "clxxxxxxxxxxxxxxxxxxxxxxx";
@@ -97,5 +105,26 @@ describe("resolveOrgOwnedReuseUrl", () => {
     expect(resolveOrgOwnedReuseUrl("/uploads/../etc/passwd", ORG)).toBeNull();
     expect(resolveOrgOwnedReuseUrl("/uploads/branding/logo.png", ORG)).toBeNull();
     expect(resolveOrgOwnedReuseUrl("/uploads/a/b/c.mp4", ORG)).toBeNull();
+  });
+});
+
+describe("locate reuse video vs image", () => {
+  it("dá mais tempo para mp4 do que para jpg", () => {
+    expect(isReusableVideoFileName("auto_1785341950642_f7nyxi.mp4")).toBe(true);
+    expect(isReusableVideoFileName("auto_1.jpg")).toBe(false);
+    expect(locateReuseDeadlineMs("auto_1.jpg")).toBe(LOCATE_REUSE_DEADLINE_MS);
+    expect(locateReuseDeadlineMs("auto_1785341950642_f7nyxi.mp4")).toBe(
+      LOCATE_REUSE_VIDEO_DEADLINE_MS,
+    );
+  });
+
+  it("firstNonNull devolve o hit rápido sem esperar a promise lenta", async () => {
+    const slow = new Promise<string | null>((resolve) => {
+      setTimeout(() => resolve("late"), 250);
+    });
+    const fast = Promise.resolve("hit");
+    const t0 = Date.now();
+    await expect(firstNonNull([slow, fast])).resolves.toBe("hit");
+    expect(Date.now() - t0).toBeLessThan(120);
   });
 });
