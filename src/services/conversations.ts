@@ -146,10 +146,8 @@ export type GetConversationsParams = {
 const listSelect = {
   id: true,
   number: true,
-  externalId: true,
   channel: true,
   status: true,
-  inboxName: true,
   unreadCount: true,
   hasError: true,
   lastInboundAt: true,
@@ -162,7 +160,7 @@ const listSelect = {
   department: { select: { id: true, name: true, requireTabulationOnClose: true } },
   tabulationId: true,
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
+    select: { id: true, name: true, avatarUrl: true, type: true },
   },
   contact: {
     select: {
@@ -267,14 +265,13 @@ async function lastMessagePreviewsBatch(
     conversationId: string;
     content: string;
     messageType: string;
-    mediaUrl: string | null;
     direction: string;
     sendStatus: string | null;
     sendError: string | null;
     createdAt: Date;
   }[]>`
     SELECT DISTINCT ON ("conversationId")
-      "conversationId", "content", "messageType", "mediaUrl", "direction",
+      "conversationId", "content", "messageType", "direction",
       "sendStatus", "sendError", "createdAt"
     FROM "messages"
     WHERE "conversationId" = ANY(${conversationIds})
@@ -299,10 +296,16 @@ async function lastMessagePreviewsBatch(
       preview: {
         content: text.length > 140 ? `${text.slice(0, 137)}…` : text,
         messageType: r.messageType || "text",
-        mediaUrl: r.mediaUrl ?? null,
+        // Card da lista não renderiza mídia — URL S3/local inchava ~50×300B.
+        mediaUrl: null,
         direction: r.direction || "in",
         sendStatus: r.sendStatus ?? null,
-        sendError: r.sendError ?? null,
+        sendError:
+          r.sendStatus === "failed" && r.sendError
+            ? r.sendError.length > 80
+              ? `${r.sendError.slice(0, 77)}…`
+              : r.sendError
+            : null,
       },
       createdAt: r.createdAt,
     });
