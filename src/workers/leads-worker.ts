@@ -85,7 +85,13 @@ async function router(job: Job<LeadsBulkPayload>): Promise<void> {
   // não tentar adivinhar org.
   const operation = await prismaBase.bulkOperation.findUnique({
     where: { id: operationId },
-    select: { id: true, organizationId: true, status: true, type: true },
+    select: {
+      id: true,
+      organizationId: true,
+      status: true,
+      type: true,
+      createdBy: { select: { id: true, name: true, email: true } },
+    },
   });
 
   if (!operation) {
@@ -124,8 +130,20 @@ async function router(job: Job<LeadsBulkPayload>): Promise<void> {
     return;
   }
 
-  // Executa o handler dentro do contexto de tenant.
-  await withSystemContext(organizationId, () => dispatch(job));
+  // Executa o handler dentro do contexto de tenant. O ator é quem disparou a
+  // operação na tela — sem isso o `logEvent` cai no default SYSTEM e a
+  // timeline mostra "Sistema" em vez do nome de quem encerrou/moveu em massa.
+  const initiator = operation.createdBy;
+  const initiatorLabel =
+    initiator?.name?.trim() || initiator?.email?.trim() || null;
+  await withSystemContext(organizationId, () => dispatch(job), {
+    // `userId` alimenta o FK `actorUserId` do ActivityEvent (a extension do
+    // Prisma só usa organizationId, então isto não afeta escopo).
+    userId: initiator?.id,
+    actor: initiatorLabel
+      ? { type: "HUMAN", label: initiatorLabel }
+      : undefined,
+  });
 }
 
 async function dispatch(job: Job<LeadsBulkPayload>): Promise<void> {

@@ -37,7 +37,7 @@ function db() {
 
 export type PainelDealFilters = {
   range: PainelRange;
-  /** Vazio = todos os funis (soma). */
+  /** Um funil. Vazio só se a org não tiver pipeline ativo. */
   pipelineIds: string[];
   stageIds?: string[];
   tagIds?: string[];
@@ -49,7 +49,7 @@ export type PainelDealFilters = {
   fieldIds?: string[];
 };
 
-/** Primeiro funil (hrefs / legado). Vazio quando a soma é de todos. */
+/** Funil ativo do painel (hrefs / legado). */
 export function primaryPipelineId(f: Pick<PainelDealFilters, "pipelineIds">): string {
   return f.pipelineIds[0] ?? "";
 }

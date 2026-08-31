@@ -215,6 +215,21 @@ export async function resolvePipelineByPublicRef(raw: string) {
   );
 }
 
+/** Funil padrão da org: `isDefault`, senão o mais antigo ainda ativo. */
+export async function getDefaultPipelineId(): Promise<string | null> {
+  const def =
+    (await prisma.pipeline.findFirst({
+      where: { isDefault: true, archivedAt: null },
+      select: { id: true },
+    })) ??
+    (await prisma.pipeline.findFirst({
+      where: { archivedAt: null },
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
+    }));
+  return def?.id ?? null;
+}
+
 export async function allocateStageSlug(
   pipelineId: string,
   name: string,

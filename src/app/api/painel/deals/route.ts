@@ -10,7 +10,10 @@ import {
   computePainelRange,
   parseStalledDays,
 } from "@/services/painel-period";
-import { resolvePipelineByPublicRef } from "@/services/pipelines";
+import {
+  getDefaultPipelineId,
+  resolvePipelineByPublicRef,
+} from "@/services/pipelines";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -20,8 +23,9 @@ function csv(value: string | null): string[] {
 }
 
 /**
- * Vazio = todos os funis (soma).
- * Aceita `pipelineIds`, `pipelineId` e `pipeline` (number/slug/CUID), CSV.
+ * Sempre um funil (estilo Kommo). Sem ref / `all` → funil padrão da org.
+ * Aceita `pipelineIds`, `pipelineId` e `pipeline` (number/slug/CUID).
+ * CSV com vários ids usa só o primeiro.
  */
 async function resolvePipelineIds(
   pipelineIdsRaw: string,
@@ -33,14 +37,9 @@ async function resolvePipelineIds(
     ...csv(pipelineId),
     ...csv(pipelineRef),
   ];
-  const unique = [...new Set(refs)];
-  if (
-    unique.length === 0 ||
-    unique.includes("all") ||
-    unique.includes("__all__")
-  ) {
-    return [];
-  }
+  const unique = [...new Set(refs)].filter(
+    (ref) => ref !== "all" && ref !== "__all__",
+  );
   const ids: string[] = [];
   for (const ref of unique) {
     if (/^\d+$/.test(ref)) {
@@ -50,7 +49,10 @@ async function resolvePipelineIds(
       ids.push(ref);
     }
   }
-  return [...new Set(ids)];
+  const first = [...new Set(ids)][0];
+  if (first) return [first];
+  const fallback = await getDefaultPipelineId();
+  return fallback ? [fallback] : [];
 }
 
 export async function GET(request: Request) {
