@@ -47,7 +47,20 @@ async function fetchAudioBuffer(
   rawUrl: string,
   request: Request,
 ): Promise<{ buffer: Buffer; contentType: string }> {
-  const decoded = decodeURIComponent(rawUrl);
+  let decoded = decodeURIComponent(rawUrl);
+  if (!decoded.startsWith("/")) {
+    try {
+      const parsed = new URL(decoded);
+      if (
+        parsed.pathname.startsWith("/api/") ||
+        parsed.pathname.startsWith("/uploads/")
+      ) {
+        decoded = `${parsed.pathname}${parsed.search}`;
+      }
+    } catch {
+      /* URL absoluta que não é storage — segue o fluxo Meta/externo */
+    }
+  }
 
   // PR 1.3: paths internos (`/uploads/...`, `/api/storage/...`) são
   // resolvidos via fetch HTTP com cookies de sessão pra que o
