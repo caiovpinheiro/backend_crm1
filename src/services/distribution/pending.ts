@@ -5,7 +5,8 @@
  * responsável (conversa aberta, sem `assignedToId`). Deriva do mesmo
  * critério da aba Entrada do inbox. A drenagem automática passa por
  * `processPendingDistributionQueue` (gatilhos: novo item, agente online,
- * elegibilidade, capacidade liberada, botão manual, cron de segurança).
+ * elegibilidade, capacidade liberada, botão manual; cron só se a última
+ * passagem não foi vazia).
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
  * elegível abre a fila dos seus depts; o reprocesso manual/cron também
  * tenta os depts que já têm gente na espera — o motor decide se o
@@ -41,9 +42,11 @@ import { keepHumanAfterAutomationClose } from "@/services/distribution/return-af
 import { executeDistribution } from "./engine";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
+  fruitlessCooldownIsArmed,
   fruitlessPassNeedsCooldown,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
+  shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "./pending-drain-guard";
 import {
@@ -392,6 +395,12 @@ function clearFruitlessCooldown(state: DrainState) {
   state.cooldownUntil = 0;
   state.cooldownReason = null;
   state.cooldownSkipLogged = false;
+}
+
+/** Peek in-memory — cron usa pra devolver 200 sem scan. Sem org no mapa = 1ª passagem. */
+export function isFruitlessCooldownActive(orgId: string): boolean {
+  const s = drainState.get(orgId);
+  return s != null && fruitlessCooldownIsArmed(s.cooldownReason);
 }
 
 function logCooldownSkip(
@@ -998,7 +1007,11 @@ export async function processPendingDistributionQueue(opts: {
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
     clearFruitlessCooldown(state);
   } else if (
-    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)
+    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
+    shouldSkipScheduledFruitlessCooldown(
+      opts.trigger,
+      fruitlessCooldownIsArmed(state.cooldownReason),
+    )
   ) {
     logCooldownSkip(orgId, state, opts.trigger, "process");
     return {
@@ -1355,6 +1368,8 @@ export async function processPendingDistributionQueue(opts: {
 
     if (fruitlessPassNeedsCooldown({ resolved, pending })) {
       armFruitlessCooldown(state, skipReason ?? "NO_ASSIGN");
+    } else {
+      clearFruitlessCooldown(state);
     }
 
     if (
@@ -1398,7 +1413,7 @@ export async function processPendingDistributionQueue(opts: {
     // `new_item` NÃO reentra sozinho — evita loop quando a fila está
     // cheia e ninguém ONLINE.
     // `capacity_released` após passagem vazia: não agenda retry. A
-    // próxima varredura é agent_online / elegível / new_item / manual / cron.
+    // próxima varredura é agent_online / elegível / new_item / manual.
     const queuedCapacityOnCooldown =
       queued === "capacity_released" &&
       shouldSkipCapacityReleasedCooldown(queued, state.cooldownUntil) &&
@@ -1447,7 +1462,11 @@ export function scheduleProcessPendingDistributionQueue(opts: {
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
     clearFruitlessCooldown(state);
   } else if (
-    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)
+    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
+    shouldSkipScheduledFruitlessCooldown(
+      opts.trigger,
+      fruitlessCooldownIsArmed(state.cooldownReason),
+    )
   ) {
     logCooldownSkip(orgId, state, opts.trigger, "schedule");
     if (!shouldScheduleRetryOnCooldownSkip()) return;

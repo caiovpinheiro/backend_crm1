@@ -4,8 +4,9 @@
  * Job de segurança: drena a fila "Aguardando distribuição" de todas as
  * organizações com o widget `smart_distribution` ativo.
  *
- * Cobre casos em que ninguém mudou de status (ex.: horário de expediente
- * começou, limite de fila liberou por timeout, presença já estava ONLINE).
+ * Cobre o 1º tick pós-deploy e passagens que ainda atribuem. Depois de
+ * uma passagem vazia o cron devolve `{skipped:true,reason:cooldown}`
+ * até `agent_online` / `agent_eligible` / `new_item` / `manual`.
  *
  * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
  *
@@ -20,7 +21,10 @@ import { NextResponse } from "next/server";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
-import { processPendingDistributionQueue } from "@/services/distribution";
+import {
+  isFruitlessCooldownActive,
+  processPendingDistributionQueue,
+} from "@/services/distribution";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -59,8 +63,13 @@ export async function GET(request: Request) {
       resolved: number;
       pending: number;
     }> = [];
+    let skippedCooldown = 0;
 
     for (const { organizationId } of orgs) {
+      if (isFruitlessCooldownActive(organizationId)) {
+        skippedCooldown += 1;
+        continue;
+      }
       try {
         const drain = await runWithContext(
           {
@@ -75,6 +84,10 @@ export async function GET(request: Request) {
           },
           () => processPendingDistributionQueue({ trigger: "scheduled" }),
         );
+        if (drain.skipReason === "COOLDOWN") {
+          skippedCooldown += 1;
+          continue;
+        }
         results.push({
           organizationId,
           resolved: drain.resolved,
@@ -90,12 +103,27 @@ export async function GET(request: Request) {
       }
     }
 
+    if (orgs.length > 0 && skippedCooldown === orgs.length) {
+      console.info(
+        "[cron/distribution-pending] skipped",
+        JSON.stringify({ reason: "cooldown", orgs: orgs.length }),
+      );
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: "cooldown",
+        orgs: orgs.length,
+        resolvedTotal: 0,
+      });
+    }
+
     const resolvedTotal = results.reduce((s, r) => s + Math.max(0, r.resolved), 0);
 
     return NextResponse.json({
       ok: true,
       orgs: orgs.length,
       resolvedTotal,
+      skippedCooldown,
       results,
     });
   } catch (e) {

@@ -46,6 +46,7 @@ export {
   isDistributionAutoOnInbound,
   purgeUnansweredFromPendingQueue,
   retryPendingDistributions,
+  isFruitlessCooldownActive,
   processPendingDistributionQueue,
   scheduleProcessPendingDistributionQueue,
   maybeDistributeNewInboundTicket,
