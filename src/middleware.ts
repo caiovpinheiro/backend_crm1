@@ -7,6 +7,10 @@ import {
   CRM_HTTP_METHOD_HEADER,
   CRM_REQUEST_ID_HEADER,
 } from "@/lib/api-access-audit-constants";
+import {
+  applyBrowserApiCors,
+  isAllowedBrowserApiOrigin,
+} from "@/lib/browser-api-cors";
 
 /**
  * Mesma regra que `useSecureCookies` em `auth.config.ts` — define o nome do
@@ -85,7 +89,10 @@ async function readAuthFromRequestCookie(
  * NAO setamos Content-Security-Policy aqui pra nao quebrar o service worker
  * / inline scripts do Next. CSP fica de TODO separado com testes.
  */
-function withSecurityHeaders(res: NextResponse): NextResponse {
+function withSecurityHeaders(
+  res: NextResponse,
+  req?: { headers: Headers; nextUrl: { pathname: string } },
+): NextResponse {
   // HSTS só em HTTPS — em HTTP local causaria Mixed Content e bloquearia SSE
   if ((process.env.NEXTAUTH_URL ?? "").startsWith("https://")) {
     res.headers.set(
@@ -97,6 +104,9 @@ function withSecurityHeaders(res: NextResponse): NextResponse {
   res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   res.headers.set("X-Frame-Options", "SAMEORIGIN");
   res.headers.set("X-DNS-Prefetch-Control", "on");
+  if (req?.nextUrl.pathname.startsWith("/api/")) {
+    applyBrowserApiCors(req, res);
+  }
   return res;
 }
 
@@ -125,9 +135,10 @@ function nextWithSecurityAndAudit(req: MiddlewareReq): NextResponse {
       NextResponse.next({
         request: { headers: forwardApiAuditHeaders(req, pathname) },
       }),
+      req,
     );
   }
-  return withSecurityHeaders(NextResponse.next());
+  return withSecurityHeaders(NextResponse.next(), req);
 }
 
 const PUBLIC_PATHS = new Set([
@@ -161,6 +172,16 @@ const PWA_PUBLIC_PATHS = new Set([
 ]);
 
 export async function middleware(req: NextRequest) {
+  // Preflight do browser → api.{tenant} (antes do 401 JSON). Origens
+  // cockpit/widgets (não-tenant) caem nas rotas que já têm CORS próprio.
+  if (req.method === "OPTIONS" && req.nextUrl.pathname.startsWith("/api/")) {
+    if (isAllowedBrowserApiOrigin(req.headers.get("origin"))) {
+      const preflight = new NextResponse(null, { status: 204 });
+      applyBrowserApiCors(req, preflight);
+      return preflight;
+    }
+  }
+
   let reqAuth: { user?: { id: string; isSuperAdmin?: boolean } } | null = null;
   try {
     reqAuth = await readAuthFromRequestCookie(req);
@@ -175,6 +196,7 @@ export async function middleware(req: NextRequest) {
         NextResponse.rewrite(rewritten, {
           request: { headers: forwardApiAuditHeaders(req, apiPath) },
         }),
+        req,
       );
     }
 
@@ -231,11 +253,12 @@ export async function middleware(req: NextRequest) {
             { message: "Unauthorized", code: "AUTH_REQUIRED" },
             { status: 401 },
           ),
+          req,
         );
       }
       const loginUrl = new URL("/login", req.nextUrl.origin);
       loginUrl.searchParams.set("callbackUrl", pathname);
-      return withSecurityHeaders(NextResponse.redirect(loginUrl));
+      return withSecurityHeaders(NextResponse.redirect(loginUrl), req);
     }
 
     const isSuperAdmin = Boolean(reqAuth.user?.isSuperAdmin);
@@ -250,10 +273,12 @@ export async function middleware(req: NextRequest) {
             { message: "Acesso restrito a administradores da plataforma." },
             { status: 403 },
           ),
+          req,
         );
       }
       return withSecurityHeaders(
         NextResponse.redirect(new URL("/", req.nextUrl.origin)),
+        req,
       );
     }
 
@@ -268,13 +293,14 @@ export async function middleware(req: NextRequest) {
             { message: "Unauthorized", code: "AUTH_REQUIRED" },
             { status: 401 },
           ),
+          req,
         );
       }
     } catch {
       /* fall through */
     }
     const loginUrl = new URL("/login", req.nextUrl.origin);
-    return withSecurityHeaders(NextResponse.redirect(loginUrl));
+    return withSecurityHeaders(NextResponse.redirect(loginUrl), req);
   }
 }
 

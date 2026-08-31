@@ -200,38 +200,6 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   tags: ConversationTag[];
 };
 
-/** Detalhe (GET :id). A lista usa a coluna + irmãos, sem join em messages. */
-async function lastInboundBatch(
-  conversationIds: string[]
-): Promise<Map<string, Date>> {
-  if (conversationIds.length === 0) return new Map();
-  const orgId = getOrgIdOrThrow();
-  // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket: um ticket
-  // recem-aberto (reopen/resposta pos-encerramento) nasce sem inbound, mas
-  // o cliente pode ter escrito minutos atras no ticket anterior. Agrega o
-  // ultimo inbound de QUALQUER conversa do mesmo contato+canal.
-  const rows = await prisma.$queryRaw<{ conversationId: string; lastIn: Date }[]>`
-    SELECT c."id" AS "conversationId", MAX(m."createdAt") AS "lastIn"
-    FROM "conversations" c
-    JOIN "conversations" c2
-      ON c2."contactId" = c."contactId"
-     AND c2."channel" = c."channel"
-     AND c2."organizationId" = c."organizationId"
-    JOIN "messages" m
-      ON m."conversationId" = c2."id"
-     AND m."direction" = 'in'
-    WHERE c."id" = ANY(${conversationIds})
-      AND c."organizationId" = ${orgId}
-    GROUP BY c."id"
-  `;
-  const map = new Map<string, Date>();
-  for (const r of rows) {
-    map.set(r.conversationId, r.lastIn);
-  }
-  await applyChannelSessionResetToInboundMap(conversationIds, map);
-  return map;
-}
-
 /**
  * Lista: preenche `lastInboundAt` nulo (ticket reaberto sem inbound) com o
  * MAX denormalizado dos irmãos contato+canal — sem tocar em `messages`.
@@ -1165,6 +1133,18 @@ async function hydrateConversationsByIds(
   return { items, total: items.length, page: 1, perPage, hasMore: false, nextCursor: null };
 }
 
+/**
+ * DISTINCT ON (contato+canal) só é necessário quando o recorte inclui
+ * tickets RESOLVED (vários por número). Filas OPEN já são 1:1 pelo
+ * índice `conversations_active_contact_channel`.
+ */
+function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
+  if (params.contactId) return false;
+  const tab = params.tab;
+  if (!tab || tab === "todos" || tab === "finalizados") return true;
+  return false;
+}
+
 export async function getConversations(
   params: GetConversationsParams = {}
 ): Promise<ConversationListPage> {
@@ -1186,15 +1166,13 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
 
-  // Colapso por CONTATO+CANAL (1 card por numero — modelo de ticket).
-  // Reabrir uma conversa encerrada gera um NOVO id (ticket B); o ticket A
-  // (RESOLVED) nao pode aparecer como um segundo card do mesmo numero.
-  // Representante = primeiro da ordem por grupo (updatedAt desc = ativo).
-  // Uma query DISTINCT ON (+1 pra hasMore). COUNT DISTINCT do tab inteiro
-  // saiu daqui — badges ficam em GET ?counts=1 (Redis 90s).
-  // Cursor = keyset em (sortVal, id) DEPOIS do colapso — OFFSET só se
-  // o cliente velho mandar `page` sem `cursor`.
-  const collapse = !params.contactId;
+  // Colapso por CONTATO+CANAL só onde há histórico RESOLVED no mesmo
+  // grupo (finalizados / todos / sem aba). Filas OPEN já têm unique
+  // parcial (org, contact, channel) WHERE status <> RESOLVED — DISTINCT
+  // ON sobre o tab inteiro era o 5s+ da 1ª página. COUNT DISTINCT saiu
+  // daqui (badges em GET ?counts=1). OFFSET só se o cliente velho mandar
+  // `page` sem `cursor`.
+  const collapse = listNeedsContactChannelCollapse(params);
   const { ids: windowIds, hasMore, knownTotal } = await findCollapsedConversationPage({
     where,
     collapse,
@@ -2037,10 +2015,22 @@ export async function getConversationById(idOrNumber: string) {
   if (row.contact) {
     await enrichContactsWithUserAvatarFallback([row.contact]);
   }
-  const [previewMap, lastInboundMap] = await Promise.all([
+  const lastInboundMap = new Map<string, Date>();
+  if (row.lastInboundAt) lastInboundMap.set(convId, row.lastInboundAt);
+  const [previewMap] = await Promise.all([
     lastMessagePreviewsBatch([convId]),
-    lastInboundBatch([convId]),
+    fillMissingLastInboundFromSiblings(
+      [
+        {
+          id: convId,
+          contactId: row.contact?.id ?? null,
+          lastInboundAt: row.lastInboundAt,
+        },
+      ],
+      lastInboundMap,
+    ),
   ]);
+  await applyChannelSessionResetToInboundMap([convId], lastInboundMap);
   const tagMap = new Map<string, ConversationTag>();
   for (const t of row.contact?.tags ?? []) {
     if (t.tag) tagMap.set(t.tag.id, t.tag);
@@ -2291,6 +2281,10 @@ export async function assignConversationsInline(params: {
         sseBus.publish("conversation_updated", {
           organizationId: params.organizationId,
           conversationId,
+          assignedToId: nextId,
+          assignedTo: result.conversation.assignedTo
+            ? { type: result.conversation.assignedTo.type }
+            : null,
         });
         sseBus.publish("conversation_timeline_updated", {
           organizationId: params.organizationId,
@@ -2822,6 +2816,8 @@ export async function resolveConversationsInline(params: {
         sseBus.publish("conversation_updated", {
           organizationId: conv.organizationId,
           conversationId: conv.id,
+          status: "RESOLVED",
+          closedAt: new Date().toISOString(),
         });
         sseBus.publish("conversation_timeline_updated", {
           organizationId: conv.organizationId,
