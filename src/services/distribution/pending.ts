@@ -40,6 +40,12 @@ import { keepHumanAfterAutomationClose } from "@/services/distribution/return-af
 
 import { executeDistribution } from "./engine";
 import {
+  CAPACITY_RELEASED_COOLDOWN_MS,
+  fruitlessPassNeedsCooldown,
+  shouldSkipCapacityReleasedCooldown,
+  triggerClearsFruitlessCooldown,
+} from "./pending-drain-guard";
+import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
@@ -272,17 +278,21 @@ export type PendingQueueTrigger =
   | "manual"
   | "scheduled";
 
-/** Debounce / lock in-memory por org (sem schema novo). */
-const drainState = new Map<
-  string,
-  {
-    running: boolean;
-    queuedTrigger: PendingQueueTrigger | null;
-    /** null = todos os depts com elegível; string = só depts desta pessoa. */
-    queuedUserId: string | null;
-    timer: ReturnType<typeof setTimeout> | null;
-  }
->();
+type DrainState = {
+  running: boolean;
+  queuedTrigger: PendingQueueTrigger | null;
+  /** null = todos os depts com elegível; string = só depts desta pessoa. */
+  queuedUserId: string | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Epoch ms — `capacity_released` não reentra até este instante. */
+  cooldownUntil: number;
+  cooldownReason: string | null;
+  cooldownSkipLogged: boolean;
+  coalesceLogged: boolean;
+};
+
+/** Debounce / lock in-memory por org (sem schema novo). Redis não é requisito. */
+const drainState = new Map<string, DrainState>();
 
 function getDrainState(orgId: string) {
   let s = drainState.get(orgId);
@@ -292,10 +302,46 @@ function getDrainState(orgId: string) {
       queuedTrigger: null,
       queuedUserId: null,
       timer: null,
+      cooldownUntil: 0,
+      cooldownReason: null,
+      cooldownSkipLogged: false,
+      coalesceLogged: false,
     };
     drainState.set(orgId, s);
   }
   return s;
+}
+
+function armFruitlessCooldown(state: DrainState, reason: string) {
+  state.cooldownUntil = Date.now() + CAPACITY_RELEASED_COOLDOWN_MS;
+  state.cooldownReason = reason;
+  state.cooldownSkipLogged = false;
+}
+
+function clearFruitlessCooldown(state: DrainState) {
+  state.cooldownUntil = 0;
+  state.cooldownReason = null;
+  state.cooldownSkipLogged = false;
+}
+
+function logCooldownSkip(
+  orgId: string,
+  state: DrainState,
+  trigger: PendingQueueTrigger,
+  via: "schedule" | "process" | "requeue",
+) {
+  if (state.cooldownSkipLogged) return;
+  state.cooldownSkipLogged = true;
+  console.info(
+    "[distribution] processPending skip — cooldown após passagem vazia",
+    JSON.stringify({
+      orgId,
+      trigger,
+      via,
+      reason: state.cooldownReason,
+      retryInMs: Math.max(0, state.cooldownUntil - Date.now()),
+    }),
+  );
 }
 
 type ResponsibleCapacity = {
@@ -878,6 +924,23 @@ export async function processPendingDistributionQueue(opts: {
   }
 
   const state = getDrainState(orgId);
+  if (triggerClearsFruitlessCooldown(opts.trigger)) {
+    clearFruitlessCooldown(state);
+  } else if (
+    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)
+  ) {
+    logCooldownSkip(orgId, state, opts.trigger, "process");
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending: 0,
+      trigger: opts.trigger,
+      skipReason: "COOLDOWN",
+      skipMessage:
+        "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
+    };
+  }
+
   if (state.running) {
     const pending = await prisma.conversation.count({
       where: await getWaitingQueueWhere(),
@@ -897,6 +960,19 @@ export async function processPendingDistributionQueue(opts: {
     // Coalesca: marca para re-rodar ao terminar.
     // 2º evento enquanto roda → amplia (todos os depts com elegível),
     // para não perder o dept de outro consultor que ficou elegível.
+    if (!state.coalesceLogged) {
+      state.coalesceLogged = true;
+      console.info(
+        "[distribution] processPending coalesce — already running",
+        JSON.stringify({
+          orgId,
+          trigger: opts.trigger,
+          queuedTrigger: state.queuedTrigger,
+          userId: opts.userId ?? null,
+          pending,
+        }),
+      );
+    }
     if (state.queuedTrigger) {
       state.queuedUserId = null;
     } else {
@@ -907,6 +983,7 @@ export async function processPendingDistributionQueue(opts: {
   }
 
   state.running = true;
+  state.coalesceLogged = false;
   try {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
     debugWarn(
@@ -962,6 +1039,7 @@ export async function processPendingDistributionQueue(opts: {
           cancelledOrphans,
         }),
       );
+      armFruitlessCooldown(state, "NO_ELIGIBLE_RESPONSIBLE");
       return {
         resolved: 0,
         cancelled: cancelledOrphans,
@@ -991,6 +1069,7 @@ export async function processPendingDistributionQueue(opts: {
             pending,
           }),
         );
+        armFruitlessCooldown(state, "USER_NOT_ELIGIBLE");
         return {
           resolved: 0,
           cancelled: cancelledOrphans,
@@ -1203,6 +1282,10 @@ export async function processPendingDistributionQueue(opts: {
       skipMessage = explained.skipMessage;
     }
 
+    if (fruitlessPassNeedsCooldown({ resolved, pending })) {
+      armFruitlessCooldown(state, skipReason ?? "NO_ASSIGN");
+    }
+
     if (
       resolved > 0 ||
       cancelledOrphans > 0 ||
@@ -1243,7 +1326,14 @@ export async function processPendingDistributionQueue(opts: {
     // Só re-drena se alguém ficou elegível / capacidade / manual.
     // `new_item` NÃO reentra sozinho — evita loop quando a fila está
     // cheia e ninguém ONLINE.
-    if (
+    // `capacity_released` após passagem vazia fica em cooldown — senão
+    // cada outbound humano reabre um scan completo.
+    const queuedCapacityOnCooldown =
+      queued === "capacity_released" &&
+      shouldSkipCapacityReleasedCooldown(queued, state.cooldownUntil);
+    if (queuedCapacityOnCooldown) {
+      logCooldownSkip(orgId, state, queued, "requeue");
+    } else if (
       queued &&
       (queued === "agent_online" ||
         queued === "agent_eligible" ||
@@ -1282,6 +1372,14 @@ export function scheduleProcessPendingDistributionQueue(opts: {
 
   const delayMs = opts.delayMs ?? 500;
   const state = getDrainState(orgId);
+  if (triggerClearsFruitlessCooldown(opts.trigger)) {
+    clearFruitlessCooldown(state);
+  } else if (
+    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)
+  ) {
+    logCooldownSkip(orgId, state, opts.trigger, "schedule");
+    return;
+  }
   // Debounce por org: vários gatilhos próximos viram uma única execução.
   state.queuedTrigger = opts.trigger;
   if (
