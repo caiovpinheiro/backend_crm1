@@ -13,7 +13,13 @@ import { enqueueMetaAttach } from "@/lib/queue";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
-import { generateFileName, saveFile } from "@/lib/storage/local";
+import {
+  generateFileName,
+  mimeFromFilename,
+  resolveOrgOwnedReuseUrl,
+  saveFile,
+  statStoredFile,
+} from "@/lib/storage/local";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -72,7 +78,129 @@ function resolveMime(rawType: string, fileName: string): string {
   const fromExt = mimeFromExtension(ext);
   if (fromExt) return fromExt;
 
+  const fromName = mimeFromFilename(fileName);
+  if (fromName && fromName !== "application/octet-stream") return fromName;
+
   return blobMime || "application/octet-stream";
+}
+
+type AttachmentSource =
+  | {
+      mode: "upload";
+      file: Blob & { name?: string };
+      caption: string;
+      requestedChannelId: string | null;
+    }
+  | {
+      mode: "reuse";
+      publicUrl: string;
+      fileName: string;
+      mimeBase: string;
+      caption: string;
+      requestedChannelId: string | null;
+    };
+
+function readChannelId(raw: unknown): string | null {
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+async function parseAttachmentRequest(
+  request: Request,
+  orgId: string,
+): Promise<{ ok: true; source: AttachmentSource } | { ok: false; response: NextResponse }> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return {
+        ok: false,
+        response: NextResponse.json({ message: "JSON inválido." }, { status: 400 }),
+      };
+    }
+    const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const resolved = resolveOrgOwnedReuseUrl(
+      typeof rec.reuseUrl === "string" ? rec.reuseUrl : "",
+      orgId,
+    );
+    if (!resolved) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            message:
+              "URL de mídia inválida. Só é possível reutilizar arquivos do storage desta organização.",
+          },
+          { status: 400 },
+        ),
+      };
+    }
+    const exists = await statStoredFile(resolved.orgId, resolved.bucket, resolved.fileName);
+    if (!exists) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          { message: "Arquivo não encontrado no storage." },
+          { status: 404 },
+        ),
+      };
+    }
+    const fileName =
+      typeof rec.fileName === "string" && rec.fileName.trim()
+        ? rec.fileName.trim().slice(0, 255)
+        : resolved.fileName;
+    const mimeBase = resolveMime("", fileName);
+    if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          { message: `Tipo não suportado: ${mimeBase}` },
+          { status: 400 },
+        ),
+      };
+    }
+    return {
+      ok: true,
+      source: {
+        mode: "reuse",
+        publicUrl: resolved.url,
+        fileName,
+        mimeBase,
+        caption: typeof rec.caption === "string" ? rec.caption : "",
+        requestedChannelId: readChannelId(rec.channelId),
+      },
+    };
+  }
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch (err) {
+    console.error("[attachments] formData parse error:", err);
+    return {
+      ok: false,
+      response: NextResponse.json({ message: "Erro ao processar upload." }, { status: 400 }),
+    };
+  }
+
+  const raw = form.get("file");
+  if (!raw || !isFileLike(raw) || raw.size === 0) {
+    return {
+      ok: false,
+      response: NextResponse.json({ message: "Nenhum arquivo enviado." }, { status: 400 }),
+    };
+  }
+
+  return {
+    ok: true,
+    source: {
+      mode: "upload",
+      file: raw,
+      caption: (form.get("caption") as string) ?? "",
+      requestedChannelId: readChannelId(form.get("channelId")),
+    },
+  };
 }
 
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
@@ -107,27 +235,11 @@ export async function POST(request: Request, context: RouteContext) {
       const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
       if (sendDenied) return sendDenied;
 
-      let form: FormData;
-      try {
-        form = await request.formData();
-      } catch (err) {
-        console.error("[attachments] formData parse error:", err);
-        return NextResponse.json({ message: "Erro ao processar upload." }, { status: 400 });
-      }
-
-      const raw = form.get("file");
-      const caption = (form.get("caption") as string) ?? "";
-      // Override de canal vindo do composer (mesmo contrato do route de
-      // /messages). Multipart envia como string; vazio == ausência.
-      const requestedChannelIdRaw = form.get("channelId");
-      const requestedChannelId =
-        typeof requestedChannelIdRaw === "string" && requestedChannelIdRaw.trim()
-          ? requestedChannelIdRaw.trim()
-          : null;
-
-      if (!raw || !isFileLike(raw) || raw.size === 0) {
-        return NextResponse.json({ message: "Nenhum arquivo enviado." }, { status: 400 });
-      }
+      const parsed = await parseAttachmentRequest(request, conv.organizationId);
+      if (!parsed.ok) return parsed.response;
+      const source = parsed.source;
+      const caption = source.caption;
+      const requestedChannelId = source.requestedChannelId;
 
       // Resolve o canal de envio (com override se válido). Vem ANTES dos
       // metaClient/baileys para que `channelId` snapshotado em
@@ -174,46 +286,61 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      if (raw.size > MAX_FILE_SIZE) {
-        return NextResponse.json({ message: "Arquivo muito grande (máx 16 MB)." }, { status: 400 });
-      }
-
       const senderName = session.user.name ?? session.user.email ?? "Agente";
-      const fileName = (raw as File).name || "file";
 
-      const mimeBase = resolveMime(raw.type, fileName);
+      let fileName: string;
+      let mimeBase: string;
+      let publicUrl: string;
 
-      if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
-        return NextResponse.json({ message: `Tipo não suportado: ${mimeBase}` }, { status: 400 });
-      }
+      if (source.mode === "reuse") {
+        // Send-by-reference: aponta message.mediaUrl para o arquivo já
+        // armazenado (biblioteca / automation-media). Não copia o blob.
+        fileName = source.fileName;
+        mimeBase = source.mimeBase;
+        publicUrl = source.publicUrl;
+      } else {
+        const raw = source.file;
+        if (raw.size > MAX_FILE_SIZE) {
+          return NextResponse.json({ message: "Arquivo muito grande (máx 16 MB)." }, { status: 400 });
+        }
 
-      let buffer: Buffer;
-      try {
-        buffer = await blobToBuffer(raw);
-      } catch (err) {
-        console.error("[attachments] buffer read error:", err);
-        return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
+        fileName = raw.name || "file";
+        mimeBase = resolveMime(raw.type, fileName);
+
+        if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
+          return NextResponse.json({ message: `Tipo não suportado: ${mimeBase}` }, { status: 400 });
+        }
+
+        let buffer: Buffer;
+        try {
+          buffer = await blobToBuffer(raw);
+        } catch (err) {
+          console.error("[attachments] buffer read error:", err);
+          return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
+        }
+
+        const storeExt = fileName.includes(".")
+          ? fileName.split(".").pop()!
+          : mimeBase.split("/").pop() ?? "bin";
+        const safeFileName = generateFileName({ prefix: "att", ext: storeExt });
+
+        // PR 1.3: storage prefixado por org. Antes: `public/uploads/<file>`
+        // (servido estático sem auth). Agora: `<STORAGE_ROOT>/<orgId>/attachments/<file>`,
+        // entregue via `/api/storage/...` com validação de tenant.
+        const saved = await saveFile({
+          orgId: conv.organizationId,
+          bucket: "attachments",
+          fileName: safeFileName,
+          buffer,
+        });
+        publicUrl = saved.url;
       }
 
       const mediaTypeResolved = resolveMediaType(mimeBase);
-      const storeExt = fileName.includes(".") ? fileName.split(".").pop()! : mimeBase.split("/").pop() ?? "bin";
       const looksLikeVoice =
         mimeBase.startsWith("audio/webm") ||
         mimeBase.startsWith("audio/ogg") ||
         mimeBase === "audio/opus";
-
-      const safeFileName = generateFileName({ prefix: "att", ext: storeExt });
-
-      // PR 1.3: storage prefixado por org. Antes: `public/uploads/<file>`
-      // (servido estático sem auth). Agora: `<STORAGE_ROOT>/<orgId>/attachments/<file>`,
-      // entregue via `/api/storage/...` com validação de tenant.
-      const saved = await saveFile({
-        orgId: conv.organizationId,
-        bucket: "attachments",
-        fileName: safeFileName,
-        buffer,
-      });
-      const publicUrl = saved.url;
 
       // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
 
