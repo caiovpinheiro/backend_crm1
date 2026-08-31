@@ -42,7 +42,10 @@ import {
 
 import { getLogger } from "@/lib/logger";
 import { metrics, safeLabel } from "@/lib/metrics";
-import { getOrgRateLimitRpm } from "@/lib/org-rate-limit-config";
+import {
+  getOrgRateLimitRpm,
+  getTokenOrgRateLimitRpm,
+} from "@/lib/org-rate-limit-config";
 import { logRateLimitReject } from "@/lib/rate-limit-reject-log";
 
 const log = getLogger("rate-limit");
@@ -117,8 +120,8 @@ export const RATE_LIMIT_PROFILES = {
   /** Bulk-ops (import contatos, export). 5/min/org. */
   "api.bulk": { points: 5, durationSec: 60 },
 
-  /** Bearer API tokens (n8n/integrações). Mesmo teto ORG_RATE_LIMIT_RPM por token. */
-  "api.token": { points: getOrgRateLimitRpm(), durationSec: 60 },
+  /** Bearer API tokens (n8n/integrações). Teto por token = TOKEN_ORG_RATE_LIMIT_RPM. */
+  "api.token": { points: getTokenOrgRateLimitRpm(), durationSec: 60 },
   /**
    * Sessão cookie (NextAuth) — choke point `requireAuth` / `withOrgContext`.
    * 600/min bloqueia um loop de render (~15 req/s ≈ 900/min) e ainda cabe
@@ -146,6 +149,9 @@ function getProfileConfig(profile: RateLimitProfile): {
 } {
   if (profile === "api.session") {
     return { points: getSessionRateLimitRpm(), durationSec: 60 };
+  }
+  if (profile === "api.token") {
+    return { points: getTokenOrgRateLimitRpm(), durationSec: 60 };
   }
   return RATE_LIMIT_PROFILES[profile];
 }

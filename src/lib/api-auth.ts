@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { logApiAccessAuthReject, logApiAccessCompleted, resolveResponseStatus } from "@/lib/api-access-audit";
+import {
+  bearerRequiresPublicApiMessage,
+  isBearerAllowedOnThisProcess,
+} from "@/lib/api-public-access";
 import { auth } from "@/lib/auth";
 import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
@@ -50,6 +54,24 @@ export async function authenticateApiRequest(
     const result = await validateToken(rawToken);
 
     if (result) {
+      if (!isBearerAllowedOnThisProcess()) {
+        logApiAccessAuthReject(request, {
+          reason: "bearer_requires_public_api",
+          status: 401,
+          via: "bearer",
+        });
+        return {
+          ok: false,
+          response: NextResponse.json(
+            {
+              message: bearerRequiresPublicApiMessage(),
+              code: "bearer_requires_public_api",
+            },
+            { status: 401 },
+          ),
+        };
+      }
+
       // Rate limit DISTRIBUÍDO (Redis) por token — o limiter em memória
       // anterior valia por processo: com N réplicas o teto efetivo era
       // N×400/min, e um restart zerava a janela.

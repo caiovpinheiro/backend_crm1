@@ -4,6 +4,7 @@
  * Conta
  * ─────
  * Requisições **Bearer** com `organizationId` (`org:{id}:rpm:token`).
+ * Teto da lane token: `TOKEN_ORG_RATE_LIMIT_RPM` (default 240).
  * Sessão NextAuth não entra — teto é `api.session` (600/user).
  *
  * Não conta
@@ -20,7 +21,8 @@
  *
  * Store: Redis ZSET (`org:{id}:rpm:token` / `:session`) quando `REDIS_URL`
  * existe; senão Map in-memory **por processo** (N réplicas = N×teto).
- * Override: `ORG_RATE_LIMIT_RPM` (default 400).
+ * Override lane token: `TOKEN_ORG_RATE_LIMIT_RPM` (default 240).
+ * `ORG_RATE_LIMIT_RPM` (default 400) não vale para Bearer.
  *
  * Sessão NextAuth não consome o bucket de token — já tem `api.session`
  * (600/user). GET quentes do inbox também ficam de fora.
@@ -32,6 +34,7 @@ import { getLogger } from "@/lib/logger";
 import { metrics, safeLabel } from "@/lib/metrics";
 import {
   getOrgRateLimitRpm,
+  getTokenOrgRateLimitRpm,
   isOrgRpmExemptPath,
   orgRpmKey,
   ORG_RATE_LIMIT_WINDOW_MS,
@@ -159,9 +162,11 @@ export async function consumeOrgRpm(
   opts: ConsumeOrgRpmOpts = {},
 ): Promise<OrgRateLimitDecision> {
   const now = opts.now ?? Date.now();
-  const limit = opts.limit ?? getOrgRateLimitRpm();
-  const windowMs = opts.windowMs ?? ORG_RATE_LIMIT_WINDOW_MS;
   const lane = opts.lane ?? "token";
+  const limit =
+    opts.limit ??
+    (lane === "token" ? getTokenOrgRateLimitRpm() : getOrgRateLimitRpm());
+  const windowMs = opts.windowMs ?? ORG_RATE_LIMIT_WINDOW_MS;
 
   if (useMemoryStore(opts.store)) {
     if (!warnedMemory && opts.store !== "memory") {
@@ -274,6 +279,7 @@ export function resetOrgRpmMemoryForTests(): void {
 
 export {
   getOrgRateLimitRpm,
+  getTokenOrgRateLimitRpm,
   isInboxHotSessionPath,
   isOrgRpmExemptPath,
   orgRpmKey,

@@ -1,8 +1,10 @@
 /**
  * Teto duro de API por organização. Fonte única do número — não copiar
  * `400` em rotas. Override: `ORG_RATE_LIMIT_RPM`.
+ * Lane Bearer/n8n: `TOKEN_ORG_RATE_LIMIT_RPM` (default 240) — não usa este.
  */
 export const DEFAULT_ORG_RATE_LIMIT_RPM = 400;
+export const DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM = 240;
 export const ORG_RATE_LIMIT_WINDOW_MS = 60_000;
 
 export type OrgRpmLane = "session" | "token";
@@ -12,6 +14,15 @@ export function getOrgRateLimitRpm(): number {
   if (!raw) return DEFAULT_ORG_RATE_LIMIT_RPM;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 1) return DEFAULT_ORG_RATE_LIMIT_RPM;
+  return Math.floor(n);
+}
+
+/** Teto Bearer por org (`org:{id}:rpm:token`). Override: `TOKEN_ORG_RATE_LIMIT_RPM`. */
+export function getTokenOrgRateLimitRpm(): number {
+  const raw = process.env.TOKEN_ORG_RATE_LIMIT_RPM?.trim();
+  if (!raw) return DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_TOKEN_ORG_RATE_LIMIT_RPM;
   return Math.floor(n);
 }
 
