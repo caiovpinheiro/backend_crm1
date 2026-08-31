@@ -2,8 +2,8 @@
  * Aba Negócios do Painel. Tudo respeita o período, exceto Valor em aberto
  * (estado presente, rotulado "hoje").
  *
- * Funil: coorte — dos que entraram na etapa A no período, quantos chegaram
- * na B. Não mistura com "quem está parado hoje".
+ * Funil: estoque atual por etapa (igual ao kanban). O período só entra
+ * no +N de entradas, nos novos e na passagem/perda da coorte.
  */
 
 import { Prisma, type DealStatus } from "@prisma/client";
@@ -86,10 +86,11 @@ export type PainelFunnelStage = {
   id: string;
   name: string;
   color: string;
+  /** Negócios abertos hoje nesta etapa (estoque do kanban). */
   count: number;
   value: number;
   passThrough: number | null;
-  /** Entradas na etapa no período (coorte). */
+  /** Entradas na etapa no período. */
   entered: number;
   lost: number;
   /** Entradas desde o início do dia (fuso do Painel). */
@@ -384,7 +385,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   const orgId = getOrgIdOrThrow();
   const stages = await loadStages(f.pipelineIds);
   const tooltip =
-    "Coorte: dos negócios que entraram nesta etapa no período, quantos chegaram na seguinte. Não é o estoque de hoje.";
+    "Estoque atual do funil, igual às colunas do kanban. O + é quem entrou na etapa no período.";
   const emptyNovos = { count: 0, value: 0 };
 
   if (stages.length === 0) {
@@ -428,6 +429,13 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   }
 
   const todayStart = parseDay(dayKeyFromDate(new Date()), false)!;
+  const structural = await structuralWhere(f);
+  const stockRows = await db().deal.groupBy({
+    by: ["stageId", "ownerId"],
+    where: and(structural, { status: "OPEN" as DealStatus }),
+    _count: { _all: true },
+    _sum: { value: true },
+  });
 
   const entered = await db().$queryRaw<
     {
@@ -487,6 +495,8 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     byUser: Map<string, { count: number; value: number; todayDelta: number }>;
   };
   const byStage = new Map<string, StageBucket>();
+  type StockUser = { count: number; value: number };
+  const stockByStage = new Map<string, { count: number; value: number; byUser: Map<string, StockUser> }>();
   for (const s of stages) {
     byStage.set(s.id, {
       count: 0,
@@ -497,6 +507,20 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       firstAt: new Map(),
       byUser: new Map(),
     });
+    stockByStage.set(s.id, { count: 0, value: 0, byUser: new Map() });
+  }
+  for (const row of stockRows) {
+    const stock = stockByStage.get(row.stageId);
+    if (!stock) continue;
+    const n = row._count._all;
+    const v = toNumber(row._sum.value);
+    stock.count += n;
+    stock.value += v;
+    const ownerKey = row.ownerId ?? "__none__";
+    const user = stock.byUser.get(ownerKey) ?? { count: 0, value: 0 };
+    user.count += n;
+    user.value += v;
+    stock.byUser.set(ownerKey, user);
   }
 
   const createdDeals = new Map<string, number>();
@@ -558,6 +582,11 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       if (id !== "__none__") ownerIds.add(id);
     }
   }
+  for (const stock of stockByStage.values()) {
+    for (const id of stock.byUser.keys()) {
+      if (id !== "__none__") ownerIds.add(id);
+    }
+  }
   const users = ownerIds.size
     ? await db().user.findMany({
         where: { id: { in: [...ownerIds] } },
@@ -569,6 +598,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   const openStages = stages.filter((s) => !s.isWon && !s.isLost);
   const result: PainelFunnelStage[] = openStages.map((s, i) => {
     const bucket = byStage.get(s.id)!;
+    const stock = stockByStage.get(s.id)!;
     const next = openStages[i + 1];
     let passThrough: number | null = null;
     if (next && bucket.count > 0) {
@@ -594,21 +624,21 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
         }
       }
     }
-    const byUser: PainelFunnelUserRow[] = [...bucket.byUser.entries()]
+    const byUser: PainelFunnelUserRow[] = [...stock.byUser.entries()]
       .map(([id, u]) => ({
         id,
         name: id === "__none__" ? "Sem responsável" : (userName.get(id) ?? "Sem responsável"),
         count: u.count,
         value: round2(u.value),
-        todayDelta: u.todayDelta,
+        todayDelta: bucket.byUser.get(id)?.todayDelta ?? 0,
       }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"));
     return {
       id: s.id,
       name: s.name,
       color: s.color,
-      count: bucket.count,
-      value: round2(bucket.value),
+      count: stock.count,
+      value: round2(stock.value),
       passThrough,
       entered: bucket.count,
       lost,
@@ -627,7 +657,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     definition: "cohort",
     tooltip,
     stages: merged,
-    empty: merged.every((s) => s.count === 0),
+    empty: openStages.length === 0,
     novos,
   };
 }
