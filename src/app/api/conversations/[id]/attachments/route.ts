@@ -138,6 +138,12 @@ async function parseAttachmentRequest(
     }
     const resolved = await locateReusableStoredObject(parsedReuse);
     if (!resolved) {
+      console.warn(
+        "[attachments] reuse miss",
+        parsedReuse.orgId,
+        parsedReuse.bucket,
+        parsedReuse.fileName,
+      );
       return {
         ok: false,
         response: NextResponse.json(

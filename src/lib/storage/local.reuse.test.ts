@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveOrgOwnedReuseUrl } from "@/lib/storage/local";
+import { resolveOrgOwnedReuseUrl, reuseFileNameAliases } from "@/lib/storage/local";
 
 const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
 const OTHER = "clxxxxxxxxxxxxxxxxxxxxxxx";
@@ -27,6 +27,26 @@ describe("resolveOrgOwnedReuseUrl", () => {
     expect(got?.bucket).toBe("attachments");
     expect(got?.fileName).toBe("att_1.jpg");
     expect(got?.orgId).toBe(ORG);
+  });
+
+  it("aceita URL absoluta do tenant (pathname /api/storage/...)", () => {
+    const got = resolveOrgOwnedReuseUrl(
+      `https://acme.bwipo.com/api/storage/${ORG}/automation-media/auto_1785342090743_56a2o7.jpg`,
+      ORG,
+    );
+    expect(got?.bucket).toBe("automation-media");
+    expect(got?.fileName).toBe("auto_1785342090743_56a2o7.jpg");
+    expect(got?.orgId).toBe(ORG);
+  });
+
+  it("alias jpg ↔ jpeg no mesmo stem", () => {
+    expect(reuseFileNameAliases("auto_1.jpg")).toEqual(
+      expect.arrayContaining(["auto_1.jpg", "auto_1.jpeg"]),
+    );
+    expect(reuseFileNameAliases("auto_1.jpeg")).toEqual(
+      expect.arrayContaining(["auto_1.jpeg", "auto_1.jpg"]),
+    );
+    expect(reuseFileNameAliases("clip.mp4")).toEqual(["clip.mp4"]);
   });
 
   it("rejeita org diferente (sem SSRF / tenant escape)", () => {

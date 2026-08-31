@@ -459,22 +459,46 @@ export async function statStoredFile(
 }
 
 /**
- * Existência no mesmo critério do GET /api/storage: stat, probe de 1 byte,
- * depois o GetObject/read cheio. Head e Range podem falhar no compat
- * (Spaces) enquanto o GET sem Range ainda serve — típico em imagem
- * pequena. Sem o read cheio o browser/GET passa e o POST reuseUrl 404.
+ * Existência no mesmo critério do GET /api/storage quando serve o body
+ * (imagem não manda Range): GetObject/read cheio primeiro. Head e Range
+ * no compat (Spaces) 404-am JPEG pequeno enquanto o GET sem Range 200.
+ * Stat só como confirmação se o read falhar (stream vazio / retry esgotado).
  */
 export async function existsStoredFile(
   orgId: string,
   bucket: StorageBucket,
   fileName: string,
 ): Promise<boolean> {
+  const full = await readStoredFile(orgId, bucket, fileName);
+  if (full != null) return true;
   const st = await statStoredFile(orgId, bucket, fileName);
   if (st) return true;
   const probe = await readStoredFileRange(orgId, bucket, fileName, 0, 0);
-  if (probe) return true;
-  const full = await readStoredFile(orgId, bucket, fileName);
-  return full != null;
+  return probe != null;
+}
+
+/**
+ * Variantes de filename org-owned para o mesmo objeto. JPEG de modelo
+ * costuma gravar `auto_….jpg` (sniff → ext `jpg`) enquanto o cliente
+ * manda `….jpeg`, ou o contrário no Spaces. Sem alias o GET/reuse
+ * batem em keys diferentes.
+ */
+export function reuseFileNameAliases(fileName: string): string[] {
+  const names = [fileName];
+  const idx = fileName.lastIndexOf(".");
+  if (idx <= 0 || idx === fileName.length - 1) return names;
+  const base = fileName.slice(0, idx);
+  const ext = fileName.slice(idx + 1);
+  const lower = ext.toLowerCase();
+  const swap =
+    lower === "jpg" ? ["jpeg", "JPEG", "JPG"] : lower === "jpeg" ? ["jpg", "JPG", "JPEG"] : [];
+  for (const alt of swap) {
+    const candidate = `${base}.${alt}`;
+    if (candidate !== fileName && isValidFileName(candidate) && !names.includes(candidate)) {
+      names.push(candidate);
+    }
+  }
+  return names;
 }
 
 function resolveLegacyUploadsAbs(relative: string): string | null {
@@ -525,13 +549,17 @@ export async function readLegacyUploadsFile(
 export async function locateReusableStoredObject(
   resolved: OrgOwnedReuseUrl,
 ): Promise<OrgOwnedReuseUrl | null> {
-  if (await existsStoredFile(resolved.orgId, resolved.bucket, resolved.fileName)) {
-    return {
-      url: buildPublicUrl(resolved.orgId, resolved.bucket, resolved.fileName),
-      orgId: resolved.orgId,
-      bucket: resolved.bucket,
-      fileName: resolved.fileName,
-    };
+  const names = reuseFileNameAliases(resolved.fileName);
+
+  for (const fileName of names) {
+    if (await existsStoredFile(resolved.orgId, resolved.bucket, fileName)) {
+      return {
+        url: buildPublicUrl(resolved.orgId, resolved.bucket, fileName),
+        orgId: resolved.orgId,
+        bucket: resolved.bucket,
+        fileName,
+      };
+    }
   }
 
   // Filename já validado e org-owned: tenta os outros buckets de reuse
@@ -539,19 +567,21 @@ export async function locateReusableStoredObject(
   // em attachments) e o volume legado `public/uploads/<file>`.
   for (const bucket of REUSE_BUCKETS) {
     if (bucket === resolved.bucket) continue;
-    if (await existsStoredFile(resolved.orgId, bucket, resolved.fileName)) {
-      return {
-        url: buildPublicUrl(resolved.orgId, bucket, resolved.fileName),
-        orgId: resolved.orgId,
-        bucket,
-        fileName: resolved.fileName,
-      };
+    for (const fileName of names) {
+      if (await existsStoredFile(resolved.orgId, bucket, fileName)) {
+        return {
+          url: buildPublicUrl(resolved.orgId, bucket, fileName),
+          orgId: resolved.orgId,
+          bucket,
+          fileName,
+        };
+      }
     }
   }
 
   const legacyCandidates = new Set<string>();
   if (resolved.legacyRelative) legacyCandidates.add(resolved.legacyRelative);
-  legacyCandidates.add(resolved.fileName);
+  for (const fileName of names) legacyCandidates.add(fileName);
   for (const relative of legacyCandidates) {
     if (!(await legacyUploadsFileExists(relative))) continue;
     return {
