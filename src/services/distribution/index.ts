@@ -50,6 +50,7 @@ export {
   scheduleProcessPendingDistributionQueue,
   maybeDistributeNewInboundTicket,
   type PendingDistributionView,
+  type PendingDistributionsPage,
   type RetryResult,
   type PendingQueueTrigger,
 } from "./pending";

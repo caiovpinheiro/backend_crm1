@@ -42,6 +42,7 @@ import { executeDistribution } from "./engine";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
   fruitlessPassNeedsCooldown,
+  shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
   triggerClearsFruitlessCooldown,
 } from "./pending-drain-guard";
@@ -145,9 +146,35 @@ async function ensureConversationInWaitingQueue(args: {
   });
 }
 
-export async function getPendingDistributions(): Promise<
-  PendingDistributionView[]
-> {
+const PENDING_LIST_DEFAULT = 50;
+const PENDING_LIST_MAX = 100;
+
+function parsePendingCursor(
+  raw: string | null,
+): { createdAt: Date; id: string } | null {
+  if (!raw) return null;
+  const [tsStr, id] = raw.split("_");
+  const ts = Number(tsStr);
+  if (!Number.isFinite(ts) || !id) return null;
+  return { createdAt: new Date(ts), id };
+}
+
+export interface PendingDistributionsPage {
+  pending: PendingDistributionView[];
+  nextCursor: string | null;
+  total: number;
+}
+
+export async function getPendingDistributions(opts: {
+  limit?: number;
+  cursor?: string | null;
+} = {}): Promise<PendingDistributionsPage> {
+  const limit = Math.min(
+    PENDING_LIST_MAX,
+    Math.max(1, opts.limit ?? PENDING_LIST_DEFAULT),
+  );
+  const cursor = parsePendingCursor(opts.cursor ?? null);
+
   // Limpa pendências de quem só recebeu template e nunca respondeu.
   await purgeUnansweredFromPendingQueue().catch(() => 0);
 
@@ -166,36 +193,61 @@ export async function getPendingDistributions(): Promise<
     .map((p) => p.conversationId)
     .filter((id): id is string => Boolean(id));
 
-  const items = await prisma.conversation.findMany({
-    where: {
-      OR: [
-        ABERTA_SEM_RESPONSAVEL,
-        ...(manualConvIds.length > 0
-          ? [
-              {
-                id: { in: manualConvIds },
-                ...activeInboxQueueGuardWhere(),
-                assignedToId: null,
-              },
-            ]
-          : []),
-      ],
-    },
-    orderBy: { createdAt: "asc" },
-    select: {
-      id: true,
-      number: true,
-      channel: true,
-      contactId: true,
-      departmentId: true,
-      createdAt: true,
-      updatedAt: true,
-      contact: { select: { name: true, phone: true } },
-      department: { select: { id: true, name: true } },
-    },
-  });
+  const baseWhere: Prisma.ConversationWhereInput = {
+    OR: [
+      ABERTA_SEM_RESPONSAVEL,
+      ...(manualConvIds.length > 0
+        ? [
+            {
+              id: { in: manualConvIds },
+              ...activeInboxQueueGuardWhere(),
+              assignedToId: null,
+            },
+          ]
+        : []),
+    ],
+  };
 
-  if (items.length === 0) return [];
+  const where: Prisma.ConversationWhereInput = cursor
+    ? {
+        AND: [
+          baseWhere,
+          {
+            OR: [
+              { createdAt: { gt: cursor.createdAt } },
+              { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+            ],
+          },
+        ],
+      }
+    : baseWhere;
+
+  const [itemsPlus, total] = await Promise.all([
+    prisma.conversation.findMany({
+      where,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
+      select: {
+        id: true,
+        number: true,
+        channel: true,
+        contactId: true,
+        departmentId: true,
+        createdAt: true,
+        updatedAt: true,
+        contact: { select: { name: true, phone: true } },
+        department: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.conversation.count({ where: baseWhere }),
+  ]);
+
+  const hasMore = itemsPlus.length > limit;
+  const items = hasMore ? itemsPlus.slice(0, limit) : itemsPlus;
+
+  if (items.length === 0) {
+    return { pending: [], nextCursor: null, total };
+  }
 
   const convIds = items.map((c) => c.id);
   const contactIds = items
@@ -236,7 +288,7 @@ export async function getPendingDistributions(): Promise<
     }
   }
 
-  return items.map((c) => {
+  const pending = items.map((c) => {
     const meta =
       byConv.get(c.id) ??
       (c.contactId ? byContact.get(c.contactId) : undefined) ??
@@ -257,6 +309,12 @@ export async function getPendingDistributions(): Promise<
       createdAt: (meta?.createdAt ?? c.createdAt).toISOString(),
     };
   });
+
+  const last = items[items.length - 1];
+  const nextCursor =
+    hasMore && last ? `${last.createdAt.getTime()}_${last.id}` : null;
+
+  return { pending, nextCursor, total };
 }
 
 export interface RetryResult {
@@ -312,10 +370,22 @@ function getDrainState(orgId: string) {
   return s;
 }
 
+function cancelCapacityReleasedRetry(state: DrainState) {
+  if (state.queuedTrigger !== "capacity_released") return;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+  state.queuedTrigger = null;
+  state.queuedUserId = null;
+}
+
 function armFruitlessCooldown(state: DrainState, reason: string) {
   state.cooldownUntil = Date.now() + CAPACITY_RELEASED_COOLDOWN_MS;
   state.cooldownReason = reason;
   state.cooldownSkipLogged = false;
+  // Sem timer para o fim da janela — outbound não reabre scan sozinho.
+  cancelCapacityReleasedRetry(state);
 }
 
 function clearFruitlessCooldown(state: DrainState) {
@@ -340,6 +410,7 @@ function logCooldownSkip(
       via,
       reason: state.cooldownReason,
       retryInMs: Math.max(0, state.cooldownUntil - Date.now()),
+      scheduled: false,
     }),
   );
 }
@@ -1326,11 +1397,12 @@ export async function processPendingDistributionQueue(opts: {
     // Só re-drena se alguém ficou elegível / capacidade / manual.
     // `new_item` NÃO reentra sozinho — evita loop quando a fila está
     // cheia e ninguém ONLINE.
-    // `capacity_released` após passagem vazia fica em cooldown — senão
-    // cada outbound humano reabre um scan completo.
+    // `capacity_released` após passagem vazia: não agenda retry. A
+    // próxima varredura é agent_online / elegível / new_item / manual / cron.
     const queuedCapacityOnCooldown =
       queued === "capacity_released" &&
-      shouldSkipCapacityReleasedCooldown(queued, state.cooldownUntil);
+      shouldSkipCapacityReleasedCooldown(queued, state.cooldownUntil) &&
+      !shouldScheduleRetryOnCooldownSkip();
     if (queuedCapacityOnCooldown) {
       logCooldownSkip(orgId, state, queued, "requeue");
     } else if (
@@ -1378,7 +1450,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
     shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)
   ) {
     logCooldownSkip(orgId, state, opts.trigger, "schedule");
-    return;
+    if (!shouldScheduleRetryOnCooldownSkip()) return;
   }
   // Debounce por org: vários gatilhos próximos viram uma única execução.
   state.queuedTrigger = opts.trigger;

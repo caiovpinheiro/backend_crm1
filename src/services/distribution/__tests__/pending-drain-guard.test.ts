@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
   fruitlessPassNeedsCooldown,
+  shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
   triggerClearsFruitlessCooldown,
 } from "../pending-drain-guard";
@@ -51,7 +52,11 @@ describe("pending drain guard", () => {
     expect(fruitlessPassNeedsCooldown({ resolved: 0, pending: 0 })).toBe(false);
   });
 
-  it("uses an 8s cooldown in the 3–10s range", () => {
-    expect(CAPACITY_RELEASED_COOLDOWN_MS).toBe(8_000);
+  it("uses a ~30s cooldown so outbound does not rescan every few seconds", () => {
+    expect(CAPACITY_RELEASED_COOLDOWN_MS).toBe(30_000);
+  });
+
+  it("does not schedule a retry timer when the fruitless cooldown is active", () => {
+    expect(shouldScheduleRetryOnCooldownSkip()).toBe(false);
   });
 });

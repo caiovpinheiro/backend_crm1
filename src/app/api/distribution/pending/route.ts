@@ -1,8 +1,8 @@
 /**
- * GET /api/distribution/pending
+ * GET /api/distribution/pending?limit&cursor
  * Lista os leads na fila de espera da Distribuição (não distribuídos por
- * falta de responsável elegível). Gateado por `smart_distribution` +
- * `distribution:view`.
+ * falta de responsável elegível). Página limitada (default 50, máx. 100)
+ * + `total` da fila. Gateado por `smart_distribution` + `distribution:view`.
  */
 
 import { NextResponse } from "next/server";
@@ -15,7 +15,7 @@ import {
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
 
-export async function GET() {
+export async function GET(req: Request) {
   return withOrgContext(async (session) => {
     const ctx = await loadAuthzContext({
       userId: session.user.id,
@@ -45,8 +45,12 @@ export async function GET() {
     }
 
     try {
-      const pending = await getPendingDistributions();
-      return NextResponse.json({ pending });
+      const url = new URL(req.url);
+      const cursor = url.searchParams.get("cursor");
+      const limitRaw = Number(url.searchParams.get("limit"));
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50;
+      const result = await getPendingDistributions({ cursor, limit });
+      return NextResponse.json(result);
     } catch (e) {
       console.error("[GET /api/distribution/pending]", e);
       return NextResponse.json(

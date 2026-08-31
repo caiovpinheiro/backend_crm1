@@ -4,7 +4,8 @@
  * Puro — sem Prisma — para o lock in-process em `pending.ts` e testes.
  */
 
-export const CAPACITY_RELEASED_COOLDOWN_MS = 8_000;
+/** Outbound / `capacity_released` não reabre scan completo neste intervalo. */
+export const CAPACITY_RELEASED_COOLDOWN_MS = 30_000;
 
 export function shouldSkipCapacityReleasedCooldown(
   trigger: string,
@@ -23,6 +24,15 @@ export function triggerClearsFruitlessCooldown(trigger: string): boolean {
     trigger === "manual" ||
     trigger === "scheduled"
   );
+}
+
+/**
+ * Passagem vazia não agenda `setTimeout` para o fim da janela.
+ * O `retryInMs` do log é só o restante do cooldown — a próxima varredura
+ * vem de `agent_online` / `agent_eligible` / `new_item` / `manual` / cron.
+ */
+export function shouldScheduleRetryOnCooldownSkip(): boolean {
+  return false;
 }
 
 /** Passagem sem assign e ainda há gente na espera (skip / capacity exhausted). */
