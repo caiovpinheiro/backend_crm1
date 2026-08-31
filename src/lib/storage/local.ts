@@ -261,28 +261,75 @@ const REUSE_BUCKETS: ReadonlySet<StorageBucket> = new Set([
   "recordings",
 ]);
 
+const UPLOADS_PREFIXES = ["/uploads/", "/api/uploads/"] as const;
+
 /**
- * Extrai o pathname `/api/storage/...` de um reuseUrl.
- * Nunca faz fetch — só parse. Rejeita esquemas perigosos e URLs externas
- * que não sejam path de storage (defesa SSRF / tenant escape).
+ * Extrai o pathname de um reuseUrl. Nunca faz fetch — só parse.
+ * Rejeita esquemas perigosos (defesa SSRF / tenant escape).
  */
-function extractStoragePathFromReuseUrl(raw: string): string | null {
+function extractReusePathname(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (/^(data|blob|javascript|file|ftp):/i.test(trimmed)) return null;
   if (trimmed.startsWith("//")) return null;
 
-  let pathOnly = trimmed;
   if (/^https?:\/\//i.test(trimmed)) {
     try {
-      pathOnly = new URL(trimmed).pathname;
+      return new URL(trimmed).pathname;
     } catch {
       return null;
     }
   }
 
-  if (!pathOnly.startsWith(URL_PREFIX)) return null;
-  return pathOnly;
+  if (!trimmed.startsWith("/")) return null;
+  return trimmed;
+}
+
+function extractUploadsRelative(pathOnly: string): string | null {
+  for (const prefix of UPLOADS_PREFIXES) {
+    if (pathOnly === prefix.slice(0, -1) || pathOnly.startsWith(prefix)) {
+      return pathOnly.startsWith(prefix) ? pathOnly.slice(prefix.length) : "";
+    }
+  }
+  return null;
+}
+
+function resolveLegacyUploadsReuse(
+  relative: string,
+  expectedOrgId: string,
+): OrgOwnedReuseUrl | null {
+  const segments = relative.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.length > 2) return null;
+  if (segments.some((s) => s.includes(".."))) return null;
+
+  let bucket: StorageBucket;
+  let fileRaw: string;
+  if (segments.length === 2) {
+    const [bucketRaw, nameRaw] = segments;
+    if (!(BUCKETS as readonly string[]).includes(bucketRaw)) return null;
+    if (!REUSE_BUCKETS.has(bucketRaw as StorageBucket)) return null;
+    bucket = bucketRaw as StorageBucket;
+    fileRaw = nameRaw;
+  } else {
+    // Filename solto: biblioteca de modelos gravava em automation-media.
+    bucket = "automation-media";
+    fileRaw = segments[0];
+  }
+
+  let fileName: string;
+  try {
+    fileName = decodeURIComponent(fileRaw);
+  } catch {
+    return null;
+  }
+  if (!isValidFileName(fileName)) return null;
+  return {
+    url: buildPublicUrl(expectedOrgId, bucket, fileName),
+    orgId: expectedOrgId,
+    bucket,
+    fileName,
+    legacyRelative: relative,
+  };
 }
 
 export type OrgOwnedReuseUrl = {
@@ -290,31 +337,42 @@ export type OrgOwnedReuseUrl = {
   orgId: string;
   bucket: StorageBucket;
   fileName: string;
+  /** Path relativo em `public/uploads/` quando o reuseUrl era legacy. */
+  legacyRelative?: string;
 };
 
 /**
- * Valida um reuseUrl contra a org da conversa. Só aceita
+ * Valida um reuseUrl contra a org da conversa. Aceita
  * `/api/storage/<orgId>/<bucket>/<file>` (ou URL absoluta cujo pathname
- * seja isso) da org esperada. Devolve a URL canônica do storage — nunca
- * a URL crua do cliente.
+ * seja isso) da org esperada, e o legado `/uploads/<file>` ou
+ * `/uploads/<bucket>/<file>`. Devolve a URL canônica — nunca a URL crua
+ * do cliente (exceto o path `/uploads/...` sanitizado, preenchido depois
+ * se o objeto só existir no disco legado).
  */
 export function resolveOrgOwnedReuseUrl(
   raw: string,
   expectedOrgId: string,
 ): OrgOwnedReuseUrl | null {
   if (!isValidOrgId(expectedOrgId)) return null;
-  const pathOnly = extractStoragePathFromReuseUrl(raw);
+  const pathOnly = extractReusePathname(raw);
   if (!pathOnly) return null;
-  const parsed = parseStoragePath(pathOnly);
-  if (!parsed) return null;
-  if (parsed.orgId !== expectedOrgId) return null;
-  if (!REUSE_BUCKETS.has(parsed.bucket)) return null;
-  return {
-    url: buildPublicUrl(parsed.orgId, parsed.bucket, parsed.fileName),
-    orgId: parsed.orgId,
-    bucket: parsed.bucket,
-    fileName: parsed.fileName,
-  };
+
+  if (pathOnly.startsWith(URL_PREFIX)) {
+    const parsed = parseStoragePath(pathOnly);
+    if (!parsed) return null;
+    if (parsed.orgId !== expectedOrgId) return null;
+    if (!REUSE_BUCKETS.has(parsed.bucket)) return null;
+    return {
+      url: buildPublicUrl(parsed.orgId, parsed.bucket, parsed.fileName),
+      orgId: parsed.orgId,
+      bucket: parsed.bucket,
+      fileName: parsed.fileName,
+    };
+  }
+
+  const uploadsRel = extractUploadsRelative(pathOnly);
+  if (uploadsRel == null) return null;
+  return resolveLegacyUploadsReuse(uploadsRel, expectedOrgId);
 }
 
 export type SaveFileOptions = {
@@ -398,6 +456,108 @@ export async function statStoredFile(
     return s3.statStoredFile(orgId, bucket, fileName);
   }
   return statStoredFileLocal(orgId, bucket, fileName);
+}
+
+/**
+ * Existência no mesmo driver do GET /api/storage (stat + probe de 1 byte).
+ * HeadObject/stat podem falhar enquanto GetObject/read ainda servem o arquivo;
+ * reuse tem que seguir o mesmo critério, senão o browser consegue o GET e o
+ * POST reuseUrl 404.
+ */
+export async function existsStoredFile(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+): Promise<boolean> {
+  const st = await statStoredFile(orgId, bucket, fileName);
+  if (st) return true;
+  const probe = await readStoredFileRange(orgId, bucket, fileName, 0, 0);
+  return probe != null;
+}
+
+function resolveLegacyUploadsAbs(relative: string): string | null {
+  if (!relative || relative.includes("..") || relative.includes("\\")) return null;
+  const root = path.resolve(process.cwd(), "public", "uploads");
+  const abs = path.resolve(root, relative);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  return abs;
+}
+
+async function legacyUploadsFileExists(relative: string): Promise<boolean> {
+  const abs = resolveLegacyUploadsAbs(relative);
+  if (!abs) return false;
+  try {
+    const s = await stat(abs);
+    return s.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Lê um arquivo do volume legado `public/uploads/<relative>`. Null se ausente. */
+export async function readLegacyUploadsFile(
+  relative: string,
+): Promise<ReadFileResult | null> {
+  const abs = resolveLegacyUploadsAbs(relative);
+  if (!abs) return null;
+  try {
+    const s = await stat(abs);
+    if (!s.isFile()) return null;
+    const buffer = await readFile(abs);
+    return {
+      buffer,
+      size: s.size,
+      mimeType: mimeFromFilename(path.basename(relative)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Confirma que o objeto do reuseUrl existe no driver ativo (S3 ou disco).
+ * Se o URL era `/uploads/<file>` sem bucket, tenta os outros buckets de
+ * reuse. Se só existir no volume legado `public/uploads`, devolve essa URL
+ * (workers Baileys / meta-attach já leem `/uploads/...`).
+ */
+export async function locateReusableStoredObject(
+  resolved: OrgOwnedReuseUrl,
+): Promise<OrgOwnedReuseUrl | null> {
+  if (await existsStoredFile(resolved.orgId, resolved.bucket, resolved.fileName)) {
+    return {
+      url: buildPublicUrl(resolved.orgId, resolved.bucket, resolved.fileName),
+      orgId: resolved.orgId,
+      bucket: resolved.bucket,
+      fileName: resolved.fileName,
+    };
+  }
+
+  const isBareLegacy = Boolean(resolved.legacyRelative && !resolved.legacyRelative.includes("/"));
+  if (isBareLegacy) {
+    for (const bucket of REUSE_BUCKETS) {
+      if (bucket === resolved.bucket) continue;
+      if (await existsStoredFile(resolved.orgId, bucket, resolved.fileName)) {
+        return {
+          url: buildPublicUrl(resolved.orgId, bucket, resolved.fileName),
+          orgId: resolved.orgId,
+          bucket,
+          fileName: resolved.fileName,
+        };
+      }
+    }
+  }
+
+  if (resolved.legacyRelative && (await legacyUploadsFileExists(resolved.legacyRelative))) {
+    return {
+      url: `/uploads/${resolved.legacyRelative}`,
+      orgId: resolved.orgId,
+      bucket: resolved.bucket,
+      fileName: resolved.fileName,
+      legacyRelative: resolved.legacyRelative,
+    };
+  }
+
+  return null;
 }
 
 /**

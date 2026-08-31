@@ -15,10 +15,10 @@ import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
 import {
   generateFileName,
+  locateReusableStoredObject,
   mimeFromFilename,
   resolveOrgOwnedReuseUrl,
   saveFile,
-  statStoredFile,
 } from "@/lib/storage/local";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -120,11 +120,11 @@ async function parseAttachmentRequest(
       };
     }
     const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-    const resolved = resolveOrgOwnedReuseUrl(
+    const parsedReuse = resolveOrgOwnedReuseUrl(
       typeof rec.reuseUrl === "string" ? rec.reuseUrl : "",
       orgId,
     );
-    if (!resolved) {
+    if (!parsedReuse) {
       return {
         ok: false,
         response: NextResponse.json(
@@ -136,8 +136,8 @@ async function parseAttachmentRequest(
         ),
       };
     }
-    const exists = await statStoredFile(resolved.orgId, resolved.bucket, resolved.fileName);
-    if (!exists) {
+    const resolved = await locateReusableStoredObject(parsedReuse);
+    if (!resolved) {
       return {
         ok: false,
         response: NextResponse.json(

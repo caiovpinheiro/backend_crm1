@@ -194,7 +194,30 @@ export async function readStoredFile(
   }
 }
 
-/** Tamanho do objeto sem baixar o corpo (HeadObject). Null se ausente. */
+function contentLengthToSize(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+}
+
+/** `Content-Range: bytes 0-0/12345` → 12345. */
+function sizeFromContentRange(value: string | undefined): number | null {
+  if (!value) return null;
+  const m = /\/(\d+)\s*$/.exec(value);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/**
+ * Tamanho do objeto sem baixar o corpo. HeadObject primeiro; se o
+ * compat (Spaces) omitir ContentLength, negar HEAD, ou falhar com
+ * algo que não é 404, confirma com GetObject Range — o mesmo I/O que
+ * o GET /api/storage usa quando o stat falha e o read passa.
+ */
 export async function statStoredFile(
   orgId: string,
   bucket: StorageBucket,
@@ -209,13 +232,32 @@ export async function statStoredFile(
   const { client, bucket: bucketName } = getS3();
   try {
     const out = await client.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
-    if (typeof out.ContentLength !== "number") return null;
-    return { size: out.ContentLength };
+    const size = contentLengthToSize(out.ContentLength);
+    // Head 200 sem ContentLength ainda significa "existe" — GET /api/storage
+    // seguiria para GetObject. Não tratar como miss.
+    return { size: size ?? 0 };
   } catch (err) {
     if (isNotFound(err)) return null;
-    log.error({ err, key }, "storage-s3: falha no HeadObject");
-    countError("stat");
-    return null;
+    log.warn({ err, key }, "storage-s3: HeadObject falhou, tentando GetObject range");
+    try {
+      const ranged = await client.send(
+        new GetObjectCommand({
+          Bucket: bucketName,
+          Key: key,
+          Range: "bytes=0-0",
+        }),
+      );
+      const size =
+        sizeFromContentRange(ranged.ContentRange) ??
+        contentLengthToSize(ranged.ContentLength) ??
+        0;
+      return { size };
+    } catch (rangeErr) {
+      if (isNotFound(rangeErr)) return null;
+      log.error({ err: rangeErr, key }, "storage-s3: falha no HeadObject e no GetObject range");
+      countError("stat");
+      return null;
+    }
   }
 }
 
