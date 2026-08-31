@@ -10,12 +10,14 @@ export async function GET(_request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
       const { id } = await context.params;
+      // Access/404 antes de hidratar preview — 8× GET :id sem permissão
+      // não pode pagar o join em messages.
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
       const row = await getConversationById(id);
       if (!row) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
       }
-      const denied = await requireConversationAccess(session, row.id);
-      if (denied) return denied;
 
       return NextResponse.json(row);
     } catch (e) {

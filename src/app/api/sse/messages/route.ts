@@ -1,4 +1,5 @@
 import { auth } from "@/lib/auth";
+import { applyBrowserApiCors } from "@/lib/browser-api-cors";
 import { sseBus } from "@/lib/sse-bus";
 
 export const dynamic = "force-dynamic";
@@ -13,10 +14,16 @@ export const dynamic = "force-dynamic";
  * Corrigido junto com a inclusao de organizationId obrigatorio no envelope
  * de cada publish.
  */
-export async function GET() {
+function sseError(request: Request, body: string, status: number): Response {
+  const headers = new Headers();
+  applyBrowserApiCors(request, { headers });
+  return new Response(body, { status, headers });
+}
+
+export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user) {
-    return new Response("Não autorizado", { status: 401 });
+    return sseError(request, "Não autorizado", 401);
   }
 
   const sessionUser = session.user as {
@@ -30,7 +37,7 @@ export async function GET() {
   // Sessao sem org E sem super-admin = nao tem nada pra escutar.
   // Fail-closed: 403 explicito em vez de stream vazio silencioso.
   if (!organizationId && !isSuperAdmin) {
-    return new Response("Sem organização vinculada à sessão", { status: 403 });
+    return sseError(request, "Sem organização vinculada à sessão", 403);
   }
 
   const encoder = new TextEncoder();
@@ -46,7 +53,7 @@ export async function GET() {
         } catch {
           clearInterval(heartbeat);
         }
-      }, 30_000);
+      }, 60_000);
 
       unsubscribe = sseBus.subscribe(
         { organizationId, isSuperAdmin },
@@ -80,12 +87,13 @@ export async function GET() {
     },
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    },
+  const headers = new Headers({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
   });
+  applyBrowserApiCors(request, { headers });
+
+  return new Response(stream, { headers });
 }
