@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { processPendingDistributionQueue } from "@/services/distribution";
+import { enqueueProcessPendingOrRun } from "@/services/distribution";
 import { drainSupportQueue } from "@/services/support/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -97,7 +97,7 @@ export async function PUT(req: Request, ctx: Ctx) {
           );
           // #endregion
           try {
-            const drain = await processPendingDistributionQueue({
+            const drain = await enqueueProcessPendingOrRun({
               trigger: "agent_online",
               userId: id,
             });
@@ -111,13 +111,6 @@ export async function PUT(req: Request, ctx: Ctx) {
               }),
             );
             // #endregion
-            if (drain.resolved > 0 || drain.cancelled > 0) {
-              sseBus.publish("presence_update", {
-                organizationId: getOrgIdOrNull(),
-                userId: id,
-                status,
-              });
-            }
           } catch (e) {
             console.warn(
               "[/api/agents/[id]/status] processPendingDistributionQueue falhou:",

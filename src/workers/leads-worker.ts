@@ -7,6 +7,10 @@ import {
   getBullConnection,
 } from "@/lib/queue-connection";
 import {
+  DISTRIBUTION_DRAIN_QUEUE_NAME,
+  type DistributionDrainPayload,
+} from "@/lib/distribution-drain-queue";
+import {
   LEADS_BULK_JOB_NAMES,
   LEADS_BULK_QUEUE_NAME,
   type BulkAssignConversationsPayload,
@@ -17,6 +21,7 @@ import {
 } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 
+import { processDistributionDrainJob } from "@/jobs/distribution/process-pending.job";
 import { processBulkAssignConversations } from "@/jobs/leads/bulk-assign-conversations.job";
 import { processBulkMoveStage } from "@/jobs/leads/bulk-move-stage.job";
 import { processBulkResolveConversations } from "@/jobs/leads/bulk-resolve-conversations.job";
@@ -49,9 +54,8 @@ const log = getLogger("worker.leads");
  *   - Cada job processa seus próprios chunks sequencialmente.
  *   - O pool default de `worker-leads` (10, ver `defaultPoolMax`) cobre a
  *     concurrency 5 mais o semáforo de efeitos colaterais do
- *     bulk-move-stage. Ao subir `LEADS_BULK_CONCURRENCY`, suba também
- *     `DB_POOL_MAX` — pool menor que a demanda faz o job esperar conexão
- *     na fila interna do pg-pool e falhar por timeout.
+ *     bulk-move-stage e 1 job `distribution-drain` (concurrency 1).
+ *     Ao subir `LEADS_BULK_CONCURRENCY`, suba também `DB_POOL_MAX`.
  *
  * Retries:
  *   - Configurados no produtor (`enqueueLeadsBulk`).
@@ -202,6 +206,15 @@ export function startLeadsWorker() {
     { connection, concurrency },
   );
 
+  const drainConcurrency = envInt("DISTRIBUTION_DRAIN_CONCURRENCY", 1);
+  const drainWorker = new Worker<DistributionDrainPayload>(
+    DISTRIBUTION_DRAIN_QUEUE_NAME,
+    async (job) => {
+      await processDistributionDrainJob(job.data);
+    },
+    { connection: duplicateBullConnection(), concurrency: drainConcurrency },
+  );
+
   worker.on("completed", (job) => {
     log.info(
       {
@@ -232,13 +245,37 @@ export function startLeadsWorker() {
     log.error({ err: truncateErrorMessage(err) }, "Worker error");
   });
 
-  log.info({ concurrency, queue: LEADS_BULK_QUEUE_NAME }, "leads-worker started");
+  drainWorker.on("failed", (job, err) => {
+    log.error(
+      {
+        organizationId: job?.data.organizationId,
+        trigger: job?.data.trigger,
+        jobId: job?.id,
+        attempt: (job?.attemptsMade ?? 0) + 1,
+        err: truncateErrorMessage(err),
+      },
+      "distribution-drain falhou",
+    );
+  });
+  drainWorker.on("error", (err) => {
+    log.error({ err: truncateErrorMessage(err) }, "distribution-drain worker error");
+  });
+
+  log.info(
+    {
+      concurrency,
+      drainConcurrency,
+      queue: LEADS_BULK_QUEUE_NAME,
+      drainQueue: DISTRIBUTION_DRAIN_QUEUE_NAME,
+    },
+    "leads-worker started",
+  );
 
   // Graceful shutdown — fecha o worker e a conexão antes de matar o processo.
   const shutdown = async (signal: string) => {
     log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
     try {
-      await worker.close();
+      await Promise.all([worker.close(), drainWorker.close()]);
     } catch (err) {
       log.error({ err: truncateErrorMessage(err) }, "Erro ao fechar worker");
     }
