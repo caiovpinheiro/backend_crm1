@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-01 — Mailjet via HTTPS, não SMTP
+
+**Decisão.** Envio transacional passa a `POST https://api.mailjet.com/v3.1/send` (443, IPv4). Continua usando `SMTP_USER`/`SMTP_PASS` (API key + secret do Mailjet) e `SMTP_FROM_*`. `SMTP_HOST`/`SMTP_PORT` deixam de ser usados.
+
+**Contexto.** No container da API, `in-v3.mailjet.com:587` dá TIMEOUT; `api.mailjet.com:443` conecta. O VPS bloqueia SMTP de saída.
+
+**Alternativas descartadas.** Insistir em Nodemailer/587 (não sai). Pedir abertura de SMTP no host (mais lento, e 465/25 costumam estar fechados também). Nova env `MAILJET_*` (desnecessário: as keys SMTP do Mailjet já são as da API).
+
+**Impacto.** `src/lib/mail/transport.ts`. Deploy precisa de **rebuild**. Nodemailer fica no package.json, sem uso neste fluxo.
+
+---
+
 ### 2026-09-01 — SMTP lido em runtime (sem inlining do Next)
 
 **Decisão.** Mail e `secrets` env-provider passam a ler env via `globalThis.process.env[name]`. Nomes SMTP são montados com `join` pra o webpack não substituir `process.env.SMTP_HOST` por `undefined` no `next build`.

@@ -20,7 +20,7 @@ async function trySend(
     return { sent: true };
   } catch (err) {
     if (err instanceof MailNotConfiguredError) {
-      log.warn("SMTP_HOST ausente — e-mail transacional não enviado");
+      log.warn("SMTP_USER/SMTP_PASS ausentes — e-mail transacional não enviado");
       return { sent: false, reason: "not_configured" };
     }
     log.error({ err }, "Envio de e-mail transacional falhou");
