@@ -57,9 +57,9 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-# Workers compilados (campaign-worker.js, campaigns-worker.js, leads-worker.js).
-# Esses arquivos são executados com `node dist/workers/<name>.js` quando
-# APP_MODE=worker-whatsapp ou APP_MODE=worker-leads no docker-entrypoint.sh.
+# Workers compilados (campaign-worker.js, campaigns-worker.js, leads-worker.js,
+# distribution-worker.js, …). Executados com `node dist/workers/<name>.js`
+# conforme APP_MODE no docker-entrypoint.sh.
 COPY --from=builder /app/dist/workers ./dist/workers
 # Scripts de manutencao/seed rodados manualmente no console do container
 # (ex.: `node scripts/seed-consultores-eduit.mjs`). Nao entram no runtime

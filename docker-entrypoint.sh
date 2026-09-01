@@ -126,7 +126,9 @@ fi
 #                         e sweeps de campanha travada / recipients stale
 # - worker-leads        → worker BullMQ que consome leads-bulk
 #                         (operações em massa de Deals com BulkOperation tracking)
-#                         e distribution-drain (processPending da fila de espera)
+#                         e ainda distribution-drain (Phase A; Phase C remove)
+# - worker-distribution → worker BullMQ que consome distribution-drain
+#                         (processPending da fila de espera da Distribuição)
 # - worker-etl          → worker BullMQ que consome import-etl
 # - worker-automation   → worker BullMQ que consome automation-jobs (Salesbot/automações)
 #
@@ -153,6 +155,10 @@ case "$APP_MODE" in
     echo "[entrypoint] starting Leads worker..."
     exec node dist/workers/leads-worker.js
     ;;
+  worker-distribution)
+    echo "[entrypoint] starting Distribution drain worker..."
+    exec node dist/workers/distribution-worker.js
+    ;;
   worker-etl)
     echo "[entrypoint] starting ETL worker (import-etl)..."
     exec node dist/workers/etl-worker.js
@@ -167,7 +173,7 @@ case "$APP_MODE" in
     ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
+    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-distribution | worker-etl | worker-automation | worker-meta-webhook"
     exit 1
     ;;
 esac

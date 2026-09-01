@@ -125,6 +125,8 @@ const entries = [
   "src/workers/campaigns-worker.ts",
   // Leads (Deals) — worker novo.
   "src/workers/leads-worker.ts",
+  // Distribuição — drena `distribution-drain` (processPending).
+  "src/workers/distribution-worker.ts",
   // ETL — importação de contatos via arquivo (CSV/XLSX).
   "src/workers/etl-worker.ts",
   // Automações / Salesbot — consome a fila `automation-jobs`.

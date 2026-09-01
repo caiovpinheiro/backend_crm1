@@ -7,7 +7,7 @@ import {
 import { fruitlessCooldownRedisKey } from "@/services/distribution/pending-drain-store";
 
 describe("distribution drain queue", () => {
-  it("uses a stable queue name consumed by worker-leads", () => {
+  it("uses a stable queue name consumed by worker-distribution", () => {
     expect(DISTRIBUTION_DRAIN_QUEUE_NAME).toBe("distribution-drain");
   });
 
