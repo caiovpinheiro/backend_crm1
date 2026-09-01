@@ -109,32 +109,40 @@ async function main() {
   // ─── 1. Usuários de teste (upsert por email) ────────────────────────────
   const userIdByEmail = new Map<string, string>();
   for (const u of TEST_USERS) {
-    const user = await prisma.user.upsert({
-      where: { email: u.email },
-      update: {
-        name: u.name,
-        role: u.role,
-        organizationId: EDUIT_ORG_ID,
-        type: "HUMAN",
-        isSuperAdmin: false,
-        isErased: false,
-        phone: u.phone ?? null,
-        signature: u.signature ?? null,
-        hashedPassword,
-      },
-      create: {
-        email: u.email,
-        name: u.name,
-        role: u.role,
-        organizationId: EDUIT_ORG_ID,
-        type: "HUMAN",
-        isSuperAdmin: false,
-        phone: u.phone ?? null,
-        signature: u.signature ?? null,
-        hashedPassword,
-      },
-      select: { id: true, email: true, role: true },
+    const existingUser = await prisma.user.findFirst({
+      where: { email: u.email, organizationId: EDUIT_ORG_ID },
+      select: { id: true },
     });
+    const user = existingUser
+      ? await prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            name: u.name,
+            role: u.role,
+            organizationId: EDUIT_ORG_ID,
+            type: "HUMAN",
+            isSuperAdmin: false,
+            isErased: false,
+            phone: u.phone ?? null,
+            signature: u.signature ?? null,
+            hashedPassword,
+          },
+          select: { id: true, email: true, role: true },
+        })
+      : await prisma.user.create({
+          data: {
+            email: u.email,
+            name: u.name,
+            role: u.role,
+            organizationId: EDUIT_ORG_ID,
+            type: "HUMAN",
+            isSuperAdmin: false,
+            phone: u.phone ?? null,
+            signature: u.signature ?? null,
+            hashedPassword,
+          },
+          select: { id: true, email: true, role: true },
+        });
     userIdByEmail.set(u.email, user.id);
 
     // Vincula ao preset Role correspondente (UserRoleAssignment). Sem isto o

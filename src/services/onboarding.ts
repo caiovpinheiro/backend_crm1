@@ -141,11 +141,11 @@ export async function createAdminFromInvite(
     throw new Error("A senha precisa ter pelo menos 8 caracteres.");
   }
 
-  const existing = await prismaBase.user.findUnique({
-    where: { email },
+  const existing = await prismaBase.user.findFirst({
+    where: { email, organizationId: organization.id },
     select: { id: true },
   });
-  if (existing) throw new Error("Já existe uma conta com este email.");
+  if (existing) throw new Error("Já existe uma conta com este email nesta organização.");
 
   const hashedPassword = await hash(password, 12);
 
@@ -389,8 +389,8 @@ export async function signupOrganizationWithAdmin(input: {
       where: { slug },
       select: { id: true },
     }),
-    prismaBase.user.findUnique({
-      where: { email: adminEmail },
+    prismaBase.user.findFirst({
+      where: { email: adminEmail, isSuperAdmin: true, organizationId: null },
       select: { id: true },
     }),
   ]);
@@ -492,11 +492,11 @@ export async function acceptMemberInvite(input: {
     throw new Error("A senha precisa ter pelo menos 8 caracteres.");
   }
   const email = invite.email.toLowerCase();
-  const existing = await prismaBase.user.findUnique({
-    where: { email },
+  const existing = await prismaBase.user.findFirst({
+    where: { email, organizationId: organization.id },
     select: { id: true },
   });
-  if (existing) throw new Error("Já existe uma conta com este email.");
+  if (existing) throw new Error("Já existe uma conta com este email nesta organização.");
 
   const hashedPassword = await hash(input.password, 12);
   const result = await prismaBase.$transaction(async (tx) => {

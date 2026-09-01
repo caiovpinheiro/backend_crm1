@@ -202,34 +202,10 @@ export async function PUT(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
       }
       if (isP2002(e)) {
-        // User.email eh @unique global — colisao pode ser cross-org.
-        // Mesmo raciocinio do POST: mensagem que diferencia ajuda o admin
-        // a entender por que o email "esta em uso" se ele nao consegue ver.
-        if (data.email) {
-          const existing = await prisma.user.findFirst({
-            where: { email: data.email, id: { not: id } },
-            select: {
-              organizationId: true,
-              organization: { select: { name: true } },
-            },
-          });
-          if (
-            existing &&
-            existing.organizationId &&
-            existing.organizationId !== r.session.user.organizationId
-          ) {
-            const orgName = existing.organization?.name;
-            return NextResponse.json(
-              {
-                message: orgName
-                  ? `E-mail já em uso em outra organização ("${orgName}").`
-                  : "E-mail já em uso em outra organização.",
-              },
-              { status: 409 },
-            );
-          }
-        }
-        return NextResponse.json({ message: "E-mail já em uso." }, { status: 409 });
+        return NextResponse.json(
+          { message: "E-mail já em uso nesta organização." },
+          { status: 409 },
+        );
       }
       throw e;
     }

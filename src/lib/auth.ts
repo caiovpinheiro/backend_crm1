@@ -46,6 +46,7 @@ const nextAuth = NextAuth({
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Senha", type: "password" },
+        organizationSlug: { label: "Org", type: "text" },
         // MFA: o cliente pode enviar `mfaCode` (TOTP de 6 digitos) ou
         // `backupCode` (16 chars com hifens). Se a conta tem MFA
         // habilitado e nada disso veio, throw MfaRequired pra UI
@@ -68,12 +69,16 @@ const nextAuth = NextAuth({
           throw new AccountLocked();
         }
 
+        const organizationSlugHint = String(
+          credentials.organizationSlug ?? "",
+        )
+          .trim()
+          .toLowerCase();
+
         let user;
         try {
-          user = await prisma.user.findUnique({
-            where: { email },
-            // `select` explícito: evita P2022 se o BD estiver atrás do schema
-            // (ex.: coluna `chatTheme` ainda sem migration aplicada).
+          const candidates = await prisma.user.findMany({
+            where: { email, type: { not: "AI" }, isErased: false },
             select: {
               id: true,
               name: true,
@@ -86,8 +91,19 @@ const nextAuth = NextAuth({
               isSuperAdmin: true,
               mfaSecret: true,
               mfaEnabledAt: true,
+              organization: { select: { slug: true } },
             },
           });
+          if (organizationSlugHint) {
+            user =
+              candidates.find((u) => u.organization?.slug === organizationSlugHint) ??
+              null;
+          } else if (candidates.length === 1) {
+            user = candidates[0];
+          } else {
+            user =
+              candidates.find((u) => u.isSuperAdmin && !u.organizationId) ?? null;
+          }
         } catch (err) {
           console.error("[auth] authorize: database error", err);
           await recordLoginAttempt({ email, outcome: "db_error" });
