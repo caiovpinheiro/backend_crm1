@@ -17,12 +17,8 @@ const log = getLogger("worker.distribution");
 /**
  * Worker BullMQ dedicado à fila `distribution-drain`.
  *
- * Consome o mesmo handler do worker-leads (`processDistributionDrainJob` →
- * `processPendingDistributionQueue` via `withSystemContext`).
- *
- * Phase A: worker-leads ainda consome esta fila para o DEV assignment
- * não parar se este container ainda não estiver no ar. Phase C remove
- * o consumidor de lá.
+ * Consome `processDistributionDrainJob` → `processPendingDistributionQueue`
+ * via `withSystemContext`. Único consumidor de `distribution-drain`.
  */
 
 function envInt(name: string, defaultValue: number): number {

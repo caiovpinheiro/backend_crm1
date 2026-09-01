@@ -157,8 +157,8 @@ services:
 
   worker-distribution:
     <<: *backend
-    # Drain da fila de espera (processPending). Phase A: worker-leads
-    # ainda consome a mesma fila até o Phase C isolar.
+    # Drain da fila de espera (processPending). Único consumidor de
+    # distribution-drain — worker-leads só faz leads-bulk.
     cpus: 0.3
     mem_limit: 512m
     environment:

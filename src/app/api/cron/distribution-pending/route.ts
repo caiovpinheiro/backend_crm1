@@ -2,7 +2,7 @@
  * GET /api/cron/distribution-pending
  *
  * Job de segurança: enfileira drenagem da fila "Aguardando distribuição"
- * (`worker-distribution` / `worker-leads` consomem `distribution-drain`).
+ * (`worker-distribution` consome `distribution-drain`).
  * Não roda o scan na API.
  *
  * Cobre o 1º tick pós-deploy e passagens que ainda atribuem. Depois de

@@ -2,9 +2,8 @@
  * Fila BullMQ `distribution-drain`.
  *
  * A API (`APP_MODE=api`) só enfileira "capacidade liberada" / cron / online.
- * O `worker-distribution` (e, na Phase A, o `worker-leads`) drena
- * `processPendingDistributionQueue` — tira o scan pesado do processo
- * HTTP do inbox.
+ * O `worker-distribution` drena `processPendingDistributionQueue` —
+ * tira o scan pesado do processo HTTP do inbox.
  *
  * Arquivo separado de `lib/queue.ts` de propósito (meta-attach / outbound
  * têm PRs irmãos).
@@ -58,7 +57,7 @@ export function getDistributionDrainQueue(): Queue<DistributionDrainPayload> | n
 }
 
 /**
- * Enfileira drenagem no `worker-distribution` (e `worker-leads` na Phase A).
+ * Enfileira drenagem no `worker-distribution`.
  *
  * - `added` / `exists`: caller NÃO deve rodar processPending in-process.
  * - `null`: Redis/fila indisponível — caller faz fallback síncrono.
