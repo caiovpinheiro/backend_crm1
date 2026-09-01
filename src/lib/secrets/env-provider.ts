@@ -1,4 +1,5 @@
 import type { SecretsProvider } from "./types";
+import { runtimeEnv } from "@/lib/runtime-env";
 
 /**
  * Provider que le secrets diretamente de `process.env`.
@@ -6,16 +7,16 @@ import type { SecretsProvider } from "./types";
  * Default em todos os deploys hoje (PR 3.3). Zero overhead, zero I/O,
  * zero rede. Compatibilidade total com .env / EasyPanel / Docker
  * Swarm secrets injetados como env vars.
+ *
+ * Usa `runtimeEnv` (não `process.env.KEY` estático) pra o Next não
+ * congelar `undefined` no bundle quando a chave só existe no EasyPanel.
  */
 export function createEnvProvider(): SecretsProvider {
   return {
     name: "env",
 
     get(key) {
-      const v = process.env[key];
-      if (v === undefined) return undefined;
-      const trimmed = v.trim();
-      return trimmed.length === 0 ? undefined : trimmed;
+      return runtimeEnv(key);
     },
 
     async prefetch() {

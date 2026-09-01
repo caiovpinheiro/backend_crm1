@@ -2,12 +2,17 @@ import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 
 import { getLogger } from "@/lib/logger";
-import { secrets } from "@/lib/secrets";
+import { runtimeEnv } from "@/lib/runtime-env";
 
 const log = getLogger("mail");
 
 const DEFAULT_FROM_EMAIL = "no-reply@bwipo.com";
 const DEFAULT_FROM_NAME = "Bwipo";
+
+/** Nomes montados em runtime — o bundler não consegue inlinear `undefined`. */
+function smtpKey(part: "HOST" | "PORT" | "USER" | "PASS" | "FROM" | "FROM_EMAIL" | "FROM_NAME"): string {
+  return ["SMTP", part].join("_");
+}
 
 export class MailNotConfiguredError extends Error {
   constructor() {
@@ -16,7 +21,7 @@ export class MailNotConfiguredError extends Error {
   }
 }
 
-let cached: Transporter | null | undefined;
+let cached: Transporter | undefined;
 
 function intPort(raw: string | undefined, fallback: number): number {
   const n = Number.parseInt(String(raw ?? ""), 10);
@@ -24,9 +29,9 @@ function intPort(raw: string | undefined, fallback: number): number {
 }
 
 export function resolveFromAddress(): { address: string; name: string } {
-  const namedEmail = secrets.optional("SMTP_FROM_EMAIL")?.trim();
-  const namedName = secrets.optional("SMTP_FROM_NAME")?.trim();
-  const combined = secrets.optional("SMTP_FROM")?.trim();
+  const namedEmail = runtimeEnv(smtpKey("FROM_EMAIL"));
+  const namedName = runtimeEnv(smtpKey("FROM_NAME"));
+  const combined = runtimeEnv(smtpKey("FROM"));
   if (namedEmail) {
     return { address: namedEmail, name: namedName || DEFAULT_FROM_NAME };
   }
@@ -44,15 +49,22 @@ export function resolveFromAddress(): { address: string; name: string } {
 }
 
 export function getMailTransporter(): Transporter | null {
-  if (cached !== undefined) return cached;
-  const host = secrets.optional("SMTP_HOST")?.trim();
+  if (cached) return cached;
+  const host = runtimeEnv(smtpKey("HOST"));
   if (!host) {
-    cached = null;
+    log.warn(
+      {
+        smtpHost: false,
+        smtpUser: Boolean(runtimeEnv(smtpKey("USER"))),
+        smtpFromEmail: Boolean(runtimeEnv(smtpKey("FROM_EMAIL"))),
+      },
+      "SMTP_HOST ausente — e-mail transacional não enviado",
+    );
     return null;
   }
-  const port = intPort(secrets.optional("SMTP_PORT"), 587);
-  const user = secrets.optional("SMTP_USER")?.trim();
-  const pass = secrets.optional("SMTP_PASS");
+  const port = intPort(runtimeEnv(smtpKey("PORT")), 587);
+  const user = runtimeEnv(smtpKey("USER"));
+  const pass = runtimeEnv(smtpKey("PASS"));
   cached = nodemailer.createTransport({
     host,
     port,
