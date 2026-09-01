@@ -1,6 +1,6 @@
 name: crm1
 
-# Base compartilhada pelos 7 processos do backend. Todos usam a mesma
+# Base compartilhada pelos processos do backend. Todos usam a mesma
 # imagem e se diferenciam por APP_MODE, igual ao EasyPanel.
 x-backend: &backend
   image: ${BACKEND_IMAGE:-ghcr.io/caiovpinheiro/backend_crm1:latest}
@@ -151,6 +151,18 @@ services:
     mem_limit: 768m
     environment:
       APP_MODE: worker-leads
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker-distribution:
+    <<: *backend
+    # Drain da fila de espera (processPending). Phase A: worker-leads
+    # ainda consome a mesma fila até o Phase C isolar.
+    cpus: 0.3
+    mem_limit: 512m
+    environment:
+      APP_MODE: worker-distribution
     depends_on:
       api:
         condition: service_healthy

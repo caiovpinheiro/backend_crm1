@@ -206,6 +206,9 @@ export function startLeadsWorker() {
     { connection, concurrency },
   );
 
+  // Phase A: keep consuming `distribution-drain` so DEV assignment
+  // continues if `APP_MODE=worker-distribution` is not up yet.
+  // Phase C will remove this consumer (dedicated worker only).
   const drainConcurrency = envInt("DISTRIBUTION_DRAIN_CONCURRENCY", 1);
   const drainWorker = new Worker<DistributionDrainPayload>(
     DISTRIBUTION_DRAIN_QUEUE_NAME,

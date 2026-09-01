@@ -8,7 +8,7 @@
  * elegibilidade, capacidade liberada, botão manual; cron só se a última
  * passagem não foi vazia).
  * Na API o scan não roda in-process: `enqueueProcessPendingOrRun`
- * empurra `distribution-drain` e o `worker-leads` drena. Fallback
+ * empurra `distribution-drain` e o worker drena. Fallback
  * síncrono só se Redis estiver down.
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
  * elegível abre a fila dos seus depts; o reprocesso manual/cron também
@@ -1472,8 +1472,9 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
 }
 
 /**
- * Enfileira drenagem no `worker-leads`. Só roda `processPending` neste
- * processo se Redis/fila estiver down (dev ou outage).
+ * Enfileira drenagem no `worker-distribution` (e `worker-leads` na
+ * Phase A). Só roda `processPending` neste processo se Redis/fila
+ * estiver down (dev ou outage).
  */
 export async function enqueueProcessPendingOrRun(opts: {
   trigger: PendingQueueTrigger;

@@ -43,10 +43,10 @@ function appMode(): string {
  * job inteiro.
  *
  * - api: 20 (inbox/pipeline/board sob carga). processPending saiu deste
- *   processo (`distribution-drain` no worker-leads). Não baixar o default
- *   para 10: inbox/board ainda compartilham este pool e um COUNT/lista
- *   concorrente com write de mensagem estoura se o teto for o da
- *   demanda média. Override via DB_POOL_MAX depois de medir ociosidade.
+ *   processo (`distribution-drain` no worker-leads / worker-distribution).
+ *   Não baixar o default para 10: inbox/board ainda compartilham este
+ *   pool e um COUNT/lista concorrente com write de mensagem estoura se
+ *   o teto for o da demanda média. Override via DB_POOL_MAX.
  * - api-public: 10 (Bearer/n8n — pool próprio; saturar aqui não drena o da inbox)
  * - worker-whatsapp: 8 (inbox Meta: meta-attach remux + meta-outbound +
  *   sweepers de sessão; sem rodízio de campanha)
@@ -58,14 +58,15 @@ function appMode(): string {
  *   paralelo ao job e não são contabilizadas pela concurrency)
  * - worker-leads: 10 (concurrency 5 + semáforo de efeitos colaterais do
  *   bulk-move-stage, limitado a 3 em voo por processo, + 1
- *   distribution-drain em série + folga)
+ *   distribution-drain em série + folga; Phase C tira o drain daqui)
+ * - worker-distribution: 4 (concurrency 1 no drain; honor DB_POOL_MAX)
  * - worker-automation: 6 (concurrency 4 + folga p/ enqueue/log)
  * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas
  *   por linha)
  *
- * Soma dos defaults com 1 réplica de cada: 20 + 10 + 8 + 16 + 16 + 10 + 6 + 4 = 90,
+ * Soma dos defaults com 1 réplica de cada: 20 + 10 + 8 + 16 + 16 + 10 + 4 + 6 + 4 = 94,
  * contra ~197 conexões disponíveis no Postgres gerenciado (4 vCPU/8 GB).
- * Sobram ~115 para réplicas, migrations e sessões de manutenção.
+ * Sobram ~103 para réplicas, migrations e sessões de manutenção.
  */
 function defaultPoolMax(): number {
   const mode = appMode();
@@ -75,6 +76,7 @@ function defaultPoolMax(): number {
   if (mode === "worker-campaigns") return 16;
   if (mode === "worker-meta-webhook") return 16;
   if (mode === "worker-leads") return 10;
+  if (mode === "worker-distribution") return 4;
   if (mode === "worker-automation") return 6;
   return 4;
 }

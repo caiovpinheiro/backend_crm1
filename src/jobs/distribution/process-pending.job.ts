@@ -6,8 +6,8 @@ import { processPendingDistributionQueue } from "@/services/distribution/pending
 const log = getLogger("jobs.distribution.process-pending");
 
 /**
- * Consome `distribution-drain`. Corre no `worker-leads` (mesmo Redis +
- * `withSystemContext` dos jobs de leads-bulk).
+ * Consome `distribution-drain`. Corre no `worker-distribution` e, na
+ * Phase A, também no `worker-leads` (mesmo Redis + `withSystemContext`).
  */
 export async function processDistributionDrainJob(
   payload: DistributionDrainPayload,
