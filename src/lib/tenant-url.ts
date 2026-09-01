@@ -64,3 +64,23 @@ export function buildTenantUrl(slug: string): string {
 export function tenantUrl(slug: string): string {
   return buildTenantUrl(slug);
 }
+
+/**
+ * Primeiro label de `{slug}.{TENANT_BASE_DOMAIN}`. Apex, www e hosts
+ * sem subdomínio de org devolvem null.
+ */
+export function slugFromRequestHost(hostHeader: string | null | undefined): string | null {
+  const hostname = String(hostHeader ?? "")
+    .trim()
+    .toLowerCase()
+    .split(":")[0]
+    ?.replace(/\.$/, "");
+  if (!hostname) return null;
+  const base = getTenantBaseDomain();
+  if (hostname === base || hostname === `www.${base}`) return null;
+  if (!hostname.endsWith(`.${base}`)) return null;
+  const slug = hostname.slice(0, -(base.length + 1));
+  if (!slug || slug.includes(".")) return null;
+  if (slug === "www" || slug === "api" || slug === "app") return null;
+  return slug;
+}

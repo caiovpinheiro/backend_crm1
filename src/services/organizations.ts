@@ -1,8 +1,8 @@
 import { OrgStatus, Prisma, UserRole } from "@prisma/client";
-import crypto from "node:crypto";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { logAudit } from "@/lib/audit/log";
+import { issueOrganizationInvite } from "@/services/invites";
 
 /**
  * Serviço global (super-admin only) de organizações. Usa `prismaBase`
@@ -91,8 +91,16 @@ export async function getOrganizationById(id: string) {
         orderBy: { createdAt: "asc" },
       },
       invites: {
-        where: { acceptedAt: null, expiresAt: { gt: new Date() } },
+        where: { acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
         orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          token: true,
+          expiresAt: true,
+          createdAt: true,
+        },
       },
       _count: {
         select: {
@@ -132,36 +140,6 @@ export async function createInviteForOrganization(params: {
   email: string;
   role: UserRole;
   createdById: string;
-}): Promise<{ token: string; expiresAt: Date; email: string }> {
-  const email = params.email.trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    throw new Error("Email inválido.");
-  }
-
-  const token = crypto.randomBytes(32).toString("base64url");
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  const inv = await prismaBase.organizationInvite.create({
-    data: {
-      organizationId: params.organizationId,
-      email,
-      role: params.role,
-      token,
-      expiresAt,
-      createdById: params.createdById,
-    },
-  });
-  await logAudit({
-    entity: "organization",
-    action: "invite_create",
-    entityId: inv.id,
-    organizationId: params.organizationId,
-    actorId: params.createdById,
-    after: {
-      id: inv.id,
-      email: inv.email,
-      role: inv.role,
-      expiresAt: inv.expiresAt,
-    },
-  });
-  return { token: inv.token, expiresAt: inv.expiresAt, email: inv.email };
+}): Promise<{ id: string; token: string; expiresAt: Date; email: string; sent: boolean }> {
+  return issueOrganizationInvite(params);
 }

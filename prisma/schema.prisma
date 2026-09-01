@@ -450,10 +450,25 @@ model OrganizationInvite {
   /// Quando ADMIN, o convite abre o wizard completo `/onboarding`. Quando
   /// MANAGER/MEMBER, abre só `/accept-invite` (criar user + entrar no app).
   role           UserRole     @default(ADMIN)
-  token          String       @unique
+  /// Legado: convites antigos guardavam o token em plaintext. Novos
+  /// gravam só `tokenHash` (`token` fica null). Lookup: hash primeiro,
+  /// fallback `token` se `tokenHash` for null.
+  token          String?      @unique
+  tokenHash      String?      @unique
+  /// Nome sugerido no aceite (Equipe). O convidado ainda pode editar.
+  inviteeName    String?
+  /// Role customizada a aplicar no aceite (`PUT primary-role`). Null =
+  /// só o preset em `role`.
+  pendingRoleId  String?
+  /// Overrides CRM (`editLeads` / `runAutomations` / `assignOwner`) a
+  /// gravar em scopeGrants no aceite. Null = default permissivo.
+  pendingCrmActions Json?
   expiresAt      DateTime
+  /// Aceite real somente. Reenvio NÃO preenche isto — usa `revokedAt`.
   acceptedAt     DateTime?
   acceptedById   String?
+  /// Token anterior invalidado (reenvio / revogação). Distinto de aceite.
+  revokedAt      DateTime?
   createdById    String?
   createdAt      DateTime     @default(now())
 
@@ -514,6 +529,11 @@ model User {
   mfaSecret    String?
   mfaEnabledAt DateTime?
 
+  /// Posse do e-mail confirmada (código/token). Null = ainda não
+  /// verificou. Signup do primeiro ADMIN nasce null; usuários já
+  /// existentes foram backfillados na migration (não são forçados).
+  emailVerifiedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -549,6 +569,8 @@ model User {
   preferences                    UserPreference?
   mfaBackupCodes                 UserMfaBackupCode[]
   loginAttempts                  LoginAttempt[]
+  passwordResetTokens            PasswordResetToken[]
+  emailVerificationTokens        EmailVerificationToken[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
   departmentMemberships          DepartmentMember[]
@@ -586,6 +608,37 @@ model User {
   @@unique([organizationId, email])
   @@unique([organizationId, number])
   @@map("users")
+}
+
+/// Reset de senha (esqueci a senha). Token URL só existe em plaintext
+/// no e-mail; o banco guarda SHA-256. Single-use (`usedAt`).
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@map("password_reset_tokens")
+}
+
+/// Confirmação de posse do e-mail no signup (código de 6 dígitos
+/// hasheado). Single-use. Usuários grandfathered não passam por isto.
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, codeHash])
+  @@map("email_verification_tokens")
 }
 
 /// Codigos de backup de MFA (PR 4.1). Cada codigo e gerado uma vez,
