@@ -41,22 +41,27 @@ export async function GET(request: Request) {
     ];
   }
 
-  const [products, total] = await Promise.all([
-    prisma.product.findMany({
-      where,
-      orderBy: { name: "asc" },
-      skip: (page - 1) * perPage,
-      take: perPage,
-      include: {
-        courseConfig: {
-          select: { level: true, mode: true, semester: true },
+  try {
+    const [products, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        orderBy: { name: "asc" },
+        skip: (page - 1) * perPage,
+        take: perPage,
+        include: {
+          courseConfig: {
+            select: { level: true, mode: true, semester: true },
+          },
         },
-      },
-    }),
-    prisma.product.count({ where }),
-  ]);
+      }),
+      prisma.product.count({ where }),
+    ]);
 
-  return NextResponse.json({ products, total, page, perPage });
+    return NextResponse.json({ products, total, page, perPage });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Erro ao listar produtos.";
+    return NextResponse.json({ message }, { status: 500 });
+  }
   });
 }
 
@@ -120,38 +125,63 @@ export async function POST(request: Request) {
     catalogId = catalog.id;
   }
 
-  const product = await prisma.product.create({
-    data: withOrgFromCtx({
-      name,
-      description: typeof body.description === "string" ? body.description.trim() || null : null,
-      sku: typeof body.sku === "string" && body.sku.trim() ? body.sku.trim() : null,
-      price: Number(body.price) || 0,
-      unit:
-        kind === "SERVICE"
-          ? "serviço"
-          : kind === "COURSE"
-            ? "matrícula"
-            : typeof body.unit === "string" && body.unit.trim()
-              ? body.unit.trim()
-              : "un",
-      type,
-      kind,
-      catalogId,
-      isActive: body.isActive !== false,
-      trackStock,
-      stock: trackStock ? Math.max(0, Number(body.stock) || 0) : 0,
-    }),
-  });
-
-  if (kind === "COURSE") {
-    await prisma.courseConfig.create({
+  try {
+    const product = await prisma.product.create({
       data: withOrgFromCtx({
-        productId: product.id,
-        mode: courseMode,
+        name,
+        description: typeof body.description === "string" ? body.description.trim() || null : null,
+        sku: typeof body.sku === "string" && body.sku.trim() ? body.sku.trim() : null,
+        price: Number(body.price) || 0,
+        unit:
+          kind === "SERVICE"
+            ? "serviço"
+            : kind === "COURSE"
+              ? "matrícula"
+              : typeof body.unit === "string" && body.unit.trim()
+                ? body.unit.trim()
+                : "un",
+        type,
+        kind,
+        catalogId,
+        isActive: body.isActive !== false,
+        trackStock,
+        stock: trackStock ? Math.max(0, Number(body.stock) || 0) : 0,
       }),
     });
-  }
 
-  return NextResponse.json({ product }, { status: 201 });
+    if (kind === "COURSE") {
+      await prisma.courseConfig.create({
+        data: withOrgFromCtx({
+          productId: product.id,
+          mode: courseMode,
+        }),
+      });
+    }
+
+    return NextResponse.json({ product }, { status: 201 });
+  } catch (e) {
+    const code =
+      e && typeof e === "object" && "code" in e
+        ? String((e as { code: unknown }).code)
+        : "";
+    const target = e && typeof e === "object" && "meta" in e
+      ? (e as { meta?: { target?: string[] | string } }).meta?.target
+      : undefined;
+    const targetText = Array.isArray(target) ? target.join(",") : String(target ?? "");
+    if (code === "P2002" && targetText.includes("sku")) {
+      return NextResponse.json(
+        { message: "Já existe um produto com este SKU." },
+        { status: 409 },
+      );
+    }
+    if (code === "P2002") {
+      return NextResponse.json(
+        { message: "Violação de unicidade ao criar produto." },
+        { status: 409 },
+      );
+    }
+    const message = e instanceof Error ? e.message : "Erro ao criar produto.";
+    return NextResponse.json({ message }, { status: 500 });
+  }
   });
 }
