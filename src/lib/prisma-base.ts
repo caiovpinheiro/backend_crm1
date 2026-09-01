@@ -42,7 +42,11 @@ function appMode(): string {
  * "timeout exceeded when trying to connect" — que no worker vira retry do
  * job inteiro.
  *
- * - api: 20 (inbox/pipeline/board sob carga)
+ * - api: 20 (inbox/pipeline/board sob carga). processPending saiu deste
+ *   processo (`distribution-drain` no worker-leads). Não baixar o default
+ *   para 10: inbox/board ainda compartilham este pool e um COUNT/lista
+ *   concorrente com write de mensagem estoura se o teto for o da
+ *   demanda média. Override via DB_POOL_MAX depois de medir ociosidade.
  * - api-public: 10 (Bearer/n8n — pool próprio; saturar aqui não drena o da inbox)
  * - worker-whatsapp: 8 (inbox Meta: meta-attach remux + meta-outbound +
  *   sweepers de sessão; sem rodízio de campanha)
@@ -53,7 +57,8 @@ function appMode(): string {
  *   status/inbound dispara IIFEs `void (async () => ...)` que rodam em
  *   paralelo ao job e não são contabilizadas pela concurrency)
  * - worker-leads: 10 (concurrency 5 + semáforo de efeitos colaterais do
- *   bulk-move-stage, limitado a 3 em voo por processo, + folga)
+ *   bulk-move-stage, limitado a 3 em voo por processo, + 1
+ *   distribution-drain em série + folga)
  * - worker-automation: 6 (concurrency 4 + folga p/ enqueue/log)
  * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas
  *   por linha)

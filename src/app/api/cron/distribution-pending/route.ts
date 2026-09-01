@@ -1,8 +1,8 @@
 /**
  * GET /api/cron/distribution-pending
  *
- * Job de segurança: drena a fila "Aguardando distribuição" de todas as
- * organizações com o widget `smart_distribution` ativo.
+ * Job de segurança: enfileira drenagem da fila "Aguardando distribuição"
+ * (worker-leads consome `distribution-drain`). Não roda o scan na API.
  *
  * Cobre o 1º tick pós-deploy e passagens que ainda atribuem. Depois de
  * uma passagem vazia o cron devolve `{skipped:true,reason:cooldown}`
@@ -22,8 +22,8 @@ import { NextResponse } from "next/server";
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
 import {
-  isFruitlessCooldownActive,
-  processPendingDistributionQueue,
+  enqueueProcessPendingOrRun,
+  isFruitlessCooldownActiveAsync,
 } from "@/services/distribution";
 
 export const dynamic = "force-dynamic";
@@ -66,7 +66,7 @@ export async function GET(request: Request) {
     let skippedCooldown = 0;
 
     for (const { organizationId } of orgs) {
-      if (isFruitlessCooldownActive(organizationId)) {
+      if (await isFruitlessCooldownActiveAsync(organizationId)) {
         skippedCooldown += 1;
         continue;
       }
@@ -82,7 +82,7 @@ export async function GET(request: Request) {
               sublabel: "cron:distribution-pending",
             },
           },
-          () => processPendingDistributionQueue({ trigger: "scheduled" }),
+          () => enqueueProcessPendingOrRun({ trigger: "scheduled" }),
         );
         if (drain.skipReason === "COOLDOWN") {
           skippedCooldown += 1;

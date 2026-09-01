@@ -126,6 +126,7 @@ fi
 #                         e sweeps de campanha travada / recipients stale
 # - worker-leads        → worker BullMQ que consome leads-bulk
 #                         (operações em massa de Deals com BulkOperation tracking)
+#                         e distribution-drain (processPending da fila de espera)
 # - worker-etl          → worker BullMQ que consome import-etl
 # - worker-automation   → worker BullMQ que consome automation-jobs (Salesbot/automações)
 #

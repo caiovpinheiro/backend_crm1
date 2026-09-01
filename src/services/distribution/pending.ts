@@ -7,6 +7,9 @@
  * `processPendingDistributionQueue` (gatilhos: novo item, agente online,
  * elegibilidade, capacidade liberada, botão manual; cron só se a última
  * passagem não foi vazia).
+ * Na API o scan não roda in-process: `enqueueProcessPendingOrRun`
+ * empurra `distribution-drain` e o `worker-leads` drena. Fallback
+ * síncrono só se Redis estiver down.
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
  * elegível abre a fila dos seus depts; o reprocesso manual/cron também
  * tenta os depts que já têm gente na espera — o motor decide se o
@@ -18,6 +21,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { enqueueDistributionDrain } from "@/lib/distribution-drain-queue";
 import { debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
@@ -49,6 +53,11 @@ import {
   shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "./pending-drain-guard";
+import {
+  clearPublishedFruitlessCooldown,
+  peekPublishedFruitlessCooldown,
+  publishFruitlessCooldown,
+} from "./pending-drain-store";
 import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
@@ -383,24 +392,43 @@ function cancelCapacityReleasedRetry(state: DrainState) {
   state.queuedUserId = null;
 }
 
-function armFruitlessCooldown(state: DrainState, reason: string) {
+function armFruitlessCooldown(
+  state: DrainState,
+  reason: string,
+  orgId: string,
+) {
   state.cooldownUntil = Date.now() + CAPACITY_RELEASED_COOLDOWN_MS;
   state.cooldownReason = reason;
   state.cooldownSkipLogged = false;
   // Sem timer para o fim da janela — outbound não reabre scan sozinho.
   cancelCapacityReleasedRetry(state);
+  void publishFruitlessCooldown(orgId, reason).catch((e) => {
+    console.warn("[distribution] publish fruitless cooldown failed", e);
+  });
 }
 
-function clearFruitlessCooldown(state: DrainState) {
+function clearFruitlessCooldown(state: DrainState, orgId?: string) {
   state.cooldownUntil = 0;
   state.cooldownReason = null;
   state.cooldownSkipLogged = false;
+  if (!orgId) return;
+  void clearPublishedFruitlessCooldown(orgId).catch((e) => {
+    console.warn("[distribution] clear fruitless cooldown failed", e);
+  });
 }
 
 /** Peek in-memory — cron usa pra devolver 200 sem scan. Sem org no mapa = 1ª passagem. */
 export function isFruitlessCooldownActive(orgId: string): boolean {
   const s = drainState.get(orgId);
   return s != null && fruitlessCooldownIsArmed(s.cooldownReason);
+}
+
+/** Cron na API: memória local OU flag Redis armada pelo worker. */
+export async function isFruitlessCooldownActiveAsync(
+  orgId: string,
+): Promise<boolean> {
+  if (isFruitlessCooldownActive(orgId)) return true;
+  return peekPublishedFruitlessCooldown(orgId);
 }
 
 function logCooldownSkip(
@@ -1005,7 +1033,7 @@ export async function processPendingDistributionQueue(opts: {
 
   const state = getDrainState(orgId);
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
-    clearFruitlessCooldown(state);
+    clearFruitlessCooldown(state, orgId);
   } else if (
     shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
     shouldSkipScheduledFruitlessCooldown(
@@ -1123,7 +1151,7 @@ export async function processPendingDistributionQueue(opts: {
           cancelledOrphans,
         }),
       );
-      armFruitlessCooldown(state, "NO_ELIGIBLE_RESPONSIBLE");
+      armFruitlessCooldown(state, "NO_ELIGIBLE_RESPONSIBLE", orgId);
       return {
         resolved: 0,
         cancelled: cancelledOrphans,
@@ -1153,7 +1181,7 @@ export async function processPendingDistributionQueue(opts: {
             pending,
           }),
         );
-        armFruitlessCooldown(state, "USER_NOT_ELIGIBLE");
+        armFruitlessCooldown(state, "USER_NOT_ELIGIBLE", orgId);
         return {
           resolved: 0,
           cancelled: cancelledOrphans,
@@ -1367,9 +1395,9 @@ export async function processPendingDistributionQueue(opts: {
     }
 
     if (fruitlessPassNeedsCooldown({ resolved, pending })) {
-      armFruitlessCooldown(state, skipReason ?? "NO_ASSIGN");
+      armFruitlessCooldown(state, skipReason ?? "NO_ASSIGN", orgId);
     } else {
-      clearFruitlessCooldown(state);
+      clearFruitlessCooldown(state, orgId);
     }
 
     if (
@@ -1440,7 +1468,82 @@ export async function processPendingDistributionQueue(opts: {
  * Compat: botão "Reprocessar agora" e callers legados.
  */
 export async function retryPendingDistributions(): Promise<RetryResult> {
-  return processPendingDistributionQueue({ trigger: "manual" });
+  return enqueueProcessPendingOrRun({ trigger: "manual" });
+}
+
+/**
+ * Enfileira drenagem no `worker-leads`. Só roda `processPending` neste
+ * processo se Redis/fila estiver down (dev ou outage).
+ */
+export async function enqueueProcessPendingOrRun(opts: {
+  trigger: PendingQueueTrigger;
+  userId?: string | null;
+}): Promise<RetryResult> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) {
+    return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
+  }
+
+  const state = getDrainState(orgId);
+  if (triggerClearsFruitlessCooldown(opts.trigger)) {
+    clearFruitlessCooldown(state);
+  } else if (
+    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
+    shouldSkipScheduledFruitlessCooldown(
+      opts.trigger,
+      fruitlessCooldownIsArmed(state.cooldownReason) ||
+        (await peekPublishedFruitlessCooldown(orgId)),
+    )
+  ) {
+    logCooldownSkip(orgId, state, opts.trigger, "schedule");
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending: 0,
+      trigger: opts.trigger,
+      skipReason: "COOLDOWN",
+      skipMessage:
+        "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
+    };
+  }
+
+  const queued = await enqueueDistributionDrain({
+    organizationId: orgId,
+    trigger: opts.trigger,
+    userId: opts.userId ?? null,
+  });
+  if (queued) {
+    let pending = 0;
+    if (opts.trigger === "manual" || opts.trigger === "scheduled") {
+      try {
+        pending = await prisma.conversation.count({
+          where: await getWaitingQueueWhere(),
+        });
+      } catch {
+        /* toast / cron ainda funcionam com pending=0 */
+      }
+    }
+    console.info(
+      "[distribution] drain enqueued",
+      JSON.stringify({
+        orgId,
+        trigger: opts.trigger,
+        userId: opts.userId ?? null,
+        pending,
+      }),
+    );
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending,
+      trigger: opts.trigger,
+      skipReason: "QUEUED",
+      skipMessage:
+        "Reprocesso enfileirado — a fila será drenada em instantes.",
+    };
+  }
+
+  return processPendingDistributionQueue(opts);
 }
 
 /**
@@ -1510,7 +1613,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
           sublabel: `queue:${trigger}`,
         },
       },
-      () => processPendingDistributionQueue({ trigger, userId }),
+      () => enqueueProcessPendingOrRun({ trigger, userId }),
     ).catch((e) => {
       console.error(
         "[distribution] scheduleProcessPendingDistributionQueue failed",
