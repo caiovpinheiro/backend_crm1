@@ -75,6 +75,11 @@ const SENSITIVE_KEYS = new Set(
     "authorization",
     "cookie",
     "set-cookie",
+    "smtp_user",
+    "smtp_pass",
+    "smtpuser",
+    "smtppass",
+    "smtp_from",
   ].map((k) => k.toLowerCase()),
 );
 

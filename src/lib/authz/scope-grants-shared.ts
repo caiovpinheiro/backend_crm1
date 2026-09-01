@@ -309,6 +309,29 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
   };
 }
 
+/** Merge imutável dos overrides CRM de um usuário (aceite de convite). */
+export function mergeCrmActionGrantsForUser(
+  scopeGrants: unknown,
+  userId: string,
+  grants: Partial<Record<CrmActionKey, boolean>>,
+): ScopeGrants {
+  const current = parseScopeGrants(scopeGrants);
+  const currentCrm: CrmActionGrants = { ...(current.crm ?? {}) };
+  for (const action of CRM_ACTION_KEYS) {
+    const value = grants[action];
+    if (value === undefined) continue;
+    const currentAction = currentCrm[action] ?? {};
+    currentCrm[action] = {
+      ...currentAction,
+      users: {
+        ...(currentAction.users ?? {}),
+        [userId]: value,
+      },
+    };
+  }
+  return { ...current, crm: currentCrm };
+}
+
 /**
  * Lê o override por usuário para uma ação do CRM. Retorna `true | false`
  * (override explícito) ou `null` (sem override — segue a regra do RBAC).

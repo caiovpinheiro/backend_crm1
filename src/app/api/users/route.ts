@@ -144,6 +144,7 @@ export async function POST(request: Request) {
             role: validRole,
             number: await nextUserNumber(orgId, tx),
             organization: { connect: { id: orgId } },
+            emailVerifiedAt: new Date(),
           },
           select: { id: true, name: true, email: true, role: true },
         });

@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-01 — E-mail transacional, convite hashed, verificação no signup
+
+**Decisão.** Nodemailer + SMTP (Mailjet) para convite, reset de senha, verificação de posse no signup do primeiro ADMIN e welcome após aceite. `OrganizationInvite.token` ficou nullable; novos convites gravam só `tokenHash`. Reenvio revoga o token anterior (`revokedAt` + `expiresAt=now`) e emite outro — `acceptedAt` só no aceite real. Usuários já existentes recebem `emailVerifiedAt = createdAt` na migration e não são forçados a verificar.
+
+**Contexto.** O plano de e-mail transacional foi aprovado com três ajustes: prova de posse no signup (não só welcome), convites sem plaintext, e resend sem marcar aceite.
+
+**Alternativas descartadas.** Welcome sem código no signup. Invalidar convite anterior com `acceptedAt`. Trocar NextAuth Credentials.
+
+**Impacto.** Schema (`emailVerifiedAt`, `PasswordResetToken`, `EmailVerificationToken`, invite hash/revoke/pending role/CRM). APIs públicas de forgot/reset/verify e `/api/invites/validate`. Equipe passa a convidar por e-mail; `POST /api/users` com senha permanece.
+
+---
+
 ### 2026-08-31 — tenant-lookup devolve lista de orgs
 
 **Decisão.** `POST /api/auth/tenant-lookup` passa a usar `findMany` e devolver `orgs[]` + `displayName`. 1 org ACTIVE ainda manda `slug` (clientes antigos e users atuais iguais). 2+ orgs mandam a lista sem `slug`. Super-admin sem org e 404 genérico não mudam. `User.email` continua `@unique` — nenhum login existente quebra.

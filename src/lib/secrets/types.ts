@@ -43,6 +43,8 @@ export type SecretKey =
   | "SMTP_USER"
   | "SMTP_PASS"
   | "SMTP_FROM"
+  | "SMTP_FROM_EMAIL"
+  | "SMTP_FROM_NAME"
   // ── AI ───────────────────────────────────────────────────
   | "OPENAI_API_KEY"
   | "ANTHROPIC_API_KEY"

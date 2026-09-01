@@ -38,6 +38,11 @@ class MfaInvalid extends CredentialsSignin {
   code = "mfa_invalid";
 }
 
+/** Signup recente: e-mail ainda não confirmado. */
+class EmailUnverified extends CredentialsSignin {
+  code = "email_unverified";
+}
+
 const nextAuth = NextAuth({
   ...authConfig,
   providers: [
@@ -91,6 +96,7 @@ const nextAuth = NextAuth({
               isSuperAdmin: true,
               mfaSecret: true,
               mfaEnabledAt: true,
+              emailVerifiedAt: true,
               organization: { select: { slug: true } },
             },
           });
@@ -146,6 +152,14 @@ const nextAuth = NextAuth({
             outcome: "bad_password",
           });
           return null;
+        }
+
+        if (
+          !user.isSuperAdmin &&
+          user.type === "HUMAN" &&
+          !user.emailVerifiedAt
+        ) {
+          throw new EmailUnverified();
         }
 
         // PR 4.1: MFA enforcement. Se o user habilitou MFA, exige

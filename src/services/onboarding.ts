@@ -1,6 +1,5 @@
 import { UserRole } from "@prisma/client";
 import { hash } from "bcryptjs";
-import crypto from "node:crypto";
 
 import {
   ensureSystemPresetRoles,
@@ -16,6 +15,12 @@ import {
 } from "@/lib/onboarding-templates";
 import { buildTenantUrl } from "@/lib/tenant-url";
 import { slugify } from "@/lib/utils";
+import { issueEmailVerification } from "@/services/email-verification";
+import {
+  acceptInvite,
+  issueOrganizationInvite,
+  loadInviteByRawToken,
+} from "@/services/invites";
 
 /**
  * Logica do wizard de onboarding. Opera com `prismaBase` porque:
@@ -51,21 +56,7 @@ export type InviteLookup = {
 };
 
 async function loadInvite(token: string): Promise<InviteLookup> {
-  if (!token || typeof token !== "string") {
-    throw new Error("Token ausente.");
-  }
-  const invite = await prismaBase.organizationInvite.findUnique({
-    where: { token },
-    include: { organization: true },
-  });
-  if (!invite) throw new Error("Convite inválido.");
-  if (invite.acceptedAt) throw new Error("Convite já utilizado.");
-  if (invite.expiresAt.getTime() < Date.now()) {
-    throw new Error("Convite expirado.");
-  }
-  if (invite.organization.status !== "ACTIVE") {
-    throw new Error("Organização inativa.");
-  }
+  const invite = await loadInviteByRawToken(token);
   return {
     invite: {
       id: invite.id,
@@ -126,49 +117,20 @@ export async function createAdminFromInvite(
   if (invite.role !== UserRole.ADMIN) {
     throw new Error("Este convite não é pra admin inicial.");
   }
-
-  const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
-  const password = input.password;
-  if (name.length < 2) throw new Error("Informe um nome válido.");
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    throw new Error("Email inválido.");
-  }
   if (invite.email.toLowerCase() !== email) {
     throw new Error("Use o mesmo email do convite.");
   }
-  if (password.length < 8) {
-    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
-  }
-
-  const existing = await prismaBase.user.findFirst({
-    where: { email, organizationId: organization.id },
-    select: { id: true },
+  const accepted = await acceptInvite({
+    token,
+    name: input.name,
+    password: input.password,
   });
-  if (existing) throw new Error("Já existe uma conta com este email nesta organização.");
-
-  const hashedPassword = await hash(password, 12);
-
-  const result = await prismaBase.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        name,
-        email,
-        hashedPassword,
-        role: UserRole.ADMIN,
-        organizationId: organization.id,
-        number: await nextUserNumber(organization.id, tx),
-      },
-      select: { id: true },
-    });
-    await tx.organizationInvite.update({
-      where: { id: invite.id },
-      data: { acceptedAt: new Date(), acceptedById: user.id },
-    });
-    return user;
-  });
-
-  return { userId: result.id, organizationId: organization.id, email };
+  return {
+    userId: accepted.userId,
+    organizationId: organization.id,
+    email: accepted.email,
+  };
 }
 
 export async function updateBranding(
@@ -297,33 +259,26 @@ export async function inviteTeamMembers(
   organizationId: string,
   createdById: string,
   members: { email: string; role: UserRole }[],
-): Promise<{ created: number; tokens: string[] }> {
-  const validated: { email: string; role: UserRole; token: string; expiresAt: Date }[] = [];
+): Promise<{ created: number; emails: string[] }> {
+  const emails: string[] = [];
   for (const m of members) {
     const email = m.email.trim().toLowerCase();
     if (!email) continue;
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) continue;
-    if (m.role === UserRole.ADMIN) continue; // wizard so convida MANAGER/MEMBER
-    validated.push({
-      email,
-      role: m.role,
-      token: crypto.randomBytes(32).toString("base64url"),
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
+    if (m.role === UserRole.ADMIN) continue;
+    try {
+      await issueOrganizationInvite({
+        organizationId,
+        email,
+        role: m.role,
+        createdById,
+      });
+      emails.push(email);
+    } catch {
+      // E-mail já na org ou inválido — segue os demais.
+    }
   }
-  if (!validated.length) return { created: 0, tokens: [] };
-
-  await prismaBase.organizationInvite.createMany({
-    data: validated.map((v) => ({
-      organizationId,
-      email: v.email,
-      role: v.role,
-      token: v.token,
-      expiresAt: v.expiresAt,
-      createdById,
-    })),
-  });
-  return { created: validated.length, tokens: validated.map((v) => v.token) };
+  return { created: emails.length, emails };
 }
 
 export async function completeOnboarding(organizationId: string): Promise<void> {
@@ -337,11 +292,8 @@ export async function completeOnboarding(organizationId: string): Promise<void> 
  * Signup self-service (sem convite). Cria Organization + User(ADMIN)
  * numa unica transacao. Chamado pelo endpoint publico POST /api/signup.
  *
- * O user criado vira ADMIN da org e NAO super-admin. `createdById` da
- * org e preenchido com o id do user recem criado (self-created).
- *
- * Depois desse call, o caller deve dar signIn() client-side pra iniciar
- * a session e continuar o wizard nos passos 3-6.
+ * O user nasce com `emailVerifiedAt` null. O caller deve mandar o
+ * admin confirmar o código no e-mail antes do login.
  */
 export async function signupOrganizationWithAdmin(input: {
   organizationName: string;
@@ -357,6 +309,8 @@ export async function signupOrganizationWithAdmin(input: {
   tenantUrl: string;
   userId: string;
   email: string;
+  emailVerificationRequired: true;
+  emailSent: boolean;
 }> {
   const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
@@ -454,6 +408,12 @@ export async function signupOrganizationWithAdmin(input: {
       metadata: { source: "registration" },
     });
 
+    const verify = await issueEmailVerification({
+      userId: result.user.id,
+      email: adminEmail,
+      organizationName,
+    });
+
     return {
       organizationId: result.org.id,
       organizationSlug: result.org.slug,
@@ -461,6 +421,8 @@ export async function signupOrganizationWithAdmin(input: {
       tenantUrl: buildTenantUrl(result.org.slug),
       userId: result.user.id,
       email: adminEmail,
+      emailVerificationRequired: true as const,
+      emailSent: verify.sent,
     };
   } catch (e) {
     if (
@@ -481,50 +443,6 @@ export async function acceptMemberInvite(input: {
   token: string;
   name: string;
   password: string;
-}): Promise<{ userId: string; email: string }> {
-  const { invite, organization } = await loadInvite(input.token);
-  if (invite.role === UserRole.ADMIN) {
-    throw new Error("Use o link de onboarding para admin inicial.");
-  }
-  const name = input.name.trim();
-  if (name.length < 2) throw new Error("Informe um nome válido.");
-  if (input.password.length < 8) {
-    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
-  }
-  const email = invite.email.toLowerCase();
-  const existing = await prismaBase.user.findFirst({
-    where: { email, organizationId: organization.id },
-    select: { id: true },
-  });
-  if (existing) throw new Error("Já existe uma conta com este email nesta organização.");
-
-  const hashedPassword = await hash(input.password, 12);
-  const result = await prismaBase.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        name,
-        email,
-        hashedPassword,
-        role: invite.role,
-        organizationId: organization.id,
-        number: await nextUserNumber(organization.id, tx),
-      },
-      select: { id: true },
-    });
-    await tx.organizationInvite.update({
-      where: { id: invite.id },
-      data: { acceptedAt: new Date(), acceptedById: user.id },
-    });
-    return user;
-  });
-  await logAudit({
-    entity: "organization",
-    action: "invite_accept",
-    entityId: invite.id,
-    organizationId: organization.id,
-    actorId: result.id,
-    actorEmail: email,
-    after: { userId: result.id, role: invite.role },
-  });
-  return { userId: result.id, email };
+}): Promise<{ userId: string; email: string; organizationSlug: string }> {
+  return acceptInvite(input);
 }

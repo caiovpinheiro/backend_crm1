@@ -1,4 +1,3 @@
-import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { parseScopeGrants, type ScopeGrants } from "@/lib/authz/scope-grants-shared";
@@ -23,6 +22,7 @@ export {
   INBOX_TAB_BAR_ORDER,
   parseScopeGrants,
   readCrmActionGrant,
+  mergeCrmActionGrantsForUser,
   CRM_ACTION_KEYS,
 } from "@/lib/authz/scope-grants-shared";
 
@@ -45,9 +45,18 @@ export async function getScopeGrants(organizationIdArg?: string | null): Promise
 
 export async function setScopeGrants(grants: ScopeGrants): Promise<void> {
   const organizationId = getOrgIdOrThrow();
-  await prisma.organizationSetting.upsert({
+  await setScopeGrantsForOrg(organizationId, grants);
+}
+
+/** Persistência sem RequestContext (aceite de convite público). */
+export async function setScopeGrantsForOrg(
+  organizationId: string,
+  grants: ScopeGrants,
+): Promise<void> {
+  const value = JSON.stringify(parseScopeGrants(grants));
+  await prismaBase.organizationSetting.upsert({
     where: { organizationId_key: { organizationId, key: SETTINGS_KEY } },
-    create: { organizationId, key: SETTINGS_KEY, value: JSON.stringify(parseScopeGrants(grants)) },
-    update: { value: JSON.stringify(parseScopeGrants(grants)) },
+    create: { organizationId, key: SETTINGS_KEY, value },
+    update: { value },
   });
 }
