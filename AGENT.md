@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-01 — SMTP lido em runtime (sem inlining do Next)
+
+**Decisão.** Mail e `secrets` env-provider passam a ler env via `globalThis.process.env[name]`. Nomes SMTP são montados com `join` pra o webpack não substituir `process.env.SMTP_HOST` por `undefined` no `next build`.
+
+**Contexto.** EasyPanel tinha as vars no painel; o log da API era `SMTP_HOST ausente`. O `Ready in 360ms` foi restart da imagem antiga, buildada sem SMTP — o Next tinha congelado vazio no bundle (mesmo padrão do `NEXTAUTH_URL` em 2026-05-14).
+
+**Alternativas descartadas.** Listar SMTP em `next.config env` (pior: congela no build). Exigir rebuild só com a var no build-arg.
+
+**Impacto.** `src/lib/runtime-env.ts`, `env-provider.ts`, `mail/transport.ts`. Deploy precisa de **rebuild** da imagem, não só restart.
+
+---
+
 ### 2026-09-01 — E-mail transacional, convite hashed, verificação no signup
 
 **Decisão.** Nodemailer + SMTP (Mailjet) para convite, reset de senha, verificação de posse no signup do primeiro ADMIN e welcome após aceite. `OrganizationInvite.token` ficou nullable; novos convites gravam só `tokenHash`. Reenvio revoga o token anterior (`revokedAt` + `expiresAt=now`) e emite outro — `acceptedAt` só no aceite real. Usuários já existentes recebem `emailVerifiedAt = createdAt` na migration e não são forçados a verificar.
