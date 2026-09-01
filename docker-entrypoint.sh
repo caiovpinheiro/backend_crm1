@@ -126,7 +126,6 @@ fi
 #                         e sweeps de campanha travada / recipients stale
 # - worker-leads        → worker BullMQ que consome leads-bulk
 #                         (operações em massa de Deals com BulkOperation tracking)
-#                         e ainda distribution-drain (Phase A; Phase C remove)
 # - worker-distribution → worker BullMQ que consome distribution-drain
 #                         (processPending da fila de espera da Distribuição)
 # - worker-etl          → worker BullMQ que consome import-etl
@@ -134,6 +133,11 @@ fi
 #
 # Workers são compilados via esbuild (npm run build:workers) e copiados para
 # /app/dist/workers no Dockerfile runner stage. Executar com `node` direto.
+case "$APP_MODE" in
+  worker-*)
+    echo "[entrypoint] worker sem HTTP — EasyPanel: desligar Tempo de inatividade zero (senão SIGTERM em ~2–4s)."
+    ;;
+esac
 case "$APP_MODE" in
   api)
     echo "[entrypoint] starting Next.js standalone server..."
