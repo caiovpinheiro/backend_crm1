@@ -470,10 +470,8 @@ model OrganizationInvite {
 model User {
   id             String   @id @default(cuid())
   name           String
-  /// Email globalmente único — evita ambiguidade no login (um email
-  /// pertence a uma única org). Se um operador precisar estar em várias
-  /// orgs, usa emails diferentes (ex.: `fulano+clienteA@empresa.com`).
-  email          String   @unique
+  /// Único por organização. O mesmo e-mail pode existir em orgs diferentes.
+  email          String
   /// Senha com hash. Opcional porque usuários com `type = AI` não fazem login.
   hashedPassword String?
   /// Distingue operadores humanos de agentes de IA. Agentes IA são tratados
@@ -584,6 +582,8 @@ model User {
   @@index([organizationId, role])
   @@index([organizationId, type])
   @@index([isSuperAdmin])
+  @@index([email])
+  @@unique([organizationId, email])
   @@unique([organizationId, number])
   @@map("users")
 }

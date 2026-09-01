@@ -42,23 +42,28 @@ async function main() {
   });
   console.log("Organização criada/atualizada:", org.name);
 
-  const admin = await prisma.user.upsert({
-    where: { email: adminEmail },
-    update: {
-      organizationId: EDUIT_ORG_ID,
-      isSuperAdmin: true,
-      // Sem isto, um segundo `db:seed` nunca corrige senha — típico em dev local.
-      ...(passwordFromEnv ? { hashedPassword } : {}),
-    },
-    create: {
-      name: "Admin EduIT",
-      email: adminEmail,
-      hashedPassword,
-      role: "ADMIN",
-      organizationId: EDUIT_ORG_ID,
-      isSuperAdmin: true,
-    },
+  const existingAdmin = await prisma.user.findFirst({
+    where: { email: adminEmail, organizationId: EDUIT_ORG_ID },
   });
+  const admin = existingAdmin
+    ? await prisma.user.update({
+        where: { id: existingAdmin.id },
+        data: {
+          organizationId: EDUIT_ORG_ID,
+          isSuperAdmin: true,
+          ...(passwordFromEnv ? { hashedPassword } : {}),
+        },
+      })
+    : await prisma.user.create({
+        data: {
+          name: "Admin EduIT",
+          email: adminEmail,
+          hashedPassword,
+          role: "ADMIN",
+          organizationId: EDUIT_ORG_ID,
+          isSuperAdmin: true,
+        },
+      });
   console.log("Usuário super-admin criado:", admin.email);
   if (passwordFromEnv) {
     console.log("  ✓ Senha do admin definida/atualizada a partir de SEED_ADMIN_PASSWORD.");

@@ -249,7 +249,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
 
   let email = baseEmail;
   for (let attempt = 0; attempt < 20; attempt++) {
-    const exists = await prisma.user.findUnique({ where: { email } });
+    const exists = await prisma.user.findFirst({ where: { email } });
     if (!exists) break;
     email = `${safeSlug}-${Math.random().toString(36).slice(2, 6)}@ai.local`;
   }

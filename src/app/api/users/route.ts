@@ -159,35 +159,10 @@ export async function POST(request: Request) {
     } catch (e: unknown) {
       const prismaErr = e as { code?: string };
       if (prismaErr.code === "P2002") {
-        // Como User.email eh @unique GLOBAL, o duplicate pode estar em
-        // OUTRA org (signup publico antigo, conta esquecida, etc) — caso
-        // em que a UI de Equipe nao consegue ver/excluir o registro.
-        // Diferenciamos pra mensagem dar o caminho de saida em vez de
-        // virar misterio. User nao esta em SCOPED_MODELS, entao essa
-        // query roda cross-tenant sem precisar de prismaBase.
-        const existing = await prisma.user.findFirst({
-          where: { email: normalizedEmail },
-          select: {
-            organizationId: true,
-            organization: { select: { name: true } },
-          },
-        });
-        if (
-          existing &&
-          existing.organizationId &&
-          existing.organizationId !== orgId
-        ) {
-          const orgName = existing.organization?.name;
-          return NextResponse.json(
-            {
-              message: orgName
-                ? `E-mail já cadastrado em outra organização ("${orgName}"). Peça ao usuário para sair da outra ou contate o suporte.`
-                : "E-mail já cadastrado em outra organização. Contate o suporte para liberar o convite.",
-            },
-            { status: 409 },
-          );
-        }
-        return NextResponse.json({ message: "E-mail já cadastrado." }, { status: 409 });
+        return NextResponse.json(
+          { message: "E-mail já cadastrado nesta organização." },
+          { status: 409 },
+        );
       }
       throw e;
     }

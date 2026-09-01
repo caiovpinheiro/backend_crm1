@@ -4,10 +4,15 @@ import { getClientIp, withRateLimit } from "@/lib/rate-limit";
 import { prismaBase } from "@/lib/prisma-base";
 
 /**
- * Identifica a org do e-mail no login do apex (bwipo.com) para
+ * Identifica a(s) org(s) do e-mail no login do apex (bwipo.com) para
  * redirecionar a senha para `{slug}.bwipo.com`.
  *
- * Não revela se o e-mail existe além de ok/404 genérico.
+ * 0 orgs → 404 genérico (não enumerar).
+ * 1 org ACTIVE → `slug` (fluxo atual; front redireciona direto).
+ * 2+ orgs → `orgs[]` sem `slug` (front mostra o seletor).
+ * Super-admin sem org → `apex: true`.
+ *
+ * Não muda unicidade de e-mail: users existentes continuam 0 ou 1 hit.
  * POST /api/auth/tenant-lookup  { email }
  */
 
@@ -38,38 +43,80 @@ export async function POST(request: Request) {
     );
   }
 
-  const user = await prismaBase.user.findUnique({
-    where: { email },
+  const users = await prismaBase.user.findMany({
+    where: { email, type: { not: "AI" } },
     select: {
-      type: true,
+      name: true,
       isSuperAdmin: true,
-      organization: { select: { slug: true, status: true } },
+      organization: { select: { slug: true, name: true, status: true } },
     },
   });
 
-  if (!user || user.type === "AI") {
+  if (users.length === 0) {
     return NextResponse.json(
       { ok: false as const },
       { status: 404, headers: rl.headers },
     );
   }
 
-  if (user.isSuperAdmin && !user.organization) {
+  const orgs = users
+    .filter((u) => u.organization)
+    .map((u) => ({
+      slug: u.organization!.slug,
+      name: u.organization!.name,
+      status: u.organization!.status,
+    }));
+  const displayName = users[0]?.name ?? null;
+  const apexOnly =
+    orgs.length === 0 && users.some((u) => u.isSuperAdmin && !u.organization);
+
+  if (apexOnly) {
     return NextResponse.json(
-      { ok: true as const, slug: null, apex: true as const },
+      {
+        ok: true as const,
+        slug: null,
+        apex: true as const,
+        orgs: [] as const,
+        displayName,
+      },
       { status: 200, headers: rl.headers },
     );
   }
 
-  if (!user.organization || user.organization.status !== "ACTIVE") {
+  if (orgs.length === 1) {
+    if (orgs[0].status !== "ACTIVE") {
+      return NextResponse.json(
+        { ok: false as const },
+        { status: 404, headers: rl.headers },
+      );
+    }
     return NextResponse.json(
-      { ok: false as const },
-      { status: 404, headers: rl.headers },
+      {
+        ok: true as const,
+        slug: orgs[0].slug,
+        apex: false as const,
+        orgs,
+        displayName,
+      },
+      { status: 200, headers: rl.headers },
+    );
+  }
+
+  if (orgs.length > 1) {
+    return NextResponse.json(
+      {
+        ok: true as const,
+        slug: null,
+        apex: false as const,
+        orgs,
+        displayName,
+      },
+      { status: 200, headers: rl.headers },
     );
   }
 
   return NextResponse.json(
-    { ok: true as const, slug: user.organization.slug, apex: false as const },
-    { status: 200, headers: rl.headers },
+    { ok: false as const },
+    { status: 404, headers: rl.headers },
   );
 }

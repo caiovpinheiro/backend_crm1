@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-31 — tenant-lookup devolve lista de orgs
+
+**Decisão.** `POST /api/auth/tenant-lookup` passa a usar `findMany` e devolver `orgs[]` + `displayName`. 1 org ACTIVE ainda manda `slug` (clientes antigos e users atuais iguais). 2+ orgs mandam a lista sem `slug`. Super-admin sem org e 404 genérico não mudam. `User.email` continua `@unique` — nenhum login existente quebra.
+
+**Contexto.** Preparar o seletor visual no apex sem soltar a unicidade global (authorize e criação de user ainda assumem um e-mail).
+
+**Alternativas descartadas.** Trocar a unique agora (quebraria `findUnique({ email })` em dezenas de pontos). Membership.
+
+**Impacto.** Só esta rota. Front novo ignora `orgs` vazio e segue `slug`.
+
+---
+
 ### 2026-08-31 — Bearer só em api-public + 240 rpm/org
 
 **Decisão.** Token `eduit_…` válido em produção só é aceito quando `APP_MODE=api-public`. Na API privada (`APP_MODE=api`) devolve 401 `bearer_requires_public_api` apontando `API_PUBLIC_BASE_URL` (default `https://integrations.bwipo.com`). Teto Bearer por org: 240 req/min (`TOKEN_ORG_RATE_LIMIT_RPM`), bucket Redis `org:{id}:rpm:token`. Sessão/inbox inalteradas (`api.session` 600/user; `ORG_RATE_LIMIT_RPM` 400 não vale para Bearer).
