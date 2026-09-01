@@ -64,6 +64,7 @@ import IORedis, { type Redis as IORedisClient } from "ioredis";
 
 import { getLogger } from "@/lib/logger";
 import { metrics, safeLabel } from "@/lib/metrics";
+import { isRedisWritable, waitForRedisWritable } from "@/lib/redis-ready";
 
 const log = getLogger("cache");
 
@@ -145,7 +146,7 @@ function noteFailure(err: unknown, key: string, op: string): void {
   }
 }
 
-function getClient(): IORedisClient | null {
+function ensureClient(): IORedisClient | null {
   if (redisDisabled) return null;
   if (circuitIsOpen()) {
     if (Date.now() - lastCircuitLogAt > 5_000) {
@@ -201,6 +202,27 @@ function getClient(): IORedisClient | null {
     redisDisabled = true;
     return null;
   }
+}
+
+/**
+ * Cliente só quando o socket já aceita comando. Com
+ * `enableOfflineQueue: false`, GET/SET em `connecting` vira
+ * "Stream isn't writeable" e o circuit abre no boot do worker.
+ */
+function getClient(): IORedisClient | null {
+  const client = ensureClient();
+  if (!client) return null;
+  if (!isRedisWritable(client)) return null;
+  return client;
+}
+
+/** Workers: espera o Redis do cache ficar ready antes do 1º job. */
+export async function waitUntilCacheReady(
+  timeoutMs = 8_000,
+): Promise<boolean> {
+  const client = ensureClient();
+  if (!client) return false;
+  return waitForRedisWritable(client, timeoutMs);
 }
 
 function encode(value: unknown): string | null {
@@ -521,6 +543,7 @@ export const cache = {
   delPattern,
   wrap,
   tryClaim,
+  waitUntilReady: waitUntilCacheReady,
 };
 
 /**

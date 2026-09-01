@@ -1,5 +1,7 @@
 import IORedis, { type RedisOptions } from "ioredis";
 
+import { waitForRedisWritable } from "@/lib/redis-ready";
+
 /**
  * Conexão IORedis compartilhada para os novos workers/queues BullMQ.
  *
@@ -88,4 +90,12 @@ export async function closeBullConnection(): Promise<void> {
  */
 export function isRedisConfigured(): boolean {
   return Boolean(REDIS_URL);
+}
+
+/** Espera o singleton BullMQ ficar `ready` (handshake TCP). */
+export async function waitUntilBullReady(
+  timeoutMs = 8_000,
+): Promise<boolean> {
+  if (!REDIS_URL) return false;
+  return waitForRedisWritable(getBullConnection(), timeoutMs);
 }

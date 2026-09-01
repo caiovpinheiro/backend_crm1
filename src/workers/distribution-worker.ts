@@ -1,10 +1,12 @@
 import { Worker } from "bullmq";
 
+import { waitUntilCacheReady } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
 import {
   duplicateBullConnection,
-  getBullConnection,
+  waitUntilBullReady,
 } from "@/lib/queue-connection";
+import { waitForRedisWritable } from "@/lib/redis-ready";
 import {
   DISTRIBUTION_DRAIN_QUEUE_NAME,
   type DistributionDrainPayload,
@@ -28,10 +30,26 @@ function envInt(name: string, defaultValue: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
 }
 
-export function startDistributionWorker() {
+export async function startDistributionWorker() {
   const concurrency = envInt("DISTRIBUTION_DRAIN_CONCURRENCY", 1);
   const connection = duplicateBullConnection();
-  getBullConnection();
+
+  const REDIS_WAIT_MS = 8_000;
+  const [bullOk, workerConnOk, cacheOk] = await Promise.all([
+    waitUntilBullReady(REDIS_WAIT_MS),
+    waitForRedisWritable(connection, REDIS_WAIT_MS),
+    waitUntilCacheReady(REDIS_WAIT_MS),
+  ]);
+  if (!bullOk || !workerConnOk || !cacheOk) {
+    log.warn(
+      {
+        bullReady: bullOk,
+        workerConnReady: workerConnOk,
+        cacheReady: cacheOk,
+      },
+      "redis ainda não ready — Worker sobe; cache/cooldown usam fallback até o socket gravar",
+    );
+  }
 
   const worker = new Worker<DistributionDrainPayload>(
     DISTRIBUTION_DRAIN_QUEUE_NAME,
@@ -70,7 +88,11 @@ export function startDistributionWorker() {
   });
 
   log.info(
-    { concurrency, queue: DISTRIBUTION_DRAIN_QUEUE_NAME },
+    {
+      concurrency,
+      queue: DISTRIBUTION_DRAIN_QUEUE_NAME,
+      redisReady: bullOk && workerConnOk && cacheOk,
+    },
     "distribution-worker started",
   );
 
@@ -91,5 +113,8 @@ export function startDistributionWorker() {
 }
 
 if (require.main === module) {
-  startDistributionWorker();
+  void startDistributionWorker().catch((err) => {
+    log.error({ err: truncateErrorMessage(err) }, "distribution-worker falhou ao iniciar");
+    process.exit(1);
+  });
 }
