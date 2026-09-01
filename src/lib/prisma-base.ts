@@ -43,7 +43,7 @@ function appMode(): string {
  * job inteiro.
  *
  * - api: 20 (inbox/pipeline/board sob carga). processPending saiu deste
- *   processo (`distribution-drain` no worker-leads / worker-distribution).
+ *   processo (`distribution-drain` no worker-distribution).
  *   Não baixar o default para 10: inbox/board ainda compartilham este
  *   pool e um COUNT/lista concorrente com write de mensagem estoura se
  *   o teto for o da demanda média. Override via DB_POOL_MAX.
@@ -57,8 +57,7 @@ function appMode(): string {
  *   status/inbound dispara IIFEs `void (async () => ...)` que rodam em
  *   paralelo ao job e não são contabilizadas pela concurrency)
  * - worker-leads: 10 (concurrency 5 + semáforo de efeitos colaterais do
- *   bulk-move-stage, limitado a 3 em voo por processo, + 1
- *   distribution-drain em série + folga; Phase C tira o drain daqui)
+ *   bulk-move-stage, limitado a 3 em voo por processo + folga)
  * - worker-distribution: 4 (concurrency 1 no drain; honor DB_POOL_MAX)
  * - worker-automation: 6 (concurrency 4 + folga p/ enqueue/log)
  * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas

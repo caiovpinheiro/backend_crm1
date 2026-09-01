@@ -1472,9 +1472,8 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
 }
 
 /**
- * Enfileira drenagem no `worker-distribution` (e `worker-leads` na
- * Phase A). Só roda `processPending` neste processo se Redis/fila
- * estiver down (dev ou outage).
+ * Enfileira drenagem no `worker-distribution`. Só roda `processPending`
+ * neste processo se Redis/fila estiver down (dev ou outage).
  */
 export async function enqueueProcessPendingOrRun(opts: {
   trigger: PendingQueueTrigger;
