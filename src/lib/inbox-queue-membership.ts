@@ -42,7 +42,7 @@ export function withActiveInboxQueueGuard(
  *
  * Deal GANHO/PERDIDO com conversa ainda OPEN **não** entra aqui.
  */
-export function encerradasTabWhere(): Prisma.ConversationWhereInput {
+function closedConversationWhere(): Prisma.ConversationWhereInput {
   return {
     OR: [
       { status: "RESOLVED" },
@@ -53,5 +53,18 @@ export function encerradasTabWhere(): Prisma.ConversationWhereInput {
         ],
       },
     ],
+  };
+}
+
+export function encerradasTabWhere(): Prisma.ConversationWhereInput {
+  return {
+    AND: [closedConversationWhere(), { followUpAt: null }],
+  };
+}
+
+/** Aba Resolvido: encerrada em acompanhamento (tarefa / follow-up). */
+export function resolvidosTabWhere(): Prisma.ConversationWhereInput {
+  return {
+    AND: [closedConversationWhere(), { followUpAt: { not: null } }],
   };
 }

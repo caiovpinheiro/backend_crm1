@@ -770,10 +770,13 @@ export async function POST(request: Request, context: RouteContext) {
         clearDepartment = !keepDepartment;
       }
 
+      const followUp = dbStatus === "RESOLVED" && b.followUp === true;
+
       const updated = await updateConversationStatusInDb(id, dbStatus, {
         tabulationId,
         clearAssignedTo,
         clearDepartment,
+        followUp,
       });
 
       if (conv.status !== updated.status) {

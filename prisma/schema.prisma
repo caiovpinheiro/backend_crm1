@@ -2871,6 +2871,11 @@ model Conversation {
 
   closedAt DateTime?
 
+  /// Encerramento em acompanhamento (aba Resolvido). Null = Encerradas
+  /// ou ainda OPEN. Preenchido no toggle Acompanhar; limpo ao Finalizar
+  /// de vez ou ao reabrir (ticket novo).
+  followUpAt DateTime?
+
   /// Tabulacao final escolhida ao encerrar (folha da arvore por departamento).
   /// Setada por POST /conversations/:id/actions com action=resolve quando o
   /// departamento tem `requireTabulationOnClose=true`. Dispara o trigger de

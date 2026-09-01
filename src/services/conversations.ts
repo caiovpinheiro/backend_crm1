@@ -22,6 +22,7 @@ import {
 import {
   activeInboxQueueGuardWhere,
   encerradasTabWhere,
+  resolvidosTabWhere,
   withActiveInboxQueueGuard,
 } from "@/lib/inbox-queue-membership";
 import {
@@ -69,6 +70,7 @@ export const INBOX_CATEGORY_TABS = [
   "respondidas",
   "agente_ia",
   "automacao",
+  "resolvidos",
   "finalizados",
   "erro",
 ] as const;
@@ -153,6 +155,7 @@ const listSelect = {
   lastInboundAt: true,
   lastMessageDirection: true,
   closedAt: true,
+  followUpAt: true,
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
@@ -433,6 +436,8 @@ function tabToWhere(
           },
         },
       });
+    case "resolvidos":
+      return resolvidosTabWhere();
     case "finalizados":
       return encerradasTabWhere();
     case "erro":
@@ -1179,7 +1184,7 @@ async function hydrateConversationsByIds(
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
-  return params.tab === "finalizados";
+  return params.tab === "finalizados" || params.tab === "resolvidos";
 }
 
 export async function getConversations(
@@ -1699,7 +1704,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 5,
+          k: 6,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1832,6 +1837,7 @@ async function tryComputeTabCountsOneSql(args: {
   const respondidas = tabSql(tabToWhere("respondidas", args.countAgentReply));
   const agenteIa = tabSql(tabToWhere("agente_ia", args.countAgentReply));
   const automacao = tabSql(tabToWhere("automacao", args.countAgentReply));
+  const resolvidos = tabSql(tabToWhere("resolvidos", args.countAgentReply));
   const finalizados = tabSql(tabToWhere("finalizados", args.countAgentReply));
   const erro = tabSql(tabToWhere("erro", args.countAgentReply));
   const abertas = tabSql(activeInboxQueueGuardWhere());
@@ -1852,6 +1858,7 @@ async function tryComputeTabCountsOneSql(args: {
     !respondidas ||
     !agenteIa ||
     !automacao ||
+    !resolvidos ||
     !finalizados ||
     !erro ||
     !abertas ||
@@ -1872,6 +1879,7 @@ async function tryComputeTabCountsOneSql(args: {
         respondidas: number;
         agente_ia: number;
         automacao: number;
+        resolvidos: number;
         finalizados: number;
         erro: number;
         todos: number;
@@ -1885,6 +1893,7 @@ async function tryComputeTabCountsOneSql(args: {
         ${tabCountExpr(respondidas, false)} AS respondidas,
         ${tabCountExpr(agenteIa, false)} AS agente_ia,
         ${tabCountExpr(automacao, false)} AS automacao,
+        ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
         ${tabCountExpr(erro, false)} AS erro,
         ${tabCountExpr(todos, false)} AS todos,
@@ -1901,6 +1910,7 @@ async function tryComputeTabCountsOneSql(args: {
       respondidas: row.respondidas ?? 0,
       agente_ia: row.agente_ia ?? 0,
       automacao: row.automacao ?? 0,
+      resolvidos: row.resolvidos ?? 0,
       finalizados: row.finalizados ?? 0,
       erro: row.erro ?? 0,
       todos: row.todos ?? 0,
@@ -1948,7 +1958,9 @@ async function computeTabCounts(
 
   // Fallback: where não traduziu (filtro raro) — sequencial pra não
   // esgotar o pool com 8 COUNT em paralelo.
-  const lightTabs = TAB_LIST.filter((t) => t !== "finalizados");
+  const lightTabs = TAB_LIST.filter(
+    (t) => t !== "finalizados" && t !== "resolvidos",
+  );
   const countTab = async (tab: InboxCategoryTab) => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
@@ -1962,7 +1974,7 @@ async function computeTabCounts(
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(
       conditions,
-      collapseByContact && tab === "finalizados",
+      collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
       assigneeIdsByType,
     );
   };
@@ -1971,6 +1983,7 @@ async function computeTabCounts(
   for (const tab of lightTabs) {
     lightResults.push([tab, await countTab(tab)]);
   }
+  const resolvidos = await countTab("resolvidos");
   const finalizados = await countTab("finalizados");
   // `todos` na lista não colapsa (só Encerradas). COUNT(*) casa o
   // badge com a fila e evita DISTINCT em OPEN+RESOLVED da org.
@@ -2008,6 +2021,7 @@ async function computeTabCounts(
   })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
+  record.resolvidos = resolvidos;
   record.finalizados = finalizados;
   record.todos = todos;
   record.abertas = abertas;
@@ -2441,6 +2455,8 @@ export async function updateConversationStatusInDb(
     clearAssignedTo?: boolean;
     /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
     clearDepartment?: boolean;
+    /** Acompanhar: aba Resolvido + mantém o agente. */
+    followUp?: boolean;
   },
 ) {
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
@@ -2465,11 +2481,19 @@ export async function updateConversationStatusInDb(
   // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
   // finalizar". Quando desligadas, o caller passa clearAssignedTo/
   // clearDepartment=true e desvinculamos os campos aqui.
+  const followUp = extra?.followUp === true;
+  const followUpPatch: { followUpAt: Date | null } | Record<string, never> =
+    status === "RESOLVED"
+      ? { followUpAt: followUp ? new Date() : null }
+      : status === "OPEN"
+        ? { followUpAt: null }
+        : {};
+
   const clearPatch: { assignedToId?: null; departmentId?: null } =
     status === "RESOLVED"
       ? {
-          ...(extra?.clearAssignedTo ? { assignedToId: null } : {}),
-          ...(extra?.clearDepartment ? { departmentId: null } : {}),
+          ...(extra?.clearAssignedTo && !followUp ? { assignedToId: null } : {}),
+          ...(extra?.clearDepartment && !followUp ? { departmentId: null } : {}),
         }
       : {};
 
@@ -2501,6 +2525,7 @@ export async function updateConversationStatusInDb(
       status,
       ...closedAtPatch,
       ...tabulationPatch,
+      ...followUpPatch,
       ...clearPatch,
       // Encerrar remove da fila Erro — hasError sticky não é mais acionável.
       ...(status === "RESOLVED" ? { hasError: false } : {}),
@@ -2517,7 +2542,7 @@ export async function updateConversationStatusInDb(
 
   // Encerrou atendimento → liberou capacidade na fila do responsável.
   // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).
-  if (status === "RESOLVED") {
+  if (status === "RESOLVED" && !followUp) {
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({

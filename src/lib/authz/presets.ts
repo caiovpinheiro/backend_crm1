@@ -40,7 +40,7 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   // Filas da Inbox — Gestor vê todas as abas
   "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando", "inbox:tab:respondidas",
   "inbox:tab:ligar", "inbox:tab:agente_ia",
-  "inbox:tab:automacao", "inbox:tab:finalizados", "inbox:tab:erro",
+  "inbox:tab:automacao", "inbox:tab:resolvidos", "inbox:tab:finalizados", "inbox:tab:erro",
   // Automation / AI
   "automation:view", "automation:create", "automation:edit", "automation:publish", "automation:delete",
   "ai_agent:view", "ai_agent:create", "ai_agent:edit", "ai_agent:delete",
@@ -98,7 +98,7 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   // minhas" e a fila inteira é o toggle do header da Inbox (`?mine=1`).
   // Automação segue exigindo grant explícito em Settings → Permissões.
   "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando",
-  "inbox:tab:respondidas", "inbox:tab:ligar",
+  "inbox:tab:respondidas", "inbox:tab:ligar", "inbox:tab:resolvidos",
   // Agente IA: as conversas com a IA como responsável apareciam em Entrada
   // antes da aba existir — sem esta chave o operador perderia visibilidade.
   "inbox:tab:agente_ia",

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeInboxQueueGuardWhere,
   encerradasTabWhere,
+  resolvidosTabWhere,
   withActiveInboxQueueGuard,
 } from "../inbox-queue-membership";
 
@@ -21,19 +22,29 @@ describe("inbox-queue-membership", () => {
     });
   });
 
-  it("encerradasTabWhere é RESOLVED ou closedAt — não deal WON/LOST", () => {
+  it("encerradasTabWhere é RESOLVED/closedAt sem followUp — não deal WON/LOST", () => {
     const where = encerradasTabWhere();
-    expect(where.OR).toEqual([
-      { status: "RESOLVED" },
+    expect(where.AND).toEqual([
       {
-        AND: [
-          { status: { not: "RESOLVED" } },
-          { closedAt: { not: null } },
+        OR: [
+          { status: "RESOLVED" },
+          {
+            AND: [
+              { status: { not: "RESOLVED" } },
+              { closedAt: { not: null } },
+            ],
+          },
         ],
       },
+      { followUpAt: null },
     ]);
     const serialized = JSON.stringify(where);
     expect(serialized).not.toContain("WON");
     expect(serialized).not.toContain("LOST");
+  });
+
+  it("resolvidosTabWhere exige followUpAt", () => {
+    const where = resolvidosTabWhere();
+    expect(JSON.stringify(where)).toContain("followUpAt");
   });
 });
