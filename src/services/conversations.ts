@@ -1699,7 +1699,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 4,
+          k: 5,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1862,6 +1862,8 @@ async function tryComputeTabCountsOneSql(args: {
   }
 
   const collapse = args.collapseByContact;
+  // `todos` = COUNT(*) (lista não colapsa essa aba). Só Encerradas
+  // usa DISTINCT contact+channel — DISTINCT em todos varria OPEN+RESOLVED.
   try {
     const rows = await prisma.$queryRaw<
       [{
@@ -1885,7 +1887,7 @@ async function tryComputeTabCountsOneSql(args: {
         ${tabCountExpr(automacao, false)} AS automacao,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
         ${tabCountExpr(erro, false)} AS erro,
-        ${tabCountExpr(todos, collapse)} AS todos,
+        ${tabCountExpr(todos, false)} AS todos,
         ${tabCountExpr(abertas, false)} AS abertas,
         ${tabCountExpr(ligar, false)} AS ligar
       FROM conversations c
@@ -1970,6 +1972,8 @@ async function computeTabCounts(
     lightResults.push([tab, await countTab(tab)]);
   }
   const finalizados = await countTab("finalizados");
+  // `todos` na lista não colapsa (só Encerradas). COUNT(*) casa o
+  // badge com a fila e evita DISTINCT em OPEN+RESOLVED da org.
   const todos = await countTodosTab(
     visibilityCollapsed,
     todosMemberCategoryTabs ?? null,
@@ -1977,7 +1981,7 @@ async function computeTabCounts(
     extra,
     searchWhere,
     countAgentReply,
-    collapseByContact,
+    false,
     assigneeIdsByType,
   );
   const abertas = await (() => {
