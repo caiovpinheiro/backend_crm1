@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { denyUnless, jsonError } from "../../_guard";
-import { ITEM_KINDS, PRIORITIES, getItem, updateItem } from "@/services/demands";
+import { ITEM_KINDS, PRIORITIES, deleteItem, getItem, updateItem } from "@/services/demands";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -39,5 +39,16 @@ export async function PATCH(request: Request, ctx: Ctx) {
     const item = await updateItem(session.user.id, id, parsed.data);
     if (!item) return jsonError("Demanda não encontrada.", 404);
     return NextResponse.json(item);
+  });
+}
+
+export async function DELETE(_request: Request, ctx: Ctx) {
+  return withOrgContext(async (session) => {
+    const denied = await denyUnless(session, "demand:edit");
+    if (denied) return denied;
+    const { id } = await ctx.params;
+    const ok = await deleteItem(id);
+    if (!ok) return jsonError("Demanda não encontrada.", 404);
+    return NextResponse.json({ ok: true });
   });
 }
