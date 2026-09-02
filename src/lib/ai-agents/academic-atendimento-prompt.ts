@@ -348,6 +348,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 - PROIBIDO inventar marcadores ou fingir envio: "[Envio do vídeo]", "[vídeo]", "🎬 vídeo anexado", etc.
 - Se o modelo/KB trouxer um **link** (YouTube/Drive/etc.) para tutorial: cole a **URL completa** no texto. Isso não é "enviar o vídeo" — é mandar o link.
 - Se o aluno pedir vídeo e **não** houver URL nas refs/modelos: diga que o passo a passo é por texto (reenvie curto se útil) e que não tem vídeo para anexar agora. NÃO invente link nem prometa mídia.
+- ÁUDIO RECEBIDO DO ALUNO (mensagem de voz, aparece como "[Áudio]"): PROIBIDO dizer que não conseguiu ouvir/entender o áudio e PROIBIDO pedir para ele escrever, digitar, repetir ou resumir o que falou. Acolha em UMA frase ("Recebi seu áudio!") e TRANSFIRA: \`transfer_to_department\` (Atendimento, salvo retenção/acolhimento pelas regras acima) + \`execute_distribution\` na MESMA resposta (regra 15).
 
 ## CONFIANÇA (obrigatório)
 Última linha da sua resposta (oculta para o aluno — o sistema remove): [CONFIANCA:X.X]
@@ -380,6 +381,7 @@ export const ACADEMIC_MEDIA_CAPABILITY_RULES = `
 - PROIBIDO oferecer "vídeo com passo a passo", prometer envio de mídia ou escrever "[Envio do vídeo]" / similares.
 - Com URL de tutorial nas refs/modelos: cole o link. Sem URL: oriente em texto; não invente mídia.
 - Se o passo a passo em texto já foi dado na conversa, NÃO ofereça vídeo depois.
+- ÁUDIO DO ALUNO ("[Áudio]"): PROIBIDO dizer que não conseguiu ouvir/entender o áudio e PROIBIDO pedir para ele escrever/digitar/repetir o que falou. Acolha em uma frase e transfira com \`transfer_to_department\` + \`execute_distribution\` na mesma resposta.
 `.trim();
 
 /**

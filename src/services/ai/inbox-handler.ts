@@ -55,6 +55,11 @@ import {
   shouldSendInauguralClassLink,
 } from "@/services/ai/inaugural-class-link";
 import {
+  buildAudioHandoffMessage,
+  detectInboundAudio,
+  messageLooksLikeAudioNotice,
+} from "@/services/ai/audio-inbound";
+import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
@@ -1020,6 +1025,67 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           return;
         }
       }
+    }
+
+    // ── 1d. Áudio/voz do aluno → distribuição determinística ──
+    // Não há transcrição automática: o LLM só receberia "[Áudio]" e
+    // improvisaria ("não consegui ouvir, pode escrever?"). A regra da
+    // operação é acolher em uma frase e passar para um humano.
+    const audioCheck = await detectInboundAudio({
+      conversationId: args.conversationId,
+      userMessage: args.userMessage,
+    });
+    if (audioCheck.shouldHandoff) {
+      const lastBotBeforeAudio = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      const audioDeptKey = inferDepartmentFromContext({
+        userMessage: args.userMessage,
+      });
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        departmentName:
+          audioDeptKey === "retencao"
+            ? "Retenção"
+            : audioDeptKey === "acolhimento"
+              ? "Acolhimento"
+              : "Atendimento",
+        reason: "Aluno enviou áudio — atendimento humano obrigatório",
+      });
+      // Áudios em sequência não repetem a bolha de aviso.
+      if (!messageLooksLikeAudioNotice(lastBotBeforeAudio?.content)) {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildAudioHandoffMessage({ assignedToHuman: gotHuman }),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "inbound_audio",
+        department: audioDeptKey,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
     }
 
     // ── 2. Keyword handoff ────────────────────────────────────
