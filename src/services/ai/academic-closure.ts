@@ -163,6 +163,73 @@ export function userReportsResolvedOrWaiting(
 }
 
 /**
+ * Fillers que não mudam o sentido de "era isso mesmo" — abrem a frase
+ * ("Sim, era isso", "No momento é só isso") ou fecham ("era isso, obrigada").
+ */
+const THATS_ALL_LEAD =
+  // "não" fica de fora de propósito: "não era isso" é correção, não fim.
+  "(?:(?:sim|ah|ata|aham|uhum|ok|okay|oki|blz|beleza|certo|perfeito|otim[ao]|show|entendi|entao|pronto|prontinho|isso|ja|por enquanto|no momento|por agora|por hoje|ate agora|por ora)\\s+)*";
+const THATS_ALL_HEDGE =
+  "(?:acho que|acredito que|creio que|imagino que|por enquanto|no momento|por agora|por hoje|ate agora|por ora)";
+const THATS_ALL_TAIL =
+  "(?:\\s+(?:mesmo|entao|ja|so|viu|ta|por enquanto|no momento|por agora|por hoje|mais nada|nada mais|obrigad[oa]s?|obg|obgd|brigad[oa]|grat[ao]|gratidao|valeu|vlw|de tudo|por tudo|pela ajuda|pela atencao))*";
+const THATS_ALL_TARGET = "(?:isso|isto|isso ai|tudo)";
+
+/**
+ * "Era isso mesmo": o aluno declara que o pedido acabou. Exige marca de
+ * fechamento — verbo no passado ("era/seria/foi isso") ou restritivo
+ * ("só isso") —, porque "isso" e "isso mesmo" sozinhos são confirmação de
+ * entendimento no meio do atendimento, não fim.
+ */
+const THATS_ALL_RE = new RegExp(
+  [
+    // "só isso", "seria só com isso", "era só isso mesmo", "no momento é só isso".
+    `^${THATS_ALL_LEAD}(?:era|seria|foi|sera|fica|ficou|e)?\\s*(?:so|somente|apenas)\\s*(?:com|por)?\\s*${THATS_ALL_TARGET}${THATS_ALL_TAIL}$`,
+    // "era isso", "por enquanto era isso", "sim, era isso".
+    `^${THATS_ALL_LEAD}(?:era|seria|foi|sera)\\s*(?:com|por)?\\s*${THATS_ALL_TARGET}${THATS_ALL_TAIL}$`,
+    // "acho que é isso", "no momento é isso".
+    `^${THATS_ALL_LEAD}${THATS_ALL_HEDGE}\\s+(?:e|era|seria|foi)\\s*(?:so\\s*)?(?:com|por)?\\s*${THATS_ALL_TARGET}${THATS_ALL_TAIL}$`,
+  ].join("|"),
+);
+
+/**
+ * Aluno diz que o atendimento acabou sem agradecer nem se despedir:
+ * "Seria só com isso", "era só isso mesmo", "por enquanto era isso",
+ * "não preciso de mais nada".
+ *
+ * Caso real (Carla, #340517): a resposta ao check-in de 30 min foi
+ * "Seria só com isso" — nenhum detector pegava, o agente se despediu e a
+ * conversa ficou aberta na fila.
+ */
+export function userSaysThatsAll(userMessage?: string | null): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw || hasOpenQuestion(raw)) return false;
+  const msg = normalize(raw);
+  if (!msg || msg.length > 140) return false;
+  if (hasPendingRequest(msg)) return false;
+
+  const bare = msg
+    .replace(/\p{Extended_Pictographic}/gu, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!bare) return false;
+
+  // "não preciso de mais nada", "não vou precisar de mais nada por hoje".
+  if (
+    /\bnao (vou )?precis(o|a|ar)\b.{0,24}\b(mais|nada|no momento|por enquanto|por agora|por hoje)\b/.test(
+      bare,
+    )
+  ) {
+    return true;
+  }
+  if (/^(nada mais|mais nada)( por (enquanto|agora|hoje))?$/.test(bare)) {
+    return true;
+  }
+  return THATS_ALL_RE.test(bare);
+}
+
+/**
  * Agradecimento dentro de uma frase com conteúdo ("Ficou bom, usarei esse
  * exemplo como base. Obrigado", "Ajudou muito, valeu").
  *
@@ -427,6 +494,9 @@ export function shouldCloseAiAfterStudentMessage(args: {
   if (userThanksAndWrapsUp(args.userMessage)) {
     return { close: true, reason: "thanks_wrapup" };
   }
+  if (userSaysThatsAll(args.userMessage)) {
+    return { close: true, reason: "thats_all" };
+  }
   const recent = (args.recentInbound ?? []).join("\n");
   const deferred =
     userDefersUntilLater(args.userMessage) || userDefersUntilLater(recent);
@@ -450,6 +520,7 @@ export function studentWrappedUp(userMessage?: string | null): boolean {
     userDefersUntilLater(text) ||
     userReportsResolvedOrWaiting(text) ||
     userWantsAiConversationClose(text) ||
+    userSaysThatsAll(text) ||
     userThanksInSentence(text) ||
     userSaysGoodbye(text)
   );

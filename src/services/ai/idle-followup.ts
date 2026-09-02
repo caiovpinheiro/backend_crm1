@@ -45,9 +45,19 @@ export function userWantsSoftAiClose(userMessage?: string | null): boolean {
   if (/^(era )?so isso( mesmo)?$/.test(msg) || /^e so isso$/.test(msg)) {
     return true;
   }
+  // "Seria só com isso", "sim, era isso mesmo", "por enquanto era isso".
+  if (
+    /^(sim |ja |entao |isso )?(por enquanto |no momento |por agora )?(era|seria|foi|e) (so )?(com )?isso( mesmo)?( obrigad[oa]s?| valeu)?$/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (/^(so|somente|apenas) (com |por )?isso( mesmo)?$/.test(msg)) return true;
   if (/^(nao quero|pode deixar|deixa pra la|ja resolvi)$/.test(msg)) {
     return true;
   }
+  if (/^(ja )?(resolvi|consegui|deu certo)( sim| tudo)?$/.test(msg)) return true;
   return false;
 }
 

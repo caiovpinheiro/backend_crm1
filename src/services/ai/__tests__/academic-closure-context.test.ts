@@ -12,11 +12,15 @@ import { describe, expect, it } from "vitest";
 import {
   agentReplyLooksLikeFarewell,
   shouldCloseAfterAgentFarewell,
+  shouldCloseAiAfterStudentMessage,
+  studentWrappedUp,
   userAcknowledgedAndClosed,
   userDefersUntilLater,
   userSaysGoodbye,
+  userSaysThatsAll,
   userThanksInSentence,
 } from "@/services/ai/academic-closure";
+import { userWantsSoftAiClose } from "@/services/ai/idle-followup";
 
 const FAREWELL =
   "Beleza, David! Se precisar de mais alguma coisa, é só chamar aqui. Boa tarde pra você! 😊";
@@ -90,6 +94,69 @@ describe("userSaysGoodbye", () => {
   it("saudação de abertura não é despedida", () => {
     expect(userSaysGoodbye("Boa tarde")).toBe(false);
     expect(userSaysGoodbye("Bom dia!")).toBe(false);
+  });
+});
+
+describe("userSaysThatsAll", () => {
+  it("família 'era isso mesmo' encerra", () => {
+    for (const msg of [
+      "Seria só com isso",
+      "seria só isso",
+      "Era só isso mesmo",
+      "só isso mesmo",
+      "Por enquanto era isso",
+      "era isso",
+      "Sim, era isso",
+      "acho que é isso",
+      "No momento é só isso",
+      "não preciso de mais nada",
+      "era isso, obrigada!",
+    ]) {
+      expect(userSaysThatsAll(msg), msg).toBe(true);
+    }
+  });
+
+  it("pendência, pergunta ou correção não encerra", () => {
+    for (const msg of [
+      "seria só isso, mas não consegui acessar",
+      "era isso, e sobre a prova?",
+      "era isso, e sobre a prova",
+      "não era isso",
+      "não é só isso",
+      "isso",
+      "isso mesmo",
+      "sim",
+      "era só isso que eu queria confirmar com o atendente",
+    ]) {
+      expect(userSaysThatsAll(msg), msg).toBe(false);
+    }
+  });
+
+  it("entra na varredura e no worker via studentWrappedUp", () => {
+    expect(studentWrappedUp("Seria só com isso")).toBe(true);
+    expect(studentWrappedUp("Isso mesmo, obrigada")).toBe(true);
+    expect(studentWrappedUp("seria só isso, mas não consegui acessar")).toBe(
+      false,
+    );
+  });
+
+  it("inbox encerra na hora, sem esperar a despedida", () => {
+    expect(
+      shouldCloseAiAfterStudentMessage({ userMessage: "Seria só com isso" }),
+    ).toEqual({ close: true, reason: "thats_all" });
+  });
+});
+
+describe("userWantsSoftAiClose", () => {
+  it("resposta ao check-in de 30 min encerra", () => {
+    expect(userWantsSoftAiClose("Seria só com isso")).toBe(true);
+    expect(userWantsSoftAiClose("era isso mesmo")).toBe(true);
+    expect(userWantsSoftAiClose("já resolvi")).toBe(true);
+  });
+
+  it("resposta que reabre o assunto não encerra", () => {
+    expect(userWantsSoftAiClose("não era isso")).toBe(false);
+    expect(userWantsSoftAiClose("ainda preciso de ajuda")).toBe(false);
   });
 });
 
