@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-02 — Demandas com vários responsáveis
+
+**Decisão.** Tabela `demand_item_assignees` (N:N). `DemandItem.assigneeId` continua sendo o primeiro da lista. GET `/api/demands/boards` e GET `/api/demands/users` devolvem humanos da org. Create/PATCH aceitam `assigneeIds[]`.
+
+**Contexto.** O form de solicitação precisa listar a equipe e atribuir a uma ou mais pessoas.
+
+**Alternativas descartadas.** Só `assigneeId` (não cobre vários). Array JSON no item (sem FK). Reusar GET `/api/users` (já existe, mas a tela de demandas precisa da lista no próprio fluxo).
+
+**Impacto.** `src/services/demands.ts`, rotas de demands, migration `20260902160000_demand_item_assignees`. Front: usar `users` + `assigneeIds`.
+
+---
+
 ### 2026-09-01 — Mailjet via HTTPS, não SMTP
 
 **Decisão.** Envio transacional passa a `POST https://api.mailjet.com/v3.1/send` (443, IPv4). Continua usando `SMTP_USER`/`SMTP_PASS` (API key + secret do Mailjet) e `SMTP_FROM_*`. `SMTP_HOST`/`SMTP_PORT` deixam de ser usados.

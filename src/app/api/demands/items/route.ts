@@ -13,6 +13,7 @@ const CreateItem = z.object({
   priority: z.enum(PRIORITIES).optional(),
   stageId: z.string().optional(),
   assigneeId: z.string().nullable().optional(),
+  assigneeIds: z.array(z.string().min(1)).max(50).optional(),
   tags: z.array(z.string().max(40)).max(12).optional(),
 });
 

@@ -24,6 +24,7 @@ const PatchItem = z.object({
   kind: z.enum(ITEM_KINDS).optional(),
   priority: z.enum(PRIORITIES).optional(),
   assigneeId: z.string().nullable().optional(),
+  assigneeIds: z.array(z.string().min(1)).max(50).optional(),
   tags: z.array(z.string().max(40)).max(12).optional(),
   dueAt: z.string().nullable().optional(),
 });

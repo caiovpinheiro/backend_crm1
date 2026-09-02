@@ -164,6 +164,7 @@ model Organization {
   demandComments           DemandComment[]
   demandVotes              DemandVote[]
   demandEvents             DemandEvent[]
+  demandItemAssignees      DemandItemAssignee[]
   teamChatRooms            TeamChatRoom[]
   teamChatMembers          TeamChatMember[]
   teamChatMessages         TeamChatMessage[]
@@ -591,6 +592,7 @@ model User {
   supportTicketMessages          SupportTicketMessage[]    @relation("SupportTicketMessageAuthor")
   demandItemsRequested           DemandItem[]              @relation("DemandItemRequester")
   demandItemsAssigned            DemandItem[]              @relation("DemandItemAssignee")
+  demandItemAssigneeLinks        DemandItemAssignee[]
   demandCommentsAuthored         DemandComment[]           @relation("DemandCommentAuthor")
   demandVotes                    DemandVote[]
   demandEvents                   DemandEvent[]             @relation("DemandEventActor")
@@ -5482,12 +5484,30 @@ model DemandItem {
   comments DemandComment[]
   votes    DemandVote[]
   events   DemandEvent[]
+  assignees DemandItemAssignee[]
 
   @@unique([organizationId, number])
   @@index([organizationId, boardId, stageId])
   @@index([organizationId, assigneeId])
   @@index([boardId, stageId, position])
   @@map("demand_items")
+}
+
+/// Atribuição N:N — uma demanda pode ter vários responsáveis.
+model DemandItemAssignee {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           DemandItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+
+  @@unique([itemId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("demand_item_assignees")
 }
 
 model DemandComment {

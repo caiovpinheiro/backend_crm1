@@ -3,15 +3,18 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { denyUnless, jsonError } from "../_guard";
-import { createBoard, listBoards } from "@/services/demands";
+import { createBoard, listAssignableUsers, listBoards } from "@/services/demands";
 
 export async function GET() {
   return withOrgContext(async (session) => {
     const denied = await denyUnless(session, "demand:view");
     if (denied) return denied;
     try {
-      const boards = await listBoards();
-      return NextResponse.json({ boards });
+      const [boards, users] = await Promise.all([
+        listBoards(),
+        listAssignableUsers(),
+      ]);
+      return NextResponse.json({ boards, users });
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Não foi possível carregar os boards.";
