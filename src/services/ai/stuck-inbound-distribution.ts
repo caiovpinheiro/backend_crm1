@@ -5,9 +5,9 @@
  * de LLM/chave, canal fora do ar e qualquer caminho em que o agente fica
  * em silêncio — sem isso o lead fica preso na IA e nunca chega a humano.
  *
- * Roda no tick do `ai-agent-inactivity-worker` (override:
- * `AI_AGENT_STUCK_INBOUND_MS`, 0 desliga) e como ação de ops via
- * `/api/cron/distribute-stuck-inbound` (dry-run + limite).
+ * Roda no `worker-distribution` (`stuck-inbound`). Cron POST e o tick
+ * de inatividade só enfileiram o mesmo jobId. GET do cron continua
+ * dry-run aqui. Override: `AI_AGENT_STUCK_INBOUND_MS` (0 desliga).
  *
  * Nunca envia mensagem ao aluno: só reatribui / enfileira.
  */

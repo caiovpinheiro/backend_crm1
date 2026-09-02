@@ -9,7 +9,7 @@
  * passagem não foi vazia).
  * Na API o scan não roda in-process: `enqueueProcessPendingOrRun`
  * empurra `distribution-drain` e o worker drena. Fallback
- * síncrono só se Redis estiver down.
+ * síncrono só em test/dev se Redis estiver down.
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
  * elegível abre a fila dos seus depts; o reprocesso manual/cron também
  * tenta os depts que já têm gente na espera — o motor decide se o
@@ -21,7 +21,11 @@
 
 import { Prisma } from "@prisma/client";
 
-import { enqueueDistributionDrain } from "@/lib/distribution-drain-queue";
+import {
+  allowInlineDistributionFallback,
+  enqueueDistributionDrain,
+} from "@/lib/distribution-drain-queue";
+import { metrics } from "@/lib/metrics";
 import { debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
@@ -1472,8 +1476,8 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
 }
 
 /**
- * Enfileira drenagem no `worker-distribution`. Só roda `processPending`
- * neste processo se Redis/fila estiver down (dev ou outage).
+ * Enfileira drenagem no `worker-distribution`. Fallback síncrono só em
+ * test/dev — em prod (`APP_MODE=api`) a API nunca drena in-process.
  */
 export async function enqueueProcessPendingOrRun(opts: {
   trigger: PendingQueueTrigger;
@@ -1564,7 +1568,32 @@ export async function enqueueProcessPendingOrRun(opts: {
     };
   }
 
-  return processPendingDistributionQueue(opts);
+  if (allowInlineDistributionFallback()) {
+    return processPendingDistributionQueue(opts);
+  }
+
+  metrics.errors.inc({
+    scope: "distribution.drain",
+    kind: "queue_unavailable",
+  });
+  console.warn(
+    "[distribution] drain queue unavailable — skip sync fallback",
+    JSON.stringify({
+      orgId,
+      trigger: opts.trigger,
+      userId: opts.userId ?? null,
+      pending: pending ?? -1,
+    }),
+  );
+  return {
+    resolved: 0,
+    cancelled: 0,
+    pending: pending ?? 0,
+    trigger: opts.trigger,
+    skipReason: "QUEUE_UNAVAILABLE",
+    skipMessage:
+      "Fila de distribuição indisponível. Tente novamente em instantes.",
+  };
 }
 
 /**

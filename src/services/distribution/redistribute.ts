@@ -41,6 +41,11 @@ export type RedistributeResult = {
   recipients: { userId: string; name: string | null; received: number }[];
 };
 
+/** Job no worker: validação 4xx volta como outcome (não falha o BullMQ). */
+export type RedistributeJobOutcome =
+  | { ok: true; result: RedistributeResult }
+  | { ok: false; message: string; code?: string; status: number };
+
 async function queueWhere(
   sourceUserId: string,
   scope: RedistributeQueueScope,

@@ -18,6 +18,8 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
+import { metrics } from "@/lib/metrics";
+import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
 import { executeDistribution } from "@/services/distribution";
 import {
   assertLeafInDepartments,
@@ -453,18 +455,50 @@ export async function POST(request: Request, context: RouteContext) {
           // departamento (transferir p/ "sem departamento" apenas desvincula).
           if (newDeptId) {
             try {
-              const result = await executeDistribution({
-                conversationId: id,
-                contactId: prevConv.contactId ?? null,
-                departmentId: newDeptId,
-                triggerSource: "MANUAL",
-              });
-              distribution = {
-                success: result.success,
-                reason: result.reason,
-                selectedUserId: result.selectedUserId,
-                selectedUserName: result.selectedUserName,
-              };
+              const orgId = sessionUser.organizationId;
+              if (!orgId) {
+                throw new Error("organizationId ausente");
+              }
+              const outcome = await runDistributionExecuteOrInline(
+                {
+                  organizationId: orgId,
+                  triggerSource: "MANUAL",
+                  conversationId: id,
+                  contactId: prevConv.contactId ?? null,
+                  departmentId: newDeptId,
+                  requestedByUserId: sessionUser.id,
+                },
+                () =>
+                  executeDistribution({
+                    conversationId: id,
+                    contactId: prevConv.contactId ?? null,
+                    departmentId: newDeptId,
+                    triggerSource: "MANUAL",
+                  }),
+              );
+              if (outcome.kind === "result") {
+                distribution = {
+                  success: outcome.result.success,
+                  reason: outcome.result.reason,
+                  selectedUserId: outcome.result.selectedUserId,
+                  selectedUserName: outcome.result.selectedUserName,
+                };
+              } else if (outcome.kind === "queued") {
+                distribution = {
+                  success: false,
+                  reason: "QUEUED",
+                  selectedUserId: null,
+                  selectedUserName: null,
+                };
+              } else {
+                metrics.errors.inc({
+                  scope: "distribution.transfer",
+                  kind: "queue_unavailable",
+                });
+                console.warn(
+                  "[transfer] fila indisponível — departamento já persistido",
+                );
+              }
             } catch (e) {
               console.error("[transfer] falha ao acionar distribuição", e);
             }

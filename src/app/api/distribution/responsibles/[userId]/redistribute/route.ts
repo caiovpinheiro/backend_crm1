@@ -13,6 +13,8 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { metrics } from "@/lib/metrics";
+import { runDistributionRedistributeOrInline } from "@/lib/distribution-execute-queue";
 import { redistributeResponsibleQueue } from "@/services/distribution/redistribute";
 
 type RouteContext = { params: Promise<{ userId: string }> };
@@ -83,18 +85,59 @@ export async function POST(request: Request, context: RouteContext) {
       );
     }
 
+    const organizationId = session.user.organizationId;
+    if (!organizationId) {
+      return NextResponse.json(
+        { message: "Organização obrigatória." },
+        { status: 400 },
+      );
+    }
+
+    const input = {
+      sourceUserId: userId,
+      mode: parsed.data.mode,
+      recipientUserIds: parsed.data.recipientUserIds,
+      queueScope: parsed.data.queueScope ?? "all",
+      actor: {
+        id: session.user.id,
+        role: session.user.role as "ADMIN" | "MANAGER" | "MEMBER",
+      },
+    };
+
     try {
-      const result = await redistributeResponsibleQueue({
-        sourceUserId: userId,
-        mode: parsed.data.mode,
-        recipientUserIds: parsed.data.recipientUserIds,
-        queueScope: parsed.data.queueScope ?? "all",
-        actor: {
-          id: session.user.id,
-          role: session.user.role as "ADMIN" | "MANAGER" | "MEMBER",
+      const outcome = await runDistributionRedistributeOrInline(
+        { organizationId, ...input },
+        async () => {
+          const result = await redistributeResponsibleQueue(input);
+          return { ok: true as const, result };
         },
+      );
+      if (outcome.kind === "result") {
+        if (!outcome.result.ok) {
+          return NextResponse.json(
+            {
+              message: outcome.result.message,
+              code: outcome.result.code,
+            },
+            { status: outcome.result.status },
+          );
+        }
+        return NextResponse.json({ result: outcome.result.result });
+      }
+      if (outcome.kind === "queued") {
+        return NextResponse.json(
+          { queued: true, jobId: outcome.jobId },
+          { status: 202 },
+        );
+      }
+      metrics.errors.inc({
+        scope: "distribution.redistribute",
+        kind: "queue_unavailable",
       });
-      return NextResponse.json({ result });
+      return NextResponse.json(
+        { message: "Fila de distribuição indisponível. Tente novamente." },
+        { status: 503 },
+      );
     } catch (e) {
       const err = e as { message?: string; code?: string; status?: number };
       const status = typeof err.status === "number" ? err.status : 500;

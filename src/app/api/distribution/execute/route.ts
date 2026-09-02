@@ -1,9 +1,12 @@
 /**
  * POST /api/distribution/execute
- * Executa a distribuição REAL (atribui owner + propaga + log). Trigger
+ * Enfileira a distribuição REAL no `worker-distribution`. Trigger
  * manual. Exige `distribution:execute` (gestores) **ou**
  * `conversation:claim` (consultor redistribuindo do inbox) e o widget
  * `smart_distribution`.
+ *
+ * Espera o job (8–15s). Timeout → 202 `{ queued, jobId }` — o worker
+ * termina e o SSE publica `conversation_updated`.
  *
  * Body: {
  *   dealId?, contactId?, conversationId?,
@@ -13,11 +16,15 @@
  * }
  */
 
+import { randomUUID } from "node:crypto";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
+import { metrics } from "@/lib/metrics";
+import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
 import { executeDistribution } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
@@ -36,9 +43,17 @@ const bodySchema = z.object({
 
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
+    const organizationId = session.user.organizationId;
+    if (!organizationId) {
+      return NextResponse.json(
+        { message: "Organização obrigatória." },
+        { status: 400 },
+      );
+    }
+
     const ctx = await loadAuthzContext({
       userId: session.user.id,
-      organizationId: session.user.organizationId,
+      organizationId,
       isSuperAdmin: session.user.isSuperAdmin,
     });
     const canExecute =
@@ -91,17 +106,56 @@ export async function POST(request: Request) {
       ),
     );
 
+    const departmentId = parsed.data.departmentId ?? null;
+    const executeInput = {
+      dealId: parsed.data.dealId,
+      contactId: parsed.data.contactId,
+      conversationId: parsed.data.conversationId,
+      distributionType: parsed.data.distributionType ?? null,
+      departmentIds: departmentIds.length > 0 ? departmentIds : null,
+      reassign: parsed.data.reassign === true,
+      triggerSource: "MANUAL" as const,
+    };
+
     try {
-      const result = await executeDistribution({
-        dealId: parsed.data.dealId,
-        contactId: parsed.data.contactId,
-        conversationId: parsed.data.conversationId,
-        distributionType: parsed.data.distributionType ?? null,
-        departmentIds: departmentIds.length > 0 ? departmentIds : null,
-        reassign: parsed.data.reassign === true,
-        triggerSource: "MANUAL",
+      const outcome = await runDistributionExecuteOrInline(
+        {
+          organizationId,
+          triggerSource: "MANUAL",
+          conversationId: parsed.data.conversationId ?? null,
+          contactId: parsed.data.contactId ?? null,
+          dealId: parsed.data.dealId ?? null,
+          departmentId,
+          departmentIds: departmentIds.length > 0 ? departmentIds : null,
+          reassign: parsed.data.reassign === true,
+          distributionType: parsed.data.distributionType ?? null,
+          requestedByUserId: session.user.id,
+          correlationId: randomUUID(),
+        },
+        () => executeDistribution(executeInput),
+      );
+
+      if (outcome.kind === "result") {
+        return NextResponse.json(outcome.result);
+      }
+      if (outcome.kind === "queued") {
+        return NextResponse.json(
+          { queued: true, jobId: outcome.jobId },
+          { status: 202 },
+        );
+      }
+
+      metrics.errors.inc({
+        scope: "distribution.execute",
+        kind: "queue_unavailable",
       });
-      return NextResponse.json(result);
+      console.warn(
+        "[POST /api/distribution/execute] fila indisponível — sem fallback em prod",
+      );
+      return NextResponse.json(
+        { message: "Fila de distribuição indisponível. Tente novamente." },
+        { status: 503 },
+      );
     } catch (e) {
       console.error("[POST /api/distribution/execute]", e);
       return NextResponse.json(
