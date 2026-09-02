@@ -24,9 +24,10 @@ import { Prisma } from "@prisma/client";
 import {
   allowInlineDistributionFallback,
   enqueueDistributionDrain,
+  isFreshDrainEnqueue,
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
-import { debugWarn } from "@/lib/debug-log";
+import { debugInfo, debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -1548,15 +1549,17 @@ export async function enqueueProcessPendingOrRun(opts: {
     userId: opts.userId ?? null,
   });
   if (queued) {
-    console.info(
-      "[distribution] drain enqueued",
-      JSON.stringify({
-        orgId,
-        trigger: opts.trigger,
-        userId: opts.userId ?? null,
-        pending: pending ?? -1,
-      }),
-    );
+    const drainMeta = JSON.stringify({
+      orgId,
+      trigger: opts.trigger,
+      userId: opts.userId ?? null,
+      pending: pending ?? -1,
+    });
+    if (isFreshDrainEnqueue(queued)) {
+      console.info("[distribution] drain enqueued", drainMeta);
+    } else {
+      debugInfo("[distribution] drain already queued", drainMeta);
+    }
     return {
       resolved: 0,
       cancelled: 0,

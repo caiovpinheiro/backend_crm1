@@ -62,6 +62,12 @@ export function getDistributionDrainQueue(): Queue<DistributionDrainPayload> | n
  * - `added` / `exists`: caller NÃO deve rodar processPending in-process.
  * - `null`: Redis/fila indisponível — fallback síncrono só em test/dev.
  */
+export function isFreshDrainEnqueue(
+  result: "added" | "exists" | null,
+): boolean {
+  return result === "added";
+}
+
 export async function enqueueDistributionDrain(
   payload: DistributionDrainPayload,
 ): Promise<"added" | "exists" | null> {
