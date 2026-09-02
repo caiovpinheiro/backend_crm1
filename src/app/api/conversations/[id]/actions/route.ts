@@ -18,7 +18,12 @@ import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
 import { executeDistribution } from "@/services/distribution";
-import { assertLeafInDepartment, getAncestors, tabulationLogMeta } from "@/services/tabulations";
+import {
+  assertLeafInDepartments,
+  getAncestors,
+  listDepartmentsForUser,
+  tabulationLogMeta,
+} from "@/services/tabulations";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
 async function resolveConversationAssignFlags(user: {
@@ -712,6 +717,7 @@ export async function POST(request: Request, context: RouteContext) {
           where: { id },
           select: {
             departmentId: true,
+            assignedToId: true,
             tabulationId: true,
             department: { select: { id: true, requireTabulationOnClose: true } },
           },
@@ -719,7 +725,16 @@ export async function POST(request: Request, context: RouteContext) {
         resolvedDepartmentId = dept?.departmentId ?? null;
         previousTabulationId = dept?.tabulationId ?? null;
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
-        const requires = !!dept?.department?.requireTabulationOnClose;
+        const agentUserId = dept?.assignedToId ?? session.user.id;
+        let allowedDepartmentIds: string[] = dept?.departmentId
+          ? [dept.departmentId]
+          : [];
+        let requires = !!dept?.department?.requireTabulationOnClose;
+        if (!dept?.departmentId && agentUserId) {
+          const memberships = await listDepartmentsForUser(agentUserId);
+          allowedDepartmentIds = memberships.map((d) => d.id);
+          requires = memberships.some((d) => d.requireTabulationOnClose);
+        }
         if (requires && !rawTab) {
           // Encerramento MANUAL (esta rota). Bots/automações usam
           // updateConversationStatusInDb direto e NÃO passam por aqui —
@@ -727,22 +742,28 @@ export async function POST(request: Request, context: RouteContext) {
           // nem em finish_conversation.
           return NextResponse.json(
             {
-              message: "Este departamento exige uma tabulacao ao encerrar.",
+              message: dept?.departmentId
+                ? "Este departamento exige uma tabulacao ao encerrar."
+                : "Selecione uma tabulacao ao encerrar.",
               code: "TABULATION_REQUIRED",
               departmentId: dept?.departmentId ?? null,
+              userId: dept?.departmentId ? null : agentUserId,
             },
             { status: 400 },
           );
         }
         if (rawTab) {
-          if (!dept?.departmentId) {
+          if (allowedDepartmentIds.length === 0) {
             return NextResponse.json(
-              { message: "Conversa sem departamento — nao aceita tabulacao." },
+              { message: "Nenhum departamento disponivel para tabular." },
               { status: 400 },
             );
           }
           try {
-            const leaf = await assertLeafInDepartment(rawTab, dept.departmentId);
+            const leaf = await assertLeafInDepartments(
+              rawTab,
+              allowedDepartmentIds,
+            );
             tabulationId = leaf.id;
             tabulationName = leaf.name;
             tabulationNumber = leaf.number;
