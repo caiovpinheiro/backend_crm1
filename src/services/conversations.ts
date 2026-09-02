@@ -2368,6 +2368,25 @@ export async function assignConversationsInline(params: {
  * antes), reusa; caso contrario cria um novo, tratando a corrida do indice
  * unico parcial. Herda canal/jid/inbox/responsavel da conversa origem.
  */
+/** Departamento do ticket origem, ou o último do mesmo contato+canal. */
+export async function resolveReopenDepartmentId(opts: {
+  contactId: string;
+  channel: string;
+  preferred: string | null;
+}): Promise<string | null> {
+  if (opts.preferred) return opts.preferred;
+  const sibling = await prisma.conversation.findFirst({
+    where: {
+      contactId: opts.contactId,
+      channel: opts.channel,
+      departmentId: { not: null },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { departmentId: true },
+  });
+  return sibling?.departmentId ?? null;
+}
+
 export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
   id: string;
   created: boolean;
@@ -2378,7 +2397,7 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
     where: { id: sourceId },
     select: {
       id: true, contactId: true, channel: true, channelId: true,
-      waJid: true, inboxName: true, assignedToId: true,
+      waJid: true, inboxName: true, assignedToId: true, departmentId: true,
     },
   });
   if (!src || !src.contactId) {
@@ -2396,6 +2415,12 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
     return { id: existing.id, created: false, contactId: src.contactId, channel: src.channel };
   }
 
+  const departmentId = await resolveReopenDepartmentId({
+    contactId: src.contactId,
+    channel: src.channel,
+    preferred: src.departmentId,
+  });
+
   try {
     const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
@@ -2408,6 +2433,7 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
           ...(src.waJid ? { waJid: src.waJid } : {}),
           ...(src.inboxName ? { inboxName: src.inboxName } : {}),
           ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+          ...(departmentId ? { departmentId } : {}),
         }),
         select: { id: true },
       }),

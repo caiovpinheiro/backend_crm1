@@ -9,6 +9,7 @@ import { prisma } from "@/lib/prisma";
 import {
   assignConversationAssignedTo,
   getConversationById,
+  resolveReopenDepartmentId,
   updateConversationStatusInDb,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -525,6 +526,7 @@ export async function POST(request: Request, context: RouteContext) {
             channelId: true,
             inboxName: true,
             assignedToId: true,
+            departmentId: true,
             contactId: true,
           },
         });
@@ -534,6 +536,12 @@ export async function POST(request: Request, context: RouteContext) {
             { status: 500 },
           );
         }
+
+        const reopenDepartmentId = await resolveReopenDepartmentId({
+          contactId: src.contactId,
+          channel: src.channel,
+          preferred: src.departmentId,
+        });
 
         // Guard extra contra corrida: se ja existe um ticket ATIVO pro
         // contato+canal (ex.: inbound reabriu enquanto o operador clicava),
@@ -569,6 +577,7 @@ export async function POST(request: Request, context: RouteContext) {
                 contactId: src.contactId!,
                 ...(src.channelId ? { channelId: src.channelId } : {}),
                 ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+                ...(reopenDepartmentId ? { departmentId: reopenDepartmentId } : {}),
               }),
               select: {
                 id: true,
@@ -656,18 +665,9 @@ export async function POST(request: Request, context: RouteContext) {
           }
         }
 
+        const full = (await getConversationById(created.id)) ?? created;
         return NextResponse.json({
-          conversation: {
-            id: created.id,
-            number: created.number,
-            status: created.status,
-            externalId: created.externalId,
-            channel: created.channel,
-            channelId: created.channelId,
-            inboxName: created.inboxName,
-            createdAt: created.createdAt,
-            updatedAt: created.updatedAt,
-          },
+          conversation: full,
           previousConversationId: id,
         });
       }
