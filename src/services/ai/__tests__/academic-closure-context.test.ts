@@ -14,6 +14,8 @@ import {
   shouldCloseAfterAgentFarewell,
   userAcknowledgedAndClosed,
   userDefersUntilLater,
+  userSaysGoodbye,
+  userThanksInSentence,
 } from "@/services/ai/academic-closure";
 
 const FAREWELL =
@@ -54,7 +56,65 @@ describe("userDefersUntilLater", () => {
   });
 });
 
+describe("userThanksInSentence", () => {
+  it("agradecimento comentando o resultado encerra", () => {
+    expect(
+      userThanksInSentence("Ficou bom, usarei esse exemplo como base. Obrigado"),
+    ).toBe(true);
+    expect(userThanksInSentence("Ajudou muito, valeu!")).toBe(true);
+  });
+
+  it("agradecimento com pendência ou pergunta não encerra", () => {
+    expect(userThanksInSentence("Obrigado, mas o link não abre")).toBe(false);
+    expect(userThanksInSentence("Obrigado! E sobre a prova, como acesso?")).toBe(
+      false,
+    );
+    expect(userThanksInSentence("Obrigado, mas preciso falar com um consultor")).toBe(
+      false,
+    );
+  });
+});
+
+describe("userSaysGoodbye", () => {
+  it("retribuição de despedida encerra", () => {
+    expect(
+      userSaysGoodbye(
+        "Desejo o mesmo, uma ótima tarde pra você também, boa quarta-feira!",
+      ),
+    ).toBe(true);
+    expect(userSaysGoodbye("Igualmente!")).toBe(true);
+    expect(userSaysGoodbye("Até mais")).toBe(true);
+    expect(userSaysGoodbye("Bom fim de semana")).toBe(true);
+  });
+
+  it("saudação de abertura não é despedida", () => {
+    expect(userSaysGoodbye("Boa tarde")).toBe(false);
+    expect(userSaysGoodbye("Bom dia!")).toBe(false);
+  });
+});
+
 describe("shouldCloseAfterAgentFarewell", () => {
+  it("caso Davi: elogio + obrigado, com despedida do agente, encerra", () => {
+    expect(
+      shouldCloseAfterAgentFarewell({
+        userMessage: "Ficou bom, usarei esse exemplo como base. Obrigado",
+        replyText:
+          "Que bom que gostou, Davi! Qualquer coisa que precisar, tô aqui pra ajudar, tá? Boa sorte no seu projeto e nos estudos! 😊 Boa tarde!",
+      }),
+    ).toBe(true);
+  });
+
+  it("caso Davi: aluno retribui a despedida e o agente responde, encerra", () => {
+    expect(
+      shouldCloseAfterAgentFarewell({
+        userMessage:
+          "Desejo o mesmo, uma ótima tarde pra você também, boa quarta-feira!",
+        replyText:
+          "Obrigado, Davi! Aproveite bastante sua quarta-feira e conte comigo sempre que precisar. 😊 Boa tarde!",
+      }),
+    ).toBe(true);
+  });
+
   it("caso David: aceite + despedida do agente encerra", () => {
     expect(
       shouldCloseAfterAgentFarewell({

@@ -162,6 +162,64 @@ export function userReportsResolvedOrWaiting(
   return false;
 }
 
+/**
+ * Agradecimento dentro de uma frase com conteúdo ("Ficou bom, usarei esse
+ * exemplo como base. Obrigado", "Ajudou muito, valeu").
+ *
+ * `userThanksAndWrapsUp` exige que quase nada sobre além do "obrigado", então
+ * o aluno que agradece comentando o resultado passava batido e a conversa
+ * ficava aberta depois da despedida do agente.
+ */
+export function userThanksInSentence(userMessage?: string | null): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw || hasOpenQuestion(raw)) return false;
+  const msg = normalize(raw);
+  if (!msg || msg.length > 220) return false;
+  if (hasPendingRequest(msg)) return false;
+  return /\b(obrigad[oa]s?|obg|obgd|brigad[oa]|grat[ao]|gratidao|valeu|vlw|agradec[oi])\b/.test(
+    msg,
+  );
+}
+
+/**
+ * Aluno retribui a despedida: "desejo o mesmo", "boa tarde pra você também",
+ * "boa quarta-feira", "até mais", "tchau".
+ *
+ * Um voto de bom dia/tarde SOZINHO não entra (é saudação de abertura) — só
+ * conta com marca de retribuição, despedida explícita ou voto de dia/semana.
+ */
+export function userSaysGoodbye(userMessage?: string | null): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw || hasOpenQuestion(raw)) return false;
+  const msg = normalize(raw);
+  if (!msg || msg.length > 200) return false;
+  if (hasPendingRequest(msg)) return false;
+  if (
+    /\b(tchau|xau|falou|abraco|abracos|ate mais|ate logo|ate breve|ate a proxima|ate depois|ate amanha|fica com deus|va com deus)\b/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(igualmente|desejo o mesmo|o mesmo (pra|para) (voce|vc|ti)|(pra|para) (voce|vc) tambem|(voce|vc) tambem)\b/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(bom|boa|otim[ao]) (fim de semana|semana|feriado|domingo|segunda|terca|quarta|quinta|sexta|sabado)/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  return /\b(desejo|te desejo)\b.{0,30}(otim[ao]|bo[ma]|excelente|feliz)/.test(
+    msg,
+  );
+}
+
 /** Agradecimento que fecha o turno ("muito grata por toda ajuda"). */
 export function userThanksAndWrapsUp(userMessage?: string | null): boolean {
   const raw = userMessage ?? "";
@@ -391,7 +449,9 @@ export function studentWrappedUp(userMessage?: string | null): boolean {
     userSignalsNoFurtherHelp(text) ||
     userDefersUntilLater(text) ||
     userReportsResolvedOrWaiting(text) ||
-    userWantsAiConversationClose(text)
+    userWantsAiConversationClose(text) ||
+    userThanksInSentence(text) ||
+    userSaysGoodbye(text)
   );
 }
 
