@@ -960,7 +960,8 @@ function modalidadeHint(
     .map((r) => `${r.curso ?? ""} ${r.instituicao ?? ""} ${r.ciclo ?? ""}`)
     .join(" ")
     .toUpperCase();
-  if (/\bEAD\b|A DIST[AÂ]NCIA|DIST[AÂ]NCIA|ONLINE|\bDIGITAL\b/.test(hay)) {
+  // Só marcadores inequívocos: "Marketing Digital" não é modalidade.
+  if (/\bEAD\b|A DIST[AÂ]NCIA|\bONLINE\b/.test(hay)) {
     return {
       modalidade: "EAD",
       hint: "Curso EAD: a prova é EAD (online) — pode afirmar. Ainda assim aponte a Plataforma de provas (Área do Aluno → Vida acadêmica → Plataforma de provas) para data, horário e disciplina.",
