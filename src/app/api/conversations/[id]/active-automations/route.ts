@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import type { AppUserRole } from "@/lib/auth-types";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getContactActiveContexts } from "@/services/automation-context";
 import { labelForActiveStep } from "@/services/automation-step-labels";
@@ -37,8 +36,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     return await runWithApiUserContext(authResult.user, async () => {
       const { id } = await context.params;
-      const accessUser = authResult.user as { id: string; role: AppUserRole };
-      const denied = await requireConversationAccess({ user: accessUser }, id);
+      const denied = await requireConversationAccess({ user: authResult.user }, id);
       if (denied) return denied;
 
       const conv = await getConversationLite(id);

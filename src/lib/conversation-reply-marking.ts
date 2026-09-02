@@ -19,6 +19,13 @@ export type BotOutboundReplyMark = {
   hasAgentReply: true;
 };
 
+/** Outbound de consultor humano (inbox, template, flow, texto). */
+export const HUMAN_OUTBOUND_REPLY_MARK = {
+  lastMessageDirection: "out" as const,
+  hasAgentReply: true as const,
+  hasHumanReply: true as const,
+};
+
 export async function countAgentReplyAsAnswered(
   orgId?: string | null,
 ): Promise<boolean> {
