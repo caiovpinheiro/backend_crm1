@@ -87,13 +87,48 @@ export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
  */
 export type InboxTab = InboxCategoryTab | "todos" | "abertas" | "ligar";
 
+const ALL_INBOX_TABS: readonly InboxTab[] = [
+  ...INBOX_CATEGORY_TABS,
+  "todos",
+  "abertas",
+  "ligar",
+];
+
+const INBOX_TAB_SET = new Set<string>(ALL_INBOX_TABS);
+
+/**
+ * `?tab=entrada` ou `?tab=entrada,ligar,esperando`.
+ * Ignora ids desconhecidos; `todos` com outras filas vira só `todos`.
+ */
+export function parseInboxTabParam(
+  raw: string | undefined | null,
+): InboxTab[] {
+  if (!raw) return [];
+  const seen = new Set<InboxTab>();
+  const out: InboxTab[] = [];
+  for (const part of raw.split(",")) {
+    const id = part.trim();
+    if (!INBOX_TAB_SET.has(id) || seen.has(id as InboxTab)) continue;
+    seen.add(id as InboxTab);
+    out.push(id as InboxTab);
+  }
+  if (out.includes("todos")) return ["todos"];
+  return out;
+}
+
+function listTabsOf(params: GetConversationsParams): InboxTab[] {
+  if (!params.tab) return [];
+  return Array.isArray(params.tab) ? params.tab : [params.tab];
+}
+
 export type GetConversationsParams = {
   contactId?: string;
   status?: ConversationStatus;
   channel?: string;
   /** IDs de instância de Channel (e sentinelas `__missing__:` / `__deleted__`). */
   channelIds?: string[];
-  tab?: InboxTab;
+  /** Uma fila ou união (OR) de filas. */
+  tab?: InboxTab | InboxTab[];
   /**
    * Com `tab: "todos"` e papel MEMBER: OR destas categorias (só o que o
    * utilizador pode ver). Omitir para ADMIN/MANAGER (todas as conversas
@@ -543,6 +578,24 @@ function tabFilterWhere(
   return tabToWhere(tab, countAgentReply);
 }
 
+/** União (OR) das filas pedidas. `todos` sozinho (ou com outras) = visão todas. */
+function tabsFilterWhere(
+  tabs: InboxTab[],
+  todosCategoryTabs?: InboxCategoryTab[],
+  countAgentReply = false,
+): Prisma.ConversationWhereInput | null {
+  if (tabs.length === 0) return null;
+  if (tabs.includes("todos")) {
+    return tabFilterWhere("todos", todosCategoryTabs, countAgentReply);
+  }
+  const parts = tabs
+    .map((t) => tabFilterWhere(t, todosCategoryTabs, countAgentReply))
+    .filter((w): w is Prisma.ConversationWhereInput => w != null);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0] ?? null;
+  return { OR: parts };
+}
+
 /**
  * Monta o `where` da listagem de conversas (visibilidade + busca/aba +
  * filtros). Extraído de `getConversations` para ser reaproveitado pelo
@@ -566,15 +619,16 @@ export async function buildConversationListWhere(
   if (searchWhere) conditions.push(searchWhere);
 
   const countAgentReply = await countAgentReplyAsAnswered();
-  if (params.tab) {
-    const tabWhere = tabFilterWhere(
-      params.tab,
+  const tabs = listTabsOf(params);
+  if (tabs.length > 0) {
+    const tabWhere = tabsFilterWhere(
+      tabs,
       params.todosCategoryTabs,
       countAgentReply,
     );
     if (tabWhere) conditions.push(tabWhere);
   }
-  if (params.status && !params.tab) conditions.push({ status: params.status });
+  if (params.status && tabs.length === 0) conditions.push({ status: params.status });
   if (params.allowedChannelIds) {
     conditions.push({ channelId: { in: params.allowedChannelIds } });
   }
@@ -1185,7 +1239,14 @@ async function hydrateConversationsByIds(
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
-  return params.tab === "finalizados" || params.tab === "resolvidos";
+  const tabs = listTabsOf(params);
+  // Encerradas/Resolvendo: DISTINCT contato+canal. Filas quentes (Entrada,
+  // Aguardando, …) não — DISTINCT na org inteira é caro. União mista com
+  // fila quente também fica sem DISTINCT; o FE colapsa o card.
+  return (
+    tabs.length > 0 &&
+    tabs.every((t) => t === "finalizados" || t === "resolvidos")
+  );
 }
 
 export async function getConversations(
@@ -1728,7 +1789,9 @@ async function peekCachedTabTotal(
   params: GetConversationsParams,
   collapse: boolean,
 ): Promise<number | null> {
-  const tab = params.tab;
+  const tabs = listTabsOf(params);
+  if (tabs.length !== 1) return null;
+  const tab = tabs[0];
   if (!tab) return null;
   const orgId = getOrgIdOrNull();
   if (!orgId) return null;

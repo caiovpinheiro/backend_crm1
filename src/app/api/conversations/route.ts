@@ -12,6 +12,7 @@ import {
   getTabCounts,
   INBOX_CATEGORY_TABS,
   INBOX_TAB_LIST,
+  parseInboxTabParam,
   type InboxCategoryTab,
   type InboxTab,
 } from "@/services/conversations";
@@ -23,19 +24,6 @@ function parseIntParam(v: string | null, fallback: number) {
 }
 
 const statuses = new Set(["OPEN", "RESOLVED", "PENDING", "SNOOZED"]);
-const validTabs = new Set<InboxTab>([
-  "entrada",
-  "esperando",
-  "respondidas",
-  "agente_ia",
-  "automacao",
-  "resolvidos",
-  "finalizados",
-  "erro",
-  "todos",
-  "abertas",
-  "ligar",
-]);
 const validSortBy = new Set(["updatedAt", "createdAt", "unreadCount"]);
 
 // Bug 24/abr/26: usavamos authenticateApiRequest direto + enterRequestContext,
@@ -209,11 +197,22 @@ export async function GET(request: Request) {
       }
 
       const tabRaw = searchParams.get("tab") ?? undefined;
-      const tab = tabRaw && validTabs.has(tabRaw as InboxTab) ? (tabRaw as InboxTab) : undefined;
-
-      if (tab && !canSeeInboxTab({ grants, role: user.role, tab, permissions: inboxPerms })) {
+      const requestedTabs = parseInboxTabParam(tabRaw);
+      const allowedTabs = requestedTabs.filter((t) =>
+        canSeeInboxTab({ grants, role: user.role, tab: t, permissions: inboxPerms }),
+      );
+      if (tabRaw && tabRaw.trim() && requestedTabs.length === 0) {
+        return NextResponse.json({ message: "Nenhuma fila válida." }, { status: 400 });
+      }
+      if (requestedTabs.length > 0 && allowedTabs.length === 0) {
         return NextResponse.json({ message: "Sem permissão para esta aba." }, { status: 403 });
       }
+      const tab: InboxTab | InboxTab[] | undefined =
+        allowedTabs.length === 0
+          ? undefined
+          : allowedTabs.length === 1
+            ? allowedTabs[0]
+            : allowedTabs;
       const statusRaw = searchParams.get("status") ?? undefined;
       const status = statusRaw && statuses.has(statusRaw)
         ? (statusRaw as "OPEN" | "RESOLVED" | "PENDING" | "SNOOZED")
@@ -250,7 +249,8 @@ export async function GET(request: Request) {
       );
 
       const memberTodosCategories: InboxCategoryTab[] | undefined =
-        tab === "todos" && user.role === "MEMBER"
+        (tab === "todos" || (Array.isArray(tab) && tab.includes("todos"))) &&
+        user.role === "MEMBER"
           ? (() => {
               const tabs = INBOX_CATEGORY_TABS.filter((t) =>
                 canSeeInboxTab({ grants, role: user.role, tab: t, permissions: inboxPerms }),
