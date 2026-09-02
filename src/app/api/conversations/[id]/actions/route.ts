@@ -761,10 +761,21 @@ export async function POST(request: Request, context: RouteContext) {
         }
         if (rawTab) {
           try {
-            const leaf =
-              allowedDepartmentIds.length > 0
-                ? await assertLeafInDepartments(rawTab, allowedDepartmentIds)
-                : await assertLeafInOrg(rawTab);
+            let leaf: Awaited<ReturnType<typeof assertLeafInOrg>>;
+            if (allowedDepartmentIds.length > 0) {
+              try {
+                leaf = await assertLeafInDepartments(
+                  rawTab,
+                  allowedDepartmentIds,
+                );
+              } catch (first) {
+                const code = (first as { code?: string }).code;
+                if (code === "TABULATION_NOT_LEAF") throw first;
+                leaf = await assertLeafInOrg(rawTab);
+              }
+            } else {
+              leaf = await assertLeafInOrg(rawTab);
+            }
             tabulationId = leaf.id;
             tabulationName = leaf.name;
             tabulationNumber = leaf.number;
