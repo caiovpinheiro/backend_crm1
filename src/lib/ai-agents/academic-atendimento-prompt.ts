@@ -65,6 +65,38 @@ export function formatCanonicalPortalAccessHint(
   ].join("\n");
 }
 
+const EXAM_ACCESS_INTENT_RE =
+  /prova|avaliac|avalia[cç][aã]o|plataforma de prova|como (fa[cç]o |eu )?(pra |para )?(ver|acessar|entrar|fazer).*(prova|avaliac)|onde (fica|vejo|acesso|entro).*(prova|avaliac)/i;
+
+/**
+ * Caminho oficial da plataforma de provas. Injetado quando o aluno pergunta
+ * ou quando o último disparo falava de prova e ele responde de forma vaga.
+ */
+export function formatExamAccessHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  const hay = `${q}\n${recentContext ?? ""}`;
+  const asks =
+    EXAM_ACCESS_INTENT_RE.test(q) ||
+    (looksLikeAffirmative(q) && EXAM_ACCESS_INTENT_RE.test(recentContext ?? "")) ||
+    (/como (fa[cç]o|eu vejo|ver|acesso)|onde (vejo|fica|acesso)/i.test(q) &&
+      /prova|avaliac/i.test(hay));
+  if (!asks) return "";
+  return [
+    "",
+    "PLATAFORMA DE PROVAS — CAMINHO OFICIAL (entregue na hora, com empatia):",
+    "Acolha em 1 frase (ex.: 'Te explico o caminho da prova, é rapidinho.').",
+    `1. Abra a Área do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    "2. Vá em *Vida acadêmica*",
+    "3. Abra *Plataforma de provas*",
+    "PROIBIDO perguntar 'o que você quer ver?' se o disparo/contexto já falava de prova.",
+    "PROIBIDO inventar outro menu. NÃO transfira só por essa dúvida.",
+  ].join("\n");
+}
+
 export const ACADEMIC_ATENDIMENTO_RULES = `
 ## IDENTIDADE
 Você é consultora de suporte acadêmico da **${OFFICIAL_INSTITUTION_NAME}** no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
@@ -137,6 +169,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
 11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
+11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
 12. COORDENAÇÃO: Blackboard → Organizações. Nunca invente e-mail/telefone. PROIBIDO usar "fale/confirme com a coordenação do curso" como saída padrão — principalmente em DP/dependência/disciplina reprovada, que tem caminho próprio (regra 16).
 13. Fora de escopo ou frustração forte repetida → distribua (Atendimento, salvo retenção).
 14. VALOR / MENSALIDADE / GRADE / INFO DE CURSO QUE NÃO SEJA O CURSO ATUAL DO ALUNO: NUNCA responda com link de site/catálogo. Avise que vai conectar e ACIONE transfer (Atendimento) + execute_distribution.

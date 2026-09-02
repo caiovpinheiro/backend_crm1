@@ -6,6 +6,7 @@
  * URL: INAUGURAL_CLASS_YOUTUBE_URL ou default abaixo.
  */
 import { prisma } from "@/lib/prisma";
+import type { InboxPolicy } from "@/lib/ai-agents/steering";
 
 export const INAUGURAL_CLASS_YOUTUBE_URL =
   (process.env.INAUGURAL_CLASS_YOUTUBE_URL || "").trim() ||
@@ -13,13 +14,24 @@ export const INAUGURAL_CLASS_YOUTUBE_URL =
 
 const CALOUROS_TAG_RE = /^calouros1008_[1-6]$/i;
 
-export function isInauguralLinkWindow(now = new Date()): boolean {
+/** URL efetiva: o que o consultor salvou na tela vence env/default. */
+export function resolveInauguralUrl(policy?: InboxPolicy | null): string {
+  return policy?.inauguralUrl?.trim() || INAUGURAL_CLASS_YOUTUBE_URL;
+}
+
+export function isInauguralLinkWindow(
+  now = new Date(),
+  policy?: InboxPolicy | null,
+): boolean {
   const day = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(now);
+  if (policy?.inauguralDates?.length) {
+    return policy.inauguralDates.includes(day);
+  }
   const raw =
     process.env.INAUGURAL_LINK_DATES?.trim() || "2026-08-10,2026-08-11";
   const allowed = new Set(
@@ -98,8 +110,9 @@ export function userAsksInauguralClassLinkOrIssue(text: string): boolean {
 
 export function buildInauguralClassLinkMessage(opts?: {
   problem?: boolean;
+  policy?: InboxPolicy | null;
 }): string {
-  const link = INAUGURAL_CLASS_YOUTUBE_URL;
+  const link = resolveInauguralUrl(opts?.policy);
   if (opts?.problem) {
     return [
       "Entendo, vamos te ajudar com a *aula inaugural* 💜",
@@ -148,8 +161,12 @@ export async function conversationAlreadyGotInauguralLink(
 export async function shouldSendInauguralClassLink(args: {
   contactId: string;
   userMessage: string;
+  policy?: InboxPolicy | null;
 }): Promise<{ send: boolean; priorityCalouros: boolean; problem: boolean }> {
-  if (!isInauguralLinkWindow()) {
+  if (args.policy && !args.policy.inauguralEnabled) {
+    return { send: false, priorityCalouros: false, problem: false };
+  }
+  if (!isInauguralLinkWindow(new Date(), args.policy)) {
     return { send: false, priorityCalouros: false, problem: false };
   }
   const priorityCalouros = await contactHasCalouros1008Tag(args.contactId);

@@ -27,6 +27,12 @@ import {
   type OutputStyle,
   type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
+import {
+  normalizeInboxPolicy,
+  normalizeToolConfig,
+  type InboxPolicy,
+  type ToolConfigMap,
+} from "@/lib/ai-agents/steering";
 
 export type AIAgentRow = {
   id: string;
@@ -95,8 +101,14 @@ export type CreateAIAgentInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  systemPromptTemplate?: string;
   systemPromptOverride?: string | null;
   productPolicy?: string | null;
+
+  // Pilotagem profunda (regras + travas de tool + política de inbox).
+  steeringRules?: string | null;
+  toolConfig?: ToolConfigMap | null;
+  inboxPolicy?: InboxPolicy | null;
   tone?: string;
   language?: string;
   autonomyMode?: AIAgentAutonomy;
@@ -239,6 +251,53 @@ export function sanitizePilotingInput(input: {
   return out;
 }
 
+/**
+ * Normaliza os campos de pilotagem profunda vindos da API. Mesma
+ * filosofia do `sanitizePilotingInput`: chave desconhecida é dropada e
+ * ausência de campo significa "não mexe".
+ */
+export function sanitizeSteeringInput(input: {
+  systemPromptTemplate?: unknown;
+  steeringRules?: unknown;
+  toolConfig?: unknown;
+  inboxPolicy?: unknown;
+}): Partial<
+  Pick<
+    CreateAIAgentInput,
+    "systemPromptTemplate" | "steeringRules" | "toolConfig" | "inboxPolicy"
+  >
+> {
+  const out: Partial<CreateAIAgentInput> = {};
+
+  if (
+    typeof input.systemPromptTemplate === "string" &&
+    input.systemPromptTemplate.trim()
+  ) {
+    // Template vazio deixaria o agente sem prompt-base — só aceita texto.
+    out.systemPromptTemplate = input.systemPromptTemplate;
+  }
+
+  if (typeof input.steeringRules === "string") {
+    out.steeringRules = input.steeringRules.trim() || null;
+  } else if (input.steeringRules === null) {
+    out.steeringRules = null;
+  }
+
+  if (input.toolConfig === null) {
+    out.toolConfig = null;
+  } else if (input.toolConfig !== undefined) {
+    out.toolConfig = normalizeToolConfig(input.toolConfig);
+  }
+
+  if (input.inboxPolicy === null) {
+    out.inboxPolicy = null;
+  } else if (input.inboxPolicy !== undefined) {
+    out.inboxPolicy = normalizeInboxPolicy(input.inboxPolicy);
+  }
+
+  return out;
+}
+
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
 
@@ -278,9 +337,17 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         model: input.model ?? archetype.suggestedModel,
         temperature: input.temperature ?? 0.7,
         maxTokens: input.maxTokens ?? 1024,
-        systemPromptTemplate: archetype.systemPromptTemplate,
+        systemPromptTemplate:
+          input.systemPromptTemplate ?? archetype.systemPromptTemplate,
         systemPromptOverride: input.systemPromptOverride ?? null,
         productPolicy: input.productPolicy ?? null,
+        steeringRules: input.steeringRules ?? null,
+        toolConfig:
+          (input.toolConfig as unknown as Prisma.InputJsonValue | undefined) ??
+          Prisma.JsonNull,
+        inboxPolicy:
+          (input.inboxPolicy as unknown as Prisma.InputJsonValue | undefined) ??
+          Prisma.JsonNull,
         tone: input.tone ?? archetype.defaultTone,
         language: input.language ?? "pt-BR",
         autonomyMode: input.autonomyMode ?? "DRAFT",
@@ -351,8 +418,30 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           ? { temperature: input.temperature }
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.systemPromptTemplate !== undefined
+          ? { systemPromptTemplate: input.systemPromptTemplate }
+          : {}),
         ...(input.systemPromptOverride !== undefined
           ? { systemPromptOverride: input.systemPromptOverride }
+          : {}),
+        ...(input.steeringRules !== undefined
+          ? { steeringRules: input.steeringRules }
+          : {}),
+        ...(input.toolConfig !== undefined
+          ? {
+              toolConfig:
+                input.toolConfig === null
+                  ? Prisma.JsonNull
+                  : (input.toolConfig as unknown as Prisma.InputJsonValue),
+            }
+          : {}),
+        ...(input.inboxPolicy !== undefined
+          ? {
+              inboxPolicy:
+                input.inboxPolicy === null
+                  ? Prisma.JsonNull
+                  : (input.inboxPolicy as unknown as Prisma.InputJsonValue),
+            }
           : {}),
         ...(input.productPolicy !== undefined
           ? { productPolicy: input.productPolicy }

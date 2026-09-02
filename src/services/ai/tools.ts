@@ -21,6 +21,17 @@ import {
   templateVariablesFromSendComponents,
 } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import {
+  applyArgPolicy,
+  describeToolPolicy,
+  emptyToolPolicy,
+  listAllows,
+  listBlocks,
+  toolPolicyFor,
+  type InboxPolicy,
+  type ToolConfigMap,
+  type ToolPolicy,
+} from "@/lib/ai-agents/steering";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
@@ -58,6 +69,8 @@ export type RunContext = {
   dealId?: string | null;
   /// Última mensagem do aluno (para inferir departamento no handoff).
   userMessage?: string | null;
+  /// Política de inbox do agente (aliases de departamento, keywords).
+  inboxPolicy?: InboxPolicy | null;
 };
 
 function ok<T>(data: T) {
@@ -251,7 +264,7 @@ function moveStageTool(ctx: RunContext) {
 
 // ── add_tag ────────────────────────────────────────────────────
 
-function addTagTool(ctx: RunContext) {
+function addTagTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Adiciona uma tag ao contato atual. Se a tag não existir, ela é criada. Útil para segmentar leads por interesse, origem ou qualificação.",
@@ -263,11 +276,21 @@ function addTagTool(ctx: RunContext) {
         if (!ctx.contactId) return fail("Sem contato para marcar.");
         const name = tagName.trim();
         if (!name) return fail("Nome de tag vazio.");
+        if (!listAllows(policy.allowedTagNames, name)) {
+          return fail(
+            `Tag "${name}" não está liberada para este agente. Permitidas: ${policy.allowedTagNames.join(", ")}.`,
+          );
+        }
         let tag = await prisma.tag.findFirst({
           where: { name: { equals: name, mode: "insensitive" } },
           select: { id: true, name: true },
         });
         if (!tag) {
+          if (policy.denyCreateNew || policy.allowedTagNames.length > 0) {
+            return fail(
+              `Tag "${name}" não existe e a criação de tags novas está desativada para este agente.`,
+            );
+          }
           tag = await prisma.tag.create({
             data: withOrgFromCtx({ name, color: "#64748b" }),
             select: { id: true, name: true },
@@ -299,7 +322,7 @@ function addTagTool(ctx: RunContext) {
 
 const ACTIVITY_TYPES = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"] as const;
 
-function createActivityTool(ctx: RunContext) {
+function createActivityTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Registra uma atividade ou follow-up vinculado ao contato/deal atual. Útil para 'ligar amanhã 15h' ou deixar uma nota pro time comercial.",
@@ -314,12 +337,27 @@ function createActivityTool(ctx: RunContext) {
     }),
     execute: async ({ type, title, description, scheduledAt }) => {
       try {
+        let resolvedType = type as string;
+        if (!listAllows(policy.allowedTypes, resolvedType)) {
+          // Com defaultType configurado o operador prefere corrigir a
+          // silenciosamente em vez de fazer o LLM tentar de novo.
+          if (policy.defaultType) {
+            resolvedType = policy.defaultType;
+          } else {
+            return fail(
+              `Tipo "${resolvedType}" não liberado. Permitidos: ${policy.allowedTypes.join(", ")}.`,
+            );
+          }
+        }
+        if (!ACTIVITY_TYPES.includes(resolvedType as (typeof ACTIVITY_TYPES)[number])) {
+          return fail(`Tipo de atividade inválido: "${resolvedType}".`);
+        }
         const activity = await createActivity({
-          type: type as ActivityType,
+          type: resolvedType as ActivityType,
           title,
           description,
           scheduledAt: scheduledAt ?? undefined,
-          completed: type === "NOTE",
+          completed: resolvedType === "NOTE",
           contactId: ctx.contactId ?? undefined,
           dealId: ctx.dealId ?? undefined,
           userId: ctx.agentUserId,
@@ -645,7 +683,26 @@ function searchProductsTool(_ctx: RunContext) {
 
 // ── transfer_to_human ──────────────────────────────────────────
 
-function transferToHumanTool(ctx: RunContext) {
+/**
+ * Recusa nomes de departamento fora do que o operador liberou. Devolve
+ * a mensagem de erro (para o LLM corrigir) ou null quando pode seguir.
+ */
+function departmentGate(
+  policy: ToolPolicy,
+  departmentName: string | null | undefined,
+): string | null {
+  const name = departmentName?.trim();
+  if (!name) return null;
+  if (listBlocks(policy.blockedDepartments, name)) {
+    return `Departamento "${name}" está bloqueado para este agente.`;
+  }
+  if (!listAllows(policy.allowedDepartments, name)) {
+    return `Departamento "${name}" não liberado. Permitidos: ${policy.allowedDepartments.join(", ")}.`;
+  }
+  return null;
+}
+
+function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
@@ -670,6 +727,8 @@ function transferToHumanTool(ctx: RunContext) {
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const gate = departmentGate(policy, departmentName);
+        if (gate) return fail(gate);
         // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
         // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
         const result = await executeAcademicDepartmentHandoff({
@@ -679,6 +738,7 @@ function transferToHumanTool(ctx: RunContext) {
           departmentName: departmentName ?? null,
           userMessage: ctx.userMessage ?? null,
           reason,
+          policy: ctx.inboxPolicy,
         });
         if (ctx.contactId) {
           await createActivity({
@@ -749,7 +809,7 @@ function transferToHumanTool(ctx: RunContext) {
 
 // ── transfer_to_department ─────────────────────────────────────
 
-function transferToDepartmentTool(ctx: RunContext) {
+function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
@@ -766,6 +826,8 @@ function transferToDepartmentTool(ctx: RunContext) {
         if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
         const name = departmentName.trim();
         if (!name) return fail("Nome de departamento vazio.");
+        const gate = departmentGate(policy, name);
+        if (gate) return fail(gate);
 
         // Últimas inbound — rematrícula / operacional forçam Atendimento
         // (mesmo se o LLM mandar Acolhimento).
@@ -783,9 +845,9 @@ function transferToDepartmentTool(ctx: RunContext) {
         let dept =
           messageImpliesRematricula(inboundBlob) ||
           messageImpliesOperationalAtendimento(inboundBlob)
-            ? await resolveDepartmentByKey("atendimento")
+            ? await resolveDepartmentByKey("atendimento", ctx.inboxPolicy)
             : null;
-        if (!dept) dept = await resolveDepartmentByName(name);
+        if (!dept) dept = await resolveDepartmentByName(name, ctx.inboxPolicy);
         if (!dept)
           return fail(
             `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
@@ -793,6 +855,7 @@ function transferToDepartmentTool(ctx: RunContext) {
         dept = await enforceAtendimentoIfAcolhimentoBlocked({
           contactId: ctx.contactId,
           dept,
+          policy: ctx.inboxPolicy,
         });
         if (!dept)
           return fail(
@@ -822,7 +885,7 @@ function transferToDepartmentTool(ctx: RunContext) {
 
 // ── execute_distribution ───────────────────────────────────────
 
-function executeDistributionTool(ctx: RunContext) {
+function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor escolhe automaticamente quem recebe (menor fila, dentro do departamento roteado, respeitando horário e disponibilidade) — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
@@ -842,6 +905,8 @@ function executeDistributionTool(ctx: RunContext) {
       try {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
+        const gate = departmentGate(policy, departmentName);
+        if (gate) return fail(gate);
 
         // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
         // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
@@ -860,6 +925,7 @@ function executeDistributionTool(ctx: RunContext) {
               departmentName: departmentName ?? null,
               userMessage: ctx.userMessage ?? null,
               reason: reason ?? "execute_distribution via IA",
+              policy: ctx.inboxPolicy,
             });
             const queuedWaiting =
               handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
@@ -880,7 +946,10 @@ function executeDistributionTool(ctx: RunContext) {
 
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          const dept = await resolveDepartmentByName(departmentName);
+          const dept = await resolveDepartmentByName(
+            departmentName,
+            ctx.inboxPolicy,
+          );
           if (!dept)
             return fail(`Departamento "${departmentName}" não encontrado.`);
           departmentId = dept.id;
@@ -951,7 +1020,9 @@ const MATRICULA_TRANSFER_MESSAGE =
 const MATRICULA_POLITICA =
   "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
 
-function consultarMatriculaTool(ctx: RunContext) {
+function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
+  const politica = policy.policyText ?? MATRICULA_POLITICA;
+  const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
   return tool({
     description:
       "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
@@ -987,8 +1058,8 @@ function consultarMatriculaTool(ctx: RunContext) {
         if (records.length === 0) {
           return ok({
             found: false,
-            politica: MATRICULA_POLITICA,
-            transferMessage: MATRICULA_TRANSFER_MESSAGE,
+            politica,
+            transferMessage,
             hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
           });
         }
@@ -1014,8 +1085,8 @@ function consultarMatriculaTool(ctx: RunContext) {
 
         return ok({
           found: true,
-          politica: MATRICULA_POLITICA,
-          transferMessage: MATRICULA_TRANSFER_MESSAGE,
+          politica,
+          transferMessage,
           nome: records[0]?.nome ?? contact.name,
           ativo,
           totalMatriculas: matriculas.length,
@@ -1081,7 +1152,9 @@ function closeConversationTool(ctx: RunContext) {
 // TypeScript não consegue inferir isso automaticamente sem este cast.
 type AnyTool = ReturnType<typeof tool<any, any>>;
 
-const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
+type ToolFactory = (ctx: RunContext, policy: ToolPolicy) => AnyTool;
+
+const FACTORY_MAP: Record<string, ToolFactory> = {
   create_deal: createDealTool,
   move_stage: moveStageTool,
   add_tag: addTagTool,
@@ -1095,11 +1168,41 @@ const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
   close_conversation: closeConversationTool,
 };
 
-export function buildToolSet(ctx: RunContext, enabledIds: string[]): ToolSet {
+/**
+ * Camada genérica da policy, válida para qualquer tool: anuncia as
+ * travas na description (senão o LLM insiste no arg bloqueado e entra
+ * em loop de erro) e higieniza os args antes do execute.
+ */
+function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
+  const suffix = describeToolPolicy(policy);
+  if (!suffix) return t;
+  const execute = t.execute;
+  return {
+    ...t,
+    description: `${t.description ?? ""}${suffix}`,
+    ...(execute
+      ? {
+          execute: ((args: Record<string, unknown>, options: unknown) =>
+            execute(
+              applyArgPolicy(args ?? {}, policy),
+              options as never,
+            )) as typeof execute,
+        }
+      : {}),
+  } as AnyTool;
+}
+
+export function buildToolSet(
+  ctx: RunContext,
+  enabledIds: string[],
+  toolConfig?: ToolConfigMap | null,
+): ToolSet {
   const set: Record<string, AnyTool> = {};
   for (const id of enabledIds) {
     const factory = FACTORY_MAP[id];
-    if (factory) set[id] = factory(ctx);
+    if (!factory) continue;
+    const policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
+    set[id] = withArgPolicy(factory(ctx, policy), policy);
   }
   return set as ToolSet;
 }

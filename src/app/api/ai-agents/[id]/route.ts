@@ -5,6 +5,7 @@ import {
   deleteAIAgent,
   getAIAgent,
   sanitizePilotingInput,
+  sanitizeSteeringInput,
   updateAIAgent,
   type UpdateAIAgentInput,
 } from "@/services/ai-agents";
@@ -124,6 +125,12 @@ export async function PUT(
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,
+      }),
+      ...sanitizeSteeringInput({
+        systemPromptTemplate: body.systemPromptTemplate,
+        steeringRules: body.steeringRules,
+        toolConfig: body.toolConfig,
+        inboxPolicy: body.inboxPolicy,
       }),
     };
 
