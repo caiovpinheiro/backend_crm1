@@ -306,20 +306,177 @@ export async function moveOpenDealToEmAtendimento(args: {
 
   const deal = await prisma.deal.findUnique({
     where: { id: dealId },
-    select: { stageId: true },
+    select: {
+      stageId: true,
+      stage: {
+        select: {
+          id: true,
+          name: true,
+          pipelineId: true,
+          pipeline: { select: { name: true } },
+        },
+      },
+    },
   });
   if (!deal) return { moved: false, dealId };
   if (deal.stageId === stage.id) {
     return { moved: true, stageId: stage.id, dealId };
   }
 
+  const origin = deal.stage;
   try {
-    const { moveDeal } = await import("@/services/deals");
+    const { moveDeal, createDealEvent } = await import("@/services/deals");
     await moveDeal(dealId, stage.id, 0);
+    // Marca de onde o card veio: ao encerrar o atendimento a IA devolve o
+    // aluno para ESTE estágio (o funil acadêmico de origem), não para um
+    // palpite. Também é o único registro do move na timeline — `moveDeal`
+    // não grava `STAGE_CHANGED` por conta própria.
+    await createDealEvent(
+      dealId,
+      null,
+      "STAGE_CHANGED",
+      {
+        from: {
+          id: origin.id,
+          name: origin.name,
+          pipelineId: origin.pipelineId,
+          pipelineName: origin.pipeline?.name ?? null,
+        },
+        to: { id: stage.id, name: "Em Atendimento" },
+        aiAttendanceHandoff: true,
+      },
+      { type: "AI", label: "Agente IA" },
+    ).catch(() => {});
     return { moved: true, stageId: stage.id, dealId };
   } catch (e) {
     console.error("[academic-handoff] moveOpenDealToEmAtendimento failed", e);
     return { moved: false, stageId: stage.id, dealId };
+  }
+}
+
+/** Funil de atendimento (fila humana) — de onde o card deve sair ao encerrar. */
+function isAtendimentoPipelineName(name?: string | null): boolean {
+  const n = normalize(name ?? "");
+  return !!n && (n.includes("atendimento") || n === "sac");
+}
+
+/**
+ * Encerrou o atendimento: devolve o card ao estágio do funil acadêmico em que
+ * ele estava ANTES de ir para o funil de Atendimento.
+ *
+ * Se o deal não está no funil de Atendimento, não mexe — o aluno fica no
+ * funil em que já está (regra pedida pela operação).
+ */
+export async function restoreDealToAcademicOrigin(args: {
+  dealId?: string | null;
+  contactId?: string | null;
+}): Promise<{ moved: boolean; reason: string; dealId?: string; stageId?: string }> {
+  let dealId = args.dealId ?? null;
+  if (!dealId && args.contactId) {
+    const open = await prisma.deal.findFirst({
+      where: { contactId: args.contactId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    dealId = open?.id ?? null;
+  }
+  if (!dealId) return { moved: false, reason: "NO_DEAL" };
+
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: {
+      id: true,
+      stageId: true,
+      stage: {
+        select: {
+          id: true,
+          name: true,
+          pipelineId: true,
+          pipeline: { select: { id: true, name: true } },
+        },
+      },
+    },
+  });
+  if (!deal) return { moved: false, reason: "NO_DEAL" };
+  // Fora do funil de Atendimento: mantém onde está.
+  if (!isAtendimentoPipelineName(deal.stage?.pipeline?.name)) {
+    return { moved: false, reason: "NOT_IN_ATENDIMENTO", dealId };
+  }
+
+  const events = await prisma.dealEvent.findMany({
+    where: { dealId, type: "STAGE_CHANGED" },
+    orderBy: { createdAt: "desc" },
+    take: 30,
+    select: { meta: true },
+  });
+
+  type StageRef = { id?: string; pipelineName?: string | null };
+  const readRef = (v: unknown): StageRef | null =>
+    typeof v === "object" && v !== null ? (v as StageRef) : null;
+
+  let originStageId: string | null = null;
+  for (const ev of events) {
+    const meta = (ev.meta as Record<string, unknown> | null) ?? {};
+    const from = readRef(meta.from);
+    const to = readRef(meta.to);
+    if (!from?.id) continue;
+    const enteredAtendimento =
+      meta.aiAttendanceHandoff === true ||
+      to?.id === deal.stageId ||
+      isAtendimentoPipelineName(to?.pipelineName);
+    if (!enteredAtendimento) continue;
+    if (isAtendimentoPipelineName(from.pipelineName)) continue;
+    originStageId = from.id;
+    break;
+  }
+
+  if (!originStageId) return { moved: false, reason: "NO_ORIGIN", dealId };
+
+  const originStage = await prisma.stage.findUnique({
+    where: { id: originStageId },
+    select: {
+      id: true,
+      name: true,
+      pipelineId: true,
+      pipeline: { select: { name: true } },
+    },
+  });
+  // Estágio apagado ou que virou parte do próprio Atendimento: não arrisca.
+  if (!originStage || isAtendimentoPipelineName(originStage.pipeline?.name)) {
+    return { moved: false, reason: "ORIGIN_GONE", dealId };
+  }
+  if (originStage.id === deal.stageId) {
+    return { moved: false, reason: "ALREADY_THERE", dealId };
+  }
+
+  try {
+    const { moveDeal, createDealEvent } = await import("@/services/deals");
+    await moveDeal(dealId, originStage.id, 0);
+    await createDealEvent(
+      dealId,
+      null,
+      "STAGE_CHANGED",
+      {
+        from: {
+          id: deal.stageId,
+          name: deal.stage?.name ?? deal.stageId,
+          pipelineId: deal.stage?.pipelineId ?? null,
+          pipelineName: deal.stage?.pipeline?.name ?? null,
+        },
+        to: {
+          id: originStage.id,
+          name: originStage.name,
+          pipelineId: originStage.pipelineId,
+          pipelineName: originStage.pipeline?.name ?? null,
+        },
+        aiAttendanceReturn: true,
+      },
+      { type: "AI", label: "Agente IA" },
+    ).catch(() => {});
+    return { moved: true, reason: "MOVED", dealId, stageId: originStage.id };
+  } catch (e) {
+    console.error("[academic-closure] restoreDealToAcademicOrigin failed", e);
+    return { moved: false, reason: "ERROR", dealId };
   }
 }
 

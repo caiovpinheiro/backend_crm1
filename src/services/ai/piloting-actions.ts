@@ -62,6 +62,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Despedida enviada → encerra o atendimento se o aluno já havia fechado o
+ * assunto. Fica aqui (e não só no inbox) porque a resposta pode sair pela
+ * tool `send_message` ou pelo follow-up — todas passam por este envio.
+ * Saudação e aviso de fora de horário nunca encerram.
+ */
+async function closeAttendanceIfFarewell(args: {
+  conversationId: string;
+  contactId: string;
+  kind?: "text" | "greeting" | "farewell" | "off_hours";
+  text: string;
+}): Promise<void> {
+  if (args.kind === "greeting" || args.kind === "off_hours") return;
+  try {
+    const { closeIfAgentFarewellEndsAttendance } = await import(
+      "@/services/ai/academic-closure"
+    );
+    await closeIfAgentFarewellEndsAttendance({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      replyText: args.text,
+    });
+  } catch (e) {
+    console.warn(
+      "[ai-piloting] encerramento pós-despedida falhou",
+      e instanceof Error ? e.message : e,
+    );
+  }
+}
+
 export type SendAgentMessageResult =
   | { status: "sent"; messageId: string }
   | { status: "draft"; messageId: string }
@@ -298,6 +328,12 @@ export async function sendAgentMessage(args: {
       content: text,
       timestamp: saved.createdAt,
     });
+    await closeAttendanceIfFarewell({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      kind: args.kind,
+      text,
+    });
     return { status: "sent", messageId: saved.id };
   }
 
@@ -368,6 +404,12 @@ export async function sendAgentMessage(args: {
         direction: "out",
         content: text,
         timestamp: saved.createdAt,
+      });
+      await closeAttendanceIfFarewell({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        kind: args.kind,
+        text,
       });
       return { status: "sent", messageId: saved.id };
     } catch (err) {

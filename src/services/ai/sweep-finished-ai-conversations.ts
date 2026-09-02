@@ -69,7 +69,6 @@ export async function sweepFinishedAiConversations(
   const rows = await prismaBase.conversation.findMany({
     where: {
       status: { not: "RESOLVED" },
-      contactId: { not: null },
       ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
       ...(numbers.length
         ? { number: { in: numbers } }

@@ -180,7 +180,7 @@ async function closeAfterFarewellIfNeeded(args: {
     reason: "Atendimento concluído — aluno se despediu e o agente encerrou",
   }).catch(() => ({ closed: false, reason: "ERROR" }));
   if (closed.closed) {
-    cancelAiReplyDebounce(args.conversationId);
+    cancelAiReplyDebounce(args.conversationId, "agent_farewell");
     logAi("closed", {
       conversationId: args.conversationId,
       reason: "agent_farewell",
@@ -1010,7 +1010,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               : "Aluno pediu encerramento (detector IA)",
         });
         if (closed.closed) {
-          cancelAiReplyDebounce(args.conversationId);
+          cancelAiReplyDebounce(args.conversationId, "ai_only_close");
           logAi("closed", {
             conversationId: args.conversationId,
             reason: afterIdleNudge

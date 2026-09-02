@@ -77,7 +77,18 @@ export function userDefersUntilLater(userMessage?: string | null): boolean {
   ) {
     return true;
   }
-  return /depois (eu )?(te )?(chamo|falo|volto)/.test(msg);
+  if (/depois (eu )?(te )?(chamo|falo|volto)/.test(msg)) return true;
+  // "Mais tarde entro em contato", "amanhã eu retorno", "te procuro depois".
+  if (
+    /(mais tarde|depois|amanha|a noite|de noite|outro dia)\b.{0,30}\b(entro|entrarei|retorno|retornarei|volto|voltarei|procuro|falo|chamo|mando|envio)/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  return /\b(entro|entrarei|vou entrar|retorno|retornarei|volto|voltarei|te procuro|procuro voce)\b.{0,30}(mais tarde|depois|amanha|a noite|em contato|quando)/.test(
+    msg,
+  );
 }
 
 /** Tags retóricas de fim de frase — "tá?", "né?" não são perguntas abertas. */
@@ -228,20 +239,113 @@ export function agentReplyLooksLikeFarewell(replyText?: string | null): boolean 
 
 /**
  * Fecha na hora, logo depois de enviar a resposta: exige que o agente
- * tenha se despedido E que o aluno tenha fechado o assunto (agradeceu,
- * adiou, disse que volta a chamar ou relatou que já resolveu).
+ * tenha se despedido E que o aluno tenha fechado o assunto — agradeceu,
+ * adiou, disse que volta a chamar, relatou que já resolveu ou apenas
+ * aceitou a resposta ("Ok", "tá bom obrigado").
  *
  * Mais restrito que `attendanceEndedInFarewell` de propósito: aqui a
- * conversa ainda está viva, então não fechamos só porque o aluno mandou
- * uma frase sem pergunta. O worker e a varredura, que só agem após 30 min
- * de silêncio, usam a regra ampla.
+ * conversa ainda está viva, então não fechamos com uma frase qualquer sem
+ * pergunta. O worker e a varredura, que só agem após 30 min de silêncio,
+ * usam a regra ampla.
  */
 export function shouldCloseAfterAgentFarewell(args: {
   userMessage: string;
   replyText: string;
 }): boolean {
   if (!agentReplyLooksLikeFarewell(args.replyText)) return false;
-  return studentWrappedUp(args.userMessage);
+  return (
+    studentWrappedUp(args.userMessage) ||
+    userAcknowledgedAndClosed(args.userMessage)
+  );
+}
+
+/** Tokens de aceite: sozinhos não dizem nada além de "recebido, tudo certo". */
+const ACK_TOKEN_RE =
+  /\b(ok|okay|okey|oki|okk+|k|ta|tah|tabom|esta|bom|boa|dia|tarde|noite|tudo|bem|blz|beleza|certo|correto|combinado|fechado|fechou|isso|ai|exato|exatamente|entendi|entendido|compreendi|perfeito|otim[ao]|maravilha|show|legal|bacana|joia|tranquilo|de boa|sim|claro|uhum|aham|ata|ah|obrigad[oa]s?|obg|obgd|brigad[oa]|grat[ao]|gratidao|valeu|vlw|muito|mto|mesmo|viu|entao|so isso|era so isso|nada mais|por (nada|isso)|deus (te )?abencoe|amem|abraco|bjs|bjo)\b/g;
+
+/**
+ * Aceite curto do aluno ("Ok", "tá bom obrigado", "beleza, entendi").
+ *
+ * Isolado NÃO quer dizer fim de atendimento — "Ok" também é "estou
+ * aguardando" ou "concordo". O contexto vem de FORA: só usamos isso quando a
+ * resposta do agente naquele turno foi uma despedida (`shouldCloseAfterAgentFarewell`).
+ * Se o aluno deixou pergunta ou pedido no texto, não é aceite.
+ */
+export function userAcknowledgedAndClosed(userMessage?: string | null): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw || hasOpenQuestion(raw)) return false;
+  const msg = normalize(raw);
+  if (!msg || msg.length > 60) return false;
+  if (hasPendingRequest(msg)) return false;
+  // Só cumprimento não aceita nada — o atendimento pode nem ter começado.
+  if (/^(oi|ola|opa|e ai|bom dia|boa tarde|boa noite)[\s,.!]*$/.test(msg)) {
+    return false;
+  }
+  const leftover = msg
+    .replace(/\p{Extended_Pictographic}/gu, " ")
+    .replace(ACK_TOKEN_RE, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .trim();
+  return leftover.length === 0;
+}
+
+/**
+ * Hook pós-envio, válido para QUALQUER rota de saída do agente (inbox, tools,
+ * follow-up): se a mensagem enviada é despedida e a última fala do aluno
+ * fechou o assunto — incluindo um "Ok" seco —, encerra o ticket na hora.
+ *
+ * Sem isso a conversa sobrevive ao atendimento e ainda recebe follow-up
+ * depois, mesmo tendo a despedida do agente como última mensagem.
+ */
+export async function closeIfAgentFarewellEndsAttendance(args: {
+  conversationId: string;
+  contactId?: string | null;
+  replyText: string;
+}): Promise<{ closed: boolean; reason: string }> {
+  if (!agentReplyLooksLikeFarewell(args.replyText)) {
+    return { closed: false, reason: "NOT_FAREWELL" };
+  }
+  const conv = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: {
+      status: true,
+      contactId: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (!conv || conv.status === "RESOLVED") {
+    return { closed: false, reason: "ALREADY_CLOSED" };
+  }
+  // Já passou para humano: quem encerra é o consultor.
+  if (conv.assignedTo?.type !== "AI") return { closed: false, reason: "NOT_AI" };
+
+  const lastInbound = await prisma.message.findFirst({
+    where: {
+      conversationId: args.conversationId,
+      direction: "in",
+      isPrivate: false,
+      messageType: { not: "note" },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { content: true },
+  });
+  const studentText = (lastInbound?.content ?? "").trim();
+  if (!studentText) return { closed: false, reason: "NO_STUDENT_MSG" };
+  if (
+    !shouldCloseAfterAgentFarewell({
+      userMessage: studentText,
+      replyText: args.replyText,
+    })
+  ) {
+    return { closed: false, reason: "NOT_WRAPPED_UP" };
+  }
+
+  return closeAiOnlyConversation({
+    conversationId: args.conversationId,
+    contactId: args.contactId ?? conv.contactId,
+    allowAfterHumanReply: true,
+    reason: "Atendimento concluído — agente encerrou após o aluno fechar o assunto",
+  });
 }
 
 export function userThanksOnly(userMessage?: string | null): boolean {
@@ -437,6 +541,24 @@ export async function closeAiOnlyConversation(args: {
       select: { id: true },
     });
     dealId = deal?.id;
+  }
+
+  // Encerrou o atendimento → devolve o card ao funil acadêmico de origem.
+  // Se o aluno não estava no funil de Atendimento, a função não mexe nele.
+  // Roda ANTES do gatilho para a automação "Encerramento" enxergar o
+  // estágio final (e não mover duas vezes).
+  if (dealId || contactId) {
+    try {
+      const { restoreDealToAcademicOrigin } = await import(
+        "@/services/ai/academic-department-routing"
+      );
+      await restoreDealToAcademicOrigin({
+        dealId: dealId ?? null,
+        contactId: contactId ?? null,
+      });
+    } catch (e) {
+      console.warn("[ai-close] restore academic stage failed", e);
+    }
   }
 
   await fireTrigger("conversation_tabulated", {
