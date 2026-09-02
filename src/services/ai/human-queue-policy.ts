@@ -155,6 +155,14 @@ export function buildHumanQueueWithHoursMessage(now = new Date()): string {
   );
 }
 
+/** Aviso quando a conversa já foi atribuída a um consultor (não depender da automação). */
+export function buildAssignedConsultantNotice(): string {
+  return (
+    "Já te passei para um *consultor* da equipe. Ele continua daqui — " +
+    "pode levar um pouquinho, mas seu pedido já está com alguém, tá? 💛"
+  );
+}
+
 /** Pedido explícito de fila / humano / consultor / distribuição. */
 export function userWantsHumanDistribution(userMessage: string): boolean {
   const n = normalizeMsg(userMessage);
@@ -230,6 +238,11 @@ export const HUMAN_QUEUE_MSG_PATTERNS = [
   "fala com você em breve",
   "fala com voce em breve",
   "vou te conectar",
+  "já te passei para um consultor",
+  "ja te passei para um consultor",
+  "passei para um consultor",
+  "seu pedido já está com alguém",
+  "seu pedido ja esta com alguem",
 ] as const;
 
 export function messageLooksLikeHumanQueueNotice(

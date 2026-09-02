@@ -4614,6 +4614,23 @@ model AIAgentConfig {
   /// acontece implicitamente na mesma chamada.
   markMessagesRead Boolean @default(true)
 
+  // ── Pilotagem profunda (editável no CRM, sem deploy) ──────
+  /// Regras de atendimento injetadas no system prompt (o que antes era
+  /// a constante `ACADEMIC_ATENDIMENTO_RULES`). Null/vazio = o runtime
+  /// cai no fallback do código, preservando o comportamento legado.
+  steeringRules String? @db.Text
+
+  /// Travas por ferramenta: `{ [toolId]: { disabledArgs, argHints,
+  /// defaults, allowedTagNames, allowedDepartments, allowedTypes, ... } }`.
+  /// Aplicado em `buildToolSet` antes de expor a tool ao LLM.
+  toolConfig Json?
+
+  /// Política de inbox: limiar de confiança, keywords extras de
+  /// retenção/compra, aliases de departamento, toggles dos interceptos
+  /// determinísticos do `inbox-handler`, escopo de atendimento (funis,
+  /// etapas e tags que o agente pode atender) e as mensagens de handoff.
+  inboxPolicy Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
