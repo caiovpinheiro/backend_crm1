@@ -77,8 +77,9 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: result.message }, { status: result.status });
       }
 
-      // Contrato preservado: a UI espera `message.id` = wamid quando existe,
-      // para casar com o status de entrega vindo do webhook.
+      // Paridade com POST texto: pending + id interno até o worker gravar
+      // o wamid. Se o fallback síncrono já mandou, id continua = wamid.
+      const sendStatus = result.sendStatus ?? (result.message.externalId ? "sent" : "pending");
       const dto: InboxMessageDto = {
         id: result.message.externalId ?? result.message.id,
         content: result.message.content,
@@ -86,6 +87,9 @@ export async function POST(request: Request, context: RouteContext) {
         direction: "out",
         messageType: "template",
         senderName: result.message.senderName,
+        sendStatus,
+        status:
+          sendStatus === "failed" ? "FAILED" : sendStatus === "sent" ? "SENT" : "PENDING",
       };
 
       return NextResponse.json(
@@ -95,6 +99,7 @@ export async function POST(request: Request, context: RouteContext) {
           ...(result.reopenedConversationId
             ? { reopenedConversationId: result.reopenedConversationId }
             : {}),
+          ...(result.metaError ? { metaError: result.metaError } : {}),
         },
         { status: 201 },
       );

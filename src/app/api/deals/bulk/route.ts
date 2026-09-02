@@ -25,12 +25,12 @@ const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "d
 type BulkAction = (typeof VALID_ACTIONS)[number];
 
 /**
- * Threshold acima do qual `move_stage` automaticamente roda async via worker.
- * Abaixo do threshold (e sem `async: true` explícito no body), mantém o
- * comportamento síncrono histórico para não quebrar UIs existentes que
- * esperam `{ affected: number }` na resposta.
+ * Threshold acima do qual `move_stage` roda async via worker-leads.
+ * 1–2 deals ficam no path síncrono histórico (`{ affected }`, 200).
+ * 15 cards "jogar para perdido" NÃO podem encadear update+fireTrigger no HTTP.
+ * O FE já trata 202 + `operationId` (modal de progresso).
  */
-const ASYNC_AUTO_THRESHOLD = 50;
+const ASYNC_AUTO_THRESHOLD = 2;
 
 /** Mesmo teto da edição em massa de campos — o worker processa em chunks de 50. */
 const MAX_BULK_IDS = 5000;
@@ -203,8 +203,8 @@ export async function POST(request: Request) {
           );
         }
 
-        // Modo async: explícito, volume > threshold, ou `scope` (recorte do
-        // board pode ser milhares — mesmo caminho da edição de campos).
+        // Modo async: explícito, >2 deals, ou `scope` (recorte do board).
+        // FE já trata 202 + operationId.
         const wantAsync =
           body.async === true ||
           dealIds.length > ASYNC_AUTO_THRESHOLD ||

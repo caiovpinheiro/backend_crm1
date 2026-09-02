@@ -23,9 +23,9 @@ export const META_WEBHOOK_QUEUE_NAME = "meta-webhook-events" as const;
  */
 export const META_ATTACH_QUEUE_NAME = "meta-attach" as const;
 /**
- * Texto livre Meta do inbox (Graph sendText). A API persiste a mensagem
- * `pending` e enfileira; o `worker-whatsapp` consome. Fallback síncrono
- * se Redis estiver down (mesmo padrão de meta-attach).
+ * Texto/template Meta do inbox (Graph sendText / sendTemplate). A API
+ * persiste a mensagem `pending` e enfileira; o `worker-whatsapp` consome.
+ * Fallback síncrono se Redis estiver down (mesmo padrão de meta-attach).
  */
 export const META_OUTBOUND_QUEUE_NAME = "meta-outbound" as const;
 /**
@@ -156,7 +156,21 @@ export type MetaAttachPayload = {
   kind?: MetaAttachKind;
 };
 
-/** Job de envio de texto livre Meta do inbox (Graph sendText). */
+/** Campos extras quando o job envia template Meta (mesma fila `meta-outbound`). */
+export type MetaOutboundTemplate = {
+  templateName: string;
+  languageCode: string;
+  components?: unknown[] | null;
+  flowToken?: string | null;
+  flowActionData?: Record<string, unknown> | null;
+  templateGraphId?: string | null;
+  /** `false` = sem botão FLOW (pula enrich Graph). `null` = desconhecido. */
+  knownHasFlowButton?: boolean | null;
+  templateConfigId?: string | null;
+  actorId?: string | null;
+};
+
+/** Job de envio Meta do inbox (Graph sendText ou sendTemplate). */
 export type MetaOutboundPayload = {
   conversationId: string;
   messageId: string;
@@ -167,7 +181,16 @@ export type MetaOutboundPayload = {
   replyContextWamid?: string | null;
   waJid?: string | null;
   senderName?: string | null;
+  /** Ausente = texto (jobs antigos). */
+  kind?: "text" | "template";
+  template?: MetaOutboundTemplate | null;
 };
+
+export function isMetaOutboundTemplate(
+  payload: MetaOutboundPayload,
+): boolean {
+  return payload.kind === "template" && !!payload.template?.templateName;
+}
 
 // ── Leads bulk payloads ──────────────────────────────────
 //
@@ -833,7 +856,7 @@ function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
 }
 
 /**
- * Enfileira sendText Graph de uma mensagem de texto já persistida (`pending`).
+ * Enfileira sendText/sendTemplate Graph de uma mensagem já persistida (`pending`).
  * `jobId = meta-outbound-${messageId}` deduplica retries do produtor.
  * BullMQ rejeita `:` em custom jobId — usar hífen.
  * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller faz fallback síncrono.

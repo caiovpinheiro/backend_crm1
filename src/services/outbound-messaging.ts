@@ -21,13 +21,10 @@ import type { NextResponse } from "next/server";
 
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
-import {
-  renderTemplatePreview,
-  type TemplateVariableInput,
-} from "@/lib/meta-whatsapp/build-template-components";
+import type { TemplateVariableInput } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
-import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
+import { enqueueMetaOutbound } from "@/lib/queue";
 import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
@@ -74,6 +71,8 @@ export type OutboundSuccess = {
   reopenedConversationId?: string;
   /** Erro reportado pela Meta sem impedir a persistência da mensagem. */
   metaError?: string;
+  /** Paridade com POST texto: pending enquanto o worker-whatsapp manda na Graph. */
+  sendStatus?: "pending" | "sent" | "failed";
 };
 
 export type OutboundResult = OutboundSuccess | OutboundFailure;
@@ -1239,9 +1238,9 @@ export type SendTemplateArgs = {
 /**
  * Envia template aprovado da WABA na conversa.
  *
- * Extraído de `POST /api/conversations/:id/template` sem mudança de
- * comportamento — inclusive `strictFlowEnrich: false`, que mantém o envio de
- * templates simples funcionando quando a consulta da definição na Meta falha.
+ * Produção: valida + persiste `pending` + enfileira `meta-outbound`
+ * (worker-whatsapp faz Flow enrich + Graph sendTemplate). Fallback
+ * síncrono só se Redis estiver down — mesmo contrato do sendText.
  */
 export async function sendTemplateToConversation(
   args: SendTemplateArgs,
@@ -1381,38 +1380,8 @@ export async function sendTemplateToConversation(
     // config local é opcional — o template pode existir só na WABA
   }
 
-  let bodyPreview = args.bodyPreview?.trim() || null;
-  let languageCode = args.languageCode?.trim() || configLanguage || null;
-
-  // Consulta a Graph só quando falta preview (ou category+idioma juntos).
-  // Idioma sozinho NÃO justifica listar até 200 templates (timeout → 502 proxy).
-  if (!bodyPreview || (!templateCategory && !languageCode)) {
-    const metaTemplates = (await metaClient
-      .listMessageTemplates({ limit: 200 })
-      .catch(() => null)) as {
-      data?: {
-        name: string;
-        category?: string;
-        language?: string;
-        components?: unknown[];
-        parameter_format?: string;
-      }[];
-    } | null;
-    const match = metaTemplates?.data?.find((t) => t.name === templateName);
-    if (match) {
-      if (!templateCategory && match.category) templateCategory = match.category;
-      if (!languageCode && match.language) languageCode = match.language;
-      if (!bodyPreview) {
-        const analysis = analyzeTemplateComponents(match.components, {
-          parameterFormat: match.parameter_format ?? null,
-        });
-        bodyPreview =
-          renderTemplatePreview(analysis.bodyText, args.templateVariables).trim() || null;
-      }
-    }
-  }
-
-  if (!languageCode) languageCode = "pt_BR";
+  const bodyPreview = args.bodyPreview?.trim() || null;
+  const languageCode = args.languageCode?.trim() || configLanguage || "pt_BR";
 
   const content = buildOutboundTemplateMessageContent(
     templateName,
@@ -1421,43 +1390,11 @@ export async function sendTemplateToConversation(
     bodyPreview,
   );
 
-  let externalId: string | null = null;
-  let resolvedFlowToken: string | null = null;
-  try {
-    const baseComponents = Array.isArray(args.components) ? args.components : undefined;
-    // Template sem FLOW (config local): envia direto — GET/listagem Meta no
-    // enrich era a causa frequente de timeout do proxy após o deploy.
-    let sendComponents = baseComponents;
-    if (knownHasFlowButton !== false) {
-      const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
-        templateName,
-        languageCode,
-        components: baseComponents,
-        flowToken: args.flowToken?.trim() || null,
-        flowActionData: args.flowActionData ?? null,
-        templateGraphId,
-        strictFlowEnrich: false,
-      });
-      sendComponents = enrichResult.components;
-      resolvedFlowToken = enrichResult.flowToken;
-    }
-    const result = await metaClient.sendTemplate(
-      to,
-      templateName,
-      languageCode,
-      sendComponents,
-      recipient,
-    );
-    externalId = result.messages?.[0]?.id ?? null;
-    console.log(
-      `[meta-send-template] template=${templateName} channel=${outboundChannelId ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId} flowEnrich=${knownHasFlowButton !== false}`,
-    );
-  } catch (e: unknown) {
-    console.error("[meta-send-template]", e);
+  if (!conv.organizationId || !conv.contactId) {
     return {
       ok: false,
-      status: 502,
-      message: e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.",
+      status: 400,
+      message: "Conversa sem organização ou contato para enfileirar o envio.",
     };
   }
 
@@ -1469,8 +1406,8 @@ export async function sendTemplateToConversation(
       direction: "out",
       messageType: "template",
       senderName,
-      ...(externalId ? { externalId } : {}),
-      ...(resolvedFlowToken?.trim() ? { flowToken: resolvedFlowToken.trim() } : {}),
+      sendStatus: "pending",
+      ...(args.flowToken?.trim() ? { flowToken: args.flowToken.trim() } : {}),
       ...(templateConfigId ? { templateConfigId } : {}),
     }),
   });
@@ -1512,18 +1449,72 @@ export async function sendTemplateToConversation(
     });
   }
 
-  await afterOutboundSideEffects(
-    conv,
-    args.actor.id,
-    content,
-    true,
-    outboundChannelId,
+  if (conv.contactId) {
+    try {
+      await cancelActiveContextsForContactIfAny(conv.contactId);
+    } catch (err) {
+      console.warn("[automation] cancel after outbound:", err);
+    }
+  }
+  cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
+    console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
   );
+
+  const outboundPayload = {
+    conversationId: conv.id,
+    messageId: saved.id,
+    organizationId: conv.organizationId,
+    contactId: conv.contactId,
+    content,
+    channelId: outboundChannelId ?? null,
+    senderName,
+    kind: "template" as const,
+    template: {
+      templateName,
+      languageCode,
+      components: Array.isArray(args.components) ? args.components : null,
+      flowToken: args.flowToken?.trim() || null,
+      flowActionData: args.flowActionData ?? null,
+      templateGraphId,
+      knownHasFlowButton,
+      templateConfigId,
+      actorId: args.actor.id,
+    },
+  };
+
+  const job = await enqueueMetaOutbound(outboundPayload);
+  let sendStatus: "pending" | "sent" | "failed" = "pending";
+  let externalId: string | null = null;
+  let sendErrorMsg: string | undefined;
+  if (!job) {
+    console.warn("[meta-outbound] enqueue falhou (jobId/queue) — sendTemplate síncrono");
+    try {
+      const result = await processMetaOutbound(outboundPayload);
+      sendStatus = result.sendStatus;
+      externalId = result.externalId;
+      sendErrorMsg = result.metaError ?? undefined;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Falha ao enviar template pelo WhatsApp.";
+      await prisma.message
+        .updateMany({
+          where: { id: saved.id, sendStatus: "pending" },
+          data: { sendStatus: "failed", sendError: errMsg },
+        })
+        .catch(() => {});
+      await prisma.conversation
+        .update({ where: { id: conv.id }, data: { hasError: true } })
+        .catch(() => {});
+      sendStatus = "failed";
+      sendErrorMsg = errMsg;
+    }
+  }
 
   return {
     ok: true,
     conversationId: conv.id,
+    sendStatus,
     ...(reopenedConversationId ? { reopenedConversationId } : {}),
+    ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     message: {
       id: saved.id,
       content,
