@@ -948,13 +948,37 @@ function executeDistributionTool(ctx: RunContext) {
 const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
+/**
+ * O relatório de matriculados NÃO tem coluna de modalidade. O único sinal
+ * disponível é o texto de curso/instituição/ciclo ("UNICID - EAD"). Quando
+ * não há sinal, o agente NÃO pode chutar "presencial" (conversa #340901).
+ */
+function modalidadeHint(
+  rows: Array<{ curso?: string | null; instituicao?: string | null; ciclo?: string | null }>,
+): { modalidade: "EAD" | "DESCONHECIDA"; hint: string } {
+  const hay = rows
+    .map((r) => `${r.curso ?? ""} ${r.instituicao ?? ""} ${r.ciclo ?? ""}`)
+    .join(" ")
+    .toUpperCase();
+  if (/\bEAD\b|A DIST[AÂ]NCIA|DIST[AÂ]NCIA|ONLINE|\bDIGITAL\b/.test(hay)) {
+    return {
+      modalidade: "EAD",
+      hint: "Curso EAD: a prova é EAD (online) — pode afirmar. Ainda assim aponte a Plataforma de provas (Área do Aluno → Vida acadêmica → Plataforma de provas) para data, horário e disciplina.",
+    };
+  }
+  return {
+    modalidade: "DESCONHECIDA",
+    hint: "Modalidade NÃO consta no relatório. PROIBIDO afirmar que a prova/aula é presencial e PROIBIDO inferir isso do polo. Em dúvida de prova, oriente a conferir na Plataforma de provas (Área do Aluno → Vida acadêmica → Plataforma de provas).",
+  };
+}
+
 const MATRICULA_POLITICA =
   "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
 
 function consultarMatriculaTool(ctx: RunContext) {
   return tool({
     description:
-      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
+      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Retorna também `modalidade` (EAD ou DESCONHECIDA, deduzida do texto de curso/instituição — o relatório não tem essa coluna): com DESCONHECIDA é PROIBIDO afirmar que prova/aula é presencial, oriente pela Plataforma de provas. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
     inputSchema: z.object({
       cpf: z
         .string()
@@ -989,7 +1013,8 @@ function consultarMatriculaTool(ctx: RunContext) {
             found: false,
             politica: MATRICULA_POLITICA,
             transferMessage: MATRICULA_TRANSFER_MESSAGE,
-            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
+            modalidade: "DESCONHECIDA",
+            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano. Sem matrícula você NÃO sabe a modalidade do curso: PROIBIDO afirmar que prova/aula é presencial — em dúvida de prova, oriente pela Plataforma de provas.",
           });
         }
 
@@ -1012,6 +1037,8 @@ function consultarMatriculaTool(ctx: RunContext) {
           ),
         );
 
+        const modalidade = modalidadeHint(records);
+
         return ok({
           found: true,
           politica: MATRICULA_POLITICA,
@@ -1020,6 +1047,8 @@ function consultarMatriculaTool(ctx: RunContext) {
           ativo,
           totalMatriculas: matriculas.length,
           matriculas,
+          modalidade: modalidade.modalidade,
+          modalidadeHint: modalidade.hint,
         });
       } catch (err) {
         return fail(

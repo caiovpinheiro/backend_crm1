@@ -35,6 +35,7 @@ import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import {
   ACADEMIC_ATENDIMENTO_RULES,
   ACADEMIC_CONFIDENCE_RULES,
+  ACADEMIC_EXAM_MODALITY_RULES,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
   formatCanonicalPortalAccessHint,
   formatExamAccessHint,
@@ -258,6 +259,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           // Sempre: override no banco pode estar velho sem mídia/confiança.
           ACADEMIC_MEDIA_CAPABILITY_RULES,
           ACADEMIC_CONFIDENCE_RULES,
+          // Modalidade: nunca afirmar "presencial" (conversa #340901).
+          ACADEMIC_EXAM_MODALITY_RULES,
         ]
           .filter(Boolean)
           .join("\n\n")
