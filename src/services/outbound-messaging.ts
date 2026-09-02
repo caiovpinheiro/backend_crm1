@@ -28,6 +28,7 @@ import {
 } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -385,8 +386,7 @@ export async function sendTextToConversation(args: {
     await prisma.conversation.update({
       where: { id: conv.id },
       data: {
-        lastMessageDirection: "out",
-        hasAgentReply: true,
+        ...HUMAN_OUTBOUND_REPLY_MARK,
         hasError: sendResult.failed,
       },
     });
@@ -621,8 +621,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     await prisma.conversation.update({
       where: { id: conv.id },
       data: {
-        lastMessageDirection: "out",
-        hasAgentReply: true,
+        ...HUMAN_OUTBOUND_REPLY_MARK,
         hasError: Boolean(sendError),
       },
     });
@@ -930,8 +929,7 @@ export async function sendInteractiveListToConversation(args: {
     await prisma.conversation.update({
       where: { id: conv.id },
       data: {
-        lastMessageDirection: "out",
-        hasAgentReply: true,
+        ...HUMAN_OUTBOUND_REPLY_MARK,
         hasError: Boolean(sendError),
       },
     });
@@ -1151,8 +1149,7 @@ export async function sendFlowToConversation(args: {
     await prisma.conversation.update({
       where: { id: conv.id },
       data: {
-        lastMessageDirection: "out",
-        hasAgentReply: true,
+        ...HUMAN_OUTBOUND_REPLY_MARK,
         hasError: Boolean(sendError),
       },
     });
@@ -1477,6 +1474,18 @@ export async function sendTemplateToConversation(
       ...(templateConfigId ? { templateConfigId } : {}),
     }),
   });
+
+  try {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: {
+        ...HUMAN_OUTBOUND_REPLY_MARK,
+        hasError: false,
+      },
+    });
+  } catch {
+    // colunas opcionais em bases antigas
+  }
 
   publishNewMessage(conv, content, saved.createdAt);
 
