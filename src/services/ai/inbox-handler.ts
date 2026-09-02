@@ -63,6 +63,7 @@ import {
 } from "@/services/ai/academic-department-routing";
 import {
   closeAiOnlyConversation,
+  shouldCloseAfterAgentFarewell,
   shouldCloseAiAfterStudentMessage,
   userWantsAiConversationClose,
 } from "@/services/ai/academic-closure";
@@ -147,6 +148,44 @@ function buildGenericQueueHandoffMessage(now = new Date()): string {
 
 function studentNoticeAfterHandoff(gotHuman: boolean, queueText: string): string {
   return gotHuman ? buildAssignedConsultantNotice() : queueText;
+}
+
+/**
+ * Aluno encerrou o assunto e o agente se despediu → fecha o ticket.
+ * Sem isso a conversa fica na fila da IA depois do atendimento pronto.
+ */
+async function closeAfterFarewellIfNeeded(args: {
+  conversationId: string;
+  contactId: string;
+  userMessage: string;
+  replyText: string;
+}): Promise<void> {
+  if (
+    !shouldCloseAfterAgentFarewell({
+      userMessage: args.userMessage,
+      replyText: args.replyText,
+    })
+  ) {
+    return;
+  }
+  const gate = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { status: true, assignedTo: { select: { type: true } } },
+  });
+  if (gate?.status === "RESOLVED" || gate?.assignedTo?.type !== "AI") return;
+  const closed = await closeAiOnlyConversation({
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    allowAfterHumanReply: true,
+    reason: "Atendimento concluído — aluno se despediu e o agente encerrou",
+  }).catch(() => ({ closed: false, reason: "ERROR" }));
+  if (closed.closed) {
+    cancelAiReplyDebounce(args.conversationId);
+    logAi("closed", {
+      conversationId: args.conversationId,
+      reason: "agent_farewell",
+    });
+  }
 }
 
 /** Após distribuição bem-sucedida a saudação fica com a automação (como responsável). */
@@ -1620,6 +1659,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         model: cfg.model,
         durationMs: Date.now() - startedAt.getTime(),
       });
+      await closeAfterFarewellIfNeeded({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        userMessage: args.userMessage,
+        replyText: text,
+      });
       return;
     }
 
@@ -1641,6 +1686,14 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         channel: "baileys",
         durationMs: Date.now() - startedAt.getTime(),
       });
+      if (sendResult.status === "sent") {
+        await closeAfterFarewellIfNeeded({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          userMessage: args.userMessage,
+          replyText: text,
+        });
+      }
       return;
     }
 

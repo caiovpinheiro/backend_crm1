@@ -38,6 +38,7 @@ import {
   ACADEMIC_MEDIA_CAPABILITY_RULES,
   formatCanonicalPortalAccessHint,
   formatExamAccessHint,
+  formatPoloAddressesHint,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   formatCampaignDispatchBlock,
@@ -226,12 +227,16 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             .join("\n"),
         )
       : "";
+    const poloAddressesHint = isAcademicAttendance
+      ? formatPoloAddressesHint(args.userMessage, recentContextForHint)
+      : "";
     const clockHint = isAcademicAttendance ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
       messageModelsBlock,
       portalAccessHint,
       examAccessHint,
+      poloAddressesHint,
       campaignDispatchBlock,
       clockHint,
     ]

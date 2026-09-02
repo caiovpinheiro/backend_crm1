@@ -97,6 +97,76 @@ export function formatExamAccessHint(
   ].join("\n");
 }
 
+/**
+ * Polos oficiais — ÚNICA fonte de endereço presencial. Texto literal:
+ * não parafrasear ruas, números ou referências.
+ */
+export const OFFICIAL_POLO_LIST = `*Polo Barra Funda – Rua do Bosque, 1621, Loja 12 - Térreo
+10 minutos do Metrô - Estação Palmeiras Barra Funda- Linha 3 - Vermelha
+
+*Polo Vila Prudente 2- Rua Ibitirama, 404
+5 minutos do terminal de ônibus - Estação Vila Prudente – Linha 2-Verde
+
+*Polo Morumbi - Rua Amélia Corrêa Fontes Guimarães, 34
+10 minutos do Metrô São Paulo - Morumbi - Linha Amarela - Seguir na Av Francisco Morato e virar na Rua Três Irmãos do Hospital Lefort
+
+*Polo Taboão da Serra Centro - Av. Jovina de Carvalho Dau, 216 –  Parque Santos Dumont
+Centro de Taboão da Serra - Em frente a Delegacia
+
+*Polo Taboão da Serra Jardim Mituizi - Osmar Antônio Silva 128
+Altura do número 2800 da Av. Kizaemon Takeuti, em frente ao colégio Dom Pedro
+
+*Polo Sapopemba -  Av. Vila Ema, 6121 - Sapopemba
+Travessa da Av. Sapopemba – Altura do número 7737
+
+*Polo Freguesia do Ó – Rua Manuel Madruga, 82 - Freguesia do Ó
+Travessa da Av. Itaberaba – Altura no número 591
+
+*Polo Ibirapuera  Av. Iraí 79, 21B Moema
+Próximo a estação Eucaliptos
+
+*Polo Campinas R. Armando Frederico Renganeschi, 276 - Ouro Verde (Jardim Cristina) Campinas - SP, 13054-000
+
+*Polo Capivari: Rua Padre Haroldo, 746 - Centro, Capivari - SP, 13360-000
+
+*Polo Itapira: R. 15 de Novembro, 366 - Centro, Itapira - SP, 13970-270`;
+
+const POLO_INTENT_RE =
+  /\bpolos?\b|\bunidade(s)?\b|\bcampus\b|presencial|pessoalmente|ir (a[ií]|at[ée]|no|na|pessoalmente)|comparecer|endere[cç]o|onde (fica|é|e|localiza)|secretaria f[ií]sica/i;
+
+/**
+ * Polos oficiais + como corrigir polo inexistente.
+ *
+ * Injetado quando o aluno fala de polo/unidade/presencial/endereço. Sem
+ * isso o agente já confirmou polo que não existe ("Polo da Av. Paulista").
+ */
+export function formatPoloAddressesHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  const direct = POLO_INTENT_RE.test(q);
+  const inheritedFromContext =
+    !direct &&
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    POLO_INTENT_RE.test(recentContext);
+  if (!direct && !inheritedFromContext) return "";
+  return [
+    "",
+    "POLOS OFICIAIS — LISTA ÚNICA E COMPLETA (fonte da verdade):",
+    OFFICIAL_POLO_LIST,
+    "",
+    "COMO USAR (regra dura):",
+    "- PROIBIDO confirmar, elogiar ou citar polo que NÃO esteja na lista acima. PROIBIDO inventar endereço, bairro ou referência.",
+    '- Se o aluno citou um polo que não existe na lista (ex.: "Polo da Av. Paulista"), corrija com empatia e sem constranger: diga que não temos unidade nesse endereço e mostre os polos oficiais.',
+    "- Copie rua, número e referência EXATAMENTE como estão acima. Pode listar só os 2–3 mais próximos do que o aluno citou, mas sem alterar o texto.",
+    "- Diga que ele NÃO precisa se deslocar: dá para resolver por aqui mesmo no WhatsApp, comigo, agora.",
+    "- Ofereça a alternativa de falar com um consultor se ele preferir. Só nesse caso chame `transfer_to_department` + `execute_distribution`.",
+  ].join("\n");
+}
+
 export const ACADEMIC_ATENDIMENTO_RULES = `
 ## IDENTIDADE
 Você é consultora de suporte acadêmico da **${OFFICIAL_INSTITUTION_NAME}** no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
@@ -166,7 +236,9 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 4. NUNCA use nomes de atendentes das referências.
 5. Use o nome do aluno de forma natural (não em toda mensagem).
 6. Se a referência/modelo tiver **URLs** úteis do *próprio* fluxo acadêmico (portal do aluno, AVA/Blackboard, senha, Duda), INCLUA o link na resposta. PROIBIDO mandar páginas de *venda/catálogo* de cursos; portal/AVA de acesso aos estudos é permitido.
-7. ENDEREÇO DE POLO: sem dado nas refs → tente orientar o caminho (Área do Aluno / CAA) e só então ofereça conectar com Atendimento se o aluno quiser.
+7. POLO / UNIDADE / ENDEREÇO PRESENCIAL: existe uma LISTA OFICIAL de polos no contexto (bloco "POLOS OFICIAIS"). Ela é a ÚNICA fonte. Entregue os endereços de lá, copiados sem alterar rua/número/referência.
+7b. PROIBIDO confirmar, elogiar ou citar polo fora dessa lista. Se o aluno disser que vai a um polo que não existe (ex.: "Polo da Av. Paulista"), corrija com empatia — não temos unidade nesse endereço — e mostre os polos oficiais. Nunca invente endereço.
+7c. Sempre diga que ele NÃO precisa se deslocar: dá para resolver por aqui mesmo no WhatsApp com você. Ofereça consultor como alternativa; só aí use transfer_to_department + execute_distribution.
 8. INÍCIO DAS AULAS: depende da turma. Sem data → diga que depende da turma/turma no portal e oriente a ver na Área do Aluno. NÃO chame transfer/execute_distribution nesta dúvida — responda você. Só distribua se o aluno **pedir** humano/consultor ou insistir após sua orientação.
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
 9. ESQUECI MINHA SENHA: fluxo por SMS + telefone atualizado. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam".

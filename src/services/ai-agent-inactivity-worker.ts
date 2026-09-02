@@ -23,7 +23,10 @@ import {
   renderTemplate,
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
-import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
+import {
+  attendanceEndedInFarewell,
+  closeAiOnlyConversation,
+} from "@/services/ai/academic-closure";
 import {
   IDLE_CLOSE_AFTER_NUDGE_MS,
   IDLE_NUDGE_MS,
@@ -102,6 +105,7 @@ type IdleRow = {
   autonomy_mode: "AUTONOMOUS" | "DRAFT";
   last_out_content: string | null;
   last_out_at: Date;
+  last_in_content: string | null;
   last_inbound_at: Date | null;
 };
 
@@ -116,6 +120,7 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       a."autonomyMode" AS autonomy_mode,
       last_out.content AS last_out_content,
       last_out."createdAt" AS last_out_at,
+      last_in.content AS last_in_content,
       c."lastInboundAt" AS last_inbound_at
     FROM "conversations" c
     JOIN "users" u ON u.id = c."assignedToId"
@@ -130,6 +135,16 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       ORDER BY m."createdAt" DESC
       LIMIT 1
     ) last_out ON true
+    LEFT JOIN LATERAL (
+      SELECT m.content
+      FROM messages m
+      WHERE m."conversationId" = c.id
+        AND m.direction = 'in'
+        AND COALESCE(m."isPrivate", false) = false
+        AND m."messageType" <> 'note'
+      ORDER BY m."createdAt" DESC
+      LIMIT 1
+    ) last_in ON true
     WHERE u.type = 'AI'
       AND a.active = true
       AND c.status = 'OPEN'
@@ -170,10 +185,21 @@ async function processIdleAiOnly(
     const isNudge = isIdleNudgeContent(row.last_out_content);
     const ageMs = now.getTime() - new Date(row.last_out_at).getTime();
     const canText = windowOpen(row.last_inbound_at, now);
+    // Atendimento já terminou em despedida: perguntar "ainda posso
+    // ajudar?" reabre uma conversa encerrada. Encerra direto.
+    const endedInFarewell =
+      !isNudge &&
+      attendanceEndedInFarewell({
+        lastAgentText: row.last_out_content,
+        lastStudentText: row.last_in_content,
+      });
 
     const shouldClose =
-      (isNudge && ageMs >= closeMs) || (!isNudge && !canText && ageMs >= nudgeMs);
-    const shouldNudge = !isNudge && canText && ageMs >= nudgeMs;
+      endedInFarewell ||
+      (isNudge && ageMs >= closeMs) ||
+      (!isNudge && !canText && ageMs >= nudgeMs);
+    const shouldNudge =
+      !isNudge && !endedInFarewell && canText && ageMs >= nudgeMs;
 
     try {
       if (shouldClose) {
@@ -181,9 +207,11 @@ async function processIdleAiOnly(
           closeAiOnlyConversation({
             conversationId: row.conversation_id,
             contactId: row.contact_id,
-            reason: isNudge
-              ? "IA: sem resposta ao check-in de 30 min"
-              : "IA: 30 min sem retorno e janela 24h fechada",
+            reason: endedInFarewell
+              ? "IA: atendimento concluído na despedida"
+              : isNudge
+                ? "IA: sem resposta ao check-in de 30 min"
+                : "IA: 30 min sem retorno e janela 24h fechada",
           }),
         );
         if (result.closed) closed++;
