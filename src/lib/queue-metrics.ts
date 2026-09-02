@@ -14,6 +14,7 @@ import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
 import { DISTRIBUTION_DRAIN_QUEUE_NAME } from "@/lib/distribution-drain-queue";
+import { DISTRIBUTION_EXECUTE_QUEUE_NAME } from "@/lib/distribution-execute-queue";
 import { metrics } from "@/lib/metrics";
 import {
   AUTOMATION_JOBS_QUEUE_NAME,
@@ -36,6 +37,7 @@ const QUEUE_NAMES = [
   IMPORT_ETL_QUEUE_NAME,
   META_WEBHOOK_QUEUE_NAME,
   DISTRIBUTION_DRAIN_QUEUE_NAME,
+  DISTRIBUTION_EXECUTE_QUEUE_NAME,
 ] as const;
 
 type QueueName = (typeof QUEUE_NAMES)[number];

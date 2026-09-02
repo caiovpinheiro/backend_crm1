@@ -9,6 +9,7 @@ import { prisma } from "@/lib/prisma";
 import {
   assignConversationAssignedTo,
   getConversationById,
+  resolveReopenDepartmentId,
   updateConversationStatusInDb,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -17,8 +18,17 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
+import { metrics } from "@/lib/metrics";
+import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
 import { executeDistribution } from "@/services/distribution";
-import { assertLeafInDepartment, getAncestors, tabulationLogMeta } from "@/services/tabulations";
+import {
+  assertLeafInDepartments,
+  assertLeafInOrg,
+  getAncestors,
+  listDepartmentsForUser,
+  listOrgDepartments,
+  tabulationLogMeta,
+} from "@/services/tabulations";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
 async function resolveConversationAssignFlags(user: {
@@ -445,18 +455,50 @@ export async function POST(request: Request, context: RouteContext) {
           // departamento (transferir p/ "sem departamento" apenas desvincula).
           if (newDeptId) {
             try {
-              const result = await executeDistribution({
-                conversationId: id,
-                contactId: prevConv.contactId ?? null,
-                departmentId: newDeptId,
-                triggerSource: "MANUAL",
-              });
-              distribution = {
-                success: result.success,
-                reason: result.reason,
-                selectedUserId: result.selectedUserId,
-                selectedUserName: result.selectedUserName,
-              };
+              const orgId = sessionUser.organizationId;
+              if (!orgId) {
+                throw new Error("organizationId ausente");
+              }
+              const outcome = await runDistributionExecuteOrInline(
+                {
+                  organizationId: orgId,
+                  triggerSource: "MANUAL",
+                  conversationId: id,
+                  contactId: prevConv.contactId ?? null,
+                  departmentId: newDeptId,
+                  requestedByUserId: sessionUser.id,
+                },
+                () =>
+                  executeDistribution({
+                    conversationId: id,
+                    contactId: prevConv.contactId ?? null,
+                    departmentId: newDeptId,
+                    triggerSource: "MANUAL",
+                  }),
+              );
+              if (outcome.kind === "result") {
+                distribution = {
+                  success: outcome.result.success,
+                  reason: outcome.result.reason,
+                  selectedUserId: outcome.result.selectedUserId,
+                  selectedUserName: outcome.result.selectedUserName,
+                };
+              } else if (outcome.kind === "queued") {
+                distribution = {
+                  success: false,
+                  reason: "QUEUED",
+                  selectedUserId: null,
+                  selectedUserName: null,
+                };
+              } else {
+                metrics.errors.inc({
+                  scope: "distribution.transfer",
+                  kind: "queue_unavailable",
+                });
+                console.warn(
+                  "[transfer] fila indisponível — departamento já persistido",
+                );
+              }
             } catch (e) {
               console.error("[transfer] falha ao acionar distribuição", e);
             }
@@ -520,6 +562,7 @@ export async function POST(request: Request, context: RouteContext) {
             channelId: true,
             inboxName: true,
             assignedToId: true,
+            departmentId: true,
             contactId: true,
           },
         });
@@ -529,6 +572,12 @@ export async function POST(request: Request, context: RouteContext) {
             { status: 500 },
           );
         }
+
+        const reopenDepartmentId = await resolveReopenDepartmentId({
+          contactId: src.contactId,
+          channel: src.channel,
+          preferred: src.departmentId,
+        });
 
         // Guard extra contra corrida: se ja existe um ticket ATIVO pro
         // contato+canal (ex.: inbound reabriu enquanto o operador clicava),
@@ -564,6 +613,7 @@ export async function POST(request: Request, context: RouteContext) {
                 contactId: src.contactId!,
                 ...(src.channelId ? { channelId: src.channelId } : {}),
                 ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+                ...(reopenDepartmentId ? { departmentId: reopenDepartmentId } : {}),
               }),
               select: {
                 id: true,
@@ -651,24 +701,20 @@ export async function POST(request: Request, context: RouteContext) {
           }
         }
 
+        const full = (await getConversationById(created.id)) ?? created;
         return NextResponse.json({
-          conversation: {
-            id: created.id,
-            number: created.number,
-            status: created.status,
-            externalId: created.externalId,
-            channel: created.channel,
-            channelId: created.channelId,
-            inboxName: created.inboxName,
-            createdAt: created.createdAt,
-            updatedAt: created.updatedAt,
-          },
+          conversation: full,
           previousConversationId: id,
         });
       }
 
       const rawStatus = typeof b.status === "string" ? b.status : undefined;
-      const dbStatus = actionToDbStatus(action, rawStatus);
+      const wantsFollowUp = action === "resolve" && b.followUp === true;
+      // Acompanhar: permanece OPEN. Encerrar de verdade é resolve sem followUp.
+      let dbStatus = actionToDbStatus(action, rawStatus);
+      if (wantsFollowUp && dbStatus === "RESOLVED") {
+        dbStatus = "OPEN";
+      }
 
       // Encerrar sem automações: só ADMIN (ou super-admin da plataforma).
       // Outros roles: o flag é ignorado — a conversa encerra e os triggers
@@ -695,10 +741,10 @@ export async function POST(request: Request, context: RouteContext) {
         );
       }
 
-      // Tabulacao ao encerrar. Somente aplicavel quando esta indo pra
-      // RESOLVED e a conversa tem departamento vinculado. Se o
-      // departamento exigir e o body nao trouxer id valido (folha na
-      // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
+      // Tabulacao ao encerrar OU acompanhar. Se o departamento exigir e o
+      // body nao trouxer id valido (folha na arvore do dept) -> 400
+      // (defesa; UI ja bloqueia o botao). Acompanhar grava a folha sem
+      // encerrar e sem disparar automação.
       let tabulationId: string | null = null;
       let tabulationAncestors: string[] = [];
       let tabulationName: string | null = null;
@@ -707,11 +753,12 @@ export async function POST(request: Request, context: RouteContext) {
       let resolvedDepartmentId: string | null = null;
       /** Tabulação gravada ANTES deste encerramento (detecta re-tabulação). */
       let previousTabulationId: string | null = null;
-      if (dbStatus === "RESOLVED") {
+      if (dbStatus === "RESOLVED" || wantsFollowUp) {
         const dept = await prisma.conversation.findUnique({
           where: { id },
           select: {
             departmentId: true,
+            assignedToId: true,
             tabulationId: true,
             department: { select: { id: true, requireTabulationOnClose: true } },
           },
@@ -719,7 +766,21 @@ export async function POST(request: Request, context: RouteContext) {
         resolvedDepartmentId = dept?.departmentId ?? null;
         previousTabulationId = dept?.tabulationId ?? null;
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
-        const requires = !!dept?.department?.requireTabulationOnClose;
+        const agentUserId = dept?.assignedToId ?? session.user.id;
+        let allowedDepartmentIds: string[] = dept?.departmentId
+          ? [dept.departmentId]
+          : [];
+        let requires = !!dept?.department?.requireTabulationOnClose;
+        if (!dept?.departmentId) {
+          const depts =
+            isAdmin(session) || isSuperAdmin(session)
+              ? await listOrgDepartments()
+              : agentUserId
+                ? await listDepartmentsForUser(agentUserId)
+                : [];
+          allowedDepartmentIds = depts.map((d) => d.id);
+          requires = depts.some((d) => d.requireTabulationOnClose);
+        }
         if (requires && !rawTab) {
           // Encerramento MANUAL (esta rota). Bots/automações usam
           // updateConversationStatusInDb direto e NÃO passam por aqui —
@@ -727,22 +788,33 @@ export async function POST(request: Request, context: RouteContext) {
           // nem em finish_conversation.
           return NextResponse.json(
             {
-              message: "Este departamento exige uma tabulacao ao encerrar.",
+              message: dept?.departmentId
+                ? "Este departamento exige uma tabulacao ao encerrar."
+                : "Selecione uma tabulacao ao encerrar.",
               code: "TABULATION_REQUIRED",
               departmentId: dept?.departmentId ?? null,
+              userId: dept?.departmentId ? null : agentUserId,
             },
             { status: 400 },
           );
         }
         if (rawTab) {
-          if (!dept?.departmentId) {
-            return NextResponse.json(
-              { message: "Conversa sem departamento — nao aceita tabulacao." },
-              { status: 400 },
-            );
-          }
           try {
-            const leaf = await assertLeafInDepartment(rawTab, dept.departmentId);
+            let leaf: Awaited<ReturnType<typeof assertLeafInOrg>>;
+            if (allowedDepartmentIds.length > 0) {
+              try {
+                leaf = await assertLeafInDepartments(
+                  rawTab,
+                  allowedDepartmentIds,
+                );
+              } catch (first) {
+                const code = (first as { code?: string }).code;
+                if (code === "TABULATION_NOT_LEAF") throw first;
+                leaf = await assertLeafInOrg(rawTab);
+              }
+            } else {
+              leaf = await assertLeafInOrg(rawTab);
+            }
             tabulationId = leaf.id;
             tabulationName = leaf.name;
             tabulationNumber = leaf.number;
@@ -770,10 +842,13 @@ export async function POST(request: Request, context: RouteContext) {
         clearDepartment = !keepDepartment;
       }
 
+      const followUp = wantsFollowUp;
+
       const updated = await updateConversationStatusInDb(id, dbStatus, {
         tabulationId,
         clearAssignedTo,
         clearDepartment,
+        followUp,
       });
 
       if (conv.status !== updated.status) {
@@ -877,6 +952,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
+      // Acompanhar (followUp) permanece OPEN e NÃO entra aqui.
       // Antes só rodava com tabulationId — conversas sem departamento / sem
       // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
       // automações configuradas como "Qualquer tabulação". Automações que
@@ -919,6 +995,8 @@ export async function POST(request: Request, context: RouteContext) {
           status: updated.status,
           externalId: updated.externalId,
           tabulationId: updated.tabulationId,
+          followUpAt: updated.followUpAt,
+          closedAt: updated.closedAt,
         },
       });
     } catch (e: unknown) {

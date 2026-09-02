@@ -3,13 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   activeInboxQueueGuardWhere,
   encerradasTabWhere,
+  resolvidosTabWhere,
   withActiveInboxQueueGuard,
 } from "../inbox-queue-membership";
 
 describe("inbox-queue-membership", () => {
-  it("activeInboxQueueGuardWhere é OPEN sem closedAt — sem filtro de deal", () => {
+  it("activeInboxQueueGuardWhere é OPEN sem closedAt nem followUp — sem filtro de deal", () => {
     const where = activeInboxQueueGuardWhere();
-    expect(where).toEqual({ status: "OPEN", closedAt: null });
+    expect(where).toEqual({ status: "OPEN", closedAt: null, followUpAt: null });
     expect(where).not.toHaveProperty("NOT");
     expect(where).not.toHaveProperty("contact");
   });
@@ -21,19 +22,30 @@ describe("inbox-queue-membership", () => {
     });
   });
 
-  it("encerradasTabWhere é RESOLVED ou closedAt — não deal WON/LOST", () => {
+  it("encerradasTabWhere é RESOLVED/closedAt sem followUp — não deal WON/LOST", () => {
     const where = encerradasTabWhere();
-    expect(where.OR).toEqual([
-      { status: "RESOLVED" },
+    expect(where.AND).toEqual([
       {
-        AND: [
-          { status: { not: "RESOLVED" } },
-          { closedAt: { not: null } },
+        OR: [
+          { status: "RESOLVED" },
+          {
+            AND: [
+              { status: { not: "RESOLVED" } },
+              { closedAt: { not: null } },
+            ],
+          },
         ],
       },
+      { followUpAt: null },
     ]);
     const serialized = JSON.stringify(where);
     expect(serialized).not.toContain("WON");
     expect(serialized).not.toContain("LOST");
+  });
+
+  it("resolvidosTabWhere é só followUpAt — não exige encerrar", () => {
+    const where = resolvidosTabWhere();
+    expect(where).toEqual({ followUpAt: { not: null } });
+    expect(JSON.stringify(where)).not.toContain("RESOLVED");
   });
 });

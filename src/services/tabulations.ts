@@ -94,16 +94,16 @@ function orgIdOrThrow(): string {
   return orgId;
 }
 
-export async function listByDepartment(departmentId: string) {
-  const orgId = orgIdOrThrow();
-  return prisma.tabulation.findMany({
-    where: { organizationId: orgId, departmentId },
-    orderBy: [{ position: "asc" }, { name: "asc" }],
-  });
-}
+export type TabulationDepartmentGroup = {
+  departmentId: string;
+  departmentName: string;
+  requireTabulationOnClose: boolean;
+  tree: TabulationNode[];
+};
 
-export async function getTree(departmentId: string): Promise<TabulationNode[]> {
-  const rows = await listByDepartment(departmentId);
+type TabulationRow = Awaited<ReturnType<typeof listByDepartment>>[number];
+
+function buildTreeFromRows(rows: TabulationRow[]): TabulationNode[] {
   const byId = new Map<string, TabulationNode>();
   rows.forEach((r) => {
     byId.set(r.id, {
@@ -131,6 +131,83 @@ export async function getTree(departmentId: string): Promise<TabulationNode[]> {
   };
   sortRec(roots);
   return roots;
+}
+
+export async function listByDepartment(departmentId: string) {
+  const orgId = orgIdOrThrow();
+  return prisma.tabulation.findMany({
+    where: { organizationId: orgId, departmentId },
+    orderBy: [{ position: "asc" }, { name: "asc" }],
+  });
+}
+
+export async function getTree(departmentId: string): Promise<TabulationNode[]> {
+  const rows = await listByDepartment(departmentId);
+  return buildTreeFromRows(rows);
+}
+
+export async function listOrgDepartments(): Promise<
+  Array<{
+    id: string;
+    name: string;
+    requireTabulationOnClose: boolean;
+  }>
+> {
+  const orgId = orgIdOrThrow();
+  return prisma.department.findMany({
+    where: { organizationId: orgId },
+    select: { id: true, name: true, requireTabulationOnClose: true },
+    orderBy: { name: "asc" },
+  });
+}
+
+export async function listDepartmentsForUser(userId: string): Promise<
+  Array<{
+    id: string;
+    name: string;
+    requireTabulationOnClose: boolean;
+  }>
+> {
+  const orgId = orgIdOrThrow();
+  const rows = await prisma.departmentMember.findMany({
+    where: { organizationId: orgId, userId },
+    select: {
+      department: {
+        select: { id: true, name: true, requireTabulationOnClose: true },
+      },
+    },
+  });
+  return rows
+    .map((r) => r.department)
+    .sort((a, b) => a.name.localeCompare(b.name, "pt"));
+}
+
+export async function getTreesForDepartments(
+  departments: Array<{
+    id: string;
+    name: string;
+    requireTabulationOnClose: boolean;
+  }>,
+): Promise<TabulationDepartmentGroup[]> {
+  if (departments.length === 0) return [];
+  const orgId = orgIdOrThrow();
+  const ids = departments.map((d) => d.id);
+  const rows = await prisma.tabulation.findMany({
+    where: { organizationId: orgId, departmentId: { in: ids } },
+    orderBy: [{ position: "asc" }, { name: "asc" }],
+  });
+  const byDept = new Map<string, TabulationRow[]>();
+  for (const row of rows) {
+    const list = byDept.get(row.departmentId) ?? [];
+    list.push(row);
+    byDept.set(row.departmentId, list);
+  }
+  return departments.map((d) => ({
+    departmentId: d.id,
+    departmentName: d.name,
+    requireTabulationOnClose: d.requireTabulationOnClose,
+    tree: buildTreeFromRows(byDept.get(d.id) ?? []),
+  }));
 }
 
 /** Retorna [rootId, ..., leafId] (inclui o proprio id ao fim). */
@@ -189,9 +266,14 @@ export async function resolveAutoCloseTabulation(args: {
 
   const node = await prisma.tabulation.findFirst({
     where: { id: tabulationId, organizationId, departmentId, active: true },
-    select: { id: true, name: true, number: true, _count: { select: { children: true } } },
+    select: {
+      id: true,
+      name: true,
+      number: true,
+      children: { where: { active: true }, select: { id: true }, take: 1 },
+    },
   });
-  if (!node || node._count.children > 0) return null;
+  if (!node || node.children.length > 0) return null;
 
   return {
     tabulationId,
@@ -231,10 +313,10 @@ export async function resolveTabulationForStep(args: {
       departmentId: true,
       name: true,
       number: true,
-      _count: { select: { children: true } },
+      children: { where: { active: true }, select: { id: true }, take: 1 },
     },
   });
-  if (!node || node._count.children > 0) return null;
+  if (!node || node.children.length > 0) return null;
 
   return {
     tabulationId: node.id,
@@ -247,7 +329,8 @@ export async function resolveTabulationForStep(args: {
 
 /**
  * Garante que `id` existe, pertence ao `departmentId` E eh folha (sem
- * filhos). Lanca com `code` estavel pra rota mapear pra 400.
+ * filhos ativos). Filhos inativos nao impedem a escolha — `active` eh
+ * por no. Lanca com `code` estavel pra rota mapear pra 400.
  */
 export async function assertLeafInDepartment(
   id: string,
@@ -256,19 +339,105 @@ export async function assertLeafInDepartment(
   const orgId = orgIdOrThrow();
   const node = await prisma.tabulation.findFirst({
     where: { id, organizationId: orgId, departmentId, active: true },
-    select: { id: true, name: true, number: true, _count: { select: { children: true } } },
+    select: {
+      id: true,
+      name: true,
+      number: true,
+      children: { where: { active: true }, select: { id: true }, take: 1 },
+    },
   });
   if (!node) {
     const err = new Error("Tabulacao invalida para este departamento.");
     (err as { code?: string }).code = "TABULATION_INVALID";
     throw err;
   }
-  if (node._count.children > 0) {
+  if (node.children.length > 0) {
     const err = new Error("Selecione uma tabulacao folha.");
     (err as { code?: string }).code = "TABULATION_NOT_LEAF";
     throw err;
   }
   return { id: node.id, name: node.name, number: node.number };
+}
+
+/** Folha ativa em qualquer um dos departamentos (fallback sem depto na conversa). */
+export async function assertLeafInDepartments(
+  id: string,
+  departmentIds: string[],
+): Promise<{ id: string; name: string; number: number; departmentId: string }> {
+  if (departmentIds.length === 0) {
+    const err = new Error("Tabulacao invalida para este agente.");
+    (err as { code?: string }).code = "TABULATION_INVALID";
+    throw err;
+  }
+  if (departmentIds.length === 1) {
+    const leaf = await assertLeafInDepartment(id, departmentIds[0]!);
+    return { ...leaf, departmentId: departmentIds[0]! };
+  }
+  const orgId = orgIdOrThrow();
+  const node = await prisma.tabulation.findFirst({
+    where: {
+      id,
+      organizationId: orgId,
+      departmentId: { in: departmentIds },
+      active: true,
+    },
+    select: {
+      id: true,
+      name: true,
+      number: true,
+      departmentId: true,
+      children: { where: { active: true }, select: { id: true }, take: 1 },
+    },
+  });
+  if (!node) {
+    const err = new Error("Tabulacao invalida para os departamentos deste agente.");
+    (err as { code?: string }).code = "TABULATION_INVALID";
+    throw err;
+  }
+  if (node.children.length > 0) {
+    const err = new Error("Selecione uma tabulacao folha.");
+    (err as { code?: string }).code = "TABULATION_NOT_LEAF";
+    throw err;
+  }
+  return {
+    id: node.id,
+    name: node.name,
+    number: node.number,
+    departmentId: node.departmentId,
+  };
+}
+
+/** Folha ativa em qualquer departamento da org (conversa sem depto associado). */
+export async function assertLeafInOrg(
+  id: string,
+): Promise<{ id: string; name: string; number: number; departmentId: string | null }> {
+  const orgId = orgIdOrThrow();
+  const node = await prisma.tabulation.findFirst({
+    where: { id, organizationId: orgId, active: true },
+    select: {
+      id: true,
+      name: true,
+      number: true,
+      departmentId: true,
+      children: { where: { active: true }, select: { id: true }, take: 1 },
+    },
+  });
+  if (!node) {
+    const err = new Error("Tabulacao invalida.");
+    (err as { code?: string }).code = "TABULATION_INVALID";
+    throw err;
+  }
+  if (node.children.length > 0) {
+    const err = new Error("Selecione uma tabulacao folha.");
+    (err as { code?: string }).code = "TABULATION_NOT_LEAF";
+    throw err;
+  }
+  return {
+    id: node.id,
+    name: node.name,
+    number: node.number,
+    departmentId: node.departmentId,
+  };
 }
 
 export async function createNode(input: {

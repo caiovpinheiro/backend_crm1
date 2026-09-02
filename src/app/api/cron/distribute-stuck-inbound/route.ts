@@ -1,6 +1,6 @@
 /**
  * GET  /api/cron/distribute-stuck-inbound          dry-run (só lista)
- * POST /api/cron/distribute-stuck-inbound?apply=1  distribui de fato
+ * POST /api/cron/distribute-stuck-inbound?apply=1  enfileira no worker
  *
  * Destrava aluno preso na IA: conversa OPEN, responsável do tipo AI, sem
  * resposta humana e sem nenhuma outbound depois do último inbound. NÃO
@@ -8,19 +8,20 @@
  *
  * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
  *
- * Parâmetros:
- *   minMinutes=15   idle mínimo (alias em ms: `stuckMs`)
- *   sinceMinutes=0  janela: só inbound das últimas N min (0 = sem limite)
- *   limit=50        teto de conversas por execução (máx. 500)
- *   org=<id>        restringe a uma organização
- *
- * No container de prod (sem src/ nem tsx):
- *   curl -fsS "http://127.0.0.1:3000/api/cron/distribute-stuck-inbound?secret=$CRON_SECRET&minMinutes=15&limit=200"
- *   curl -fsS -X POST "http://127.0.0.1:3000/api/cron/distribute-stuck-inbound?secret=$CRON_SECRET&minMinutes=15&limit=200&apply=1"
+ * POST aplica via `distribution-execute` / `stuck-inbound` (mesmo jobId
+ * do tick de inatividade — não roda o SQL duas vezes).
  */
 
 import { NextResponse } from "next/server";
 
+import {
+  allowInlineDistributionFallback,
+} from "@/lib/distribution-drain-queue";
+import {
+  enqueueDistributionStuckInbound,
+  stuckInboundEnqueueOpts,
+} from "@/lib/distribution-execute-queue";
+import { metrics } from "@/lib/metrics";
 import {
   STUCK_INBOUND_MS,
   distributeStuckInbound,
@@ -105,8 +106,38 @@ export async function POST(request: Request) {
   const denied = authorize(request);
   if (denied) return denied;
   try {
-    const result = await distributeStuckInbound(parseOpts(request, true));
-    return NextResponse.json({ ok: true, ...result });
+    const opts = parseOpts(request, true);
+    if (!opts.apply) {
+      const result = await distributeStuckInbound(opts);
+      return NextResponse.json({ ok: true, ...result });
+    }
+
+    const queued = await enqueueDistributionStuckInbound(
+      stuckInboundEnqueueOpts(opts),
+    );
+    if (queued) {
+      return NextResponse.json(
+        { ok: true, queued: true, jobId: "dsi-stuck-inbound" },
+        { status: 202 },
+      );
+    }
+
+    if (allowInlineDistributionFallback()) {
+      const result = await distributeStuckInbound(opts);
+      return NextResponse.json({ ok: true, ...result });
+    }
+
+    metrics.errors.inc({
+      scope: "distribution.stuck-inbound",
+      kind: "queue_unavailable",
+    });
+    console.warn(
+      "[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback",
+    );
+    return NextResponse.json(
+      { ok: false, message: "Fila de distribuição indisponível." },
+      { status: 503 },
+    );
   } catch (e) {
     console.error("[cron/distribute-stuck-inbound]", e);
     return NextResponse.json(

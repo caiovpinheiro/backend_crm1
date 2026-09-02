@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DISTRIBUTION_DRAIN_QUEUE_NAME,
+  allowInlineDistributionFallback,
   distributionDrainJobId,
 } from "./distribution-drain-queue";
 import { fruitlessCooldownRedisKey } from "@/services/distribution/pending-drain-store";
@@ -19,5 +20,9 @@ describe("distribution drain queue", () => {
 
   it("scopes the fruitless Redis flag per org", () => {
     expect(fruitlessCooldownRedisKey("org_a")).toBe("dist:fruitless:org_a");
+  });
+
+  it("allows inline drain fallback in test/dev only", () => {
+    expect(allowInlineDistributionFallback()).toBe(true);
   });
 });

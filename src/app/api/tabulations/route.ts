@@ -1,24 +1,32 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
-import { getTree } from "@/services/tabulations";
+import {
+  getTree,
+  getTreesForDepartments,
+  listDepartmentsForUser,
+  listOrgDepartments,
+} from "@/services/tabulations";
 
 /**
  * Rota de leitura para agentes (nao exige role ADMIN/MANAGER — soh
- * autenticacao). Usada pelo modal de tabulacao no encerramento e por
- * qualquer UI que precise mostrar a arvore de um departamento.
+ * autenticacao). Usada pelo modal de tabulacao no encerramento.
  *
  * GET /api/tabulations?departmentId=xxx
- *   → { departmentId, requireTabulationOnClose, tree: TabulationNode[] }
+ *   → arvore do departamento da conversa
+ * GET /api/tabulations?userId=xxx
+ *   → arvores dos departamentos do agente; admin / sem membership
+ *     cai na arvore da org (conversa sem departmentId)
  */
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
     const url = new URL(request.url);
-    const departmentId = url.searchParams.get("departmentId")?.trim();
-    if (!departmentId) {
+    const departmentId = url.searchParams.get("departmentId")?.trim() || null;
+    const userId = url.searchParams.get("userId")?.trim() || null;
+    if (!departmentId && !userId) {
       return NextResponse.json(
-        { message: "departmentId eh obrigatorio." },
+        { message: "departmentId ou userId eh obrigatorio." },
         { status: 400 },
       );
     }
@@ -29,21 +37,52 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     }
-    const dept = await prisma.department.findFirst({
-      where: { id: departmentId, organizationId: orgId },
-      select: { id: true, requireTabulationOnClose: true },
-    });
-    if (!dept) {
-      return NextResponse.json(
-        { message: "Departamento nao encontrado." },
-        { status: 404 },
-      );
+
+    if (departmentId) {
+      const dept = await prisma.department.findFirst({
+        where: { id: departmentId, organizationId: orgId },
+        select: { id: true, name: true, requireTabulationOnClose: true },
+      });
+      if (!dept) {
+        return NextResponse.json(
+          { message: "Departamento nao encontrado." },
+          { status: 404 },
+        );
+      }
+      const tree = await getTree(departmentId);
+      return NextResponse.json({
+        departmentId,
+        userId: null,
+        requireTabulationOnClose: dept.requireTabulationOnClose,
+        tree,
+        groups: [
+          {
+            departmentId: dept.id,
+            departmentName: dept.name,
+            requireTabulationOnClose: dept.requireTabulationOnClose,
+            tree,
+          },
+        ],
+      });
     }
-    const tree = await getTree(departmentId);
+
+    let departments =
+      isAdmin(session) || isSuperAdmin(session)
+        ? await listOrgDepartments()
+        : await listDepartmentsForUser(userId!);
+    if (departments.length === 0) {
+      departments = await listOrgDepartments();
+    }
+    const groups = await getTreesForDepartments(departments);
+    const requireTabulationOnClose = groups.some(
+      (g) => g.requireTabulationOnClose,
+    );
     return NextResponse.json({
-      departmentId,
-      requireTabulationOnClose: dept.requireTabulationOnClose,
-      tree,
+      departmentId: null,
+      userId,
+      requireTabulationOnClose,
+      tree: groups.length === 1 ? groups[0]!.tree : [],
+      groups,
     });
   });
 }

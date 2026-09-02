@@ -60,7 +60,7 @@ export function getDistributionDrainQueue(): Queue<DistributionDrainPayload> | n
  * Enfileira drenagem no `worker-distribution`.
  *
  * - `added` / `exists`: caller NÃO deve rodar processPending in-process.
- * - `null`: Redis/fila indisponível — caller faz fallback síncrono.
+ * - `null`: Redis/fila indisponível — fallback síncrono só em test/dev.
  */
 export async function enqueueDistributionDrain(
   payload: DistributionDrainPayload,
@@ -96,6 +96,17 @@ export async function enqueueDistributionDrain(
     );
     return null;
   }
+}
+
+/**
+ * Fallback síncrono do motor/drain no processo da API.
+ * Produção (`APP_MODE=api`) nunca roda o scan/engine in-process.
+ * Vitest e dev local sem Redis continuam inline.
+ */
+export function allowInlineDistributionFallback(): boolean {
+  const env = (process.env.NODE_ENV ?? "").trim().toLowerCase();
+  if (env === "test" || env === "development") return true;
+  return false;
 }
 
 function readPositiveInt(raw: string | undefined, fallback: number): number {

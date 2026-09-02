@@ -15,6 +15,7 @@ import {
   assignConversationsInline,
   getFilteredConversationIds,
   getResolvableConversationIds,
+  parseInboxTabParam,
   resolveConversationsInline,
   type InboxTab,
 } from "@/services/conversations";
@@ -27,12 +28,21 @@ const FILTER_TABS = new Set<InboxTab>([
   "respondidas",
   "agente_ia",
   "automacao",
+  "resolvidos",
   "finalizados",
   "erro",
   "todos",
   "abertas",
   "ligar",
 ]);
+
+function parseBulkFilterTab(
+  raw: string | undefined,
+): InboxTab | InboxTab[] | undefined {
+  const tabs = parseInboxTabParam(raw).filter((t) => FILTER_TABS.has(t));
+  if (tabs.length === 0) return undefined;
+  return tabs.length === 1 ? tabs[0] : tabs;
+}
 
 /**
  * POST /api/conversations/bulk
@@ -157,10 +167,7 @@ export async function POST(request: Request) {
             // "Todas do filtro": resolve os alvos server-side com o MESMO where
             // da lista (visibilidade + aba + busca + escopo de canais). O worker
             // roda em system-context, então a visibilidade é aplicada aqui.
-            const tab =
-              body.tab && FILTER_TABS.has(body.tab as InboxTab)
-                ? (body.tab as InboxTab)
-                : undefined;
+            const tab = parseBulkFilterTab(body.tab);
             const allowedChannelIds = await listAllowedChannelIds({
               id: user.id,
               role: user.role,
@@ -399,10 +406,7 @@ export async function POST(request: Request) {
 
           let targetIds: string[];
           if (allInFilter) {
-            const tab =
-              body.tab && FILTER_TABS.has(body.tab as InboxTab)
-                ? (body.tab as InboxTab)
-                : undefined;
+            const tab = parseBulkFilterTab(body.tab);
             const allowedChannelIds = await listAllowedChannelIds({
               id: user.id,
               role: user.role,

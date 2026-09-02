@@ -17,6 +17,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors";
 import {
+  isStorageReuseBucket,
   mimeFromFilename,
   parseStoragePath,
   readStoredFile,
@@ -24,6 +25,7 @@ import {
   reuseFileNameAliases,
   statStoredFile,
 } from "@/lib/storage/local";
+import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
@@ -33,9 +35,20 @@ function withStorageCors(request: Request, res: Response): Response {
   return res;
 }
 
+/** Worker sem cookie: mesmo segredo dos crons. Não aceita `?secret=` (vaza em log). */
+function hasCronSecret(request: Request): boolean {
+  const expected = process.env.CRON_SECRET?.trim();
+  if (!expected) return false;
+  const provided = (request.headers.get("authorization") ?? "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+  return provided.length > 0 && provided === expected;
+}
+
 export async function GET(request: Request, context: RouteContext) {
-  const session = await auth();
-  if (!session?.user) {
+  const cronOk = hasCronSecret(request);
+  const session = cronOk ? null : await auth();
+  if (!cronOk && !session?.user) {
     return withStorageCors(
       request,
       NextResponse.json({ message: "Não autorizado." }, { status: 401 }),
@@ -52,20 +65,29 @@ export async function GET(request: Request, context: RouteContext) {
     );
   }
 
-  // Multi-tenancy enforcement: só super-admin atravessa orgs.
-  const sUser = session.user as {
-    organizationId?: string | null;
-    isSuperAdmin?: boolean;
-  };
-  const sessionOrgId = sUser.organizationId ?? null;
-  const isSuperAdmin = Boolean(sUser.isSuperAdmin);
+  if (cronOk) {
+    if (!isStorageReuseBucket(parsed.bucket)) {
+      return withStorageCors(
+        request,
+        NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
+      );
+    }
+  } else {
+    // Multi-tenancy enforcement: só super-admin atravessa orgs.
+    const sUser = session!.user as {
+      organizationId?: string | null;
+      isSuperAdmin?: boolean;
+    };
+    const sessionOrgId = sUser.organizationId ?? null;
+    const isSuperAdmin = Boolean(sUser.isSuperAdmin);
 
-  if (!isSuperAdmin && sessionOrgId !== parsed.orgId) {
-    // 404 (e não 403) pra não confirmar existência.
-    return withStorageCors(
-      request,
-      NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
-    );
+    if (!isSuperAdmin && sessionOrgId !== parsed.orgId) {
+      // 404 (e não 403) pra não confirmar existência.
+      return withStorageCors(
+        request,
+        NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
+      );
+    }
   }
 
   // 16/jul/26 — Suporte a HTTP Range. Sem isso, `<video controls>` do
@@ -178,7 +200,30 @@ export async function GET(request: Request, context: RouteContext) {
   }
 
   const fallback = await tryUpstreamFallback(request, joined);
-  if (fallback) return withStorageCors(request, fallback);
+  if (fallback) {
+    if (fallback.status === 200 && fallback.body) {
+      const buf = Buffer.from(await fallback.arrayBuffer());
+      void persistLegacyBytesToActiveDriver(
+        {
+          orgId: parsed.orgId,
+          bucket: parsed.bucket,
+          fileName: parsed.fileName,
+        },
+        buf,
+      ).catch((err) => {
+        console.warn("[storage] write-through do fallback falhou:", err);
+      });
+      const headers = new Headers(fallback.headers);
+      return withStorageCors(
+        request,
+        new Response(new Uint8Array(buf), {
+          status: 200,
+          headers,
+        }),
+      );
+    }
+    return withStorageCors(request, fallback);
+  }
 
   return withStorageCors(
     request,

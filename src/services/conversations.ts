@@ -22,6 +22,7 @@ import {
 import {
   activeInboxQueueGuardWhere,
   encerradasTabWhere,
+  resolvidosTabWhere,
   withActiveInboxQueueGuard,
 } from "@/lib/inbox-queue-membership";
 import {
@@ -69,6 +70,7 @@ export const INBOX_CATEGORY_TABS = [
   "respondidas",
   "agente_ia",
   "automacao",
+  "resolvidos",
   "finalizados",
   "erro",
 ] as const;
@@ -85,13 +87,48 @@ export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
  */
 export type InboxTab = InboxCategoryTab | "todos" | "abertas" | "ligar";
 
+const ALL_INBOX_TABS: readonly InboxTab[] = [
+  ...INBOX_CATEGORY_TABS,
+  "todos",
+  "abertas",
+  "ligar",
+];
+
+const INBOX_TAB_SET = new Set<string>(ALL_INBOX_TABS);
+
+/**
+ * `?tab=entrada` ou `?tab=entrada,ligar,esperando`.
+ * Ignora ids desconhecidos; `todos` com outras filas vira só `todos`.
+ */
+export function parseInboxTabParam(
+  raw: string | undefined | null,
+): InboxTab[] {
+  if (!raw) return [];
+  const seen = new Set<InboxTab>();
+  const out: InboxTab[] = [];
+  for (const part of raw.split(",")) {
+    const id = part.trim();
+    if (!INBOX_TAB_SET.has(id) || seen.has(id as InboxTab)) continue;
+    seen.add(id as InboxTab);
+    out.push(id as InboxTab);
+  }
+  if (out.includes("todos")) return ["todos"];
+  return out;
+}
+
+function listTabsOf(params: GetConversationsParams): InboxTab[] {
+  if (!params.tab) return [];
+  return Array.isArray(params.tab) ? params.tab : [params.tab];
+}
+
 export type GetConversationsParams = {
   contactId?: string;
   status?: ConversationStatus;
   channel?: string;
   /** IDs de instância de Channel (e sentinelas `__missing__:` / `__deleted__`). */
   channelIds?: string[];
-  tab?: InboxTab;
+  /** Uma fila ou união (OR) de filas. */
+  tab?: InboxTab | InboxTab[];
   /**
    * Com `tab: "todos"` e papel MEMBER: OR destas categorias (só o que o
    * utilizador pode ver). Omitir para ADMIN/MANAGER (todas as conversas
@@ -153,6 +190,7 @@ const listSelect = {
   lastInboundAt: true,
   lastMessageDirection: true,
   closedAt: true,
+  followUpAt: true,
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
@@ -433,6 +471,8 @@ function tabToWhere(
           },
         },
       });
+    case "resolvidos":
+      return resolvidosTabWhere();
     case "finalizados":
       return encerradasTabWhere();
     case "erro":
@@ -538,6 +578,24 @@ function tabFilterWhere(
   return tabToWhere(tab, countAgentReply);
 }
 
+/** União (OR) das filas pedidas. `todos` sozinho (ou com outras) = visão todas. */
+function tabsFilterWhere(
+  tabs: InboxTab[],
+  todosCategoryTabs?: InboxCategoryTab[],
+  countAgentReply = false,
+): Prisma.ConversationWhereInput | null {
+  if (tabs.length === 0) return null;
+  if (tabs.includes("todos")) {
+    return tabFilterWhere("todos", todosCategoryTabs, countAgentReply);
+  }
+  const parts = tabs
+    .map((t) => tabFilterWhere(t, todosCategoryTabs, countAgentReply))
+    .filter((w): w is Prisma.ConversationWhereInput => w != null);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0] ?? null;
+  return { OR: parts };
+}
+
 /**
  * Monta o `where` da listagem de conversas (visibilidade + busca/aba +
  * filtros). Extraído de `getConversations` para ser reaproveitado pelo
@@ -561,15 +619,16 @@ export async function buildConversationListWhere(
   if (searchWhere) conditions.push(searchWhere);
 
   const countAgentReply = await countAgentReplyAsAnswered();
-  if (params.tab) {
-    const tabWhere = tabFilterWhere(
-      params.tab,
+  const tabs = listTabsOf(params);
+  if (tabs.length > 0) {
+    const tabWhere = tabsFilterWhere(
+      tabs,
       params.todosCategoryTabs,
       countAgentReply,
     );
     if (tabWhere) conditions.push(tabWhere);
   }
-  if (params.status && !params.tab) conditions.push({ status: params.status });
+  if (params.status && tabs.length === 0) conditions.push({ status: params.status });
   if (params.allowedChannelIds) {
     conditions.push({ channelId: { in: params.allowedChannelIds } });
   }
@@ -1174,12 +1233,20 @@ async function hydrateConversationsByIds(
  * DISTINCT ON (contato+canal) materializa TODOS os grupos antes do
  * LIMIT — 5s+ na 1ª página de `todos` (OPEN+RESOLVED da org). Filas
  * OPEN já são 1:1 (`conversations_active_contact_channel`). `todos` e
- * o picker sem aba usam ORDER BY + LIMIT; o FE já colapsa o card.
- * Só Encerradas ainda colapsa (N tickets RESOLVED por número).
+ * o picker sem aba usam ORDER BY + LIMIT; o FE colapsa o card e o
+ * badge conta DISTINCT contato+canal. Encerradas/Resolvidos colapsam
+ * no SQL (N tickets RESOLVED por número).
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
-  return params.tab === "finalizados";
+  const tabs = listTabsOf(params);
+  // Encerradas/Resolvendo: DISTINCT contato+canal. Filas quentes (Entrada,
+  // Aguardando, …) não — DISTINCT na org inteira é caro. União mista com
+  // fila quente também fica sem DISTINCT; o FE colapsa o card.
+  return (
+    tabs.length > 0 &&
+    tabs.every((t) => t === "finalizados" || t === "resolvidos")
+  );
 }
 
 export async function getConversations(
@@ -1203,8 +1270,10 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
 
-  // Colapso SQL só em Encerradas. `todos` / sem aba / filas OPEN:
-  // ORDER BY + LIMIT (1ª página). COUNT DISTINCT ficou no GET ?counts=1.
+  // Colapso SQL só em Encerradas/Resolvidos. `todos` / sem aba / filas
+  // OPEN: ORDER BY + LIMIT (1ª página) — DISTINCT ON em OPEN+RESOLVED
+  // da org materializa todos os grupos (5s+). O FE colapsa o card; o
+  // badge (?counts=1) usa COUNT DISTINCT contato+canal.
   // OFFSET só se o cliente velho mandar `page` sem `cursor`.
   const collapse = listNeedsContactChannelCollapse(params);
   const { ids: windowIds, hasMore, knownTotal } = await findCollapsedConversationPage({
@@ -1699,7 +1768,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 5,
+          k: 8,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1720,7 +1789,9 @@ async function peekCachedTabTotal(
   params: GetConversationsParams,
   collapse: boolean,
 ): Promise<number | null> {
-  const tab = params.tab;
+  const tabs = listTabsOf(params);
+  if (tabs.length !== 1) return null;
+  const tab = tabs[0];
   if (!tab) return null;
   const orgId = getOrgIdOrNull();
   if (!orgId) return null;
@@ -1832,6 +1903,7 @@ async function tryComputeTabCountsOneSql(args: {
   const respondidas = tabSql(tabToWhere("respondidas", args.countAgentReply));
   const agenteIa = tabSql(tabToWhere("agente_ia", args.countAgentReply));
   const automacao = tabSql(tabToWhere("automacao", args.countAgentReply));
+  const resolvidos = tabSql(tabToWhere("resolvidos", args.countAgentReply));
   const finalizados = tabSql(tabToWhere("finalizados", args.countAgentReply));
   const erro = tabSql(tabToWhere("erro", args.countAgentReply));
   const abertas = tabSql(activeInboxQueueGuardWhere());
@@ -1852,6 +1924,7 @@ async function tryComputeTabCountsOneSql(args: {
     !respondidas ||
     !agenteIa ||
     !automacao ||
+    !resolvidos ||
     !finalizados ||
     !erro ||
     !abertas ||
@@ -1862,8 +1935,9 @@ async function tryComputeTabCountsOneSql(args: {
   }
 
   const collapse = args.collapseByContact;
-  // `todos` = COUNT(*) (lista não colapsa essa aba). Só Encerradas
-  // usa DISTINCT contact+channel — DISTINCT em todos varria OPEN+RESOLVED.
+  // Encerradas / Resolvendo: DISTINCT contato+canal.
+  // Todas: NÃO DISTINCT em OPEN+RESOLVED (5s+ na org). Admin = abertas
+  // (1:1) + fechadas únicas. MEMBER = COUNT(*) das filas permitidas.
   try {
     const rows = await prisma.$queryRaw<
       [{
@@ -1872,6 +1946,7 @@ async function tryComputeTabCountsOneSql(args: {
         respondidas: number;
         agente_ia: number;
         automacao: number;
+        resolvidos: number;
         finalizados: number;
         erro: number;
         todos: number;
@@ -1885,6 +1960,7 @@ async function tryComputeTabCountsOneSql(args: {
         ${tabCountExpr(respondidas, false)} AS respondidas,
         ${tabCountExpr(agenteIa, false)} AS agente_ia,
         ${tabCountExpr(automacao, false)} AS automacao,
+        ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
         ${tabCountExpr(erro, false)} AS erro,
         ${tabCountExpr(todos, false)} AS todos,
@@ -1901,9 +1977,12 @@ async function tryComputeTabCountsOneSql(args: {
       respondidas: row.respondidas ?? 0,
       agente_ia: row.agente_ia ?? 0,
       automacao: row.automacao ?? 0,
+      resolvidos: row.resolvidos ?? 0,
       finalizados: row.finalizados ?? 0,
       erro: row.erro ?? 0,
-      todos: row.todos ?? 0,
+      todos: args.todosMemberCategoryTabs?.length
+        ? (row.todos ?? 0)
+        : (row.abertas ?? 0) + (row.resolvidos ?? 0) + (row.finalizados ?? 0),
       abertas: row.abertas ?? 0,
       ligar: row.ligar ?? 0,
     };
@@ -1948,7 +2027,9 @@ async function computeTabCounts(
 
   // Fallback: where não traduziu (filtro raro) — sequencial pra não
   // esgotar o pool com 8 COUNT em paralelo.
-  const lightTabs = TAB_LIST.filter((t) => t !== "finalizados");
+  const lightTabs = TAB_LIST.filter(
+    (t) => t !== "finalizados" && t !== "resolvidos",
+  );
   const countTab = async (tab: InboxCategoryTab) => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
@@ -1962,7 +2043,7 @@ async function computeTabCounts(
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(
       conditions,
-      collapseByContact && tab === "finalizados",
+      collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
       assigneeIdsByType,
     );
   };
@@ -1971,25 +2052,14 @@ async function computeTabCounts(
   for (const tab of lightTabs) {
     lightResults.push([tab, await countTab(tab)]);
   }
+  const resolvidos = await countTab("resolvidos");
   const finalizados = await countTab("finalizados");
-  // `todos` na lista não colapsa (só Encerradas). COUNT(*) casa o
-  // badge com a fila e evita DISTINCT em OPEN+RESOLVED da org.
-  const todos = await countTodosTab(
-    visibilityCollapsed,
-    todosMemberCategoryTabs ?? null,
-    allowedChannelIds,
-    extra,
-    searchWhere,
-    countAgentReply,
-    false,
-    assigneeIdsByType,
-  );
   const abertas = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
     }
-    conditions.push({ status: "OPEN" });
+    conditions.push(activeInboxQueueGuardWhere());
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
@@ -2008,8 +2078,20 @@ async function computeTabCounts(
   })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
+  record.resolvidos = resolvidos;
   record.finalizados = finalizados;
-  record.todos = todos;
+  record.todos = todosMemberCategoryTabs?.length
+    ? await countTodosTab(
+        visibilityCollapsed,
+        todosMemberCategoryTabs,
+        allowedChannelIds,
+        extra,
+        searchWhere,
+        countAgentReply,
+        false,
+        assigneeIdsByType,
+      )
+    : abertas + resolvidos + finalizados;
   record.abertas = abertas;
   record.ligar = ligar;
   return record;
@@ -2354,6 +2436,25 @@ export async function assignConversationsInline(params: {
  * antes), reusa; caso contrario cria um novo, tratando a corrida do indice
  * unico parcial. Herda canal/jid/inbox/responsavel da conversa origem.
  */
+/** Departamento do ticket origem, ou o último do mesmo contato+canal. */
+export async function resolveReopenDepartmentId(opts: {
+  contactId: string;
+  channel: string;
+  preferred: string | null;
+}): Promise<string | null> {
+  if (opts.preferred) return opts.preferred;
+  const sibling = await prisma.conversation.findFirst({
+    where: {
+      contactId: opts.contactId,
+      channel: opts.channel,
+      departmentId: { not: null },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { departmentId: true },
+  });
+  return sibling?.departmentId ?? null;
+}
+
 export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
   id: string;
   created: boolean;
@@ -2364,7 +2465,7 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
     where: { id: sourceId },
     select: {
       id: true, contactId: true, channel: true, channelId: true,
-      waJid: true, inboxName: true, assignedToId: true,
+      waJid: true, inboxName: true, assignedToId: true, departmentId: true,
     },
   });
   if (!src || !src.contactId) {
@@ -2382,6 +2483,12 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
     return { id: existing.id, created: false, contactId: src.contactId, channel: src.channel };
   }
 
+  const departmentId = await resolveReopenDepartmentId({
+    contactId: src.contactId,
+    channel: src.channel,
+    preferred: src.departmentId,
+  });
+
   try {
     const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
@@ -2394,6 +2501,7 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
           ...(src.waJid ? { waJid: src.waJid } : {}),
           ...(src.inboxName ? { inboxName: src.inboxName } : {}),
           ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+          ...(departmentId ? { departmentId } : {}),
         }),
         select: { id: true },
       }),
@@ -2441,35 +2549,51 @@ export async function updateConversationStatusInDb(
     clearAssignedTo?: boolean;
     /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
     clearDepartment?: boolean;
+    /**
+     * Acompanhar: aba Resolvendo. Ticket permanece OPEN, sem closedAt,
+     * sem disparar encerramento. Pode gravar tabulationId sem fechar.
+     */
+    followUp?: boolean;
   },
 ) {
+  const followUp = extra?.followUp === true;
+
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
-  // Outros valores (PENDING/SNOOZED) nao mexem em closedAt.
+  // Acompanhar NÃO preenche closedAt. Outros (PENDING/SNOOZED) não mexem.
   const closedAtPatch: { closedAt: Date | null } | Record<string, never> =
-    status === "RESOLVED"
+    status === "RESOLVED" && !followUp
       ? { closedAt: new Date() }
       : status === "OPEN"
         ? { closedAt: null }
         : {};
 
-  // Reabrir (OPEN) limpa a tabulacao — coerente com "novo ciclo". O
-  // caller pode passar `tabulationId` explicito no encerramento, ou omitir.
+  // Reabrir (OPEN sem follow-up) limpa a tabulacao — "novo ciclo".
+  // Acompanhar pode persistir a folha sem encerrar.
   const tabulationPatch: { tabulationId: string | null } | Record<string, never> =
-    status === "OPEN"
-      ? { tabulationId: null }
-      : extra && "tabulationId" in extra
-        ? { tabulationId: extra.tabulationId ?? null }
-        : {};
+    followUp && extra && "tabulationId" in extra
+      ? { tabulationId: extra.tabulationId ?? null }
+      : status === "OPEN"
+        ? { tabulationId: null }
+        : extra && "tabulationId" in extra
+          ? { tabulationId: extra.tabulationId ?? null }
+          : {};
 
   // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
   // finalizar". Quando desligadas, o caller passa clearAssignedTo/
   // clearDepartment=true e desvinculamos os campos aqui.
+  const followUpPatch: { followUpAt: Date | null } | Record<string, never> =
+    followUp
+      ? { followUpAt: new Date() }
+      : status === "RESOLVED" || status === "OPEN"
+        ? { followUpAt: null }
+        : {};
+
   const clearPatch: { assignedToId?: null; departmentId?: null } =
     status === "RESOLVED"
       ? {
-          ...(extra?.clearAssignedTo ? { assignedToId: null } : {}),
-          ...(extra?.clearDepartment ? { departmentId: null } : {}),
+          ...(extra?.clearAssignedTo && !followUp ? { assignedToId: null } : {}),
+          ...(extra?.clearDepartment && !followUp ? { departmentId: null } : {}),
         }
       : {};
 
@@ -2501,6 +2625,7 @@ export async function updateConversationStatusInDb(
       status,
       ...closedAtPatch,
       ...tabulationPatch,
+      ...followUpPatch,
       ...clearPatch,
       // Encerrar remove da fila Erro — hasError sticky não é mais acionável.
       ...(status === "RESOLVED" ? { hasError: false } : {}),
@@ -2509,15 +2634,29 @@ export async function updateConversationStatusInDb(
   });
 
   // Badges Redis (TTL 45s) sem invalidação sobreviviam ao F5 — Erro 233
-  // com lista já vazia. Encerrou/reabriu → zera o cache da org.
+  // com lista já vazia. Encerrou/reabriu/acompanhou → zera o cache da org.
   if (status === "RESOLVED" || status === "OPEN") {
     const orgId = getOrgIdOrNull();
     if (orgId) void invalidateInboxTabCounts(orgId);
   }
 
+  if (followUp) {
+    try {
+      sseBus.publish("conversation_updated", {
+        organizationId: updated.organizationId,
+        conversationId: id,
+        status: updated.status,
+        closedAt: updated.closedAt?.toISOString() ?? null,
+        followUpAt: updated.followUpAt?.toISOString() ?? null,
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
   // Encerrou atendimento → liberou capacidade na fila do responsável.
   // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).
-  if (status === "RESOLVED") {
+  if (status === "RESOLVED" && !followUp) {
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({

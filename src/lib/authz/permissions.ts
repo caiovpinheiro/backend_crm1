@@ -117,6 +117,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "tab:ligar", label: "Ligar (permissão de voz)" },
       { action: "tab:agente_ia", label: "Agente IA" },
       { action: "tab:automacao", label: "Automação" },
+      { action: "tab:resolvidos", label: "Resolvido" },
       { action: "tab:finalizados", label: "Encerradas" },
       { action: "tab:erro", label: "Erro" },
     ],

@@ -68,6 +68,7 @@ export {
 export {
   redistributeResponsibleQueue,
   type RedistributeInput,
+  type RedistributeJobOutcome,
   type RedistributeMode,
   type RedistributeQueueScope,
   type RedistributeResult,
