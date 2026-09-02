@@ -21,6 +21,7 @@
 
 import type { AIAgentAutonomy, Prisma } from "@prisma/client";
 
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { runWithActor } from "@/lib/request-context";
@@ -35,8 +36,8 @@ import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import {
   ACADEMIC_ATENDIMENTO_RULES,
   ACADEMIC_CONFIDENCE_RULES,
-  ACADEMIC_EXAM_MODALITY_RULES,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
+  academicExamModalityRules,
   formatCanonicalPortalAccessHint,
   formatExamAccessHint,
   formatPoloAddressesHint,
@@ -220,12 +221,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       return null;
     });
     const campaignDispatchBlock = formatCampaignDispatchBlock(campaignCtx);
+    // Fato da operação: toda prova é online. Se um dia voltar a existir
+    // prova presencial, a org grava `ai.exams.onlineOnly=false` em
+    // `PUT /api/settings/org` — sem deploy. Falha de contexto/org cai no
+    // default seguro (online).
+    const examsOnlineOnly = isAcademicAttendance
+      ? await getOrgSettingBool("ai.exams.onlineOnly", true).catch(() => true)
+      : true;
     const examAccessHint = isAcademicAttendance
       ? formatExamAccessHint(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
             .filter(Boolean)
             .join("\n"),
+          examsOnlineOnly,
         )
       : "";
     const poloAddressesHint = isAcademicAttendance
@@ -259,8 +268,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           // Sempre: override no banco pode estar velho sem mídia/confiança.
           ACADEMIC_MEDIA_CAPABILITY_RULES,
           ACADEMIC_CONFIDENCE_RULES,
-          // Modalidade: nunca afirmar "presencial" (conversa #340901).
-          ACADEMIC_EXAM_MODALITY_RULES,
+          // Modalidade: prova é online; nunca afirmar "presencial" (#340901).
+          academicExamModalityRules(examsOnlineOnly),
         ]
           .filter(Boolean)
           .join("\n\n")

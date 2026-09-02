@@ -69,23 +69,47 @@ const EXAM_ACCESS_INTENT_RE =
   /prova|avaliac|avalia[cç][aã]o|plataforma de prova|como (fa[cç]o |eu )?(pra |para )?(ver|acessar|entrar|fazer).*(prova|avaliac)|onde (fica|vejo|acesso|entro).*(prova|avaliac)/i;
 
 /**
- * Modalidade (presencial x EAD) — regra dura.
+ * Modalidade da prova — regra dura, injetada no hint de prova E sempre no
+ * runtime. O agente afirmou "a prova é presencial, normalmente feita no
+ * campus" só porque a aluna tinha polo cadastrado (conversa #340901).
  *
- * O agente afirmou "a prova é presencial, normalmente feita no campus" só
- * porque a aluna tinha polo cadastrado (conversa #340901). Ter polo NÃO
- * define modalidade, e o relatório de matriculados NÃO traz esse campo.
- * Este bloco é injetado no hint de prova E sempre no runtime.
+ * Hoje a operação NÃO tem prova presencial: toda prova é online, dentro da
+ * Plataforma de Provas — o agente afirma isso direto, sem hedge. Se um dia
+ * surgir prova presencial, a org desliga o fato pela setting
+ * `ai.exams.onlineOnly` (`PUT /api/settings/org`) e o runtime passa a
+ * injetar a variante sem afirmação de modalidade.
  */
 export const ACADEMIC_EXAM_MODALITY_RULES = `
-## MODALIDADE DA PROVA (runtime — regra dura)
-- PROIBIDO afirmar que prova, aula, avaliação ou atendimento é **presencial**. Nunca. PROIBIDO dizer "é feita no campus", "normalmente é no campus vinculado ao polo", "você comparece ao polo" ou equivalente.
+## MODALIDADE DA PROVA (runtime — fato, regra dura)
+- TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Isso é fato: afirme direto, sem hesitar e sem hedge.
+- "A prova é presencial ou online?" → responda na hora: é **online**, feita na *Plataforma de provas* — Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. PROIBIDO "confira lá qual é a modalidade", PROIBIDO pedir mais dados e PROIBIDO transferir por isso.
+- A Plataforma de Provas é onde ele confere **data, horário e disciplina** — a modalidade você já sabe: online.
+- PROIBIDO afirmar ou insinuar que prova, aula ou avaliação é **presencial**. PROIBIDO "é feita no campus", "no campus vinculado ao polo", "você comparece ao polo".
 - PROIBIDO inferir modalidade a partir do **polo** do aluno. Ter polo cadastrado NÃO significa prova presencial.
-- Dúvida de prova — inclusive "a prova é presencial ou online?" — acolha em 1 frase e oriente a **conferir na Plataforma de Provas**: Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem modalidade, data, horário e disciplina.
-- PROIBIDO oferecer endereço de polo, mapa ou "te passo o endereço certinho" como resposta a dúvida de prova — isso reforça a ideia de presencial.
-- Aluno de curso **EAD / a distância** (o contexto ou \`consultar_matricula\` mostra EAD no curso/instituição/ciclo, ex.: "UNICID - EAD"): a prova é **EAD (online)** — isso pode afirmar com segurança. Ainda assim aponte a Plataforma de Provas para data, horário e disciplina.
-- Se você NÃO tem como saber a modalidade do curso dele, NÃO adivinhe e NÃO chute "presencial" nem "online": oriente pela Plataforma de Provas.
+- PROIBIDO oferecer endereço de polo, mapa ou "te passo o endereço certinho" como resposta a dúvida de prova.
+`.trim();
+
+/**
+ * Variante para quando a org desliga `ai.exams.onlineOnly` (voltou a ter
+ * prova presencial): sem afirmar modalidade, a Plataforma de Provas é a
+ * fonte. Substitui explicitamente o fato "toda prova é online" do override.
+ */
+export const ACADEMIC_EXAM_MODALITY_RULES_MIXED = `
+## MODALIDADE DA PROVA (runtime — regra dura, SUBSTITUI o texto acima)
+- A modalidade da prova VARIA. Ignore qualquer regra anterior que diga que toda prova é online.
+- Dúvida de modalidade → acolha em 1 frase e mande conferir na **Plataforma de Provas**: Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem modalidade, data, horário e disciplina.
+- PROIBIDO afirmar que a prova é presencial ou online por conta própria. PROIBIDO "é feita no campus", "você comparece ao polo".
+- PROIBIDO inferir modalidade a partir do **polo** do aluno.
+- PROIBIDO oferecer endereço de polo como resposta a dúvida de prova.
 - NÃO transfira só por essa dúvida.
 `.trim();
+
+/** Bloco de modalidade conforme a setting da org (default: só online). */
+export function academicExamModalityRules(onlineOnly: boolean): string {
+  return onlineOnly
+    ? ACADEMIC_EXAM_MODALITY_RULES
+    : ACADEMIC_EXAM_MODALITY_RULES_MIXED;
+}
 
 /**
  * Caminho oficial da plataforma de provas. Injetado quando o aluno pergunta
@@ -94,6 +118,7 @@ export const ACADEMIC_EXAM_MODALITY_RULES = `
 export function formatExamAccessHint(
   userMessage: string,
   recentContext?: string,
+  examsOnlineOnly = true,
 ): string {
   const q = userMessage.trim();
   if (!q) return "";
@@ -114,7 +139,7 @@ export function formatExamAccessHint(
     "PROIBIDO perguntar 'o que você quer ver?' se o disparo/contexto já falava de prova.",
     "PROIBIDO inventar outro menu. NÃO transfira só por essa dúvida.",
     "",
-    ACADEMIC_EXAM_MODALITY_RULES,
+    academicExamModalityRules(examsOnlineOnly),
   ].join("\n");
 }
 
@@ -279,13 +304,13 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
 11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
-11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. É lá que aparecem modalidade, data, horário e disciplina. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
-11e. MODALIDADE (regra dura, sem exceção):
-- PROIBIDO afirmar que prova/aula/avaliação/atendimento é **presencial**. PROIBIDO "é feita no campus", "normalmente é no campus vinculado ao polo", "você comparece ao polo".
+11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. É lá que ele confere data, horário e disciplina. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
+11e. MODALIDADE DA PROVA (fato, regra dura):
+- TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Afirme direto, sem hedge.
+- "A prova é presencial ou online?" → responda na hora que é **online**, na Plataforma de provas, e entregue o caminho da regra 11d. PROIBIDO "confira lá a modalidade", PROIBIDO pedir mais dados, PROIBIDO transferir por isso.
+- PROIBIDO afirmar ou insinuar que prova/aula/avaliação é **presencial**: "é feita no campus", "no campus vinculado ao polo", "você comparece ao polo".
 - PROIBIDO inferir modalidade do **polo** do aluno — ter polo NÃO significa prova presencial.
-- "A prova é presencial ou online?" → acolha em 1 frase e mande conferir na **Plataforma de provas** (regra 11d). PROIBIDO oferecer endereço de polo nessa dúvida.
-- Curso **EAD / a distância** (contexto ou \`consultar_matricula\` mostra EAD em curso/instituição/ciclo, ex.: "UNICID - EAD"): a prova é **EAD (online)** — pode afirmar. Ainda assim aponte a Plataforma de provas para data, horário e disciplina.
-- Sem saber a modalidade do curso dele: NÃO adivinhe (nem "presencial", nem "online") — oriente pela Plataforma de provas.
+- PROIBIDO oferecer endereço de polo como resposta a dúvida de prova.
 12. COORDENAÇÃO: Blackboard → Organizações. Nunca invente e-mail/telefone. PROIBIDO usar "fale/confirme com a coordenação do curso" como saída padrão — principalmente em DP/dependência/disciplina reprovada, que tem caminho próprio (regra 16).
 13. Fora de escopo ou frustração forte repetida → distribua (Atendimento, salvo retenção).
 14. VALOR / MENSALIDADE / GRADE / INFO DE CURSO QUE NÃO SEJA O CURSO ATUAL DO ALUNO: NUNCA responda com link de site/catálogo. Avise que vai conectar e ACIONE transfer (Atendimento) + execute_distribution.
