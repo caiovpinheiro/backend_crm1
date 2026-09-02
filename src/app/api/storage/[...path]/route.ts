@@ -24,6 +24,7 @@ import {
   reuseFileNameAliases,
   statStoredFile,
 } from "@/lib/storage/local";
+import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
@@ -178,7 +179,30 @@ export async function GET(request: Request, context: RouteContext) {
   }
 
   const fallback = await tryUpstreamFallback(request, joined);
-  if (fallback) return withStorageCors(request, fallback);
+  if (fallback) {
+    if (fallback.status === 200 && fallback.body) {
+      const buf = Buffer.from(await fallback.arrayBuffer());
+      void persistLegacyBytesToActiveDriver(
+        {
+          orgId: parsed.orgId,
+          bucket: parsed.bucket,
+          fileName: parsed.fileName,
+        },
+        buf,
+      ).catch((err) => {
+        console.warn("[storage] write-through do fallback falhou:", err);
+      });
+      const headers = new Headers(fallback.headers);
+      return withStorageCors(
+        request,
+        new Response(new Uint8Array(buf), {
+          status: 200,
+          headers,
+        }),
+      );
+    }
+    return withStorageCors(request, fallback);
+  }
 
   return withStorageCors(
     request,
