@@ -21,8 +21,10 @@ import { sseBus } from "@/lib/sse-bus";
 import { executeDistribution } from "@/services/distribution";
 import {
   assertLeafInDepartments,
+  assertLeafInOrg,
   getAncestors,
   listDepartmentsForUser,
+  listOrgDepartments,
   tabulationLogMeta,
 } from "@/services/tabulations";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
@@ -730,10 +732,15 @@ export async function POST(request: Request, context: RouteContext) {
           ? [dept.departmentId]
           : [];
         let requires = !!dept?.department?.requireTabulationOnClose;
-        if (!dept?.departmentId && agentUserId) {
-          const memberships = await listDepartmentsForUser(agentUserId);
-          allowedDepartmentIds = memberships.map((d) => d.id);
-          requires = memberships.some((d) => d.requireTabulationOnClose);
+        if (!dept?.departmentId) {
+          const depts =
+            isAdmin(session) || isSuperAdmin(session)
+              ? await listOrgDepartments()
+              : agentUserId
+                ? await listDepartmentsForUser(agentUserId)
+                : [];
+          allowedDepartmentIds = depts.map((d) => d.id);
+          requires = depts.some((d) => d.requireTabulationOnClose);
         }
         if (requires && !rawTab) {
           // Encerramento MANUAL (esta rota). Bots/automações usam
@@ -753,17 +760,11 @@ export async function POST(request: Request, context: RouteContext) {
           );
         }
         if (rawTab) {
-          if (allowedDepartmentIds.length === 0) {
-            return NextResponse.json(
-              { message: "Nenhum departamento disponivel para tabular." },
-              { status: 400 },
-            );
-          }
           try {
-            const leaf = await assertLeafInDepartments(
-              rawTab,
-              allowedDepartmentIds,
-            );
+            const leaf =
+              allowedDepartmentIds.length > 0
+                ? await assertLeafInDepartments(rawTab, allowedDepartmentIds)
+                : await assertLeafInOrg(rawTab);
             tabulationId = leaf.id;
             tabulationName = leaf.name;
             tabulationNumber = leaf.number;

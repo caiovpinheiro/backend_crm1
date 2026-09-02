@@ -16,8 +16,8 @@ import {
  * GET /api/tabulations?departmentId=xxx
  *   → arvore do departamento da conversa
  * GET /api/tabulations?userId=xxx
- *   → arvores de todos os departamentos em que o agente eh membro,
- *     agrupadas por departamento (conversa sem departmentId)
+ *   → arvores dos departamentos do agente; admin / sem membership
+ *     cai na arvore da org (conversa sem departmentId)
  */
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -66,10 +66,13 @@ export async function GET(request: Request) {
       });
     }
 
-    const departments =
+    let departments =
       isAdmin(session) || isSuperAdmin(session)
         ? await listOrgDepartments()
         : await listDepartmentsForUser(userId!);
+    if (departments.length === 0) {
+      departments = await listOrgDepartments();
+    }
     const groups = await getTreesForDepartments(departments);
     const requireTabulationOnClose = groups.some(
       (g) => g.requireTabulationOnClose,

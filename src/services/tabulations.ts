@@ -407,6 +407,39 @@ export async function assertLeafInDepartments(
   };
 }
 
+/** Folha ativa em qualquer departamento da org (conversa sem depto associado). */
+export async function assertLeafInOrg(
+  id: string,
+): Promise<{ id: string; name: string; number: number; departmentId: string | null }> {
+  const orgId = orgIdOrThrow();
+  const node = await prisma.tabulation.findFirst({
+    where: { id, organizationId: orgId, active: true },
+    select: {
+      id: true,
+      name: true,
+      number: true,
+      departmentId: true,
+      children: { where: { active: true }, select: { id: true }, take: 1 },
+    },
+  });
+  if (!node) {
+    const err = new Error("Tabulacao invalida.");
+    (err as { code?: string }).code = "TABULATION_INVALID";
+    throw err;
+  }
+  if (node.children.length > 0) {
+    const err = new Error("Selecione uma tabulacao folha.");
+    (err as { code?: string }).code = "TABULATION_NOT_LEAF";
+    throw err;
+  }
+  return {
+    id: node.id,
+    name: node.name,
+    number: node.number,
+    departmentId: node.departmentId,
+  };
+}
+
 export async function createNode(input: {
   departmentId: string;
   parentId?: string | null;
