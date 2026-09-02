@@ -1507,35 +1507,56 @@ export async function enqueueProcessPendingOrRun(opts: {
     };
   }
 
+  // Conta a espera ANTES de enfileirar. `capacity_released` (fechar
+  // atendimento) disparava drain com `pending:0` no log — não era
+  // contagem, era skip do COUNT. Fila vazia = nada a drenar.
+  let pending: number | null = null;
+  try {
+    pending = await prisma.conversation.count({
+      where: await getWaitingQueueWhere(),
+    });
+  } catch {
+    /* COUNT falhou: enfileira mesmo assim (cron/toast ainda funcionam) */
+  }
+  if (pending === 0) {
+    console.info(
+      "[distribution] drain skipped — empty waiting queue",
+      JSON.stringify({
+        orgId,
+        trigger: opts.trigger,
+        userId: opts.userId ?? null,
+        pending: 0,
+      }),
+    );
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending: 0,
+      trigger: opts.trigger,
+      skipReason: "EMPTY_QUEUE",
+      skipMessage: "Fila de espera vazia.",
+    };
+  }
+
   const queued = await enqueueDistributionDrain({
     organizationId: orgId,
     trigger: opts.trigger,
     userId: opts.userId ?? null,
   });
   if (queued) {
-    let pending = 0;
-    if (opts.trigger === "manual" || opts.trigger === "scheduled") {
-      try {
-        pending = await prisma.conversation.count({
-          where: await getWaitingQueueWhere(),
-        });
-      } catch {
-        /* toast / cron ainda funcionam com pending=0 */
-      }
-    }
     console.info(
       "[distribution] drain enqueued",
       JSON.stringify({
         orgId,
         trigger: opts.trigger,
         userId: opts.userId ?? null,
-        pending,
+        pending: pending ?? -1,
       }),
     );
     return {
       resolved: 0,
       cancelled: 0,
-      pending,
+      pending: pending ?? 0,
       trigger: opts.trigger,
       skipReason: "QUEUED",
       skipMessage:
