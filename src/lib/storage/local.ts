@@ -330,6 +330,10 @@ const REUSE_BUCKETS: ReadonlySet<StorageBucket> = new Set([
   "recordings",
 ]);
 
+export function isStorageReuseBucket(bucket: string): boolean {
+  return REUSE_BUCKETS.has(bucket as StorageBucket);
+}
+
 const UPLOADS_PREFIXES = ["/uploads/", "/api/uploads/"] as const;
 
 /**

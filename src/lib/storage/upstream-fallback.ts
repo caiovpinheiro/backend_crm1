@@ -30,6 +30,34 @@ function getFallbackBase(): string | null {
   return raw.replace(/\/$/, "");
 }
 
+function cronSecretBearer(): string | null {
+  const secret = process.env.CRON_SECRET?.trim();
+  return secret ? `Bearer ${secret}` : null;
+}
+
+/** Hosts que o worker pode GET (env only — nunca a URL crua do step). */
+export function peerStorageBases(): string[] {
+  const out: string[] = [];
+  for (const raw of [
+    process.env.STORAGE_PEER_URL,
+    process.env.STORAGE_FALLBACK_URL,
+    // Mesmo env do app: rewrite /api/* do frontend cai na API.
+    process.env.NEXTAUTH_URL,
+  ]) {
+    const base = raw?.trim().replace(/\/$/, "");
+    if (base && !out.includes(base)) out.push(base);
+  }
+  return out;
+}
+
+function hostHeaderFor(base: string): string {
+  try {
+    return new URL(base).host;
+  } catch {
+    return "";
+  }
+}
+
 /** True se STORAGE_FALLBACK_URL está definida (repair / diagnóstico). */
 export function storageFallbackConfigured(): boolean {
   return getFallbackBase() != null;
@@ -59,6 +87,15 @@ function buildUpstreamHeaders(
   if (!base) return null;
   const sessionToken = extractSessionToken(cookieHeader);
   if (!sessionToken) {
+    const cron = cronSecretBearer();
+    if (cron) {
+      const headers: Record<string, string> = {
+        authorization: cron,
+        host: hostHeaderFor(base),
+      };
+      if (range) headers.range = range;
+      return headers;
+    }
     const cookieNames = cookieHeader
       ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
       : [];
@@ -143,7 +180,8 @@ export async function readUpstreamFallbackBytes(
   // Só org/bucket/file já parseados — nunca a URL crua do cliente.
   if (!parseStoragePath(joined)) return null;
   const headers = buildUpstreamHeaders(cookieHeader ?? "", null) ?? {
-    host: new URL(base).host,
+    ...(cronSecretBearer() ? { authorization: cronSecretBearer()! } : {}),
+    host: hostHeaderFor(base),
   };
   const timeoutMs = opts?.timeoutMs ?? fallbackTimeoutMs(joined);
   try {
@@ -160,4 +198,37 @@ export async function readUpstreamFallbackBytes(
     console.warn("[storage] upstream fallback bytes erro:", err);
     return null;
   }
+}
+
+/**
+ * Worker sem o volume da API: GET no STORAGE_PEER_URL / STORAGE_FALLBACK_URL
+ * com `Authorization: Bearer CRON_SECRET`. Só path já parseado (SSRF).
+ */
+export async function readPeerStorageBytes(joined: string): Promise<Buffer | null> {
+  if (!parseStoragePath(joined)) return null;
+  const auth = cronSecretBearer();
+  const bases = peerStorageBases();
+  if (bases.length === 0 || !auth) return null;
+  const timeoutMs = fallbackTimeoutMs(joined);
+  for (const base of bases) {
+    try {
+      const upstream = await fetch(`${base}/api/storage/${joined}`, {
+        headers: { authorization: auth, host: hostHeaderFor(base) },
+        cache: "no-store",
+        redirect: "follow",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!upstream.ok) {
+        console.warn(
+          `[storage] peer ${upstream.status} ${base} ${joined}`,
+        );
+        continue;
+      }
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      if (buf.length) return buf;
+    } catch (err) {
+      console.warn("[storage] peer read erro:", base, err);
+    }
+  }
+  return null;
 }

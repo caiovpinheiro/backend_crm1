@@ -951,54 +951,22 @@ async function resolveTemplateHeaderMediaParam(
   mediaType: "image" | "video" | "document",
 ): Promise<{ link: string } | { id: string }> {
   const trimmed = mediaUrl.trim();
-  const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
-    "@/lib/storage/local"
+  const { isOrgOwnedStorageUrl, readStoredMediaForSend } = await import(
+    "@/lib/storage/read-for-send"
   );
-  const parsedStorage = parseStoragePath(trimmed);
-  const isLegacyLocal = !parsedStorage && trimmed.startsWith("/uploads/");
 
-  if (parsedStorage || isLegacyLocal) {
-    let buffer: Buffer;
-    let resolvedFileName: string;
-    let mimeType: string;
-
-    if (parsedStorage) {
-      const stored = await readStoredFile(
-        parsedStorage.orgId,
-        parsedStorage.bucket,
-        parsedStorage.fileName,
+  if (isOrgOwnedStorageUrl(trimmed)) {
+    const stored = await readStoredMediaForSend(trimmed);
+    if (!stored) {
+      throw new MetaSendFailureError(
+        `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
       );
-      if (!stored) {
-        throw new MetaSendFailureError(
-          `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
-        );
-      }
-      buffer = stored.buffer;
-      mimeType = stored.mimeType;
-      resolvedFileName = parsedStorage.fileName;
-    } else {
-      const { readFile } = await import("fs/promises");
-      const { join, basename } = await import("path");
-      const filePath = join(process.cwd(), "public", trimmed);
-      try {
-        buffer = await readFile(filePath);
-      } catch (fsErr) {
-        const code =
-          fsErr && typeof fsErr === "object" && "code" in fsErr
-            ? String((fsErr as { code: unknown }).code)
-            : "";
-        if (code === "ENOENT") {
-          throw new MetaSendFailureError(
-            `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
-          );
-        }
-        throw fsErr;
-      }
-      resolvedFileName = basename(trimmed);
-      mimeType = mimeFromFilename(resolvedFileName);
     }
-
-    const metaMediaId = await client.uploadMedia(buffer, mimeType, resolvedFileName);
+    const metaMediaId = await client.uploadMedia(
+      stored.buffer,
+      stored.mimeType,
+      stored.fileName,
+    );
     return { id: metaMediaId };
   }
 
@@ -3217,58 +3185,23 @@ async function executeStep(
       let displayContent: string;
 
       try {
-        // PR 1.3: aceita tanto URLs novas (`/api/storage/...` tenant-scoped)
-        // quanto legacy (`/uploads/...`). Se conseguirmos resolver localmente,
-        // fazemos upload pra Meta via media id (evita expor URL pública).
-        const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
-          "@/lib/storage/local"
+        // PR 1.3: `/api/storage/...` e `/uploads/...`. Worker sem o volume
+        // da API busca no peer (CRON_SECRET) e faz upload Meta por media id.
+        const { isOrgOwnedStorageUrl, readStoredMediaForSend } = await import(
+          "@/lib/storage/read-for-send"
         );
-        const parsedStorage = parseStoragePath(mediaUrl);
-        const isLegacyLocal = !parsedStorage && mediaUrl.startsWith("/uploads/");
-        const isLocalFile = Boolean(parsedStorage) || isLegacyLocal;
+        const isLocalFile = isOrgOwnedStorageUrl(mediaUrl);
 
         if (isLocalFile) {
-          let buffer: Buffer | null = null;
-          let resolvedFileName: string;
-          let mimeType: string;
-
-          if (parsedStorage) {
-            const stored = await readStoredFile(
-              parsedStorage.orgId,
-              parsedStorage.bucket,
-              parsedStorage.fileName,
+          const stored = await readStoredMediaForSend(mediaUrl);
+          if (!stored) {
+            throw new MetaSendFailureError(
+              `send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`,
             );
-            if (!stored) {
-              throw new MetaSendFailureError(
-                `send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`,
-              );
-            }
-            buffer = stored.buffer;
-            mimeType = stored.mimeType;
-            resolvedFileName = parsedStorage.fileName;
-          } else {
-            const { readFile } = await import("fs/promises");
-            const { join, basename } = await import("path");
-            const filePath = join(process.cwd(), "public", mediaUrl);
-            try {
-              buffer = await readFile(filePath);
-            } catch (fsErr) {
-              const code =
-                fsErr && typeof fsErr === "object" && "code" in fsErr
-                  ? String((fsErr as { code: unknown }).code)
-                  : "";
-              // Arquivo configurado inexistente = impossibilidade de envio.
-              // Demais erros de FS (permissão, I/O) seguem genéricos.
-              if (code === "ENOENT") {
-                throw new MetaSendFailureError(
-                  `send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`,
-                );
-              }
-              throw fsErr;
-            }
-            resolvedFileName = basename(mediaUrl);
-            mimeType = mimeFromFilename(resolvedFileName);
           }
+          const buffer = stored.buffer;
+          const mimeType = stored.mimeType;
+          const resolvedFileName = stored.fileName;
 
           const fName = filename || resolvedFileName;
           let mType = mediaType as "image" | "audio" | "video" | "document";
