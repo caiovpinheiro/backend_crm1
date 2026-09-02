@@ -93,21 +93,22 @@ export async function GET(request: Request, context: RouteContext) {
   // 16/jul/26 — Suporte a HTTP Range. Sem isso, `<video controls>` do
   // HTML5 nao inicia a reproducao (Safari/iOS falham sempre; Chrome
   // tolera arquivos pequenos e trava em vídeos maiores). Estrategia:
-  //  1. `statStoredFile()` pra descobrir tamanho antes de ler (fs.stat
-  //     no driver local; HeadObject no driver s3).
+  //  1. Com `Range`, `statStoredFile()` pra descobrir tamanho (fs.stat
+  //     no driver local; HeadObject no driver s3). Head 404 = miss.
   //  2. Se o request trouxer `Range: bytes=start-end`, responde 206
   //     com apenas o slice via `readStoredFileRange()` — no driver s3 o
   //     Range é repassado ao GetObject, então vídeo de 50MB nunca é
   //     carregado inteiro na RAM em nenhum dos backends.
-  //  3. Sem Range, mantem o comportamento antigo (200 + full body),
-  //     preservando imagem/audio/doc.
+  //  3. Sem Range, `readStoredFile` na key canônica (Get fallback OK).
   // A validacao de auth ja foi feita acima; aqui e' so I/O + headers.
-  const fileStat = await statStoredFile(parsed.orgId, parsed.bucket, parsed.fileName);
+  const rangeHeader = request.headers.get("range");
+  const fileStat = rangeHeader
+    ? await statStoredFile(parsed.orgId, parsed.bucket, parsed.fileName)
+    : null;
 
   if (fileStat) {
     const total = fileStat.size;
     const mimeType = mimeFromFilename(parsed.fileName);
-    const rangeHeader = request.headers.get("range");
 
     if (rangeHeader) {
       // Formato aceito: `bytes=<start>-<end?>`. Multi-range (RFC 7233)
@@ -178,12 +179,12 @@ export async function GET(request: Request, context: RouteContext) {
     );
   }
 
-  const aliasReads = reuseFileNameAliases(parsed.fileName)
-    .filter((name) => name !== parsed.fileName)
-    .map((name) => readStoredFile(parsed.orgId, parsed.bucket, name));
-  const aliasHits = aliasReads.length ? await Promise.all(aliasReads) : [];
-  const aliasFile = aliasHits.find((hit) => hit != null);
-  if (aliasFile) {
+  // Miss canônica: só aliases de extensão no mesmo bucket (jpg/jpeg, mp4/MP4).
+  // Sequencial — para no primeiro hit. Não varre outros buckets no gateway.
+  for (const name of reuseFileNameAliases(parsed.fileName)) {
+    if (name === parsed.fileName) continue;
+    const aliasFile = await readStoredFile(parsed.orgId, parsed.bucket, name);
+    if (!aliasFile) continue;
     return withStorageCors(
       request,
       new Response(new Uint8Array(aliasFile.buffer), {

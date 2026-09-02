@@ -537,9 +537,9 @@ export async function statStoredFile(
 }
 
 /**
- * Existência barata: Head/stat + disco local. No S3, `statStoredFile`
- * cai em GetObject sem Range e aborta o body (Head/Range 404 flake) —
- * não baixa o mp4 inteiro.
+ * Existência barata: Head/stat + disco local. No S3, Head 404/NotFound/
+ * NoSuchKey é miss — sem Range nem GetObject. Range/Get só se Head
+ * falhar por motivo não-404 (timeout, 403).
  */
 export async function existsStoredFile(
   orgId: string,
@@ -555,21 +555,16 @@ export async function existsStoredFile(
 }
 
 const EXT_ALIASES: Record<string, readonly string[]> = {
-  jpg: ["jpeg", "JPEG", "JPG"],
-  jpeg: ["jpg", "JPG", "JPEG"],
-  png: ["PNG"],
-  gif: ["GIF"],
-  webp: ["WEBP"],
+  jpg: ["jpeg"],
+  jpeg: ["jpg"],
   mp4: ["MP4"],
-  webm: ["WEBM"],
-  mov: ["MOV"],
-  pdf: ["PDF"],
 };
 
 /**
  * Variantes de filename org-owned para o mesmo objeto. JPEG de modelo
  * costuma gravar `auto_….jpg` (sniff → ext `jpg`) enquanto o cliente
- * manda `….jpeg`. Vídeo pode estar como `.MP4`.
+ * manda `….jpeg`. Vídeo pode estar como `.MP4`. Só jpg↔jpeg e mp4↔MP4
+ * (+ case-fold da extensão pedida). Sem fan-out png/gif/pdf.
  */
 export function reuseFileNameAliases(fileName: string): string[] {
   const names = [fileName];
@@ -578,14 +573,42 @@ export function reuseFileNameAliases(fileName: string): string[] {
   const base = fileName.slice(0, idx);
   const ext = fileName.slice(idx + 1);
   const lower = ext.toLowerCase();
-  const swap = EXT_ALIASES[lower] ?? (ext !== lower ? [lower] : []);
-  for (const alt of swap) {
+  const extras: string[] = [];
+  if (ext !== lower) extras.push(lower);
+  extras.push(...(EXT_ALIASES[lower] ?? []));
+  for (const alt of extras) {
     const candidate = `${base}.${alt}`;
     if (candidate !== fileName && isValidFileName(candidate) && !names.includes(candidate)) {
       names.push(candidate);
     }
   }
   return names;
+}
+
+/**
+ * Ordem do locate: (bucket pedido + nome exato) → aliases no mesmo
+ * bucket → outros REUSE_BUCKETS só com o nome exato. Sem ext × bucket.
+ */
+export function reuseLocateProbePlan(
+  bucket: StorageBucket,
+  fileName: string,
+): Array<{ bucket: StorageBucket; fileName: string }> {
+  const plan: Array<{ bucket: StorageBucket; fileName: string }> = [];
+  const seen = new Set<string>();
+  const push = (nextBucket: StorageBucket, nextName: string) => {
+    const id = `${nextBucket}\0${nextName}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    plan.push({ bucket: nextBucket, fileName: nextName });
+  };
+  for (const name of reuseFileNameAliases(fileName)) {
+    push(bucket, name);
+  }
+  for (const other of REUSE_BUCKETS) {
+    if (other === bucket) continue;
+    push(other, fileName);
+  }
+  return plan;
 }
 
 export const LOCATE_REUSE_DEADLINE_MS = 800;
@@ -691,11 +714,11 @@ export async function readLegacyUploadsFile(
 
 /**
  * Confirma que o objeto do reuseUrl existe no driver ativo (S3 ou disco).
- * Probes em paralelo; devolve no primeiro hit (não espera GetObject cheio).
- * Teto 800ms (imagem) / 4s (vídeo). Miss real não pode prender o send.
+ * Probes sequenciais (para no primeiro hit). Teto 800ms (imagem) / 4s
+ * (vídeo). Miss real não pode prender o send. Sem ListObjects/stem.
  * Se o URL era `/uploads/<file>` sem bucket, tenta os outros buckets de
- * reuse. Se só existir no volume legado `public/uploads`, devolve essa URL
- * (workers Baileys / meta-attach já leem `/uploads/...`).
+ * reuse só com o nome exato. Se só existir no volume legado
+ * `public/uploads`, devolve essa URL.
  */
 export async function locateReusableStoredObject(
   resolved: OrgOwnedReuseUrl,
@@ -711,42 +734,17 @@ export async function locateReusableStoredObject(
 async function locateReusableStoredObjectInner(
   resolved: OrgOwnedReuseUrl,
 ): Promise<OrgOwnedReuseUrl | null> {
-  const names = reuseFileNameAliases(resolved.fileName);
-  const buckets = [resolved.bucket, ...[...REUSE_BUCKETS].filter((b) => b !== resolved.bucket)];
-
-  const probes = buckets.flatMap((bucket) =>
-    names.map(async (fileName) => {
-      if (!(await existsStoredFile(resolved.orgId, bucket, fileName))) return null;
-      return {
-        url: buildPublicUrl(resolved.orgId, bucket, fileName),
-        orgId: resolved.orgId,
-        bucket,
-        fileName,
-      } satisfies OrgOwnedReuseUrl;
-    }),
-  );
-
-  const probeHit = await firstNonNull(probes);
-  if (probeHit) return probeHit;
-
-  if (storageDriver() === "s3") {
-    const s3 = await import("./s3");
-    const listOnce = () =>
-      s3.findOrgObjectByStem(resolved.orgId, [...REUSE_BUCKETS], resolved.fileName);
-    let listed = await listOnce();
-    if (!listed && isReusableVideoFileName(resolved.fileName)) {
-      listed = await listOnce();
-    }
-    if (listed) {
-      return {
-        url: buildPublicUrl(resolved.orgId, listed.bucket, listed.fileName),
-        orgId: resolved.orgId,
-        bucket: listed.bucket,
-        fileName: listed.fileName,
-      };
-    }
+  for (const probe of reuseLocateProbePlan(resolved.bucket, resolved.fileName)) {
+    if (!(await existsStoredFile(resolved.orgId, probe.bucket, probe.fileName))) continue;
+    return {
+      url: buildPublicUrl(resolved.orgId, probe.bucket, probe.fileName),
+      orgId: resolved.orgId,
+      bucket: probe.bucket,
+      fileName: probe.fileName,
+    };
   }
 
+  const names = reuseFileNameAliases(resolved.fileName);
   const legacyCandidates = new Set<string>();
   if (resolved.legacyRelative) legacyCandidates.add(resolved.legacyRelative);
   for (const fileName of names) legacyCandidates.add(fileName);

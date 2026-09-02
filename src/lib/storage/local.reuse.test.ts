@@ -9,6 +9,7 @@ import {
   resolveOrgOwnedReuseUrl,
   resolveOutboundAttachmentMime,
   reuseFileNameAliases,
+  reuseLocateProbePlan,
 } from "@/lib/storage/local";
 
 const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
@@ -58,6 +59,27 @@ describe("resolveOrgOwnedReuseUrl", () => {
     expect(reuseFileNameAliases("clip.mp4")).toEqual(
       expect.arrayContaining(["clip.mp4", "clip.MP4"]),
     );
+    expect(reuseFileNameAliases("clip.MP4")).toEqual(
+      expect.arrayContaining(["clip.MP4", "clip.mp4"]),
+    );
+    expect(reuseFileNameAliases("foto.png")).toEqual(["foto.png"]);
+  });
+
+  it("locate: aliases só no bucket pedido; outros buckets só com o nome exato", () => {
+    const plan = reuseLocateProbePlan("automation-media", "auto_1.mp4");
+    expect(plan[0]).toEqual({ bucket: "automation-media", fileName: "auto_1.mp4" });
+    expect(plan.filter((p) => p.bucket === "automation-media").map((p) => p.fileName)).toEqual(
+      ["auto_1.mp4", "auto_1.MP4"],
+    );
+    const other = plan.filter((p) => p.bucket !== "automation-media");
+    expect(other.every((p) => p.fileName === "auto_1.mp4")).toBe(true);
+    expect(other.map((p) => p.bucket).sort()).toEqual(
+      ["attachments", "inbound-media", "recordings"].sort(),
+    );
+    expect(plan.some((p) => p.bucket === "attachments" && p.fileName === "auto_1.MP4")).toBe(
+      false,
+    );
+    expect(plan).toHaveLength(5);
   });
 
   it("rejeita org diferente (sem SSRF / tenant escape)", () => {
