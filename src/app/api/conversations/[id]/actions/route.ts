@@ -20,6 +20,10 @@ import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
 import { metrics } from "@/lib/metrics";
 import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
+import {
+  departmentTransferDistributionInput,
+  transferDistributionFromQueueOutcome,
+} from "@/lib/transfer-distribution";
 import { executeDistribution } from "@/services/distribution";
 import {
   assertLeafInDepartments,
@@ -459,6 +463,12 @@ export async function POST(request: Request, context: RouteContext) {
               if (!orgId) {
                 throw new Error("organizationId ausente");
               }
+              const distInput = departmentTransferDistributionInput({
+                conversationId: id,
+                contactId: prevConv.contactId ?? null,
+                departmentId: newDeptId,
+                explicitAgent: hasAgent,
+              });
               const outcome = await runDistributionExecuteOrInline(
                 {
                   organizationId: orgId,
@@ -466,31 +476,14 @@ export async function POST(request: Request, context: RouteContext) {
                   conversationId: id,
                   contactId: prevConv.contactId ?? null,
                   departmentId: newDeptId,
+                  departmentIds: [newDeptId],
+                  reassign: distInput.reassign,
                   requestedByUserId: sessionUser.id,
                 },
-                () =>
-                  executeDistribution({
-                    conversationId: id,
-                    contactId: prevConv.contactId ?? null,
-                    departmentId: newDeptId,
-                    triggerSource: "MANUAL",
-                  }),
+                () => executeDistribution(distInput),
               );
-              if (outcome.kind === "result") {
-                distribution = {
-                  success: outcome.result.success,
-                  reason: outcome.result.reason,
-                  selectedUserId: outcome.result.selectedUserId,
-                  selectedUserName: outcome.result.selectedUserName,
-                };
-              } else if (outcome.kind === "queued") {
-                distribution = {
-                  success: false,
-                  reason: "QUEUED",
-                  selectedUserId: null,
-                  selectedUserName: null,
-                };
-              } else {
+              distribution = transferDistributionFromQueueOutcome(outcome);
+              if (!distribution && outcome.kind === "unavailable") {
                 metrics.errors.inc({
                   scope: "distribution.transfer",
                   kind: "queue_unavailable",
