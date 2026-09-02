@@ -10,6 +10,10 @@
  * 2) Handoff por inatividade (`inactivityTimerMs > 0`), só se já houve
  *    reply humano. IA-only não vai pra fila de consultor.
  *
+ * 3) Retry de inbound sem resposta: aluno escreveu, a IA é a responsável e
+ *    ninguém respondeu (debounce perdido em restart). Override:
+ *    `AI_AGENT_RETRY_UNANSWERED_MS` (0 desliga).
+ *
  * Opt-out do worker inteiro: `AI_AGENT_INACTIVITY_WORKER=0`.
  */
 
@@ -38,6 +42,10 @@ import {
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { enqueueDistributionStuckInbound } from "@/lib/distribution-execute-queue";
+import {
+  AI_RETRY_UNANSWERED_MS,
+  retryUnansweredAiInbound,
+} from "@/services/ai/retry-unanswered-ai-inbound";
 import { STUCK_INBOUND_MS } from "@/services/ai/stuck-inbound-distribution";
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
@@ -255,6 +263,25 @@ async function processIdleAiOnly(
 export async function tickOnce(now: Date = new Date()) {
   const { closed } = await processIdleAiOnly(now);
 
+  // Aluno escreveu e a IA nunca respondeu (timer do debounce morreu num
+  // restart de container, ou o flush estourou). Reprocessa ANTES da
+  // distribuição de segurança, pra IA atender em vez de jogar o aluno na
+  // fila humana por causa de um deploy. `AI_AGENT_RETRY_UNANSWERED_MS=0` desliga.
+  let retried = 0;
+  try {
+    const retryMs = envMs(
+      "AI_AGENT_RETRY_UNANSWERED_MS",
+      AI_RETRY_UNANSWERED_MS,
+    );
+    const r = await retryUnansweredAiInbound({ now, apply: true, retryMs });
+    retried = r.retried;
+  } catch (err) {
+    console.warn(
+      "[ai-inactivity] retry de inbound sem resposta falhou:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   // Aluno esperando resposta da IA há tempo demais → mesmo job do cron
   // (`dsi-stuck-inbound`) no worker-distribution. Dedup evita SQL duplo.
   try {
@@ -322,7 +349,7 @@ export async function tickOnce(now: Date = new Date()) {
   if (handed > 0) {
     console.info(`[ai-inactivity] tick concluído — transferidas=${handed}`);
   }
-  return { processed: rows.length, handed, closed };
+  return { processed: rows.length, handed, closed, retried };
 }
 
 async function dispatchOne(row: ExpiredRow) {
