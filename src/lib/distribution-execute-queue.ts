@@ -258,10 +258,52 @@ export async function enqueueDistributionStuckInbound(
   return added.status;
 }
 
+/**
+ * Transferir / Distribuir do inbox (MANUAL) não pode depender da fila
+ * `distribution-execute`. O worker de produção consome `distribution-drain`
+ * (fila de espera); jobs MANUAL ficam waiting e o consultor vê falha.
+ * IA/SYSTEM já chamam `executeDistribution` direto nos próprios processos.
+ */
+export function shouldRunManualExecuteInline(
+  triggerSource: DistributionTriggerSource,
+): boolean {
+  return triggerSource === "MANUAL";
+}
+
+async function discardWaitingExecuteJob(
+  jobId: string | undefined,
+): Promise<void> {
+  if (!jobId) return;
+  const queue = getDistributionExecuteQueue();
+  if (!queue) return;
+  try {
+    const existing = await queue.getJob(jobId);
+    if (!existing) return;
+    const state = await existing.getState();
+    if (state === "waiting" || state === "delayed" || state === "failed") {
+      await existing.remove().catch(() => {});
+    }
+  } catch {
+    /* fila instável — segue o inline */
+  }
+}
+
 export async function runDistributionExecuteOrInline(
   payload: DistributionExecutePayload,
   runInline: () => Promise<DistributionResult>,
 ): Promise<EnqueueWaitResult<DistributionResult>> {
+  if (shouldRunManualExecuteInline(payload.triggerSource)) {
+    await discardWaitingExecuteJob(distributionExecuteJobId(payload));
+    console.info(
+      "[distribution] manual execute inline",
+      JSON.stringify({
+        organizationId: payload.organizationId,
+        conversationId: payload.conversationId ?? null,
+        reassign: payload.reassign === true,
+      }),
+    );
+    return { kind: "result", result: await runInline() };
+  }
   const queued = await enqueueAndWaitDistributionExecute(payload);
   if (queued.kind !== "unavailable") return queued;
   if (allowInlineDistributionFallback()) {

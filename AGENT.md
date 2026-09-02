@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-02 — MANUAL execute inline (não na fila do worker)
+
+**Decisão.** `triggerSource=MANUAL` (Transferir / Distribuir p/ departamento) volta a rodar `executeDistribution` no processo da API. A fila `distribution-execute` fica para redistribute/stuck-inbound.
+
+**Contexto.** Depois de mover o execute para o worker (2026-09-02 14:58 BRT), zero logs MANUAL. O worker em produção só mostra `distribution-drain` (`capacity_released` + COOLDOWN). IA/SYSTEM continuaram porque já chamam o motor direto. Consultor via toast de falha; o departamento do Transfer até gravava, o dono não.
+
+**Alternativas descartadas.** Esperar o worker consumir `distribution-execute` (imagem/fila). Tratar 202 como sucesso (o job nunca rodava).
+
+**Impacto.** `runDistributionExecuteOrInline`. Drain continua no worker.
+
+---
+
 ### 2026-09-02 — Transferência de departamento com reassign
 
 **Decisão.** Transferir só para departamento (`explicitAgent: false`) chama `executeDistribution` com `reassign: true`. Job ainda na fila (`queued`) conta como sucesso na API de transfer e no kebab.

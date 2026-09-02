@@ -5,6 +5,7 @@ import {
   DISTRIBUTION_STUCK_INBOUND_JOB_ID,
   distributionExecuteJobId,
   distributionRedistributeJobId,
+  shouldRunManualExecuteInline,
 } from "./distribution-execute-queue";
 
 describe("distribution execute queue", () => {
@@ -45,5 +46,11 @@ describe("distribution execute queue", () => {
     );
     expect(id).toBe("dr-clorg123-user9-equal-entrada");
     expect(id).not.toMatch(/:/);
+  });
+
+  it("MANUAL do inbox roda inline; o resto segue a fila", () => {
+    expect(shouldRunManualExecuteInline("MANUAL")).toBe(true);
+    expect(shouldRunManualExecuteInline("SYSTEM")).toBe(false);
+    expect(shouldRunManualExecuteInline("AI_AGENT")).toBe(false);
   });
 });
