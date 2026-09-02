@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-02 — Transferência de departamento com reassign
+
+**Decisão.** Transferir só para departamento (`explicitAgent: false`) chama `executeDistribution` com `reassign: true`. Job ainda na fila (`queued`) conta como sucesso na API de transfer e no kebab.
+
+**Contexto.** O worker `distribution-execute` passou a responder 202. Sem `reassign`, o motor devolvia `ASSIGNED` e mantinha o dono. O front lia `{ queued: true }` sem `success` e mostrava "Não foi possível distribuir."
+
+**Alternativas descartadas.** Sempre `reassign` (apagaria o agente escolhido no mesmo transfer). Tratar 202 como erro e pedir retry.
+
+**Impacto.** `src/lib/transfer-distribution.ts`, `conversations/[id]/actions`. Front: `outcome-toast.ts`. Já em `main` e `DEV_BRANCH`.
+
+---
+
 ### 2026-09-02 — Demandas com vários responsáveis
 
 **Decisão.** Tabela `demand_item_assignees` (N:N). `DemandItem.assigneeId` continua sendo o primeiro da lista. GET `/api/demands/boards` e GET `/api/demands/users` devolvem humanos da org. Create/PATCH aceitam `assigneeIds[]`.
