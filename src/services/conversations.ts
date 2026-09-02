@@ -1179,8 +1179,9 @@ async function hydrateConversationsByIds(
  * DISTINCT ON (contato+canal) materializa TODOS os grupos antes do
  * LIMIT — 5s+ na 1ª página de `todos` (OPEN+RESOLVED da org). Filas
  * OPEN já são 1:1 (`conversations_active_contact_channel`). `todos` e
- * o picker sem aba usam ORDER BY + LIMIT; o FE já colapsa o card.
- * Só Encerradas ainda colapsa (N tickets RESOLVED por número).
+ * o picker sem aba usam ORDER BY + LIMIT; o FE colapsa o card e o
+ * badge conta DISTINCT contato+canal. Encerradas/Resolvidos colapsam
+ * no SQL (N tickets RESOLVED por número).
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
@@ -1208,8 +1209,10 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
 
-  // Colapso SQL só em Encerradas. `todos` / sem aba / filas OPEN:
-  // ORDER BY + LIMIT (1ª página). COUNT DISTINCT ficou no GET ?counts=1.
+  // Colapso SQL só em Encerradas/Resolvidos. `todos` / sem aba / filas
+  // OPEN: ORDER BY + LIMIT (1ª página) — DISTINCT ON em OPEN+RESOLVED
+  // da org materializa todos os grupos (5s+). O FE colapsa o card; o
+  // badge (?counts=1) usa COUNT DISTINCT contato+canal.
   // OFFSET só se o cliente velho mandar `page` sem `cursor`.
   const collapse = listNeedsContactChannelCollapse(params);
   const { ids: windowIds, hasMore, knownTotal } = await findCollapsedConversationPage({
@@ -1222,8 +1225,12 @@ export async function getConversations(
     cursor,
   });
   const pageIds = windowIds.slice(0, perPage);
+  // Badge de Todas já é DISTINCT; peek com a mesma chave pra o
+  // `total` da lista não voltar COUNT(*) inflado.
+  const peekCollapse =
+    collapse || (params.tab === "todos" && !params.contactId);
   const [cachedTotal, hydrated, previewMap] = await Promise.all([
-    knownTotal == null ? peekCachedTabTotal(params, collapse) : Promise.resolve(null),
+    knownTotal == null ? peekCachedTabTotal(params, peekCollapse) : Promise.resolve(null),
     pageIds.length === 0
       ? Promise.resolve([])
       : prisma.conversation.findMany({
@@ -1704,7 +1711,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 6,
+          k: 7,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1869,8 +1876,8 @@ async function tryComputeTabCountsOneSql(args: {
   }
 
   const collapse = args.collapseByContact;
-  // `todos` = COUNT(*) (lista não colapsa essa aba). Só Encerradas
-  // usa DISTINCT contact+channel — DISTINCT em todos varria OPEN+RESOLVED.
+  // Encerradas / Resolvidos / Todas: 1 por contato+canal (mesmo
+  // card da lista). Filas OPEN já são 1:1; COUNT(*) nelas basta.
   try {
     const rows = await prisma.$queryRaw<
       [{
@@ -1896,7 +1903,7 @@ async function tryComputeTabCountsOneSql(args: {
         ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
         ${tabCountExpr(erro, false)} AS erro,
-        ${tabCountExpr(todos, false)} AS todos,
+        ${tabCountExpr(todos, collapse)} AS todos,
         ${tabCountExpr(abertas, false)} AS abertas,
         ${tabCountExpr(ligar, false)} AS ligar
       FROM conversations c
@@ -1985,8 +1992,8 @@ async function computeTabCounts(
   }
   const resolvidos = await countTab("resolvidos");
   const finalizados = await countTab("finalizados");
-  // `todos` na lista não colapsa (só Encerradas). COUNT(*) casa o
-  // badge com a fila e evita DISTINCT em OPEN+RESOLVED da org.
+  // Mesma chave da lista (contato+canal): N tickets RESOLVED da
+  // mesma pessoa contam 1 em Todas, como em Encerradas.
   const todos = await countTodosTab(
     visibilityCollapsed,
     todosMemberCategoryTabs ?? null,
@@ -1994,7 +2001,7 @@ async function computeTabCounts(
     extra,
     searchWhere,
     countAgentReply,
-    false,
+    collapseByContact,
     assigneeIdsByType,
   );
   const abertas = await (() => {
