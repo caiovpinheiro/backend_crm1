@@ -1225,12 +1225,8 @@ export async function getConversations(
     cursor,
   });
   const pageIds = windowIds.slice(0, perPage);
-  // Badge de Todas já é DISTINCT; peek com a mesma chave pra o
-  // `total` da lista não voltar COUNT(*) inflado.
-  const peekCollapse =
-    collapse || (params.tab === "todos" && !params.contactId);
   const [cachedTotal, hydrated, previewMap] = await Promise.all([
-    knownTotal == null ? peekCachedTabTotal(params, peekCollapse) : Promise.resolve(null),
+    knownTotal == null ? peekCachedTabTotal(params, collapse) : Promise.resolve(null),
     pageIds.length === 0
       ? Promise.resolve([])
       : prisma.conversation.findMany({
@@ -1711,7 +1707,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 7,
+          k: 8,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1876,8 +1872,9 @@ async function tryComputeTabCountsOneSql(args: {
   }
 
   const collapse = args.collapseByContact;
-  // Encerradas / Resolvidos / Todas: 1 por contato+canal (mesmo
-  // card da lista). Filas OPEN já são 1:1; COUNT(*) nelas basta.
+  // Encerradas / Resolvendo: DISTINCT contato+canal.
+  // Todas: NÃO DISTINCT em OPEN+RESOLVED (5s+ na org). Admin = abertas
+  // (1:1) + fechadas únicas. MEMBER = COUNT(*) das filas permitidas.
   try {
     const rows = await prisma.$queryRaw<
       [{
@@ -1903,7 +1900,7 @@ async function tryComputeTabCountsOneSql(args: {
         ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
         ${tabCountExpr(finalizados, collapse)} AS finalizados,
         ${tabCountExpr(erro, false)} AS erro,
-        ${tabCountExpr(todos, collapse)} AS todos,
+        ${tabCountExpr(todos, false)} AS todos,
         ${tabCountExpr(abertas, false)} AS abertas,
         ${tabCountExpr(ligar, false)} AS ligar
       FROM conversations c
@@ -1920,7 +1917,9 @@ async function tryComputeTabCountsOneSql(args: {
       resolvidos: row.resolvidos ?? 0,
       finalizados: row.finalizados ?? 0,
       erro: row.erro ?? 0,
-      todos: row.todos ?? 0,
+      todos: args.todosMemberCategoryTabs?.length
+        ? (row.todos ?? 0)
+        : (row.abertas ?? 0) + (row.resolvidos ?? 0) + (row.finalizados ?? 0),
       abertas: row.abertas ?? 0,
       ligar: row.ligar ?? 0,
     };
@@ -1992,18 +1991,6 @@ async function computeTabCounts(
   }
   const resolvidos = await countTab("resolvidos");
   const finalizados = await countTab("finalizados");
-  // Mesma chave da lista (contato+canal): N tickets RESOLVED da
-  // mesma pessoa contam 1 em Todas, como em Encerradas.
-  const todos = await countTodosTab(
-    visibilityCollapsed,
-    todosMemberCategoryTabs ?? null,
-    allowedChannelIds,
-    extra,
-    searchWhere,
-    countAgentReply,
-    collapseByContact,
-    assigneeIdsByType,
-  );
   const abertas = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
@@ -2030,7 +2017,18 @@ async function computeTabCounts(
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
   record.resolvidos = resolvidos;
   record.finalizados = finalizados;
-  record.todos = todos;
+  record.todos = todosMemberCategoryTabs?.length
+    ? await countTodosTab(
+        visibilityCollapsed,
+        todosMemberCategoryTabs,
+        allowedChannelIds,
+        extra,
+        searchWhere,
+        countAgentReply,
+        false,
+        assigneeIdsByType,
+      )
+    : abertas + resolvidos + finalizados;
   record.abertas = abertas;
   record.ligar = ligar;
   return record;
