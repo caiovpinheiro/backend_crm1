@@ -60,23 +60,23 @@ function isNoiseText(content: string | null | undefined): boolean {
 export type InboundAudioCheck = {
   /** O aluno mandou pelo menos um áudio nesta rodada. */
   hasAudio: boolean;
-  /** Existe texto aproveitável junto (transcrição, legenda ou pergunta escrita). */
-  hasUsableText: boolean;
-  /** Áudio sem nada aproveitável → transferir para humano. */
+  /** O próprio áudio veio com transcrição/legenda no conteúdo. */
+  hasTranscript: boolean;
+  /** Áudio sem transcrição utilizável → transferir para humano. */
   shouldHandoff: boolean;
 };
 
 /**
  * Inspeciona as mensagens inbound ainda não respondidas (mesma janela do
- * debounce: tudo depois da última outbound) para decidir se a rodada é
- * essencialmente um áudio.
+ * debounce: tudo depois da última outbound) para saber se o aluno mandou
+ * áudio e se esse áudio já veio com transcrição no conteúdo.
  */
 export async function detectInboundAudio(args: {
   conversationId: string;
   userMessage: string;
 }): Promise<InboundAudioCheck> {
   let hasAudio = false;
-  let hasUsableText = false;
+  let hasTranscript = false;
 
   try {
     const lastOut = await prisma.message.findFirst({
@@ -107,13 +107,10 @@ export async function detectInboundAudio(args: {
       const isAudioMsg =
         AUDIO_MESSAGE_TYPES.has((m.messageType ?? "").toLowerCase()) ||
         isAudioPlaceholderText(m.content);
-      if (isAudioMsg) {
-        hasAudio = true;
-        // Áudio com transcrição/legenda salva no conteúdo já é atendível.
-        if (!isNoiseText(m.content)) hasUsableText = true;
-        continue;
-      }
-      if (!isNoiseText(m.content)) hasUsableText = true;
+      if (!isAudioMsg) continue;
+      hasAudio = true;
+      // Áudio com transcrição/legenda salva no conteúdo já é atendível.
+      if (!isNoiseText(m.content)) hasTranscript = true;
     }
   } catch (e) {
     console.error("[ai] detectInboundAudio failed", e);
@@ -122,17 +119,12 @@ export async function detectInboundAudio(args: {
   // Fallback: sem linha no banco (ex.: caminho sem persistência), o texto
   // agregado ainda denuncia o áudio pelo placeholder.
   if (!hasAudio) {
-    const lines = args.userMessage.split("\n");
-    for (const line of lines) {
-      if (isAudioPlaceholderText(line)) {
-        hasAudio = true;
-      } else if (!isNoiseText(line)) {
-        hasUsableText = true;
-      }
+    for (const line of args.userMessage.split("\n")) {
+      if (isAudioPlaceholderText(line)) hasAudio = true;
     }
   }
 
-  return { hasAudio, hasUsableText, shouldHandoff: hasAudio && !hasUsableText };
+  return { hasAudio, hasTranscript, shouldHandoff: hasAudio && !hasTranscript };
 }
 
 /**
