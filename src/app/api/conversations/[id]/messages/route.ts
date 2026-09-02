@@ -229,7 +229,7 @@ export async function GET(request: Request, context: RouteContext) {
     return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     const accessUser = authResult.user as { id: string; role: AppUserRole };
-    const denied = await requireConversationAccess({ user: accessUser }, id);
+    const denied = await requireConversationAccess({ user: authResult.user }, id);
     if (denied) return denied;
 
     const conv = await getConversationLite(id);
@@ -679,7 +679,7 @@ export async function POST(request: Request, context: RouteContext) {
     return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     const accessUser = authResult.user as { id: string; role: AppUserRole };
-    const denied = await requireConversationAccess({ user: accessUser }, id);
+    const denied = await requireConversationAccess({ user: authResult.user }, id);
     if (denied) return denied;
 
     let conv = await getConversationLite(id);
