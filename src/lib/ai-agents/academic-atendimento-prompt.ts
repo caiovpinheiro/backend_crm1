@@ -111,8 +111,7 @@ export function academicExamModalityRules(onlineOnly: boolean): string {
     : ACADEMIC_EXAM_MODALITY_RULES_MIXED;
 }
 
-/**
- * Caminho oficial da plataforma de provas. Injetado quando o aluno pergunta
+/** * Caminho oficial da plataforma de provas. Injetado quando o aluno pergunta
  * ou quando o último disparo falava de prova e ele responde de forma vaga.
  */
 export function formatExamAccessHint(
@@ -217,8 +216,7 @@ export function formatPoloAddressesHint(
     "- Copie rua, número e referência EXATAMENTE como estão acima. Pode listar só os 2–3 mais próximos do que o aluno citou, mas sem alterar o texto.",
     "- Diga que ele NÃO precisa se deslocar: dá para resolver por aqui mesmo no WhatsApp, comigo, agora.",
     "- PROIBIDO usar esta lista como resposta a dúvida de PROVA e PROIBIDO concluir daqui que prova/aula é presencial. Endereço só quando o aluno pedir o local.",
-    "- Ofereça a alternativa de falar com um consultor se ele preferir. Só nesse caso chame `transfer_to_department` + `execute_distribution`.",
-  ].join("\n");
+    "- Ofereça a alternativa de falar com um consultor se ele preferir. Só nesse caso chame `transfer_to_department` + `execute_distribution`.",  ].join("\n");
 }
 
 export const ACADEMIC_ATENDIMENTO_RULES = `

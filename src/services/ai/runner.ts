@@ -56,6 +56,10 @@ import {
   formatRetrievalBlock,
   retrieveRelevantChunks,
 } from "@/services/ai/retrieval";
+import {
+  normalizeInboxPolicy,
+  normalizeToolConfig,
+} from "@/lib/ai-agents/steering";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 
 export type RunSource = "inbox" | "playground" | "automation" | "api";
@@ -87,13 +91,21 @@ export type RunResult = {
 };
 
 const MAX_HISTORY = 10;
-const ACADEMIC_RUNTIME_TOOLS = [
-  "consultar_matricula",
-  "transfer_to_department",
-  "execute_distribution",
-  "transfer_to_human",
-  "close_conversation",
-] as const;
+
+/**
+ * Regras de atendimento usadas quando `AIAgentConfig.steeringRules`
+ * está vazio (agentes criados antes da pilotagem pelo CRM). Uma vez
+ * que o consultor salva as regras na tela, o banco manda — inclusive
+ * nos blocos de mídia/confiança, que passam a ser editáveis.
+ */
+export function fallbackSteeringRules(archetype: string): string {
+  if (archetype !== "ATENDIMENTO") return "";
+  return [
+    ACADEMIC_ATENDIMENTO_RULES,
+    ACADEMIC_MEDIA_CAPABILITY_RULES,
+    ACADEMIC_CONFIDENCE_RULES,
+  ].join("\n\n");
+}
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   const agent = await prisma.aIAgentConfig.findUnique({
@@ -253,33 +265,24 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .filter(Boolean)
       .join("\n");
 
-    const runtimeTools = isAcademicAttendance
-      ? Array.from(new Set([...agent.enabledTools, ...ACADEMIC_RUNTIME_TOOLS]))
-      : agent.enabledTools;
-    const runtimeOverride = isAcademicAttendance
-      ? [
-          agent.systemPromptOverride?.includes(
-            "## DISTRIBUIÇÃO POR DEPARTAMENTO",
-          )
-            ? agent.systemPromptOverride
-            : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
-                .filter(Boolean)
-                .join("\n\n"),
-          // Sempre: override no banco pode estar velho sem mídia/confiança.
-          ACADEMIC_MEDIA_CAPABILITY_RULES,
-          ACADEMIC_CONFIDENCE_RULES,
-          // Modalidade: prova é online; nunca afirmar "presencial" (#340901).
-          academicExamModalityRules(examsOnlineOnly),
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      : agent.systemPromptOverride;
+    const runtimeTools = agent.enabledTools;
+    const steeringRules =
+      agent.steeringRules?.trim() || fallbackSteeringRules(agent.archetype);
+    const runtimeOverride =
+      [
+        agent.systemPromptOverride?.trim(),
+        steeringRules,
+        isAcademicAttendance ? academicExamModalityRules(examsOnlineOnly) : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n") || null;
 
     const systemPrompt = renderSystemPrompt({
       template: agent.systemPromptTemplate,
       override: runtimeOverride,
       productPolicy: agent.productPolicy,
       hasProductSearch: runtimeTools.includes("search_products"),
+      hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
       tone: agent.tone,
       language: agent.language,
       autonomyMode: agent.autonomyMode,
@@ -297,9 +300,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
+      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy),
     };
 
-    const toolSet = buildToolSet(ctx, runtimeTools);
+    const toolSet = buildToolSet(
+      ctx,
+      runtimeTools,
+      normalizeToolConfig(agent.toolConfig),
+    );
 
     const messages: Array<{
       role: "user" | "assistant";
@@ -418,44 +426,45 @@ async function loadHistoryFromConversation(
   conversationId: string | null,
 ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
   if (!conversationId) return [];
-    const msgs = await prisma.message.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: "desc" },
-      take: MAX_HISTORY,
-      select: {
-        content: true,
-        direction: true,
-        messageType: true,
-        templateConfigId: true,
-        senderName: true,
-      },
-    });
-    const chronological = msgs.reverse().filter((m) => !!m.content);
-    return Promise.all(
-      chronological.map(async (m) => {
-        const raw = m.content ?? "";
-        const content =
-          m.direction === "out"
-            ? await hydrateOutboundTemplateContent({
-                content: raw,
-                messageType: m.messageType,
-                templateConfigId: m.templateConfigId,
-                senderName: m.senderName,
-              })
-            : raw;
-        return {
-          role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
-          content,
-        };
-      }),
-    );
-  }
-
+  const msgs = await prisma.message.findMany({
+    where: { conversationId },
+    orderBy: { createdAt: "desc" },
+    take: MAX_HISTORY,
+    select: {
+      content: true,
+      direction: true,
+      messageType: true,
+      templateConfigId: true,
+      senderName: true,
+    },
+  });
+  const chronological = msgs.reverse().filter((m) => !!m.content);
+  const hydrated = await Promise.all(
+    chronological.map(async (m) => {
+      const raw = m.content ?? "";
+      const content =
+        m.direction === "out"
+          ? await hydrateOutboundTemplateContent({
+              content: raw,
+              messageType: m.messageType,
+              templateConfigId: m.templateConfigId,
+              senderName: m.senderName,
+            })
+          : raw;
+      return {
+        role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
+        content,
+      };
+    }),
+  );
+  return hydrated;
+}
 type RenderArgs = {
   template: string;
   override: string | null;
   productPolicy: string | null;
   hasProductSearch: boolean;
+  hasEnrollmentLookup: boolean;
   tone: string;
   language: string;
   autonomyMode: AIAgentAutonomy;
@@ -518,10 +527,14 @@ function renderSystemPrompt(args: RenderArgs): string {
     );
   }
 
-  lines.push("");
-  lines.push(
-    "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
-  );
+  // Só lembra da tool se ela estiver ligada no CRM — desligar a tool e
+  // continuar pedindo que o agente a chame gerava alucinação de matrícula.
+  if (args.hasEnrollmentLookup) {
+    lines.push("");
+    lines.push(
+      "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+    );
+  }
 
   if (args.override?.trim()) {
     lines.push("");

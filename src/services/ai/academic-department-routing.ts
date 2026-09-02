@@ -7,9 +7,37 @@ import { executeDistribution } from "@/services/distribution";
 import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  matchesAnyKeyword,
+  type InboxPolicy,
+} from "@/lib/ai-agents/steering";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 
 export type AcademicDeptKey = keyof typeof ACADEMIC_DEPARTMENT_ALIASES;
+
+/**
+ * Aliases efetivos: o que o consultor cadastrou em `inboxPolicy` tem
+ * prioridade; chave sem alias configurado cai no default do código.
+ */
+export function effectiveDepartmentAliases(
+  policy?: InboxPolicy | null,
+): Record<AcademicDeptKey, string[]> {
+  const configured = policy?.departmentAliases;
+  return {
+    acolhimento:
+      configured?.acolhimento?.length
+        ? configured.acolhimento
+        : ACADEMIC_DEPARTMENT_ALIASES.acolhimento,
+    retencao:
+      configured?.retencao?.length
+        ? configured.retencao
+        : ACADEMIC_DEPARTMENT_ALIASES.retencao,
+    atendimento:
+      configured?.atendimento?.length
+        ? configured.atendimento
+        : ACADEMIC_DEPARTMENT_ALIASES.atendimento,
+  };
+}
 
 function normalize(s: string): string {
   return s
@@ -142,6 +170,7 @@ export async function shouldBlockAcolhimentoFromMatricula(
 export async function enforceAtendimentoIfAcolhimentoBlocked(args: {
   contactId: string | null | undefined;
   dept: { id: string; name: string } | null;
+  policy?: InboxPolicy | null;
 }): Promise<{ id: string; name: string } | null> {
   if (!args.dept) return null;
   if (classifyAcademicDepartmentKey(args.dept.name) !== "acolhimento") {
@@ -149,7 +178,7 @@ export async function enforceAtendimentoIfAcolhimentoBlocked(args: {
   }
   const gate = await shouldBlockAcolhimentoFromMatricula(args.contactId);
   if (!gate.block) return args.dept;
-  const atendimento = await resolveDepartmentByKey("atendimento");
+  const atendimento = await resolveDepartmentByKey("atendimento", args.policy);
   return atendimento ?? args.dept;
 }
 
@@ -157,8 +186,14 @@ export function inferDepartmentFromContext(args: {
   userMessage?: string | null;
   pipelineName?: string | null;
   stageName?: string | null;
+  /// Termos extras cadastrados pelo consultor que também caracterizam
+  /// retenção (somados aos regexes abaixo, nunca no lugar deles).
+  policy?: InboxPolicy | null;
 }): AcademicDeptKey {
   const msg = normalize(args.userMessage ?? "");
+  if (matchesAnyKeyword(args.userMessage, args.policy?.retentionKeywords ?? [])) {
+    return "retencao";
+  }
   if (
     /cancel|tranc|desist/.test(msg) ||
     /transferenc\w*\s+(de\s+)?(curso|polo)/.test(msg) ||
@@ -198,6 +233,7 @@ export function inferDepartmentFromContext(args: {
 
 export async function resolveDepartmentByName(
   name: string,
+  policy?: InboxPolicy | null,
 ): Promise<{ id: string; name: string } | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
@@ -245,7 +281,7 @@ export async function resolveDepartmentByName(
   if (exact) return { id: exact.id, name: exact.name };
 
   if (key) {
-    const patterns = ACADEMIC_DEPARTMENT_ALIASES[key];
+    const patterns = effectiveDepartmentAliases(policy)[key];
     const hit = ranked.find((d) => {
       const dn = normalize(d.name);
       return patterns.some((p) => dn.includes(normalize(p)));
@@ -260,13 +296,17 @@ export async function resolveDepartmentByName(
 
 export async function resolveDepartmentByKey(
   key: AcademicDeptKey,
+  policy?: InboxPolicy | null,
 ): Promise<{ id: string; name: string } | null> {
   const labels: Record<AcademicDeptKey, string> = {
     acolhimento: "Acolhimento",
     retencao: "Retenção",
     atendimento: "Atendimento",
   };
-  return resolveDepartmentByName(labels[key]);
+  // Com alias configurado, ele é o rótulo de busca (o nome no banco pode
+  // não conter a palavra canônica, ex.: "SAC EAD" para atendimento).
+  const configured = policy?.departmentAliases?.[key]?.[0];
+  return resolveDepartmentByName(configured || labels[key], policy);
 }
 
 /**
@@ -484,9 +524,15 @@ export async function restoreDealToAcademicOrigin(args: {
  * Dúvida comercial sobre valor/grade/info de curso (em geral outro curso
  * que não o da matrícula) — NUNCA site institucional; sempre humano.
  */
-export function isCourseShoppingInquiry(userMessage: string): boolean {
+export function isCourseShoppingInquiry(
+  userMessage: string,
+  policy?: InboxPolicy | null,
+): boolean {
   const msg = normalize(userMessage);
   if (!msg) return false;
+  if (matchesAnyKeyword(userMessage, policy?.courseShoppingKeywords ?? [])) {
+    return true;
+  }
   if (
     /(valor|preco|mensalidade|investimento|quanto\s+custa).{0,50}(curso|graduacao|pos[\s-]?graduacao|mba)/.test(
       msg,
@@ -528,12 +574,13 @@ export function isCourseShoppingInquiry(userMessage: string): boolean {
  */
 export function isImmediateAcademicHandoffJustified(
   userMessage?: string | null,
+  policy?: InboxPolicy | null,
 ): boolean {
   const msg = (userMessage ?? "").trim();
   if (!msg) return false;
   if (userWantsHumanDistribution(msg)) return true;
-  if (isCourseShoppingInquiry(msg)) return true;
-  if (inferDepartmentFromContext({ userMessage: msg }) === "retencao") {
+  if (isCourseShoppingInquiry(msg, policy)) return true;
+  if (inferDepartmentFromContext({ userMessage: msg, policy }) === "retencao") {
     return true;
   }
   return false;
@@ -568,6 +615,8 @@ export async function executeAcademicDepartmentHandoff(args: {
   /** Se informado, tem prioridade sobre a inferência. */
   departmentName?: string | null;
   reason?: string;
+  /** Aliases/keywords que o consultor cadastrou na tela do agente. */
+  policy?: InboxPolicy | null;
 }): Promise<{
   departmentId: string | null;
   departmentName: string | null;
@@ -647,11 +696,11 @@ export async function executeAcademicDepartmentHandoff(args: {
     messageImpliesRematricula(recentInboundBlob) ||
     messageImpliesOperationalAtendimento(recentInboundBlob)
   ) {
-    dept = await resolveDepartmentByKey("atendimento");
+    dept = await resolveDepartmentByKey("atendimento", args.policy);
   }
 
   if (!dept && args.departmentName?.trim()) {
-    dept = await resolveDepartmentByName(args.departmentName);
+    dept = await resolveDepartmentByName(args.departmentName, args.policy);
   }
 
   // Antes de re-inferir pelo texto do aluno, respeita o departamento que
@@ -674,8 +723,9 @@ export async function executeAcademicDepartmentHandoff(args: {
       userMessage,
       pipelineName,
       stageName,
+      policy: args.policy,
     });
-    dept = await resolveDepartmentByKey(key);
+    dept = await resolveDepartmentByKey(key, args.policy);
   }
 
   // Garante contactId cedo: gate de Acolhimento + DistributionPending.
@@ -692,6 +742,7 @@ export async function executeAcademicDepartmentHandoff(args: {
   dept = await enforceAtendimentoIfAcolhimentoBlocked({
     contactId,
     dept,
+    policy: args.policy,
   });
 
   if (dept) {

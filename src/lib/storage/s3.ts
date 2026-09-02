@@ -152,7 +152,13 @@ export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
     countError("save");
     throw err;
   }
-  const confirmed = await probeStoredFile(opts.orgId, opts.bucket, opts.fileName);
+  // Head 404 no hunt é miss; após write o Spaces ainda pode omitir Head
+  // e servir só o Get — confirma com Get abortando o body.
+  let confirmed = await probeStoredFile(opts.orgId, opts.bucket, opts.fileName);
+  if (!confirmed) {
+    const { client, bucket: bucketName } = getS3();
+    confirmed = (await confirmGetObjectExists(client, bucketName, key)) != null;
+  }
   if (!confirmed) {
     log.error({ key }, "storage-s3: upload.done sem objeto confirmado");
     countError("save_unconfirmed");
@@ -166,14 +172,30 @@ export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
   };
 }
 
-/** Head (ou Get range) — existência sem baixar o body. */
+/** Head — existência sem baixar o body. 404 = miss (sem Range/Get). */
 export async function probeStoredFile(
   orgId: string,
   bucket: StorageBucket,
   fileName: string,
 ): Promise<boolean> {
-  const st = await statStoredFile(orgId, bucket, fileName);
-  return st != null;
+  let key: string;
+  try {
+    key = objectKey(orgId, bucket, fileName);
+  } catch {
+    return false;
+  }
+  const { client, bucket: bucketName } = getS3();
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
+    return true;
+  } catch (err) {
+    if (isNotFound(err)) {
+      log.debug({ key }, "storage-s3: HeadObject miss");
+      return false;
+    }
+    log.warn({ err, key }, "storage-s3: HeadObject falhou, tentando GetObject range");
+    return (await statViaRangeOrGet(client, bucketName, key)) != null;
+  }
 }
 
 function fileStem(fileName: string): string {
@@ -189,6 +211,7 @@ export type ListedOrgObject = {
 /**
  * Lista keys da org cujo filename começa com o stem (`auto_ts_rand`).
  * Só prefixo `<orgId>/<bucket>/` — sem escape de tenant.
+ * Não usar no locate/hunt: ListObjects em attachments/inbound é caro.
  */
 export async function findOrgObjectByStem(
   orgId: string,
@@ -326,7 +349,7 @@ async function confirmGetObjectExists(
   bucketName: string,
   key: string,
 ): Promise<StoredFileStat | null> {
-  // Duas tentativas: mesmo flake JPEG (GetObject vazio / 404 transitório).
+  // Retry só em falha não-404 (timeout / body vazio). 404 = miss.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const out = await client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
@@ -338,10 +361,7 @@ async function confirmGetObjectExists(
       abortS3Body(out.Body);
       return { size: size > 0 ? size : 1 };
     } catch (err) {
-      if (isNotFound(err)) {
-        if (attempt === 0) continue;
-        return null;
-      }
+      if (isNotFound(err)) return null;
       if (attempt === 0) {
         log.warn({ err, key }, "storage-s3: GetObject existência falhou, tentando de novo");
         continue;
@@ -355,11 +375,42 @@ async function confirmGetObjectExists(
 }
 
 /**
- * Tamanho do objeto sem baixar o corpo. HeadObject primeiro; se o
- * compat (Spaces) omitir ContentLength, negar HEAD, 404 em HEAD de
- * objeto que o GET serve, ou falhar, confirma com GetObject Range —
- * o mesmo I/O que o GET /api/storage usa quando o stat falha e o
- * read passa. Não tratar Head 404 como miss definitivo.
+ * Range/Get só depois de Head não-404 (timeout, 403) ou Head 200 sem
+ * ContentLength. Head/Range 404 no hunt não chega aqui.
+ */
+async function statViaRangeOrGet(
+  client: S3Client,
+  bucketName: string,
+  key: string,
+): Promise<StoredFileStat | null> {
+  try {
+    const ranged = await client.send(
+      new GetObjectCommand({
+        Bucket: bucketName,
+        Key: key,
+        Range: "bytes=0-0",
+      }),
+    );
+    abortS3Body(ranged.Body);
+    const size =
+      sizeFromContentRange(ranged.ContentRange) ??
+      contentLengthToSize(ranged.ContentLength) ??
+      0;
+    return { size };
+  } catch (rangeErr) {
+    if (isNotFound(rangeErr)) {
+      log.debug({ key }, "storage-s3: GetObject range miss");
+      return confirmGetObjectExists(client, bucketName, key);
+    }
+    log.warn({ err: rangeErr, key }, "storage-s3: GetObject range falhou, tentando GetObject sem Range");
+    return confirmGetObjectExists(client, bucketName, key);
+  }
+}
+
+/**
+ * Tamanho sem baixar o corpo. Head 404/NotFound/NoSuchKey = miss.
+ * Range/Get só se Head falhar por motivo não-404 ou omitir ContentLength
+ * (quirk do Spaces no read canônico / stat com size).
  */
 export async function statStoredFile(
   orgId: string,
@@ -376,30 +427,15 @@ export async function statStoredFile(
   try {
     const out = await client.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
     const size = contentLengthToSize(out.ContentLength);
-    // Head 200 sem ContentLength ainda significa "existe" — GET /api/storage
-    // seguiria para GetObject. Não tratar como miss.
-    return { size: size ?? 0 };
+    if (size != null) return { size };
+    return await statViaRangeOrGet(client, bucketName, key);
   } catch (err) {
-    log.warn({ err, key }, "storage-s3: HeadObject falhou, tentando GetObject range");
-    try {
-      const ranged = await client.send(
-        new GetObjectCommand({
-          Bucket: bucketName,
-          Key: key,
-          Range: "bytes=0-0",
-        }),
-      );
-      const size =
-        sizeFromContentRange(ranged.ContentRange) ??
-        contentLengthToSize(ranged.ContentLength) ??
-        0;
-      return { size };
-    } catch (rangeErr) {
-      // Head/Range 404 em objeto que o GET sem Range serve (JPEG e mp4).
-      // Não tratar Range 404 como miss — confirma com GetObject e aborta o body.
-      log.warn({ err: rangeErr, key }, "storage-s3: GetObject range falhou, tentando GetObject sem Range");
-      return confirmGetObjectExists(client, bucketName, key);
+    if (isNotFound(err)) {
+      log.debug({ key }, "storage-s3: HeadObject miss");
+      return null;
     }
+    log.warn({ err, key }, "storage-s3: HeadObject falhou, tentando GetObject range");
+    return await statViaRangeOrGet(client, bucketName, key);
   }
 }
 
