@@ -63,11 +63,14 @@ import {
 } from "@/services/ai/academic-department-routing";
 import {
   closeAiOnlyConversation,
+  shouldCloseAiAfterStudentMessage,
   userWantsAiConversationClose,
 } from "@/services/ai/academic-closure";
 import {
+  buildNaturalAttendanceCloseReply,
   buildSoftCloseAfterNudgeReply,
   isIdleNudgeContent,
+  rewriteMismatchedDaypartWish,
   userWantsSoftAiClose,
 } from "@/services/ai/idle-followup";
 import {
@@ -75,6 +78,7 @@ import {
   shouldHandoffOnLowConfidence,
 } from "@/services/ai/confidence";
 import {
+  buildAssignedConsultantNotice,
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
   humanAttendanceStartHint,
@@ -139,6 +143,10 @@ function buildRetentionHandoffMessage(now = new Date()): string {
 /** Mensagem genérica de fila — respeita expediente (não promete "em breve" à noite). */
 function buildGenericQueueHandoffMessage(now = new Date()): string {
   return buildHumanUnavailableOfferMessage(now);
+}
+
+function studentNoticeAfterHandoff(gotHuman: boolean, queueText: string): string {
+  return gotHuman ? buildAssignedConsultantNotice() : queueText;
 }
 
 /** Após distribuição bem-sucedida a saudação fica com a automação (como responsável). */
@@ -759,6 +767,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "atendimento humano retoma",
         "já pedi para a equipe",
         "já registrei seu pedido",
+        "já te passei para um",
+        "seu pedido já está com alguém",
         "estou aqui contigo",
         "setor de",
         "Retenção",
@@ -781,7 +791,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               /obrigad[oa]|valeu|beleza|aguardo/.test(norm));
           const wantsHuman =
             userWantsHumanDistribution(args.userMessage) || isAck;
-          if (wantsHuman) {
+          const wrappingUp = shouldCloseAiAfterStudentMessage({
+            userMessage: args.userMessage,
+          }).close;
+          if (wantsHuman && !wrappingUp) {
             const curConv = await prisma.conversation.findUnique({
               where: { id: args.conversationId },
               select: { assignedToId: true },
@@ -812,17 +825,16 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             const gotHumanAck = await conversationAssignedToHuman(
               args.conversationId,
             );
-            if (
-              !gotHumanAck &&
-              !lastBotOut?.content?.includes("expediente inicia") &&
-              !lastBotOut?.content?.includes("já está na *fila*")
-            ) {
+            if (!messageLooksLikeHumanQueueNotice(lastBotOut?.content)) {
               await sendAgentMessage({
                 conversationId: args.conversationId,
                 contactId: args.contactId,
                 agentUserId: assignee.id,
                 autonomyMode: cfg.autonomyMode,
-                text: buildHumanQueueWithHoursMessage(),
+                text: studentNoticeAfterHandoff(
+                  gotHumanAck,
+                  buildHumanQueueWithHoursMessage(),
+                ),
                 channel: args.channel,
                 kind: "text",
                 humanBehavior,
@@ -893,7 +905,24 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       select: { content: true },
     });
     const afterIdleNudge = isIdleNudgeContent(lastAiOut?.content);
+    const recentInbound = await prisma.message.findMany({
+      where: {
+        conversationId: args.conversationId,
+        direction: "in",
+        isPrivate: false,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 4,
+      select: { content: true },
+    });
+    const closeDecision = shouldCloseAiAfterStudentMessage({
+      userMessage: args.userMessage,
+      recentInbound: recentInbound
+        .map((m) => m.content ?? "")
+        .filter((c) => c && c !== args.userMessage),
+    });
     const wantsClose =
+      closeDecision.close ||
       userWantsAiConversationClose(args.userMessage) ||
       (afterIdleNudge && userWantsSoftAiClose(args.userMessage));
     if (wantsClose) {
@@ -905,14 +934,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           assignedTo: { select: { type: true } },
         },
       });
+      const wrapUpClose =
+        closeDecision.reason === "thanks_wrapup" ||
+        closeDecision.reason === "thanks_after_defer";
       const canAiClose =
         closeGate?.status !== "RESOLVED" &&
-        closeGate?.hasHumanReply === false &&
-        closeGate?.assignedTo?.type === "AI";
+        closeGate?.assignedTo?.type === "AI" &&
+        (closeGate.hasHumanReply === false || wrapUpClose);
       if (canAiClose) {
         const closeText = afterIdleNudge
           ? buildSoftCloseAfterNudgeReply()
-          : "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂";
+          : closeDecision.reason === "thanks_wrapup" ||
+              closeDecision.reason === "thanks_after_defer"
+            ? buildNaturalAttendanceCloseReply()
+            : "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂";
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -927,15 +962,21 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const closed = await closeAiOnlyConversation({
           conversationId: args.conversationId,
           contactId: args.contactId,
+          allowAfterHumanReply: wrapUpClose,
           reason: afterIdleNudge
             ? "Aluno encerrou após check-in de 30 min"
-            : "Aluno pediu encerramento (detector IA)",
+            : closeDecision.reason === "thanks_wrapup" ||
+                closeDecision.reason === "thanks_after_defer"
+              ? "Aluno agradeceu e encerrou o atendimento"
+              : "Aluno pediu encerramento (detector IA)",
         });
         if (closed.closed) {
           cancelAiReplyDebounce(args.conversationId);
           logAi("closed", {
             conversationId: args.conversationId,
-            reason: afterIdleNudge ? "idle_nudge_soft_close" : "ai_only_close",
+            reason: afterIdleNudge
+              ? "idle_nudge_soft_close"
+              : closeDecision.reason || "ai_only_close",
           });
           return;
         }
@@ -964,8 +1005,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               : "Atendimento",
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
       });
-      // Humano atribuído → saudação da automação; agente só fala se ficou em fila.
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
+      {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
         const keywordText =
           deptKey === "retencao"
             ? buildRetentionHandoffMessage()
@@ -975,7 +1016,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           contactId: args.contactId,
           agentUserId: assignee.id,
           autonomyMode: cfg.autonomyMode,
-          text: keywordText,
+          text: studentNoticeAfterHandoff(gotHuman, keywordText),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1004,13 +1045,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         reason:
           "Dúvida sobre valor/grade/info de curso — handoff obrigatório (sem site)",
       });
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
+      {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
           agentUserId: assignee.id,
           autonomyMode: cfg.autonomyMode,
-          text: buildGenericQueueHandoffMessage(),
+          text: studentNoticeAfterHandoff(
+            gotHuman,
+            buildGenericQueueHandoffMessage(),
+          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1040,13 +1085,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         departmentName: "Retenção",
         reason: "Intenção de trancamento/cancelamento (regra determinística)",
       });
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
+      {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
           agentUserId: assignee.id,
           autonomyMode: cfg.autonomyMode,
-          text: buildRetentionHandoffMessage(),
+          text: studentNoticeAfterHandoff(
+            gotHuman,
+            buildRetentionHandoffMessage(),
+          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1177,9 +1226,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         reason: `Falha no run da IA: ${result.error ?? "unknown"}`,
       }).catch(() => null);
-      if (!(await conversationAssignedToHuman(args.conversationId))) {
-        // Durante uma queda o aluno escreve várias vezes: só avisa da fila
-        // uma vez, senão repete o mesmo texto em cada mensagem.
+      {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
         const lastBotOut = await prisma.message.findFirst({
           where: {
             conversationId: args.conversationId,
@@ -1197,7 +1245,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             contactId: args.contactId,
             agentUserId: assignee.id,
             autonomyMode: cfg.autonomyMode,
-            text: buildGenericQueueHandoffMessage(),
+            text: studentNoticeAfterHandoff(
+              gotHuman,
+              buildGenericQueueHandoffMessage(),
+            ),
             channel: args.channel,
             kind: "text",
             humanBehavior,
@@ -1330,9 +1381,19 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
       let outbound: string | null = null;
       if (gotHuman) {
-        // Consultor + automação de saudação falam com o aluno; agente não envia
-        // "já pedi a equipe..." (chegaria depois e confundiria).
-        outbound = null;
+        // lead_distributed muitas vezes não chega (janela 24h fechada após
+        // HSM de campanha). Sem aviso o aluno fica esperando sem saber
+        // que já foi para um consultor.
+        if (alreadyNoticed) {
+          outbound = null;
+        } else if (
+          replyText.trim() &&
+          messageLooksLikeHumanQueueNotice(handoffText)
+        ) {
+          outbound = handoffText;
+        } else {
+          outbound = buildAssignedConsultantNotice();
+        }
       } else if (alreadyNoticed) {
         // Já avisou fila — não repete; só envia se o LLM trouxe info nova
         // e não for near-duplicate / promessa falsa de "em breve".
@@ -1383,7 +1444,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     }
 
     const parsed = parseAgentConfidence(result.text.trim());
-    let text = parsed.text;
+    let text = rewriteMismatchedDaypartWish(parsed.text);
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
       const recentSame = await prisma.message.findFirst({

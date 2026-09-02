@@ -32,6 +32,7 @@ import { createActivity } from "@/services/activities";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 import { createConversationEvent } from "@/services/conversation-events";
+import { rewriteMismatchedDaypartWish } from "@/services/ai/idle-followup";
 
 /**
  * Busca o wamid (externalId) da mensagem INBOUND mais recente da
@@ -101,7 +102,7 @@ export async function sendAgentMessage(args: {
    */
   bypassAssigneeCheck?: boolean;
 }): Promise<SendAgentMessageResult> {
-  const text = args.text.trim();
+  const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
 
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo

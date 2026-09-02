@@ -1035,7 +1035,7 @@ function consultarMatriculaTool(ctx: RunContext) {
 function closeConversationTool(ctx: RunContext) {
   return tool({
     description:
-      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir explicitamente para encerrar/finalizar o atendimento com você. NÃO use se já houver consultor humano na conversa.",
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir para encerrar/finalizar, agradecer de forma conclusiva ('muito grata', 'obrigada por toda ajuda') depois de já ter sido atendido, ou disser que volta depois/à noite e em seguida agradecer. NÃO use se já houver consultor humano na conversa. NÃO use só porque o aluno disse que vai estudar à noite — nesse caso confirme e continue; encerre no agradecimento seguinte.",
     inputSchema: z.object({
       reason: z
         .string()

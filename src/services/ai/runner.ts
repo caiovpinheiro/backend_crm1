@@ -37,7 +37,14 @@ import {
   ACADEMIC_CONFIDENCE_RULES,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
   formatCanonicalPortalAccessHint,
+  formatExamAccessHint,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  formatCampaignDispatchBlock,
+  hydrateOutboundTemplateContent,
+  loadLastCampaignDispatchContext,
+} from "@/services/ai/campaign-context";
+import { formatLocalClockHint } from "@/services/ai/idle-followup";
 import {
   formatMessageModelsBlock,
   retrieveRelevantMessageModels,
@@ -203,10 +210,30 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const portalAccessHint = isAcademicAttendance
       ? formatCanonicalPortalAccessHint(args.userMessage, recentContextForHint)
       : "";
+    const campaignCtx = await loadLastCampaignDispatchContext(
+      args.conversationId ?? null,
+      args.contactId ?? null,
+    ).catch((err) => {
+      console.warn(`[ai] contexto de campanha falhou: ${err}`);
+      return null;
+    });
+    const campaignDispatchBlock = formatCampaignDispatchBlock(campaignCtx);
+    const examAccessHint = isAcademicAttendance
+      ? formatExamAccessHint(
+          args.userMessage,
+          [recentContextForHint, campaignCtx?.body ?? ""]
+            .filter(Boolean)
+            .join("\n"),
+        )
+      : "";
+    const clockHint = isAcademicAttendance ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
       messageModelsBlock,
       portalAccessHint,
+      examAccessHint,
+      campaignDispatchBlock,
+      clockHint,
     ]
       .filter(Boolean)
       .join("\n");
@@ -374,20 +401,38 @@ async function loadHistoryFromConversation(
   conversationId: string | null,
 ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
   if (!conversationId) return [];
-  const msgs = await prisma.message.findMany({
-    where: { conversationId },
-    orderBy: { createdAt: "desc" },
-    take: MAX_HISTORY,
-    select: { content: true, direction: true },
-  });
-  return msgs
-    .reverse()
-    .filter((m) => !!m.content)
-    .map((m) => ({
-      role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
-      content: m.content ?? "",
-    }));
-}
+    const msgs = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "desc" },
+      take: MAX_HISTORY,
+      select: {
+        content: true,
+        direction: true,
+        messageType: true,
+        templateConfigId: true,
+        senderName: true,
+      },
+    });
+    const chronological = msgs.reverse().filter((m) => !!m.content);
+    return Promise.all(
+      chronological.map(async (m) => {
+        const raw = m.content ?? "";
+        const content =
+          m.direction === "out"
+            ? await hydrateOutboundTemplateContent({
+                content: raw,
+                messageType: m.messageType,
+                templateConfigId: m.templateConfigId,
+                senderName: m.senderName,
+              })
+            : raw;
+        return {
+          role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
+          content,
+        };
+      }),
+    );
+  }
 
 type RenderArgs = {
   template: string;
