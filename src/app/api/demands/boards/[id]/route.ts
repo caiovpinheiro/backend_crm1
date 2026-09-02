@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { denyUnless, jsonError } from "../../_guard";
-import { addStage, getBoard } from "@/services/demands";
+import { addStage, deleteBoard, getBoard } from "@/services/demands";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -34,5 +34,16 @@ export async function POST(request: Request, ctx: Ctx) {
     const stage = await addStage(id, parsed.data);
     if (!stage) return jsonError("Board não encontrado.", 404);
     return NextResponse.json(stage, { status: 201 });
+  });
+}
+
+export async function DELETE(_request: Request, ctx: Ctx) {
+  return withOrgContext(async (session) => {
+    const denied = await denyUnless(session, "demand:manage_board");
+    if (denied) return denied;
+    const { id } = await ctx.params;
+    const ok = await deleteBoard(id);
+    if (!ok) return jsonError("Board não encontrado.", 404);
+    return NextResponse.json({ ok: true });
   });
 }

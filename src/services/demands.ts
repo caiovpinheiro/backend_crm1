@@ -372,6 +372,22 @@ export async function addStage(
   });
 }
 
+/** Apaga items → stages → board. stageId é onDelete: Restrict. */
+export async function deleteBoard(boardId: string): Promise<boolean> {
+  const board = await prisma.demandBoard.findFirst({
+    where: { id: boardId },
+    select: { id: true },
+  });
+  if (!board) return false;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.demandItem.deleteMany({ where: { boardId } });
+    await tx.demandStage.deleteMany({ where: { boardId } });
+    await tx.demandBoard.delete({ where: { id: boardId } });
+  });
+  return true;
+}
+
 async function nextItemNumber(): Promise<number> {
   const last = await prisma.demandItem.aggregate({ _max: { number: true } });
   return (last._max.number ?? 0) + 1;
@@ -549,6 +565,16 @@ export async function updateItem(
     await writeEvent({ itemId, actorId, type: "UPDATED", payload: patch });
   }
   return item;
+}
+
+export async function deleteItem(itemId: string): Promise<boolean> {
+  const item = await prisma.demandItem.findFirst({
+    where: { id: itemId },
+    select: { id: true },
+  });
+  if (!item) return false;
+  await prisma.demandItem.delete({ where: { id: itemId } });
+  return true;
 }
 
 export async function moveItem(
