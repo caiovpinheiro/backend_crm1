@@ -7,10 +7,12 @@
  *
  * A fila segue o **status da conversa**, não o estágio do funil.
  * GANHO/PERDIDO (ou qualquer etapa) NÃO tira o ticket de Entrada/
- * Aguardando. Só encerrar (`RESOLVED` / `closedAt`) faz isso.
+ * Aguardando. Encerrar (`RESOLVED` / `closedAt`) ou Acompanhar
+ * (`followUpAt`) tira das filas quentes.
  *
  * Defesa além de `status = OPEN`:
  *  - `closedAt` preenchido (status ficou stale após encerrar de verdade)
+ *  - `followUpAt` (Resolvendo / Acompanhar — ticket continua OPEN)
  *
  * Encerrar também respeita `conversation.keepAgentOnEnd` /
  * `conversation.keepDepartmentOnEnd` (desvincula só quando a org não
@@ -27,6 +29,7 @@ export function activeInboxQueueGuardWhere(): Prisma.ConversationWhereInput {
   return {
     status: "OPEN",
     closedAt: null,
+    followUpAt: null,
   };
 }
 
@@ -62,9 +65,10 @@ export function encerradasTabWhere(): Prisma.ConversationWhereInput {
   };
 }
 
-/** Aba Resolvido: encerrada em acompanhamento (tarefa / follow-up). */
+/**
+ * Aba Resolvendo: em acompanhamento (`followUpAt`). O ticket NÃO encerra
+ * — fica OPEN. Tickets antigos (RESOLVED + followUpAt) continuam aqui.
+ */
 export function resolvidosTabWhere(): Prisma.ConversationWhereInput {
-  return {
-    AND: [closedConversationWhere(), { followUpAt: { not: null } }],
-  };
+  return { followUpAt: { not: null } };
 }

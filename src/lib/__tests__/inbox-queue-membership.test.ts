@@ -8,9 +8,9 @@ import {
 } from "../inbox-queue-membership";
 
 describe("inbox-queue-membership", () => {
-  it("activeInboxQueueGuardWhere é OPEN sem closedAt — sem filtro de deal", () => {
+  it("activeInboxQueueGuardWhere é OPEN sem closedAt nem followUp — sem filtro de deal", () => {
     const where = activeInboxQueueGuardWhere();
-    expect(where).toEqual({ status: "OPEN", closedAt: null });
+    expect(where).toEqual({ status: "OPEN", closedAt: null, followUpAt: null });
     expect(where).not.toHaveProperty("NOT");
     expect(where).not.toHaveProperty("contact");
   });
@@ -43,8 +43,9 @@ describe("inbox-queue-membership", () => {
     expect(serialized).not.toContain("LOST");
   });
 
-  it("resolvidosTabWhere exige followUpAt", () => {
+  it("resolvidosTabWhere é só followUpAt — não exige encerrar", () => {
     const where = resolvidosTabWhere();
-    expect(JSON.stringify(where)).toContain("followUpAt");
+    expect(where).toEqual({ followUpAt: { not: null } });
+    expect(JSON.stringify(where)).not.toContain("RESOLVED");
   });
 });

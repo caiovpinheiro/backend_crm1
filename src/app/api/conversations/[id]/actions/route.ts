@@ -675,7 +675,12 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       const rawStatus = typeof b.status === "string" ? b.status : undefined;
-      const dbStatus = actionToDbStatus(action, rawStatus);
+      const wantsFollowUp = action === "resolve" && b.followUp === true;
+      // Acompanhar: permanece OPEN. Encerrar de verdade é resolve sem followUp.
+      let dbStatus = actionToDbStatus(action, rawStatus);
+      if (wantsFollowUp && dbStatus === "RESOLVED") {
+        dbStatus = "OPEN";
+      }
 
       // Encerrar sem automações: só ADMIN (ou super-admin da plataforma).
       // Outros roles: o flag é ignorado — a conversa encerra e os triggers
@@ -702,10 +707,10 @@ export async function POST(request: Request, context: RouteContext) {
         );
       }
 
-      // Tabulacao ao encerrar. Somente aplicavel quando esta indo pra
-      // RESOLVED e a conversa tem departamento vinculado. Se o
-      // departamento exigir e o body nao trouxer id valido (folha na
-      // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
+      // Tabulacao ao encerrar OU acompanhar. Se o departamento exigir e o
+      // body nao trouxer id valido (folha na arvore do dept) -> 400
+      // (defesa; UI ja bloqueia o botao). Acompanhar grava a folha sem
+      // encerrar e sem disparar automação.
       let tabulationId: string | null = null;
       let tabulationAncestors: string[] = [];
       let tabulationName: string | null = null;
@@ -714,7 +719,7 @@ export async function POST(request: Request, context: RouteContext) {
       let resolvedDepartmentId: string | null = null;
       /** Tabulação gravada ANTES deste encerramento (detecta re-tabulação). */
       let previousTabulationId: string | null = null;
-      if (dbStatus === "RESOLVED") {
+      if (dbStatus === "RESOLVED" || wantsFollowUp) {
         const dept = await prisma.conversation.findUnique({
           where: { id },
           select: {
@@ -803,7 +808,7 @@ export async function POST(request: Request, context: RouteContext) {
         clearDepartment = !keepDepartment;
       }
 
-      const followUp = dbStatus === "RESOLVED" && b.followUp === true;
+      const followUp = wantsFollowUp;
 
       const updated = await updateConversationStatusInDb(id, dbStatus, {
         tabulationId,
@@ -913,6 +918,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
+      // Acompanhar (followUp) permanece OPEN e NÃO entra aqui.
       // Antes só rodava com tabulationId — conversas sem departamento / sem
       // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
       // automações configuradas como "Qualquer tabulação". Automações que
@@ -955,6 +961,8 @@ export async function POST(request: Request, context: RouteContext) {
           status: updated.status,
           externalId: updated.externalId,
           tabulationId: updated.tabulationId,
+          followUpAt: updated.followUpAt,
+          closedAt: updated.closedAt,
         },
       });
     } catch (e: unknown) {

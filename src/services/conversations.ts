@@ -1996,7 +1996,7 @@ async function computeTabCounts(
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
     }
-    conditions.push({ status: "OPEN" });
+    conditions.push(activeInboxQueueGuardWhere());
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
@@ -2486,37 +2486,43 @@ export async function updateConversationStatusInDb(
     clearAssignedTo?: boolean;
     /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
     clearDepartment?: boolean;
-    /** Acompanhar: aba Resolvido + mantém o agente. */
+    /**
+     * Acompanhar: aba Resolvendo. Ticket permanece OPEN, sem closedAt,
+     * sem disparar encerramento. Pode gravar tabulationId sem fechar.
+     */
     followUp?: boolean;
   },
 ) {
+  const followUp = extra?.followUp === true;
+
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
-  // Outros valores (PENDING/SNOOZED) nao mexem em closedAt.
+  // Acompanhar NÃO preenche closedAt. Outros (PENDING/SNOOZED) não mexem.
   const closedAtPatch: { closedAt: Date | null } | Record<string, never> =
-    status === "RESOLVED"
+    status === "RESOLVED" && !followUp
       ? { closedAt: new Date() }
       : status === "OPEN"
         ? { closedAt: null }
         : {};
 
-  // Reabrir (OPEN) limpa a tabulacao — coerente com "novo ciclo". O
-  // caller pode passar `tabulationId` explicito no encerramento, ou omitir.
+  // Reabrir (OPEN sem follow-up) limpa a tabulacao — "novo ciclo".
+  // Acompanhar pode persistir a folha sem encerrar.
   const tabulationPatch: { tabulationId: string | null } | Record<string, never> =
-    status === "OPEN"
-      ? { tabulationId: null }
-      : extra && "tabulationId" in extra
-        ? { tabulationId: extra.tabulationId ?? null }
-        : {};
+    followUp && extra && "tabulationId" in extra
+      ? { tabulationId: extra.tabulationId ?? null }
+      : status === "OPEN"
+        ? { tabulationId: null }
+        : extra && "tabulationId" in extra
+          ? { tabulationId: extra.tabulationId ?? null }
+          : {};
 
   // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
   // finalizar". Quando desligadas, o caller passa clearAssignedTo/
   // clearDepartment=true e desvinculamos os campos aqui.
-  const followUp = extra?.followUp === true;
   const followUpPatch: { followUpAt: Date | null } | Record<string, never> =
-    status === "RESOLVED"
-      ? { followUpAt: followUp ? new Date() : null }
-      : status === "OPEN"
+    followUp
+      ? { followUpAt: new Date() }
+      : status === "RESOLVED" || status === "OPEN"
         ? { followUpAt: null }
         : {};
 
@@ -2565,10 +2571,24 @@ export async function updateConversationStatusInDb(
   });
 
   // Badges Redis (TTL 45s) sem invalidação sobreviviam ao F5 — Erro 233
-  // com lista já vazia. Encerrou/reabriu → zera o cache da org.
+  // com lista já vazia. Encerrou/reabriu/acompanhou → zera o cache da org.
   if (status === "RESOLVED" || status === "OPEN") {
     const orgId = getOrgIdOrNull();
     if (orgId) void invalidateInboxTabCounts(orgId);
+  }
+
+  if (followUp) {
+    try {
+      sseBus.publish("conversation_updated", {
+        organizationId: updated.organizationId,
+        conversationId: id,
+        status: updated.status,
+        closedAt: updated.closedAt?.toISOString() ?? null,
+        followUpAt: updated.followUpAt?.toISOString() ?? null,
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Encerrou atendimento → liberou capacidade na fila do responsável.
