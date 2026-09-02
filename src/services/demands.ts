@@ -6,7 +6,8 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrgFromCtx, withOrgMany } from "@/lib/prisma-helpers";
+import { getRequestContext } from "@/lib/request-context";
 import { seedDemandMocksIfEmpty } from "@/services/demands-mock-seed";
 
 const USER_LITE = { select: { id: true, name: true, avatarUrl: true } } as const;
@@ -105,7 +106,84 @@ const ITEM_SELECT = {
   updatedAt: true,
   requester: USER_LITE,
   assignee: USER_LITE,
+  assignees: {
+    orderBy: { createdAt: "asc" as const },
+    select: { user: USER_LITE },
+  },
 } as const;
+
+type ItemRow = {
+  assignees?: Array<{ user: { id: string; name: string; avatarUrl: string | null } }>;
+  assignee?: { id: string; name: string; avatarUrl: string | null } | null;
+};
+
+function shapeItem<T extends ItemRow>(row: T) {
+  const { assignees: links, ...rest } = row;
+  const assignees =
+    links && links.length > 0
+      ? links.map((l) => l.user)
+      : rest.assignee
+        ? [rest.assignee]
+        : [];
+  return { ...rest, assignees };
+}
+
+function collectAssigneeIds(input: {
+  assigneeId?: string | null;
+  assigneeIds?: string[];
+}): string[] | undefined {
+  if (input.assigneeIds === undefined && input.assigneeId === undefined) {
+    return undefined;
+  }
+  if (input.assigneeIds !== undefined) {
+    const ids = input.assigneeIds.filter(Boolean);
+    if (input.assigneeId && !ids.includes(input.assigneeId)) {
+      ids.unshift(input.assigneeId);
+    }
+    return [...new Set(ids)];
+  }
+  return input.assigneeId ? [input.assigneeId] : [];
+}
+
+async function resolveOrgUserIds(ids: string[]): Promise<string[]> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (!unique.length) return [];
+  const orgId = getRequestContext()?.organizationId;
+  const found = await prisma.user.findMany({
+    where: {
+      id: { in: unique },
+      type: "HUMAN",
+      isErased: false,
+      ...(orgId ? { organizationId: orgId } : {}),
+    },
+    select: { id: true },
+  });
+  const ok = new Set(found.map((u) => u.id));
+  return unique.filter((id) => ok.has(id));
+}
+
+async function replaceAssignees(itemId: string, userIds: string[]) {
+  await prisma.demandItemAssignee.deleteMany({ where: { itemId } });
+  if (!userIds.length) return;
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return;
+  await prisma.demandItemAssignee.createMany({
+    data: withOrgMany(
+      userIds.map((userId) => ({ itemId, userId })),
+      orgId,
+    ),
+  });
+}
+
+export async function listAssignableUsers() {
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return [];
+  return prisma.user.findMany({
+    where: { organizationId: orgId, type: "HUMAN", isErased: false },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, email: true, avatarUrl: true },
+  });
+}
 
 function slugify(input: string): string {
   const base = input
@@ -186,14 +264,34 @@ async function ensureDemandTables() {
     `CREATE INDEX IF NOT EXISTS "demand_votes_organizationId_idx" ON "demand_votes"("organizationId")`,
     `CREATE INDEX IF NOT EXISTS "demand_events_itemId_createdAt_idx" ON "demand_events"("itemId", "createdAt")`,
     `CREATE INDEX IF NOT EXISTS "demand_events_organizationId_idx" ON "demand_events"("organizationId")`,
+    `CREATE TABLE IF NOT EXISTS "demand_item_assignees" (
+      "id" TEXT NOT NULL, "organizationId" TEXT NOT NULL, "itemId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "demand_item_assignees_pkey" PRIMARY KEY ("id"))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "demand_item_assignees_itemId_userId_key" ON "demand_item_assignees"("itemId", "userId")`,
+    `CREATE INDEX IF NOT EXISTS "demand_item_assignees_organizationId_idx" ON "demand_item_assignees"("organizationId")`,
+    `CREATE INDEX IF NOT EXISTS "demand_item_assignees_userId_idx" ON "demand_item_assignees"("userId")`,
   ];
   for (const sql of stmts) {
     await prisma.$executeRawUnsafe(sql);
   }
 }
 
+async function ensureDemandAssigneeTable() {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "demand_item_assignees" (
+      "id" TEXT NOT NULL, "organizationId" TEXT NOT NULL, "itemId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "demand_item_assignees_pkey" PRIMARY KEY ("id"))
+  `);
+  await prisma.$executeRawUnsafe(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "demand_item_assignees_itemId_userId_key" ON "demand_item_assignees"("itemId", "userId")`,
+  );
+}
+
 export async function ensureDefaultBoards() {
   await ensureDemandTables();
+  await ensureDemandAssigneeTable();
   const existing = await prisma.demandBoard.count();
   if (existing > 0) return;
 
@@ -320,6 +418,7 @@ export async function getBoard(boardId: string) {
     orderBy: { position: "asc" },
     select: ITEM_SELECT,
   });
+  const users = await listAssignableUsers();
 
   return {
     id: board.id,
@@ -329,6 +428,7 @@ export async function getBoard(boardId: string) {
     color: board.color,
     description: board.description,
     isDefault: board.isDefault,
+    users,
     stages: board.stages.map((s) => ({
       id: s.id,
       name: s.name,
@@ -336,7 +436,7 @@ export async function getBoard(boardId: string) {
       color: s.color,
       position: s.position,
       isTerminal: s.isTerminal,
-      items: items.filter((it) => it.stageId === s.id),
+      items: items.filter((it) => it.stageId === s.id).map(shapeItem),
     })),
   };
 }
@@ -427,6 +527,7 @@ export async function createItem(
     priority?: string;
     stageId?: string;
     assigneeId?: string | null;
+    assigneeIds?: string[];
     tags?: string[];
   },
 ) {
@@ -451,6 +552,8 @@ export async function createItem(
     ? (input.priority as DemandPriority)
     : "NONE";
 
+  const assigneeIds = await resolveOrgUserIds(collectAssigneeIds(input) ?? []);
+
   const item = await prisma.demandItem.create({
     data: withOrgFromCtx({
       boardId: board.id,
@@ -462,18 +565,27 @@ export async function createItem(
       priority,
       position: await nextItemPosition(stage.id),
       requesterId: actorId,
-      assigneeId: input.assigneeId || null,
+      assigneeId: assigneeIds[0] ?? null,
       tags: input.tags?.filter(Boolean) ?? [],
     }),
     select: ITEM_SELECT,
   });
+  await replaceAssignees(item.id, assigneeIds);
   await writeEvent({
     itemId: item.id,
     actorId,
     type: "CREATED",
-    payload: { stageId: stage.id, stageName: stage.name },
+    payload: {
+      stageId: stage.id,
+      stageName: stage.name,
+      assigneeIds,
+    },
   });
-  return { item };
+  const created = await prisma.demandItem.findFirst({
+    where: { id: item.id },
+    select: ITEM_SELECT,
+  });
+  return { item: shapeItem(created ?? item) };
 }
 
 export async function getItem(itemId: string, viewerId: string) {
@@ -509,7 +621,7 @@ export async function getItem(itemId: string, viewerId: string) {
   });
   if (!item) return null;
   const { votes, ...rest } = item;
-  return { ...rest, votedByMe: votes.length > 0 };
+  return { ...shapeItem(rest), votedByMe: votes.length > 0 };
 }
 
 export async function updateItem(
@@ -521,6 +633,7 @@ export async function updateItem(
     kind?: string;
     priority?: string;
     assigneeId?: string | null;
+    assigneeIds?: string[];
     tags?: string[];
     dueAt?: string | null;
   },
@@ -531,6 +644,12 @@ export async function updateItem(
   });
   if (!current) return null;
 
+  const nextAssigneeIds = collectAssigneeIds(patch);
+  const resolvedIds =
+    nextAssigneeIds === undefined
+      ? undefined
+      : await resolveOrgUserIds(nextAssigneeIds);
+
   const data: Record<string, unknown> = {};
   if (typeof patch.title === "string") data.title = patch.title.trim();
   if (typeof patch.description === "string") data.description = patch.description;
@@ -540,31 +659,42 @@ export async function updateItem(
   if (patch.priority && PRIORITIES.includes(patch.priority as DemandPriority)) {
     data.priority = patch.priority;
   }
-  if (patch.assigneeId !== undefined) {
-    data.assigneeId = patch.assigneeId || null;
+  if (resolvedIds !== undefined) {
+    data.assigneeId = resolvedIds[0] ?? null;
   }
   if (patch.tags) data.tags = patch.tags.filter(Boolean);
   if (patch.dueAt !== undefined) {
     data.dueAt = patch.dueAt ? new Date(patch.dueAt) : null;
   }
 
-  const item = await prisma.demandItem.update({
+  await prisma.demandItem.update({
     where: { id: itemId },
     data,
+  });
+  if (resolvedIds !== undefined) {
+    await replaceAssignees(itemId, resolvedIds);
+  }
+
+  const item = await prisma.demandItem.findFirst({
+    where: { id: itemId },
     select: ITEM_SELECT,
   });
+  if (!item) return null;
 
-  if (patch.assigneeId !== undefined && patch.assigneeId !== current.assigneeId) {
+  if (
+    resolvedIds !== undefined &&
+    (resolvedIds[0] ?? null) !== current.assigneeId
+  ) {
     await writeEvent({
       itemId,
       actorId,
       type: "ASSIGNED",
-      payload: { assigneeId: patch.assigneeId },
+      payload: { assigneeIds: resolvedIds, assigneeId: resolvedIds[0] ?? null },
     });
   } else {
     await writeEvent({ itemId, actorId, type: "UPDATED", payload: patch });
   }
-  return item;
+  return shapeItem(item);
 }
 
 export async function deleteItem(itemId: string): Promise<boolean> {
@@ -636,7 +766,7 @@ export async function moveItem(
       payload: { fromStageId: item.stageId, toStageId: stage.id, toStageName: stage.name },
     });
   }
-  return { item: updated };
+  return { item: shapeItem(updated) };
 }
 
 export async function addComment(actorId: string, itemId: string, content: string) {
@@ -686,7 +816,7 @@ export async function toggleVote(userId: string, itemId: string) {
       data: { votesCount: { decrement: 1 } },
       select: ITEM_SELECT,
     });
-    return { item: updated, votedByMe: false };
+    return { item: shapeItem(updated), votedByMe: false };
   }
 
   await prisma.demandVote.create({
@@ -698,5 +828,5 @@ export async function toggleVote(userId: string, itemId: string) {
     select: ITEM_SELECT,
   });
   await writeEvent({ itemId, actorId: userId, type: "VOTED" });
-  return { item: updated, votedByMe: true };
+  return { item: shapeItem(updated), votedByMe: true };
 }

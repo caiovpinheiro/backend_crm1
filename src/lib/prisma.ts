@@ -96,6 +96,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DemandBoard",
   "DemandStage",
   "DemandItem",
+  "DemandItemAssignee",
   "DemandComment",
   "DemandVote",
   "DemandEvent",
