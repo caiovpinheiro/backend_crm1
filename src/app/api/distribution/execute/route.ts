@@ -1,12 +1,10 @@
 /**
  * POST /api/distribution/execute
- * Enfileira a distribuição REAL no `worker-distribution`. Trigger
- * manual. Exige `distribution:execute` (gestores) **ou**
- * `conversation:claim` (consultor redistribuindo do inbox) e o widget
- * `smart_distribution`.
- *
- * Espera o job (8–15s). Timeout → 202 `{ queued, jobId }` — o worker
- * termina e o SSE publica `conversation_updated`.
+ * Distribuição REAL. Trigger MANUAL roda no processo da API (o
+ * worker-distribution prioriza `distribution-drain`; jobs execute MANUAL
+ * ficavam waiting e o consultor via 202/erro). Exige
+ * `distribution:execute` (gestores) **ou** `conversation:claim` e o
+ * widget `smart_distribution`.
  *
  * Body: {
  *   dealId?, contactId?, conversationId?,
