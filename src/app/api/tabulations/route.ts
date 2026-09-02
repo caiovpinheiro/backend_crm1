@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import {
   getTree,
   getTreesForDepartments,
   listDepartmentsForUser,
+  listOrgDepartments,
 } from "@/services/tabulations";
 
 /**
@@ -65,7 +66,10 @@ export async function GET(request: Request) {
       });
     }
 
-    const departments = await listDepartmentsForUser(userId!);
+    const departments =
+      isAdmin(session) || isSuperAdmin(session)
+        ? await listOrgDepartments()
+        : await listDepartmentsForUser(userId!);
     const groups = await getTreesForDepartments(departments);
     const requireTabulationOnClose = groups.some(
       (g) => g.requireTabulationOnClose,

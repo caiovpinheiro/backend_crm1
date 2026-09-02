@@ -146,6 +146,21 @@ export async function getTree(departmentId: string): Promise<TabulationNode[]> {
   return buildTreeFromRows(rows);
 }
 
+export async function listOrgDepartments(): Promise<
+  Array<{
+    id: string;
+    name: string;
+    requireTabulationOnClose: boolean;
+  }>
+> {
+  const orgId = orgIdOrThrow();
+  return prisma.department.findMany({
+    where: { organizationId: orgId },
+    select: { id: true, name: true, requireTabulationOnClose: true },
+    orderBy: { name: "asc" },
+  });
+}
+
 export async function listDepartmentsForUser(userId: string): Promise<
   Array<{
     id: string;
