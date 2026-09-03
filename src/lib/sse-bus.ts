@@ -1,6 +1,10 @@
 import IORedis from "ioredis";
 
-import { scheduleBoardInvalidation, scheduleTabCountsInvalidation } from "@/lib/cache/keys";
+import {
+  scheduleBoardInvalidation,
+  scheduleTabCountsInvalidation,
+  shouldInvalidateInboxTabCounts,
+} from "@/lib/cache/keys";
 import { metrics, safeLabel } from "@/lib/metrics";
 
 /**
@@ -183,12 +187,10 @@ class SseBus {
       scheduleBoardInvalidation(orgId);
     }
 
-    // Os badges das abas seguem a mesma lógica do board: o cliente refaz
-    // `?counts=1` ~1s depois destes eventos. Invalidar aqui garante que esse
-    // refetch encontre o cache limpo, em vez de recomputar a agregação por
-    // acaso de TTL. `conversation_updated` cobre transferência, troca de
-    // responsável e mudança de status — tudo que move conversa entre abas.
-    if (event === "new_message" || event === "conversation_updated") {
+    // Badges: NÃO purgar em `new_message` (preview). O FE ainda recebe o
+    // SSE e patcha o card; `?counts=1` deve bater no Redis (TTL 90s).
+    // Purga só quando o payload indica mudança de aba.
+    if (shouldInvalidateInboxTabCounts(event, data)) {
       scheduleTabCountsInvalidation(orgId);
     }
 

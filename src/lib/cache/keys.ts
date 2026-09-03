@@ -121,8 +121,9 @@ export async function invalidateWhatsappTemplateCatalog(
 // ── Inbox tab counts ────────────────────────────────────────────
 //
 // GET /api/conversations?counts=1 — COUNT por aba é caro em orgs
-// grandes (finalizados/todos). TTL curto cobre cold-load stampede;
-// abas quentes (esperando/entrada) aceitam stale ≤60s nos badges.
+// grandes (11 COUNT FILTER, 200ms–1s). TTL 90s cobre stampede; badges
+// aceitam stale. NÃO purgar em cada `new_message` (preview) — isso
+// era o storm de CPU. Purgar só quando o ticket muda de aba.
 
 export function inboxTabCountsKey(orgId: string, scopeFp: string): string {
   return `inbox_tab_counts:${orgId}:${scopeFp}`;
@@ -137,13 +138,66 @@ export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
 }
 
 /**
- * Mesma coalescência do board (leading + trailing), aplicada aos badges.
- *
- * Sem isto, mensagem nova não invalidava os counts e a frescura dependia só
- * do TTL — que precisava ser curto (5s) e perdia a corrida contra o refetch
- * que o SSE dispara ~1s depois, fazendo ~metade das chamadas recomputar a
- * agregação (1,2-2,3s medidos em produção). Com invalidação no path da
- * mensagem, o TTL pode ser longo sem defasar o badge.
+ * Campos de `conversation_updated` que movem o ticket entre abas
+ * (`tabToWhere` / guard / Ligar / visibilidade por departamento).
+ * Preview, contactId e conversationId sozinhos NÃO entram.
+ */
+const TAB_MEMBERSHIP_UPDATE_KEYS = [
+  "assignedToId",
+  "assignedTo",
+  "status",
+  "closedAt",
+  "followUpAt",
+  "departmentId",
+  "hasError",
+  "whatsappCallConsentStatus",
+  "whatsappCallConsentExpiresAt",
+] as const;
+
+/** Timeline types that move a ticket across inbox tabs (not tabulation). */
+const TAB_MEMBERSHIP_TIMELINE_TYPES = new Set([
+  "ASSIGNEE_CHANGED",
+  "CONVERSATION_CLOSED",
+  "CONVERSATION_REOPENED",
+  "CONVERSATION_CREATED",
+  "CONVERSATION_DEPARTMENT_CHANGED",
+  "CONVERSATION_STATUS_CHANGED",
+]);
+
+export function conversationUpdatedAffectsInboxTabs(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const rec = data as Record<string, unknown>;
+  return TAB_MEMBERSHIP_UPDATE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(rec, k));
+}
+
+export function conversationTimelineAffectsInboxTabs(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const type = (data as { type?: unknown }).type;
+  return typeof type === "string" && TAB_MEMBERSHIP_TIMELINE_TYPES.has(type);
+}
+
+/**
+ * SSE → badges. `new_message` (preview / last message) NÃO invalida:
+ * direção Entrada↔Aguardando pode ficar stale até o TTL — aceite do
+ * operador. Assign / resolve / reopen / transfer / departamento sim.
+ */
+export function shouldInvalidateInboxTabCounts(
+  event: string,
+  data: unknown,
+): boolean {
+  if (event === "new_message") return false;
+  if (event === "conversation_updated") {
+    return conversationUpdatedAffectsInboxTabs(data);
+  }
+  if (event === "conversation_timeline_updated") {
+    return conversationTimelineAffectsInboxTabs(data);
+  }
+  return false;
+}
+
+/**
+ * Coalescência leading + trailing (~15s) para assign/resolve/transfer.
+ * Não usar no path de `new_message`.
  */
 const TAB_COUNTS_INVALIDATION_WINDOW_MS = 15_000;
 
