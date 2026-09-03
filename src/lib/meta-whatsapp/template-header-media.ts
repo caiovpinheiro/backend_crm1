@@ -4,6 +4,11 @@
  *
  * Extraído de `automation-executor.ts` para o worker de campanhas poder
  * reutilizar sem puxar o executor inteiro.
+ *
+ * Preferimos sempre `{ id }` (upload no phone number) em vez de `{ link }`:
+ * a Meta costuma devolver 132012 "expected IMAGE, received UNKNOWN" quando
+ * o crawler dela não classifica o arquivo baixado do `link` (CDN própria,
+ * headers atípicos, etc.), mesmo com Content-Type correto num GET externo.
  */
 
 import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
@@ -17,13 +22,119 @@ export class TemplateHeaderMediaError extends Error {
   }
 }
 
+const HEADER_MEDIA_FETCH_TIMEOUT_MS = 20_000;
+
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : null;
 }
 
-/** Resolve `{ link }` (URL pública) ou `{ id }` (upload interno → Meta media). */
+function fileNameFromUrl(url: string, mediaType: string): string {
+  try {
+    const path = new URL(url).pathname;
+    const base = path.split("/").filter(Boolean).pop() || "";
+    if (base && /\.[a-z0-9]{2,5}$/i.test(base)) return decodeURIComponent(base);
+  } catch {
+    /* ignore */
+  }
+  const ext =
+    mediaType === "video" ? "mp4" : mediaType === "document" ? "pdf" : "png";
+  return `header.${ext}`;
+}
+
+function mimeMatchesMediaType(
+  mimeType: string,
+  mediaType: "image" | "video" | "document",
+): boolean {
+  const m = mimeType.toLowerCase();
+  if (mediaType === "image") return m.startsWith("image/");
+  if (mediaType === "video") return m.startsWith("video/");
+  // document: pdf, ms* , openxml, etc.
+  return (
+    m === "application/pdf" ||
+    m.startsWith("application/") ||
+    m.startsWith("text/") ||
+    m.startsWith("image/") // alguns docs são imagem escaneada
+  );
+}
+
+/** Baixa URL pública e devolve bytes p/ upload na Meta. */
+async function fetchPublicMediaBytes(
+  mediaUrl: string,
+  mediaType: "image" | "video" | "document",
+): Promise<{ buffer: Buffer; mimeType: string; fileName: string }> {
+  const absolute = toAbsolutePublicMediaUrl(mediaUrl);
+  // Custom field / URL digitada pelo operador — evita SSRF ao baixar no worker.
+  const { assertSafeOutboundUrl } = await import("@/lib/safe-outbound-url");
+  try {
+    await assertSafeOutboundUrl(absolute);
+  } catch (err) {
+    throw new TemplateHeaderMediaError(
+      `header de template: URL de mídia bloqueada (${absolute}): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(absolute, {
+      cache: "no-store",
+      redirect: "follow",
+      signal: AbortSignal.timeout(HEADER_MEDIA_FETCH_TIMEOUT_MS),
+      headers: {
+        // Alguns CDNs respondem UNKNOWN à Meta sem User-Agent de browser.
+        Accept: "image/*,video/*,application/pdf,*/*",
+        "User-Agent": "BWIPO-CRM-TemplateHeader/1.0",
+      },
+    });
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new TemplateHeaderMediaError(
+        `header de template: tempo limite ao baixar a mídia (${HEADER_MEDIA_FETCH_TIMEOUT_MS}ms): ${absolute}`,
+      );
+    }
+    throw new TemplateHeaderMediaError(
+      `header de template: falha ao baixar a mídia (${absolute}): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  if (!res.ok) {
+    throw new TemplateHeaderMediaError(
+      `header de template: HTTP ${res.status} ao baixar a mídia (${absolute})`,
+    );
+  }
+
+  const mimeType =
+    (res.headers.get("content-type") || "").split(";")[0].trim() ||
+    "application/octet-stream";
+  if (!mimeMatchesMediaType(mimeType, mediaType)) {
+    throw new TemplateHeaderMediaError(
+      `header de template: Content-Type "${mimeType}" incompatível com header ${mediaType.toUpperCase()} (${absolute})`,
+    );
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length === 0) {
+    throw new TemplateHeaderMediaError(
+      `header de template: arquivo vazio em ${absolute}`,
+    );
+  }
+
+  return {
+    buffer,
+    mimeType,
+    fileName: fileNameFromUrl(absolute, mediaType),
+  };
+}
+
+/**
+ * Resolve parâmetro de mídia do header.
+ * Sempre prefere `{ id }` (upload no phone number da Meta) — evita 132012
+ * "expected IMAGE, received UNKNOWN" do caminho `{ link }`.
+ */
 export async function resolveTemplateHeaderMediaParam(
   client: MetaWhatsAppClient,
   mediaUrl: string,
@@ -50,7 +161,13 @@ export async function resolveTemplateHeaderMediaParam(
   }
 
   if (trimmed.startsWith("https://") || trimmed.startsWith("/")) {
-    return { link: toAbsolutePublicMediaUrl(trimmed) };
+    const fetched = await fetchPublicMediaBytes(trimmed, mediaType);
+    const metaMediaId = await client.uploadMedia(
+      fetched.buffer,
+      fetched.mimeType,
+      fetched.fileName,
+    );
+    return { id: metaMediaId };
   }
 
   throw new TemplateHeaderMediaError(
