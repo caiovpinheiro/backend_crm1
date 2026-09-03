@@ -37,6 +37,7 @@ import {
   ACADEMIC_ATENDIMENTO_RULES,
   ACADEMIC_CONFIDENCE_RULES,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
+  ACADEMIC_CURRICULUM_TCE_RULES,
   academicExamModalityRules,
   formatCanonicalPortalAccessHint,
   formatExamAccessHint,
@@ -103,6 +104,7 @@ export function fallbackSteeringRules(archetype: string): string {
   if (archetype !== "ATENDIMENTO") return "";
   return [
     ACADEMIC_ATENDIMENTO_RULES,
+    ACADEMIC_CURRICULUM_TCE_RULES,
     ACADEMIC_MEDIA_CAPABILITY_RULES,
     ACADEMIC_CONFIDENCE_RULES,
   ].join("\n\n");
@@ -283,6 +285,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         agent.systemPromptOverride?.trim(),
         steeringRules,
         isAcademicAttendance ? academicExamModalityRules(examsOnlineOnly) : "",
+        isAcademicAttendance ? ACADEMIC_CURRICULUM_TCE_RULES : "",
       ]
         .filter(Boolean)
         .join("\n\n") || null;

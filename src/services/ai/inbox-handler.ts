@@ -69,6 +69,7 @@ import {
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
   moveOpenDealToEmAtendimento,
+  shouldHandoffCurriculumOrTce,
   textImpliesAcademicHandoff,
 } from "@/services/ai/academic-department-routing";
 import {
@@ -1247,6 +1248,46 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "course_shopping",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // ── 2b2. Grade/estágio obrigatório ou TCE para assinar ──
+    // Sem esperar o LLM: inventar "geralmente tem estágio" / prometer
+    // assinar TCE é pior que transferir. Prazo/docs de TCE NÃO entram.
+    if (shouldHandoffCurriculumOrTce(args.userMessage)) {
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        departmentName: "Atendimento",
+        reason:
+          "Grade/estágio obrigatório ou TCE para assinatura — handoff obrigatório",
+        policy,
+      });
+      {
+        const gotHuman = await conversationAssignedToHuman(args.conversationId);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: studentNoticeAfterHandoff(
+            gotHuman,
+            buildGenericQueueHandoffMessage(new Date(), policy),
+          ),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "curriculum_or_tce",
         durationMs: Date.now() - startedAt.getTime(),
       });
       return;
