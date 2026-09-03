@@ -50,7 +50,7 @@ import {
 import {
   buildFlowButtonComponent,
 } from "@/lib/meta-whatsapp/enrich-template-flow";
-import { injectTemplateHeaderMediaComponent } from "@/lib/meta-whatsapp/template-header-media";
+import { injectTemplateHeaderMediaComponent, describeTemplateHeaderMedia } from "@/lib/meta-whatsapp/template-header-media";
 import {
   campaignTemplatePayloadIsDynamic,
   interpolateCampaignTemplatePayload,
@@ -396,13 +396,22 @@ async function resolveRecipientTemplateComponents(
   );
   let components = resolved.components;
 
-  if (resolved.headerMediaUrl) {
+  const wantsMediaHeader = Boolean(prepared.templatePayload.headerMediaType);
+  const headerUrl = resolved.headerMediaUrl?.trim() || "";
+
+  if (wantsMediaHeader && !headerUrl) {
+    throw new Error(
+      `Campanha exige header ${prepared.templatePayload.headerMediaType?.toUpperCase()} mas a URL ficou vazia após interpolar o campo mapeado (contact=${contactId}). Confira o custom field no negócio OPEN.`,
+    );
+  }
+
+  if (headerUrl) {
     components = await injectTemplateHeaderMediaComponent(client, {
       templateName: campaign.templateName!,
       languageCode: campaign.templateLanguage ?? "pt_BR",
       templateGraphId: prepared.templateGraphId,
       components,
-      headerMediaUrl: resolved.headerMediaUrl,
+      headerMediaUrl: headerUrl,
       headerMediaType: prepared.templatePayload.headerMediaType ?? null,
     });
   }
@@ -901,14 +910,39 @@ async function sendViaMetaCloudApi(
     );
     const built = buildSendComponents(prepared, recipientComponents);
     flowToken = built.flowToken;
-    const result = await client.sendTemplate(
-      phone,
-      campaign.templateName!,
-      campaign.templateLanguage ?? "pt_BR",
-      built.components,
-      bsuid,
+    const headerDiag = describeTemplateHeaderMedia(built.components);
+    if (
+      prepared.templatePayload.headerMediaType &&
+      (headerDiag === "missing" ||
+        headerDiag === "no-header" ||
+        headerDiag === "header-empty" ||
+        headerDiag.startsWith("header-type="))
+    ) {
+      throw new Error(
+        `Campanha template "${campaign.templateName}" exige header ${prepared.templatePayload.headerMediaType.toUpperCase()}, mas o payload ficou inválido (${headerDiag}).`,
+      );
+    }
+    console.log(
+      `[campaign-send] template=${campaign.templateName} header=${headerDiag} contact=${contactId}`,
     );
-    metaMessageId = result.messages?.[0]?.id ?? null;
+    try {
+      const result = await client.sendTemplate(
+        phone,
+        campaign.templateName!,
+        campaign.templateLanguage ?? "pt_BR",
+        built.components,
+        bsuid,
+      );
+      metaMessageId = result.messages?.[0]?.id ?? null;
+    } catch (sendErr) {
+      const base = formatMetaSendError(sendErr);
+      // Se ainda vier 132012, o diagnóstico diz se o worker mandou id ou link
+      // (link = imagem Docker antiga / worker não rebuildado).
+      if (/132012/.test(base) || /expected IMAGE/i.test(base)) {
+        throw new Error(`${base} [crm-header=${headerDiag}]`);
+      }
+      throw sendErr;
+    }
     messageType = "template";
     content = buildOutboundTemplateMessageContent(
       campaign.templateName!,

@@ -686,13 +686,30 @@ export class MetaWhatsAppClient {
 
   async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
     const uploadType = whatsappUploadAudioMime(mimeType, filename);
+    // Nome curto + ASCII: multipart com hash longo no filename às vezes
+    // chega na Meta sem Content-Type de parte confiável.
+    const extFromName = filename.includes(".")
+      ? filename.split(".").pop()!.toLowerCase().replace(/[^a-z0-9]/g, "")
+      : "";
+    const extFromMime = uploadType.split("/")[1]?.split(";")[0]?.trim() || "bin";
+    const ext = (extFromName || extFromMime).slice(0, 8) || "bin";
+    const safeName = `wa-upload.${ext}`;
+
+    const bytes = new Uint8Array(buffer);
+    // `File` preserva filename + type no Content-Disposition do undici;
+    // `Blob` + 3º arg do append é mais frágil e pode gravar mídia UNKNOWN.
+    const filePart =
+      typeof File !== "undefined"
+        ? new File([bytes], safeName, { type: uploadType })
+        : new Blob([bytes], { type: uploadType });
+
     const form = new FormData();
     form.append("messaging_product", "whatsapp");
-    form.append(
-      "file",
-      new Blob([new Uint8Array(buffer)], { type: uploadType }),
-      filename
-    );
+    if (typeof File !== "undefined") {
+      form.append("file", filePart);
+    } else {
+      form.append("file", filePart, safeName);
+    }
     form.append("type", uploadType);
 
     const url = MetaWhatsAppClient.buildGraphUrl(`${this.phoneNumberId}/media`);
@@ -720,10 +737,13 @@ export class MetaWhatsAppClient {
         payload,
       });
       console.error(
-        `[MetaWA] upload ${res.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
+        `[MetaWA] upload ${res.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"} mime=${uploadType} name=${safeName}: ${err.details ?? err.message}`,
       );
       throw err;
     }
+    console.log(
+      `[MetaWA] upload ok id=${parsed.id} mime=${uploadType} bytes=${buffer.length} name=${safeName}`,
+    );
     return parsed.id;
   }
 

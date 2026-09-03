@@ -123,23 +123,56 @@ async function fetchPublicMediaBytes(
     );
   }
 
+  // Nome curto e estável — evita filename=hash enorme no multipart da Meta.
+  const ext =
+    mediaType === "video" ? "mp4" : mediaType === "document" ? "pdf" : "png";
+  const fromUrl = fileNameFromUrl(absolute, mediaType);
+  const fileName = /\.(jpe?g|png|gif|webp|mp4|pdf)$/i.test(fromUrl)
+    ? `header.${fromUrl.split(".").pop()!.toLowerCase()}`
+    : `header.${ext}`;
+
   return {
     buffer,
     mimeType,
-    fileName: fileNameFromUrl(absolute, mediaType),
+    fileName,
   };
+}
+
+/** Diagnóstico do header montado (aparece no erro 132012 / logs do worker). */
+export function describeTemplateHeaderMedia(
+  components: unknown[] | undefined,
+): string {
+  if (!Array.isArray(components)) return "missing";
+  for (const c of components) {
+    const o = asRecord(c);
+    if (String(o?.type ?? "").toLowerCase() !== "header") continue;
+    const params = Array.isArray(o.parameters) ? o.parameters : [];
+    const p0 = asRecord(params[0]);
+    if (!p0) return "header-empty";
+    const pType = String(p0.type ?? "").toLowerCase();
+    const media = asRecord(p0[pType] ?? p0.image ?? p0.video ?? p0.document);
+    if (!media) return `header-type=${pType || "?"} sem objeto`;
+    if (typeof media.id === "string" && media.id.trim()) {
+      return `id:${media.id.trim().slice(0, 12)}`;
+    }
+    if (typeof media.link === "string" && media.link.trim()) {
+      return `link`;
+    }
+    return `header-type=${pType || "?"} sem id/link`;
+  }
+  return "no-header";
 }
 
 /**
  * Resolve parâmetro de mídia do header.
- * Sempre prefere `{ id }` (upload no phone number da Meta) — evita 132012
+ * Sempre faz upload e devolve `{ id }` — evita 132012
  * "expected IMAGE, received UNKNOWN" do caminho `{ link }`.
  */
 export async function resolveTemplateHeaderMediaParam(
   client: MetaWhatsAppClient,
   mediaUrl: string,
   mediaType: "image" | "video" | "document",
-): Promise<{ link: string } | { id: string }> {
+): Promise<{ id: string }> {
   const trimmed = mediaUrl.trim();
   const { isOrgOwnedStorageUrl, readStoredMediaForSend } = await import(
     "@/lib/storage/read-for-send"
@@ -229,9 +262,14 @@ export async function injectTemplateHeaderMediaComponent(
     args.headerMediaUrl,
     mediaType,
   );
+  if (!("id" in mediaParam) || !mediaParam.id) {
+    throw new TemplateHeaderMediaError(
+      `header de template: upload Meta não devolveu media id (mode=${"link" in mediaParam ? "link" : "unknown"}).`,
+    );
+  }
   const headerComponent: Record<string, unknown> = {
     type: "header",
-    parameters: [{ type: mediaType, [mediaType]: mediaParam }],
+    parameters: [{ type: mediaType, [mediaType]: { id: mediaParam.id } }],
   };
 
   const withoutExistingHeader = (args.components ?? []).filter((c) => {
@@ -239,5 +277,9 @@ export async function injectTemplateHeaderMediaComponent(
     return String(o?.type ?? "").toLowerCase() !== "header";
   });
 
-  return [headerComponent, ...withoutExistingHeader];
+  const out = [headerComponent, ...withoutExistingHeader];
+  console.log(
+    `[template-header-media] template=${args.templateName} format=${headerFormat} mode=id id=${mediaParam.id.slice(0, 12)}`,
+  );
+  return out;
 }
