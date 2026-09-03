@@ -50,6 +50,14 @@ import {
 import {
   buildFlowButtonComponent,
 } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { injectTemplateHeaderMediaComponent } from "@/lib/meta-whatsapp/template-header-media";
+import {
+  campaignTemplatePayloadIsDynamic,
+  interpolateCampaignTemplatePayload,
+  loadCampaignInterpolationRoot,
+  parseCampaignTemplatePayload,
+  type CampaignTemplatePayload,
+} from "@/services/campaign-template-variables";
 import { randomUUID } from "node:crypto";
 
 const BATCH_SIZE = 500;
@@ -187,13 +195,22 @@ async function resolveSendChannel(
 
 type PreparedTemplate = {
   templateConfigId: string | null;
+  templateGraphId: string | null;
   bodyPreview: string | null;
   category: string | null;
   buttonLabels: string[];
-  /** Componentes base SEM o botão flow (undefined = sem componentes). */
+  /**
+   * Componentes base SEM o botão flow (undefined = sem componentes).
+   * Quando o payload é dinâmico (`{{tokens}}`), fica undefined e o envio
+   * monta por destinatário a partir de `templatePayload`.
+   */
   baseComponents: unknown[] | undefined;
   /** Índice do botão flow na definição; null = template sem flow. */
   flowIndex: string | null;
+  /** Payload gravado na campanha (pode ter tokens CRM). */
+  templatePayload: CampaignTemplatePayload;
+  /** True se body/header precisam de interpolação por destinatário. */
+  dynamic: boolean;
 };
 
 const PREPARED_TEMPLATE_TTL_MS = 60_000;
@@ -243,9 +260,11 @@ async function prepareTemplateForCampaign(
   if (hit && Date.now() - hit.at < PREPARED_TEMPLATE_TTL_MS) return hit.prepared;
 
   if (!campaign.templateName) throw new Error("Template não definido na campanha.");
-  const components = campaign.templateComponents
-    ? (campaign.templateComponents as unknown[])
-    : undefined;
+  const templatePayload = parseCampaignTemplatePayload(campaign.templateComponents);
+  const dynamic = campaignTemplatePayloadIsDynamic(templatePayload);
+  // Componentes estáticos (sem token) entram no probe de flow. Dinâmicos
+  // só revelam o flowIndex; body/header são montados por destinatário.
+  const componentsForProbe = dynamic ? undefined : templatePayload.components;
 
   let templateGraphId: string | null = null;
   let templateConfigId: string | null = null;
@@ -284,7 +303,7 @@ async function prepareTemplateForCampaign(
   const probe = await enrichTemplateComponentsForFlowSend(client, {
     templateName: campaign.templateName,
     languageCode: campaign.templateLanguage ?? "pt_BR",
-    components,
+    components: componentsForProbe,
     templateGraphId,
     // Token sonda — descartado; por destinatário geramos UUID novo.
     flowToken: randomUUID(),
@@ -295,20 +314,26 @@ async function prepareTemplateForCampaign(
     const { base, flowIndex } = stripFlowButton(probe.components);
     prepared = {
       templateConfigId,
+      templateGraphId,
       bodyPreview,
       category,
       buttonLabels,
-      baseComponents: base.length ? base : undefined,
+      baseComponents: dynamic ? undefined : base.length ? base : undefined,
       flowIndex,
+      templatePayload,
+      dynamic,
     };
   } else {
     prepared = {
       templateConfigId,
+      templateGraphId,
       bodyPreview,
       category,
       buttonLabels,
-      baseComponents: probe.components,
+      baseComponents: dynamic ? undefined : probe.components,
       flowIndex: null,
+      templatePayload,
+      dynamic,
     };
   }
   cache.set(campaign.id, { prepared, at: Date.now() });
@@ -316,19 +341,68 @@ async function prepareTemplateForCampaign(
 }
 
 /** Monta os componentes finais do envio, com flow_token fresco por destinatário. */
-function buildSendComponents(prepared: PreparedTemplate): {
+function buildSendComponents(
+  prepared: PreparedTemplate,
+  baseComponents: unknown[] | undefined,
+): {
   components: unknown[] | undefined;
   flowToken: string | null;
 } {
   if (prepared.flowIndex == null) {
-    return { components: prepared.baseComponents, flowToken: null };
+    return { components: baseComponents, flowToken: null };
   }
   const token = randomUUID();
   const btn = buildFlowButtonComponent(prepared.flowIndex, token, null);
   return {
-    components: [...(prepared.baseComponents ?? []), btn],
+    components: [...(baseComponents ?? []), btn],
     flowToken: token,
   };
+}
+
+/**
+ * Resolve tokens CRM + header de mídia por destinatário e devolve o array
+ * pronto para `sendTemplate` (ainda sem o botão flow).
+ */
+async function resolveRecipientTemplateComponents(
+  prepared: PreparedTemplate,
+  campaign: {
+    templateName: string | null;
+    templateLanguage: string | null;
+  },
+  client: ReturnType<typeof metaClientFromConfig>,
+  contactId: string,
+): Promise<unknown[] | undefined> {
+  if (!prepared.dynamic) {
+    // Estático, mas ainda pode precisar de headerMediaUrl fixo (URL única).
+    const fixedHeader = prepared.templatePayload.headerMediaUrl?.trim() || null;
+    if (!fixedHeader) return prepared.baseComponents;
+    return injectTemplateHeaderMediaComponent(client, {
+      templateName: campaign.templateName!,
+      languageCode: campaign.templateLanguage ?? "pt_BR",
+      templateGraphId: prepared.templateGraphId,
+      components: prepared.baseComponents,
+      headerMediaUrl: fixedHeader,
+    });
+  }
+
+  const root = await loadCampaignInterpolationRoot(contactId);
+  const resolved = interpolateCampaignTemplatePayload(
+    prepared.templatePayload,
+    root,
+  );
+  let components = resolved.components;
+
+  if (resolved.headerMediaUrl) {
+    components = await injectTemplateHeaderMediaComponent(client, {
+      templateName: campaign.templateName!,
+      languageCode: campaign.templateLanguage ?? "pt_BR",
+      templateGraphId: prepared.templateGraphId,
+      components,
+      headerMediaUrl: resolved.headerMediaUrl,
+    });
+  }
+
+  return components;
 }
 
 function getRedisUrl(): string {
@@ -814,7 +888,13 @@ async function sendViaMetaCloudApi(
   if (campaign.type === "TEMPLATE") {
     const prepared = await prepareTemplateForCampaign(campaign, client);
     templateConfigId = prepared.templateConfigId;
-    const built = buildSendComponents(prepared);
+    const recipientComponents = await resolveRecipientTemplateComponents(
+      prepared,
+      campaign,
+      client,
+      contactId,
+    );
+    const built = buildSendComponents(prepared, recipientComponents);
     flowToken = built.flowToken;
     const result = await client.sendTemplate(
       phone,
