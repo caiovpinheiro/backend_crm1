@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-03 — Variáveis de template em campanha via custom fields
+
+**Decisão.** `Campaign.templateComponents` aceita wrapper `{ version: 1, components, headerMediaUrl }` com tokens `{{dealCustomFields.x}}`. O worker resolve por destinatário (negócio OPEN + CFs) e injeta header IMAGE/VIDEO/DOCUMENT. Array legado (sem tokens) permanece estático para todos.
+
+**Contexto.** Blast com imagem e `{{1}}` por pessoa; hoje o mesmo payload ia para todos e IMAGE sem header quebrava (132012). Automações já interpolavam; campanha não.
+
+**Alternativas descartadas.** Coluna nova `templateHeaderMediaUrl` (desnecessário: JSON já existe). Resolver no create (valores mudam até o envio). Sempre exigir mapeamento (templates sem vars não precisam da UI).
+
+**Impacto.** `campaign-template-variables.ts`, `template-header-media.ts`, `campaigns-worker`. Front: mapper só quando há header mídia ou placeholders no corpo.
+
+---
+
 ### 2026-09-02 — MANUAL execute inline (não na fila do worker)
 
 **Decisão.** `triggerSource=MANUAL` (Transferir / Distribuir p/ departamento) volta a rodar `executeDistribution` no processo da API. A fila `distribution-execute` fica para redistribute/stuck-inbound.
