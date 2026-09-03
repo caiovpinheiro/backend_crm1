@@ -5,15 +5,15 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
-### 2026-09-03 — Resumable Upload de header IMAGE com App Access Token
+### 2026-09-03 — Header IMAGE: App ID do canal (multi-tenant), não CRM global
 
-**Decisão.** `uploadResumableHandle` (criação de template IMAGE/VIDEO/DOCUMENT) usa App Access Token (`CRM_META_APP_ID|META_APP_SECRET`) e body JSON em `POST /{app-id}/uploads`, não o token do canal.
+**Decisão.** `uploadResumableHandle` usa o App ID da **organização** (`config.appId` no canal, ou `debug_token` no accessToken) + token/appSecret **do canal**. Removido uso de `CRM_META_APP_ID|META_APP_SECRET` nesse fluxo.
 
-**Contexto.** Cadastro de template TEXT funcionava; IMAGE falhava com Meta 100/33 `Object with ID '…'` — o ID era o App (ou parecia Phone Number ID). Token do canal gerencia a WABA mas muitas vezes não tem o App como asset na borda `/uploads`.
+**Contexto.** Cada org tem o próprio Meta App; o CRM ainda não é tech partner. App Access Token global quebrava criação de template IMAGE (100/33) e não faz sentido no modelo atual.
 
-**Alternativas descartadas.** Continuar com token do canal (quebrado). Usar WABA ID em `/uploads` (Meta rejeita 100/33).
+**Alternativas descartadas.** App secret global do CRM. WABA ID em `/uploads` (Meta rejeita).
 
-**Impacto.** `client.ts` `uploadResumableHandle`. Exige `META_APP_SECRET` no deploy da API. Campanha: `headerMediaType` no payload + `strictFlowEnrich: false` no prepare.
+**Impacto.** `client.ts`, `manual-cloud`, provision grava `config.appId`. UI do canal: campo App ID. Worker de campanha **não** precisa de META_APP_SECRET.
 
 ---
 
