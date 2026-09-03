@@ -307,6 +307,9 @@ async function prepareTemplateForCampaign(
     templateGraphId,
     // Token sonda — descartado; por destinatário geramos UUID novo.
     flowToken: randomUUID(),
+    // Campanha com header IMAGE não depende de Flow: se o GET do template
+    // falhar, não abortar o preparo — o envio injeta mídia via headerMediaType.
+    strictFlowEnrich: false,
   });
 
   let prepared: PreparedTemplate;
@@ -382,6 +385,7 @@ async function resolveRecipientTemplateComponents(
       templateGraphId: prepared.templateGraphId,
       components: prepared.baseComponents,
       headerMediaUrl: fixedHeader,
+      headerMediaType: prepared.templatePayload.headerMediaType ?? null,
     });
   }
 
@@ -399,6 +403,7 @@ async function resolveRecipientTemplateComponents(
       templateGraphId: prepared.templateGraphId,
       components,
       headerMediaUrl: resolved.headerMediaUrl,
+      headerMediaType: prepared.templatePayload.headerMediaType ?? null,
     });
   }
 
