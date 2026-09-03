@@ -44,6 +44,7 @@ describe("parseCampaignTemplatePayload", () => {
       version: 1,
       components: [{ type: "body" }],
       headerMediaUrl: "{{dealCustomFields.imagem_vaga}}",
+      headerMediaType: null,
     });
   });
 });

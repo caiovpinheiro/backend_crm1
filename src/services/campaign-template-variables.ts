@@ -23,6 +23,8 @@ export type CampaignTemplatePayload = {
   components?: unknown[];
   /** Token CRM ou URL fixa HTTPS para header IMAGE/VIDEO/DOCUMENT. */
   headerMediaUrl?: string | null;
+  /** Espelha o format do template — evita depender só da Graph no envio. */
+  headerMediaType?: "image" | "video" | "document" | null;
 };
 
 const TOKEN_RE = /\{\{\s*([\w.]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g;
@@ -39,10 +41,19 @@ export function parseCampaignTemplatePayload(
     : undefined;
   const headerMediaUrl =
     typeof o.headerMediaUrl === "string" ? o.headerMediaUrl : null;
+  const rawType =
+    typeof o.headerMediaType === "string"
+      ? o.headerMediaType.trim().toLowerCase()
+      : "";
+  const headerMediaType =
+    rawType === "image" || rawType === "video" || rawType === "document"
+      ? rawType
+      : null;
   return {
     version: typeof o.version === "number" ? o.version : 1,
     components,
     headerMediaUrl,
+    headerMediaType,
   };
 }
 
