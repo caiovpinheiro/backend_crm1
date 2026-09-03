@@ -7,6 +7,11 @@
 /** Outbound / `capacity_released` não reabre scan completo neste intervalo. */
 export const CAPACITY_RELEASED_COOLDOWN_MS = 30_000;
 
+/** Teto do consultor: `queueLimit`. 0 = não recebe. */
+export function consultantHasFreeSlot(load: number, queueLimit: number): boolean {
+  return queueLimit > 0 && load < queueLimit;
+}
+
 export function shouldSkipCapacityReleasedCooldown(
   trigger: string,
   cooldownUntil: number,
