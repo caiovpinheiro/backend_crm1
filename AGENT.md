@@ -5,6 +5,18 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-09-03 — Resumable Upload de header IMAGE com App Access Token
+
+**Decisão.** `uploadResumableHandle` (criação de template IMAGE/VIDEO/DOCUMENT) usa App Access Token (`CRM_META_APP_ID|META_APP_SECRET`) e body JSON em `POST /{app-id}/uploads`, não o token do canal.
+
+**Contexto.** Cadastro de template TEXT funcionava; IMAGE falhava com Meta 100/33 `Object with ID '…'` — o ID era o App (ou parecia Phone Number ID). Token do canal gerencia a WABA mas muitas vezes não tem o App como asset na borda `/uploads`.
+
+**Alternativas descartadas.** Continuar com token do canal (quebrado). Usar WABA ID em `/uploads` (Meta rejeita 100/33).
+
+**Impacto.** `client.ts` `uploadResumableHandle`. Exige `META_APP_SECRET` no deploy da API. Campanha: `headerMediaType` no payload + `strictFlowEnrich: false` no prepare.
+
+---
+
 ### 2026-09-03 — Variáveis de template em campanha via custom fields
 
 **Decisão.** `Campaign.templateComponents` aceita wrapper `{ version: 1, components, headerMediaUrl }` com tokens `{{dealCustomFields.x}}`. O worker resolve por destinatário (negócio OPEN + CFs) e injeta header IMAGE/VIDEO/DOCUMENT. Array legado (sem tokens) permanece estático para todos.

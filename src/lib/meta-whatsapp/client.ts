@@ -1,6 +1,6 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isVerboseLogging } from "@/lib/debug-log";
-import { CRM_META_APP_ID } from "@/lib/meta-constants";
+import { CRM_META_APP_ID, CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import {
   isMetaTransientServiceCode,
@@ -729,6 +729,21 @@ export class MetaWhatsAppClient {
   // bytes). O handle (`h`) resultante vai em `example.header_handle`.
 
   /**
+   * Token para `POST /{APP_ID}/uploads` (header_handle na criação de template).
+   *
+   * O token do canal (System User / embedded signup) costuma gerenciar a WABA
+   * mas NÃO ter o App como asset — a Meta responde 100/33 em
+   * `Object with ID '<app-id>'` (fácil confundir com Phone Number ID).
+   * App Access Token (`appId|appSecret`) é o caminho suportado pra essa borda.
+   */
+  private resolveResumableUploadToken(): string {
+    const appId = CRM_META_APP_ID?.trim();
+    const secret = CRM_META_APP_SECRET?.trim();
+    if (appId && secret) return `${appId}|${secret}`;
+    return this.accessToken;
+  }
+
+  /**
    * Sobe um arquivo via Resumable Upload API e devolve o `header_handle`
    * (campo `h`) exigido por `example.header_handle` no HEADER de mídia
    * ao criar um template.
@@ -741,24 +756,33 @@ export class MetaWhatsAppClient {
     const appId = CRM_META_APP_ID?.trim();
     if (!appId) {
       throw new Error(
-        "Meta: App ID não configurado (CRM_META_APP_ID) — necessário para enviar a mídia de exemplo do cabeçalho.",
+        "Meta: App ID não configurado (CRM_META_APP_ID / NEXT_PUBLIC_META_APP_ID) — necessário para mídia de exemplo do cabeçalho IMAGE/VIDEO/DOCUMENT.",
+      );
+    }
+    if (!CRM_META_APP_SECRET?.trim()) {
+      throw new Error(
+        "Meta: META_APP_SECRET não configurado — necessário para subir a mídia de exemplo do cabeçalho (Resumable Upload usa App Access Token).",
       );
     }
 
-    // Passo 1 — cria a sessão de upload.
-    const sessionParams = new URLSearchParams({
-      file_name: fileName,
-      file_length: String(buffer.length),
-      file_type: mimeType,
-    });
-    const sessionUrl = MetaWhatsAppClient.buildGraphUrl(
-      `${appId}/uploads?${sessionParams.toString()}`,
-    );
+    const uploadToken = this.resolveResumableUploadToken();
+
+    // Passo 1 — cria a sessão de upload (JSON body; query-string quebra com
+    // espaços no file_name e alguns tokens rejeitam o formato antigo).
+    const sessionUrl = MetaWhatsAppClient.buildGraphUrl(`${appId}/uploads`);
     let sessionRes: Response;
     try {
       sessionRes = await fetch(sessionUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.accessToken}` },
+        headers: {
+          Authorization: `Bearer ${uploadToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          file_name: fileName,
+          file_length: buffer.length,
+          file_type: mimeType,
+        }),
         cache: "no-store",
         signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
       });
@@ -784,6 +808,11 @@ export class MetaWhatsAppClient {
       console.error(
         `[MetaWA] resumable-upload sessão ${sessionRes.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
       );
+      if (err.code === 100 && err.subcode === 33) {
+        throw new Error(
+          `Falha ao subir mídia de exemplo do cabeçalho IMAGE (App ID ${appId}): token sem permissão no App Meta do CRM (code 100/33). Confira META_APP_SECRET e NEXT_PUBLIC_META_APP_ID — não é o Phone Number ID do canal. Detalhe Meta: ${err.message}`,
+        );
+      }
       throw err;
     }
     const sessionId = (sessionData as { id?: string } | undefined)?.id?.trim();
@@ -800,7 +829,7 @@ export class MetaWhatsAppClient {
       uploadRes = await fetch(uploadUrl, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.accessToken}`,
+          Authorization: `Bearer ${uploadToken}`,
           file_offset: "0",
           "Content-Type": "application/octet-stream",
         },

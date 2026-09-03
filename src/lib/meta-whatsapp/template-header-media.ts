@@ -86,6 +86,14 @@ export async function injectTemplateHeaderMediaComponent(
     headerFormat !== "VIDEO" &&
     headerFormat !== "DOCUMENT"
   ) {
+    // URL informada mas a Graph não confirmou o format e o chamador não
+    // passou headerMediaType — falhar cedo em vez de enviar sem header
+    // (132012) ou parecer “erro de phone number”.
+    if (args.headerMediaUrl?.trim()) {
+      throw new TemplateHeaderMediaError(
+        `template "${args.templateName}": headerMediaUrl informado, mas o formato do cabeçalho não foi resolvido (Graph/headerMediaType). Use IMAGE, VIDEO ou DOCUMENT.`,
+      );
+    }
     return args.components;
   }
 
