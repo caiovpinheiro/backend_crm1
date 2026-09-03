@@ -1,6 +1,7 @@
 /**
- * Flag Redis da passagem vazia — o cron na API precisa ver o cooldown
- * armado pelo worker (processos distintos, memória não compartilha).
+ * Flag Redis da passagem vazia — o cron (`scheduled`) e o producer
+ * `capacity_released` precisam ver o cooldown armado pelo worker
+ * (processos distintos, memória não compartilha).
  *
  * Usa a conexão BullMQ (`enableOfflineQueue` default true) — o client
  * de rate-limit / cache (`enableOfflineQueue: false`) rejeita SET/GET
@@ -42,11 +43,21 @@ export async function clearPublishedFruitlessCooldown(
   await r.del(fruitlessCooldownRedisKey(orgId));
 }
 
+export type FruitlessCooldownPeek = {
+  armed: boolean;
+  /** PTTL em ms. null = sem Redis, chave sem expiry, ou ausente. */
+  ttlMs: number | null;
+};
+
 export async function peekPublishedFruitlessCooldown(
   orgId: string,
-): Promise<boolean> {
+): Promise<FruitlessCooldownPeek> {
   const r = redis();
-  if (!r) return false;
-  const v = await r.get(fruitlessCooldownRedisKey(orgId));
-  return v != null && v.length > 0;
+  if (!r) return { armed: false, ttlMs: null };
+  const key = fruitlessCooldownRedisKey(orgId);
+  const [v, pttl] = await Promise.all([r.get(key), r.pttl(key)]);
+  return {
+    armed: v != null && v.length > 0,
+    ttlMs: typeof pttl === "number" && pttl >= 0 ? pttl : null,
+  };
 }

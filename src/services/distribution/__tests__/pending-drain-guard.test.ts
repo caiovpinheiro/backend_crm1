@@ -7,6 +7,7 @@ import {
   fruitlessPassNeedsCooldown,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
+  shouldSkipCapacityReleasedFruitlessCooldown,
   shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "../pending-drain-guard";
@@ -57,6 +58,30 @@ describe("pending drain guard", () => {
     );
     expect(shouldSkipScheduledFruitlessCooldown("manual", true)).toBe(false);
     expect(shouldSkipScheduledFruitlessCooldown("new_item", true)).toBe(false);
+  });
+
+  it("skips only capacity_released when the published fruitless flag is armed", () => {
+    expect(
+      shouldSkipCapacityReleasedFruitlessCooldown("capacity_released", true),
+    ).toBe(true);
+    expect(
+      shouldSkipCapacityReleasedFruitlessCooldown("capacity_released", false),
+    ).toBe(false);
+    expect(
+      shouldSkipCapacityReleasedFruitlessCooldown("scheduled", true),
+    ).toBe(false);
+    expect(
+      shouldSkipCapacityReleasedFruitlessCooldown("agent_online", true),
+    ).toBe(false);
+    expect(
+      shouldSkipCapacityReleasedFruitlessCooldown("agent_eligible", true),
+    ).toBe(false);
+    expect(shouldSkipCapacityReleasedFruitlessCooldown("new_item", true)).toBe(
+      false,
+    );
+    expect(shouldSkipCapacityReleasedFruitlessCooldown("manual", true)).toBe(
+      false,
+    );
   });
 
   it("arms cooldown after skip or 0 assigns with remaining pending", () => {
