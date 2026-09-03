@@ -55,6 +55,10 @@ export async function POST(request: Request) {
         typeof b.appSecret === "string" && b.appSecret.trim()
           ? b.appSecret.trim()
           : undefined;
+      const appId =
+        typeof b.appId === "string" && b.appId.trim()
+          ? b.appId.trim()
+          : undefined;
 
       if (!accessToken || !phoneNumberId || !wabaId) {
         return NextResponse.json(
@@ -83,6 +87,7 @@ export async function POST(request: Request) {
         verifyToken,
         webhookId,
         appSecret,
+        appId,
       });
 
       return NextResponse.json(

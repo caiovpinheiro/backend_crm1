@@ -57,6 +57,12 @@ export type ProvisionMetaCloudChannelInput = {
    * `config.appSecret` pela `createChannel`/`updateChannel`.
    */
   appSecret?: string;
+  /**
+   * Opcional: App ID do Meta App **desta organização**. Necessário para
+   * criar templates com header IMAGE/VIDEO/DOCUMENT (`POST /{app-id}/uploads`).
+   * Persistido em `config.appId`.
+   */
+  appId?: string;
 };
 
 export type ProvisionMetaCloudChannelResult = {
@@ -192,6 +198,9 @@ export async function provisionMetaCloudChannel(
   }
   if (input.appSecret && input.appSecret.trim()) {
     config.appSecret = input.appSecret.trim();
+  }
+  if (input.appId && input.appId.trim()) {
+    config.appId = input.appId.trim();
   }
 
   let channel: Channel;

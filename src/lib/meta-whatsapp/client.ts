@@ -1,6 +1,5 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isVerboseLogging } from "@/lib/debug-log";
-import { CRM_META_APP_ID, CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import {
   isMetaTransientServiceCode,
@@ -273,7 +272,15 @@ export class MetaWhatsAppClient {
   constructor(
     private readonly accessToken: string,
     private readonly phoneNumberId: string,
-    private readonly businessAccountId: string
+    private readonly businessAccountId: string,
+    /**
+     * App ID do Meta App **desta organização** (cada cliente tem o seu).
+     * Usado em `POST /{app-id}/uploads` para header_handle de template IMAGE.
+     * Se vazio, tentamos descobrir via `debug_token` no accessToken do canal.
+     */
+    private readonly metaAppId: string = "",
+    /** App Secret do App da org (opcional). Se presente com appId, monta App Access Token da própria org. */
+    private readonly metaAppSecret: string = "",
   ) {}
 
   get configured(): boolean {
@@ -725,20 +732,78 @@ export class MetaWhatsAppClient {
   //
   // A Meta NÃO aceita `link`/`id` de mídia comum como exemplo de header
   // ao CRIAR um template — exige um `header_handle` obtido via Resumable
-  // Upload API (fluxo em 2 passos: cria sessão no App, depois envia os
-  // bytes). O handle (`h`) resultante vai em `example.header_handle`.
+  // Upload API (fluxo em 2 passos: cria sessão no App da ORG, depois envia
+  // os bytes). O handle (`h`) resultante vai em `example.header_handle`.
+  //
+  // Multi-tenant: cada org tem o próprio Meta App. NÃO usamos
+  // CRM_META_APP_ID/META_APP_SECRET globais aqui (CRM ainda não é tech
+  // partner). App ID vem do canal (`config.appId`) ou do `debug_token`.
+
+  /** Descobre o App ID dono do token do canal (quando `config.appId` não veio). */
+  private async resolveOrgMetaAppId(): Promise<string> {
+    const explicit = this.metaAppId?.trim();
+    if (explicit) return explicit;
+
+    const url = MetaWhatsAppClient.buildGraphUrl(
+      `debug_token?input_token=${encodeURIComponent(this.accessToken)}`,
+    );
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.accessToken}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new Error(
+        `Meta: não foi possível descobrir o App ID do canal (debug_token). Informe config.appId no canal. (${err instanceof Error ? err.message : err})`,
+      );
+    }
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+    if (!res.ok) {
+      const payload =
+        data && typeof data === "object"
+          ? ((data as GraphErrorEnvelope).error ?? null)
+          : null;
+      const err = new MetaGraphError({
+        httpStatus: res.status,
+        path: "debug_token",
+        payload,
+      });
+      throw new Error(
+        `Meta: informe o App ID do Meta App desta organização no canal (config.appId). Sem isso não dá para subir mídia de exemplo do cabeçalho IMAGE. Detalhe: ${err.message}`,
+      );
+    }
+    const root = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+    const inner =
+      root?.data && typeof root.data === "object"
+        ? (root.data as Record<string, unknown>)
+        : null;
+    const appId =
+      (typeof inner?.app_id === "string" && inner.app_id.trim()) ||
+      (typeof inner?.app_id === "number" ? String(inner.app_id) : "");
+    if (!appId) {
+      throw new Error(
+        "Meta: debug_token não devolveu app_id. Grave o App ID do Meta App da organização em Canais → config.appId.",
+      );
+    }
+    return appId;
+  }
 
   /**
-   * Token para `POST /{APP_ID}/uploads` (header_handle na criação de template).
-   *
-   * O token do canal (System User / embedded signup) costuma gerenciar a WABA
-   * mas NÃO ter o App como asset — a Meta responde 100/33 em
-   * `Object with ID '<app-id>'` (fácil confundir com Phone Number ID).
-   * App Access Token (`appId|appSecret`) é o caminho suportado pra essa borda.
+   * Token para `POST /{APP_ID}/uploads`.
+   * Preferência: App Access Token da **própria org** (`appId|appSecret` do canal).
+   * Fallback: accessToken do canal (System User com o App nos assets).
    */
-  private resolveResumableUploadToken(): string {
-    const appId = CRM_META_APP_ID?.trim();
-    const secret = CRM_META_APP_SECRET?.trim();
+  private resolveResumableUploadToken(appId: string): string {
+    const secret = this.metaAppSecret?.trim();
     if (appId && secret) return `${appId}|${secret}`;
     return this.accessToken;
   }
@@ -753,22 +818,10 @@ export class MetaWhatsAppClient {
     mimeType: string,
     fileName: string,
   ): Promise<string> {
-    const appId = CRM_META_APP_ID?.trim();
-    if (!appId) {
-      throw new Error(
-        "Meta: App ID não configurado (CRM_META_APP_ID / NEXT_PUBLIC_META_APP_ID) — necessário para mídia de exemplo do cabeçalho IMAGE/VIDEO/DOCUMENT.",
-      );
-    }
-    if (!CRM_META_APP_SECRET?.trim()) {
-      throw new Error(
-        "Meta: META_APP_SECRET não configurado — necessário para subir a mídia de exemplo do cabeçalho (Resumable Upload usa App Access Token).",
-      );
-    }
+    const appId = await this.resolveOrgMetaAppId();
+    const uploadToken = this.resolveResumableUploadToken(appId);
 
-    const uploadToken = this.resolveResumableUploadToken();
-
-    // Passo 1 — cria a sessão de upload (JSON body; query-string quebra com
-    // espaços no file_name e alguns tokens rejeitam o formato antigo).
+    // Passo 1 — cria a sessão de upload (JSON body).
     const sessionUrl = MetaWhatsAppClient.buildGraphUrl(`${appId}/uploads`);
     let sessionRes: Response;
     try {
@@ -793,7 +846,11 @@ export class MetaWhatsAppClient {
     }
     const sessionText = await sessionRes.text();
     let sessionData: unknown;
-    try { sessionData = JSON.parse(sessionText); } catch { sessionData = sessionText; }
+    try {
+      sessionData = JSON.parse(sessionText);
+    } catch {
+      sessionData = sessionText;
+    }
 
     if (!sessionRes.ok) {
       const payload =
@@ -810,7 +867,7 @@ export class MetaWhatsAppClient {
       );
       if (err.code === 100 && err.subcode === 33) {
         throw new Error(
-          `Falha ao subir mídia de exemplo do cabeçalho IMAGE (App ID ${appId}): token sem permissão no App Meta do CRM (code 100/33). Confira META_APP_SECRET e NEXT_PUBLIC_META_APP_ID — não é o Phone Number ID do canal. Detalhe Meta: ${err.message}`,
+          `Falha ao subir mídia de exemplo do cabeçalho IMAGE no App ${appId} (code 100/33). Confira se o App ID do canal é o do Meta App desta org e se o token/System User tem esse App nos assets — não é o Phone Number ID. Detalhe Meta: ${err.message}`,
         );
       }
       throw err;
@@ -844,7 +901,11 @@ export class MetaWhatsAppClient {
     }
     const uploadText = await uploadRes.text();
     let uploadData: unknown;
-    try { uploadData = JSON.parse(uploadText); } catch { uploadData = uploadText; }
+    try {
+      uploadData = JSON.parse(uploadText);
+    } catch {
+      uploadData = uploadText;
+    }
 
     if (!uploadRes.ok) {
       const payload =
@@ -1403,6 +1464,12 @@ export function metaClientFromConfig(
   const rawToken = typeof config.accessToken === "string" ? config.accessToken.trim() : "";
   const phoneId = typeof config.phoneNumberId === "string" ? config.phoneNumberId.trim() : "";
   const wabaId = typeof config.businessAccountId === "string" ? config.businessAccountId.trim() : "";
+  const appId =
+    typeof config.appId === "string"
+      ? config.appId.trim()
+      : typeof config.metaAppId === "string"
+        ? config.metaAppId.trim()
+        : "";
 
   let token = rawToken;
   if (rawToken && isEncryptedSecret(rawToken)) {
@@ -1417,6 +1484,22 @@ export function metaClientFromConfig(
     }
   }
 
+  let appSecret = "";
+  const rawAppSecret =
+    typeof config.appSecret === "string" ? config.appSecret.trim() : "";
+  if (rawAppSecret) {
+    try {
+      appSecret = isEncryptedSecret(rawAppSecret)
+        ? decryptSecret(rawAppSecret)
+        : rawAppSecret;
+    } catch (err) {
+      console.warn(
+        "[meta-whatsapp/client] falha ao decriptar appSecret; upload de header usará só o accessToken:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   if (!token || !phoneId) return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
-  return new MetaWhatsAppClient(token, phoneId, wabaId);
+  return new MetaWhatsAppClient(token, phoneId, wabaId, appId, appSecret);
 }
