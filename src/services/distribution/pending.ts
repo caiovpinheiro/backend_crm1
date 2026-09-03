@@ -8,8 +8,9 @@
  * elegibilidade, capacidade liberada, botão manual; cron só se a última
  * passagem não foi vazia).
  * Na API o scan não roda in-process: `enqueueProcessPendingOrRun`
- * empurra `distribution-drain` e o worker drena. Fallback
- * síncrono só em test/dev se Redis estiver down.
+ * só empurra `distribution-drain` (sem COUNT / queueLimit). O worker
+ * confere o teto em `capacity_released` e drena. Fallback síncrono
+ * só em test/dev se Redis estiver down.
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
  * elegível abre a fila dos seus depts; o reprocesso manual/cron também
  * tenta os depts que já têm gente na espera — o motor decide se o
@@ -27,7 +28,7 @@ import {
   isFreshDrainEnqueue,
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
-import { debugInfo, debugWarn } from "@/lib/debug-log";
+import { debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -49,6 +50,7 @@ import { humanWasAssignedInThisConversation } from "@/services/distribution/huma
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
 import { executeDistribution } from "./engine";
+import { evaluateCapacityReleasedDrain } from "./capacity-released-gate";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
   fruitlessCooldownIsArmed,
@@ -1058,6 +1060,33 @@ export async function processPendingDistributionQueue(opts: {
     };
   }
 
+  if (opts.trigger === "capacity_released") {
+    const gate = await evaluateCapacityReleasedDrain({
+      userId: opts.userId ?? null,
+    });
+    if (!gate.proceed) {
+      armFruitlessCooldown(state, "AT_CAPACITY", orgId);
+      console.info(
+        "[distribution] processPending skip — at capacity",
+        JSON.stringify({
+          orgId,
+          trigger: opts.trigger,
+          userId: opts.userId ?? null,
+          load: gate.load,
+          volume: gate.volume,
+        }),
+      );
+      return {
+        resolved: 0,
+        cancelled: 0,
+        pending: 0,
+        trigger: opts.trigger,
+        skipReason: "AT_CAPACITY",
+        skipMessage: "Fila do consultor no teto — sem vaga para drenar.",
+      };
+    }
+  }
+
   if (state.running) {
     const pending = await prisma.conversation.count({
       where: await getWaitingQueueWhere(),
@@ -1491,15 +1520,8 @@ export async function enqueueProcessPendingOrRun(opts: {
 
   const state = getDrainState(orgId);
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
-    clearFruitlessCooldown(state);
-  } else if (
-    shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
-    shouldSkipScheduledFruitlessCooldown(
-      opts.trigger,
-      fruitlessCooldownIsArmed(state.cooldownReason) ||
-        (await peekPublishedFruitlessCooldown(orgId)),
-    )
-  ) {
+    clearFruitlessCooldown(state, orgId);
+  } else if (shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)) {
     logCooldownSkip(orgId, state, opts.trigger, "schedule");
     return {
       resolved: 0,
@@ -1510,37 +1532,22 @@ export async function enqueueProcessPendingOrRun(opts: {
       skipMessage:
         "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
     };
-  }
-
-  // Conta a espera ANTES de enfileirar. `capacity_released` (fechar
-  // atendimento) disparava drain com `pending:0` no log — não era
-  // contagem, era skip do COUNT. Fila vazia = nada a drenar.
-  let pending: number | null = null;
-  try {
-    pending = await prisma.conversation.count({
-      where: await getWaitingQueueWhere(),
-    });
-  } catch {
-    /* COUNT falhou: enfileira mesmo assim (cron/toast ainda funcionam) */
-  }
-  if (pending === 0) {
-    console.info(
-      "[distribution] drain skipped — empty waiting queue",
-      JSON.stringify({
-        orgId,
-        trigger: opts.trigger,
-        userId: opts.userId ?? null,
+  } else if (opts.trigger === "scheduled") {
+    const fruitless =
+      fruitlessCooldownIsArmed(state.cooldownReason) ||
+      (await peekPublishedFruitlessCooldown(orgId));
+    if (shouldSkipScheduledFruitlessCooldown(opts.trigger, fruitless)) {
+      logCooldownSkip(orgId, state, opts.trigger, "schedule");
+      return {
+        resolved: 0,
+        cancelled: 0,
         pending: 0,
-      }),
-    );
-    return {
-      resolved: 0,
-      cancelled: 0,
-      pending: 0,
-      trigger: opts.trigger,
-      skipReason: "EMPTY_QUEUE",
-      skipMessage: "Fila de espera vazia.",
-    };
+        trigger: opts.trigger,
+        skipReason: "COOLDOWN",
+        skipMessage:
+          "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
+      };
+    }
   }
 
   const queued = await enqueueDistributionDrain({
@@ -1549,21 +1556,20 @@ export async function enqueueProcessPendingOrRun(opts: {
     userId: opts.userId ?? null,
   });
   if (queued) {
-    const drainMeta = JSON.stringify({
-      orgId,
-      trigger: opts.trigger,
-      userId: opts.userId ?? null,
-      pending: pending ?? -1,
-    });
     if (isFreshDrainEnqueue(queued)) {
-      console.info("[distribution] drain enqueued", drainMeta);
-    } else {
-      debugInfo("[distribution] drain already queued", drainMeta);
+      console.info(
+        "[distribution] drain enqueued",
+        JSON.stringify({
+          orgId,
+          trigger: opts.trigger,
+          userId: opts.userId ?? null,
+        }),
+      );
     }
     return {
       resolved: 0,
       cancelled: 0,
-      pending: pending ?? 0,
+      pending: 0,
       trigger: opts.trigger,
       skipReason: "QUEUED",
       skipMessage:
@@ -1585,13 +1591,12 @@ export async function enqueueProcessPendingOrRun(opts: {
       orgId,
       trigger: opts.trigger,
       userId: opts.userId ?? null,
-      pending: pending ?? -1,
     }),
   );
   return {
     resolved: 0,
     cancelled: 0,
-    pending: pending ?? 0,
+    pending: 0,
     trigger: opts.trigger,
     skipReason: "QUEUE_UNAVAILABLE",
     skipMessage:
@@ -1616,7 +1621,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
   const delayMs = opts.delayMs ?? 500;
   const state = getDrainState(orgId);
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
-    clearFruitlessCooldown(state);
+    clearFruitlessCooldown(state, orgId);
   } else if (
     shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil) ||
     shouldSkipScheduledFruitlessCooldown(
@@ -1627,60 +1632,63 @@ export function scheduleProcessPendingDistributionQueue(opts: {
     logCooldownSkip(orgId, state, opts.trigger, "schedule");
     if (!shouldScheduleRetryOnCooldownSkip()) return;
   }
-  // Debounce por org: vários gatilhos próximos viram uma única execução.
-  state.queuedTrigger = opts.trigger;
-  if (
-    opts.userId &&
-    state.queuedUserId &&
-    opts.userId !== state.queuedUserId
-  ) {
-    state.queuedUserId = null;
-  } else if (!opts.userId) {
-    state.queuedUserId = null;
-  } else if (!state.timer) {
-    state.queuedUserId = opts.userId;
-  } else if (state.queuedUserId === opts.userId) {
-    state.queuedUserId = opts.userId;
-  }
-  // Se já havia timer com outro escopo amplo (null), mantém amplo.
 
-  if (state.timer) {
-    clearTimeout(state.timer);
-  }
-
-  state.timer = setTimeout(() => {
-    state.timer = null;
-    const trigger = state.queuedTrigger ?? opts.trigger;
-    const userId = state.queuedUserId;
-    state.queuedTrigger = null;
-    state.queuedUserId = null;
-
-    void runWithContext(
-      {
-        organizationId: orgId,
-        userId: "system",
-        isSuperAdmin: false,
-        actor: {
-          type: "SYSTEM",
-          label: "Distribuição Inteligente",
-          sublabel: `queue:${trigger}`,
-        },
-      },
-      () => enqueueProcessPendingOrRun({ trigger, userId }),
-    ).catch((e) => {
-      console.error(
-        "[distribution] scheduleProcessPendingDistributionQueue failed",
-        e,
-      );
-    });
-  }, delayMs);
-
-  // Evita manter o processo Node vivo só por causa do timer em testes/scripts.
-  if (typeof state.timer === "object" && state.timer && "unref" in state.timer) {
-    try {
-      state.timer.unref();
-    } catch {
-      /* ignore */
+  const armTimer = () => {
+    // Debounce por org: vários gatilhos próximos viram uma única execução.
+    state.queuedTrigger = opts.trigger;
+    if (
+      opts.userId &&
+      state.queuedUserId &&
+      opts.userId !== state.queuedUserId
+    ) {
+      state.queuedUserId = null;
+    } else if (!opts.userId) {
+      state.queuedUserId = null;
+    } else if (!state.timer) {
+      state.queuedUserId = opts.userId;
+    } else if (state.queuedUserId === opts.userId) {
+      state.queuedUserId = opts.userId;
     }
-  }
+
+    if (state.timer) {
+      clearTimeout(state.timer);
+    }
+
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      const trigger = state.queuedTrigger ?? opts.trigger;
+      const userId = state.queuedUserId;
+      state.queuedTrigger = null;
+      state.queuedUserId = null;
+
+      void runWithContext(
+        {
+          organizationId: orgId,
+          userId: "system",
+          isSuperAdmin: false,
+          actor: {
+            type: "SYSTEM",
+            label: "Distribuição Inteligente",
+            sublabel: `queue:${trigger}`,
+          },
+        },
+        () => enqueueProcessPendingOrRun({ trigger, userId }),
+      ).catch((e) => {
+        console.error(
+          "[distribution] scheduleProcessPendingDistributionQueue failed",
+          e,
+        );
+      });
+    }, delayMs);
+
+    if (typeof state.timer === "object" && state.timer && "unref" in state.timer) {
+      try {
+        state.timer.unref();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  armTimer();
 }
