@@ -31,16 +31,16 @@ import {
   renderTemplatePreview,
   templateVariablesFromSendComponents,
 } from "@/lib/meta-whatsapp/build-template-components";
-import {
-  enrichTemplateComponentsForFlowSend,
-  resolveTemplateHeaderMediaFormat,
-} from "@/lib/meta-whatsapp/enrich-template-flow";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import {
   buildOutboundTemplateMessageContent,
   buttonLabelsFromConfig,
 } from "@/lib/whatsapp-outbound-template-label";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
-import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
+import {
+  injectTemplateHeaderMediaComponent,
+  TemplateHeaderMediaError,
+} from "@/lib/meta-whatsapp/template-header-media";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
@@ -139,6 +139,7 @@ function formatOutboundChannelLabel(
 
 function classifyMetaSendFailure(err: unknown): MetaSendFailureError | null {
   if (isMetaSendFailureError(err)) return err;
+  if (err instanceof TemplateHeaderMediaError) return toMetaSendFailure(err);
   if (isMetaGraphError(err) || isMetaFlowEnrichError(err)) return toMetaSendFailure(err);
   const msg = err instanceof Error ? err.message : String(err);
   if (
@@ -147,6 +148,7 @@ function classifyMetaSendFailure(err: unknown): MetaSendFailureError | null {
     /telefone inválido/i.test(msg) ||
     /Tempo limite ao comunicar com a Meta/i.test(msg) ||
     /headerMediaUrl inválida/i.test(msg) ||
+    /header de template:/i.test(msg) ||
     /exige header\b/i.test(msg) ||
     /arquivo do header não encontrado/i.test(msg) ||
     /arquivo nao encontrado em storage/i.test(msg) ||
@@ -886,99 +888,10 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
 }
 
 /**
- * Injeta o componente `header` de mídia (IMAGE/VIDEO/DOCUMENT) exigido pela
- * Meta ao enviar templates cujo HEADER não é texto (erro `132012: header
- * component parameter should not be empty` quando o parâmetro falta).
- *
- * Fluxo (opção "link" + fallback id para uploads internos):
- *  1. Descobre o `headerFormat` na Graph (fonte da verdade); `headerMediaType`
- *     do passo só entra se a Graph não responder.
- *  2. Se não for mídia (TEXT/NONE/null), não faz nada — comportamento atual.
- *  3. Se for mídia, exige `headerMediaUrl` (falha cedo, antes de chamar a Meta).
- *  4. URL HTTPS pública → `{ link }`. Upload interno (`/api/storage/...` ou
- *     `/uploads/...`) → sobe o arquivo na Meta e usa `{ id }` (storage exige
- *     sessão; a Meta não consegue baixar o link).
- *  5. Monta `{ type: "header", parameters: [...] }`, substituindo qualquer
- *     header já presente em `components` (nunca duplica).
+ * Header IMAGE/VIDEO/DOCUMENT: ver `injectTemplateHeaderMediaComponent` em
+ * `@/lib/meta-whatsapp/template-header-media` (HTTPS → upload `{ id }`,
+ * evita Meta 132012 "expected IMAGE, received UNKNOWN" do caminho `{ link }`).
  */
-async function injectTemplateHeaderMediaComponent(
-  client: MetaWhatsAppClient,
-  args: {
-    templateName: string;
-    languageCode: string;
-    templateGraphId: string | null;
-    components: unknown[] | undefined;
-    headerMediaUrl: string | null;
-    headerMediaType: "image" | "video" | "document" | null;
-  },
-): Promise<unknown[] | undefined> {
-  const fromGraph = await resolveTemplateHeaderMediaFormat(client, {
-    templateName: args.templateName,
-    languageCode: args.languageCode,
-    templateGraphId: args.templateGraphId,
-  });
-  const headerFormat = fromGraph ?? args.headerMediaType?.toUpperCase() ?? null;
-
-  if (headerFormat !== "IMAGE" && headerFormat !== "VIDEO" && headerFormat !== "DOCUMENT") {
-    return args.components;
-  }
-
-  if (!args.headerMediaUrl) {
-    throw new Error(
-      `send_whatsapp_template: template "${args.templateName}" exige header ${headerFormat}; configure headerMediaUrl no passo.`,
-    );
-  }
-
-  const mediaType = headerFormat.toLowerCase() as "image" | "video" | "document";
-  const mediaParam = await resolveTemplateHeaderMediaParam(client, args.headerMediaUrl, mediaType);
-  const headerComponent: Record<string, unknown> = {
-    type: "header",
-    parameters: [{ type: mediaType, [mediaType]: mediaParam }],
-  };
-
-  const withoutExistingHeader = (args.components ?? []).filter((c) => {
-    const o = asRecord(c);
-    return String(o?.type ?? "").toLowerCase() !== "header";
-  });
-
-  return [headerComponent, ...withoutExistingHeader];
-}
-
-/** Resolve `{ link }` (URL pública) ou `{ id }` (upload interno → Meta media). */
-async function resolveTemplateHeaderMediaParam(
-  client: MetaWhatsAppClient,
-  mediaUrl: string,
-  mediaType: "image" | "video" | "document",
-): Promise<{ link: string } | { id: string }> {
-  const trimmed = mediaUrl.trim();
-  const { isOrgOwnedStorageUrl, readStoredMediaForSend } = await import(
-    "@/lib/storage/read-for-send"
-  );
-
-  if (isOrgOwnedStorageUrl(trimmed)) {
-    const stored = await readStoredMediaForSend(trimmed);
-    if (!stored) {
-      throw new MetaSendFailureError(
-        `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
-      );
-    }
-    const metaMediaId = await client.uploadMedia(
-      stored.buffer,
-      stored.mimeType,
-      stored.fileName,
-    );
-    return { id: metaMediaId };
-  }
-
-  // URL pública HTTPS — opção 1 pura. Relativa sem storage: expandir base.
-  if (trimmed.startsWith("https://") || trimmed.startsWith("/")) {
-    return { link: toAbsolutePublicMediaUrl(trimmed) };
-  }
-
-  throw new MetaSendFailureError(
-    `send_whatsapp_template: headerMediaUrl inválida para ${mediaType} (use HTTPS público ou upload interno): ${trimmed}`,
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────
 // Webhook — interpolação de variáveis dotted-path no body/headers
