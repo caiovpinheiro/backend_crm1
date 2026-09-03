@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: RouteContext) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
-
+  return withOrgContext(async () => {
   const { id } = await context.params;
 
   const conv = await prisma.conversation.findUnique({
@@ -77,5 +73,6 @@ export async function GET(_request: Request, context: RouteContext) {
       sender: m.senderName,
       hoursAgo: +((now.getTime() - m.createdAt.getTime()) / 3_600_000).toFixed(2),
     })),
+  });
   });
 }
