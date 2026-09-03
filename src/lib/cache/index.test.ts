@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { cache } from "@/lib/cache";
-import { boardDataKey } from "@/lib/cache/keys";
+import { boardDataKey, shouldInvalidateInboxTabCounts } from "@/lib/cache/keys";
 
 describe("cache.wrap singleflight", () => {
   it("chamadas concorrentes da mesma chave disparam o loader uma vez", async () => {
@@ -36,6 +36,95 @@ describe("cache fallback memoria", () => {
     const hit = await cache.get<typeof payload>(key);
     expect(hit?.blob.length).toBe(12_000);
     expect(hit?.n).toBe(7);
+  });
+});
+
+describe("shouldInvalidateInboxTabCounts", () => {
+  const org = { organizationId: "org1", conversationId: "c1" };
+
+  it("não invalida new_message (preview / last message)", () => {
+    expect(
+      shouldInvalidateInboxTabCounts("new_message", {
+        ...org,
+        direction: "in",
+        content: "oi",
+      }),
+    ).toBe(false);
+  });
+
+  it("invalida conversation_updated só com campos de aba", () => {
+    expect(shouldInvalidateInboxTabCounts("conversation_updated", org)).toBe(
+      false,
+    );
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        assignedToId: "u1",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        assignedTo: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        status: "RESOLVED",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        followUpAt: "2026-09-02T00:00:00.000Z",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        departmentId: "d1",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_updated", {
+        ...org,
+        whatsappCallConsentStatus: "GRANTED",
+      }),
+    ).toBe(true);
+  });
+
+  it("invalida timeline que move aba; ignora tabulação", () => {
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_timeline_updated", {
+        ...org,
+        type: "ASSIGNEE_CHANGED",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_timeline_updated", {
+        ...org,
+        type: "CONVERSATION_CLOSED",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_timeline_updated", {
+        ...org,
+        type: "CONVERSATION_REOPENED",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_timeline_updated", {
+        ...org,
+        type: "CONVERSATION_DEPARTMENT_CHANGED",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateInboxTabCounts("conversation_timeline_updated", {
+        ...org,
+        type: "CONVERSATION_TABULATED",
+      }),
+    ).toBe(false);
   });
 });
 
