@@ -81,7 +81,7 @@ describe("capacity_released producer vs worker", () => {
     getDistributionResponsibles.mockReset();
     hasOrganizationWidget.mockReset();
     peekFruitless.mockReset();
-    peekFruitless.mockResolvedValue(false);
+    peekFruitless.mockResolvedValue({ armed: false, ttlMs: null });
     hasOrganizationWidget.mockResolvedValue(true);
   });
 
@@ -105,6 +105,78 @@ describe("capacity_released producer vs worker", () => {
     expect(conversationCount).not.toHaveBeenCalled();
     expect(findFirst).not.toHaveBeenCalled();
     expect(findManyResponsibles).not.toHaveBeenCalled();
+    expect(peekFruitless).toHaveBeenCalledWith("org-producer");
+  });
+
+  it("does not enqueue capacity_released while Redis fruitless cooldown is armed", async () => {
+    getOrgIdOrNull.mockReturnValue("org-fruitless-skip");
+    peekFruitless.mockResolvedValue({ armed: true, ttlMs: 18_000 });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    const { enqueueProcessPendingOrRun } = await import("../pending");
+    const first = await enqueueProcessPendingOrRun({
+      trigger: "capacity_released",
+      userId: null,
+    });
+    const second = await enqueueProcessPendingOrRun({
+      trigger: "capacity_released",
+      userId: null,
+    });
+
+    expect(enqueueDistributionDrain).not.toHaveBeenCalled();
+    expect(first.skipReason).toBe("COOLDOWN");
+    expect(second.skipReason).toBe("COOLDOWN");
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      "[distribution] drain enqueue skipped — fruitless cooldown armed",
+      expect.stringContaining("org-fruitless-skip"),
+    );
+    expect(info.mock.calls[0]?.[1]).toContain("18000");
+    info.mockRestore();
+  });
+
+  it("still enqueues capacity_released when Redis peek fails", async () => {
+    getOrgIdOrNull.mockReturnValue("org-fruitless-failopen");
+    enqueueDistributionDrain.mockResolvedValue("added");
+    peekFruitless.mockRejectedValue(new Error("redis blip"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { enqueueProcessPendingOrRun } = await import("../pending");
+    const result = await enqueueProcessPendingOrRun({
+      trigger: "capacity_released",
+      userId: null,
+    });
+
+    expect(enqueueDistributionDrain).toHaveBeenCalledWith({
+      organizationId: "org-fruitless-failopen",
+      trigger: "capacity_released",
+      userId: null,
+    });
+    expect(result.skipReason).toBe("QUEUED");
+    expect(warn).toHaveBeenCalledWith(
+      "[distribution] peek fruitless cooldown failed",
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it("does not block agent_online when the fruitless flag is armed", async () => {
+    getOrgIdOrNull.mockReturnValue("org-agent-online");
+    enqueueDistributionDrain.mockResolvedValue("added");
+    peekFruitless.mockResolvedValue({ armed: true, ttlMs: 18_000 });
+
+    const { enqueueProcessPendingOrRun } = await import("../pending");
+    const result = await enqueueProcessPendingOrRun({
+      trigger: "agent_online",
+      userId: "u1",
+    });
+
+    expect(enqueueDistributionDrain).toHaveBeenCalledWith({
+      organizationId: "org-agent-online",
+      trigger: "agent_online",
+      userId: "u1",
+    });
+    expect(result.skipReason).toBe("QUEUED");
     expect(peekFruitless).not.toHaveBeenCalled();
   });
 

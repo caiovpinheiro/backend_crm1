@@ -57,6 +57,7 @@ import {
   fruitlessPassNeedsCooldown,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
+  shouldSkipCapacityReleasedFruitlessCooldown,
   shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "./pending-drain-guard";
@@ -435,7 +436,7 @@ export async function isFruitlessCooldownActiveAsync(
   orgId: string,
 ): Promise<boolean> {
   if (isFruitlessCooldownActive(orgId)) return true;
-  return peekPublishedFruitlessCooldown(orgId);
+  return (await peekPublishedFruitlessCooldown(orgId)).armed;
 }
 
 function logCooldownSkip(
@@ -1535,9 +1536,50 @@ export async function enqueueProcessPendingOrRun(opts: {
   } else if (opts.trigger === "scheduled") {
     const fruitless =
       fruitlessCooldownIsArmed(state.cooldownReason) ||
-      (await peekPublishedFruitlessCooldown(orgId));
+      (await peekPublishedFruitlessCooldown(orgId)).armed;
     if (shouldSkipScheduledFruitlessCooldown(opts.trigger, fruitless)) {
       logCooldownSkip(orgId, state, opts.trigger, "schedule");
+      return {
+        resolved: 0,
+        cancelled: 0,
+        pending: 0,
+        trigger: opts.trigger,
+        skipReason: "COOLDOWN",
+        skipMessage:
+          "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
+      };
+    }
+  } else if (opts.trigger === "capacity_released") {
+    // Cross-process: worker arma `dist:fruitless:{org}`; a API (outro
+    // processo) não tem cooldownUntil local — sem este peek cada send
+    // re-ADDiciona `dd-{org}-capacity_released`.
+    let fruitless = fruitlessCooldownIsArmed(state.cooldownReason);
+    let ttlMs: number | null =
+      state.cooldownUntil > Date.now()
+        ? Math.max(0, state.cooldownUntil - Date.now())
+        : null;
+    if (!fruitless) {
+      try {
+        const peeked = await peekPublishedFruitlessCooldown(orgId);
+        fruitless = peeked.armed;
+        if (peeked.ttlMs != null) ttlMs = peeked.ttlMs;
+      } catch (e) {
+        console.warn("[distribution] peek fruitless cooldown failed", e);
+        fruitless = false;
+      }
+    }
+    if (shouldSkipCapacityReleasedFruitlessCooldown(opts.trigger, fruitless)) {
+      if (!state.cooldownSkipLogged) {
+        state.cooldownSkipLogged = true;
+        console.info(
+          "[distribution] drain enqueue skipped — fruitless cooldown armed",
+          JSON.stringify({
+            orgId,
+            trigger: opts.trigger,
+            ttlMs,
+          }),
+        );
+      }
       return {
         resolved: 0,
         cancelled: 0,

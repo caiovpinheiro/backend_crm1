@@ -41,6 +41,17 @@ export function shouldSkipScheduledFruitlessCooldown(
   return trigger === "scheduled" && fruitlessArmed;
 }
 
+/**
+ * Outbound (`capacity_released`) também respeita `dist:fruitless:{org}`.
+ * Não cobre cron (`scheduled` tem o helper acima) nem gatilhos reais.
+ */
+export function shouldSkipCapacityReleasedFruitlessCooldown(
+  trigger: string,
+  fruitlessArmed: boolean,
+): boolean {
+  return trigger === "capacity_released" && fruitlessArmed;
+}
+
 /** Última passagem armou o cooldown (reason fica até um gatilho real limpar). */
 export function fruitlessCooldownIsArmed(
   cooldownReason: string | null,
