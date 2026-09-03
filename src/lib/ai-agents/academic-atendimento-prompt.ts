@@ -12,6 +12,10 @@
 export const OFFICIAL_STUDENT_PORTAL_URL =
   "https://novoportal.cruzeirodosul.edu.br/";
 
+/** Área do Aluno da Aula Inaugural — certificado de participação (não é o novoportal). */
+export const OFFICIAL_INAUGURAL_CERTIFICATE_URL =
+  "https://app.cruzeiroead.com.br/";
+
 /**
  * Instituição do aluno. O agente acadêmico atende alunos da Cruzeiro do Sul —
  * nunca deve falar de forma genérica ("sua instituição", "sua faculdade").
@@ -139,6 +143,42 @@ export function formatExamAccessHint(
     "PROIBIDO inventar outro menu. NÃO transfira só por essa dúvida.",
     "",
     academicExamModalityRules(examsOnlineOnly),
+  ].join("\n");
+}
+
+const CERTIFICATE_INTENT_RE =
+  /certificado|gerar certificado|comprovante de participa/i;
+
+/**
+ * Certificado de participação da Aula Inaugural. Injetado quando o aluno
+ * pergunta ou quando o último disparo falava de certificado e ele responde
+ * de forma vaga. Site próprio (app.cruzeiroead) — não misturar com novoportal.
+ */
+export function formatParticipationCertificateHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  const hay = `${q}\n${recentContext ?? ""}`;
+  const asks =
+    CERTIFICATE_INTENT_RE.test(q) ||
+    (looksLikeAffirmative(q) &&
+      CERTIFICATE_INTENT_RE.test(recentContext ?? "")) ||
+    (/como (fa[cç]o|eu (pego|gero|tiro|acesso|consigo))|onde (pego|gero|fica|acesso|tiro)|quero (gerar|o |meu )/i.test(
+      q,
+    ) &&
+      CERTIFICATE_INTENT_RE.test(hay));
+  if (!asks) return "";
+  return [
+    "",
+    "CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural) — CAMINHO OFICIAL:",
+    "Acolha em 1 frase (ex.: 'Te passo o caminho do certificado, é rapidinho.').",
+    `- Abra a Área do Aluno: ${OFFICIAL_INAUGURAL_CERTIFICATE_URL}`,
+    "- Tela de login: *Área do Aluno / Cruzeiro do Sul Educacional* (`/login`). Campo: *RGM ou E-mail*.",
+    "- Senha inicial (REGRA, não invente outra): primeiro nome com a inicial maiúscula + `123@` (ex.: Raphael123@). Explique a regra; não invente senha diferente nem a do novoportal.",
+    '- Depois do login: no painel, clique no card *"Gerar Certificado"* ("Gere seu certificado de participação na Aula Inaugural").',
+    "- ENTREGUE o link na hora. PROIBIDO misturar com novoportal, Plataforma de Provas ou polo presencial. PROIBIDO inventar outro site. NÃO transfira só por essa dúvida.",
   ].join("\n");
 }
 
@@ -297,6 +337,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 7d. A lista de polos é endereço, NÃO é modalidade. PROIBIDO oferecer endereço de polo em dúvida de PROVA e PROIBIDO concluir do polo do aluno que prova/aula é presencial (regra 11e).
 8. INÍCIO DAS AULAS: depende da turma. Sem data → diga que depende da turma/turma no portal e oriente a ver na Área do Aluno. NÃO chame transfer/execute_distribution nesta dúvida — responda você. Só distribua se o aluno **pedir** humano/consultor ou insistir após sua orientação.
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
+8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
 9. ESQUECI MINHA SENHA: fluxo por SMS + telefone atualizado. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam".
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.

@@ -79,6 +79,9 @@ export function userAsksInauguralClassLinkOrIssue(text: string): boolean {
     .trim();
   if (!t) return false;
 
+  // Certificado de participação vai para o LLM (hint no runner), não o YouTube.
+  if (/certificado|comprovante de participa/.test(t)) return false;
+
   if (
     t.includes("clique para receber o link") ||
     t.includes("receber o link") ||
