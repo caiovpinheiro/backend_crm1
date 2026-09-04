@@ -768,7 +768,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   // #region agent log
   debugWarn(
     "[DBG-e46688 maybeDist] entry",
-    JSON.stringify({
+    () => JSON.stringify({
       convId: input.conversationId,
       contactId: input.contactId,
       alreadyAssigned: !!input.assignedToId,
@@ -786,7 +786,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (keptHumanId) {
       debugWarn(
         "[DBG-e46688 maybeDist] keep_human_after_automation_close",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           humanUserId: keptHumanId,
         }),
@@ -806,7 +806,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (check.isAi) {
       debugWarn(
         "[DBG-e46688 maybeDist] keep_ai_assignee",
-        JSON.stringify({ convId: input.conversationId, assignee }),
+        () => JSON.stringify({ convId: input.conversationId, assignee }),
       );
       // Fora do expediente a IA pode falar, mas o lead entra na espera
       // para distribuir quando o primeiro consultor ficar elegível.
@@ -844,14 +844,14 @@ export async function maybeDistributeNewInboundTicket(input: {
         ) {
           debugWarn(
             "[DBG-e46688 maybeDist] keep_assigned_human",
-            JSON.stringify({ convId: input.conversationId, assignee }),
+            () => JSON.stringify({ convId: input.conversationId, assignee }),
           );
           return;
         }
         if (!conv?.hasHumanReply) {
           debugWarn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: input.conversationId,
               assignee,
             }),
@@ -872,7 +872,7 @@ export async function maybeDistributeNewInboundTicket(input: {
         } else {
           debugWarn(
             "[DBG-e46688 maybeDist] keep_eligible_assignee",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: input.conversationId,
               assignee,
               isAi: check.isAi,
@@ -883,7 +883,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       } else {
         debugWarn(
           "[DBG-e46688 maybeDist] keep_eligible_assignee",
-          JSON.stringify({
+          () => JSON.stringify({
             convId: input.conversationId,
             assignee,
             isAi: check.isAi,
@@ -894,7 +894,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     } else {
       debugWarn(
         "[DBG-e46688 maybeDist] clear_ineligible_assignee",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           assignee,
           reason: check.reason,
@@ -926,7 +926,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (aiUserId) {
       debugWarn(
         "[DBG-e46688 maybeDist] first_attendance_ai",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           aiUserId,
         }),
@@ -949,7 +949,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] widget check",
-      JSON.stringify({ widgetActive, convId: input.conversationId }),
+      () => JSON.stringify({ widgetActive, convId: input.conversationId }),
     );
     // #endregion
     if (!widgetActive) return;
@@ -987,7 +987,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] result",
-      JSON.stringify({
+      () => JSON.stringify({
         convId: input.conversationId,
         remappedPending: remapped.count,
         success: result.success,
@@ -1004,7 +1004,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] threw",
-      JSON.stringify({
+      () => JSON.stringify({
         convId: input.conversationId,
         err: e instanceof Error ? e.message : String(e),
       }),
@@ -1135,7 +1135,7 @@ export async function processPendingDistributionQueue(opts: {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
     debugWarn(
       "[DBG-e46688 retry] widget check",
-      JSON.stringify({
+      () => JSON.stringify({
         widgetActive,
         trigger: opts.trigger,
         userId: opts.userId ?? null,
@@ -1351,7 +1351,7 @@ export async function processPendingDistributionQueue(opts: {
           });
           debugWarn(
             "[DBG-e46688 retry] executeDistribution",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: it.id,
               departmentId: it.departmentId,
               success: result.success,
