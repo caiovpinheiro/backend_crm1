@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { getCampaigns, createCampaign, type CreateCampaignInput } from "@/services/campaigns";
 
 const CAMPAIGN_TYPES = new Set(["TEMPLATE", "TEXT", "AUTOMATION"]);
 
-// withOrgContext estabelece o RequestContext (organizationId/userId) via
-// AsyncLocalStorage — necessario porque getCampaigns/createCampaign usam
-// withOrgFromCtx() internamente para escopar por tenant. Sem o wrapper, o
-// contexto fica vazio e o create quebra com "RequestContext sem organizationId".
 export async function GET(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "campaign:view");
+    if (denied) return denied;
     try {
       const { searchParams } = new URL(request.url);
       const result = await getCampaigns({
@@ -34,6 +33,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "campaign:create");
+    if (denied) return denied;
     try {
       const body = (await request.json()) as Record<string, unknown>;
 

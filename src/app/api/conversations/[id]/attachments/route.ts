@@ -9,7 +9,6 @@ import {
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
 } from "@/lib/audio-convert";
-import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { enqueueMetaAttach } from "@/lib/queue";
@@ -667,27 +666,19 @@ export async function POST(request: Request, context: RouteContext) {
         let delivery: "voice" | "audio" | "document" | null = null;
         let queuedMetaError: string | null = null;
         if (!job) {
-          console.warn("[meta-attach] enqueue falhou (jobId/queue) — upload+send síncrono na API");
-          try {
-            const result = await processMetaAttach(jobPayload);
-            sendStatus = result.sendStatus;
-            storedType = result.messageType;
-            delivery = result.audioDelivery;
-            queuedMetaError = result.metaError;
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : "Falha no envio de mídia";
-            await prisma.message
-              .updateMany({
-                where: { id: msgRow.id, sendStatus: "pending" },
-                data: { sendStatus: "failed", sendError: errMsg },
-              })
-              .catch(() => {});
-            await prisma.conversation
-              .update({ where: { id: conv.id }, data: { hasError: true } })
-              .catch(() => {});
-            sendStatus = "failed";
-            queuedMetaError = errMsg;
-          }
+          const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
+          console.warn("[meta-attach] enqueue falhou — marcando failed (sem sync na API)");
+          await prisma.message
+            .updateMany({
+              where: { id: msgRow.id, sendStatus: "pending" },
+              data: { sendStatus: "failed", sendError: errMsg },
+            })
+            .catch(() => {});
+          await prisma.conversation
+            .update({ where: { id: conv.id }, data: { hasError: true } })
+            .catch(() => {});
+          sendStatus = "failed";
+          queuedMetaError = errMsg;
         }
 
         return NextResponse.json({

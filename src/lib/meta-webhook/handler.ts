@@ -2432,14 +2432,22 @@ async function executePostBody(
       if (queued) {
         return NextResponse.json({ status: "accepted" });
       }
+      // Sem fail-open sync: não processar no processo da API. Meta reintenta.
       log.warn(
-        "enqueue meta-webhook falhou (Redis?) — processando síncrono (fail-open)",
+        "enqueue meta-webhook falhou (Redis?) — 503 para retry da Meta (sem sync na API)",
       );
-    } else {
-      log.warn(
-        "MetaWebhookEvent sem organizationId — processando síncrono (fail-open)",
+      return NextResponse.json(
+        { status: "unavailable", message: "Fila Meta indisponível" },
+        { status: 503 },
       );
     }
+    log.warn(
+      "MetaWebhookEvent sem organizationId — 503 para retry (sem sync na API)",
+    );
+    return NextResponse.json(
+      { status: "unavailable", message: "Evento Meta sem organização" },
+      { status: 503 },
+    );
   }
 
   return processMetaWebhookPayload(body, { metaWebhookEventId });

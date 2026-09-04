@@ -48,8 +48,8 @@ describe("distribution execute queue", () => {
     expect(id).not.toMatch(/:/);
   });
 
-  it("MANUAL do inbox roda inline; o resto segue a fila", () => {
-    expect(shouldRunManualExecuteInline("MANUAL")).toBe(true);
+  it("nenhum triggerSource roda inline na API (fila + priority MANUAL)", () => {
+    expect(shouldRunManualExecuteInline("MANUAL")).toBe(false);
     expect(shouldRunManualExecuteInline("SYSTEM")).toBe(false);
     expect(shouldRunManualExecuteInline("AI_AGENT")).toBe(false);
   });

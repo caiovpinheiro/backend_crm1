@@ -25,7 +25,12 @@ export function assertImportPermission(session: SessionLike): NextResponse | nul
  * de 1 import ativo por org (M6). Estenda com DEAL_IMPORT quando o import de
  * deals migrar para o fluxo assíncrono.
  */
-const ACTIVE_IMPORT_TYPES = ["CONTACT_IMPORT", "DEAL_IMPORT"] as const;
+const ACTIVE_IMPORT_TYPES = [
+  "CONTACT_IMPORT",
+  "DEAL_IMPORT",
+  "ACADEMIC_IMPORT",
+  "COMPANY_IMPORT",
+] as const;
 
 /**
  * M6 — permite apenas 1 importação de arquivo ATIVA (PENDING/PROCESSING) por

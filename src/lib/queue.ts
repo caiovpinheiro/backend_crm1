@@ -50,6 +50,8 @@ export const IMPORT_ETL_QUEUE_NAME = "import-etl" as const;
 export const IMPORT_ETL_JOB_NAMES = {
   contactImport: "contact-import",
   dealImport: "deal-import",
+  academicImport: "academic-import",
+  companyImport: "company-import",
 } as const;
 export type ImportEtlJobName =
   (typeof IMPORT_ETL_JOB_NAMES)[keyof typeof IMPORT_ETL_JOB_NAMES];
@@ -780,8 +782,8 @@ function getMetaWebhookQueue(): Queue<MetaWebhookJobPayload> | null {
  * `worker-meta-webhook`. `jobId = metaWebhookEventId` deduplica retries
  * da Meta (mesmo evento não vira dois jobs).
  *
- * Retorna `null` se Redis indisponível — o caller decide o fallback
- * (processar síncrono para não perder o evento).
+ * Retorna `null` se Redis indisponível — o caller deve responder 503
+ * (Meta reintenta); não processar síncrono na API.
  */
 export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
   const queue = getMetaWebhookQueue();
@@ -816,7 +818,8 @@ function getMetaAttachQueue(): Queue<MetaAttachPayload> | null {
  * Enfileira upload Graph + envio Cloud API de um anexo já persistido.
  * `jobId = meta-attach-${messageId}` deduplica retries do produtor.
  * BullMQ rejeita `:` em custom jobId — usar hífen.
- * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller faz fallback síncrono.
+ * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller marca
+ * a mensagem como failed (sem Graph sync na API).
  */
 export async function enqueueMetaAttach(payload: MetaAttachPayload) {
   const queue = getMetaAttachQueue();
@@ -859,7 +862,8 @@ function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
  * Enfileira sendText/sendTemplate Graph de uma mensagem já persistida (`pending`).
  * `jobId = meta-outbound-${messageId}` deduplica retries do produtor.
  * BullMQ rejeita `:` em custom jobId — usar hífen.
- * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller faz fallback síncrono.
+ * Retorna `null` se enqueue falhar (Redis, jobId, fila) — o caller marca
+ * a mensagem como failed (sem Graph sync na API).
  */
 export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
   const queue = getMetaOutboundQueue();

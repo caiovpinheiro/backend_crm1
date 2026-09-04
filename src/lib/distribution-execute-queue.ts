@@ -13,13 +13,15 @@ import {
   getBullConnection,
   isRedisConfigured,
 } from "@/lib/queue-connection";
-import type { DistributionTriggerSource } from "@/services/distribution/engine";
+import type { StuckInboundOptions } from "@/services/ai/stuck-inbound-distribution";
+import type {
+  DistributionResult,
+  DistributionTriggerSource,
+} from "@/services/distribution/engine";
 import type {
   RedistributeInput,
   RedistributeJobOutcome,
 } from "@/services/distribution/redistribute";
-import type { DistributionResult } from "@/services/distribution/engine";
-import type { StuckInboundOptions } from "@/services/ai/stuck-inbound-distribution";
 
 import { allowInlineDistributionFallback } from "@/lib/distribution-drain-queue";
 
@@ -119,7 +121,10 @@ function getDistributionExecuteEvents(): QueueEvents | null {
   return globalForExecute.distributionExecuteEvents;
 }
 
-function jobOpts(jobId: string | undefined): JobsOptions {
+function jobOpts(
+  jobId: string | undefined,
+  priority?: number,
+): JobsOptions {
   const attempts = readPositiveInt(
     process.env.DISTRIBUTION_EXECUTE_MAX_ATTEMPTS,
     3,
@@ -130,11 +135,23 @@ function jobOpts(jobId: string | undefined): JobsOptions {
   );
   return {
     ...(jobId ? { jobId } : {}),
+    ...(priority != null ? { priority } : {}),
     removeOnComplete: true,
     removeOnFail: { count: 200 },
     attempts,
     backoff: { type: "exponential", delay: backoffDelay },
   };
+}
+
+/** BullMQ: menor número = maior prioridade. MANUAL do inbox passa na frente. */
+function executePriority(payload: DistributionExecuteJobData): number | undefined {
+  if (
+    "triggerSource" in payload &&
+    payload.triggerSource === "MANUAL"
+  ) {
+    return 1;
+  }
+  return undefined;
 }
 
 async function addOrReuse(
@@ -144,7 +161,7 @@ async function addOrReuse(
 ): Promise<{ job: Job<DistributionExecuteJobData>; status: "added" | "exists" } | null> {
   const queue = getDistributionExecuteQueue();
   if (!queue) return null;
-  const opts = jobOpts(jobId);
+  const opts = jobOpts(jobId, executePriority(payload));
 
   try {
     const job = await queue.add(name, payload, opts);
@@ -259,51 +276,20 @@ export async function enqueueDistributionStuckInbound(
 }
 
 /**
- * Transferir / Distribuir do inbox (MANUAL) não pode depender da fila
- * `distribution-execute`. O worker de produção consome `distribution-drain`
- * (fila de espera); jobs MANUAL ficam waiting e o consultor vê falha.
- * IA/SYSTEM já chamam `executeDistribution` direto nos próprios processos.
+ * Antes MANUAL rodava inline na API (medo de starvation atrás do drain).
+ * Drain e execute são filas distintas; MANUAL agora vai pela fila com
+ * `priority: 1`. Mantido só como flag de teste / feature-toggle legado.
  */
 export function shouldRunManualExecuteInline(
-  triggerSource: DistributionTriggerSource,
+  _triggerSource: DistributionTriggerSource,
 ): boolean {
-  return triggerSource === "MANUAL";
-}
-
-async function discardWaitingExecuteJob(
-  jobId: string | undefined,
-): Promise<void> {
-  if (!jobId) return;
-  const queue = getDistributionExecuteQueue();
-  if (!queue) return;
-  try {
-    const existing = await queue.getJob(jobId);
-    if (!existing) return;
-    const state = await existing.getState();
-    if (state === "waiting" || state === "delayed" || state === "failed") {
-      await existing.remove().catch(() => {});
-    }
-  } catch {
-    /* fila instável — segue o inline */
-  }
+  return false;
 }
 
 export async function runDistributionExecuteOrInline(
   payload: DistributionExecutePayload,
   runInline: () => Promise<DistributionResult>,
 ): Promise<EnqueueWaitResult<DistributionResult>> {
-  if (shouldRunManualExecuteInline(payload.triggerSource)) {
-    await discardWaitingExecuteJob(distributionExecuteJobId(payload));
-    console.info(
-      "[distribution] manual execute inline",
-      JSON.stringify({
-        organizationId: payload.organizationId,
-        conversationId: payload.conversationId ?? null,
-        reassign: payload.reassign === true,
-      }),
-    );
-    return { kind: "result", result: await runInline() };
-  }
   const queued = await enqueueAndWaitDistributionExecute(payload);
   if (queued.kind !== "unavailable") return queued;
   if (allowInlineDistributionFallback()) {
