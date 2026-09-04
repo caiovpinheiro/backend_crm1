@@ -33,6 +33,7 @@
     "db:seed:saleshub": "tsx prisma/seed-sales-hub.ts",
     "db:seed:courses": "tsx prisma/seed-courses.ts",
     "db:seed:testusers": "tsx prisma/seed-test-users.ts",
+    "seed:volume": "tsx scripts/seed-volume.ts",
     "db:ensure-conversations": "tsx prisma/ensure-deal-conversations.ts",
     "db:studio": "prisma studio",
     "check:migrations": "tsx scripts/check-migrations.ts",
