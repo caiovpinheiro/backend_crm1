@@ -14,6 +14,14 @@
  *   org_vol_small  (~200 conversas)
  *   org_vol_medium (~15k)
  *   org_vol_large  (~120k)
+ *
+ * Schema vs DB local:
+ *   O Prisma marca `Conversation.contactId` e `Conversation.channel` como
+ *   obrigatórios (NOT NULL). Este seed, ao semear, roda ALTER TABLE e torna
+ *   essas colunas nullable no Postgres para exercitar as bordas do SQL de
+ *   collapse (`contactId IS NULL` / `channel IS NULL`). Isso **diverge** do
+ *   schema.prisma — é intencional só no DB de volume/dev. Não rode em prod.
+ *   `--clean` remove as orgs volume; não restaura o NOT NULL automaticamente.
  */
 
 import "dotenv/config";
