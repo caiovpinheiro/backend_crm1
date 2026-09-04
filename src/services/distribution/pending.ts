@@ -28,7 +28,7 @@ import {
   isFreshDrainEnqueue,
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
-import { debugWarn } from "@/lib/debug-log";
+import { debugInfo, debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -447,7 +447,7 @@ function logCooldownSkip(
 ) {
   if (state.cooldownSkipLogged) return;
   state.cooldownSkipLogged = true;
-  console.info(
+  debugInfo(
     "[distribution] processPending skip — cooldown após passagem vazia",
     JSON.stringify({
       orgId,
@@ -728,7 +728,7 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
   });
 
   if (res.count > 0) {
-    console.info(
+    debugInfo(
       "[distribution] purgeUnansweredFromPendingQueue",
       JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
     );
@@ -1067,7 +1067,7 @@ export async function processPendingDistributionQueue(opts: {
     });
     if (!gate.proceed) {
       armFruitlessCooldown(state, "AT_CAPACITY", orgId);
-      console.info(
+      debugInfo(
         "[distribution] processPending skip — at capacity",
         JSON.stringify({
           orgId,
@@ -1109,7 +1109,7 @@ export async function processPendingDistributionQueue(opts: {
     // para não perder o dept de outro consultor que ficou elegível.
     if (!state.coalesceLogged) {
       state.coalesceLogged = true;
-      console.info(
+      debugInfo(
         "[distribution] processPending coalesce — already running",
         JSON.stringify({
           orgId,
@@ -1149,7 +1149,7 @@ export async function processPendingDistributionQueue(opts: {
     try {
       cancelledOrphans = await cancelStalePendingOrphans(orgId);
       if (cancelledOrphans > 0) {
-        console.info(
+        debugInfo(
           "[distribution] cancelStalePendingOrphans",
           JSON.stringify({
             orgId,
@@ -1177,7 +1177,7 @@ export async function processPendingDistributionQueue(opts: {
       const pending = await prisma.conversation.count({
         where: await getWaitingQueueWhere(),
       });
-      console.info(
+      debugInfo(
         "[distribution] processPending skip — nenhum consultor elegível",
         JSON.stringify({
           orgId,
@@ -1207,7 +1207,7 @@ export async function processPendingDistributionQueue(opts: {
         const pending = await prisma.conversation.count({
           where: await getWaitingQueueWhere(),
         });
-        console.info(
+        debugInfo(
           "[distribution] processPending skip — userId não elegível",
           JSON.stringify({
             orgId,
@@ -1324,7 +1324,7 @@ export async function processPendingDistributionQueue(opts: {
             assignedDeltaByUser,
           )
         ) {
-          console.info(
+          debugInfo(
             "[distribution] processPending cap — scope capacity exhausted",
             JSON.stringify({
               orgId,
@@ -1374,7 +1374,7 @@ export async function processPendingDistributionQueue(opts: {
                   focus &&
                   liveFreeCapacityForUser(focus, assignedDeltaByUser) <= 0
                 ) {
-                  console.info(
+                  debugInfo(
                     "[distribution] processPending cap — user budget exhausted",
                     JSON.stringify({
                       orgId,
@@ -1441,7 +1441,7 @@ export async function processPendingDistributionQueue(opts: {
       opts.trigger === "manual" ||
       opts.trigger === "scheduled"
     ) {
-      console.info(
+      debugInfo(
         "[distribution] processPendingDistributionQueue",
         JSON.stringify({
           orgId,
@@ -1571,7 +1571,7 @@ export async function enqueueProcessPendingOrRun(opts: {
     if (shouldSkipCapacityReleasedFruitlessCooldown(opts.trigger, fruitless)) {
       if (!state.cooldownSkipLogged) {
         state.cooldownSkipLogged = true;
-        console.info(
+        debugInfo(
           "[distribution] drain enqueue skipped — fruitless cooldown armed",
           JSON.stringify({
             orgId,
@@ -1599,7 +1599,7 @@ export async function enqueueProcessPendingOrRun(opts: {
   });
   if (queued) {
     if (isFreshDrainEnqueue(queued)) {
-      console.info(
+      debugInfo(
         "[distribution] drain enqueued",
         JSON.stringify({
           orgId,

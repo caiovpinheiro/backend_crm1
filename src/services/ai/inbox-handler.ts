@@ -99,6 +99,7 @@ import {
   userWantsAiContinue,
   userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
+import { debugInfo } from "@/lib/debug-log";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { runAgent } from "@/services/ai/runner";
 
@@ -113,7 +114,7 @@ export type InboundAIArgs = {
 };
 
 function logAi(event: string, payload: Record<string, unknown>) {
-  console.info(
+  debugInfo(
     "[ai-attend]",
     JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
   );
