@@ -116,7 +116,7 @@ export type InboundAIArgs = {
 function logAi(event: string, payload: Record<string, unknown>) {
   debugInfo(
     "[ai-attend]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
+    () => JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
   );
 }
 

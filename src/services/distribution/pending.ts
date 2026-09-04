@@ -449,7 +449,7 @@ function logCooldownSkip(
   state.cooldownSkipLogged = true;
   debugInfo(
     "[distribution] processPending skip — cooldown após passagem vazia",
-    JSON.stringify({
+    () => JSON.stringify({
       orgId,
       trigger,
       via,
@@ -730,7 +730,7 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
   if (res.count > 0) {
     debugInfo(
       "[distribution] purgeUnansweredFromPendingQueue",
-      JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
+      () => JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
     );
   }
   return res.count;
@@ -1069,7 +1069,7 @@ export async function processPendingDistributionQueue(opts: {
       armFruitlessCooldown(state, "AT_CAPACITY", orgId);
       debugInfo(
         "[distribution] processPending skip — at capacity",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,
@@ -1111,7 +1111,7 @@ export async function processPendingDistributionQueue(opts: {
       state.coalesceLogged = true;
       debugInfo(
         "[distribution] processPending coalesce — already running",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           queuedTrigger: state.queuedTrigger,
@@ -1151,7 +1151,7 @@ export async function processPendingDistributionQueue(opts: {
       if (cancelledOrphans > 0) {
         debugInfo(
           "[distribution] cancelStalePendingOrphans",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             cancelled: cancelledOrphans,
@@ -1179,7 +1179,7 @@ export async function processPendingDistributionQueue(opts: {
       });
       debugInfo(
         "[distribution] processPending skip — nenhum consultor elegível",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           pending,
@@ -1209,7 +1209,7 @@ export async function processPendingDistributionQueue(opts: {
         });
         debugInfo(
           "[distribution] processPending skip — userId não elegível",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             userId: opts.userId,
@@ -1326,7 +1326,7 @@ export async function processPendingDistributionQueue(opts: {
         ) {
           debugInfo(
             "[distribution] processPending cap — scope capacity exhausted",
-            JSON.stringify({
+            () => JSON.stringify({
               orgId,
               trigger: opts.trigger,
               userId: opts.userId ?? null,
@@ -1376,7 +1376,7 @@ export async function processPendingDistributionQueue(opts: {
                 ) {
                   debugInfo(
                     "[distribution] processPending cap — user budget exhausted",
-                    JSON.stringify({
+                    () => JSON.stringify({
                       orgId,
                       trigger: opts.trigger,
                       userId: opts.userId,
@@ -1443,7 +1443,7 @@ export async function processPendingDistributionQueue(opts: {
     ) {
       debugInfo(
         "[distribution] processPendingDistributionQueue",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,
@@ -1573,7 +1573,7 @@ export async function enqueueProcessPendingOrRun(opts: {
         state.cooldownSkipLogged = true;
         debugInfo(
           "[distribution] drain enqueue skipped — fruitless cooldown armed",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             ttlMs,
@@ -1601,7 +1601,7 @@ export async function enqueueProcessPendingOrRun(opts: {
     if (isFreshDrainEnqueue(queued)) {
       debugInfo(
         "[distribution] drain enqueued",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,
