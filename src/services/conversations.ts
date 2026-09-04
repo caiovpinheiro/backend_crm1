@@ -187,6 +187,9 @@ const listSelect = {
   status: true,
   unreadCount: true,
   hasError: true,
+  /** Preciso no FE para Entrada vs Aguardando (mesmo predicado de `tabToWhere`). */
+  hasHumanReply: true,
+  hasAgentReply: true,
   lastInboundAt: true,
   lastMessageDirection: true,
   closedAt: true,
