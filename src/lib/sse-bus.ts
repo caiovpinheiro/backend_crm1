@@ -5,6 +5,7 @@ import {
   scheduleTabCountsInvalidation,
   shouldInvalidateInboxTabCounts,
 } from "@/lib/cache/keys";
+import { withInboxSseCard } from "@/lib/inbox-sse-card";
 import { metrics, safeLabel } from "@/lib/metrics";
 
 /**
@@ -152,6 +153,10 @@ class SseBus {
    * cai no chao (fail-closed pra evitar leak).
    *
    * Ex.: sseBus.publish("new_message", { organizationId: conv.organizationId, conversationId, ... })
+   *
+   * `new_message` / `conversation_updated` that can land a ticket in the
+   * inbox list get an extra `card` field (slim list DTO). See
+   * `withInboxSseCard`. Old clients ignore it.
    */
   publish(event: string, data: unknown) {
     const orgId =
@@ -194,24 +199,37 @@ class SseBus {
       scheduleTabCountsInvalidation(orgId);
     }
 
-    const envelope: SseEventEnvelope = { organizationId: orgId, data };
-
     metrics.sse.messages.inc({
       event: safeLabel(event),
       organization: safeLabel(orgId),
     });
 
+    void this.fanout(event, orgId, data);
+  }
+
+  private async fanout(event: string, orgId: string, data: unknown) {
+    let payload = data;
+    try {
+      payload = await withInboxSseCard(event, data);
+    } catch (e) {
+      console.error("[sse-bus] inbox card snapshot:", e);
+    }
+
+    const envelope: SseEventEnvelope = { organizationId: orgId, data: payload };
+
     if (sseRedisPubSubEnabled()) {
-      void (async () => {
-        try {
-          await this.ensureRedis();
-          if (!this.redisPub) return;
-          const payload = JSON.stringify({ event, organizationId: orgId, data });
-          await this.redisPub.publish(REDIS_CHANNEL, payload);
-        } catch (e) {
-          console.error("[sse-bus] publish Redis:", e);
-        }
-      })();
+      try {
+        await this.ensureRedis();
+        if (!this.redisPub) return;
+        const body = JSON.stringify({
+          event,
+          organizationId: orgId,
+          data: payload,
+        });
+        await this.redisPub.publish(REDIS_CHANNEL, body);
+      } catch (e) {
+        console.error("[sse-bus] publish Redis:", e);
+      }
       return;
     }
 

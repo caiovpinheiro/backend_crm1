@@ -15,6 +15,8 @@ import { withSystemContext } from "@/lib/webhook-context";
 
 import { processContactImport } from "@/jobs/import/contact-import.job";
 import { processDealsImport } from "@/jobs/import/deals-import.job";
+import { processAcademicImport } from "@/jobs/import/academic-import.job";
+import { processCompanyImport } from "@/jobs/import/company-import.job";
 import {
   markOperationFailed,
   truncateErrorMessage,
@@ -98,6 +100,12 @@ async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
       return;
     case IMPORT_ETL_JOB_NAMES.dealImport:
       await processDealsImport(job.data, job);
+      return;
+    case IMPORT_ETL_JOB_NAMES.academicImport:
+      await processAcademicImport(job.data, job);
+      return;
+    case IMPORT_ETL_JOB_NAMES.companyImport:
+      await processCompanyImport(job.data, job);
       return;
     default: {
       const { operationId, organizationId } = job.data;

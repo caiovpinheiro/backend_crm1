@@ -1,4 +1,4 @@
-generator client {
+﻿generator client {
   provider = "prisma-client-js"
 }
 
@@ -4939,6 +4939,10 @@ enum BulkOperationType {
   CONTACT_IMPORT
   /// Importação de negócios via arquivo (CSV/XLSX) processada pelo etl-worker.
   DEAL_IMPORT
+  /// Importação de matriculados (Excel/CSV) — etl-worker.
+  ACADEMIC_IMPORT
+  /// Importação de empresas (CSV/XLSX) — etl-worker.
+  COMPANY_IMPORT
   /// Encerra (resolve) múltiplas conversas em massa — processada pelo leads-worker.
   CONVERSATION_BULK_RESOLVE
   /// Reatribui ou remove o responsável de várias conversas — leads-worker.

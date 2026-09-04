@@ -1,60 +1,23 @@
 import { NextResponse } from "next/server";
+import { BulkOperationType } from "@prisma/client";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { assertNoActiveImport } from "@/lib/import-guard";
 import {
   readDelimiterFlag,
   readUpdateExistingFlag,
   readUploadedTable,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
-import { createCompany, updateCompany } from "@/services/companies";
+import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 
 const MAX_ROWS = 10_000;
 
-const KEY_ALIASES: Record<string, string> = {
-  nome: "name",
-  name: "name",
-  dominio: "domain",
-  domain: "domain",
-  website: "domain",
-  site: "domain",
-  setor: "industry",
-  industria: "industry",
-  industry: "industry",
-  porte: "size",
-  size: "size",
-  telefone: "phone",
-  phone: "phone",
-  endereco: "address",
-  address: "address",
-  cep: "cep",
-  cidade: "city",
-  city: "city",
-  estado: "state",
-  uf: "state",
-  state: "state",
-  notas: "notes",
-  notes: "notes",
-  observacoes: "notes",
-};
-
-function norm(h: string): string {
-  return h
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_|_$/g, "");
-}
-
-function cell(row: Record<string, string>, key: string): string {
-  return (row[key] ?? "").trim();
-}
-
 /**
  * POST /api/companies/import
- * CSV remapeado (1 linha = 1 empresa). Casa por nome (case-insensitive).
+ * CSV remapeado (1 linha = 1 empresa). Processamento no etl-worker (202).
  */
 export async function POST(request: Request) {
   try {
@@ -75,6 +38,14 @@ export async function POST(request: Request) {
       );
       if (denied) return denied;
 
+      const organizationId = authResult.user.organizationId;
+      if (!organizationId) {
+        return NextResponse.json({ message: "Sessão sem organização." }, { status: 401 });
+      }
+
+      const activeDenied = await assertNoActiveImport();
+      if (activeDenied) return activeDenied;
+
       const formData = await request.formData();
       const file = formData.get("file");
       if (!(file instanceof File)) {
@@ -86,8 +57,11 @@ export async function POST(request: Request) {
 
       const delimiter = readDelimiterFlag(formData);
       const updateExisting = readUpdateExistingFlag(formData);
-      const { headers, rows } = await readUploadedTable(file, delimiter);
+      const { rows } = await readUploadedTable(file, delimiter);
 
+      if (rows.length === 0) {
+        return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
+      }
       if (rows.length > MAX_ROWS) {
         return NextResponse.json(
           { message: `Limite de ${MAX_ROWS} linhas por importação.` },
@@ -95,69 +69,72 @@ export async function POST(request: Request) {
         );
       }
 
-      const headerMap = new Map<string, string>();
-      for (const h of headers) {
-        const key = KEY_ALIASES[norm(h)] ?? KEY_ALIASES[h] ?? h;
-        headerMap.set(h, key);
+      const lower = file.name.toLowerCase();
+      const ext = lower.endsWith(".xlsx")
+        ? "xlsx"
+        : lower.endsWith(".xls")
+          ? "xls"
+          : lower.endsWith(".ods")
+            ? "ods"
+            : "csv";
+      const fileName = generateFileName({ prefix: "companies", ext });
+      const buffer = Buffer.from(await file.arrayBuffer());
+      await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
+
+      const operation = await prisma.bulkOperation.create({
+        // Cast: Prisma Exact<> + $extends atrasa o enum novo no tipo gerado.
+        data: {
+          organizationId,
+          type: BulkOperationType.COMPANY_IMPORT,
+          status: "PENDING",
+          total: rows.length,
+          payload: {
+            fileName,
+            originalName: file.name,
+            updateExisting,
+            ...(delimiter ? { delimiter } : {}),
+          },
+          createdById: authResult.user.id,
+        } as never,
+        select: { id: true },
+      });
+
+      const job = await enqueueImportEtl(IMPORT_ETL_JOB_NAMES.companyImport, {
+        operationId: operation.id,
+        organizationId,
+        initiatedByUserId: authResult.user.id,
+        fileName,
+        originalName: file.name,
+        delimiter,
+        updateExisting,
+      });
+
+      if (!job) {
+        await prisma.bulkOperation.update({
+          where: { id: operation.id },
+          data: {
+            status: "FAILED",
+            finishedAt: new Date(),
+            errors: [
+              {
+                itemId: "__operation__",
+                message: "Fila de jobs indisponível (Redis offline)",
+                attempt: 0,
+                at: new Date().toISOString(),
+              },
+            ],
+          },
+        });
+        return NextResponse.json(
+          { message: "Fila de importação indisponível. Tente novamente." },
+          { status: 503 },
+        );
       }
 
-      let created = 0;
-      let updated = 0;
-      let skipped = 0;
-      const failed: { row: number; message: string }[] = [];
-
-      for (let i = 0; i < rows.length; i++) {
-        const raw = rows[i]!;
-        const mapped: Record<string, string> = {};
-        for (const [src, dest] of headerMap) {
-          mapped[dest] = (raw[src] ?? "").trim();
-        }
-
-        const name = cell(mapped, "name");
-        if (!name) {
-          failed.push({ row: i + 2, message: "Nome é obrigatório." });
-          continue;
-        }
-
-        try {
-          const existing = await prisma.company.findFirst({
-            where: { name: { equals: name, mode: "insensitive" } },
-            select: { id: true },
-          });
-
-          const payload = {
-            name,
-            domain: cell(mapped, "domain") || null,
-            industry: cell(mapped, "industry") || null,
-            size: cell(mapped, "size") || null,
-            phone: cell(mapped, "phone") || null,
-            address: cell(mapped, "address") || null,
-            cep: cell(mapped, "cep") || null,
-            city: cell(mapped, "city") || null,
-            state: cell(mapped, "state") || null,
-            notes: cell(mapped, "notes") || null,
-          };
-
-          if (existing) {
-            if (!updateExisting) {
-              skipped += 1;
-              continue;
-            }
-            await updateCompany(existing.id, payload);
-            updated += 1;
-          } else {
-            await createCompany(payload);
-            created += 1;
-          }
-        } catch (err) {
-          failed.push({
-            row: i + 2,
-            message: err instanceof Error ? err.message : "Falha ao gravar.",
-          });
-        }
-      }
-
-      return NextResponse.json({ created, updated, skipped, failed });
+      return NextResponse.json(
+        { operationId: operation.id, total: rows.length },
+        { status: 202 },
+      );
     });
   } catch (e) {
     console.error("[companies/import]", e);

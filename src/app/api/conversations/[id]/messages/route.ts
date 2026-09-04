@@ -18,7 +18,6 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
 import { enqueueMetaOutbound } from "@/lib/queue";
-import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
 import {
   platformFromConversationChannel,
@@ -50,6 +49,20 @@ async function stopAutomationsAfterHumanReply(
   } catch (err) {
     console.warn("[automation] cancel after human reply:", err);
   }
+}
+
+/** Consultor respondeu → card sai de Entrada/Aguardando. A API só
+ *  enfileira drain; o worker confere queueLimit. */
+function scheduleCapacityReleasedAfterHumanSend(userId?: string | null) {
+  void import("@/services/distribution/pending")
+    .then((m) =>
+      m.scheduleProcessPendingDistributionQueue({
+        trigger: "capacity_released",
+        delayMs: 400,
+        userId: userId ?? null,
+      }),
+    )
+    .catch(() => {});
 }
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -950,16 +963,9 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* colunas opcionais */ }
 
-      // Resposta do consultor libera vaga na fila (deixa de contar em
-      // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
-      void import("@/services/distribution/pending")
-        .then((m) =>
-          m.scheduleProcessPendingDistributionQueue({
-            trigger: "capacity_released",
-            delayMs: 400,
-          }),
-        )
-        .catch(() => {});
+      scheduleCapacityReleasedAfterHumanSend(
+        conv.assignedToId ?? authResult.user.id,
+      );
 
       void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
         fireTrigger("message_sent", {
@@ -1102,14 +1108,9 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* columns may not exist yet */ }
 
-      void import("@/services/distribution/pending")
-        .then((m) =>
-          m.scheduleProcessPendingDistributionQueue({
-            trigger: "capacity_released",
-            delayMs: 400,
-          }),
-        )
-        .catch(() => {});
+      scheduleCapacityReleasedAfterHumanSend(
+        conv.assignedToId ?? authResult.user.id,
+      );
 
       void stopAutomationsAfterHumanReply(conv.contactId);
 
@@ -1151,26 +1152,20 @@ export async function POST(request: Request, context: RouteContext) {
       let externalId: string | null = null;
       let sendErrorMsg: string | undefined;
       if (!job) {
-        console.warn("[meta-outbound] enqueue falhou (jobId/queue) — sendText síncrono na API");
-        try {
-          const result = await processMetaOutbound(outboundPayload);
-          sendStatus = result.sendStatus;
-          externalId = result.externalId;
-          sendErrorMsg = result.metaError ?? undefined;
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : "Falha no envio de texto";
-          await prisma.message
-            .updateMany({
-              where: { id: saved.id, sendStatus: "pending" },
-              data: { sendStatus: "failed", sendError: errMsg },
-            })
-            .catch(() => {});
-          await prisma.conversation
-            .update({ where: { id: conv.id }, data: { hasError: true } })
-            .catch(() => {});
-          sendStatus = "failed";
-          sendErrorMsg = errMsg;
-        }
+        // Sem fail-open sync na API — mensagem fica failed; UI pode reenviar.
+        const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
+        console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+        await prisma.message
+          .updateMany({
+            where: { id: saved.id, sendStatus: "pending" },
+            data: { sendStatus: "failed", sendError: errMsg },
+          })
+          .catch(() => {});
+        await prisma.conversation
+          .update({ where: { id: conv.id }, data: { hasError: true } })
+          .catch(() => {});
+        sendStatus = "failed";
+        sendErrorMsg = errMsg;
       }
 
       return NextResponse.json({
@@ -1222,16 +1217,9 @@ export async function POST(request: Request, context: RouteContext) {
       });
     } catch { /* columns may not exist yet */ }
 
-    // Resposta do consultor libera vaga na fila (deixa de contar em
-    // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
-    void import("@/services/distribution/pending")
-      .then((m) =>
-        m.scheduleProcessPendingDistributionQueue({
-          trigger: "capacity_released",
-          delayMs: 400,
-        }),
-      )
-      .catch(() => {});
+    scheduleCapacityReleasedAfterHumanSend(
+      conv.assignedToId ?? authResult.user.id,
+    );
 
     void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
       fireTrigger("message_sent", {

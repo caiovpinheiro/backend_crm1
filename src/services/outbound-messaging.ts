@@ -23,7 +23,6 @@ import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import type { TemplateVariableInput } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
-import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
 import { enqueueMetaOutbound } from "@/lib/queue";
 import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
@@ -1239,8 +1238,8 @@ export type SendTemplateArgs = {
  * Envia template aprovado da WABA na conversa.
  *
  * Produção: valida + persiste `pending` + enfileira `meta-outbound`
- * (worker-whatsapp faz Flow enrich + Graph sendTemplate). Fallback
- * síncrono só se Redis estiver down — mesmo contrato do sendText.
+ * (worker-whatsapp faz Flow enrich + Graph sendTemplate). Sem Redis,
+ * marca failed — não processa Graph no processo da API.
  */
 export async function sendTemplateToConversation(
   args: SendTemplateArgs,
@@ -1487,26 +1486,19 @@ export async function sendTemplateToConversation(
   let externalId: string | null = null;
   let sendErrorMsg: string | undefined;
   if (!job) {
-    console.warn("[meta-outbound] enqueue falhou (jobId/queue) — sendTemplate síncrono");
-    try {
-      const result = await processMetaOutbound(outboundPayload);
-      sendStatus = result.sendStatus;
-      externalId = result.externalId;
-      sendErrorMsg = result.metaError ?? undefined;
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Falha ao enviar template pelo WhatsApp.";
-      await prisma.message
-        .updateMany({
-          where: { id: saved.id, sendStatus: "pending" },
-          data: { sendStatus: "failed", sendError: errMsg },
-        })
-        .catch(() => {});
-      await prisma.conversation
-        .update({ where: { id: conv.id }, data: { hasError: true } })
-        .catch(() => {});
-      sendStatus = "failed";
-      sendErrorMsg = errMsg;
-    }
+    const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
+    console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+    await prisma.message
+      .updateMany({
+        where: { id: saved.id, sendStatus: "pending" },
+        data: { sendStatus: "failed", sendError: errMsg },
+      })
+      .catch(() => {});
+    await prisma.conversation
+      .update({ where: { id: conv.id }, data: { hasError: true } })
+      .catch(() => {});
+    sendStatus = "failed";
+    sendErrorMsg = errMsg;
   }
 
   return {
