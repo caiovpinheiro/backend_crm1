@@ -505,6 +505,33 @@ export async function GET(request: Request, context: RouteContext) {
       };
     };
 
+    // replyToId no banco = cuid interno; bolha usa externalId ?? id.
+    // Mapeia para o id de exibição pra o FE rolar até a citação.
+    const replyParentIds = [
+      ...new Set(
+        [...rows, ...historyTickets.flatMap((t) => t.rows)]
+          .map((r) => r.replyToId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    ];
+    const replyDisplayByInternalId = new Map<string, string>();
+    if (replyParentIds.length > 0) {
+      const parents = await prisma.message.findMany({
+        where: {
+          id: { in: replyParentIds },
+          ...userOrgFilter({ user: authResult.user }),
+        },
+        select: { id: true, externalId: true },
+      });
+      for (const p of parents) {
+        replyDisplayByInternalId.set(p.id, p.externalId ?? p.id);
+      }
+    }
+    const replyToDisplayId = (internalId: string | null | undefined) => {
+      if (!internalId) return null;
+      return replyDisplayByInternalId.get(internalId) ?? internalId;
+    };
+
     const messages: InboxMessageDto[] = rows.map((r) => {
       const ev = eventActorOf(r.id, r.senderName);
       return {
@@ -523,7 +550,7 @@ export async function GET(request: Request, context: RouteContext) {
           ? senderAvatarMap.get(ev.senderName.trim().toLowerCase()) ?? null
           : null,
       mediaUrl: r.mediaUrl,
-      replyToId: r.replyToId,
+      replyToId: replyToDisplayId(r.replyToId),
       replyToPreview: r.replyToPreview,
       reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
       sendStatus: r.sendStatus,
@@ -563,7 +590,7 @@ export async function GET(request: Request, context: RouteContext) {
           authorType: r.authorType as "human" | "bot" | "system",
           triggeredByName: r.triggeredByName ?? undefined,
           mediaUrl: r.mediaUrl,
-          replyToId: r.replyToId,
+          replyToId: replyToDisplayId(r.replyToId),
           replyToPreview: r.replyToPreview,
           reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
           sendStatus: r.sendStatus,

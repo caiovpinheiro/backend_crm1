@@ -22,6 +22,8 @@ const INBOX_SSE_CARD_SELECT = {
   status: true,
   unreadCount: true,
   hasError: true,
+  hasHumanReply: true,
+  hasAgentReply: true,
   lastInboundAt: true,
   lastMessageDirection: true,
   closedAt: true,
@@ -57,6 +59,8 @@ export type InboxSseCard = {
   status: string;
   unreadCount: number;
   hasError: boolean;
+  hasHumanReply: boolean;
+  hasAgentReply: boolean;
   lastInboundAt: string | null;
   lastMessageDirection: string | null;
   closedAt: string | null;
@@ -159,6 +163,12 @@ function rowToCard(
     lastMessageDirection = "out";
     updatedAt = lastMessageAt;
   }
+  // Preview outbound no evento: promove reply contável mesmo se o SELECT
+  // correr num instante em que o UPDATE ainda não commitou (race rara).
+  const hasHumanReply =
+    preview?.direction === "out" ? true : Boolean(row.hasHumanReply);
+  const hasAgentReply =
+    preview?.direction === "out" ? true : Boolean(row.hasAgentReply);
   return {
     id: row.id,
     number: row.number,
@@ -166,6 +176,8 @@ function rowToCard(
     status: row.status,
     unreadCount: row.unreadCount,
     hasError: row.hasError,
+    hasHumanReply,
+    hasAgentReply,
     lastInboundAt,
     lastMessageDirection,
     closedAt: iso(row.closedAt),
