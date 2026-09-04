@@ -2028,8 +2028,9 @@ async function computeTabCounts(
   });
   if (oneSql) return oneSql;
 
-  // Fallback: where não traduziu (filtro raro) — sequencial pra não
-  // esgotar o pool com 8 COUNT em paralelo.
+  // Fallback: where não traduziu (filtro raro). Paraleliza COUNT se o
+  // pool (DB_POOL_MAX) couber; senão sequencial — a agregada (oneSql)
+  // já foi tentada acima e falhou por where não traduzível.
   const lightTabs = TAB_LIST.filter(
     (t) => t !== "finalizados" && t !== "resolvidos",
   );
@@ -2050,14 +2051,7 @@ async function computeTabCounts(
       assigneeIdsByType,
     );
   };
-
-  const lightResults: Array<readonly [InboxCategoryTab, number]> = [];
-  for (const tab of lightTabs) {
-    lightResults.push([tab, await countTab(tab)]);
-  }
-  const resolvidos = await countTab("resolvidos");
-  const finalizados = await countTab("finalizados");
-  const abertas = await (() => {
+  const countAbertas = () => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
@@ -2067,8 +2061,8 @@ async function computeTabCounts(
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  })();
-  const ligar = await (() => {
+  };
+  const countLigar = () => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
@@ -2078,7 +2072,59 @@ async function computeTabCounts(
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(conditions, false, assigneeIdsByType);
+  };
+
+  // Mirror de defaultPoolMax em prisma-base (api=20) — sem export novo.
+  const poolMax = (() => {
+    const raw = process.env.DB_POOL_MAX?.trim();
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    const mode = (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
+    if (mode === "api-public") return 10;
+    if (!mode.startsWith("worker")) return 20;
+    if (mode === "worker-whatsapp") return 8;
+    if (mode === "worker-campaigns") return 16;
+    if (mode === "worker-meta-webhook") return 16;
+    if (mode === "worker-leads") return 10;
+    if (mode === "worker-distribution") return 4;
+    if (mode === "worker-automation") return 6;
+    return 4;
   })();
+  const parallelBudget = lightTabs.length + 4; // +resolvidos +finalizados +abertas +ligar
+
+  let lightResults: Array<readonly [InboxCategoryTab, number]>;
+  let resolvidos: number;
+  let finalizados: number;
+  let abertas: number;
+  let ligar: number;
+
+  if (poolMax < parallelBudget) {
+    lightResults = [];
+    for (const tab of lightTabs) {
+      lightResults.push([tab, await countTab(tab)]);
+    }
+    resolvidos = await countTab("resolvidos");
+    finalizados = await countTab("finalizados");
+    abertas = await countAbertas();
+    ligar = await countLigar();
+  } else {
+    const [light, res, fin, ab, lig] = await Promise.all([
+      Promise.all(
+        lightTabs.map(async (tab) => [tab, await countTab(tab)] as const),
+      ),
+      countTab("resolvidos"),
+      countTab("finalizados"),
+      countAbertas(),
+      countLigar(),
+    ]);
+    lightResults = light;
+    resolvidos = res;
+    finalizados = fin;
+    abertas = ab;
+    ligar = lig;
+  }
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
   record.resolvidos = resolvidos;
