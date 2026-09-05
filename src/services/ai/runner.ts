@@ -41,6 +41,8 @@ import {
   academicExamModalityRules,
   formatCanonicalPortalAccessHint,
   formatExamAccessHint,
+  formatFirstAccessHint,
+  formatPasswordResetHint,
   formatParticipationCertificateHint,
   formatPoloAddressesHint,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
@@ -269,6 +271,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             .join("\n"),
         )
       : "";
+    const firstAccessHint = isAcademicAttendance
+      ? formatFirstAccessHint(args.userMessage, recentContextForHint)
+      : "";
+    const passwordResetHint = isAcademicAttendance
+      ? formatPasswordResetHint(args.userMessage, recentContextForHint)
+      : "";
     const clockHint = isAcademicAttendance ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
@@ -277,6 +285,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       examAccessHint,
       poloAddressesHint,
       certificateHint,
+      firstAccessHint,
+      passwordResetHint,
       campaignDispatchBlock,
       clockHint,
     ]

@@ -97,6 +97,14 @@ const ACCESS_SYNONYMS: Array<{ match: RegExp; extra: string }> = [
     match: /\bduda\b/i,
     extra: "aplicativo duda app mobile",
   },
+  {
+    match: /primeiro\s*acesso|nunca (acessei|entrei)|criar senha|senha inicial/i,
+    extra: "primeiro acesso portal aluno novoportal tutorial duda",
+  },
+  {
+    match: /esqueci|redefinir senha|alterar senha|trocar senha/i,
+    extra: "alterar senha duda esqueci senha sms",
+  },
 ];
 
 function normalize(s: string): string {
@@ -161,6 +169,18 @@ export function scoreMessageModelMatch(
   if (wantsPc && nameN.includes("portal")) score += 4;
   if (wantsPc && nameN.includes("duda") && !nameN.includes("portal")) {
     score -= 1.5;
+  }
+  const wantsFirstAccess =
+    /primeiro\s*acesso|nunca (acessei|entrei)|criar senha|senha inicial/i.test(
+      query,
+    );
+  if (wantsFirstAccess && nameN.includes("primeiro") && nameN.includes("acesso")) {
+    score += 5;
+  }
+  const wantsReset =
+    /esqueci|redefinir senha|alterar senha|trocar senha/i.test(query);
+  if (wantsReset && nameN.includes("senha") && nameN.includes("duda")) {
+    score += 5;
   }
   return score;
 }

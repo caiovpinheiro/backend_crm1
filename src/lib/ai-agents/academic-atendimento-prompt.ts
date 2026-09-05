@@ -69,6 +69,74 @@ export function formatCanonicalPortalAccessHint(
   ].join("\n");
 }
 
+/** Tutorial oficial do time (modelo "Primeiro Acesso - MSG"). */
+export const OFFICIAL_FIRST_ACCESS_VIDEO_URL = "https://youtu.be/vFJP7a1EMsU";
+export const OFFICIAL_DUDA_ANDROID_URL =
+  "https://play.google.com/store/apps/details?id=br.com.cruzeirodosulvirtual";
+export const OFFICIAL_DUDA_IOS_URL =
+  "https://apps.apple.com/us/app/duda-aplicativo-do-estudante/id6451416655";
+
+const FIRST_ACCESS_INTENT_RE =
+  /primeiro\s*acesso|1[oº]?\s*acesso|nunca (acessei|entrei|loguei)|ainda n[aã]o (acessei|entrei|tenho senha|criei senha)|criar (minha )?senha|cadastrar senha|senha (inicial|provis[oó]ria)|como (fa[cç]o|eu )?(pra |para )?(entrar|acessar|criar senha).*(primeira|primeiro)/i;
+
+const PASSWORD_RESET_INTENT_RE =
+  /esqueci.*(senha)|n[aã]o (lembro|sei) (a |minha )?senha|recuperar senha|redefinir senha|trocar senha|alterar senha|resetar senha/i;
+
+/**
+ * Primeiro acesso ao portal — só o que o time manda: vídeo + link + Duda.
+ * PROIBIDO inventar botão "Primeiro Acesso" (o modelo não tem esse clique).
+ */
+export function formatFirstAccessHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  if (PASSWORD_RESET_INTENT_RE.test(q)) return "";
+  const inherited =
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    FIRST_ACCESS_INTENT_RE.test(recentContext);
+  if (!FIRST_ACCESS_INTENT_RE.test(q) && !inherited) return "";
+  return [
+    "",
+    "PRIMEIRO ACESSO — FONTE OFICIAL DO TIME (modelo Primeiro Acesso - MSG):",
+    "Acolha em 1 frase. ENTREGUE isto agora — não invente menu.",
+    `- Tutorial oficial (cole o link): ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `- Depois o Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `- Celular: app Duda — Android ${OFFICIAL_DUDA_ANDROID_URL} / iOS ${OFFICIAL_DUDA_IOS_URL}`,
+    '- PROIBIDO inventar botão, aba ou clique chamado *"Primeiro Acesso"*. Isso NÃO existe no playbook.',
+    "- PROIBIDO senha Nome123@ (isso é só certificado da Aula Inaugural, outro site).",
+    "- Se o modelo tiver TUTORIAL ANEXO, o sistema envia o vídeo depois do texto. Diga que segue o tutorial.",
+    "- NÃO pergunte se ele quer o passo a passo. NÃO transfira só por essa dúvida.",
+  ].join("\n");
+}
+
+/**
+ * Esqueci a senha — fluxo Duda/SMS do modelo "Alterar Senha (Duda)".
+ */
+export function formatPasswordResetHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  const inherited =
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    PASSWORD_RESET_INTENT_RE.test(recentContext);
+  if (!PASSWORD_RESET_INTENT_RE.test(q) && !inherited) return "";
+  return [
+    "",
+    "ESQUECI A SENHA — FONTE OFICIAL DO TIME (modelo Alterar Senha Duda):",
+    "1. Abra o *Duda* e informe o e-mail acadêmico",
+    "2. Toque em *Esqueci minha senha*",
+    "3. Confirme o telefone cadastrado e use o código **SMS**",
+    "PROIBIDO: link no e-mail, CPF+e-mail, 'olha no spam', botão inventado *Primeiro Acesso*.",
+    "Se o modelo tiver TUTORIAL ANEXO, o sistema envia o vídeo. Diga que segue o tutorial.",
+  ].join("\n");
+}
+
 const EXAM_ACCESS_INTENT_RE =
   /prova|avaliac|avalia[cç][aã]o|plataforma de prova|como (fa[cç]o |eu )?(pra |para )?(ver|acessar|entrar|fazer).*(prova|avaliac)|onde (fica|vejo|acesso|entro).*(prova|avaliac)/i;
 
@@ -340,7 +408,8 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 8. INÍCIO DAS AULAS: depende da turma. Sem data → diga que depende da turma/turma no portal e oriente a ver na Área do Aluno. NÃO chame transfer/execute_distribution nesta dúvida — responda você. Só distribua se o aluno **pedir** humano/consultor ou insistir após sua orientação.
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
 8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
-9. ESQUECI MINHA SENHA: fluxo por SMS + telefone atualizado. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam".
+9. ESQUECI MINHA SENHA: Duda → *Esqueci minha senha* → telefone cadastrado → código **SMS**. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam", inventar botão *Primeiro Acesso*.
+9b. PRIMEIRO ACESSO (nunca entrou / criar senha pela primeira vez): ENTREGUE o tutorial oficial \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + o portal \`${OFFICIAL_STUDENT_PORTAL_URL}\` + Duda (loja Android/iOS). PROIBIDO inventar clique/aba *"Primeiro Acesso"*. PROIBIDO misturar com senha Nome123@ do certificado.
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
