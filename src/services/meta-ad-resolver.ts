@@ -35,39 +35,80 @@ type ResolvedAd = {
   utmCampaign: string | null;
   utmContent: string | null;
   utmTerm: string | null;
+  utmId: string | null;
+  utmReferrer: string | null;
+  referrer: string | null;
+  gclid: string | null;
+  fbclid: string | null;
+  googleClientId: string | null;
+  ttadId: string | null;
+  ttadName: string | null;
+};
+
+const EMPTY_TRACKING = {
+  utmSource: null as string | null,
+  utmMedium: null as string | null,
+  utmCampaign: null as string | null,
+  utmContent: null as string | null,
+  utmTerm: null as string | null,
+  utmId: null as string | null,
+  utmReferrer: null as string | null,
+  referrer: null as string | null,
+  gclid: null as string | null,
+  fbclid: null as string | null,
+  googleClientId: null as string | null,
+  ttadId: null as string | null,
+  ttadName: null as string | null,
 };
 
 /**
- * Parseia a string `url_tags` do Ad (Marketing API). Formato típico:
- *   "utm_source=peideinafarofa&utm_medium=z%C3%A9leitor&utm_campaign=..."
- * Decodifica %xx e extrai os 5 UTMs padrão. Outros parâmetros são ignorados.
+ * Parseia `url_tags` do Ad ou querystring de uma URL (`source_url` do referral).
+ * Extrai UTMs padrão + click IDs (estilo Kommo Informação rastreada).
  */
-function parseUrlTags(urlTags: string | null | undefined): {
-  utmSource: string | null;
-  utmMedium: string | null;
-  utmCampaign: string | null;
-  utmContent: string | null;
-  utmTerm: string | null;
-} {
-  const empty = {
-    utmSource: null,
-    utmMedium: null,
-    utmCampaign: null,
-    utmContent: null,
-    utmTerm: null,
-  };
-  if (!urlTags || typeof urlTags !== "string") return empty;
+export function parseTrackingParams(raw: string | null | undefined): typeof EMPTY_TRACKING {
+  if (!raw || typeof raw !== "string") return { ...EMPTY_TRACKING };
   try {
-    const params = new URLSearchParams(urlTags.startsWith("?") ? urlTags.slice(1) : urlTags);
+    let search = raw.trim();
+    if (search.startsWith("http://") || search.startsWith("https://")) {
+      const u = new URL(search);
+      search = u.search.startsWith("?") ? u.search.slice(1) : u.search;
+      // referrer = URL sem query quando veio URL completa
+      const referrerBase = `${u.origin}${u.pathname}`;
+      const params = new URLSearchParams(search);
+      return {
+        utmSource: params.get("utm_source"),
+        utmMedium: params.get("utm_medium"),
+        utmCampaign: params.get("utm_campaign"),
+        utmContent: params.get("utm_content"),
+        utmTerm: params.get("utm_term"),
+        utmId: params.get("utm_id"),
+        utmReferrer: params.get("utm_referrer"),
+        referrer: params.get("referrer") || referrerBase || null,
+        gclid: params.get("gclid"),
+        fbclid: params.get("fbclid"),
+        googleClientId: params.get("gclientid") || params.get("_ga") || params.get("client_id"),
+        ttadId: params.get("ttad_id") || params.get("ttclid"),
+        ttadName: params.get("ttad_name"),
+      };
+    }
+    const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
     return {
       utmSource: params.get("utm_source"),
       utmMedium: params.get("utm_medium"),
       utmCampaign: params.get("utm_campaign"),
       utmContent: params.get("utm_content"),
       utmTerm: params.get("utm_term"),
+      utmId: params.get("utm_id"),
+      utmReferrer: params.get("utm_referrer"),
+      referrer: params.get("referrer"),
+      gclid: params.get("gclid"),
+      fbclid: params.get("fbclid"),
+      googleClientId: params.get("gclientid") || params.get("_ga") || params.get("client_id"),
+      ttadId: params.get("ttad_id") || params.get("ttclid"),
+      ttadName: params.get("ttad_name"),
     };
   } catch {
-    return empty;
+    return { ...EMPTY_TRACKING };
   }
 }
 
@@ -211,12 +252,117 @@ async function fetchAdFromPost(
     }
   }
 
-  const utms = parseUrlTags(urlTagsStr);
+  const utms = parseTrackingParams(urlTagsStr);
 
   return {
     status: "ok",
     error: null,
     data: { adId, adName, adsetId, adsetName, campaignId, campaignName, ...utms },
+  };
+}
+
+/** GET /{ad-id} — quando o referral já traz source_type=ad. */
+async function fetchAdById(
+  adId: string,
+  accessToken: string,
+): Promise<ResolutionResult> {
+  try {
+    const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
+    adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
+    const r = await fetch(adUrl.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (r.status === 401 || r.status === 403) {
+      return { status: "no_access", error: `HTTP ${r.status}`, data: null };
+    }
+    if (r.status === 429) {
+      return { status: "rate_limited", error: "HTTP 429", data: null };
+    }
+    if (r.status === 404) {
+      return { status: "not_found", error: "HTTP 404 do ad", data: null };
+    }
+    if (!r.ok) {
+      let body = "";
+      try {
+        body = (await r.text()).slice(0, 500);
+      } catch {
+        /* ignore */
+      }
+      return { status: "error", error: `HTTP ${r.status} ${body}`, data: null };
+    }
+    const a = (await r.json()) as Record<string, unknown>;
+    let adName: string | null = typeof a.name === "string" ? a.name : null;
+    let adsetId: string | null = null;
+    let adsetName: string | null = null;
+    let campaignId: string | null = null;
+    let campaignName: string | null = null;
+    const urlTagsStr = typeof a.url_tags === "string" ? a.url_tags : null;
+    const adset = a.adset as Record<string, unknown> | undefined;
+    if (adset) {
+      if (typeof adset.id === "string") adsetId = adset.id;
+      if (typeof adset.name === "string") adsetName = adset.name;
+      const camp = adset.campaign as Record<string, unknown> | undefined;
+      if (camp) {
+        if (typeof camp.id === "string") campaignId = camp.id;
+        if (typeof camp.name === "string") campaignName = camp.name;
+      }
+    }
+    const utms = parseTrackingParams(urlTagsStr);
+    return {
+      status: "ok",
+      error: null,
+      data: {
+        adId,
+        adName,
+        adsetId,
+        adsetName,
+        campaignId,
+        campaignName,
+        ...utms,
+      },
+    };
+  } catch (err) {
+    return {
+      status: "error",
+      error: err instanceof Error ? err.message : String(err),
+      data: null,
+    };
+  }
+}
+
+/** Monta o patch Prisma só com campos de rastreio não-nulos (não apaga o que já tem). */
+function trackingPatchFromResolved(
+  data: ResolvedAd | null,
+  opts?: { fillEmptyOnly?: Partial<Record<string, string | null>> },
+): Record<string, string | null | Date> {
+  if (!data) return {};
+  const cur = opts?.fillEmptyOnly ?? {};
+  const setIf = (key: string, value: string | null | undefined, currentKey?: string) => {
+    if (!value) return {};
+    const curKey = currentKey ?? key;
+    if (cur[curKey] != null && String(cur[curKey]).trim() !== "") return {};
+    return { [key]: value };
+  };
+  return {
+    ...setIf("adResolvedId", data.adId),
+    ...setIf("adResolvedName", data.adName),
+    ...setIf("adResolvedAdsetId", data.adsetId),
+    ...setIf("adResolvedAdsetName", data.adsetName),
+    ...setIf("adResolvedCampaignId", data.campaignId),
+    ...setIf("adResolvedCampaignName", data.campaignName),
+    ...setIf("adUtmSource", data.utmSource),
+    ...setIf("adUtmMedium", data.utmMedium),
+    ...setIf("adUtmCampaign", data.utmCampaign),
+    ...setIf("adUtmContent", data.utmContent),
+    ...setIf("adUtmTerm", data.utmTerm),
+    ...setIf("utmId", data.utmId),
+    ...setIf("utmReferrer", data.utmReferrer),
+    ...setIf("referrer", data.referrer),
+    ...setIf("gclid", data.gclid),
+    ...setIf("fbclid", data.fbclid),
+    ...setIf("googleClientId", data.googleClientId),
+    ...setIf("ttadId", data.ttadId),
+    ...setIf("ttadName", data.ttadName),
   };
 }
 
@@ -251,6 +397,14 @@ async function lookupCache(
       adUtmCampaign: true,
       adUtmContent: true,
       adUtmTerm: true,
+      utmId: true,
+      utmReferrer: true,
+      referrer: true,
+      gclid: true,
+      fbclid: true,
+      googleClientId: true,
+      ttadId: true,
+      ttadName: true,
     },
     orderBy: { adResolvedAt: "desc" },
   });
@@ -267,6 +421,14 @@ async function lookupCache(
     utmCampaign: cached.adUtmCampaign,
     utmContent: cached.adUtmContent,
     utmTerm: cached.adUtmTerm,
+    utmId: cached.utmId,
+    utmReferrer: cached.utmReferrer,
+    referrer: cached.referrer,
+    gclid: cached.gclid,
+    fbclid: cached.fbclid,
+    googleClientId: cached.googleClientId,
+    ttadId: cached.ttadId,
+    ttadName: cached.ttadName,
   };
 }
 
@@ -274,14 +436,74 @@ async function lookupCache(
  * Função pública — chame com `void` no handler do webhook para não
  * bloquear a resposta 200 à Meta. Faz cache lookup primeiro; se cache
  * miss, chama Graph API; persiste o resultado no contato.
+ *
+ * `sourceType`:
+ *  - `"ad"` → GET /{ad-id} (url_tags + campanha)
+ *  - `"post"` (ou outro) → resolve post→ad via promotion_info
  */
 export async function resolveAdAndPersistAsync(args: {
   contactId: string;
   organizationId: string;
   sourceId: string;
+  sourceType?: string | null;
   accessToken: string | null;
+  /** URL do referral (source_url) — preenche referrer/UTMs se vierem na query. */
+  sourceUrl?: string | null;
 }): Promise<void> {
   const { contactId, organizationId, sourceId, accessToken } = args;
+  const sourceType = (args.sourceType ?? "").toLowerCase();
+
+  // Sempre tenta enriquecer a partir do source_url do referral (síncrono, barato).
+  if (args.sourceUrl) {
+    const fromUrl = parseTrackingParams(args.sourceUrl);
+    const existing = await prisma.contact
+      .findUnique({
+        where: { id: contactId },
+        select: {
+          adUtmSource: true,
+          adUtmMedium: true,
+          adUtmCampaign: true,
+          adUtmContent: true,
+          adUtmTerm: true,
+          utmId: true,
+          utmReferrer: true,
+          referrer: true,
+          gclid: true,
+          fbclid: true,
+          googleClientId: true,
+          ttadId: true,
+          ttadName: true,
+        },
+      })
+      .catch(() => null);
+    const urlPatch = trackingPatchFromResolved(
+      {
+        adId: null,
+        adName: null,
+        adsetId: null,
+        adsetName: null,
+        campaignId: null,
+        campaignName: null,
+        ...fromUrl,
+      },
+      { fillEmptyOnly: (existing ?? {}) as Record<string, string | null> },
+    );
+    // source_url completa como referrer se ainda vazio
+    if (!existing?.referrer && args.sourceUrl) {
+      urlPatch.referrer = args.sourceUrl.slice(0, 2000);
+    }
+    if (Object.keys(urlPatch).length > 0) {
+      await prisma.contact
+        .update({ where: { id: contactId }, data: urlPatch })
+        .catch((e) => log.debug("falha ao gravar tracking do source_url (não-fatal):", e));
+    }
+  }
+
+  // Só source_url — sem Graph.
+  if (!sourceId || sourceId.startsWith("url:")) {
+    return;
+  }
+
   if (!accessToken) {
     await prisma.contact
       .update({
@@ -299,21 +521,39 @@ export async function resolveAdAndPersistAsync(args: {
   // Cache lookup
   const cached = await lookupCache(organizationId, sourceId).catch(() => null);
   if (cached) {
+    const existing = await prisma.contact
+      .findUnique({
+        where: { id: contactId },
+        select: {
+          adResolvedId: true,
+          adResolvedName: true,
+          adResolvedAdsetId: true,
+          adResolvedAdsetName: true,
+          adResolvedCampaignId: true,
+          adResolvedCampaignName: true,
+          adUtmSource: true,
+          adUtmMedium: true,
+          adUtmCampaign: true,
+          adUtmContent: true,
+          adUtmTerm: true,
+          utmId: true,
+          utmReferrer: true,
+          referrer: true,
+          gclid: true,
+          fbclid: true,
+          googleClientId: true,
+          ttadId: true,
+          ttadName: true,
+        },
+      })
+      .catch(() => null);
     await prisma.contact
       .update({
         where: { id: contactId },
         data: {
-          adResolvedId: cached.adId,
-          adResolvedName: cached.adName,
-          adResolvedAdsetId: cached.adsetId,
-          adResolvedAdsetName: cached.adsetName,
-          adResolvedCampaignId: cached.campaignId,
-          adResolvedCampaignName: cached.campaignName,
-          adUtmSource: cached.utmSource,
-          adUtmMedium: cached.utmMedium,
-          adUtmCampaign: cached.utmCampaign,
-          adUtmContent: cached.utmContent,
-          adUtmTerm: cached.utmTerm,
+          ...trackingPatchFromResolved(cached, {
+            fillEmptyOnly: (existing ?? {}) as Record<string, string | null>,
+          }),
           adResolvedAt: new Date(),
           adResolveStatus: "ok",
           adResolveError: null,
@@ -321,43 +561,85 @@ export async function resolveAdAndPersistAsync(args: {
       })
       .catch((e) => log.debug("falha ao gravar resultado cache (não-fatal):", e));
     log.info(
-      `Ad resolvido via cache — contato=${contactId} post=${sourceId} ad=${cached.adId}`,
+      `Ad resolvido via cache — contato=${contactId} source=${sourceId} ad=${cached.adId}`,
     );
     return;
   }
 
-  // Cache miss → Meta API
-  const result = await fetchAdFromPost(sourceId, accessToken);
+  // Cache miss → Meta API (ad direto ou post→ad)
+  const result =
+    sourceType === "ad"
+      ? await fetchAdById(sourceId, accessToken)
+      : await fetchAdFromPost(sourceId, accessToken);
+
+  const existing = await prisma.contact
+    .findUnique({
+      where: { id: contactId },
+      select: {
+        adResolvedId: true,
+        adResolvedName: true,
+        adResolvedAdsetId: true,
+        adResolvedAdsetName: true,
+        adResolvedCampaignId: true,
+        adResolvedCampaignName: true,
+        adUtmSource: true,
+        adUtmMedium: true,
+        adUtmCampaign: true,
+        adUtmContent: true,
+        adUtmTerm: true,
+        utmId: true,
+        utmReferrer: true,
+        referrer: true,
+        gclid: true,
+        fbclid: true,
+        googleClientId: true,
+        ttadId: true,
+        ttadName: true,
+      },
+    })
+    .catch(() => null);
+
+  // Se source_type=ad e a API falhou, ainda assim grava o ad_id conhecido.
+  const fallbackAd: ResolvedAd | null =
+    sourceType === "ad" && (!result.data || result.status !== "ok")
+      ? {
+          adId: sourceId,
+          adName: null,
+          adsetId: null,
+          adsetName: null,
+          campaignId: null,
+          campaignName: null,
+          ...EMPTY_TRACKING,
+        }
+      : null;
+
+  const data = result.data ?? fallbackAd;
 
   await prisma.contact
     .update({
       where: { id: contactId },
       data: {
-        adResolvedId: result.data?.adId ?? null,
-        adResolvedName: result.data?.adName ?? null,
-        adResolvedAdsetId: result.data?.adsetId ?? null,
-        adResolvedAdsetName: result.data?.adsetName ?? null,
-        adResolvedCampaignId: result.data?.campaignId ?? null,
-        adResolvedCampaignName: result.data?.campaignName ?? null,
-        adUtmSource: result.data?.utmSource ?? null,
-        adUtmMedium: result.data?.utmMedium ?? null,
-        adUtmCampaign: result.data?.utmCampaign ?? null,
-        adUtmContent: result.data?.utmContent ?? null,
-        adUtmTerm: result.data?.utmTerm ?? null,
+        ...trackingPatchFromResolved(data, {
+          fillEmptyOnly: (existing ?? {}) as Record<string, string | null>,
+        }),
+        // Em source_type=ad sempre garante adResolvedId = sourceId
+        ...(sourceType === "ad" && sourceId
+          ? { adResolvedId: existing?.adResolvedId || sourceId }
+          : {}),
         adResolvedAt: new Date(),
-        adResolveStatus: result.status,
-        adResolveError: result.error,
+        adResolveStatus: result.status === "ok" || sourceType === "ad" ? "ok" : result.status,
+        adResolveError: result.status === "ok" ? null : result.error,
       },
     })
     .catch((e) => log.error("Falha ao persistir resolução do ad:", e));
 
   if (result.status === "ok") {
     log.info(
-      `Ad resolvido via Meta — contato=${contactId} post=${sourceId} ad=${result.data?.adId} campanha="${result.data?.campaignName ?? "—"}"`,
+      `Ad resolvido via Meta — contato=${contactId} type=${sourceType || "post"} source=${sourceId} ad=${data?.adId} utm_source=${data?.utmSource ?? "—"} campanha="${data?.campaignName ?? "—"}"`,
     );
   } else {
     log.warn(
-      `Falha ao resolver post→ad — contato=${contactId} post=${sourceId} status=${result.status} erro=${result.error ?? "—"}`,
+      `Falha parcial ao resolver ad — contato=${contactId} type=${sourceType || "post"} source=${sourceId} status=${result.status} erro=${result.error ?? "—"}`,
     );
   }
 }
