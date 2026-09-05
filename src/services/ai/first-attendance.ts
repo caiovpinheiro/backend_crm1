@@ -391,28 +391,8 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Conversa já foi roteada para um departamento por handoff IA e tem um
-  // DistributionPending recente do agente → não reclama a conversa.
-  if (conv.departmentId) {
-    const recentAiHandoff = await prisma.distributionPending.findFirst({
-      where: {
-        triggerSource: { contains: "AI_AGENT" },
-        status: { in: ["PENDING", "RESOLVED"] },
-        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        OR: [{ conversationId: args.conversationId }, { contactId }],
-      },
-      select: { id: true },
-    });
-    if (recentAiHandoff) {
-      logAi("first_attendance_skip_dept_handoff", {
-        conversationId: args.conversationId,
-        contactId,
-        departmentId: conv.departmentId,
-        distributionPendingId: recentAiHandoff.id,
-      });
-      return null;
-    }
-  }
+  // Handoff RESOLVIDO (últimas 24h) não bloqueia: o operador já devolveu
+  // ao agente ou o ticket está livre. Só PENDING (acima) segura a fila.
 
   // Humano já respondeu nesta conversa → não rouba.
   if (conv.hasHumanReply && conv.assignedTo?.type === "HUMAN") {
