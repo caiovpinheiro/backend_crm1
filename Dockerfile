@@ -4,21 +4,19 @@ FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY prisma ./prisma
-# `npm install` com retry + backoff: o postinstall do `ffmpeg-static` baixa um
-# binario do GitHub Releases, que intermitentemente responde 504 (gateway
-# timeout) e quebra o build inteiro. Re-tentamos algumas vezes com espera
-# crescente para neutralizar a flakiness de rede sem precisar de cache.
-# Cache do npm entre builds (BuildKit cache mount) -- reduz ~30s/build.
+# Preferir `npm ci` (lockfile). Retry + backoff: postinstall do `ffmpeg-static`
+# baixa binário do GitHub Releases e intermitentemente responde 504 (#1120/#1121).
 # `--legacy-peer-deps`: conflito conhecido entre `@hookform/resolvers@5.x`
 # (peerOptional valibot@^1) e `valibot@0.39` (fixado via @typeschema/valibot).
-# O peer é *optional*, então tratar como npm 6 (legacy) é seguro.
 RUN --mount=type=cache,target=/root/.npm \
-    ( npm install --no-audit --no-fund --legacy-peer-deps \
-   || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund --legacy-peer-deps) \
-   || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund --legacy-peer-deps) \
-   || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund --legacy-peer-deps) )
+    ( npm ci --no-audit --no-fund --legacy-peer-deps \
+   || (echo "[npm ci] falhou — retry 1/5 em 20s..." && sleep 20 && npm ci --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm ci] falhou — retry 2/5 em 40s..." && sleep 40 && npm ci --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm ci] falhou — retry 3/5 em 60s..." && sleep 60 && npm ci --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm ci] falhou — fallback npm install em 30s..." && sleep 30 && npm install --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm install] falhou — retry final em 90s..." && sleep 90 && npm install --no-audit --no-fund --legacy-peer-deps) )
 
 COPY . .
 # Pasta `public` pode não existir no clone (vazia não vai pro Git); o runner precisa dela.

@@ -437,6 +437,13 @@ export type AdvancedDealFilters = {
   /** true = só leads sem origem (contato ausente ou source null/""). */
   withoutSource?: boolean;
 
+  /**
+   * Filtro por utm_source (Contact.adUtmSource) — informação rastreada.
+   * Pode incluir `SOURCE_NONE` para "sem utm_source".
+   */
+  utmSources?: string[];
+  withoutUtmSource?: boolean;
+
   /** Motivos de perda (Deal.lostReason) — match exato com a tabulação. */
   lostReasons?: string[];
 
@@ -706,6 +713,29 @@ function buildDealSourceCondition(
   return or.length === 1 ? or[0] : { OR: or };
 }
 
+/** Mesma semântica de origem, aplicada a Contact.adUtmSource. */
+function buildDealUtmSourceCondition(
+  utmSources?: string[],
+  withoutUtmSource?: boolean,
+): Prisma.DealWhereInput | null {
+  const real = (utmSources ?? []).filter((s) => s && s !== SOURCE_NONE);
+  const wantNone =
+    withoutUtmSource === true || (utmSources ?? []).includes(SOURCE_NONE);
+  const or: Prisma.DealWhereInput[] = [];
+  if (real.length) or.push({ contact: { is: { adUtmSource: { in: real } } } });
+  if (wantNone) {
+    or.push({
+      OR: [
+        { contactId: null },
+        { contact: { is: { adUtmSource: null } } },
+        { contact: { is: { adUtmSource: "" } } },
+      ],
+    });
+  }
+  if (or.length === 0) return null;
+  return or.length === 1 ? or[0] : { OR: or };
+}
+
 /**
  * Traduz `AdvancedDealFilters` para `Prisma.DealWhereInput`.
  * O retorno deve ser somado às outras condições via `AND` em `dealWhere`.
@@ -754,6 +784,12 @@ export async function buildDealWhereFromFilters(
 
   const sourceCond = buildDealSourceCondition(filters.sources, filters.withoutSource);
   if (sourceCond) conditions.push(sourceCond);
+
+  const utmSourceCond = buildDealUtmSourceCondition(
+    filters.utmSources,
+    filters.withoutUtmSource,
+  );
+  if (utmSourceCond) conditions.push(utmSourceCond);
 
   if (filters.lostReasons && filters.lostReasons.length > 0) {
     conditions.push({ lostReason: { in: filters.lostReasons } });
@@ -1050,6 +1086,11 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   if (sources) out.sources = sources;
   const ws = asBool(o.withoutSource);
   if (ws) out.withoutSource = ws;
+
+  const utmSources = asStringArray(o.utmSources);
+  if (utmSources) out.utmSources = utmSources;
+  const wus = asBool(o.withoutUtmSource);
+  if (wus) out.withoutUtmSource = wus;
 
   const lostReasons = asStringArray(o.lostReasons);
   if (lostReasons) out.lostReasons = lostReasons;

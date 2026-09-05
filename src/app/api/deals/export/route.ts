@@ -13,6 +13,7 @@ import {
   buildDealWhereFromFilters,
   parseAdvancedDealFiltersFromParams,
 } from "@/services/kanban-filters";
+import { TRACKING_EXPORT_COLUMNS } from "@/lib/contact-tracking-fields";
 
 const MAX_ROWS = 100_000;
 const BATCH_SIZE = 400;
@@ -95,6 +96,7 @@ export async function GET(request: Request) {
         "Empresa do contato",
         "Ciclo de vida do contato",
         "Origem do contato",
+        ...TRACKING_EXPORT_COLUMNS.map((c) => c.header),
         "Tags",
         "Previsão de fechamento",
         "Motivo da perda",
@@ -226,6 +228,12 @@ export async function GET(request: Request) {
                     deal.contact?.company?.name ?? "",
                     deal.contact?.lifecycleStage ?? "",
                     deal.contact?.source ?? "",
+                    ...TRACKING_EXPORT_COLUMNS.map(
+                      (col) =>
+                        ((deal.contact as Record<string, unknown> | null | undefined)?.[
+                          col.key
+                        ] as string | null | undefined) ?? "",
+                    ),
                     deal.tags
                       .map((t) => t.tag?.name)
                       .filter((n): n is string => !!n)

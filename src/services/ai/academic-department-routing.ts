@@ -567,6 +567,70 @@ export function isCourseShoppingInquiry(
   return false;
 }
 
+/** TCE só de prazo/documentos — a IA oriente no AVA, sem handoff. */
+export function messageAsksTceDeadlineOrDocuments(
+  userMessage?: string | null,
+): boolean {
+  const msg = normalize(userMessage ?? "");
+  if (!msg) return false;
+  if (!/\btce\b|termo de compromisso/.test(msg)) return false;
+  if (/\bassin/.test(msg)) return false;
+  return /(prazo|document|anexo|modelo|o que (eu )?preciso|quais (sao )?(os )?doc|entregar)/.test(
+    msg,
+  );
+}
+
+/** Assinar / enviar TCE pelo chat — handoff. */
+export function messageAsksTceSignature(userMessage?: string | null): boolean {
+  const msg = normalize(userMessage ?? "");
+  if (!msg) return false;
+  if (!/\btce\b|termo de compromisso/.test(msg)) return false;
+  if (messageAsksTceDeadlineOrDocuments(msg)) return false;
+  return /(assin|encaminh|mand(ar|e) (o |pelo |por )|enviar (o |pelo |por )|pelo whatsapp|por aqui|pra (voces )?assin)/.test(
+    msg,
+  );
+}
+
+/** "Tem disciplina X / estágio obrigatório no meu curso?" — handoff. */
+export function messageAsksCurriculumExistence(
+  userMessage?: string | null,
+): boolean {
+  const msg = normalize(userMessage ?? "");
+  if (!msg) return false;
+  if (/\b(dp|dependenc|reprovad|rematric)/.test(msg)) return false;
+  if (messageAsksTceDeadlineOrDocuments(msg)) return false;
+  if (messageAsksTceSignature(msg)) return false;
+
+  if (
+    /estagio/.test(msg) &&
+    /(obrigator|preciso (fazer|cursar)|tem que|tenho que|faz parte|no meu curso)/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+
+  const mentionsSubject = /(disciplina|materia)/.test(msg);
+  const asksExistence =
+    /(tem|existe|faz parte|preciso cursar|tenho que cursar|e obrigator|no meu curso)/.test(
+      msg,
+    );
+  if (mentionsSubject && asksExistence && /(curso|grade|matriz|curriculo)/.test(msg)) {
+    return true;
+  }
+  if (mentionsSubject && /no meu curso/.test(msg)) return true;
+  return false;
+}
+
+export function shouldHandoffCurriculumOrTce(
+  userMessage?: string | null,
+): boolean {
+  return (
+    messageAsksTceSignature(userMessage) ||
+    messageAsksCurriculumExistence(userMessage)
+  );
+}
+
 /**
  * Handoff imediato justificado pelo TEXTO do aluno (sem esperar confiança).
  * Pedido explícito de humano, retenção, ou dúvida comercial de curso/valor.
@@ -580,6 +644,7 @@ export function isImmediateAcademicHandoffJustified(
   if (!msg) return false;
   if (userWantsHumanDistribution(msg)) return true;
   if (isCourseShoppingInquiry(msg, policy)) return true;
+  if (shouldHandoffCurriculumOrTce(msg)) return true;
   if (inferDepartmentFromContext({ userMessage: msg, policy }) === "retencao") {
     return true;
   }

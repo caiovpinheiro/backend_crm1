@@ -1,3 +1,15 @@
+### 2026-09-05 — Origem/UTM em filtro, automação, import e export
+
+**Decisão.** Estender o que já existia para `Contact.source` (filtro Origem, condição `contact.source`) com: (1) filtro pipeline `utmSources` (`Contact.adUtmSource`); (2) campos UTM no catálogo de condições + triggers nativos; (3) import de contatos com colunas UTM e import de negócios com `contact_source`/`origem`; (4) export de contatos/negócios com colunas UTM. `createContact` passa a persistir tracking quando informado.
+
+**Contexto.** Pedido de filtro + condição "origem X" + import/export da informação rastreada.
+
+**Alternativas descartadas.** Filtrar todos os 13 campos UTM de uma vez (UI pesada). Snapshot no Deal.
+
+**Impacto.** `kanban-filters`, `filter-options`, import/export cores, automations UI, `contacts.create`.
+
+---
+
 ### 2026-09-05 — Auto-preenchimento da Informação rastreada no CTWA
 
 **Decisão.** No webhook Meta, ao identificar referral CTWA: (1) grava referral básico; (2) `resolveAdAndPersistAsync` busca metadados + `url_tags` tanto para `source_type=ad` quanto `post`; (3) parseia `source_url` e preenche UTMs/click IDs (`utm_*`, gclid, fbclid, ttad_*, referrer) sem sobrescrever o que já estava preenchido.

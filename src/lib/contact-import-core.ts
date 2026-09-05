@@ -24,6 +24,7 @@ import {
   updateContact,
 } from "@/services/contacts";
 import { upsertContactCustomFieldValues } from "@/services/custom-fields";
+import { pickTrackingFromImportRow } from "@/lib/contact-tracking-fields";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -85,6 +86,26 @@ const RESERVED_HEADERS = new Set<string>([
   "externalid",
   "kommo_contact_id",
   "contact_external_id",
+  // Informação rastreada (UTM / click IDs)
+  "utm_source",
+  "ad_utm_source",
+  "utm_medium",
+  "ad_utm_medium",
+  "utm_campaign",
+  "ad_utm_campaign",
+  "utm_content",
+  "ad_utm_content",
+  "utm_term",
+  "ad_utm_term",
+  "utm_id",
+  "utm_referrer",
+  "referrer",
+  "gclid",
+  "fbclid",
+  "gclientid",
+  "google_client_id",
+  "ttad_id",
+  "ttad_name",
 ]);
 
 /**
@@ -354,6 +375,7 @@ export async function processContactRow(
       lifecycleRaw && isValidLifecycleStage(lifecycleRaw) ? lifecycleRaw : undefined,
     companyId: companyId ?? undefined,
     assignedToId,
+    ...pickTrackingFromImportRow(row),
   };
 
   try {
