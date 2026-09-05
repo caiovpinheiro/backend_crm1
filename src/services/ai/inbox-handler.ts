@@ -60,6 +60,10 @@ import {
   shouldSendInauguralClassLink,
 } from "@/services/ai/inaugural-class-link";
 import {
+  buildFirstAccessPackMessage,
+  isFirstAccessIntent,
+} from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
   buildAudioHandoffMessage,
   detectInboundAudio,
   messageLooksLikeAudioNotice,
@@ -697,6 +701,35 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] inaugural class link intercept failed", e);
+    }
+
+    // Primeiro acesso: playbook oficial ANTES da fila/LLM. Senão um
+    // DistributionPending + sábado à noite vira "aguarde o humano".
+    if (isFirstAccessIntent(args.userMessage)) {
+      const authFa = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: assignee.id,
+        generationId: args.generationId,
+        since: startedAt,
+      });
+      if (authFa.ok) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildFirstAccessPackMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+        }).catch(() => null);
+        logAi("first_access_pack_sent", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return;
+      }
     }
 
     const openDeal = await prisma.deal.findFirst({

@@ -79,6 +79,22 @@ export const OFFICIAL_DUDA_IOS_URL =
 const FIRST_ACCESS_INTENT_RE =
   /primeiro\s*acesso|1[oº]?\s*acesso|nunca (acessei|entrei|loguei)|ainda n[aã]o (acessei|entrei|tenho senha|criei senha)|criar (minha )?senha|cadastrar senha|senha (inicial|provis[oó]ria)|como (fa[cç]o|eu )?(pra |para )?(entrar|acessar|criar senha).*(primeira|primeiro)/i;
 
+export function isFirstAccessIntent(userMessage: string): boolean {
+  return FIRST_ACCESS_INTENT_RE.test((userMessage ?? "").trim());
+}
+
+/** Pacote oficial — inbox manda isto sem passar por fila/LLM. */
+export function buildFirstAccessPackMessage(): string {
+  return [
+    "Te mando o vídeo com o passo a passo do primeiro acesso:",
+    "",
+    `Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+    `Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+  ].join("\n");
+}
+
 const PASSWORD_RESET_INTENT_RE =
   /esqueci.*(senha)|n[aã]o (lembro|sei) (a |minha )?senha|recuperar senha|redefinir senha|trocar senha|alterar senha|resetar senha/i;
 
