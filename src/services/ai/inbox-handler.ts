@@ -103,6 +103,7 @@ import {
 import { debugInfo } from "@/lib/debug-log";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { runAgent } from "@/services/ai/runner";
+import { sendAgentFollowUpMedia } from "@/services/ai/send-agent-media";
 
 export type InboundAIArgs = {
   conversationId: string;
@@ -1855,6 +1856,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         model: cfg.model,
         durationMs: Date.now() - startedAt.getTime(),
       });
+      if (result.followUpMedia?.length) {
+        const mediaCount = await sendAgentFollowUpMedia({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          attachments: result.followUpMedia,
+        }).catch((err) => {
+          console.warn(
+            "[ai-inbox] follow-up media falhou:",
+            err instanceof Error ? err.message : err,
+          );
+          return 0;
+        });
+        if (mediaCount) {
+          logAi("send_media_ok", {
+            conversationId: args.conversationId,
+            mediaCount,
+          });
+        }
+      }
       await closeAfterFarewellIfNeeded({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -1883,6 +1904,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         durationMs: Date.now() - startedAt.getTime(),
       });
       if (sendResult.status === "sent") {
+        if (result.followUpMedia?.length) {
+          const mediaCount = await sendAgentFollowUpMedia({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            attachments: result.followUpMedia,
+          }).catch((err) => {
+            console.warn(
+              "[ai-inbox] follow-up media falhou:",
+              err instanceof Error ? err.message : err,
+            );
+            return 0;
+          });
+          if (mediaCount) {
+            logAi("send_media_ok", {
+              conversationId: args.conversationId,
+              mediaCount,
+            });
+          }
+        }
         await closeAfterFarewellIfNeeded({
           conversationId: args.conversationId,
           contactId: args.contactId,

@@ -52,7 +52,9 @@ import {
 import { formatLocalClockHint } from "@/services/ai/idle-followup";
 import {
   formatMessageModelsBlock,
+  pickFollowUpMedia,
   retrieveRelevantMessageModels,
+  type AgentFaqMedia,
 } from "@/services/ai/message-models-retrieval";
 import {
   formatRetrievalBlock,
@@ -89,6 +91,8 @@ export type RunResult = {
   costUsd: number;
   autonomyMode: AIAgentAutonomy;
   toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
+  /// Tutorial do modelo interno casado — o inbox envia depois do texto.
+  followUpMedia?: AgentFaqMedia[];
   error?: string;
 };
 
@@ -208,18 +212,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
     // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
     // de retenção fica em message-models-retrieval.
-    const messageModelsBlock = isAcademicAttendance
-      ? formatMessageModelsBlock(
-          await retrieveRelevantMessageModels(args.userMessage, 3).catch(
-            (err) => {
-              console.warn(
-                `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
-              );
-              return [];
-            },
-          ),
+    const retrievedModels = isAcademicAttendance
+      ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
+          (err) => {
+            console.warn(
+              `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
+            );
+            return [];
+          },
         )
+      : [];
+    const messageModelsBlock = isAcademicAttendance
+      ? formatMessageModelsBlock(retrievedModels)
       : "";
+    const followUpMedia = pickFollowUpMedia(retrievedModels);
     // Últimos turnos: "quero sim" herda o assunto (portal/AVA) da pergunta anterior.
     const recentContextForHint = history
       .slice(-4)
@@ -408,6 +414,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         args: c.args,
         result: c.result,
       })),
+      followUpMedia: status === "COMPLETED" ? followUpMedia : [],
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
