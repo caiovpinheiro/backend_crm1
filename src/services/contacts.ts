@@ -1,6 +1,6 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
-import { sanitizeContactName } from "@/lib/display-name";
+import { defaultDealTitleForContact, sanitizeContactName } from "@/lib/display-name";
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
@@ -56,6 +56,54 @@ const LIFECYCLE_STAGES: LifecycleStage[] = [
 
 export function isValidLifecycleStage(v: string): v is LifecycleStage {
   return LIFECYCLE_STAGES.includes(v as LifecycleStage);
+}
+
+/**
+ * Inbox e ficha do contato só enxergavam `Deal.contactId === contato`.
+ * Negócio no funil sem vínculo (import, contato apagado, card criado
+ * pelo nome) ou gravado num duplicata com o mesmo telefone/e-mail
+ * sumia do painel — o operador via o deal no CRM e o aside vazio.
+ */
+export function dealsWhereForContact(
+  contactId: string,
+  phone: string | null | undefined,
+  email: string | null | undefined,
+  name: string | null | undefined,
+): Prisma.DealWhereInput {
+  const or: Prisma.DealWhereInput[] = [{ contactId }];
+
+  const variants = phoneMatchVariants(phone);
+  if (variants.length > 0) {
+    or.push({ contact: { phone: { in: variants } } });
+  }
+
+  const emailNorm = email?.trim();
+  if (emailNorm) {
+    or.push({
+      contact: { email: { equals: emailNorm, mode: "insensitive" } },
+    });
+  }
+
+  const titles = new Set<string>();
+  const person = (name ?? "").trim();
+  if (person) {
+    titles.add(person);
+    titles.add(`Negócio ${person}`);
+    titles.add(`Negócio - ${person}`);
+    const auto = defaultDealTitleForContact(person);
+    if (auto) titles.add(auto);
+  }
+  if (titles.size > 0) {
+    or.push({
+      contactId: null,
+      status: "OPEN",
+      OR: [...titles].map((title) => ({
+        title: { equals: title, mode: "insensitive" as const },
+      })),
+    });
+  }
+
+  return { OR: or };
 }
 
 export type ContactCustomFieldFilter = {
@@ -865,7 +913,7 @@ export async function getContactById(
       "deals",
       () =>
         prisma.deal.findMany({
-          where: { contactId: id },
+          where: dealsWhereForContact(id, core.phone, core.email, core.name),
           take: 20,
           orderBy: { updatedAt: "desc" },
           include: {
@@ -933,6 +981,20 @@ export async function getContactById(
   // `dealInboxPanelFields[dealAberto]` — se preenchêssemos só um negócio, abrir
   // qualquer outro do mesmo contato (ex.: reimport que gerou 2 cards) mostraria
   // a lateral vazia. Batched: 1 query pros defs + 1 pros valores de todos.
+  const orphanOpenIds = deals
+    .filter((d) => d.contactId == null && d.status === "OPEN")
+    .map((d) => d.id);
+  if (orphanOpenIds.length > 0) {
+    prisma.deal
+      .updateMany({
+        where: { id: { in: orphanOpenIds }, contactId: null },
+        data: { contactId: id },
+      })
+      .catch((err) =>
+        log.warn({ err, contactId: id }, "falha ao vincular negocios orfaos ao contato"),
+      );
+  }
+
   const dealInboxPanelFields: Record<string, InboxLeadPanelFieldRow[]> =
     deals.length > 0
       ? await safe(
