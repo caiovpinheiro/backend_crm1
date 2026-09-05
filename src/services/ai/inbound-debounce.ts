@@ -9,7 +9,11 @@
  */
 
 import { cache } from "@/lib/cache";
-import { getOrgIdOrNull, runWithContext } from "@/lib/request-context";
+import {
+  getOrgIdOrNull,
+  getRequestContext,
+  runWithContext,
+} from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
@@ -271,34 +275,44 @@ export function kickAiAfterInboxAssign(args: {
   conversationId: string;
   contactId: string;
 }): void {
+  // Captura o ALS agora: o assign HTTP já pode ter encerrado quando o
+  // primeiro `await` abaixo roda, e o prisma scoped explode sem org.
+  const ctx = getRequestContext();
   void (async () => {
-    try {
-      const text = await collectUnansweredInboundText(args.conversationId);
-      if (text.trim()) {
-        await scheduleAiReply({
-          conversationId: args.conversationId,
+    const run = async () => {
+      try {
+        const text = await collectUnansweredInboundText(args.conversationId);
+        if (text.trim()) {
+          await scheduleAiReply({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            userMessage: text,
+            channel: "meta",
+          });
+          return;
+        }
+        const conv = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedToId: true },
+        });
+        if (!conv?.assignedToId) return;
+        const { triggerAgentOpeningForContact } = await import(
+          "@/services/ai/piloting-actions"
+        );
+        await triggerAgentOpeningForContact({
           contactId: args.contactId,
-          userMessage: text,
+          agentUserId: conv.assignedToId,
           channel: "meta",
         });
-        return;
+      } catch (e) {
+        console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
       }
-      const conv = await prisma.conversation.findUnique({
-        where: { id: args.conversationId },
-        select: { assignedToId: true },
-      });
-      if (!conv?.assignedToId) return;
-      const { triggerAgentOpeningForContact } = await import(
-        "@/services/ai/piloting-actions"
-      );
-      await triggerAgentOpeningForContact({
-        contactId: args.contactId,
-        agentUserId: conv.assignedToId,
-        channel: "meta",
-      });
-    } catch (e) {
-      console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
+    };
+    if (ctx) {
+      await runWithContext(ctx, run);
+      return;
     }
+    await run();
   })();
 }
 
