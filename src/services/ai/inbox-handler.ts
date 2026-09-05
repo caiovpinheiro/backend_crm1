@@ -577,25 +577,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    // Se a última outbound é humana, não compete com o atendente.
-    const lastOut = await prisma.message.findFirst({
-      where: {
-        conversationId: args.conversationId,
-        direction: "out",
-        isPrivate: false,
-        messageType: { not: "note" },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { authorType: true, createdAt: true },
-    });
-    if (lastOut?.authorType === "human") {
-      logAi("blocked", {
-        conversationId: args.conversationId,
-        reason: "human_last_outbound",
-        agentUserId: assignee.id,
-      });
-      return;
-    }
+    // Outbound humana *histórica* (ex.: "Bomzin" neste ticket) não silencia
+    // a IA depois de transferência explícita. Humano falando *durante* o
+    // run continua abortando em `assertAiStillAuthorized({ since })`.
 
     const cfg = assignee.aiAgentConfig;
     // Política editável na tela do agente. Campo vazio = defaults do

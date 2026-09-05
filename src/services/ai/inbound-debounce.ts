@@ -263,6 +263,46 @@ async function flushDebounce(
 }
 
 /**
+ * Depois de atribuir/transferir no inbox para um User type=AI: responde
+ * inbound sem resposta, ou manda a saudação se o aluno ainda não falou.
+ * Fire-and-forget — o HTTP do assign não espera o LLM.
+ */
+export function kickAiAfterInboxAssign(args: {
+  conversationId: string;
+  contactId: string;
+}): void {
+  void (async () => {
+    try {
+      const text = await collectUnansweredInboundText(args.conversationId);
+      if (text.trim()) {
+        await scheduleAiReply({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          userMessage: text,
+          channel: "meta",
+        });
+        return;
+      }
+      const conv = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { assignedToId: true },
+      });
+      if (!conv?.assignedToId) return;
+      const { triggerAgentOpeningForContact } = await import(
+        "@/services/ai/piloting-actions"
+      );
+      await triggerAgentOpeningForContact({
+        contactId: args.contactId,
+        agentUserId: conv.assignedToId,
+        channel: "meta",
+      });
+    } catch (e) {
+      console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
+    }
+  })();
+}
+
+/**
  * Concatena mensagens inbound do cliente desde a última outbound
  * (humano/bot), em ordem cronológica.
  */
