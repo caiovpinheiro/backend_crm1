@@ -161,6 +161,35 @@ export async function PUT(request: Request, context: RouteContext) {
         b.assignedToId === null ? null : typeof b.assignedToId === "string" ? b.assignedToId : undefined;
     }
 
+    const optionalTrim = (v: unknown): string | null | undefined => {
+      if (v === null) return null;
+      if (typeof v === "string") {
+        const t = v.trim();
+        return t.length ? t : null;
+      }
+      return undefined;
+    };
+    const trackingKeys = [
+      "adUtmSource",
+      "adUtmMedium",
+      "adUtmCampaign",
+      "adUtmContent",
+      "adUtmTerm",
+      "utmId",
+      "utmReferrer",
+      "referrer",
+      "gclid",
+      "fbclid",
+      "googleClientId",
+      "ttadId",
+      "ttadName",
+    ] as const;
+    for (const key of trackingKeys) {
+      if (b[key] !== undefined) {
+        data[key] = optionalTrim(b[key]);
+      }
+    }
+
     const payload = Object.fromEntries(
       Object.entries(data).filter(([, v]) => v !== undefined)
     ) as UpdateContactInput;

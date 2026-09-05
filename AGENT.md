@@ -1,7 +1,12 @@
-# Decisões Estruturais — CRM EduIT (Backend)
+### 2026-09-05 — Informação rastreada no card Contato (estilo Kommo)
 
-Registro de decisões técnicas que afetam estrutura do projeto. Cada entrada
-documenta **por que** algo foi feito, não **o que**.
+**Decisão.** Origem/atribuição fica no **Contact** (já tinha Meta CTWA + `adUtm*`). UI: no card Contato do inbox/aside, seção colapsável **“Informação rastreada”** com UTMs e click IDs (utm_*, referrer, gclid, fbclid, gclientid, ttad_*). Campos novos no Contact: `utmId`, `utmReferrer`, `referrer`, `gclid`, `fbclid`, `googleClientId`, `ttadId`, `ttadName`. Snapshot no Deal fica para fase 2.
+
+**Contexto.** Pedido de card de origem no Contato (dropdown/ocultar) espelhando Kommo; Meta ads já existiam só no DB/API.
+
+**Alternativas descartadas.** Só UI sem novos campos (faltam gclid/fbclid/ttad). Tabela polimórfica de atribuição (overkill). Snapshot Deal nesta entrega.
+
+**Impacto.** Migration `contact_tracked_attribution`, PATCH contact, aside Contato.
 
 ---
 

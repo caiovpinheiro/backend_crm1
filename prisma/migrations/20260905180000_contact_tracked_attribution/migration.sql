@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "utm_id" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "utm_referrer" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "referrer" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "gclid" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "fbclid" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "google_client_id" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "ttad_id" TEXT;
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "ttad_name" TEXT;
