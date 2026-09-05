@@ -45,7 +45,7 @@ export async function GET(
       });
 
       const codePart = errorCode?.trim() ? `-${slugPart(errorCode)}` : "";
-      const base = `campanha-${campaign.number ?? slugPart(campaign.name) || campaign.id}-falhas${codePart}`;
+      const base = `campanha-${campaign.number ?? (slugPart(campaign.name) || campaign.id)}-falhas${codePart}`;
 
       if (format === "phones") {
         const body = campaignRecipientPhones(rows);
