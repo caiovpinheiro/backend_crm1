@@ -2762,43 +2762,35 @@ export async function processMetaWebhookPayload(
                 );
               }
 
-              // Resolução do ad_id real via Marketing API quando o referral
-              // veio como post promovido. Roda em background (fire-and-forget)
-              // pra não atrasar o 200 OK pra Meta. Resultados são gravados
-              // nos campos `ad_resolved_*` do contato.
+              // Resolução do ad + UTMs via Marketing API (ad ou post promovido).
+              // Fire-and-forget: não atrasa o 200 OK pra Meta.
               if (ref.sourceId) {
-                if (ref.sourceType === "ad") {
-                  // source_type=ad já traz o ad_id no source_id — copia direto.
-                  void prisma.contact
-                    .update({
-                      where: { id: contact.id },
-                      data: {
-                        adResolvedId: ref.sourceId,
-                        adResolvedAt: new Date(),
-                        adResolveStatus: "ok",
-                        adResolveError: null,
-                      },
-                    })
-                    .catch((e) =>
-                      log.debug(
-                        "falha ao copiar adResolvedId direto (não-fatal):",
-                        e,
-                      ),
-                    );
-                } else if (ref.sourceType === "post") {
-                  // Post promovido — precisa chamar Graph API pra mapear post→ad.
-                  const orgId = getOrgIdOrNull();
-                  if (orgId) {
-                    const token = await resolveAccessToken(
-                      phoneNumberId || undefined,
-                    );
-                    void resolveAdAndPersistAsync({
-                      contactId: contact.id,
-                      organizationId: orgId,
-                      sourceId: ref.sourceId,
-                      accessToken: token,
-                    });
-                  }
+                const orgId = getOrgIdOrNull();
+                if (orgId) {
+                  const token = await resolveAccessToken(
+                    phoneNumberId || undefined,
+                  );
+                  void resolveAdAndPersistAsync({
+                    contactId: contact.id,
+                    organizationId: orgId,
+                    sourceId: ref.sourceId,
+                    sourceType: ref.sourceType,
+                    accessToken: token,
+                    sourceUrl: ref.sourceUrl,
+                  });
+                }
+              } else if (ref.sourceUrl) {
+                // Sem source_id mas com source_url — ainda extrai UTMs da URL.
+                const orgId = getOrgIdOrNull();
+                if (orgId) {
+                  void resolveAdAndPersistAsync({
+                    contactId: contact.id,
+                    organizationId: orgId,
+                    sourceId: `url:${contact.id}`,
+                    sourceType: null,
+                    accessToken: null,
+                    sourceUrl: ref.sourceUrl,
+                  });
                 }
               }
             }

@@ -1,3 +1,15 @@
+### 2026-09-05 — Auto-preenchimento da Informação rastreada no CTWA
+
+**Decisão.** No webhook Meta, ao identificar referral CTWA: (1) grava referral básico; (2) `resolveAdAndPersistAsync` busca metadados + `url_tags` tanto para `source_type=ad` quanto `post`; (3) parseia `source_url` e preenche UTMs/click IDs (`utm_*`, gclid, fbclid, ttad_*, referrer) sem sobrescrever o que já estava preenchido.
+
+**Contexto.** Card Contato mostra os campos, mas `source_type=ad` só copiava o id — UTMs não entravam.
+
+**Alternativas descartadas.** Preencher só manualmente. Inventar utm_source=facebook sem `url_tags` (falso positivo).
+
+**Impacto.** `meta-ad-resolver.ts`, `meta-webhook/handler.ts`.
+
+---
+
 ### 2026-09-05 — Informação rastreada no card Contato (estilo Kommo)
 
 **Decisão.** Origem/atribuição fica no **Contact** (já tinha Meta CTWA + `adUtm*`). UI: no card Contato do inbox/aside, seção colapsável **“Informação rastreada”** com UTMs e click IDs (utm_*, referrer, gclid, fbclid, gclientid, ttad_*). Campos novos no Contact: `utmId`, `utmReferrer`, `referrer`, `gclid`, `fbclid`, `googleClientId`, `ttadId`, `ttadName`. Snapshot no Deal fica para fase 2.
