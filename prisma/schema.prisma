@@ -1118,11 +1118,21 @@ model Contact {
   adResolveError         String?        @map("ad_resolve_error")
   /// UTMs estruturados extraídos do campo `url_tags` do Ad (Marketing API).
   /// Preenchidos junto da resolução post→ad quando o anúncio define parâmetros de URL.
+  /// Também editáveis manualmente / import (estilo Kommo "Informação rastreada").
   adUtmSource            String?        @map("ad_utm_source")
   adUtmMedium            String?        @map("ad_utm_medium")
   adUtmCampaign          String?        @map("ad_utm_campaign")
   adUtmContent           String?        @map("ad_utm_content")
   adUtmTerm              String?        @map("ad_utm_term")
+  /// Rastreio genérico (UTM extras + click IDs) — espelho Kommo "Informação rastreada".
+  utmId                  String?        @map("utm_id")
+  utmReferrer            String?        @map("utm_referrer")
+  referrer               String?
+  gclid                  String?
+  fbclid                 String?
+  googleClientId         String?        @map("google_client_id")
+  ttadId                 String?        @map("ttad_id")
+  ttadName               String?        @map("ttad_name")
   whatsappJid            String?
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).

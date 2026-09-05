@@ -440,6 +440,20 @@ export type CreateContactInput = {
   source?: string | null;
   companyId?: string | null;
   assignedToId?: string | null;
+  /** Rastreio / UTM (estilo Kommo). Null limpa; undefined ignora. */
+  adUtmSource?: string | null;
+  adUtmMedium?: string | null;
+  adUtmCampaign?: string | null;
+  adUtmContent?: string | null;
+  adUtmTerm?: string | null;
+  utmId?: string | null;
+  utmReferrer?: string | null;
+  referrer?: string | null;
+  gclid?: string | null;
+  fbclid?: string | null;
+  googleClientId?: string | null;
+  ttadId?: string | null;
+  ttadName?: string | null;
 };
 
 export type UpdateContactInput = Partial<CreateContactInput>;
@@ -1197,6 +1211,27 @@ export async function updateContact(id: string, data: UpdateContactInput) {
   }
   if (data.externalId !== undefined) {
     updateData.externalId = data.externalId;
+  }
+
+  const trackingKeys = [
+    "adUtmSource",
+    "adUtmMedium",
+    "adUtmCampaign",
+    "adUtmContent",
+    "adUtmTerm",
+    "utmId",
+    "utmReferrer",
+    "referrer",
+    "gclid",
+    "fbclid",
+    "googleClientId",
+    "ttadId",
+    "ttadName",
+  ] as const;
+  for (const key of trackingKeys) {
+    if (data[key] !== undefined) {
+      (updateData as Record<string, unknown>)[key] = data[key];
+    }
   }
 
   const updated = await prisma.contact.update({
