@@ -147,24 +147,30 @@ async function isAcademicPipeContact(
     },
   });
   if (openDeals.length === 0) {
-    // Sem deal: ainda assim atende se o canal default aponta p/ acadêmico
-    // (mensagens iniciais antes do deal). Heurística pelo nome do pipeline
-    // default do canal da conversa mais recente.
-    const conv = await prisma.conversation.findFirst({
-      where: { contactId, status: { not: "RESOLVED" } },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        channelRef: {
-          select: {
-            defaultPipeline: { select: { id: true, name: true } },
+    // Sem deal: canal com funil acadêmico OU agente com pipelineId
+    // configurado (lead novo / canal sem default). Sem isso o inbox
+    // recebia o "oi" e a IA nunca assumia (DEV: canal 2310).
+    try {
+      const conv = await prisma.conversation.findFirst({
+        where: { contactId, status: { not: "RESOLVED" } },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          channelRef: {
+            select: {
+              defaultPipeline: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-    });
-    const pipe = conv?.channelRef?.defaultPipeline;
-    if (!pipe) return false;
-    if (configured.includes(pipe.id)) return true;
-    return /academ/i.test(pipe.name ?? "");
+      });
+      const pipe = conv?.channelRef?.defaultPipeline;
+      if (pipe) {
+        if (configured.includes(pipe.id)) return true;
+        if (/academ/i.test(pipe.name ?? "")) return true;
+      }
+    } catch (err) {
+      console.warn("[ai-attend] isAcademicPipeContact canal/default falhou", err);
+    }
+    return configured.length > 0;
   }
 
   for (const d of openDeals) {

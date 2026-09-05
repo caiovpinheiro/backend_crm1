@@ -312,21 +312,6 @@ export async function assertAiStillAuthorized(args: {
       select: { id: true },
     });
     if (humanOut) return { ok: false, reason: "human_replied_during_run" };
-  } else if (conversation.hasHumanReply) {
-    // Heurística: se a última outbound é humana, bloqueia.
-    const lastOut = await prisma.message.findFirst({
-      where: {
-        conversationId: args.conversationId,
-        direction: "out",
-        isPrivate: false,
-        messageType: { not: "note" },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { authorType: true },
-    });
-    if (lastOut?.authorType === "human") {
-      return { ok: false, reason: "human_last_outbound" };
-    }
   }
 
   return { ok: true };

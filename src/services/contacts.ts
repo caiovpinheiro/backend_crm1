@@ -799,7 +799,15 @@ export async function getContactById(
     core = await prisma.contact.findUnique({ where: { id } });
   } catch (err) {
     log.error(`findUnique(core) falhou para contato ${id}:`, err);
-    throw err;
+    try {
+      const rows = await prisma.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT * FROM contacts WHERE id = ${id} LIMIT 1
+      `;
+      core = (rows[0] as typeof core) ?? null;
+    } catch (rawErr) {
+      log.error(`fallback raw contato ${id} também falhou:`, rawErr);
+      throw err;
+    }
   }
 
   if (!core) {
@@ -913,7 +921,7 @@ export async function getContactById(
       "deals",
       () =>
         prisma.deal.findMany({
-          where: dealsWhereForContact(id, core.phone, core.email, core.name),
+          where: { contactId: id },
           take: 20,
           orderBy: { updatedAt: "desc" },
           include: {
@@ -981,6 +989,29 @@ export async function getContactById(
   // `dealInboxPanelFields[dealAberto]` — se preenchêssemos só um negócio, abrir
   // qualquer outro do mesmo contato (ex.: reimport que gerou 2 cards) mostraria
   // a lateral vazia. Batched: 1 query pros defs + 1 pros valores de todos.
+  const extraDeals = await safe(
+    "deals-match",
+    () =>
+      prisma.deal.findMany({
+        where: {
+          AND: [
+            dealsWhereForContact(id, core.phone, core.email, core.name),
+            { id: { notIn: deals.map((d) => d.id) } },
+          ],
+        },
+        take: 20,
+        orderBy: { updatedAt: "desc" },
+        include: {
+          stage: { select: { id: true, name: true, color: true, pipelineId: true, pipeline: { select: { name: true } } } },
+          owner: { select: assignedToSelect },
+        },
+      }),
+    [] as typeof deals,
+  );
+  if (extraDeals.length > 0) {
+    deals.push(...extraDeals);
+  }
+
   const orphanOpenIds = deals
     .filter((d) => d.contactId == null && d.status === "OPEN")
     .map((d) => d.id);
