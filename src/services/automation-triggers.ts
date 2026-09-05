@@ -71,6 +71,20 @@ const NATIVE_CONTACT_FIELDS = new Set([
   "source",
   "lifecycleStage",
   "assignedToId",
+  // Informação rastreada — condição "campo" no trigger do pipeline
+  "adUtmSource",
+  "adUtmMedium",
+  "adUtmCampaign",
+  "adUtmContent",
+  "adUtmTerm",
+  "utmId",
+  "utmReferrer",
+  "referrer",
+  "gclid",
+  "fbclid",
+  "googleClientId",
+  "ttadId",
+  "ttadName",
 ]);
 const NATIVE_DEAL_FIELDS = new Set(["title", "value", "status", "stageId"]);
 

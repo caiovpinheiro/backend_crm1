@@ -1108,6 +1108,21 @@ export async function createContact(data: CreateContactInput) {
             source: data.source ?? undefined,
             companyId: data.companyId ?? undefined,
             assignedToId: data.assignedToId ?? undefined,
+            ...(data.adUtmSource !== undefined ? { adUtmSource: data.adUtmSource } : {}),
+            ...(data.adUtmMedium !== undefined ? { adUtmMedium: data.adUtmMedium } : {}),
+            ...(data.adUtmCampaign !== undefined ? { adUtmCampaign: data.adUtmCampaign } : {}),
+            ...(data.adUtmContent !== undefined ? { adUtmContent: data.adUtmContent } : {}),
+            ...(data.adUtmTerm !== undefined ? { adUtmTerm: data.adUtmTerm } : {}),
+            ...(data.utmId !== undefined ? { utmId: data.utmId } : {}),
+            ...(data.utmReferrer !== undefined ? { utmReferrer: data.utmReferrer } : {}),
+            ...(data.referrer !== undefined ? { referrer: data.referrer } : {}),
+            ...(data.gclid !== undefined ? { gclid: data.gclid } : {}),
+            ...(data.fbclid !== undefined ? { fbclid: data.fbclid } : {}),
+            ...(data.googleClientId !== undefined
+              ? { googleClientId: data.googleClientId }
+              : {}),
+            ...(data.ttadId !== undefined ? { ttadId: data.ttadId } : {}),
+            ...(data.ttadName !== undefined ? { ttadName: data.ttadName } : {}),
           }),
           include: {
             company: { select: { id: true, number: true, name: true, domain: true } },

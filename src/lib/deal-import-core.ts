@@ -59,6 +59,9 @@ export const DEAL_RESERVED_HEADERS = new Set<string>([
   "contact_external_id",
   "contact_externalid",
   "kommo_contact_id",
+  /** Origem do contato (Contact.source) — import de negócios. */
+  "contact_source",
+  "contactsource",
   "owner_id",
   "ownertoid",
   "owner_email",
@@ -404,6 +407,8 @@ async function resolveContactIdForDeal(
     row.contact_name?.trim() || row.contactname?.trim() || row.contact?.trim() || "";
   const contactEmail = row.contact_email?.trim() || row.contactemail?.trim() || "";
   const contactPhone = row.contact_phone?.trim() || row.contactphone?.trim() || "";
+  const contactSource =
+    row.contact_source?.trim() || row.contactsource?.trim() || "";
 
   const memoize = (id: string) => {
     if (contactEmail) cache.contactByEmail.set(contactEmail.toLowerCase(), id);
@@ -411,11 +416,15 @@ async function resolveContactIdForDeal(
   };
 
   const syncContactFields = async (id: string) => {
-    if (!updateExisting) return;
+    if (!updateExisting && !contactSource) return;
     const patch: Record<string, string> = {};
-    if (contactName) patch.name = contactName;
-    if (contactEmail) patch.email = contactEmail;
-    if (contactPhone) patch.phone = contactPhone;
+    if (updateExisting) {
+      if (contactName) patch.name = contactName;
+      if (contactEmail) patch.email = contactEmail;
+      if (contactPhone) patch.phone = contactPhone;
+    }
+    // Origem: grava na criação e na atualização quando a coluna veio preenchida.
+    if (contactSource) patch.source = contactSource;
     if (Object.keys(patch).length === 0) return;
     try {
       await updateContact(id, patch);
@@ -460,6 +469,7 @@ async function resolveContactIdForDeal(
       name: contactName || `Contato ${ext}`,
       ...(contactEmail ? { email: contactEmail } : {}),
       ...(contactPhone ? { phone: contactPhone } : {}),
+      ...(contactSource ? { source: contactSource } : {}),
       externalId: ext,
     });
     const createdId = (created as { id?: string })?.id;
@@ -507,6 +517,7 @@ async function resolveContactIdForDeal(
       name: contactName || contactEmail || contactPhone || "Contato sem nome",
       ...(contactEmail ? { email: contactEmail } : {}),
       ...(contactPhone ? { phone: contactPhone } : {}),
+      ...(contactSource ? { source: contactSource } : {}),
     });
     const createdId = (created as { id?: string })?.id;
     if (createdId) memoize(createdId);

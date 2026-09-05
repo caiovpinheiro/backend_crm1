@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { TRACKING_EXPORT_COLUMNS } from "@/lib/contact-tracking-fields";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
 import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
@@ -89,6 +90,7 @@ export async function GET(request: Request) {
         "ID da fonte do anúncio",
         "CTWA CLID",
         "Campanha do anúncio",
+        ...TRACKING_EXPORT_COLUMNS.map((c) => c.header),
         "Criado em",
         "Atualizado em",
       ];
@@ -125,6 +127,9 @@ export async function GET(request: Request) {
           "Criado em": csvDate(c.createdAt),
           "Atualizado em": csvDate(c.updatedAt),
         };
+        for (const col of TRACKING_EXPORT_COLUMNS) {
+          row[col.header] = (c as Record<string, unknown>)[col.key] ?? "";
+        }
         for (const f of contactFields) {
           row[f.name] = cfMap.get(f.id) ?? "";
         }

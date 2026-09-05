@@ -13,7 +13,7 @@ export async function GET() {
   return withOrgContext(async (session) => {
     try {
       const orgId = getOrgIdOrThrow();
-      const [pipelines, users, tags, customFields, sourceRows, lossReasonCatalog] = await Promise.all([
+      const [pipelines, users, tags, customFields, sourceRows, utmSourceRows, lossReasonCatalog] = await Promise.all([
         prisma.pipeline.findMany({
           where: { archivedAt: null },
           orderBy: { name: "asc" },
@@ -61,6 +61,13 @@ export async function GET() {
             AND source <> ''
           LIMIT 200
         `,
+        prisma.$queryRaw<{ ad_utm_source: string }[]>`
+          SELECT DISTINCT ad_utm_source FROM contacts
+          WHERE "organizationId" = ${orgId}
+            AND ad_utm_source IS NOT NULL
+            AND ad_utm_source <> ''
+          LIMIT 200
+        `,
         prisma.lossReason.findMany({
           where: { isActive: true },
           orderBy: { position: "asc" },
@@ -83,6 +90,10 @@ export async function GET() {
         contactCustomFields,
         sources: sourceRows
           .map((s) => s.source?.trim())
+          .filter((s): s is string => !!s)
+          .sort((a, b) => a.localeCompare(b, "pt-BR")),
+        utmSources: utmSourceRows
+          .map((s) => s.ad_utm_source?.trim())
           .filter((s): s is string => !!s)
           .sort((a, b) => a.localeCompare(b, "pt-BR")),
         lossReasons,
