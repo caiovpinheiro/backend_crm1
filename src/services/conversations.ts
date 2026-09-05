@@ -42,14 +42,12 @@ import {
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
-
 /**
- * Frescura dos badges vem da invalidação (mensagem nova via `sse-bus`,
- * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
- * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
- * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
- * rede de segurança contra invalidação perdida. 90s reduz recomputo
- * das badges quando o SSE dispara refetch em rajada.
+ * Badges aceitam stale até o TTL. Não invalidar em cada `new_message`
+ * (preview) — isso matava o Redis e o `?counts=1` seguinte rodava o
+ * COUNT FILTER (200ms–1s). Invalidar só quando o ticket muda de aba
+ * (assign / resolve / reopen / transfer / departamento / status).
+ * 90s é rede de segurança se a invalidação falhar.
  */
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
 
@@ -492,7 +490,7 @@ function tabToWhere(
  * Só OPEN + hasError. Encerrar (individual ou massa) zera a flag;
  * RESOLVED com hasError sticky não entra.
  *
- * Códigos Meta de elegibilidade (131047, 131049, 131026, 130472, 133010)
+ * Códigos Meta de elegibilidade (131047, 131049, 131026, 130472, 131050, 133010)
  * deixam de marcar hasError em envios novos, mas NÃO são excluídos
  * daqui: tickets já flagados continuam visíveis até encerrar. Excluir
  * só do badge (e não da lista) recria o 233 zumbi.
@@ -1611,6 +1609,7 @@ function sqlConversationWhere(
     ["channel", Prisma.sql`c.channel`],
     ["status", Prisma.sql`c.status`, "ConversationStatus"],
     ["closedAt", Prisma.sql`c."closedAt"`],
+    ["followUpAt", Prisma.sql`c."followUpAt"`],
     ["hasError", Prisma.sql`c."hasError"`],
     ["hasHumanReply", Prisma.sql`c."hasHumanReply"`],
     ["hasAgentReply", Prisma.sql`c."hasAgentReply"`],
@@ -1672,6 +1671,7 @@ function sqlConversationWhere(
     "channel",
     "status",
     "closedAt",
+    "followUpAt",
     "hasError",
     "hasHumanReply",
     "hasAgentReply",
@@ -1771,7 +1771,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 8,
+          k: 9,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -2345,6 +2345,9 @@ export async function assignConversationAssignedTo(
       await tx.contact.update({
         where: { id: conv.contactId },
         data: { assignedToId: newAssigneeId },
+        // RETURNING * puxa utm_id etc. e quebra se a migration de
+        // attribution ainda não rodou no DEV (SKIP_PRISMA_MIGRATE).
+        select: { id: true, assignedToId: true },
       });
       await tx.deal.updateMany({
         where: { contactId: conv.contactId, status: "OPEN" },
@@ -2682,8 +2685,7 @@ export async function updateConversationStatusInDb(
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 
-  // Badges Redis (TTL 45s) sem invalidação sobreviviam ao F5 — Erro 233
-  // com lista já vazia. Encerrou/reabriu/acompanhou → zera o cache da org.
+  // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
   if (status === "RESOLVED" || status === "OPEN") {
     const orgId = getOrgIdOrNull();
     if (orgId) void invalidateInboxTabCounts(orgId);
@@ -2703,14 +2705,16 @@ export async function updateConversationStatusInDb(
     }
   }
 
-  // Encerrou atendimento → liberou capacidade na fila do responsável.
-  // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).
+  // Encerrou atendimento → saiu de Entrada/Aguardando. Enfileira drain;
+  // o worker confere o teto (queueLimit) antes de varrer a espera.
   if (status === "RESOLVED" && !followUp) {
+    const capacityUserId = clearedAssignee?.id ?? updated.assignedToId ?? null;
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({
           trigger: "capacity_released",
           delayMs: 400,
+          userId: capacityUserId,
         }),
       )
       .catch(() => {});
@@ -3062,7 +3066,9 @@ export async function resolveConversationsInline(params: {
 
   if (updated > 0) {
     const orgId = getOrgIdOrNull();
-    if (orgId) void invalidateInboxTabCounts(orgId);
+    if (orgId) {
+      void invalidateInboxTabCounts(orgId);
+    }
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({

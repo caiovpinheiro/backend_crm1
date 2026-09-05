@@ -225,6 +225,7 @@ async function assignConversationToHuman(args: {
     await tx.contact.update({
       where: { id: args.contactId },
       data: { assignedToId: args.humanUserId },
+      select: { id: true, assignedToId: true },
     });
     await tx.deal.updateMany({
       where: { contactId: args.contactId, status: "OPEN" },
@@ -402,6 +403,7 @@ export async function tryAssignFirstAttendanceAi(args: {
           await tx.contact.update({
             where: { id: contactId },
             data: { assignedToId: null },
+            select: { id: true, assignedToId: true },
           });
           await tx.deal.updateMany({
             where: { contactId, status: "OPEN" },
@@ -505,6 +507,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       await tx.contact.update({
         where: { id: contactId },
         data: { assignedToId: null },
+        select: { id: true, assignedToId: true },
       });
     });
   }
@@ -600,6 +603,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     await tx.contact.update({
       where: { id: contactId },
       data: { assignedToId: aiUserId },
+      select: { id: true, assignedToId: true },
     });
     await tx.deal.updateMany({
       where: { contactId, status: "OPEN" },
