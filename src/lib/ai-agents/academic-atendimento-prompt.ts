@@ -100,15 +100,18 @@ export function formatFirstAccessHint(
   if (!FIRST_ACCESS_INTENT_RE.test(q) && !inherited) return "";
   return [
     "",
-    "PRIMEIRO ACESSO — FONTE OFICIAL DO TIME (modelo Primeiro Acesso - MSG):",
-    "Acolha em 1 frase. ENTREGUE isto agora — não invente menu.",
-    `- Tutorial oficial (cole o link): ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
-    `- Depois o Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `- Celular: app Duda — Android ${OFFICIAL_DUDA_ANDROID_URL} / iOS ${OFFICIAL_DUDA_IOS_URL}`,
-    '- PROIBIDO inventar botão, aba ou clique chamado *"Primeiro Acesso"*. Isso NÃO existe no playbook.',
-    "- PROIBIDO senha Nome123@ (isso é só certificado da Aula Inaugural, outro site).",
-    "- Se o modelo tiver TUTORIAL ANEXO, o sistema envia o vídeo depois do texto. Diga que segue o tutorial.",
-    "- NÃO pergunte se ele quer o passo a passo. NÃO transfira só por essa dúvida.",
+    "PRIMEIRO ACESSO — O QUE O TIME FAZ DE VERDADE (centenas de tickets):",
+    "A mensagem 'Primeiro Acesso' sozinha é o BOTÃO DO FLUXO de acolhimento — NÃO é um menu do portal.",
+    "Se ainda não souber se é celular ou PC: pergunte em 1 linha (Portal no computador vs app Duda), como o time faz.",
+    "Quando for entregar (já sabe o aparelho, ou ele já pediu o caminho):",
+    `- Cole o tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `- Cole o portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `- Celular: Duda Android ${OFFICIAL_DUDA_ANDROID_URL} / iOS ${OFFICIAL_DUDA_IOS_URL}`,
+    "- O sistema envia o vídeo do modelo depois do texto. Diga que segue o tutorial.",
+    "- Se o e-mail acadêmico AINDA NÃO existiu: diga que a chave de acesso *será gerada em breve* e que ele acompanhe o e-mail — NÃO invente login/senha.",
+    "- PROIBIDO: 'clique em Primeiro Acesso' no portal/site. O time quase nunca fala isso (2x em 90 dias). O playbook é vídeo + link + Duda.",
+    "- PROIBIDO senha Nome123@ (isso é só certificado da Aula Inaugural).",
+    "- NÃO pergunte de novo se ele quer o passo a passo depois de já ter o material.",
   ].join("\n");
 }
 
