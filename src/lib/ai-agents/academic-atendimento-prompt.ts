@@ -100,18 +100,17 @@ export function formatFirstAccessHint(
   if (!FIRST_ACCESS_INTENT_RE.test(q) && !inherited) return "";
   return [
     "",
-    "PRIMEIRO ACESSO — O QUE O TIME FAZ DE VERDADE (centenas de tickets):",
-    "A mensagem 'Primeiro Acesso' sozinha é o BOTÃO DO FLUXO de acolhimento — NÃO é um menu do portal.",
-    "Se ainda não souber se é celular ou PC: pergunte em 1 linha (Portal no computador vs app Duda), como o time faz.",
-    "Quando for entregar (já sabe o aparelho, ou ele já pediu o caminho):",
-    `- Cole o tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
-    `- Cole o portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `- Celular: Duda Android ${OFFICIAL_DUDA_ANDROID_URL} / iOS ${OFFICIAL_DUDA_IOS_URL}`,
-    "- O sistema envia o vídeo do modelo depois do texto. Diga que segue o tutorial.",
-    "- Se o e-mail acadêmico AINDA NÃO existiu: diga que a chave de acesso *será gerada em breve* e que ele acompanhe o e-mail — NÃO invente login/senha.",
-    "- PROIBIDO: 'clique em Primeiro Acesso' no portal/site. O time quase nunca fala isso (2x em 90 dias). O playbook é vídeo + link + Duda.",
-    "- PROIBIDO senha Nome123@ (isso é só certificado da Aula Inaugural).",
-    "- NÃO pergunte de novo se ele quer o passo a passo depois de já ter o material.",
+    "PRIMEIRO ACESSO — ENTREGA OBRIGATÓRIA (copie este pacote, sem enfeite):",
+    "A mensagem 'Primeiro Acesso' é o botão do fluxo. Já é o pedido. ENTREGUE agora.",
+    "Texto-base do time (pode encurtar, mas TODOS os links abaixo têm que ir na mensagem):",
+    `1. Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `2. Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `3. Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+    `4. Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+    "5. Uma frase: 'te mando o vídeo com o passo a passo'.",
+    "PROIBIDO fechar com 'tá pra te ajudar?', 'qualquer dúvida', 'quer que eu explique?', 'posso te ajudar nisso?'.",
+    "PROIBIDO 'clique em Primeiro Acesso' no site. PROIBIDO senha Nome123@.",
+    "PROIBIDO só citar 'app Duda' sem colar as duas URLs da loja.",
   ].join("\n");
 }
 
@@ -412,7 +411,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
 8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
 9. ESQUECI MINHA SENHA: Duda → *Esqueci minha senha* → telefone cadastrado → código **SMS**. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam", inventar botão *Primeiro Acesso*.
-9b. PRIMEIRO ACESSO (nunca entrou / criar senha pela primeira vez): ENTREGUE o tutorial oficial \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + o portal \`${OFFICIAL_STUDENT_PORTAL_URL}\` + Duda (loja Android/iOS). PROIBIDO inventar clique/aba *"Primeiro Acesso"*. PROIBIDO misturar com senha Nome123@ do certificado.
+9b. PRIMEIRO ACESSO: cole na hora \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + \`${OFFICIAL_STUDENT_PORTAL_URL}\` + as duas lojas do Duda (\`${OFFICIAL_DUDA_ANDROID_URL}\` e \`${OFFICIAL_DUDA_IOS_URL}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
