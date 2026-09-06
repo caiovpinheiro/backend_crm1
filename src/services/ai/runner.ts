@@ -33,6 +33,7 @@ import {
   type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
+import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
   ACADEMIC_ATENDIMENTO_RULES,
   ACADEMIC_CONFIDENCE_RULES,
@@ -161,6 +162,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
   });
 
   try {
+    // Chave OpenAI do agente (obrigatória — CRM multi-tenant, sem chave
+    // global). Lança aqui → cai no catch e o run vira FAILED com mensagem
+    // acionável ("cadastre a chave na tela do agente").
+    const agentApiKey = await getAgentApiKey(agent.id);
+
     const contact = args.contactId
       ? await prisma.contact.findUnique({
           where: { id: args.contactId },
@@ -199,6 +205,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const retrievedChunks = await retrieveRelevantChunks(
       agent.id,
       args.userMessage,
+      agentApiKey,
       4,
     ).catch((err) => {
       console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
@@ -355,6 +362,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     const result = await generateWithTools({
       model: agent.model || DEFAULT_CHAT_MODEL,
+      apiKey: agentApiKey,
       system: systemPrompt,
       messages,
       tools: Object.keys(toolSet).length > 0 ? toolSet : undefined,

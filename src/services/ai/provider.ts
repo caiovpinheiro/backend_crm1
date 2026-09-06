@@ -17,59 +17,38 @@ import {
   type ToolSet,
 } from "ai";
 
-import { getSecretSettingOrEnv } from "@/services/settings";
+/**
+ * Chave OpenAI: **sempre por agente** (`AIAgentConfig.openaiApiKeyEnc`).
+ * CRM multi-tenant — não há chave global, nem fallback pra `.env`. Quem
+ * chama (runner / retrieval / indexação) resolve a chave do agente e
+ * passa aqui. Sem chave → erro claro, o agente não roda.
+ */
+const NO_KEY_MSG =
+  "Este agente não tem chave OpenAI configurada. Cadastre a chave na tela do agente.";
 
-export const AI_OPENAI_KEY_SETTING = "ai.openai.apiKey";
+// Clientes cacheados por chave (poucas chaves distintas por processo).
+const clientByKey = new Map<string, ReturnType<typeof createOpenAI>>();
 
-// Provider OpenAI singleton — construído sob demanda, chave buscada
-// primeiro em `system_settings.ai.openai.apiKey` (criptografado) e só
-// depois cai para `process.env.OPENAI_API_KEY`. Assim o admin pode
-// configurar/rotacionar a chave pela UI sem reiniciar o processo.
-let cachedOpenAI: ReturnType<typeof createOpenAI> | null = null;
-let cachedKey: string | null = null;
-
-async function getOpenAI() {
-  const apiKey = (await getSecretSettingOrEnv(
-    AI_OPENAI_KEY_SETTING,
-    "OPENAI_API_KEY",
-  )).trim();
-  if (!apiKey) {
-    throw new Error(
-      "OPENAI_API_KEY não configurada. Cadastre a chave em Configurações → IA ou defina a variável de ambiente.",
-    );
-  }
-  if (cachedOpenAI && cachedKey === apiKey) return cachedOpenAI;
-  cachedOpenAI = createOpenAI({ apiKey });
-  cachedKey = apiKey;
-  return cachedOpenAI;
+function getOpenAI(apiKey: string | null | undefined) {
+  const key = apiKey?.trim();
+  if (!key) throw new Error(NO_KEY_MSG);
+  const cached = clientByKey.get(key);
+  if (cached) return cached;
+  const client = createOpenAI({ apiKey: key });
+  clientByKey.set(key, client);
+  return client;
 }
 
-/**
- * Invalida o cliente em cache — chamar sempre que a chave mudar na UI
- * para que a próxima chamada reinstancie o SDK com a nova credencial.
- */
+/** Invalida os clientes cacheados — chamar quando uma chave muda na UI. */
 export function resetAIProviderCache(): void {
-  cachedOpenAI = null;
-  cachedKey = null;
+  clientByKey.clear();
 }
 
-export async function getModel(modelName: string): Promise<LanguageModel> {
-  const openai = await getOpenAI();
-  return openai(modelName);
-}
-
-/**
- * Indica se a plataforma está pronta para falar com a OpenAI.
- * Usado pelos endpoints que precisam avisar o front quando "IA
- * está desativada" (sem chave configurada) antes de o usuário tentar
- * clicar em "Testar" e cair num erro.
- */
-export async function isAIConfigured(): Promise<boolean> {
-  const apiKey = (await getSecretSettingOrEnv(
-    AI_OPENAI_KEY_SETTING,
-    "OPENAI_API_KEY",
-  )).trim();
-  return apiKey.length > 0;
+export function getModel(
+  modelName: string,
+  apiKey: string | null | undefined,
+): LanguageModel {
+  return getOpenAI(apiKey)(modelName);
 }
 
 export const DEFAULT_CHAT_MODEL =
@@ -80,6 +59,8 @@ export const EMBEDDING_DIMENSIONS = 1536;
 
 export type GenerateArgs = {
   model: string;
+  /// Chave OpenAI do agente. Obrigatória — não há chave global.
+  apiKey: string;
   system: string;
   messages: ModelMessage[];
   tools?: ToolSet;
@@ -104,7 +85,7 @@ export type GenerateResult = {
 export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
-  const model = await getModel(args.model);
+  const model = getModel(args.model, args.apiKey);
   const result = await generateText({
     model,
     system: args.system,
@@ -144,11 +125,14 @@ export async function generateWithTools(
   };
 }
 
-export async function embedTexts(texts: string[]): Promise<{
+export async function embedTexts(
+  texts: string[],
+  apiKey: string,
+): Promise<{
   embeddings: number[][];
   inputTokens: number;
 }> {
-  const openai = await getOpenAI();
+  const openai = getOpenAI(apiKey);
   const result = await embedMany({
     model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
     values: texts,

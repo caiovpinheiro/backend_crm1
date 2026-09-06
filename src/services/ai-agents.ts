@@ -16,6 +16,8 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { encryptSecret } from "@/lib/secret-crypto";
+import { apiKeyHint } from "@/services/ai/agent-key";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   HANDOFF_MODES,
@@ -79,7 +81,7 @@ export async function listAIAgents(): Promise<AIAgentRow[]> {
 }
 
 export async function getAIAgent(id: string) {
-  return prisma.aIAgentConfig.findUnique({
+  const row = await prisma.aIAgentConfig.findUnique({
     where: { id },
     include: {
       user: {
@@ -93,6 +95,10 @@ export async function getAIAgent(id: string) {
       },
     },
   });
+  if (!row) return null;
+  // Nunca devolve a chave OpenAI cifrada. A UI usa só o hint + o bit.
+  const { openaiApiKeyEnc, ...safe } = row;
+  return { ...safe, hasOwnOpenaiKey: Boolean(openaiApiKeyEnc) };
 }
 
 export type CreateAIAgentInput = {
@@ -117,6 +123,9 @@ export type CreateAIAgentInput = {
   pipelineId?: string | null;
   channelId?: string | null;
   avatarUrl?: string | null;
+  /// Chave OpenAI do agente (texto puro na entrada; cifrada no banco).
+  /// `""`/`null` limpa. CRM multi-tenant: não há chave global.
+  openaiApiKey?: string | null;
 
   // Piloting (controles operacionais).
   openingMessage?: string | null;
@@ -298,6 +307,22 @@ export function sanitizeSteeringInput(input: {
   return out;
 }
 
+/**
+ * Traduz `input.openaiApiKey` (texto puro) nos campos de banco.
+ * `undefined` = não mexe. `""`/`null` = limpa. `"sk-…"` = cifra + hint.
+ */
+function openaiKeyFields(
+  raw: string | null | undefined,
+): { openaiApiKeyEnc: string | null; openaiApiKeyHint: string | null } | null {
+  if (raw === undefined) return null;
+  const key = (raw ?? "").trim();
+  if (!key) return { openaiApiKeyEnc: null, openaiApiKeyHint: null };
+  if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) {
+    throw new Error("Formato de chave OpenAI inválido. Esperado algo como sk-…");
+  }
+  return { openaiApiKeyEnc: encryptSecret(key), openaiApiKeyHint: apiKeyHint(key) };
+}
+
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
 
@@ -375,6 +400,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         simulateTyping: input.simulateTyping ?? true,
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
+        ...(openaiKeyFields(input.openaiApiKey) ?? {}),
       }),
     });
 
@@ -459,6 +485,7 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.channelId !== undefined
           ? { channelId: input.channelId }
           : {}),
+        ...(openaiKeyFields(input.openaiApiKey) ?? {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
 
         // Piloting.

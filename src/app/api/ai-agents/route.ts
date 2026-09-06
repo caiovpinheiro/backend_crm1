@@ -91,6 +91,8 @@ export async function POST(request: Request) {
       pipelineId: typeof body.pipelineId === "string" ? body.pipelineId : null,
       channelId: typeof body.channelId === "string" ? body.channelId : null,
       avatarUrl: typeof body.avatarUrl === "string" ? body.avatarUrl : null,
+      openaiApiKey:
+        typeof body.openaiApiKey === "string" ? body.openaiApiKey : undefined,
       ...sanitizePilotingInput({
         openingMessage: body.openingMessage,
         openingDelayMs: body.openingDelayMs,
