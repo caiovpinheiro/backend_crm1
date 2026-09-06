@@ -756,7 +756,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
         // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
         const result = await executeAcademicDepartmentHandoff({
           conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
+          contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
           departmentName: departmentName ?? null,
           userMessage: ctx.userMessage ?? null,

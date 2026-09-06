@@ -95,7 +95,6 @@ export async function retryUnansweredAiInbound(
       status: "OPEN",
       // Humano já falou: a conversa é dele, a IA não volta a responder.
       hasHumanReply: false,
-      NOT: { contactId: null },
       assignedTo: { is: { type: "AI" } },
       lastInboundAt: {
         lt: new Date(now.getTime() - retryMs),

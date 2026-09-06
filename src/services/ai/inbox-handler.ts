@@ -775,7 +775,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             data: { assignedToId: aiAgent.id },
           });
         });
-        conversation = { ...conversation, assignedToId: aiAgent.id };
+        if (conversation) {
+          conversation = { ...conversation, assignedToId: aiAgent.id };
+        }
 
         // Não envia oferta aqui — a IA responde uma vez (evita bolha duplicada
         // oferta + LLM). Aviso de fila/indisponível fica no pós-handoff.
@@ -794,6 +796,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     }
 
+    if (!conversation?.assignedToId) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "no_assignee_after_pending",
+      });
+      return;
+    }
+    const assignedToId = conversation.assignedToId;
+
     const channelConfig = conversation.channelRef?.config as
       | Record<string, unknown>
       | null
@@ -801,7 +812,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     const metaClient: MetaWhatsAppClient = metaClientFromConfig(channelConfig);
 
     const assignee = await prisma.user.findUnique({
-      where: { id: conversation.assignedToId },
+      where: { id: assignedToId },
       select: {
         id: true,
         type: true,

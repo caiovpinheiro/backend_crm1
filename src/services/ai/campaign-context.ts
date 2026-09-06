@@ -207,7 +207,7 @@ async function resolveFromContactTags(
         tagMatchesTemplate(name, c.label),
     );
     const preview = hit?.bodyPreview?.trim();
-    if (preview) {
+    if (hit && preview) {
       return {
         templateName: hit.metaTemplateName,
         campaignLabel: name,
