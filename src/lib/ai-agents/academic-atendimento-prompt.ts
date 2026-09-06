@@ -117,16 +117,12 @@ export function buildFirstAccessPackMessage(): string {
 /** Follow-up: já mandou o pack e o aluno ainda não entrou. */
 export function buildFirstAccessStuckMessage(): string {
   return [
-    "Beleza — vamos destravar isso juntos. Onde travou?",
+    "Entendi, ainda não conseguiu entrar. Me conta o que aconteceu: foi no *Portal do Aluno*, no app *Duda*, ou na senha (não chegou / não aceita)?",
     "",
-    "1. No *Portal do Aluno* (criar senha / entrar)",
-    "2. No app *Duda*",
-    "3. A senha não chegou ou não aceita",
+    "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento o próximo passo.",
     "",
     `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
     `Vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
-    "",
-    "Me diz qual desses e o que aparece na tela (se puder, o texto do erro).",
   ].join("\n");
 }
 
@@ -463,6 +459,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
 9. ESQUECI MINHA SENHA: Duda → *Esqueci minha senha* → telefone cadastrado → código **SMS**. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam", inventar botão *Primeiro Acesso*.
 9b. PRIMEIRO ACESSO: cole na hora \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + \`${OFFICIAL_STUDENT_PORTAL_URL}\` + as duas lojas do Duda (\`${OFFICIAL_DUDA_ANDROID_URL}\` e \`${OFFICIAL_DUDA_IOS_URL}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
+9c. Se o aluno já recebeu o pack e diz que *ainda não conseguiu entrar*: NÃO mande fila humana, NÃO diga "travou" / "destravar", NÃO abra menu 1-2-3. Acolha em 1 frase ("entendi, ainda não conseguiu entrar") e pergunte se foi no Portal, no Duda ou na senha; peça o texto do erro se tiver. Continua VOCÊ atendendo.
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
