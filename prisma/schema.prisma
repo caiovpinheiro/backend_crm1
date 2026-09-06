@@ -2584,14 +2584,15 @@ model ActivityEvent {
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([id, occurredAt])
+  // Índices compostos removidos em 2026-09-06 (ver migration
+  // drop_activity_events_dead_composite_idx): entityType/entityId, dealId,
+  // contactId, actorUserId e actorType tinham <800 scans/12d em prod contra
+  // ~1,8 GB de disco. As FKs por dealId/contactId/conversationId/actorUserId
+  // (índices simples, criados por SQL, milhões de scans) cobrem os lookups de
+  // timeline; a ordenação por occurredAt cai no sort.
   @@index([organizationId, occurredAt(sort: Desc)])
-  @@index([organizationId, entityType, entityId, occurredAt(sort: Desc)])
-  @@index([organizationId, dealId, occurredAt(sort: Desc)])
-  @@index([organizationId, contactId, occurredAt(sort: Desc)])
   @@index([organizationId, conversationId, occurredAt(sort: Desc)])
-  @@index([organizationId, actorUserId, occurredAt(sort: Desc)])
   @@index([organizationId, type, occurredAt(sort: Desc)])
-  @@index([organizationId, actorType, occurredAt(sort: Desc)])
   @@map("activity_events")
 }
 
