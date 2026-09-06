@@ -32,7 +32,15 @@ function parseRetention(): number | null {
     const n = Number.parseInt(arg.split("=")[1] ?? "", 10);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  return 24; // default: 24 meses quentes
+  // Default 12 meses (log de auditoria — "quem mudou o quê"). Antes 24;
+  // ~1,5 GB/mês com os índices atuais. Ajustável por
+  // ACTIVITY_EVENTS_RETENTION_MONTHS ou --retention=N.
+  const env = Number.parseInt(
+    process.env.ACTIVITY_EVENTS_RETENTION_MONTHS ?? "",
+    10,
+  );
+  if (Number.isFinite(env) && env > 0) return env;
+  return 12;
 }
 
 async function main() {
