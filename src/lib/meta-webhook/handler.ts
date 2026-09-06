@@ -42,6 +42,7 @@ export type WebhookScope = {
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { createMessageDedup } from "@/lib/message-dedup";
 import {
   maybeDenyWhatsappCallConsent,
   maybeGrantWhatsappCallConsent,
@@ -2831,7 +2832,13 @@ export async function processMetaWebhookPayload(
             ? await resolveReplyContext(parsed.replyToWaMessageId)
             : null;
 
-          const msgCreated = await prisma.$transaction(async (tx) => {
+          // `createMessageDedup` fica FORA da transação de propósito: o
+          // P2002 aborta a tx no Postgres, então engolir o erro dentro do
+          // callback deixaria o COMMIT em estado inválido. Aqui a tx faz
+          // rollback e a duplicata volta como `null` — mesmo caminho do
+          // `findFirst` abaixo.
+          const msgCreated = await createMessageDedup(() =>
+            prisma.$transaction(async (tx) => {
               const existing = await tx.message.findFirst({
               where: { externalId: parsed.waMessageId },
               select: { id: true },
@@ -2857,7 +2864,8 @@ export async function processMetaWebhookPayload(
                   : {}),
               }),
             });
-          });
+          }),
+          );
 
           if (!msgCreated) {
             // Reentrega da Meta: a linha já existe, mas o grant pode ter

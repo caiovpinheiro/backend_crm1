@@ -3019,6 +3019,25 @@ model Message {
   @@index([channelId])
   @@index([externalId])
   @@index([aiAgentUserId, createdAt])
+  // Dedup de inbound garantida pelo BANCO. Antes disso a dedup era só o
+  // `findFirst({ externalId })` + create dentro da transação nos 3 ingests
+  // (meta-webhook/handler, meta-webhook/messaging-handler, baileys/
+  // message-handler). Com o worker Meta em concurrency 4, dois eventos do
+  // mesmo wamid liam "não existe" ao mesmo tempo e gravavam DUAS linhas —
+  // o que fazia a IA responder duas vezes a mesma mensagem do cliente.
+  //
+  // Escopo (organizationId, externalId), não `externalId` global: a dedup
+  // em código sempre foi por org (Message está em SCOPED_MODELS, então a
+  // extension injeta `organizationId` no where do findFirst), e o mesmo
+  // número/WABA pode estar conectado em duas orgs do mesmo banco (org de
+  // teste + org real) — unique global rejeitaria o ingest legítimo da
+  // segunda org. Mesma convenção de `Contact` e `Deal`
+  // (@@unique([organizationId, externalId])).
+  //
+  // `externalId` é nullable (mensagens internas/system não têm wamid) e o
+  // btree unique do Postgres trata NULL como distinto (NULLS DISTINCT, o
+  // default), então as linhas sem externalId não colidem entre si.
+  @@unique([organizationId, externalId])
   // Index isolado em createdAt: o relatório /api/reports/messaging
   // filtra mensagens por intervalo de datas em todo o sistema (sem
   // conversationId), e o índice composto acima não é usado nesse caso.

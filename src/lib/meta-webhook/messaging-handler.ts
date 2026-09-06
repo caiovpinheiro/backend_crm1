@@ -15,6 +15,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { createMessageDedup } from "@/lib/message-dedup";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
@@ -361,16 +362,26 @@ async function processEvent(
     content = url ? `[${type}] ${url}` : `[${type}]`;
   }
 
-  const msgCreated = await prisma.message.create({
-    data: withOrgFromCtx({
-      conversationId: conversation.id,
-      channelId: hit.channelId,
-      direction: "in" as const,
-      content: content || "",
-      externalId,
-      createdAt: timestamp,
+  // O `findFirst` acima resolve a reentrega tardia; a corrida (dois eventos
+  // da mesma mid processados em paralelo) é fechada pelo unique
+  // (organizationId, externalId). Perdedor = duplicata: sai sem repetir
+  // SSE / push / gatilho / resposta da IA, igual ao early-return de cima.
+  const msgCreated = await createMessageDedup(() =>
+    prisma.message.create({
+      data: withOrgFromCtx({
+        conversationId: conversation.id,
+        channelId: hit.channelId,
+        direction: "in" as const,
+        content: content || "",
+        externalId,
+        createdAt: timestamp,
+      }),
     }),
-  });
+  );
+  if (!msgCreated) {
+    log.info(`duplicata por corrida mid=${externalId ?? ""} — ignorando`);
+    return;
+  }
 
   // TODO(inbox-ig): este ingest ainda não incrementa unread nem seta
   // lastMessageDirection — bug de UX separado; não misturar com firstInboundAt.
