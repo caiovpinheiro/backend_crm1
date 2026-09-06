@@ -52,6 +52,27 @@ async function main() {
     console.log(`[partitions] partição garantida para ${iso.slice(0, 7)}`);
   }
 
+  // 1b) ANALYZE dos meses recentes. Uma partição só recebe INSERT e depois
+  // fica parada — o autoanalyze do Postgres (10% de linhas mortas) nunca
+  // dispara nela, então o planner fica com reltuples=0 e escolhe planos
+  // ruins em qualquer query que a toque (visto em prod: activity_events
+  // 2026_07 com 3 M linhas e estatística zerada). ANALYZE é rápido e sem
+  // lock de escrita.
+  const prevMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1),
+  );
+  for (const d of [prevMonth, thisMonth]) {
+    const suffix = `${d.getUTCFullYear()}_${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    try {
+      await prismaBase.$executeRawUnsafe(
+        `ANALYZE "activity_events_${suffix}"`,
+      );
+      console.log(`[partitions] ANALYZE activity_events_${suffix}`);
+    } catch (err) {
+      console.warn(`[partitions] ANALYZE ${suffix} falhou (ok se não existe): ${err}`);
+    }
+  }
+
   // 2) Retenção.
   if (retentionMonths != null) {
     const rows = await prismaBase.$queryRawUnsafe<{ dropped: number }[]>(
