@@ -17,8 +17,8 @@ const AGENT_ROW = {
   openaiApiKeyHint: "sk-…9abc",
 };
 
-const updateMock = vi.fn(async () => ({ ...AGENT_ROW }));
-const findUniqueMock = vi.fn(async () => ({
+const updateMock = vi.fn(async (_args: unknown) => ({ ...AGENT_ROW }));
+const findUniqueMock = vi.fn(async (_args: unknown) => ({
   ...AGENT_ROW,
   user: { id: "user-1", name: "Ana" },
 }));
@@ -26,8 +26,8 @@ const findUniqueMock = vi.fn(async () => ({
 vi.mock("@/lib/prisma", () => {
   const client = {
     aIAgentConfig: {
-      findUnique: (args: unknown) => findUniqueMock(args as never),
-      update: (args: unknown) => updateMock(args as never),
+      findUnique: (args: unknown) => findUniqueMock(args),
+      update: (args: unknown) => updateMock(args),
     },
     user: { update: vi.fn(async () => ({})) },
     $transaction: async (cb: (tx: unknown) => Promise<unknown>) => cb(client),

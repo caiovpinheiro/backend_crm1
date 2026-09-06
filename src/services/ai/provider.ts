@@ -17,6 +17,8 @@ import {
   type ToolSet,
 } from "ai";
 
+import { callLlmWithRetry } from "@/services/ai/llm-retry";
+
 /**
  * Chave OpenAI: **sempre por agente** (`AIAgentConfig.openaiApiKeyEnc`).
  * CRM multi-tenant — não há chave global, nem fallback pra `.env`. Quem
@@ -86,15 +88,28 @@ export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
   const model = getModel(args.model, args.apiKey);
-  const result = await generateText({
-    model,
-    system: args.system,
-    messages: args.messages,
-    tools: args.tools,
-    temperature: args.temperature ?? 0.7,
-    maxOutputTokens: args.maxOutputTokens,
-    stopWhen: stepCountIs(args.maxSteps ?? 8),
-  });
+  // `maxRetries: 0` desliga o retry interno do SDK de propósito: ele não
+  // conhece o nosso timeout (retentaria por dentro de uma tentativa que já
+  // deveria ter sido abortada) e não loga nada. Quem retenta é
+  // `callLlmWithRetry`, que também aplica o timeout por tentativa.
+  //
+  // O retry fica AQUI, antes de qualquer envio: o runner só recebe o texto
+  // final, então retentar nunca duplica mensagem para o cliente.
+  const result = await callLlmWithRetry(
+    (abortSignal) =>
+      generateText({
+        model,
+        system: args.system,
+        messages: args.messages,
+        tools: args.tools,
+        temperature: args.temperature ?? 0.7,
+        maxOutputTokens: args.maxOutputTokens,
+        stopWhen: stepCountIs(args.maxSteps ?? 8),
+        abortSignal,
+        maxRetries: 0,
+      }),
+    { label: `generateText ${args.model}` },
+  );
 
   const toolCalls: GenerateResult["toolCalls"] = [];
   for (const step of result.steps) {
@@ -133,10 +148,18 @@ export async function embedTexts(
   inputTokens: number;
 }> {
   const openai = getOpenAI(apiKey);
-  const result = await embedMany({
-    model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
-    values: texts,
-  });
+  // Mesmo tratamento do generateText: embedding entra no caminho de
+  // retrieval do inbound, então pendurar aqui também segura o worker.
+  const result = await callLlmWithRetry(
+    (abortSignal) =>
+      embedMany({
+        model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
+        values: texts,
+        abortSignal,
+        maxRetries: 0,
+      }),
+    { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
+  );
   return {
     embeddings: result.embeddings,
     inputTokens: result.usage?.tokens ?? 0,
