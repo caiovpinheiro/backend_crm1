@@ -1346,20 +1346,29 @@ const TAB_LIST = INBOX_TAB_LIST;
  */
 type AssigneeIdsByType = { HUMAN: string[]; AI: string[] };
 
+/**
+ * IDs de users HUMAN/AI da org — só muda quando alguém entra/sai da equipe
+ * ou vira agente IA. Recomputado a cada `computeTabCounts` custava ~136k
+ * queries em 12d (pg_stat). Cache de 60s sem invalidação explícita: a lista
+ * alimenta só o rewrite de `assignedTo: { type }` nas contagens de aba, que
+ * já são cacheadas 90s downstream e toleram stale.
+ */
 async function loadAssigneeIdsByType(): Promise<AssigneeIdsByType> {
   const orgId = getOrgIdOrNull();
   if (!orgId) return { HUMAN: [], AI: [] };
-  const rows = await prisma.user.findMany({
-    where: { organizationId: orgId, type: { in: ["HUMAN", "AI"] } },
-    select: { id: true, type: true },
+  return cache.wrap(`assignee_ids_by_type:${orgId}`, 60, async () => {
+    const rows = await prisma.user.findMany({
+      where: { organizationId: orgId, type: { in: ["HUMAN", "AI"] } },
+      select: { id: true, type: true },
+    });
+    const HUMAN: string[] = [];
+    const AI: string[] = [];
+    for (const r of rows) {
+      if (r.type === "AI") AI.push(r.id);
+      else HUMAN.push(r.id);
+    }
+    return { HUMAN, AI };
   });
-  const HUMAN: string[] = [];
-  const AI: string[] = [];
-  for (const r of rows) {
-    if (r.type === "AI") AI.push(r.id);
-    else HUMAN.push(r.id);
-  }
-  return { HUMAN, AI };
 }
 
 function rewriteAssignedToType(
