@@ -195,7 +195,7 @@ export function userWantsAiContinue(userMessage: string): boolean {
   if (!n) return false;
   if (userWantsHumanDistribution(userMessage)) return false;
   return (
-    /pode continuar|continua(r)?( me)? (ajud|atend)|voce (pode )?ajud|quero (sua|a) ajuda|pode me ajudar|segue( comigo)?|pode sim|quero (que )?voce/.test(
+    /pode continuar|continua(r)?( me)? (ajud|atend)|voce (pode )?ajud|quero (sua |a )?ajuda|pode me ajudar|consegue( me)? ajud|me ajuda|me ajudar|pode ajudar|segue( comigo)?|pode sim|quero (que )?voce/.test(
       n,
     ) ||
     /^(pode|quero|sim|continuar|continua)[\s!.]*$/.test(n)

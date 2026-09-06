@@ -31,9 +31,7 @@
 import { metaClientFromConfig, type MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   computeTypingDelayMs,
-  isWithinBusinessHours,
   matchHandoffKeyword,
-  normalizeBusinessHours,
   renderTemplate,
 } from "@/lib/ai-agents/piloting";
 import {
@@ -72,6 +70,7 @@ import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
+  isImmediateAcademicHandoffJustified,
   moveOpenDealToEmAtendimento,
   shouldHandoffCurriculumOrTce,
   textImpliesAcademicHandoff,
@@ -139,6 +138,24 @@ function isBareGreetingMessage(raw: string): boolean {
   if (!n || n.length > 40) return false;
   return /^(oi+|ola+|oie+|hey|hello|bom dia|boa tarde|boa noite)( tudo bem)?$/.test(
     n,
+  );
+}
+
+/** "oi", "??", "consegue me ajudar" — a IA atende; não é fila humana. */
+function isAcademicSelfServeTurn(raw: string): boolean {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return false;
+  if (/^\?+$/.test(trimmed)) return true;
+  if (isBareGreetingMessage(trimmed)) return true;
+  if (isFirstAccessIntent(trimmed)) return true;
+  if (userWantsAiContinue(trimmed)) return true;
+  return false;
+}
+
+function buildAcademicStayWithYouMessage(): string {
+  return (
+    "Claro, tô aqui com você. Pode me dizer o que precisa — " +
+    "primeiro acesso, senha, portal, Blackboard, prova, documento…"
   );
 }
 
@@ -888,14 +905,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "já registrei seu pedido",
         "já te passei para um",
         "seu pedido já está com alguém",
-        "estou aqui contigo",
         "setor de",
         "Retenção",
         "Acolhimento",
       ];
       if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
-        if (userWantsAiContinue(args.userMessage)) {
-          // Aluno escolheu continuar com a IA — segue o fluxo normal.
+        if (isAcademicSelfServeTurn(args.userMessage)) {
+          // "oi" / "consegue me ajudar" depois do aviso de fila → a IA atende.
         } else {
           const norm = args.userMessage
             .normalize("NFD")
@@ -972,45 +988,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     }
 
-    // ── 1. Business hours gate ────────────────────────────────
-    const businessHours = normalizeBusinessHours(cfg.businessHours);
-    if (businessHours?.enabled && !isWithinBusinessHours(businessHours)) {
-      if (businessHours.offHoursMessage?.trim()) {
-        const contact = await prisma.contact.findUnique({
-          where: { id: args.contactId },
-          select: { name: true },
-        });
-        const text = renderTemplate(businessHours.offHoursMessage, {
-          contactName: contact?.name ?? null,
-        });
-        const auth = await assertAiStillAuthorized({
-          conversationId: args.conversationId,
-          expectedAgentUserId: assignee.id,
-          generationId: args.generationId,
-          since: startedAt,
-        });
-        if (!auth.ok) {
-          logAi("blocked", {
-            conversationId: args.conversationId,
-            reason: auth.reason,
-            phase: "pre_off_hours_send",
-          });
-          return;
-        }
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text,
-          channel: args.channel,
-          kind: "off_hours",
-          humanBehavior,
-          generationId: args.generationId,
-        }).catch(() => null);
-      }
-      return;
-    }
+    // ── 1. Business hours ─────────────────────────────────────
+    // Expediente é da FILA HUMANA, não da IA. Playground não aplica este
+    // gate; se bloquear aqui, "oi" sábado vira template de 8h e o aluno
+    // acha que o agente não atende. Handoff justificado (humano/retenção/
+    // TCE/curso) ainda manda o aviso de horário mais abaixo.
 
     // ── 1c. Encerramento pedido pelo aluno (somente atendimento IA) ──
     const lastAiOut = await prisma.message.findFirst({
@@ -1169,7 +1151,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       args.userMessage,
       cfg.keywordHandoffs ?? [],
     );
-    if (keyword) {
+    if (keyword && !isAcademicSelfServeTurn(args.userMessage)) {
       const deptKey = inferDepartmentFromContext({
         userMessage: args.userMessage,
         policy,
@@ -1497,21 +1479,33 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     const parsedEarly = parseAgentConfidence(result.text || "");
     const replyText = parsedEarly.text.trim();
     // Tool/HANDOFF OU promessa explícita no texto ("vou te conectar…") →
-    // distribui de fato. "Atender primeiro" = não chamar tool / não prometer
-    // handoff enquanto ainda dá para orientar; se o agente já decidiu
-    // transferir, o backend NÃO adia.
+    // distribui de fato. Cumprimento / "me ajuda" / primeiro acesso NÃO
+    // viram fila. Fora do expediente, o template de horário só sai se o
+    // aluno pediu humano ou o tema exige depto (retenção, TCE, curso…).
+    const selfServeTurn = isAcademicSelfServeTurn(args.userMessage);
+    const justifiedHandoff = isImmediateAcademicHandoffJustified(
+      args.userMessage,
+      policy,
+    );
     const lowConfHandoff =
       policy.lowConfidenceHandoff &&
       shouldHandoffOnLowConfidence(
         parsedEarly.confidence,
         policy.confidenceThreshold ?? undefined,
       ) &&
-      !isBareGreetingMessage(args.userMessage);
-    const transferred =
+      !selfServeTurn;
+    let transferred =
       result.status === "HANDOFF" ||
       runHadTransferTools(result.toolCalls) ||
       textImpliesAcademicHandoff(replyText) ||
       lowConfHandoff;
+    if (
+      transferred &&
+      !justifiedHandoff &&
+      (selfServeTurn || !isHumanAttendanceWindowOpen())
+    ) {
+      transferred = false;
+    }
 
     if (transferred) {
       const handoffText =
@@ -1683,6 +1677,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = rewriteMismatchedDaypartWish(parsed.text);
+    if (
+      messageLooksLikeHumanQueueNotice(text) &&
+      !justifiedHandoff &&
+      !userWantsHumanDistribution(args.userMessage)
+    ) {
+      text = buildAcademicStayWithYouMessage();
+    }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
       const recentSame = await prisma.message.findFirst({
