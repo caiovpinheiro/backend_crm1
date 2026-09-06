@@ -114,6 +114,7 @@ import {
 } from "@/services/ai/human-queue-policy";
 import { debugInfo } from "@/lib/debug-log";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
+import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { runAgent } from "@/services/ai/runner";
 import { sendAgentFollowUpMedia } from "@/services/ai/send-agent-media";
 
@@ -520,6 +521,16 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               choice: faChoice,
             },
           );
+          await recordInboxInterceptRun({
+            agentUserId: aiId,
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            interceptName: faChoice
+              ? "first_access_choice"
+              : alreadyPack || isFirstAccessStuckIntent(args.userMessage)
+                ? "first_access_stuck_help"
+                : "first_access_pack",
+          });
           return;
         }
       }
@@ -586,6 +597,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         logAi("ava_disciplines_help", {
           conversationId: args.conversationId,
           contactId: args.contactId,
+        });
+        await recordInboxInterceptRun({
+          agentUserId: avaAi,
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          interceptName: "ava_disciplines",
         });
         return;
       }
@@ -655,6 +672,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         logAi("greeting_self_serve", {
           conversationId: args.conversationId,
           contactId: args.contactId,
+        });
+        await recordInboxInterceptRun({
+          agentUserId: greetAi,
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          interceptName: "greeting_self_serve",
         });
         return;
       }
@@ -934,6 +957,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           }).catch(() => null);
         }
       }
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "attendance_scope",
+      });
       return;
     }
 
@@ -971,6 +1000,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             contactId: args.contactId,
             priorityCalouros: inaugural.priorityCalouros,
             problem: inaugural.problem,
+          });
+          await recordInboxInterceptRun({
+            agentId: cfg.id,
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            interceptName: "inaugural_class_link",
           });
           return;
         }
@@ -1035,6 +1070,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             conversationId: args.conversationId,
             pendingId: pendingHandoff.id,
           });
+          await recordInboxInterceptRun({
+            agentId: cfg.id,
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            interceptName: "pending_handoff_human_assigned",
+          });
           return;
         }
         if (
@@ -1057,6 +1098,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         logAi("handoff_pending_human_requested", {
           conversationId: args.conversationId,
           pendingId: pendingHandoff.id,
+        });
+        await recordInboxInterceptRun({
+          agentId: cfg.id,
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          interceptName: "pending_handoff_human_requested",
         });
         return;
       }
@@ -1086,6 +1133,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         logAi("handoff_pending_human_assigned", {
           conversationId: args.conversationId,
           pendingId: pendingHandoff.id,
+        });
+        await recordInboxInterceptRun({
+          agentId: cfg.id,
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          interceptName: "pending_handoff_redistribute_human",
         });
         return;
       }
@@ -1217,6 +1270,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               conversationId: args.conversationId,
               userMessage: args.userMessage.slice(0, 50),
             });
+            await recordInboxInterceptRun({
+              agentId: cfg.id,
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              interceptName: "handoff_ack_silence",
+            });
             return;
           }
         }
@@ -1315,6 +1374,14 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               ? "idle_nudge_soft_close"
               : closeDecision.reason || "ai_only_close",
           });
+          await recordInboxInterceptRun({
+            agentId: cfg.id,
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            interceptName: afterIdleNudge
+              ? "idle_nudge_soft_close"
+              : "ai_only_close",
+          });
           return;
         }
       }
@@ -1378,6 +1445,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         department: audioDeptKey,
         durationMs: Date.now() - startedAt.getTime(),
       });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "inbound_audio",
+      });
       return;
     }
 
@@ -1430,6 +1503,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         keyword,
         department: deptKey,
       });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "keyword_handoff",
+      });
       return;
     }
 
@@ -1471,6 +1550,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         reason: "course_shopping",
         durationMs: Date.now() - startedAt.getTime(),
       });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "course_shopping",
+      });
       return;
     }
 
@@ -1510,6 +1595,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         reason: "curriculum_or_tce",
         durationMs: Date.now() - startedAt.getTime(),
+      });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "curriculum_or_tce",
       });
       return;
     }
@@ -1551,6 +1642,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         reason: "retention_intent",
         durationMs: Date.now() - startedAt.getTime(),
+      });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "retention_intent",
       });
       return;
     }
@@ -1634,6 +1731,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       logAi("greeting_only", {
         conversationId: args.conversationId,
         durationMs: Date.now() - startedAt.getTime(),
+      });
+      await recordInboxInterceptRun({
+        agentId: cfg.id,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        interceptName: "greeting_only",
       });
       return;
     }

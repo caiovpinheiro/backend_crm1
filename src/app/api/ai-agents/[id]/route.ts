@@ -9,6 +9,7 @@ import {
   updateAIAgent,
   type UpdateAIAgentInput,
 } from "@/services/ai-agents";
+import { parseAuditSource } from "@/lib/ai-agents/observability";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 const ARCHETYPES: AIAgentArchetype[] = [
@@ -125,6 +126,7 @@ export async function PUT(
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,
+        autoClosePolicy: body.autoClosePolicy,
       }),
       ...sanitizeSteeringInput({
         systemPromptTemplate: body.systemPromptTemplate,
@@ -132,6 +134,7 @@ export async function PUT(
         toolConfig: body.toolConfig,
         inboxPolicy: body.inboxPolicy,
       }),
+      auditSource: parseAuditSource(body.auditSource ?? body.source),
     };
 
     try {

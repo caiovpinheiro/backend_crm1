@@ -15,13 +15,15 @@ import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   HANDOFF_MODES,
+  normalizeAutoClosePolicy,
   normalizeBusinessHours,
   normalizeOutputStyle,
   normalizeQualificationQuestions,
+  type AutoClosePolicy,
   type BusinessHoursConfig,
   type HandoffMode,
   type OutputStyle,
@@ -33,6 +35,12 @@ import {
   type InboxPolicy,
   type ToolConfigMap,
 } from "@/lib/ai-agents/steering";
+import {
+  auditDiffAsJson,
+  buildAgentConfigDiff,
+  parseAuditSource,
+  type AuditSource,
+} from "@/lib/ai-agents/observability";
 
 export type AIAgentRow = {
   id: string;
@@ -134,6 +142,10 @@ export type CreateAIAgentInput = {
   simulateTyping?: boolean;
   typingPerCharMs?: number;
   markMessagesRead?: boolean;
+  autoClosePolicy?: AutoClosePolicy | null;
+
+  /// Origem do save pra auditoria (Onda 0). Default: api.
+  auditSource?: AuditSource;
 };
 
 /**
@@ -155,6 +167,7 @@ export function sanitizePilotingInput(input: {
   simulateTyping?: unknown;
   typingPerCharMs?: unknown;
   markMessagesRead?: unknown;
+  autoClosePolicy?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
@@ -171,6 +184,7 @@ export function sanitizePilotingInput(input: {
     | "simulateTyping"
     | "typingPerCharMs"
     | "markMessagesRead"
+    | "autoClosePolicy"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -246,6 +260,12 @@ export function sanitizePilotingInput(input: {
 
   if (typeof input.markMessagesRead === "boolean") {
     out.markMessagesRead = input.markMessagesRead;
+  }
+
+  if (input.autoClosePolicy === null) {
+    out.autoClosePolicy = null;
+  } else if (input.autoClosePolicy !== undefined) {
+    out.autoClosePolicy = normalizeAutoClosePolicy(input.autoClosePolicy);
   }
 
   return out;
@@ -375,6 +395,47 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         simulateTyping: input.simulateTyping ?? true,
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
+        autoClosePolicy:
+          (input.autoClosePolicy as unknown as Prisma.InputJsonValue | undefined) ??
+          Prisma.JsonNull,
+      }),
+    });
+
+    const auditSource = parseAuditSource(input.auditSource);
+    const ctxUserId = getRequestContext()?.userId ?? null;
+    await tx.aIAgentConfigAudit.create({
+      data: withOrgFromCtx({
+        agentId: config.id,
+        userId: ctxUserId,
+        source: auditSource,
+        diff: auditDiffAsJson(
+          buildAgentConfigDiff(
+            {},
+            {
+              name: input.name,
+              archetype: input.archetype,
+              model: config.model,
+              temperature: config.temperature,
+              maxTokens: config.maxTokens,
+              systemPromptTemplate: config.systemPromptTemplate,
+              systemPromptOverride: config.systemPromptOverride,
+              productPolicy: config.productPolicy,
+              steeringRules: config.steeringRules,
+              toolConfig: config.toolConfig,
+              inboxPolicy: config.inboxPolicy,
+              tone: config.tone,
+              language: config.language,
+              autonomyMode: config.autonomyMode,
+              enabledTools: config.enabledTools,
+              dailyTokenCap: config.dailyTokenCap,
+              pipelineId: config.pipelineId,
+              channelId: config.channelId,
+              active: config.active,
+              openingMessage: config.openingMessage,
+              autoClosePolicy: config.autoClosePolicy,
+            },
+          ),
+        ),
       }),
     });
 
@@ -509,8 +570,154 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.outputStyle !== undefined
           ? { outputStyle: input.outputStyle }
           : {}),
+        ...(input.autoClosePolicy !== undefined
+          ? {
+              autoClosePolicy:
+                input.autoClosePolicy === null
+                  ? Prisma.JsonNull
+                  : (input.autoClosePolicy as unknown as Prisma.InputJsonValue),
+            }
+          : {}),
       },
     });
+
+    const changedKeys = Object.keys(input).filter((k) => k !== "auditSource");
+    if (changedKeys.length > 0) {
+      const beforeSnap: Record<string, unknown> = {
+        name: existing.user.name,
+        avatarUrl: existing.user.avatarUrl,
+        archetype: existing.archetype,
+        model: existing.model,
+        temperature: existing.temperature,
+        maxTokens: existing.maxTokens,
+        systemPromptTemplate: existing.systemPromptTemplate,
+        systemPromptOverride: existing.systemPromptOverride,
+        productPolicy: existing.productPolicy,
+        steeringRules: existing.steeringRules,
+        toolConfig: existing.toolConfig,
+        inboxPolicy: existing.inboxPolicy,
+        tone: existing.tone,
+        language: existing.language,
+        autonomyMode: existing.autonomyMode,
+        enabledTools: existing.enabledTools,
+        dailyTokenCap: existing.dailyTokenCap,
+        pipelineId: existing.pipelineId,
+        channelId: existing.channelId,
+        active: existing.active,
+        openingMessage: existing.openingMessage,
+        openingDelayMs: existing.openingDelayMs,
+        inactivityTimerMs: existing.inactivityTimerMs,
+        inactivityHandoffMode: existing.inactivityHandoffMode,
+        inactivityHandoffUserId: existing.inactivityHandoffUserId,
+        inactivityFarewellMessage: existing.inactivityFarewellMessage,
+        keywordHandoffs: existing.keywordHandoffs,
+        qualificationQuestions: existing.qualificationQuestions,
+        businessHours: existing.businessHours,
+        outputStyle: existing.outputStyle,
+        simulateTyping: existing.simulateTyping,
+        typingPerCharMs: existing.typingPerCharMs,
+        markMessagesRead: existing.markMessagesRead,
+        autoClosePolicy: existing.autoClosePolicy,
+      };
+      const afterSnap: Record<string, unknown> = {
+        ...beforeSnap,
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
+        ...(input.archetype !== undefined ? { archetype: input.archetype } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.temperature !== undefined
+          ? { temperature: input.temperature }
+          : {}),
+        ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.systemPromptTemplate !== undefined
+          ? { systemPromptTemplate: input.systemPromptTemplate }
+          : {}),
+        ...(input.systemPromptOverride !== undefined
+          ? { systemPromptOverride: input.systemPromptOverride }
+          : {}),
+        ...(input.steeringRules !== undefined
+          ? { steeringRules: input.steeringRules }
+          : {}),
+        ...(input.toolConfig !== undefined
+          ? { toolConfig: input.toolConfig }
+          : {}),
+        ...(input.inboxPolicy !== undefined
+          ? { inboxPolicy: input.inboxPolicy }
+          : {}),
+        ...(input.productPolicy !== undefined
+          ? { productPolicy: input.productPolicy }
+          : {}),
+        ...(input.tone !== undefined ? { tone: input.tone } : {}),
+        ...(input.language !== undefined ? { language: input.language } : {}),
+        ...(input.autonomyMode !== undefined
+          ? { autonomyMode: input.autonomyMode }
+          : {}),
+        ...(input.enabledTools !== undefined
+          ? { enabledTools: input.enabledTools }
+          : {}),
+        ...(input.dailyTokenCap !== undefined
+          ? { dailyTokenCap: input.dailyTokenCap }
+          : {}),
+        ...(input.pipelineId !== undefined
+          ? { pipelineId: input.pipelineId }
+          : {}),
+        ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+        ...(input.active !== undefined ? { active: input.active } : {}),
+        ...(input.openingMessage !== undefined
+          ? { openingMessage: input.openingMessage }
+          : {}),
+        ...(input.openingDelayMs !== undefined
+          ? { openingDelayMs: input.openingDelayMs }
+          : {}),
+        ...(input.inactivityTimerMs !== undefined
+          ? { inactivityTimerMs: input.inactivityTimerMs }
+          : {}),
+        ...(input.inactivityHandoffMode !== undefined
+          ? { inactivityHandoffMode: input.inactivityHandoffMode }
+          : {}),
+        ...(input.inactivityHandoffUserId !== undefined
+          ? { inactivityHandoffUserId: input.inactivityHandoffUserId }
+          : {}),
+        ...(input.inactivityFarewellMessage !== undefined
+          ? { inactivityFarewellMessage: input.inactivityFarewellMessage }
+          : {}),
+        ...(input.keywordHandoffs !== undefined
+          ? { keywordHandoffs: input.keywordHandoffs }
+          : {}),
+        ...(input.qualificationQuestions !== undefined
+          ? { qualificationQuestions: input.qualificationQuestions }
+          : {}),
+        ...(input.businessHours !== undefined
+          ? { businessHours: input.businessHours }
+          : {}),
+        ...(input.simulateTyping !== undefined
+          ? { simulateTyping: input.simulateTyping }
+          : {}),
+        ...(input.typingPerCharMs !== undefined
+          ? { typingPerCharMs: input.typingPerCharMs }
+          : {}),
+        ...(input.markMessagesRead !== undefined
+          ? { markMessagesRead: input.markMessagesRead }
+          : {}),
+        ...(input.outputStyle !== undefined
+          ? { outputStyle: input.outputStyle }
+          : {}),
+        ...(input.autoClosePolicy !== undefined
+          ? { autoClosePolicy: input.autoClosePolicy }
+          : {}),
+      };
+      const diff = buildAgentConfigDiff(beforeSnap, afterSnap, changedKeys);
+      if (diff.length > 0) {
+        await tx.aIAgentConfigAudit.create({
+          data: withOrgFromCtx({
+            agentId: id,
+            userId: getRequestContext()?.userId ?? null,
+            source: parseAuditSource(input.auditSource),
+            diff: auditDiffAsJson(diff),
+          }),
+        });
+      }
+    }
 
     return config;
   });

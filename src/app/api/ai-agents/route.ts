@@ -7,6 +7,7 @@ import {
   sanitizePilotingInput,
   type CreateAIAgentInput,
 } from "@/services/ai-agents";
+import { parseAuditSource } from "@/lib/ai-agents/observability";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 const ARCHETYPES: AIAgentArchetype[] = [
@@ -105,7 +106,9 @@ export async function POST(request: Request) {
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,
+        autoClosePolicy: body.autoClosePolicy,
       }),
+      auditSource: parseAuditSource(body.auditSource ?? body.source),
     };
 
     try {
