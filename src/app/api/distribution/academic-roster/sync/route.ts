@@ -46,7 +46,9 @@ export async function POST() {
       throw e;
     }
 
-    const result = await getVerticalPack("academic")!.ops.ensureAcademicDepartmentRoster({ force: true });
+    const result = await getVerticalPack(
+      "academic",
+    )!.ops.ensureAcademicDepartmentRoster?.({ force: true });
     return NextResponse.json({
       ok: true,
       synced: result?.synced ?? 0,

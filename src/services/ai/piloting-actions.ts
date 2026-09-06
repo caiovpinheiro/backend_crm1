@@ -79,7 +79,7 @@ async function closeAttendanceIfFarewell(args: {
     const { getVerticalPack } = await import("@/verticals");
     const closeIfAgentFarewellEndsAttendance =
       getVerticalPack("academic")?.ops.closeIfAgentFarewellEndsAttendance;
-    await closeIfAgentFarewellEndsAttendance({
+    await closeIfAgentFarewellEndsAttendance?.({
       conversationId: args.conversationId,
       contactId: args.contactId,
       replyText: args.text,

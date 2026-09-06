@@ -214,7 +214,7 @@ async function closeAfterFarewellIfNeeded(args: {
     contactId: args.contactId,
     allowAfterHumanReply: true,
     reason: "Atendimento concluído — aluno se despediu e o agente encerrou",
-  }).catch(() => ({ closed: false, reason: "ERROR" }));
+  })?.catch(() => ({ closed: false, reason: "ERROR" }));
   if (closed?.closed) {
     cancelAiReplyDebounce(args.conversationId, "agent_farewell");
     logAi("closed", {
@@ -740,12 +740,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       });
       if (
         !distributeOnFailure ||
-        !packOps.isImmediateAcademicHandoffJustified(args.userMessage, policy)
+        !packOps.isImmediateAcademicHandoffJustified?.(args.userMessage, policy)
       ) {
         return;
       }
 
-      await packOps.executeAcademicDepartmentHandoff({
+      await packOps.executeAcademicDepartmentHandoff?.({
         conversationId: args.conversationId,
         contactId: args.contactId,
         dealId: openDeal?.id ?? null,
@@ -800,10 +800,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // viram fila. Fora do expediente, o template de horário só sai se o
     // aluno pediu humano ou o tema exige depto (retenção, TCE, curso…).
     const selfServeTurn = isAcademicSelfServeTurn(args.userMessage, packOps);
-    const justifiedHandoff = packOps.isImmediateAcademicHandoffJustified(
-      args.userMessage,
-      policy,
-    );
+    const justifiedHandoff =
+      packOps.isImmediateAcademicHandoffJustified?.(args.userMessage, policy) ??
+      false;
     const lowConfHandoff =
       policy.lowConfidenceHandoff &&
       shouldHandoffOnLowConfidence(
@@ -814,16 +813,19 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     let transferred =
       result.status === "HANDOFF" ||
       runHadTransferTools(result.toolCalls) ||
-      packOps.textImpliesAcademicHandoff(replyText) ||
+      (packOps.textImpliesAcademicHandoff?.(replyText) ?? false) ||
       lowConfHandoff;
-    if (transferred && !justifiedHandoff) {
+    // Freio de handoff "não justificado" é regra do pack: sem pack não há
+    // tema acadêmico para justificar, e cancelar aqui engoliria uma tool de
+    // transferência legítima do agente genérico.
+    if (agentPack && transferred && !justifiedHandoff) {
       transferred = false;
     }
 
     if (transferred) {
       const handoffText =
         replyText ||
-        (packOps.inferDepartmentFromContext({
+        (packOps.inferDepartmentFromContext?.({
           userMessage: args.userMessage,
           policy,
         }) === "retencao"
@@ -850,12 +852,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         select: { id: true },
       });
       if (alreadyHuman) {
-        await packOps.moveOpenDealToEmAtendimento({
+        await packOps.moveOpenDealToEmAtendimento?.({
           dealId: openDeal?.id ?? null,
           contactId: args.contactId,
         }).catch(() => null);
       } else if (!alreadyQueued || afterHandoff?.assignedTo?.type === "AI") {
-        await packOps.executeAcademicDepartmentHandoff({
+        await packOps.executeAcademicDepartmentHandoff?.({
           conversationId: args.conversationId,
           contactId: args.contactId,
           dealId: openDeal?.id ?? null,
@@ -864,7 +866,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             ? `Baixa confiança da IA (${parsedEarly.confidence?.toFixed(2)})`
             : runHadTransferTools(result.toolCalls)
               ? "Handoff via tool da IA — distribuição/fila"
-              : packOps.textImpliesAcademicHandoff(replyText)
+              : packOps.textImpliesAcademicHandoff?.(replyText)
                 ? "IA prometeu conectar — reforço distribuição/fila"
                 : "Handoff acadêmico — reforço backend",
           policy,
@@ -912,7 +914,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         /fila|indispon|posso continuar|a partir das\s*\d/i.test(handoffText);
 
       const retentionDept =
-        packOps.inferDepartmentFromContext({
+        packOps.inferDepartmentFromContext?.({
           userMessage: args.userMessage,
           policy,
         }) === "retencao";
@@ -990,14 +992,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = rewriteMismatchedDaypartWish(parsed.text);
+    // Reescrever "vou te passar pra alguém" em cópia acadêmica só faz
+    // sentido com pack: sem pack o agente genérico mantém o texto do LLM.
     if (
+      agentPack &&
       messageLooksLikeHumanQueueNotice(text) &&
       !justifiedHandoff &&
       !userWantsHumanDistribution(args.userMessage)
     ) {
-      text = packOps.isAvaOrDisciplinesIntent(args.userMessage)
-        ? packOps.buildAvaDisciplinesMessage()
-        : buildAcademicStayWithYouMessage();
+      text =
+        (packOps.isAvaOrDisciplinesIntent?.(args.userMessage)
+          ? (packOps.buildAvaDisciplinesMessage?.() as string | undefined)
+          : undefined) ?? buildAcademicStayWithYouMessage();
     }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {

@@ -29,6 +29,10 @@ import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
 import type { VerticalIntercept, VerticalPack } from "@/verticals/types";
 
+// `INAUGURAL_CLASS_YOUTUBE_URL` é constante, não op — fica fora de `ops`.
+const { INAUGURAL_CLASS_YOUTUBE_URL: _inauguralUrl, ...inauguralOps } =
+  inaugural;
+
 let _intercepts: VerticalIntercept[] | null = null;
 function loadIntercepts(): VerticalIntercept[] {
   if (!_intercepts) {
@@ -89,7 +93,7 @@ export const academicPack: VerticalPack = {
   ops: {
     ...closure,
     ...routing,
-    ...inaugural,
+    ...inauguralOps,
     ensureAcademicDepartmentRoster,
     isFirstAccessIntent,
     isFirstAccessStuckIntent,

@@ -21,7 +21,10 @@ const {
   userSaysGoodbye,
   userSaysThatsAll,
   userThanksInSentence,
-} = getVerticalPack("academic")!.ops;
+} = getVerticalPack("academic")!.ops as Record<
+  string,
+  (...args: any[]) => any
+>;
 import { userWantsSoftAiClose } from "@/services/ai/idle-followup";
 
 const FAREWELL =

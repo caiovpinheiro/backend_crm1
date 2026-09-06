@@ -33,6 +33,43 @@ export type PromptBlockCtx = {
   [key: string]: unknown;
 };
 
+type PackOp = (...args: any[]) => any;
+
+/**
+ * Métodos que o core chama nos packs. Sempre opcionais: o pack pode não
+ * implementar, e o agente pode não ter pack nenhum. Constantes e outros
+ * exports dos módulos do vertical caem no index signature (não-chamáveis
+ * sem cast, de propósito).
+ */
+export type VerticalPackOps = {
+  // intenção / classificação
+  isFirstAccessIntent?: PackOp;
+  isFirstAccessStuckIntent?: PackOp;
+  isAvaOrDisciplinesIntent?: PackOp;
+  isImmediateAcademicHandoffJustified?: PackOp;
+  textImpliesAcademicHandoff?: PackOp;
+  inferDepartmentFromContext?: PackOp;
+  shouldCloseAfterAgentFarewell?: PackOp;
+  parseFirstAccessChoice?: PackOp;
+  // ações
+  executeAcademicDepartmentHandoff?: PackOp;
+  moveOpenDealToEmAtendimento?: PackOp;
+  closeAiOnlyConversation?: PackOp;
+  closeIfAgentFarewellEndsAttendance?: PackOp;
+  ensureAcademicDepartmentRoster?: PackOp;
+  // cópia / prompt
+  buildAvaDisciplinesMessage?: PackOp;
+  formatFirstAccessHint?: PackOp;
+  formatPasswordResetHint?: PackOp;
+  formatExamAccessHint?: PackOp;
+  formatParticipationCertificateHint?: PackOp;
+  formatPoloAddressesHint?: PackOp;
+  formatCanonicalPortalAccessHint?: PackOp;
+  academicExamModalityRules?: PackOp;
+  /** Demais helpers do vertical (closure, routing, inaugural…). */
+  [key: string]: PackOp | undefined;
+};
+
 export type VerticalPack = {
   id: string;
   intercepts: VerticalIntercept[];
@@ -52,8 +89,13 @@ export type VerticalPack = {
     interceptCourseShopping?: boolean;
     inauguralEnabled?: boolean;
   };
-  /** Ops tipadas frouxamente — nomes = exports dos módulos academic. */
-  ops: Record<string, any>;
+  /**
+   * Ops do pack — nomes = exports dos módulos do vertical.
+   * Todos opcionais de propósito: agente sem pack cai em `{}`, então
+   * chamada sem `?.()` é erro de compilação (era `Record<string, any>`
+   * e deixava passar `TypeError: is not a function` em runtime).
+   */
+  ops: VerticalPackOps;
   constants: {
     handoffKeywords: string[];
     atendimentoRules: string;

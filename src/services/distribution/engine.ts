@@ -985,7 +985,7 @@ export async function executeDistribution(
     try {
       const { getVerticalPack } = await import("@/verticals");
       const moveOpenDealToEmAtendimento = getVerticalPack("academic")!.ops.moveOpenDealToEmAtendimento;
-      await moveOpenDealToEmAtendimento({
+      await moveOpenDealToEmAtendimento?.({
         dealId: assignedDealId,
         contactId: input.contactId ?? null,
       });
