@@ -80,6 +80,23 @@ export async function listAIAgents(): Promise<AIAgentRow[]> {
   }));
 }
 
+/**
+ * Tira a chave OpenAI cifrada de qualquer row de `AIAgentConfig` que vá
+ * para o cliente. A UI só precisa do bit "tem chave própria?" e do hint
+ * (últimos 4 chars, coluna `openaiApiKeyHint`) — o `openaiApiKeyEnc`
+ * nunca sai do servidor.
+ *
+ * Único ponto de redaction: GET, PUT e qualquer rota nova passam por
+ * aqui. Antes o strip existia só no GET e o PUT devolvia o row cru do
+ * Prisma direto no JSON da resposta.
+ */
+export function redactAgentOpenaiKey<
+  T extends { openaiApiKeyEnc?: string | null },
+>(row: T): Omit<T, "openaiApiKeyEnc"> & { hasOwnOpenaiKey: boolean } {
+  const { openaiApiKeyEnc, ...safe } = row;
+  return { ...safe, hasOwnOpenaiKey: Boolean(openaiApiKeyEnc) };
+}
+
 export async function getAIAgent(id: string) {
   const row = await prisma.aIAgentConfig.findUnique({
     where: { id },
@@ -96,9 +113,7 @@ export async function getAIAgent(id: string) {
     },
   });
   if (!row) return null;
-  // Nunca devolve a chave OpenAI cifrada. A UI usa só o hint + o bit.
-  const { openaiApiKeyEnc, ...safe } = row;
-  return { ...safe, hasOwnOpenaiKey: Boolean(openaiApiKeyEnc) };
+  return redactAgentOpenaiKey(row);
 }
 
 export type CreateAIAgentInput = {
@@ -404,7 +419,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
       }),
     });
 
-    return { user, config };
+    return { user, config: redactAgentOpenaiKey(config) };
   });
 }
 
@@ -539,17 +554,25 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
       },
     });
 
-    return config;
+    // Mesmo strip do GET: o `config` cru traz `openaiApiKeyEnc` e a rota
+    // PUT devolve este objeto direto no corpo da resposta.
+    return redactAgentOpenaiKey(config);
   });
 }
 
 export async function toggleAIAgentActive(id: string) {
-  const existing = await prisma.aIAgentConfig.findUnique({ where: { id } });
+  const existing = await prisma.aIAgentConfig.findUnique({
+    where: { id },
+    select: { active: true },
+  });
   if (!existing) throw new Error("Agente não encontrado.");
-  return prisma.aIAgentConfig.update({
+  const updated = await prisma.aIAgentConfig.update({
     where: { id },
     data: { active: !existing.active },
   });
+  // Hoje a rota devolve só `{ active }`, mas o row cru sai daqui — redige
+  // pra ninguém transformar isso em leak ao passar a devolver o objeto.
+  return redactAgentOpenaiKey(updated);
 }
 
 export async function deleteAIAgent(id: string) {
