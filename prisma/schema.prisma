@@ -4932,14 +4932,20 @@ model ConversationTurn {
   /// "meta" | "baileys" | "messaging" — canal de ingestão da 1ª mensagem.
   channel        String                 @default("meta")
   status         ConversationTurnStatus @default(RECEIVING)
-  /// Sentinela do invariante "no máximo UM turno aberto por conversa":
-  /// vale `conversationId` enquanto o turno está aberto (RECEIVING,
-  /// STABILIZING, READY, PROCESSING) e NULL nos estados terminais.
-  /// Combinado com @@unique([organizationId, openKey]) e o btree
-  /// NULLS DISTINCT do Postgres, dois ingests concorrentes na mesma
-  /// conversa só conseguem criar UM turno aberto — o segundo toma P2002 e
-  /// vira append. Unique parcial (WHERE status IN ...) resolveria o mesmo,
-  /// mas não é expressável no schema.prisma e o DEV é gerenciado em estilo
+  /// Sentinela do invariante "no máximo UM turno ACUMULANDO por conversa":
+  /// vale `conversationId` em RECEIVING/STABILIZING/READY e NULL a partir do
+  /// claim (PROCESSING) e nos terminais. Combinado com
+  /// @@unique([organizationId, openKey]) e o btree NULLS DISTINCT do
+  /// Postgres, dois ingests concorrentes na mesma conversa só conseguem
+  /// criar UM turno acumulando — o segundo toma P2002 e vira append.
+  ///
+  /// PROCESSING fica FORA de propósito: mensagem que chega com o turno já em
+  /// voo tem que abrir um turno NOVO (requisito: não perder input nem mexer
+  /// no turno em execução). Se PROCESSING travasse a sentinela, o ingest não
+  /// teria onde gravar.
+  ///
+  /// Unique parcial (WHERE status IN ...) daria o mesmo efeito, mas não é
+  /// expressável no schema.prisma e o DEV é gerenciado em estilo
   /// `prisma db push`, que dropa índice fora do schema — uma constraint de
   /// correção não pode depender disso.
   openKey        String?
@@ -4947,6 +4953,14 @@ model ConversationTurn {
   messageIds     Json                   @default("[]")
   /// Texto concatenado na ordem, materializado na promoção para READY.
   aggregatedText String?                @db.Text
+  /// Janela de debounce efetiva deste turno (resolvida no ingest, onde o
+  /// RequestContext existe e `ai.inboundDebounceMs` da org é legível).
+  /// Congelar aqui deixa o sweeper — que roda cross-org com prismaBase —
+  /// decidir a promoção sem nenhum lookup de org setting.
+  debounceMs     Int                    @default(1500)
+  /// Teto rígido contado de `firstMessageAt`: libera o turno mesmo com o
+  /// cliente digitando sem parar.
+  maxWaitMs      Int                    @default(8000)
   firstMessageAt DateTime               @default(now())
   lastMessageAt  DateTime               @default(now())
   readyAt        DateTime?
@@ -4973,9 +4987,10 @@ model ConversationTurn {
 }
 
 enum ConversationTurnStatus {
-  /// Aberto, recebendo mensagens. Nenhum dispatch armado.
+  /// Acumulando mensagens. Nenhum dispatch de fast path armado.
   RECEIVING
-  /// Aberto, com dispatch de fast path armado (setTimeout/delay).
+  /// Acumulando, com dispatch de fast path armado (setTimeout no processo
+  /// que ingeriu). O sweeper ignora a diferença — é só diagnóstico.
   STABILIZING
   /// Debounce venceu (ou MAX_WAIT estourou). Aguardando claim.
   READY

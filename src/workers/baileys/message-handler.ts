@@ -14,7 +14,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
-import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -674,7 +674,7 @@ export async function handleBaileysMessage(
     }
 
     if (parsed.text) {
-      void scheduleAiReply({
+      void onInboundMessageForAi({
         conversationId: conversation.id,
         contactId: contact.id,
         messageId: msgCreated.id,

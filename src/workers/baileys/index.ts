@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { BaileysManager } from "./baileys-manager";
 import { startOutboundConsumer } from "./outbound-consumer";
 import { startControlConsumer } from "./control-consumer";
@@ -12,6 +13,10 @@ const controlWorker = startControlConsumer(manager, redisUrl);
 
 async function startup() {
   console.info("[baileys-worker] Iniciando...");
+  // Turn Manager (AI_TURN_MANAGER=1): este processo ingere o inbound
+  // Baileys, então o turno nasce aqui e precisa de quem o promova.
+  // No-op com a flag desligada.
+  startAiTurnSweeper();
   await manager.startAll();
   console.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
 }

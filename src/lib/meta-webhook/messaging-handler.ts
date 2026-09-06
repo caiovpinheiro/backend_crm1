@@ -21,7 +21,7 @@ import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { sseBus } from "@/lib/sse-bus";
-import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
@@ -429,7 +429,7 @@ async function processEvent(
   }
 
   if (content?.trim()) {
-    void scheduleAiReply({
+    void onInboundMessageForAi({
       conversationId: conversation.id,
       contactId: contact.id,
       messageId: msgCreated.id,

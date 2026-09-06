@@ -91,6 +91,9 @@ export type RunArgs = {
   /// Turns anteriores (para manter contexto). Se omitido e tiver
   /// conversationId, o runner busca automaticamente as últimas 10.
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  /// `ConversationTurn.id` que originou o run (Turn Manager). Só gravado
+  /// no `AIAgentRun` — não altera o comportamento do agente.
+  turnId?: string | null;
 };
 
 export type RunResult = {
@@ -151,6 +154,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       source: args.source,
       conversationId: args.conversationId ?? null,
       contactId: args.contactId ?? null,
+      turnId: args.turnId ?? null,
       status: "RUNNING" as const,
       configHash,
       llmInvoked: true,

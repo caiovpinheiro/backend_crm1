@@ -1,6 +1,19 @@
 /**
- * Debounce de mensagens inbound para o Agente IA.
+ * Debounce de mensagens inbound para o Agente IA — CAMINHO LEGADO.
  *
+ * APOSENTADO pelo `turn-manager.ts` (Fase 1 do runtime de IA). Com
+ * `AI_TURN_MANAGER=1` os 3 ingests chamam `onInboundMessageForAi` e
+ * `scheduleAiReply` não é mais alcançado; com a flag desligada (default)
+ * este arquivo continua sendo o caminho de produção. NÃO existem dois
+ * debounces ativos ao mesmo tempo — o entrypoint novo é quem decide, e é
+ * ele que delega para cá no modo legado.
+ *
+ * Continuam vivos e compartilhados pelos dois modos:
+ *   - `claimInboundMessageForAi` (claim Redis por messageId)
+ *   - `collectUnansweredInboundText` (batch de inbound sem resposta)
+ *   - `cancelAiReplyDebounce` (agora também invalida turnos)
+ *
+
  * Agrupa mensagens consecutivas do cliente (timer renovável) e garante
  * que só a última geração válida dispare `maybeReplyAsAIAgent`.
  *
@@ -87,6 +100,12 @@ export async function claimInboundMessageForAi(
 /**
  * Cancela debounce pendente (humano assumiu / enviou mensagem).
  * Sempre invalida generationId no cache (multi-réplica / pós-flush).
+ *
+ * Ponto ÚNICO de cancelamento: além do timer local e do generationId,
+ * invalida os `ConversationTurn` acumulando da conversa. Todos os call
+ * sites atuais (POST /messages, actions/assignee, halt-inbound-burst,
+ * moveConversationAssignee, farewell do inbox-handler, `ai_only_close`
+ * do vertical academic) ficam cobertos sem mudar nenhum deles.
  */
 export function cancelAiReplyDebounce(
   conversationId: string,
@@ -101,6 +120,19 @@ export function cancelAiReplyDebounce(
     pendingByConversation.delete(conversationId);
   }
   void cache.del(`ai:gen:${conversationId}`);
+  // Import dinâmico: turn-manager importa este módulo (claim + coletor de
+  // texto), então o estático fecharia ciclo.
+  void import("@/services/ai/turn-manager")
+    .then(({ invalidateOpenTurns }) =>
+      invalidateOpenTurns(conversationId, reason),
+    )
+    .catch((err) => {
+      console.error("[ai-attend] invalidateOpenTurns falhou", {
+        conversationId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   logAi("debounce_cancelled", { conversationId, reason, hadPending: Boolean(slot) });
 }
 
@@ -283,7 +315,14 @@ export function kickAiAfterInboxAssign(args: {
       try {
         const text = await collectUnansweredInboundText(args.conversationId);
         if (text.trim()) {
-          await scheduleAiReply({
+          // Passa pelo entrypoint compartilhado: com AI_TURN_MANAGER=1 isso
+          // abre um turno em vez de armar o timer local. Sem isso, o assign
+          // ao agente IA seria um SEGUNDO debounce rodando em paralelo com
+          // o Turn Manager.
+          const { onInboundMessageForAi } = await import(
+            "@/services/ai/turn-manager"
+          );
+          await onInboundMessageForAi({
             conversationId: args.conversationId,
             contactId: args.contactId,
             userMessage: text,

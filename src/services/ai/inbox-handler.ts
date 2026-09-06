@@ -90,6 +90,8 @@ export type InboundAIArgs = {
   /** Geração do debounce — se supersedida, aborta antes do envio. */
   generationId?: string;
   inboundMessageIds?: string[];
+  /** Turno lógico que agregou as mensagens (Turn Manager). Rastreabilidade. */
+  turnId?: string | null;
 };
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -723,6 +725,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       conversationId: args.conversationId,
       contactId: args.contactId,
       dealId: openDeal?.id ?? null,
+      turnId: args.turnId ?? null,
     });
 
     if (result.status === "FAILED") {

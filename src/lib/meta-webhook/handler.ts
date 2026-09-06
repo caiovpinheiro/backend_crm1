@@ -49,7 +49,7 @@ import {
 } from "@/services/whatsapp-call-consent-webhook";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
-import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
@@ -3184,7 +3184,7 @@ export async function processMetaWebhookPayload(
             // por texto livre / ponteiro morto) ninguém falou com o aluno:
             // silenciar a IA aí deixava a mensagem sem nenhuma resposta.
             if (!isSystemMessage && parsed.text && !salesbotReplied) {
-              void scheduleAiReply({
+              void onInboundMessageForAi({
                 conversationId: conversation.id,
                 contactId: contact.id,
                 messageId: msgCreated.id,

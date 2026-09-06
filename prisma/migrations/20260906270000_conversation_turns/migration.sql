@@ -12,14 +12,19 @@
 -- linha própria. O turno só REFERENCIA os ids em `messageIds` (JSONB) e
 -- materializa o texto concatenado em `aggregatedText` na promoção a READY.
 --
--- `openKey` e o invariante "no máximo UM turno aberto por conversa":
---   `openKey` = `conversationId` enquanto o turno está aberto (RECEIVING,
---   STABILIZING, READY, PROCESSING) e NULL nos estados terminais
---   (COMPLETED, INVALIDATED, FAILED). O UNIQUE (organizationId, openKey)
---   com btree NULLS DISTINCT (default do Postgres) dá exatamente a semântica
---   de um unique parcial: dois ingests concorrentes na mesma conversa só
---   conseguem inserir UM turno aberto, o segundo toma unique_violation
---   (P2002) e o código cai no caminho de append.
+-- `openKey` e o invariante "no máximo UM turno acumulando por conversa":
+--   `openKey` = `conversationId` em RECEIVING/STABILIZING/READY e NULL a
+--   partir do claim (PROCESSING) e nos terminais (COMPLETED, INVALIDATED,
+--   FAILED). O UNIQUE (organizationId, openKey) com btree NULLS DISTINCT
+--   (default do Postgres) dá exatamente a semântica de um unique parcial:
+--   dois ingests concorrentes na mesma conversa só conseguem inserir UM
+--   turno acumulando, o segundo toma unique_violation (P2002) e o código
+--   cai no caminho de append.
+--
+--   PROCESSING fica FORA da sentinela de propósito: mensagem que chega com
+--   o turno já em voo precisa abrir um turno NOVO (não perder input, não
+--   alterar o turno em execução). Se PROCESSING travasse a sentinela o
+--   ingest não teria onde gravar.
 --
 --   Por que não `CREATE UNIQUE INDEX ... WHERE status IN (...)` direto:
 --   índice parcial não é expressável no schema.prisma e o banco de DEV é
@@ -55,6 +60,11 @@ CREATE TABLE IF NOT EXISTS "conversation_turns" (
   "openKey" TEXT,
   "messageIds" JSONB NOT NULL DEFAULT '[]',
   "aggregatedText" TEXT,
+  -- Janelas congeladas no ingest (org setting `ai.inboundDebounceMs` só é
+  -- legível dentro de RequestContext). O sweeper roda cross-org com
+  -- prismaBase e decide a promoção sem nenhum lookup por org.
+  "debounceMs" INTEGER NOT NULL DEFAULT 1500,
+  "maxWaitMs" INTEGER NOT NULL DEFAULT 8000,
   "firstMessageAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "lastMessageAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "readyAt" TIMESTAMP(3),
