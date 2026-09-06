@@ -18,10 +18,18 @@ const Send = z
   .object({
     content: z.string().max(4000).optional().default(""),
     attachments: z.array(Attachment).max(8).optional().default([]),
+    anchor: z
+      .object({
+        type: z.enum(["deal", "conversation", "contact", "work_item"]),
+        id: z.string().min(1),
+      })
+      .optional()
+      .nullable(),
   })
-  .refine((d) => d.content.trim().length > 0 || d.attachments.length > 0, {
-    message: "Mensagem vazia.",
-  });
+  .refine(
+    (d) => d.content.trim().length > 0 || d.attachments.length > 0 || !!d.anchor,
+    { message: "Mensagem vazia." },
+  );
 
 export async function GET(
   request: Request,

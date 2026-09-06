@@ -1493,10 +1493,11 @@ type DealTimelinePayload = Omit<
 export type TimelineItem =
   | { kind: "activity"; at: Date; activity: ActivityWithRelations }
   | { kind: "note"; at: Date; note: NoteWithUser }
-  | { kind: "deal"; at: Date; event: "created" | "updated" | "closed"; deal: DealTimelinePayload };
+  | { kind: "deal"; at: Date; event: "created" | "updated" | "closed"; deal: DealTimelinePayload }
+  | { kind: "chat"; at: Date; title: string; authorName: string | null };
 
 export async function getContactTimeline(contactId: string): Promise<TimelineItem[]> {
-  const [activities, notes, deals] = await Promise.all([
+  const [activities, notes, deals, chatEvents] = await Promise.all([
     prisma.activity.findMany({
       where: { contactId },
       orderBy: { createdAt: "desc" },
@@ -1517,6 +1518,12 @@ export async function getContactTimeline(contactId: string): Promise<TimelineIte
         stage: { select: { id: true, name: true, color: true } },
         owner: { select: assignedToSelect },
       },
+    }),
+    prisma.activityEvent.findMany({
+      where: { contactId, type: "TEAM_CHAT_ANCHORED" },
+      orderBy: { occurredAt: "desc" },
+      take: 50,
+      select: { occurredAt: true, entityLabel: true, meta: true, actorLabel: true },
     }),
   ]);
 
@@ -1540,6 +1547,20 @@ export async function getContactTimeline(contactId: string): Promise<TimelineIte
     if (deal.closedAt) {
       items.push({ kind: "deal", at: deal.closedAt, event: "closed", deal: base });
     }
+  }
+
+  for (const ev of chatEvents) {
+    const meta = (ev.meta ?? {}) as { authorName?: unknown };
+    const authorName =
+      typeof meta.authorName === "string"
+        ? meta.authorName
+        : ev.actorLabel;
+    items.push({
+      kind: "chat",
+      at: ev.occurredAt,
+      title: ev.entityLabel || "Conversado no chat interno",
+      authorName,
+    });
   }
 
   items.sort((a, b) => b.at.getTime() - a.at.getTime());
