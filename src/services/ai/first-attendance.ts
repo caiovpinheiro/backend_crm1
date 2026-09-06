@@ -23,6 +23,8 @@ import {
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
+import { isFirstAccessIntent } from "@/lib/ai-agents/academic-atendimento-prompt";
+import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -244,6 +246,7 @@ export async function tryAssignFirstAttendanceAi(args: {
   conversationId: string;
   contactId: string;
   assignedToId?: string | null;
+  userMessage?: string | null;
 }): Promise<string | null> {
   if (!(await isFirstAttendanceEnabled())) {
     logAi("first_attendance_disabled", {
@@ -382,13 +385,24 @@ export async function tryAssignFirstAttendanceAi(args: {
     select: { id: true, triggerSource: true },
   });
   if (waitingHuman) {
-    logAi("first_attendance_skip_pending_human", {
+    const keepAiDespitePending =
+      !isHumanAttendanceWindowOpen() ||
+      isFirstAccessIntent(args.userMessage ?? "");
+    if (!keepAiDespitePending) {
+      logAi("first_attendance_skip_pending_human", {
+        conversationId: args.conversationId,
+        contactId,
+        pendingId: waitingHuman.id,
+        triggerSource: waitingHuman.triggerSource,
+      });
+      return null;
+    }
+    logAi("first_attendance_keep_ai_despite_pending", {
       conversationId: args.conversationId,
       contactId,
       pendingId: waitingHuman.id,
       triggerSource: waitingHuman.triggerSource,
     });
-    return null;
   }
 
   // Handoff RESOLVIDO (últimas 24h) não bloqueia: o operador já devolveu
@@ -553,12 +567,14 @@ export async function tryAssignFirstAttendanceAi(args: {
 export async function ensureInboundAiAttendance(args: {
   conversationId: string;
   contactId: string;
+  userMessage?: string | null;
 }): Promise<string | null> {
   try {
     return await tryAssignFirstAttendanceAi({
       conversationId: args.conversationId,
       contactId: args.contactId,
       assignedToId: null,
+      userMessage: args.userMessage,
     });
   } catch (e) {
     console.error("[ai] ensureInboundAiAttendance failed", e);

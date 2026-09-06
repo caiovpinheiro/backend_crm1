@@ -3118,6 +3118,7 @@ export async function processMetaWebhookPayload(
               await ensureInboundAiAttendance({
                 conversationId: conversation.id,
                 contactId: contact.id,
+                userMessage: parsed.text,
               });
             } catch (err) {
               log.error("Falha no ensureInboundAiAttendance:", err);

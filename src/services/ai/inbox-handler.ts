@@ -397,6 +397,62 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       });
       return;
     }
+
+    // Primeiro acesso: pack oficial ANTES de fila/assignee/LLM.
+    // Ticket sem dono + pending à noite calava o aluno.
+    if (isFirstAccessIntent(args.userMessage)) {
+      const orgId = getOrgIdOrNull();
+      let aiId: string | null = null;
+      if (conversation?.assignedToId) {
+        const assignedAi = await prisma.user.findFirst({
+          where: { id: conversation.assignedToId, type: "AI" },
+          select: { id: true },
+        });
+        aiId = assignedAi?.id ?? null;
+      }
+      if (!aiId && orgId) {
+        const fallbackAi = await prisma.user.findFirst({
+          where: {
+            organizationId: orgId,
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        aiId = fallbackAi?.id ?? null;
+      }
+      if (aiId) {
+        await prisma
+          .$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: aiId },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: aiId },
+            });
+          })
+          .catch(() => null);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: aiId,
+          autonomyMode: "AUTONOMOUS",
+          text: buildFirstAccessPackMessage(),
+          channel: args.channel,
+          kind: "text",
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("first_access_pack_sent", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return;
+      }
+    }
+
     if (!conversation?.assignedToId) {
       // Sem responsável: se está na fila de distribuição (handoff IA),
       // tenta redistribuir; se não houver humano, oferece continuar com a IA
@@ -718,35 +774,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] inaugural class link intercept failed", e);
-    }
-
-    // Primeiro acesso: playbook oficial ANTES da fila/LLM. Senão um
-    // DistributionPending + sábado à noite vira "aguarde o humano".
-    if (isFirstAccessIntent(args.userMessage)) {
-      const authFa = await assertAiStillAuthorized({
-        conversationId: args.conversationId,
-        expectedAgentUserId: assignee.id,
-        generationId: args.generationId,
-        since: startedAt,
-      });
-      if (authFa.ok) {
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text: buildFirstAccessPackMessage(),
-          channel: args.channel,
-          kind: "text",
-          humanBehavior,
-          generationId: args.generationId,
-        }).catch(() => null);
-        logAi("first_access_pack_sent", {
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-        });
-        return;
-      }
     }
 
     const openDeal = await prisma.deal.findFirst({
