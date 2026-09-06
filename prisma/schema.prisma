@@ -117,6 +117,7 @@ model Organization {
   aiAgentKnowledgeChunks   AIAgentKnowledgeChunk[]
   aiAgentRuns              AIAgentRun[]
   aiAgentMessages          AIAgentMessage[]
+  conversationTurns        ConversationTurn[]
   aiAgentConfigAudits      AIAgentConfigAudit[]
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
@@ -4863,6 +4864,11 @@ model AIAgentRun {
   llmInvoked           Boolean?
   /// true quando o tool-loop parou por atingir maxSteps.
   stepCountReached     Boolean?
+  /// Turno lógico que originou o run (`ConversationTurn.id`). Null em run
+  /// de playground/automação/API e em inbound antigo (pré Turn Manager).
+  /// Sem relation de propósito: o turno pode ser purgado por retenção sem
+  /// arrastar o histórico de runs.
+  turnId               String?
   createdAt       DateTime         @default(now())
   finishedAt      DateTime?
 
@@ -4872,6 +4878,7 @@ model AIAgentRun {
   @@index([agentId, createdAt])
   @@index([conversationId])
   @@index([status])
+  @@index([turnId])
   @@map("ai_agent_runs")
 }
 
@@ -4900,6 +4907,86 @@ model AIAgentMessage {
   @@index([organizationId])
   @@index([runId, createdAt])
   @@map("ai_agent_messages")
+}
+
+// ──────────────────────────────────────────────
+// Turn Manager (runtime de IA — Fase 1)
+// ──────────────────────────────────────────────
+/// Turno lógico de conversa. O cliente manda "Oi" / "preciso" / "de ajuda"
+/// em bolhas separadas: cada bolha continua sendo uma `Message` própria
+/// (nada é fundido ou sobrescrito), e o turno apenas REFERENCIA os ids em
+/// `messageIds` e materializa o texto concatenado em `aggregatedText` no
+/// instante em que vira READY.
+///
+/// O estado de estabilização vive AQUI, não em memória de processo — é o
+/// que faz o agrupamento sobreviver a restart/deploy/crash e funcionar com
+/// várias réplicas. O `setTimeout` do fast path é só latência.
+model ConversationTurn {
+  id             String                 @id @default(cuid())
+  organizationId String
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Sem relation (mesma convenção de AIAgentRun.conversationId): o turno é
+  /// efêmero e não deve aparecer como include em nenhuma tela de conversa.
+  conversationId String
+  contactId      String?
+  /// "meta" | "baileys" | "messaging" — canal de ingestão da 1ª mensagem.
+  channel        String                 @default("meta")
+  status         ConversationTurnStatus @default(RECEIVING)
+  /// Sentinela do invariante "no máximo UM turno aberto por conversa":
+  /// vale `conversationId` enquanto o turno está aberto (RECEIVING,
+  /// STABILIZING, READY, PROCESSING) e NULL nos estados terminais.
+  /// Combinado com @@unique([organizationId, openKey]) e o btree
+  /// NULLS DISTINCT do Postgres, dois ingests concorrentes na mesma
+  /// conversa só conseguem criar UM turno aberto — o segundo toma P2002 e
+  /// vira append. Unique parcial (WHERE status IN ...) resolveria o mesmo,
+  /// mas não é expressável no schema.prisma e o DEV é gerenciado em estilo
+  /// `prisma db push`, que dropa índice fora do schema — uma constraint de
+  /// correção não pode depender disso.
+  openKey        String?
+  /// Ids das `Message` do turno, em ordem cronológica de ingestão.
+  messageIds     Json                   @default("[]")
+  /// Texto concatenado na ordem, materializado na promoção para READY.
+  aggregatedText String?                @db.Text
+  firstMessageAt DateTime               @default(now())
+  lastMessageAt  DateTime               @default(now())
+  readyAt        DateTime?
+  claimedAt      DateTime?
+  /// Identidade do processo que fez o claim (hostname:pid) — diagnóstico
+  /// de turno travado em PROCESSING.
+  claimedBy      String?
+  completedAt    DateTime?
+  attempts       Int                    @default(0)
+  lastError      String?                @db.Text
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  @@unique([organizationId, openKey])
+  @@index([conversationId, status])
+  @@index([status, readyAt])
+  /// Sweeper de promoção: varre abertos por lastMessageAt (janela de
+  /// debounce) sem escanear turnos terminais.
+  @@index([status, lastMessageAt])
+  /// Sweeper de stale reclaim: PROCESSING mais velho que o teto.
+  @@index([status, claimedAt])
+  @@index([organizationId, conversationId, createdAt])
+  @@map("conversation_turns")
+}
+
+enum ConversationTurnStatus {
+  /// Aberto, recebendo mensagens. Nenhum dispatch armado.
+  RECEIVING
+  /// Aberto, com dispatch de fast path armado (setTimeout/delay).
+  STABILIZING
+  /// Debounce venceu (ou MAX_WAIT estourou). Aguardando claim.
+  READY
+  /// Claimado por um worker, rodando o agente.
+  PROCESSING
+  /// Agente rodou até o fim.
+  COMPLETED
+  /// Cancelado antes de rodar (humano respondeu, assignee mudou, burst halt).
+  INVALIDATED
+  /// Estourou o teto de tentativas.
+  FAILED
 }
 
 // ──────────────────────────────────────────────
