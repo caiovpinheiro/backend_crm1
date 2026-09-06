@@ -130,10 +130,18 @@ function logAi(event: string, payload: Record<string, unknown>) {
 
 /** Cumprimento curto (oi/olá/bom dia...) sem pedido útil. */
 function isBareGreetingMessage(raw: string): boolean {
-  const n = raw
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed || trimmed.length > 48) return false;
+  if (
+    /^(oi+|ol[aá]+|oie+|hey|hello|bom dia|boa tarde|boa noite)([,.!\s]+tudo bem)?[!?.…]*$/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  const n = trimmed
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
-    .trim()
     .toLowerCase()
     .replace(/[!?.…,]+/g, " ")
     .replace(/\s+/g, " ")
@@ -158,8 +166,8 @@ function isAcademicSelfServeTurn(raw: string): boolean {
 
 function buildAcademicStayWithYouMessage(): string {
   return (
-    "Claro, tô aqui com você. Pode me dizer o que precisa — " +
-    "primeiro acesso, senha, portal, Blackboard, prova, documento…"
+    "Oi! Tô aqui. Pode me dizer o que você precisa — " +
+    "portal, senha, Blackboard, prova, documento…"
   );
 }
 
@@ -477,6 +485,63 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             contactId: args.contactId,
           },
         );
+        return;
+      }
+    }
+
+    // "oi" / "olá" / "?" — a IA cumprimenta. Nunca vira fila das 8h.
+    if (
+      isBareGreetingMessage(args.userMessage) ||
+      /^\?+$/.test((args.userMessage ?? "").trim())
+    ) {
+      const orgIdG = getOrgIdOrNull();
+      let greetAi: string | null = null;
+      if (conversation?.assignedToId) {
+        const assignedAi = await prisma.user.findFirst({
+          where: { id: conversation.assignedToId, type: "AI" },
+          select: { id: true },
+        });
+        greetAi = assignedAi?.id ?? null;
+      }
+      if (!greetAi && orgIdG) {
+        const fallbackAi = await prisma.user.findFirst({
+          where: {
+            organizationId: orgIdG,
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        greetAi = fallbackAi?.id ?? null;
+      }
+      if (greetAi) {
+        await prisma
+          .$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: greetAi },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: greetAi },
+            });
+          })
+          .catch(() => null);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: greetAi,
+          autonomyMode: "AUTONOMOUS",
+          text: buildAcademicStayWithYouMessage(),
+          channel: args.channel,
+          kind: "text",
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("greeting_self_serve", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
         return;
       }
     }
@@ -1554,11 +1619,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       runHadTransferTools(result.toolCalls) ||
       textImpliesAcademicHandoff(replyText) ||
       lowConfHandoff;
-    if (
-      transferred &&
-      !justifiedHandoff &&
-      (selfServeTurn || !isHumanAttendanceWindowOpen())
-    ) {
+    if (transferred && !justifiedHandoff) {
       transferred = false;
     }
 
