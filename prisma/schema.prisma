@@ -2905,7 +2905,9 @@ model Conversation {
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, status, updatedAt])
-  @@index([organizationId, contactId])
+  /// 3ª coluna cobre o MAX(updatedAt) por contato do board "Última interação"
+  /// (index-only). Serve também qualquer lookup por (organizationId, contactId).
+  @@index([organizationId, contactId, updatedAt])
   @@index([organizationId, assignedToId])
   @@index([organizationId, channelId])
   @@index([contactId, updatedAt])
@@ -3260,8 +3262,6 @@ model MetaWebhookEvent {
   automationLogs AutomationLog[]
 
   @@index([organizationId, receivedAt(sort: Desc)])
-  @@index([waMessageId])
-  @@index([phoneNumberId, receivedAt(sort: Desc)])
   /// Recovery de backlog do worker-meta-webhook: eventos não processados
   /// (processed=false) em ordem de chegada.
   @@index([processed, receivedAt])
