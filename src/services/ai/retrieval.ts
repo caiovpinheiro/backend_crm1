@@ -28,6 +28,7 @@ const MIN_SIMILARITY = 0.6; // distance <= 0.4 ≈ bem relevante. Mantemos folga
 export async function retrieveRelevantChunks(
   agentId: string,
   query: string,
+  apiKey: string,
   topK = 4,
 ): Promise<RetrievedChunk[]> {
   const text = query.trim();
@@ -45,7 +46,7 @@ export async function retrieveRelevantChunks(
   });
   if (!hasDocs) return [];
 
-  const { embeddings } = await embedTexts([text]);
+  const { embeddings } = await embedTexts([text], apiKey);
   const emb = embeddings[0];
   if (!emb) return [];
   const vectorLiteral = `[${emb.map((n) => (Number.isFinite(n) ? n : 0)).join(",")}]`;

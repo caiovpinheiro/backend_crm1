@@ -110,6 +110,12 @@ export async function PUT(
           : body.avatarUrl === null
             ? null
             : undefined,
+      openaiApiKey:
+        typeof body.openaiApiKey === "string"
+          ? body.openaiApiKey
+          : body.openaiApiKey === null
+            ? null
+            : undefined,
       active: typeof body.active === "boolean" ? body.active : undefined,
       ...sanitizePilotingInput({
         openingMessage: body.openingMessage,
