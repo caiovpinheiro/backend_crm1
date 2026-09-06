@@ -84,11 +84,42 @@ function parseOpts(
   };
 }
 
+async function enqueueApply(opts: StuckInboundOptions) {
+  const queued = await enqueueDistributionStuckInbound(
+    stuckInboundEnqueueOpts(opts),
+  );
+  if (queued) {
+    return NextResponse.json(
+      { ok: true, queued: true, jobId: "dsi-stuck-inbound" },
+      { status: 202 },
+    );
+  }
+
+  if (allowInlineDistributionFallback()) {
+    const result = await distributeStuckInbound(opts);
+    return NextResponse.json({ ok: true, ...result });
+  }
+
+  metrics.errors.inc({
+    scope: "distribution.stuck-inbound",
+    kind: "queue_unavailable",
+  });
+  console.warn(
+    "[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback",
+  );
+  return NextResponse.json(
+    { ok: false, message: "Fila de distribuição indisponível." },
+    { status: 503 },
+  );
+}
+
 export async function GET(request: Request) {
   const denied = authorize(request);
   if (denied) return denied;
   try {
-    const result = await distributeStuckInbound(parseOpts(request, false));
+    const opts = parseOpts(request, false);
+    if (opts.apply) return enqueueApply(opts);
+    const result = await distributeStuckInbound(opts);
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
     console.error("[cron/distribute-stuck-inbound]", e);
@@ -111,33 +142,7 @@ export async function POST(request: Request) {
       const result = await distributeStuckInbound(opts);
       return NextResponse.json({ ok: true, ...result });
     }
-
-    const queued = await enqueueDistributionStuckInbound(
-      stuckInboundEnqueueOpts(opts),
-    );
-    if (queued) {
-      return NextResponse.json(
-        { ok: true, queued: true, jobId: "dsi-stuck-inbound" },
-        { status: 202 },
-      );
-    }
-
-    if (allowInlineDistributionFallback()) {
-      const result = await distributeStuckInbound(opts);
-      return NextResponse.json({ ok: true, ...result });
-    }
-
-    metrics.errors.inc({
-      scope: "distribution.stuck-inbound",
-      kind: "queue_unavailable",
-    });
-    console.warn(
-      "[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback",
-    );
-    return NextResponse.json(
-      { ok: false, message: "Fila de distribuição indisponível." },
-      { status: 503 },
-    );
+    return enqueueApply(opts);
   } catch (e) {
     console.error("[cron/distribute-stuck-inbound]", e);
     return NextResponse.json(
