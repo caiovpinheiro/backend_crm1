@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { toggleAIAgentActive } from "@/services/ai-agents";
+import { AgentReadinessError } from "@/lib/ai-agents/readiness";
 
 export async function POST(
   _req: Request,
@@ -14,7 +15,12 @@ export async function POST(
       return NextResponse.json({ active: updated.active });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro.";
-      const status = msg.includes("não encontrado") ? 404 : 500;
+      const status =
+        e instanceof AgentReadinessError
+          ? 400
+          : msg.includes("não encontrado")
+            ? 404
+            : 500;
       return NextResponse.json({ message: msg }, { status });
     }
   });

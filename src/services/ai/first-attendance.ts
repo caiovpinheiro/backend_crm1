@@ -12,24 +12,32 @@
  *  - Desliga com `ai.firstAttendanceEnabled=false`.
  */
 
+
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import {
-  contactHasCalouros1008Tag,
-  isInauguralLinkWindow,
-} from "@/services/ai/inaugural-class-link";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
-import {
-  isAvaOrDisciplinesIntent,
-  isFirstAccessIntent,
-  isFirstAccessStuckIntent,
-  parseFirstAccessChoice,
-} from "@/lib/ai-agents/academic-atendimento-prompt";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
+import { getVerticalPack } from "@/verticals";
+
+function academicOps() {
+  return getVerticalPack("academic")?.ops ?? {};
+}
+const contactHasCalouros1008Tag = (...a: any[]) =>
+  academicOps().contactHasCalouros1008Tag?.(...a);
+const isInauguralLinkWindow = (...a: any[]) =>
+  academicOps().isInauguralLinkWindow?.(...a);
+const isAvaOrDisciplinesIntent = (m: string) =>
+  Boolean(academicOps().isAvaOrDisciplinesIntent?.(m));
+const isFirstAccessIntent = (m: string) =>
+  Boolean(academicOps().isFirstAccessIntent?.(m));
+const isFirstAccessStuckIntent = (m: string) =>
+  Boolean(academicOps().isFirstAccessStuckIntent?.(m));
+const parseFirstAccessChoice = (m: string) =>
+  academicOps().parseFirstAccessChoice?.(m) ?? null;
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -529,10 +537,7 @@ export async function tryAssignFirstAttendanceAi(args: {
   // Roster só depois de confirmar pipe acadêmico — senão qualquer inbound
   // de outro tenant criava Acolhimento/SAC/Retenção na org errada.
   try {
-    const { ensureAcademicDepartmentRoster } = await import(
-      "@/services/ai/ensure-academic-dept-roster"
-    );
-    await ensureAcademicDepartmentRoster();
+    await getVerticalPack("academic")?.ops.ensureAcademicDepartmentRoster?.();
   } catch {
     /* ignore */
   }

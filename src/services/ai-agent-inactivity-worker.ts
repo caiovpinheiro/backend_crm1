@@ -17,6 +17,7 @@
  * Opt-out do worker inteiro: `AI_AGENT_INACTIVITY_WORKER=0`.
  */
 
+
 import { prisma } from "@/lib/prisma";
 // prismaBase para o $queryRaw cross-tenant da listagem; dispatchOne
 // acessa models scoped e precisa rodar em withSystemContext.
@@ -27,10 +28,7 @@ import {
   renderTemplate,
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
-import {
-  attendanceEndedInFarewell,
-  closeAiOnlyConversation,
-} from "@/services/ai/academic-closure";
+import { getVerticalPack } from "@/verticals";
 import {
   IDLE_CLOSE_AFTER_NUDGE_MS,
   IDLE_NUDGE_MS,
@@ -47,6 +45,16 @@ import {
   retryUnansweredAiInbound,
 } from "@/services/ai/retry-unanswered-ai-inbound";
 import { STUCK_INBOUND_MS } from "@/services/ai/stuck-inbound-distribution";
+
+function academicOps() {
+  return getVerticalPack("academic")?.ops ?? {};
+}
+function attendanceEndedInFarewell(...a: any[]) {
+  return academicOps().attendanceEndedInFarewell?.(...a);
+}
+function closeAiOnlyConversation(...a: any[]) {
+  return academicOps().closeAiOnlyConversation?.(...a);
+}
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
 const BATCH_SIZE = 50;

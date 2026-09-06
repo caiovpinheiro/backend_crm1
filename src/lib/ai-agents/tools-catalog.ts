@@ -104,7 +104,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "close_conversation",
     label: "Encerrar conversa (só IA)",
     description:
-      "Encerra o ticket quando o aluno pede encerramento e o atendimento foi somente da IA. Dispara a automação Encerramento.",
+      "Encerra o ticket quando o contato pede encerramento e o atendimento foi somente da IA. Dispara a automação Encerramento.",
     category: "handoff",
     defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
   },

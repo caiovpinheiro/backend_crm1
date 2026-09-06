@@ -7,14 +7,15 @@
  * `src/scripts/ops-sweep-finished-ai.ts`. Dry-run por padrão.
  */
 
+
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
-import {
-  attendanceEndedInFarewell,
-  closeAiOnlyConversation,
-  studentWrappedUp,
-} from "@/services/ai/academic-closure";
 import { isIdleNudgeContent } from "@/services/ai/idle-followup";
+import { getVerticalPack } from "@/verticals";
+
+function academicOps() {
+  return getVerticalPack("academic")?.ops ?? {};
+}
 
 export type SweepFinishedAiOpts = {
   apply: boolean;
@@ -131,13 +132,14 @@ export async function sweepFinishedAiConversations(
 
     // Última é do aluno encerrando (inclui resposta de despedida ao check-in).
     const studentClosing =
-      last.direction === "in" && studentWrappedUp(last.content);
+      last.direction === "in" && academicOps().studentWrappedUp?.(last.content);
+
     // Última é do agente: exige despedida dele + aluno já tendo fechado
     // o assunto, senão fecharíamos conversa em que o aluno só sumiu.
     const agentClosing =
       last.direction === "out" &&
       last.authorType === "bot" &&
-      attendanceEndedInFarewell({
+      academicOps().attendanceEndedInFarewell?.({
         lastAgentText: lastIsNudge ? farewellCandidate?.content : last.content,
         lastStudentText: lastStudent?.content ?? null,
       });
@@ -167,7 +169,7 @@ export async function sweepFinishedAiConversations(
       const result = await withSystemContext(
         row.organizationId,
         () =>
-          closeAiOnlyConversation({
+          academicOps().closeAiOnlyConversation?.({
             conversationId: row.id,
             contactId: row.contactId,
             allowAfterHumanReply: true,

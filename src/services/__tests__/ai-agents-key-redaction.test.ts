@@ -18,9 +18,12 @@ const AGENT_ROW = {
 };
 
 const updateMock = vi.fn(async (_args: unknown) => ({ ...AGENT_ROW }));
+// `_count` acompanha o `include` de getAIAgent/updateAIAgent — o gate de
+// readiness (AUTONOMOUS) lê `_count.knowledgeDocs`.
 const findUniqueMock = vi.fn(async (_args: unknown) => ({
   ...AGENT_ROW,
   user: { id: "user-1", name: "Ana" },
+  _count: { knowledgeDocs: 0 },
 }));
 
 vi.mock("@/lib/prisma", () => {
@@ -29,6 +32,7 @@ vi.mock("@/lib/prisma", () => {
       findUnique: (args: unknown) => findUniqueMock(args),
       update: (args: unknown) => updateMock(args),
     },
+    aIAgentConfigAudit: { create: vi.fn(async () => ({})) },
     user: { update: vi.fn(async () => ({})) },
     $transaction: async (cb: (tx: unknown) => Promise<unknown>) => cb(client),
   };
@@ -41,6 +45,7 @@ vi.mock("@/lib/prisma-helpers", () => ({
 
 vi.mock("@/lib/request-context", () => ({
   getOrgIdOrThrow: () => "org-1",
+  getRequestContext: () => ({ userId: "user-1" }),
 }));
 
 vi.mock("@/lib/public-id", () => ({
