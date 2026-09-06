@@ -21,6 +21,11 @@ import { getSecretSettingOrEnv } from "@/services/settings";
 
 export const AI_OPENAI_KEY_SETTING = "ai.openai.apiKey";
 
+/** Timeout padrão por chamada LLM (Onda 3). */
+export const AI_GENERATE_TIMEOUT_MS = 60_000;
+/** Tentativas extras em erros transitórios. */
+export const AI_GENERATE_MAX_RETRIES = 2;
+
 // Provider OpenAI singleton — construído sob demanda, chave buscada
 // primeiro em `system_settings.ai.openai.apiKey` (criptografado) e só
 // depois cai para `process.env.OPENAI_API_KEY`. Assim o admin pode
@@ -101,47 +106,102 @@ export type GenerateResult = {
   steps: number;
 };
 
+function isTransientAiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("timeout") ||
+    lower.includes("etimedout") ||
+    lower.includes("econnreset") ||
+    lower.includes("429") ||
+    lower.includes("rate limit") ||
+    lower.includes("503") ||
+    lower.includes("502") ||
+    lower.includes("overloaded") ||
+    lower.includes("temporarily")
+  );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timeout after ${ms}ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
   const model = await getModel(args.model);
-  const result = await generateText({
-    model,
-    system: args.system,
-    messages: args.messages,
-    tools: args.tools,
-    temperature: args.temperature ?? 0.7,
-    maxOutputTokens: args.maxOutputTokens,
-    stopWhen: stepCountIs(args.maxSteps ?? 8),
-  });
-
-  const toolCalls: GenerateResult["toolCalls"] = [];
-  for (const step of result.steps) {
-    for (const call of step.toolCalls ?? []) {
-      const matchedResult = (step.toolResults ?? []).find(
-        (r) =>
-          (r as { toolCallId?: string }).toolCallId ===
-          (call as { toolCallId?: string }).toolCallId,
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= AI_GENERATE_MAX_RETRIES; attempt++) {
+    try {
+      const result = await withTimeout(
+        generateText({
+          model,
+          system: args.system,
+          messages: args.messages,
+          tools: args.tools,
+          temperature: args.temperature ?? 0.7,
+          maxOutputTokens: args.maxOutputTokens,
+          stopWhen: stepCountIs(args.maxSteps ?? 8),
+        }),
+        AI_GENERATE_TIMEOUT_MS,
+        "generateWithTools",
       );
-      toolCalls.push({
-        toolName: (call as { toolName: string }).toolName,
-        args: (call as { input?: unknown; args?: unknown }).input ??
-          (call as { args?: unknown }).args,
-        result: matchedResult
-          ? (matchedResult as { output?: unknown; result?: unknown }).output ??
-            (matchedResult as { result?: unknown }).result
-          : undefined,
-      });
+
+      const toolCalls: GenerateResult["toolCalls"] = [];
+      for (const step of result.steps) {
+        for (const call of step.toolCalls ?? []) {
+          const matchedResult = (step.toolResults ?? []).find(
+            (r) =>
+              (r as { toolCallId?: string }).toolCallId ===
+              (call as { toolCallId?: string }).toolCallId,
+          );
+          toolCalls.push({
+            toolName: (call as { toolName: string }).toolName,
+            args: (call as { input?: unknown; args?: unknown }).input ??
+              (call as { args?: unknown }).args,
+            result: matchedResult
+              ? (matchedResult as { output?: unknown; result?: unknown })
+                  .output ??
+                (matchedResult as { result?: unknown }).result
+              : undefined,
+          });
+        }
+      }
+
+      return {
+        text: result.text ?? "",
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        toolCalls,
+        steps: result.steps.length,
+      };
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= AI_GENERATE_MAX_RETRIES || !isTransientAiError(err)) {
+        throw err;
+      }
+      const backoffMs = 500 * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, backoffMs));
     }
   }
-
-  return {
-    text: result.text ?? "",
-    inputTokens: result.usage?.inputTokens ?? 0,
-    outputTokens: result.usage?.outputTokens ?? 0,
-    toolCalls,
-    steps: result.steps.length,
-  };
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 export async function embedTexts(texts: string[]): Promise<{

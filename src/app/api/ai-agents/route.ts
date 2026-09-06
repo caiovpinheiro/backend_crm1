@@ -72,6 +72,14 @@ export async function POST(request: Request) {
         typeof body.temperature === "number" ? body.temperature : undefined,
       maxTokens:
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+      maxSteps:
+        typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+      templateId:
+        typeof body.templateId === "string"
+          ? body.templateId
+          : body.templateId === null
+            ? null
+            : undefined,
       systemPromptOverride:
         typeof body.systemPromptOverride === "string"
           ? body.systemPromptOverride

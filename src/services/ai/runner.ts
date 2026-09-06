@@ -395,6 +395,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       data: withOrgFromCtx({ runId: run.id, role: "user", content: args.userMessage }),
     });
 
+    const configuredMaxSteps = Number(
+      (agent as { maxSteps?: number | null }).maxSteps,
+    );
+    const maxSteps =
+      Number.isFinite(configuredMaxSteps) && configuredMaxSteps > 0
+        ? configuredMaxSteps
+        : AGENT_MAX_STEPS;
+
     const result = await generateWithTools({
       model: agent.model || DEFAULT_CHAT_MODEL,
       system: systemPrompt,
@@ -402,16 +410,16 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       tools: Object.keys(toolSet).length > 0 ? toolSet : undefined,
       temperature: agent.temperature,
       maxOutputTokens: agent.maxTokens,
-      maxSteps: AGENT_MAX_STEPS,
+      maxSteps,
     });
 
-    const stepCountReached = result.steps >= AGENT_MAX_STEPS;
+    const stepCountReached = result.steps >= maxSteps;
     if (stepCountReached) {
       console.warn("[ai] maxSteps reached", {
         agentId: agent.id,
         conversationId: args.conversationId ?? null,
         steps: result.steps,
-        maxSteps: AGENT_MAX_STEPS,
+        maxSteps,
       });
     }
 

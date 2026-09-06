@@ -107,6 +107,7 @@ model Organization {
   systemUsageSessions      SystemUsageSession[]
   systemActivitySessions   SystemActivitySession[]
   aiAgentConfigs           AIAgentConfig[]
+  aiAgentTemplates         AgentTemplate[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
   dataRequests             DataRequest[]
@@ -4579,8 +4580,9 @@ model AIAgentConfig {
   /// Pipeline preferencial para handoff / criação de deal. Se null,
   /// usa o pipeline default do contato (primeiro pipeline ativo).
   pipelineId           String?
-  /// Canal preferencial para envio de mensagens. Null = usa o canal
-  /// da conversa em que o agente está respondendo.
+  /// @deprecated Preferir o canal da conversa. Campo legado; não
+  /// usar em fluxos novos. Null = canal da conversa em que o agente
+  /// está respondendo.
   channelId            String?
   active               Boolean          @default(true)
 
@@ -4662,6 +4664,14 @@ model AIAgentConfig {
   /// novos nascem null.
   verticalPack String?
 
+  /// Template de origem (Onda 3). Dual-write com `archetype` enquanto
+  /// o FE/migração não abandonam o enum legado.
+  templateId String?
+  template   AgentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  /// Limite do tool-loop no runner (default 8).
+  maxSteps Int @default(8)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -4672,7 +4682,35 @@ model AIAgentConfig {
   @@index([organizationId])
   @@index([organizationId, active])
   @@index([archetype])
+  @@index([templateId])
   @@map("ai_agent_configs")
+}
+
+/// Molde reutilizável de agente (sistema ou por org). Dual-write com
+/// AIAgentArchetype via `archetypeKey` enquanto o enum legado existe.
+model AgentTemplate {
+  id                   String   @id @default(cuid())
+  organizationId       String?
+  organization         Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                 String
+  description          String?  @db.Text
+  /// Espelha AIAgentArchetype (SDR|ATENDIMENTO|VENDEDOR|SUPORTE) p/ dual-write.
+  archetypeKey         String?
+  systemPromptTemplate String   @db.Text
+  defaultTools         String[] @default([])
+  defaultTone          String   @default("profissional e cordial")
+  defaultModel         String   @default("gpt-4o-mini")
+  defaultInboxPolicy   Json?
+  verticalPack         String?
+  isSystem             Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  agents AIAgentConfig[]
+
+  @@index([organizationId])
+  @@index([isSystem, archetypeKey])
+  @@map("ai_agent_templates")
 }
 
 /// Auditoria de create/update de AIAgentConfig (Onda 0 — observabilidade).

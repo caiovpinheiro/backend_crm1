@@ -17,6 +17,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
+import { findSystemTemplateByArchetype } from "@/services/ai-agent-templates";
 import {
   HANDOFF_MODES,
   normalizeAutoClosePolicy,
@@ -107,9 +108,12 @@ export async function getAIAgent(id: string) {
 export type CreateAIAgentInput = {
   name: string;
   archetype: AIAgentArchetype;
+  /// Onda 3 — se omitido, resolve template de sistema pelo archetype.
+  templateId?: string | null;
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  maxSteps?: number;
   systemPromptTemplate?: string;
   systemPromptOverride?: string | null;
   productPolicy?: string | null;
@@ -124,8 +128,10 @@ export type CreateAIAgentInput = {
   enabledTools?: string[];
   dailyTokenCap?: number;
   pipelineId?: string | null;
+  /** @deprecated Preferir canal da conversa. */
   channelId?: string | null;
   avatarUrl?: string | null;
+  verticalPack?: string | null;
 
   // Piloting (controles operacionais).
   openingMessage?: string | null;
@@ -144,9 +150,6 @@ export type CreateAIAgentInput = {
   typingPerCharMs?: number;
   markMessagesRead?: boolean;
   autoClosePolicy?: AutoClosePolicy | null;
-
-  /// Vertical pack (`academic` | null). Novos agentes: null se omitido.
-  verticalPack?: string | null;
 
   /// Origem do save pra auditoria (Onda 0). Default: api.
   auditSource?: AuditSource;
@@ -349,6 +352,21 @@ export function sanitizeVerticalPack(
 
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
+  let systemTpl: Awaited<ReturnType<typeof findSystemTemplateByArchetype>> =
+    null;
+  try {
+    systemTpl = await findSystemTemplateByArchetype(input.archetype);
+  } catch {
+    /* migration ainda não aplicada */
+  }
+  const templateId =
+    input.templateId !== undefined
+      ? input.templateId
+      : (systemTpl?.id ?? null);
+  const verticalPack =
+    input.verticalPack !== undefined
+      ? input.verticalPack
+      : (systemTpl?.verticalPack ?? null);
 
   const safeSlug =
     input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") ||
@@ -427,8 +445,13 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         autoClosePolicy:
           (input.autoClosePolicy as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
-        verticalPack: input.verticalPack ?? null,
-      }),
+        verticalPack,
+        // Onda 3 — campos novos; cast até `prisma generate` no ambiente.
+        ...( {
+          templateId,
+          maxSteps: input.maxSteps ?? 8,
+        } as Record<string, unknown>),
+      } as Parameters<typeof tx.aIAgentConfig.create>[0]["data"]),
     });
 
     const auditSource = parseAuditSource(input.auditSource);
@@ -500,15 +523,29 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
       });
     }
 
+    // Dual-write: se archetype muda e templateId não veio, aponta pro
+    // template de sistema correspondente.
+    let nextTemplateId = input.templateId;
+    if (
+      nextTemplateId === undefined &&
+      input.archetype &&
+      input.archetype !== existing.archetype
+    ) {
+      const tpl = await findSystemTemplateByArchetype(input.archetype);
+      nextTemplateId = tpl?.id ?? null;
+    }
+
     const config = await tx.aIAgentConfig.update({
       where: { id },
       data: {
         ...(input.archetype ? { archetype: input.archetype } : {}),
+        ...(nextTemplateId !== undefined ? { templateId: nextTemplateId } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.temperature !== undefined
           ? { temperature: input.temperature }
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
         ...(input.systemPromptTemplate !== undefined
           ? { systemPromptTemplate: input.systemPromptTemplate }
           : {}),
