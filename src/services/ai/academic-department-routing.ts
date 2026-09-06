@@ -6,7 +6,10 @@
 import { executeDistribution } from "@/services/distribution";
 import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
-import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  ACADEMIC_DEPARTMENT_ALIASES,
+  isAvaOrDisciplinesIntent,
+} from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   matchesAnyKeyword,
   type InboxPolicy,
@@ -530,6 +533,13 @@ export function isCourseShoppingInquiry(
 ): boolean {
   const msg = normalize(userMessage);
   if (!msg) return false;
+  if (
+    /como ver|onde (vejo|fica)|ver minhas disciplinas|minhas disciplinas|blackboard|ambiente virtual/.test(
+      msg,
+    )
+  ) {
+    return false;
+  }
   if (matchesAnyKeyword(userMessage, policy?.courseShoppingKeywords ?? [])) {
     return true;
   }
@@ -597,6 +607,9 @@ export function messageAsksCurriculumExistence(
 ): boolean {
   const msg = normalize(userMessage ?? "");
   if (!msg) return false;
+  if (/como ver|onde (vejo|fica)|ver minhas disciplinas|minhas disciplinas/.test(msg)) {
+    return false;
+  }
   if (/\b(dp|dependenc|reprovad|rematric)/.test(msg)) return false;
   if (messageAsksTceDeadlineOrDocuments(msg)) return false;
   if (messageAsksTceSignature(msg)) return false;
@@ -642,6 +655,7 @@ export function isImmediateAcademicHandoffJustified(
 ): boolean {
   const msg = (userMessage ?? "").trim();
   if (!msg) return false;
+  if (isAvaOrDisciplinesIntent(msg)) return false;
   if (userWantsHumanDistribution(msg)) return true;
   if (isCourseShoppingInquiry(msg, policy)) return true;
   if (shouldHandoffCurriculumOrTce(msg)) return true;

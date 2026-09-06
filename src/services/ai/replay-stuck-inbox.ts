@@ -52,7 +52,7 @@ export async function replayStuckAiInbox(
   const rows = await prismaBase.conversation.findMany({
     where: {
       status: "OPEN",
-      contactId: { not: null },
+      NOT: { contactId: null },
       ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
       ...(numbers.length
         ? { number: { in: numbers } }

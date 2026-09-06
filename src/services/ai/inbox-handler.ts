@@ -6,9 +6,8 @@
  *
  * Antes de chamar o LLM, aplicamos os CONTROLES DE PILOTING:
  *
- *   1. Business hours — se a config tem horário habilitado e o
- *      momento atual está fora, envia `offHoursMessage` (se houver)
- *      e encerra sem invocar o LLM.
+ *   1. Business hours — expediente do consultor (Pilotagem). A IA
+ *      continua; a fila humana usa `offHoursMessage` / `handoffMessage`.
  *   2. Keyword handoff — se a mensagem do cliente bate com alguma
  *      `keywordHandoffs`, transferimos imediatamente pra humano
  *      (sem LLM).
@@ -31,10 +30,10 @@
 import { metaClientFromConfig, type MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   computeTypingDelayMs,
-  isWithinBusinessHours,
   matchHandoffKeyword,
   normalizeBusinessHours,
   renderTemplate,
+  type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import {
   normalizeInboxPolicy,
@@ -60,6 +59,18 @@ import {
   shouldSendInauguralClassLink,
 } from "@/services/ai/inaugural-class-link";
 import {
+  buildAvaDisciplinesMessage,
+  buildFirstAccessChoiceMessage,
+  buildFirstAccessPackMessage,
+  buildFirstAccessStuckMessage,
+  isAvaOrDisciplinesIntent,
+  isFirstAccessIntent,
+  isFirstAccessStuckIntent,
+  messageLooksLikeFirstAccessHelp,
+  messageLooksLikeFirstAccessPack,
+  parseFirstAccessChoice,
+} from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
   buildAudioHandoffMessage,
   detectInboundAudio,
   messageLooksLikeAudioNotice,
@@ -68,6 +79,7 @@ import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
+  isImmediateAcademicHandoffJustified,
   moveOpenDealToEmAtendimento,
   shouldHandoffCurriculumOrTce,
   textImpliesAcademicHandoff,
@@ -100,8 +112,10 @@ import {
   userWantsAiContinue,
   userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
+import { debugInfo } from "@/lib/debug-log";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { runAgent } from "@/services/ai/runner";
+import { sendAgentFollowUpMedia } from "@/services/ai/send-agent-media";
 
 export type InboundAIArgs = {
   conversationId: string;
@@ -114,18 +128,26 @@ export type InboundAIArgs = {
 };
 
 function logAi(event: string, payload: Record<string, unknown>) {
-  console.info(
+  debugInfo(
     "[ai-attend]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
+    () => JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
   );
 }
 
 /** Cumprimento curto (oi/olá/bom dia...) sem pedido útil. */
 function isBareGreetingMessage(raw: string): boolean {
-  const n = raw
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed || trimmed.length > 48) return false;
+  if (
+    /^(oi+|ol[aá]+|oie+|hey|hello|bom dia|boa tarde|boa noite)([,.!\s]+tudo bem)?[!?.…]*$/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  const n = trimmed
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
-    .trim()
     .toLowerCase()
     .replace(/[!?.…,]+/g, " ")
     .replace(/\s+/g, " ")
@@ -136,12 +158,33 @@ function isBareGreetingMessage(raw: string): boolean {
   );
 }
 
+/** "oi", "??", "consegue me ajudar" — a IA atende; não é fila humana. */
+function isAcademicSelfServeTurn(raw: string): boolean {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return false;
+  if (/^\?+$/.test(trimmed)) return true;
+  if (isBareGreetingMessage(trimmed)) return true;
+  if (isFirstAccessIntent(trimmed)) return true;
+  if (isFirstAccessStuckIntent(trimmed)) return true;
+  if (isAvaOrDisciplinesIntent(trimmed)) return true;
+  if (userWantsAiContinue(trimmed)) return true;
+  return false;
+}
+
+function buildAcademicStayWithYouMessage(): string {
+  return (
+    "Oi! Tô aqui. Pode me dizer o que você precisa — " +
+    "portal, senha, Blackboard, prova, documento…"
+  );
+}
+
 function buildRetentionHandoffMessage(
   now = new Date(),
   policy?: InboxPolicy | null,
+  businessHours?: BusinessHoursConfig | null,
 ): string {
   if (policy?.retentionHandoffMessage) return policy.retentionHandoffMessage;
-  if (isHumanAttendanceWindowOpen(now)) {
+  if (isHumanAttendanceWindowOpen(now, businessHours)) {
     return (
       "Entendi! Sobre *trancamento/cancelamento* já pedi para o setor de *Retenção* " +
       "te atender. Assim que um(a) consultor(a) puder, continua com você. " +
@@ -156,13 +199,17 @@ function buildRetentionHandoffMessage(
   );
 }
 
-/** Mensagem genérica de fila — respeita expediente (não promete "em breve" à noite). */
+/** Mensagem genérica de fila — texto e horário vêm da Pilotagem. */
 function buildGenericQueueHandoffMessage(
   now = new Date(),
   policy?: InboxPolicy | null,
+  businessHours?: BusinessHoursConfig | null,
 ): string {
-  if (policy?.handoffMessage) return policy.handoffMessage;
-  return buildHumanUnavailableOfferMessage(now);
+  return buildHumanUnavailableOfferMessage(now, {
+    businessHours,
+    handoffMessage: policy?.handoffMessage,
+    offHoursMessage: businessHours?.offHoursMessage,
+  });
 }
 
 function studentNoticeAfterHandoff(gotHuman: boolean, queueText: string): string {
@@ -310,21 +357,6 @@ export async function assertAiStillAuthorized(args: {
       select: { id: true },
     });
     if (humanOut) return { ok: false, reason: "human_replied_during_run" };
-  } else if (conversation.hasHumanReply) {
-    // Heurística: se a última outbound é humana, bloqueia.
-    const lastOut = await prisma.message.findFirst({
-      where: {
-        conversationId: args.conversationId,
-        direction: "out",
-        isPrivate: false,
-        messageType: { not: "note" },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { authorType: true },
-    });
-    if (lastOut?.authorType === "human") {
-      return { ok: false, reason: "human_last_outbound" };
-    }
   }
 
   return { ok: true };
@@ -389,6 +421,245 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       });
       return;
     }
+
+    // Primeiro acesso (pedido, "não consegui", ou "1"/portal): a IA atende.
+    {
+      const lastBotFa = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      const faChoice =
+        messageLooksLikeFirstAccessHelp(lastBotFa?.content)
+          ? parseFirstAccessChoice(args.userMessage)
+          : null;
+      if (
+        faChoice ||
+        isFirstAccessIntent(args.userMessage) ||
+        isFirstAccessStuckIntent(args.userMessage)
+      ) {
+        const orgId = getOrgIdOrNull();
+        let aiId: string | null = null;
+        if (conversation?.assignedToId) {
+          const assignedAi = await prisma.user.findFirst({
+            where: { id: conversation.assignedToId, type: "AI" },
+            select: { id: true },
+          });
+          aiId = assignedAi?.id ?? null;
+        }
+        if (!aiId && orgId) {
+          const fallbackAi = await prisma.user.findFirst({
+            where: {
+              organizationId: orgId,
+              type: "AI",
+              aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+            },
+            select: { id: true },
+            orderBy: { createdAt: "asc" },
+          });
+          aiId = fallbackAi?.id ?? null;
+        }
+        if (aiId) {
+          const alreadyPack = messageLooksLikeFirstAccessPack(
+            lastBotFa?.content,
+          );
+          const text = faChoice
+            ? buildFirstAccessChoiceMessage(faChoice)
+            : isFirstAccessStuckIntent(args.userMessage) || alreadyPack
+              ? buildFirstAccessStuckMessage()
+              : buildFirstAccessPackMessage();
+          await prisma.distributionPending
+            .updateMany({
+              where: {
+                status: "PENDING",
+                OR: [
+                  { conversationId: args.conversationId },
+                  { contactId: args.contactId },
+                ],
+              },
+              data: { status: "CANCELLED" },
+            })
+            .catch(() => null);
+          await prisma
+            .$transaction(async (tx) => {
+              await tx.conversation.update({
+                where: { id: args.conversationId },
+                data: { assignedToId: aiId },
+              });
+              await tx.contact.update({
+                where: { id: args.contactId },
+                data: { assignedToId: aiId },
+              });
+            })
+            .catch(() => null);
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: aiId,
+            autonomyMode: "AUTONOMOUS",
+            text,
+            channel: args.channel,
+            kind: "text",
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+          logAi(
+            faChoice
+              ? "first_access_choice"
+              : alreadyPack || isFirstAccessStuckIntent(args.userMessage)
+                ? "first_access_stuck_help"
+                : "first_access_pack_sent",
+            {
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              choice: faChoice,
+            },
+          );
+          return;
+        }
+      }
+    }
+
+    // Blackboard / ver disciplinas — caminho do Portal, sem fila.
+    if (isAvaOrDisciplinesIntent(args.userMessage)) {
+      const orgIdAva = getOrgIdOrNull();
+      let avaAi: string | null = null;
+      if (conversation?.assignedToId) {
+        const assignedAi = await prisma.user.findFirst({
+          where: { id: conversation.assignedToId, type: "AI" },
+          select: { id: true },
+        });
+        avaAi = assignedAi?.id ?? null;
+      }
+      if (!avaAi && orgIdAva) {
+        const fallbackAi = await prisma.user.findFirst({
+          where: {
+            organizationId: orgIdAva,
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        avaAi = fallbackAi?.id ?? null;
+      }
+      if (avaAi) {
+        await prisma.distributionPending
+          .updateMany({
+            where: {
+              status: "PENDING",
+              OR: [
+                { conversationId: args.conversationId },
+                { contactId: args.contactId },
+              ],
+            },
+            data: { status: "CANCELLED" },
+          })
+          .catch(() => null);
+        await prisma
+          .$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: avaAi },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: avaAi },
+            });
+          })
+          .catch(() => null);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: avaAi,
+          autonomyMode: "AUTONOMOUS",
+          text: buildAvaDisciplinesMessage(),
+          channel: args.channel,
+          kind: "text",
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("ava_disciplines_help", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return;
+      }
+    }
+
+    // "oi" / "olá" / "?" — a IA cumprimenta. Nunca vira fila das 8h.
+    if (
+      isBareGreetingMessage(args.userMessage) ||
+      /^\?+$/.test((args.userMessage ?? "").trim())
+    ) {
+      const orgIdG = getOrgIdOrNull();
+      let greetAi: string | null = null;
+      if (conversation?.assignedToId) {
+        const assignedAi = await prisma.user.findFirst({
+          where: { id: conversation.assignedToId, type: "AI" },
+          select: { id: true },
+        });
+        greetAi = assignedAi?.id ?? null;
+      }
+      if (!greetAi && orgIdG) {
+        const fallbackAi = await prisma.user.findFirst({
+          where: {
+            organizationId: orgIdG,
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        greetAi = fallbackAi?.id ?? null;
+      }
+      if (greetAi) {
+        await prisma.distributionPending
+          .updateMany({
+            where: {
+              status: "PENDING",
+              OR: [
+                { conversationId: args.conversationId },
+                { contactId: args.contactId },
+              ],
+            },
+            data: { status: "CANCELLED" },
+          })
+          .catch(() => null);
+        await prisma
+          .$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: greetAi },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: greetAi },
+            });
+          })
+          .catch(() => null);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: greetAi,
+          autonomyMode: "AUTONOMOUS",
+          text: buildAcademicStayWithYouMessage(),
+          channel: args.channel,
+          kind: "text",
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("greeting_self_serve", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return;
+      }
+    }
+
     if (!conversation?.assignedToId) {
       // Sem responsável: se está na fila de distribuição (handoff IA),
       // tenta redistribuir; se não houver humano, oferece continuar com a IA
@@ -590,30 +861,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    // Se a última outbound é humana, não compete com o atendente.
-    const lastOut = await prisma.message.findFirst({
-      where: {
-        conversationId: args.conversationId,
-        direction: "out",
-        isPrivate: false,
-        messageType: { not: "note" },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { authorType: true, createdAt: true },
-    });
-    if (lastOut?.authorType === "human") {
-      logAi("blocked", {
-        conversationId: args.conversationId,
-        reason: "human_last_outbound",
-        agentUserId: assignee.id,
-      });
-      return;
-    }
+    // Outbound humana *histórica* (ex.: "Bomzin" neste ticket) não silencia
+    // a IA depois de transferência explícita. Humano falando *durante* o
+    // run continua abortando em `assertAiStillAuthorized({ since })`.
 
     const cfg = assignee.aiAgentConfig;
     // Política editável na tela do agente. Campo vazio = defaults do
     // código, então agentes antigos seguem se comportando igual.
     const policy: InboxPolicy = normalizeInboxPolicy(cfg.inboxPolicy);
+    const hours = normalizeBusinessHours(cfg.businessHours);
     const humanBehavior = {
       simulateTyping: cfg.simulateTyping,
       typingPerCharMs: cfg.typingPerCharMs,
@@ -884,14 +1140,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "já registrei seu pedido",
         "já te passei para um",
         "seu pedido já está com alguém",
-        "estou aqui contigo",
         "setor de",
         "Retenção",
         "Acolhimento",
       ];
       if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
-        if (userWantsAiContinue(args.userMessage)) {
-          // Aluno escolheu continuar com a IA — segue o fluxo normal.
+        if (isAcademicSelfServeTurn(args.userMessage)) {
+          // "oi" / "consegue me ajudar" depois do aviso de fila → a IA atende.
         } else {
           const norm = args.userMessage
             .normalize("NFD")
@@ -968,45 +1223,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     }
 
-    // ── 1. Business hours gate ────────────────────────────────
-    const businessHours = normalizeBusinessHours(cfg.businessHours);
-    if (businessHours?.enabled && !isWithinBusinessHours(businessHours)) {
-      if (businessHours.offHoursMessage?.trim()) {
-        const contact = await prisma.contact.findUnique({
-          where: { id: args.contactId },
-          select: { name: true },
-        });
-        const text = renderTemplate(businessHours.offHoursMessage, {
-          contactName: contact?.name ?? null,
-        });
-        const auth = await assertAiStillAuthorized({
-          conversationId: args.conversationId,
-          expectedAgentUserId: assignee.id,
-          generationId: args.generationId,
-          since: startedAt,
-        });
-        if (!auth.ok) {
-          logAi("blocked", {
-            conversationId: args.conversationId,
-            reason: auth.reason,
-            phase: "pre_off_hours_send",
-          });
-          return;
-        }
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text,
-          channel: args.channel,
-          kind: "off_hours",
-          humanBehavior,
-          generationId: args.generationId,
-        }).catch(() => null);
-      }
-      return;
-    }
+    // ── 1. Business hours ─────────────────────────────────────
+    // Expediente é da FILA HUMANA, não da IA. Playground não aplica este
+    // gate; se bloquear aqui, "oi" sábado vira template de 8h e o aluno
+    // acha que o agente não atende. Handoff justificado (humano/retenção/
+    // TCE/curso) ainda manda o aviso de horário mais abaixo.
 
     // ── 1c. Encerramento pedido pelo aluno (somente atendimento IA) ──
     const lastAiOut = await prisma.message.findFirst({
@@ -1165,7 +1386,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       args.userMessage,
       cfg.keywordHandoffs ?? [],
     );
-    if (keyword) {
+    if (keyword && !isAcademicSelfServeTurn(args.userMessage)) {
       const deptKey = inferDepartmentFromContext({
         userMessage: args.userMessage,
         policy,
@@ -1188,8 +1409,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const gotHuman = await conversationAssignedToHuman(args.conversationId);
         const keywordText =
           deptKey === "retencao"
-            ? buildRetentionHandoffMessage(new Date(), policy)
-            : buildGenericQueueHandoffMessage(new Date(), policy);
+            ? buildRetentionHandoffMessage(new Date(), policy, hours)
+            : buildGenericQueueHandoffMessage(new Date(), policy, hours);
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -1237,7 +1458,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildGenericQueueHandoffMessage(new Date(), policy),          ),
+            buildGenericQueueHandoffMessage(new Date(), policy, hours),          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1276,7 +1497,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildGenericQueueHandoffMessage(new Date(), policy),
+            buildGenericQueueHandoffMessage(new Date(), policy, hours),
           ),
           channel: args.channel,
           kind: "text",
@@ -1318,7 +1539,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildRetentionHandoffMessage(new Date(), policy),          ),
+            buildRetentionHandoffMessage(new Date(), policy, hours),          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1440,7 +1661,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         error: result.error,
       });
-      if (!distributeOnFailure) return;
+      if (
+        !distributeOnFailure ||
+        !isImmediateAcademicHandoffJustified(args.userMessage, policy)
+      ) {
+        return;
+      }
 
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
@@ -1473,7 +1699,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             autonomyMode: cfg.autonomyMode,
             text: studentNoticeAfterHandoff(
               gotHuman,
-              buildGenericQueueHandoffMessage(new Date(), policy),            ),
+              buildGenericQueueHandoffMessage(new Date(), policy, hours),            ),
             channel: args.channel,
             kind: "text",
             humanBehavior,
@@ -1493,21 +1719,29 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     const parsedEarly = parseAgentConfidence(result.text || "");
     const replyText = parsedEarly.text.trim();
     // Tool/HANDOFF OU promessa explícita no texto ("vou te conectar…") →
-    // distribui de fato. "Atender primeiro" = não chamar tool / não prometer
-    // handoff enquanto ainda dá para orientar; se o agente já decidiu
-    // transferir, o backend NÃO adia.
+    // distribui de fato. Cumprimento / "me ajuda" / primeiro acesso NÃO
+    // viram fila. Fora do expediente, o template de horário só sai se o
+    // aluno pediu humano ou o tema exige depto (retenção, TCE, curso…).
+    const selfServeTurn = isAcademicSelfServeTurn(args.userMessage);
+    const justifiedHandoff = isImmediateAcademicHandoffJustified(
+      args.userMessage,
+      policy,
+    );
     const lowConfHandoff =
       policy.lowConfidenceHandoff &&
       shouldHandoffOnLowConfidence(
         parsedEarly.confidence,
         policy.confidenceThreshold ?? undefined,
       ) &&
-      !isBareGreetingMessage(args.userMessage);
-    const transferred =
+      !selfServeTurn;
+    let transferred =
       result.status === "HANDOFF" ||
       runHadTransferTools(result.toolCalls) ||
       textImpliesAcademicHandoff(replyText) ||
       lowConfHandoff;
+    if (transferred && !justifiedHandoff) {
+      transferred = false;
+    }
 
     if (transferred) {
       const handoffText =
@@ -1516,8 +1750,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           userMessage: args.userMessage,
           policy,
         }) === "retencao"
-          ? buildRetentionHandoffMessage(new Date(), policy)
-          : buildGenericQueueHandoffMessage(new Date(), policy));
+          ? buildRetentionHandoffMessage(new Date(), policy, hours)
+          : buildGenericQueueHandoffMessage(new Date(), policy, hours));
       // Distribui primeiro; só depois envia UMA mensagem ao aluno.
       // Humano atribuído → saudação da automação (lead_distributed).
       const afterHandoff = await prisma.conversation.findUnique({
@@ -1606,8 +1840,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           policy,
         }) === "retencao";
       const policyQueueText = retentionDept
-        ? buildRetentionHandoffMessage(new Date(), policy)
-        : buildGenericQueueHandoffMessage(new Date(), policy);
+        ? buildRetentionHandoffMessage(new Date(), policy, hours)
+        : buildGenericQueueHandoffMessage(new Date(), policy, hours);
       const llmPromisesSoon =
         /em breve|logo algu[eé]m|s[oó] um instante|já te conectar/i.test(
           handoffText,
@@ -1634,7 +1868,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (
           replyText.trim() &&
           !llmPromisesSoon &&
-          isHumanAttendanceWindowOpen() &&
+          isHumanAttendanceWindowOpen(new Date(), hours) &&
           !recentBot.some(
             (m) => m.content && isNearDuplicateBotText(handoffText, m.content),
           )
@@ -1642,7 +1876,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           outbound = handoffText;
         }
       } else if (
-        !isHumanAttendanceWindowOpen() ||
+        !isHumanAttendanceWindowOpen(new Date(), hours) ||
         llmPromisesSoon ||
         !llmCoversQueue
       ) {
@@ -1679,6 +1913,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = rewriteMismatchedDaypartWish(parsed.text);
+    if (
+      messageLooksLikeHumanQueueNotice(text) &&
+      !justifiedHandoff &&
+      !userWantsHumanDistribution(args.userMessage)
+    ) {
+      text = isAvaOrDisciplinesIntent(args.userMessage)
+        ? buildAvaDisciplinesMessage()
+        : buildAcademicStayWithYouMessage();
+    }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
       const recentSame = await prisma.message.findFirst({
@@ -1854,6 +2097,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         model: cfg.model,
         durationMs: Date.now() - startedAt.getTime(),
       });
+      if (result.followUpMedia?.length) {
+        const mediaCount = await sendAgentFollowUpMedia({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          attachments: result.followUpMedia,
+        }).catch((err) => {
+          console.warn(
+            "[ai-inbox] follow-up media falhou:",
+            err instanceof Error ? err.message : err,
+          );
+          return 0;
+        });
+        if (mediaCount) {
+          logAi("send_media_ok", {
+            conversationId: args.conversationId,
+            mediaCount,
+          });
+        }
+      }
       await closeAfterFarewellIfNeeded({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -1882,6 +2145,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         durationMs: Date.now() - startedAt.getTime(),
       });
       if (sendResult.status === "sent") {
+        if (result.followUpMedia?.length) {
+          const mediaCount = await sendAgentFollowUpMedia({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            attachments: result.followUpMedia,
+          }).catch((err) => {
+            console.warn(
+              "[ai-inbox] follow-up media falhou:",
+              err instanceof Error ? err.message : err,
+            );
+            return 0;
+          });
+          if (mediaCount) {
+            logAi("send_media_ok", {
+              conversationId: args.conversationId,
+              mediaCount,
+            });
+          }
+        }
         await closeAfterFarewellIfNeeded({
           conversationId: args.conversationId,
           contactId: args.contactId,

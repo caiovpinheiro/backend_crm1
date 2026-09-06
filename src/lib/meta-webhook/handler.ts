@@ -1884,8 +1884,12 @@ async function updateCampaignRecipientStatus(
       const code = typeof e.code === "number" ? e.code : null;
       const human =
         details || str(e.message) || str(e.title) || "Falha no envio";
-      data.errorMessage =
-        code != null ? `${human} (code ${code})` : human;
+      const catalog = code != null ? metaErrorReason(code) : "";
+      data.errorMessage = catalog
+        ? `${catalog} (Meta: ${human}) (code ${code})`
+        : code != null
+          ? `${human} (code ${code})`
+          : human;
     }
 
     // Kill switch: STATUS_WRITE_BUFFER_ENABLED=0 volta ao update individual.
@@ -3114,6 +3118,7 @@ export async function processMetaWebhookPayload(
               await ensureInboundAiAttendance({
                 conversationId: conversation.id,
                 contactId: contact.id,
+                userMessage: parsed.text,
               });
             } catch (err) {
               log.error("Falha no ensureInboundAiAttendance:", err);

@@ -3,7 +3,7 @@
  *
  * Independente de `AgentStatus` (disponibilidade manual da Distribuição).
  * O ping do cliente (`POST /api/agents/me/ping`) chama `recordHeartbeat`
- * a cada ~90s enquanto houver uma aba aberta. Um sweeper fecha sessões
+ * a cada ~180s enquanto a aba estiver visível. Um sweeper fecha sessões
  * cujo último heartbeat expirou.
  *
  * Modelo:
@@ -24,11 +24,11 @@ import { prismaBase } from "@/lib/prisma-base";
 import { sseBus } from "@/lib/sse-bus";
 
 /**
- * Cadência do heartbeat (client) — 90s. O `STALE_MS` precisa ser
- * MAIOR pra tolerar jitter/renegociação de aba minimizada.
+ * Cadência do heartbeat (client) — 180s, pausado com aba oculta.
+ * O `STALE_MS` precisa ser MAIOR pra tolerar jitter/aba em background.
  */
-export const SYSTEM_PRESENCE_HEARTBEAT_MS = 90_000;
-export const SYSTEM_PRESENCE_STALE_MS = 150_000;
+export const SYSTEM_PRESENCE_HEARTBEAT_MS = 180_000;
+export const SYSTEM_PRESENCE_STALE_MS = 300_000;
 
 const SWEEP_INTERVAL_MS = 60_000;
 

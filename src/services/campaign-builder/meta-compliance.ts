@@ -1,10 +1,15 @@
 import {
+  extractMetaErrorCode,
   isMetaTransientServiceCode,
   META_TRANSIENT_SERVICE_CODES,
 } from "@/lib/meta-whatsapp/error-catalog";
 
-/** Rate limits / throughput — reenfileirar campanha com backoff. */
-const META_RATE_LIMIT_RETRY_CODES = new Set([130429, 131048, 131056, 131049]);
+/**
+ * Rate limits / throughput — reenfileirar campanha com backoff.
+ * 131049 NÃO entra: é filtro de marketing por destinatário; retry piora
+ * qualidade da WABA e infla a taxa de falha.
+ */
+const META_RATE_LIMIT_RETRY_CODES = new Set([130429, 131048, 131056]);
 
 /** União: rate-limit + falhas transitórias de serviço (code 2, 131016, …). */
 export const META_RETRYABLE_CODES = new Set([
@@ -17,13 +22,10 @@ export const META_RETRYABLE_CODES = new Set([
  * Prefere o sufixo canônico `(code N, …)` de `formatMetaSendError`.
  */
 export function extractMetaRetryCode(message: string): number | null {
-  const fromLabel = message.match(/\bcode\s+(\d+)/i);
-  if (fromLabel) {
-    const code = Number(fromLabel[1]);
-    return Number.isFinite(code) ? code : null;
-  }
+  const labeled = extractMetaErrorCode(message);
+  if (labeled !== null) return labeled;
   // Fallback legado: códigos rate-limit soltos no texto.
-  const bare = message.match(/\b(130429|131048|131056|131049)\b/);
+  const bare = message.match(/\b(130429|131048|131056)\b/);
   return bare ? Number(bare[1]) : null;
 }
 

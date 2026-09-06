@@ -33,7 +33,10 @@ import {
   listOrgDepartments,
   tabulationLogMeta,
 } from "@/services/tabulations";
-import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
+import {
+  cancelAiReplyDebounce,
+  kickAiAfterInboxAssign,
+} from "@/services/ai/inbound-debounce";
 
 async function resolveConversationAssignFlags(user: {
   id: string;
@@ -242,6 +245,15 @@ export async function POST(request: Request, context: RouteContext) {
           });
           // Assumir / reassign: cancela debounce IA pendente.
           cancelAiReplyDebounce(id, "assignee_changed");
+          if (
+            result.conversation.assignedTo?.type === "AI" &&
+            result.conversation.contactId
+          ) {
+            kickAiAfterInboxAssign({
+              conversationId: id,
+              contactId: result.conversation.contactId,
+            });
+          }
         }
 
         return NextResponse.json(
@@ -347,6 +359,16 @@ export async function POST(request: Request, context: RouteContext) {
               fromName: prev?.assignedTo?.name ?? null,
               toName: result.conversation.assignedTo?.name ?? null,
             });
+            cancelAiReplyDebounce(id, "assignee_changed");
+            if (
+              result.conversation.assignedTo?.type === "AI" &&
+              result.conversation.contactId
+            ) {
+              kickAiAfterInboxAssign({
+                conversationId: id,
+                contactId: result.conversation.contactId,
+              });
+            }
           }
         }
 

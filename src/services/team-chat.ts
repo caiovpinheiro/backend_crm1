@@ -227,22 +227,38 @@ export async function listRooms(viewer: TeamChatViewer) {
     userIds: [...new Set(rooms.flatMap((r) => r.members.map((m) => m.userId)))],
   }).catch(() => new Map());
 
-  const unreadByRoom = await Promise.all(
-    rooms.map(async (room) => {
-      const mine = room.members.find((m) => m.userId === viewer.userId);
-      if (!mine) return [room.id, 0] as const;
-      const unread = await prisma.teamChatMessage.count({
-        where: {
-          roomId: room.id,
-          createdAt: { gt: mine.lastReadAt },
-          OR: [{ authorId: null }, { authorId: { not: viewer.userId } }],
-          kind: "TEXT",
-        },
-      });
-      return [room.id, unread] as const;
-    }),
+  // 1 groupBy em vez de N COUNT (um por sala).
+  const roomUnreadFilters: Prisma.TeamChatMessageWhereInput[] = [];
+  for (const room of rooms) {
+    const mine = room.members.find((m) => m.userId === viewer.userId);
+    if (!mine) continue;
+    roomUnreadFilters.push({
+      roomId: room.id,
+      createdAt: { gt: mine.lastReadAt },
+    });
+  }
+  const unreadGroups =
+    roomUnreadFilters.length === 0
+      ? []
+      : await prisma.teamChatMessage.groupBy({
+          by: ["roomId"],
+          where: {
+            AND: [
+              { OR: roomUnreadFilters },
+              {
+                OR: [
+                  { authorId: null },
+                  { authorId: { not: viewer.userId } },
+                ],
+              },
+              { kind: "TEXT" },
+            ],
+          },
+          _count: { _all: true },
+        });
+  const unreadMap = new Map(
+    unreadGroups.map((g) => [g.roomId, g._count._all] as const),
   );
-  const unreadMap = new Map(unreadByRoom);
 
   return rooms.map((room) =>
     shapeRoom(room, viewer.userId, unreadMap.get(room.id) ?? 0, presence),

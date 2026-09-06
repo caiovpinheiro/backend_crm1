@@ -22,6 +22,11 @@ import {
 } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import {
+  llmMayCloseConversation,
+  normalizeAutoClosePolicy,
+  type AutoClosePolicy,
+} from "@/lib/ai-agents/piloting";
+import {
   applyArgPolicy,
   describeToolPolicy,
   emptyToolPolicy,
@@ -51,7 +56,9 @@ import {
   messageImpliesOperationalAtendimento,
   executeAcademicDepartmentHandoff,
   enforceAtendimentoIfAcolhimentoBlocked,
+  isImmediateAcademicHandoffJustified,
 } from "@/services/ai/academic-department-routing";
+import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import type { ActivityType, Prisma } from "@prisma/client";
 
@@ -71,6 +78,8 @@ export type RunContext = {
   userMessage?: string | null;
   /// Política de inbox do agente (aliases de departamento, keywords).
   inboxPolicy?: InboxPolicy | null;
+  /// Encerramento automático (pilotagem). Ausente = understood.
+  autoClosePolicy?: AutoClosePolicy | null;
 };
 
 function ok<T>(data: T) {
@@ -78,6 +87,15 @@ function ok<T>(data: T) {
 }
 function fail(error: string) {
   return { ok: false as const, error };
+}
+
+/** Fila humana só se o aluno pediu consultor ou o tema exige depto. */
+function academicDistributionAllowed(ctx: RunContext): boolean {
+  const msg = ctx.userMessage ?? "";
+  return (
+    userWantsHumanDistribution(msg) ||
+    isImmediateAcademicHandoffJustified(msg, ctx.inboxPolicy)
+  );
 }
 
 // ── create_deal ────────────────────────────────────────────────
@@ -727,6 +745,11 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (!academicDistributionAllowed(ctx)) {
+          return fail(
+            "Não distribua: o aluno não pediu humano e o tema ainda é atendimento da IA (portal, senha, Blackboard, prova, documento, cumprimento). Responda você.",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
         // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
@@ -905,6 +928,11 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
       try {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
+        if (!academicDistributionAllowed(ctx)) {
+          return fail(
+            "Não distribua: o aluno não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida (portal, senha, Blackboard, prova, documento).",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
 
@@ -1116,6 +1144,14 @@ function closeConversationTool(ctx: RunContext) {
     execute: async ({ reason }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const policy = normalizeAutoClosePolicy(ctx.autoClosePolicy);
+        if (!llmMayCloseConversation(policy)) {
+          return fail(
+            policy.mode === "off"
+              ? "Encerramento automático está desligado neste agente."
+              : "Neste agente só encerro com pedido explícito (encerrar/finalizar) ou palavra-chave. Não chame esta tool.",
+          );
+        }
         const result = await closeAiOnlyConversation({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
