@@ -102,6 +102,7 @@ export async function POST(request: Request) {
         qualificationQuestions: body.qualificationQuestions,
         businessHours: body.businessHours,
         outputStyle: body.outputStyle,
+        useInternalModels: body.useInternalModels,
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,

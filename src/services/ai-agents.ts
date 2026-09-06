@@ -129,6 +129,8 @@ export type CreateAIAgentInput = {
   qualificationQuestions?: QualificationQuestion[];
   businessHours?: BusinessHoursConfig | null;
   outputStyle?: OutputStyle;
+  /// Usa os Modelos Internos do CRM como fonte de resposta (texto + mídia).
+  useInternalModels?: boolean;
 
   // Comportamento humano: typing indicator + read receipts.
   simulateTyping?: boolean;
@@ -152,6 +154,7 @@ export function sanitizePilotingInput(input: {
   qualificationQuestions?: unknown;
   businessHours?: unknown;
   outputStyle?: unknown;
+  useInternalModels?: unknown;
   simulateTyping?: unknown;
   typingPerCharMs?: unknown;
   markMessagesRead?: unknown;
@@ -168,6 +171,7 @@ export function sanitizePilotingInput(input: {
     | "qualificationQuestions"
     | "businessHours"
     | "outputStyle"
+    | "useInternalModels"
     | "simulateTyping"
     | "typingPerCharMs"
     | "markMessagesRead"
@@ -233,6 +237,10 @@ export function sanitizePilotingInput(input: {
 
   if (typeof input.outputStyle === "string") {
     out.outputStyle = normalizeOutputStyle(input.outputStyle);
+  }
+
+  if (typeof input.useInternalModels === "boolean") {
+    out.useInternalModels = input.useInternalModels;
   }
 
   if (typeof input.simulateTyping === "boolean") {
@@ -372,6 +380,8 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           (input.businessHours as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
         outputStyle: input.outputStyle ?? "conversational",
+        useInternalModels:
+          input.useInternalModels ?? input.archetype === "ATENDIMENTO",
         simulateTyping: input.simulateTyping ?? true,
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
@@ -508,6 +518,9 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           : {}),
         ...(input.outputStyle !== undefined
           ? { outputStyle: input.outputStyle }
+          : {}),
+        ...(input.useInternalModels !== undefined
+          ? { useInternalModels: input.useInternalModels }
           : {}),
       },
     });

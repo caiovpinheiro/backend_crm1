@@ -212,9 +212,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
     const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
-    // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
-    // de retenção fica em message-models-retrieval.
-    const retrievedModels = isAcademicAttendance
+    // Modelos internos do CRM (tela Internos) — por agente (`useInternalModels`).
+    // Denylist de retenção fica em message-models-retrieval.
+    const useInternalModels = agent.useInternalModels;
+    const retrievedModels = useInternalModels
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
             console.warn(
@@ -224,7 +225,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           },
         )
       : [];
-    const messageModelsBlock = isAcademicAttendance
+    const messageModelsBlock = useInternalModels
       ? formatMessageModelsBlock(retrievedModels)
       : "";
     const followUpMedia = pickFollowUpMedia(retrievedModels);

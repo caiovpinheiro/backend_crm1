@@ -4614,6 +4614,13 @@ model AIAgentConfig {
   /// técnica) ou "structured" (permite listas/markdown).
   outputStyle String @default("conversational")
 
+  /// Usa os Modelos Internos do CRM (tela Internos) como fonte de
+  /// resposta: quando a pergunta do cliente casa lexicalmente com um
+  /// modelo, o texto entra no contexto e a mídia anexada (imagem/vídeo)
+  /// é enviada como follow-up. Genérico — qualquer agente pode ligar.
+  /// Backfill: agentes ATENDIMENTO existentes nascem com `true`.
+  useInternalModels Boolean @default(false)
+
   /// Simula comportamento humano: mostra "digitando…" no WhatsApp do
   /// cliente antes de responder e aguarda tempo proporcional ao
   /// tamanho da mensagem. API Meta entrega o indicador por até 25s.
