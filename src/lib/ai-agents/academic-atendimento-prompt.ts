@@ -102,6 +102,35 @@ export function messageLooksLikeFirstAccessPack(
   );
 }
 
+export function messageLooksLikeFirstAccessHelp(
+  content?: string | null,
+): boolean {
+  const t = content ?? "";
+  return (
+    messageLooksLikeFirstAccessPack(t) ||
+    t.includes("ainda não conseguiu entrar") ||
+    t.includes("foi no *Portal do Aluno*")
+  );
+}
+
+/** "1" / portal / Duda / senha depois do pack — continua o acesso, não fila. */
+export function parseFirstAccessChoice(
+  userMessage: string,
+): "portal" | "duda" | "senha" | null {
+  const n = (userMessage ?? "").trim().toLowerCase();
+  if (!n || n.length > 60) return null;
+  if (/^[1①]([).:\-]|º|o)?$/.test(n) || /^portal\b/.test(n)) return "portal";
+  if (/^[2②]([).:\-]|º|o)?$/.test(n) || /^duda\b/.test(n)) return "duda";
+  if (
+    /^[3③]([).:\-]|º|o)?$/.test(n) ||
+    /^(a )?senha\b/.test(n) ||
+    /senha (n[aã]o|nao) (chegou|aceita|funciona)/.test(n)
+  ) {
+    return "senha";
+  }
+  return null;
+}
+
 /** Pacote oficial — inbox manda isto sem passar por fila/LLM. */
 export function buildFirstAccessPackMessage(): string {
   return [
@@ -123,6 +152,39 @@ export function buildFirstAccessStuckMessage(): string {
     "",
     `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
     `Vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+  ].join("\n");
+}
+
+export function buildFirstAccessChoiceMessage(
+  choice: "portal" | "duda" | "senha",
+): string {
+  if (choice === "duda") {
+    return [
+      "No celular o acesso é pelo app *Duda*. Instala pela loja do seu sistema e entra com o mesmo CPF do Portal.",
+      "",
+      `Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+      `iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+      "",
+      "Se o app recusar o login, tenta primeiro criar a senha no Portal do Aluno e depois volta no Duda.",
+      `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+      "Quando aparecer um erro, cola o texto aqui.",
+    ].join("\n");
+  }
+  if (choice === "senha") {
+    return [
+      "A senha do primeiro acesso é criada no *Portal do Aluno*, não por aqui.",
+      "",
+      `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+      "",
+      "Se a senha não chegou no e-mail ou o portal não aceita, me diz a mensagem que aparece na tela que eu te oriento o próximo passo.",
+    ].join("\n");
+  }
+  return [
+    "No computador o primeiro acesso é pelo *Portal do Aluno*.",
+    "",
+    `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o passo a passo do vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    "",
+    "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento.",
   ].join("\n");
 }
 

@@ -26,6 +26,7 @@ import { keepHumanAfterAutomationClose } from "@/services/distribution/return-af
 import {
   isFirstAccessIntent,
   isFirstAccessStuckIntent,
+  parseFirstAccessChoice,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 
@@ -391,7 +392,8 @@ export async function tryAssignFirstAttendanceAi(args: {
     const keepAiDespitePending =
       !isHumanAttendanceWindowOpen() ||
       isFirstAccessIntent(args.userMessage ?? "") ||
-      isFirstAccessStuckIntent(args.userMessage ?? "");
+      isFirstAccessStuckIntent(args.userMessage ?? "") ||
+      parseFirstAccessChoice(args.userMessage ?? "") !== null;
     if (!keepAiDespitePending) {
       logAi("first_attendance_skip_pending_human", {
         conversationId: args.conversationId,

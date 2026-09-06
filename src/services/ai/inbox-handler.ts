@@ -58,11 +58,14 @@ import {
   shouldSendInauguralClassLink,
 } from "@/services/ai/inaugural-class-link";
 import {
+  buildFirstAccessChoiceMessage,
   buildFirstAccessPackMessage,
   buildFirstAccessStuckMessage,
   isFirstAccessIntent,
   isFirstAccessStuckIntent,
+  messageLooksLikeFirstAccessHelp,
   messageLooksLikeFirstAccessPack,
+  parseFirstAccessChoice,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   buildAudioHandoffMessage,
@@ -410,82 +413,106 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    // Primeiro acesso (pedido ou "não consegui entrar"): a IA atende.
-    // Não é fila humana — o template de 8h segunda é o caminho errado.
-    if (
-      isFirstAccessIntent(args.userMessage) ||
-      isFirstAccessStuckIntent(args.userMessage)
-    ) {
-      const orgId = getOrgIdOrNull();
-      let aiId: string | null = null;
-      if (conversation?.assignedToId) {
-        const assignedAi = await prisma.user.findFirst({
-          where: { id: conversation.assignedToId, type: "AI" },
-          select: { id: true },
-        });
-        aiId = assignedAi?.id ?? null;
-      }
-      if (!aiId && orgId) {
-        const fallbackAi = await prisma.user.findFirst({
-          where: {
-            organizationId: orgId,
-            type: "AI",
-            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
-          },
-          select: { id: true },
-          orderBy: { createdAt: "asc" },
-        });
-        aiId = fallbackAi?.id ?? null;
-      }
-      if (aiId) {
-        const lastBotFa = await prisma.message.findFirst({
-          where: {
-            conversationId: args.conversationId,
-            direction: "out",
-            authorType: "bot",
-            isPrivate: false,
-            messageType: { not: "note" },
-          },
-          orderBy: { createdAt: "desc" },
-          select: { content: true },
-        });
-        const alreadyPack = messageLooksLikeFirstAccessPack(lastBotFa?.content);
-        const text =
-          isFirstAccessStuckIntent(args.userMessage) || alreadyPack
-            ? buildFirstAccessStuckMessage()
-            : buildFirstAccessPackMessage();
-        await prisma
-          .$transaction(async (tx) => {
-            await tx.conversation.update({
-              where: { id: args.conversationId },
-              data: { assignedToId: aiId },
-            });
-            await tx.contact.update({
-              where: { id: args.contactId },
-              data: { assignedToId: aiId },
-            });
-          })
-          .catch(() => null);
-        await sendAgentMessage({
+    // Primeiro acesso (pedido, "não consegui", ou "1"/portal): a IA atende.
+    {
+      const lastBotFa = await prisma.message.findFirst({
+        where: {
           conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: aiId,
-          autonomyMode: "AUTONOMOUS",
-          text,
-          channel: args.channel,
-          kind: "text",
-          bypassAssigneeCheck: true,
-        }).catch(() => null);
-        logAi(
-          alreadyPack || isFirstAccessStuckIntent(args.userMessage)
-            ? "first_access_stuck_help"
-            : "first_access_pack_sent",
-          {
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      const faChoice =
+        messageLooksLikeFirstAccessHelp(lastBotFa?.content)
+          ? parseFirstAccessChoice(args.userMessage)
+          : null;
+      if (
+        faChoice ||
+        isFirstAccessIntent(args.userMessage) ||
+        isFirstAccessStuckIntent(args.userMessage)
+      ) {
+        const orgId = getOrgIdOrNull();
+        let aiId: string | null = null;
+        if (conversation?.assignedToId) {
+          const assignedAi = await prisma.user.findFirst({
+            where: { id: conversation.assignedToId, type: "AI" },
+            select: { id: true },
+          });
+          aiId = assignedAi?.id ?? null;
+        }
+        if (!aiId && orgId) {
+          const fallbackAi = await prisma.user.findFirst({
+            where: {
+              organizationId: orgId,
+              type: "AI",
+              aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+            },
+            select: { id: true },
+            orderBy: { createdAt: "asc" },
+          });
+          aiId = fallbackAi?.id ?? null;
+        }
+        if (aiId) {
+          const alreadyPack = messageLooksLikeFirstAccessPack(
+            lastBotFa?.content,
+          );
+          const text = faChoice
+            ? buildFirstAccessChoiceMessage(faChoice)
+            : isFirstAccessStuckIntent(args.userMessage) || alreadyPack
+              ? buildFirstAccessStuckMessage()
+              : buildFirstAccessPackMessage();
+          await prisma.distributionPending
+            .updateMany({
+              where: {
+                status: "PENDING",
+                OR: [
+                  { conversationId: args.conversationId },
+                  { contactId: args.contactId },
+                ],
+              },
+              data: { status: "CANCELLED" },
+            })
+            .catch(() => null);
+          await prisma
+            .$transaction(async (tx) => {
+              await tx.conversation.update({
+                where: { id: args.conversationId },
+                data: { assignedToId: aiId },
+              });
+              await tx.contact.update({
+                where: { id: args.contactId },
+                data: { assignedToId: aiId },
+              });
+            })
+            .catch(() => null);
+          await sendAgentMessage({
             conversationId: args.conversationId,
             contactId: args.contactId,
-          },
-        );
-        return;
+            agentUserId: aiId,
+            autonomyMode: "AUTONOMOUS",
+            text,
+            channel: args.channel,
+            kind: "text",
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+          logAi(
+            faChoice
+              ? "first_access_choice"
+              : alreadyPack || isFirstAccessStuckIntent(args.userMessage)
+                ? "first_access_stuck_help"
+                : "first_access_pack_sent",
+            {
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              choice: faChoice,
+            },
+          );
+          return;
+        }
       }
     }
 
@@ -516,6 +543,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         greetAi = fallbackAi?.id ?? null;
       }
       if (greetAi) {
+        await prisma.distributionPending
+          .updateMany({
+            where: {
+              status: "PENDING",
+              OR: [
+                { conversationId: args.conversationId },
+                { contactId: args.contactId },
+              ],
+            },
+            data: { status: "CANCELLED" },
+          })
+          .catch(() => null);
         await prisma
           .$transaction(async (tx) => {
             await tx.conversation.update({
@@ -1546,7 +1585,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         error: result.error,
       });
-      if (!distributeOnFailure) return;
+      if (
+        !distributeOnFailure ||
+        !isImmediateAcademicHandoffJustified(args.userMessage, policy)
+      ) {
+        return;
+      }
 
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
