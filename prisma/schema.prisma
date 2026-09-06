@@ -1194,17 +1194,17 @@ model Contact {
   @@unique([organizationId, whatsappBsuid])
   @@unique([organizationId, messengerPsid])
   @@unique([organizationId, instagramIgsid])
+  // Índices removidos em 2026-09-06 (0 scans/12d em prod, virada de mês
+  // inclusa — ver migration drop_dead_indexes_contacts_deals_automation):
+  //   (org,whatsappJid)  — inbound casa por whatsapp_bsuid, não jid
+  //   (org,leadScore), (org,companyId), (org,updatedAt)
+  //   (org,assignedToId) — prefixo de (org,assignedToId,lifecycleStage)
   @@index([organizationId])
   @@index([organizationId, number])
   @@index([organizationId, email])
   @@index([organizationId, phone])
-  @@index([organizationId, whatsappJid])
   @@index([organizationId, lifecycleStage])
-  @@index([organizationId, leadScore])
-  @@index([organizationId, companyId])
-  @@index([organizationId, assignedToId])
   @@index([organizationId, createdAt])
-  @@index([organizationId, updatedAt])
   @@index([organizationId, assignedToId, lifecycleStage])
   @@index([organizationId, lifecycleStage, createdAt])
   @@map("contacts")
@@ -1589,9 +1589,12 @@ model Deal {
 
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
+  // Índices removidos em 2026-09-06 (prod, virada de mês inclusa):
+  //   (org,stageId)   — prefixo de (org,stageId,status) 2,6M scans
+  //   (org,dealRole)  — 0 scans/12d
+  //   (org,orgUnitId) — 0 scans/12d
   @@index([organizationId])
   @@index([organizationId, status])
-  @@index([organizationId, stageId])
   @@index([organizationId, contactId])
   @@index([organizationId, ownerId])
   @@index([organizationId, createdAt])
@@ -1599,8 +1602,6 @@ model Deal {
   @@index([organizationId, stageId, status])
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
-  @@index([organizationId, dealRole])
-  @@index([organizationId, orgUnitId])
   @@map("deals")
 }
 
@@ -2596,14 +2597,15 @@ model ActivityEvent {
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([id, occurredAt])
+  // Índices compostos removidos em 2026-09-06 (ver migration
+  // drop_activity_events_dead_composite_idx): entityType/entityId, dealId,
+  // contactId, actorUserId e actorType tinham <800 scans/12d em prod contra
+  // ~1,8 GB de disco. As FKs por dealId/contactId/conversationId/actorUserId
+  // (índices simples, criados por SQL, milhões de scans) cobrem os lookups de
+  // timeline; a ordenação por occurredAt cai no sort.
   @@index([organizationId, occurredAt(sort: Desc)])
-  @@index([organizationId, entityType, entityId, occurredAt(sort: Desc)])
-  @@index([organizationId, dealId, occurredAt(sort: Desc)])
-  @@index([organizationId, contactId, occurredAt(sort: Desc)])
   @@index([organizationId, conversationId, occurredAt(sort: Desc)])
-  @@index([organizationId, actorUserId, occurredAt(sort: Desc)])
   @@index([organizationId, type, occurredAt(sort: Desc)])
-  @@index([organizationId, actorType, occurredAt(sort: Desc)])
   @@map("activity_events")
 }
 
