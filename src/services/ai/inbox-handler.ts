@@ -6,9 +6,8 @@
  *
  * Antes de chamar o LLM, aplicamos os CONTROLES DE PILOTING:
  *
- *   1. Business hours — se a config tem horário habilitado e o
- *      momento atual está fora, envia `offHoursMessage` (se houver)
- *      e encerra sem invocar o LLM.
+ *   1. Business hours — expediente do consultor (Pilotagem). A IA
+ *      continua; a fila humana usa `offHoursMessage` / `handoffMessage`.
  *   2. Keyword handoff — se a mensagem do cliente bate com alguma
  *      `keywordHandoffs`, transferimos imediatamente pra humano
  *      (sem LLM).
@@ -32,7 +31,9 @@ import { metaClientFromConfig, type MetaWhatsAppClient } from "@/lib/meta-whatsa
 import {
   computeTypingDelayMs,
   matchHandoffKeyword,
+  normalizeBusinessHours,
   renderTemplate,
+  type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import {
   normalizeInboxPolicy,
@@ -180,9 +181,10 @@ function buildAcademicStayWithYouMessage(): string {
 function buildRetentionHandoffMessage(
   now = new Date(),
   policy?: InboxPolicy | null,
+  businessHours?: BusinessHoursConfig | null,
 ): string {
   if (policy?.retentionHandoffMessage) return policy.retentionHandoffMessage;
-  if (isHumanAttendanceWindowOpen(now)) {
+  if (isHumanAttendanceWindowOpen(now, businessHours)) {
     return (
       "Entendi! Sobre *trancamento/cancelamento* já pedi para o setor de *Retenção* " +
       "te atender. Assim que um(a) consultor(a) puder, continua com você. " +
@@ -197,13 +199,17 @@ function buildRetentionHandoffMessage(
   );
 }
 
-/** Mensagem genérica de fila — respeita expediente (não promete "em breve" à noite). */
+/** Mensagem genérica de fila — texto e horário vêm da Pilotagem. */
 function buildGenericQueueHandoffMessage(
   now = new Date(),
   policy?: InboxPolicy | null,
+  businessHours?: BusinessHoursConfig | null,
 ): string {
-  if (policy?.handoffMessage) return policy.handoffMessage;
-  return buildHumanUnavailableOfferMessage(now);
+  return buildHumanUnavailableOfferMessage(now, {
+    businessHours,
+    handoffMessage: policy?.handoffMessage,
+    offHoursMessage: businessHours?.offHoursMessage,
+  });
 }
 
 function studentNoticeAfterHandoff(gotHuman: boolean, queueText: string): string {
@@ -863,6 +869,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // Política editável na tela do agente. Campo vazio = defaults do
     // código, então agentes antigos seguem se comportando igual.
     const policy: InboxPolicy = normalizeInboxPolicy(cfg.inboxPolicy);
+    const hours = normalizeBusinessHours(cfg.businessHours);
     const humanBehavior = {
       simulateTyping: cfg.simulateTyping,
       typingPerCharMs: cfg.typingPerCharMs,
@@ -1402,8 +1409,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const gotHuman = await conversationAssignedToHuman(args.conversationId);
         const keywordText =
           deptKey === "retencao"
-            ? buildRetentionHandoffMessage(new Date(), policy)
-            : buildGenericQueueHandoffMessage(new Date(), policy);
+            ? buildRetentionHandoffMessage(new Date(), policy, hours)
+            : buildGenericQueueHandoffMessage(new Date(), policy, hours);
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -1451,7 +1458,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildGenericQueueHandoffMessage(new Date(), policy),          ),
+            buildGenericQueueHandoffMessage(new Date(), policy, hours),          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1490,7 +1497,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildGenericQueueHandoffMessage(new Date(), policy),
+            buildGenericQueueHandoffMessage(new Date(), policy, hours),
           ),
           channel: args.channel,
           kind: "text",
@@ -1532,7 +1539,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           autonomyMode: cfg.autonomyMode,
           text: studentNoticeAfterHandoff(
             gotHuman,
-            buildRetentionHandoffMessage(new Date(), policy),          ),
+            buildRetentionHandoffMessage(new Date(), policy, hours),          ),
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -1692,7 +1699,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             autonomyMode: cfg.autonomyMode,
             text: studentNoticeAfterHandoff(
               gotHuman,
-              buildGenericQueueHandoffMessage(new Date(), policy),            ),
+              buildGenericQueueHandoffMessage(new Date(), policy, hours),            ),
             channel: args.channel,
             kind: "text",
             humanBehavior,
@@ -1743,8 +1750,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           userMessage: args.userMessage,
           policy,
         }) === "retencao"
-          ? buildRetentionHandoffMessage(new Date(), policy)
-          : buildGenericQueueHandoffMessage(new Date(), policy));
+          ? buildRetentionHandoffMessage(new Date(), policy, hours)
+          : buildGenericQueueHandoffMessage(new Date(), policy, hours));
       // Distribui primeiro; só depois envia UMA mensagem ao aluno.
       // Humano atribuído → saudação da automação (lead_distributed).
       const afterHandoff = await prisma.conversation.findUnique({
@@ -1833,8 +1840,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           policy,
         }) === "retencao";
       const policyQueueText = retentionDept
-        ? buildRetentionHandoffMessage(new Date(), policy)
-        : buildGenericQueueHandoffMessage(new Date(), policy);
+        ? buildRetentionHandoffMessage(new Date(), policy, hours)
+        : buildGenericQueueHandoffMessage(new Date(), policy, hours);
       const llmPromisesSoon =
         /em breve|logo algu[eé]m|s[oó] um instante|já te conectar/i.test(
           handoffText,
@@ -1861,7 +1868,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (
           replyText.trim() &&
           !llmPromisesSoon &&
-          isHumanAttendanceWindowOpen() &&
+          isHumanAttendanceWindowOpen(new Date(), hours) &&
           !recentBot.some(
             (m) => m.content && isNearDuplicateBotText(handoffText, m.content),
           )
@@ -1869,7 +1876,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           outbound = handoffText;
         }
       } else if (
-        !isHumanAttendanceWindowOpen() ||
+        !isHumanAttendanceWindowOpen(new Date(), hours) ||
         llmPromisesSoon ||
         !llmCoversQueue
       ) {

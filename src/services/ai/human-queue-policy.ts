@@ -1,13 +1,24 @@
 /**
- * Política quando não há consultor humano elegível:
- *  - avisa com empatia e oferece continuar com a IA;
- *  - fora do expediente (antes das 8h/9h ou a partir da pausa pré-fim), informa o próximo horário;
- *  - dentro do expediente, não promete "em breve" como se já houvesse alguém na linha.
+ * Política quando não há consultor humano elegível.
  *
- * Expediente humano (SP): seg–sex 8h–19h, sábado 9h–16h.
- * Pausa na fila: 30 min antes da saída → janela efetiva até 18h30 (seg–sex)
- * e 15h30 (sábado).
+ * Fonte de verdade: Pilotagem do agente (`businessHours` + mensagens).
+ * Sem horário ligado no wizard, cai no fallback SAC (seg–sex 8h–19h,
+ * sáb 9h–16h, pausa 30 min antes do fim).
  */
+
+import {
+  isWithinBusinessHours,
+  normalizeBusinessHours,
+  type BusinessHoursConfig,
+} from "@/lib/ai-agents/piloting";
+
+export type HumanQueueContext = {
+  businessHours?: BusinessHoursConfig | null;
+  /// Texto fixo de fila (Pilotagem). Se preenchido, vale em qualquer horário.
+  handoffMessage?: string | null;
+  /// Texto só quando o expediente humano está fechado.
+  offHoursMessage?: string | null;
+};
 
 const TZ = "America/Sao_Paulo";
 
@@ -103,10 +114,17 @@ export function humanAttendanceStartHint(now = new Date()): {
 }
 
 /**
- * True se estamos na janela em que faz sentido prometer atendimento humano
- * "no mesmo dia" (SP): após abertura e antes da pausa pré-fim.
+ * True se o expediente humano está aberto.
+ * Com horário ligado no wizard, usa os slots do agente.
  */
-export function isHumanAttendanceWindowOpen(now = new Date()): boolean {
+export function isHumanAttendanceWindowOpen(
+  now = new Date(),
+  businessHours?: BusinessHoursConfig | null,
+): boolean {
+  const hours = normalizeBusinessHours(businessHours ?? null);
+  if (hours?.enabled) {
+    return isWithinBusinessHours(hours, now);
+  }
   const { weekday, hour, minute } = clockInSaoPaulo(now);
   if (weekday === "Sun") return false;
   const startHour = weekday === "Sat" ? 9 : 8;
@@ -129,13 +147,34 @@ function hoursFooter(now = new Date()): string {
   );
 }
 
-export function buildHumanUnavailableOfferMessage(now = new Date()): string {
-  if (isHumanAttendanceWindowOpen(now)) {
+export function buildHumanUnavailableOfferMessage(
+  now = new Date(),
+  ctx?: HumanQueueContext,
+): string {
+  const custom = ctx?.handoffMessage?.trim();
+  if (custom) return custom;
+
+  const open = isHumanAttendanceWindowOpen(now, ctx?.businessHours);
+  if (!open) {
+    const off = ctx?.offHoursMessage?.trim();
+    if (off) return off;
+  }
+
+  if (open) {
     return (
       `Combinado — já pedi para a equipe te atender. Assim que um(a) ` +
       `consultor(a) puder, continua com você por aqui, tá? ` +
       `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo. ` +
       `Se preferir só esperar com calma, também tudo bem — me avisa 💛`
+    );
+  }
+  const hours = normalizeBusinessHours(ctx?.businessHours ?? null);
+  if (hours?.enabled) {
+    return (
+      `Combinado — já registrei seu pedido com a equipe. O atendimento ` +
+      `humano retoma no próximo expediente. Enquanto isso, se quiser ` +
+      `tirar alguma dúvida, *estou aqui* contigo. Se preferir só esperar, ` +
+      `também tudo bem — me avisa 💛`
     );
   }
   const { startHour, dayLabel } = humanAttendanceStartHint(now);
