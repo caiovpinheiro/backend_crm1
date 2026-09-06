@@ -9,6 +9,7 @@ import {
   updateAIAgent,
   type UpdateAIAgentInput,
 } from "@/services/ai-agents";
+import { AgentReadinessError } from "@/lib/ai-agents/readiness";
 import { parseAuditSource } from "@/lib/ai-agents/observability";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
@@ -107,6 +108,7 @@ export async function PUT(
           : body.pipelineId === null
             ? null
             : undefined,
+      /** @deprecated Preferir canal da conversa. */
       channelId:
         typeof body.channelId === "string"
           ? body.channelId
@@ -151,7 +153,12 @@ export async function PUT(
       return NextResponse.json(updated);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro ao atualizar.";
-      const status = msg.includes("não encontrado") ? 404 : 500;
+      const status =
+        e instanceof AgentReadinessError
+          ? 400
+          : msg.includes("não encontrado")
+            ? 404
+            : 500;
       return NextResponse.json({ message: msg }, { status });
     }
   });

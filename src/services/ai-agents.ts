@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Serviço de CRUD dos agentes de IA.
  *
  * O agente é persistido em DUAS tabelas (uma transação):
@@ -17,6 +17,9 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
+import {
+  assertAutonomousReadiness,
+} from "@/lib/ai-agents/readiness";
 import { findSystemTemplateByArchetype } from "@/services/ai-agent-templates";
 import {
   HANDOFF_MODES,
@@ -89,7 +92,7 @@ export async function listAIAgents(): Promise<AIAgentRow[]> {
 }
 
 export async function getAIAgent(id: string) {
-  return prisma.aIAgentConfig.findUnique({
+  const row = await prisma.aIAgentConfig.findUnique({
     where: { id },
     include: {
       user: {
@@ -101,8 +104,15 @@ export async function getAIAgent(id: string) {
           signature: true,
         },
       },
+      _count: { select: { knowledgeDocs: true } },
     },
   });
+  if (!row) return null;
+  const { _count, ...rest } = row;
+  return {
+    ...rest,
+    knowledgeDocsCount: _count.knowledgeDocs,
+  };
 }
 
 export type CreateAIAgentInput = {
@@ -506,9 +516,23 @@ export type UpdateAIAgentInput = Partial<
 export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
   const existing = await prisma.aIAgentConfig.findUnique({
     where: { id },
-    include: { user: true },
+    include: {
+      user: true,
+      _count: { select: { knowledgeDocs: true } },
+    },
   });
   if (!existing) throw new Error("Agente não encontrado.");
+
+  const nextAutonomy = input.autonomyMode ?? existing.autonomyMode;
+  const nextActive = input.active ?? existing.active;
+  const nextInbox =
+    input.inboxPolicy !== undefined ? input.inboxPolicy : existing.inboxPolicy;
+  assertAutonomousReadiness({
+    nextAutonomy,
+    nextActive,
+    inboxPolicy: nextInbox,
+    knowledgeDocsCount: existing._count.knowledgeDocs,
+  });
 
   return prisma.$transaction(async (tx) => {
     if (input.name || input.avatarUrl !== undefined) {
@@ -794,11 +818,23 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
 }
 
 export async function toggleAIAgentActive(id: string) {
-  const existing = await prisma.aIAgentConfig.findUnique({ where: { id } });
+  const existing = await prisma.aIAgentConfig.findUnique({
+    where: { id },
+    include: { _count: { select: { knowledgeDocs: true } } },
+  });
   if (!existing) throw new Error("Agente não encontrado.");
+  const nextActive = !existing.active;
+  if (nextActive) {
+    assertAutonomousReadiness({
+      nextAutonomy: existing.autonomyMode,
+      nextActive,
+      inboxPolicy: existing.inboxPolicy,
+      knowledgeDocsCount: existing._count.knowledgeDocs,
+    });
+  }
   return prisma.aIAgentConfig.update({
     where: { id },
-    data: { active: !existing.active },
+    data: { active: nextActive },
   });
 }
 
