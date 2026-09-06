@@ -155,6 +155,41 @@ export function buildFirstAccessStuckMessage(): string {
   ].join("\n");
 }
 
+/** Ver aulas/disciplinas no AVA — operacional, não fila humana. */
+export function isAvaOrDisciplinesIntent(userMessage: string): boolean {
+  const n = (userMessage ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .trim();
+  if (!n) return false;
+  if (
+    /\b(blackboard|\bava\b|ambiente virtual)\b/.test(n) &&
+    /(ajuda|ajudar|acess|entrar|ver|onde|como|disciplina|aula|materia)/.test(n)
+  ) {
+    return true;
+  }
+  if (/(tem|existe|no meu curso|grade curricular|matriz curricular)/.test(n)) {
+    return false;
+  }
+  return (
+    /como ver (as |minhas )?disciplinas/.test(n) ||
+    /onde (vejo|fica|estao) (as |minhas )?disciplinas/.test(n) ||
+    /ver minhas disciplinas/.test(n) ||
+    /minhas disciplinas/.test(n)
+  );
+}
+
+export function buildAvaDisciplinesMessage(): string {
+  return [
+    "Para ver as *disciplinas* no computador: entra no *Portal do Aluno* e abre o *Ambiente Virtual* (Blackboard).",
+    "",
+    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    "",
+    "No celular também dá pelo app *Duda*. Se alguma disciplina não aparecer, me diz o que está na tela.",
+  ].join("\n");
+}
+
 export function buildFirstAccessChoiceMessage(
   choice: "portal" | "duda" | "senha",
 ): string {

@@ -24,6 +24,7 @@ import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 import {
+  isAvaOrDisciplinesIntent,
   isFirstAccessIntent,
   isFirstAccessStuckIntent,
   parseFirstAccessChoice,
@@ -393,7 +394,8 @@ export async function tryAssignFirstAttendanceAi(args: {
       !isHumanAttendanceWindowOpen() ||
       isFirstAccessIntent(args.userMessage ?? "") ||
       isFirstAccessStuckIntent(args.userMessage ?? "") ||
-      parseFirstAccessChoice(args.userMessage ?? "") !== null;
+      parseFirstAccessChoice(args.userMessage ?? "") !== null ||
+      isAvaOrDisciplinesIntent(args.userMessage ?? "");
     if (!keepAiDespitePending) {
       logAi("first_attendance_skip_pending_human", {
         conversationId: args.conversationId,

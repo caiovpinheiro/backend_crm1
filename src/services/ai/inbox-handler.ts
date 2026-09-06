@@ -58,9 +58,11 @@ import {
   shouldSendInauguralClassLink,
 } from "@/services/ai/inaugural-class-link";
 import {
+  buildAvaDisciplinesMessage,
   buildFirstAccessChoiceMessage,
   buildFirstAccessPackMessage,
   buildFirstAccessStuckMessage,
+  isAvaOrDisciplinesIntent,
   isFirstAccessIntent,
   isFirstAccessStuckIntent,
   messageLooksLikeFirstAccessHelp,
@@ -163,6 +165,7 @@ function isAcademicSelfServeTurn(raw: string): boolean {
   if (isBareGreetingMessage(trimmed)) return true;
   if (isFirstAccessIntent(trimmed)) return true;
   if (isFirstAccessStuckIntent(trimmed)) return true;
+  if (isAvaOrDisciplinesIntent(trimmed)) return true;
   if (userWantsAiContinue(trimmed)) return true;
   return false;
 }
@@ -513,6 +516,72 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           );
           return;
         }
+      }
+    }
+
+    // Blackboard / ver disciplinas — caminho do Portal, sem fila.
+    if (isAvaOrDisciplinesIntent(args.userMessage)) {
+      const orgIdAva = getOrgIdOrNull();
+      let avaAi: string | null = null;
+      if (conversation?.assignedToId) {
+        const assignedAi = await prisma.user.findFirst({
+          where: { id: conversation.assignedToId, type: "AI" },
+          select: { id: true },
+        });
+        avaAi = assignedAi?.id ?? null;
+      }
+      if (!avaAi && orgIdAva) {
+        const fallbackAi = await prisma.user.findFirst({
+          where: {
+            organizationId: orgIdAva,
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        avaAi = fallbackAi?.id ?? null;
+      }
+      if (avaAi) {
+        await prisma.distributionPending
+          .updateMany({
+            where: {
+              status: "PENDING",
+              OR: [
+                { conversationId: args.conversationId },
+                { contactId: args.contactId },
+              ],
+            },
+            data: { status: "CANCELLED" },
+          })
+          .catch(() => null);
+        await prisma
+          .$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: avaAi },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: avaAi },
+            });
+          })
+          .catch(() => null);
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: avaAi,
+          autonomyMode: "AUTONOMOUS",
+          text: buildAvaDisciplinesMessage(),
+          channel: args.channel,
+          kind: "text",
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("ava_disciplines_help", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return;
       }
     }
 
@@ -1842,7 +1911,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       !justifiedHandoff &&
       !userWantsHumanDistribution(args.userMessage)
     ) {
-      text = buildAcademicStayWithYouMessage();
+      text = isAvaOrDisciplinesIntent(args.userMessage)
+        ? buildAvaDisciplinesMessage()
+        : buildAcademicStayWithYouMessage();
     }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
