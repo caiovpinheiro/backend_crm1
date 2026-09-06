@@ -1089,7 +1089,7 @@ model Contact {
   /// Número sequencial por organização (1, 2, 3...).
   /// Gerenciado no app layer via nextContactNumber() — ver services/contacts.ts.
   /// Sem default no banco; a camada de serviço atribui max+1 com retry em P2002.
-  number                 Int
+  number                 Int @default(0)
   /// ID no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo registro.
   /// Unicidade é por organização (cada empresa pode importar Kommos diferentes).
   externalId             String?        @map("external_id")
@@ -1264,7 +1264,7 @@ model Company {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. PK continua CUID; URL usa `number` (`/companies/4`).
-  number         Int
+  number         Int @default(0)
   name           String
   domain         String?
   industry       String?
@@ -1301,7 +1301,7 @@ model Tag {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL/filtros usam `?tag=3`.
-  number         Int
+  number         Int @default(0)
   name           String
   color          String         @default("#6366f1")
   contacts       TagOnContact[]
@@ -1340,7 +1340,7 @@ model CustomField {
   organizationId       String
   organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number               Int
+  number               Int @default(0)
   name                 String
   label                String
   type                 CustomFieldType
@@ -1379,7 +1379,7 @@ model SavedFilter {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. Atalho `/pipeline/filter/3`.
-  number         Int
+  number         Int @default(0)
   entityType     String       @map("entityType")
   name           String
   filterConfig   Json         @default("{}") @map("filterConfig")
@@ -1452,7 +1452,7 @@ model Pipeline {
   /// Número sequencial por organização (1, 2, 3…). Mesmo padrão de
   /// Deal.number / Contact.number / Tabulation.number. PK continua CUID
   /// (FKs); este campo é o ID amigável na URL (`?pipeline=12`).
-  number               Int
+  number               Int @default(0)
   isDefault            Boolean              @default(false)
   /// Se true, marcar negócio como perdido neste funil exige motivo.
   lossReasonRequired   Boolean              @default(false)
@@ -1523,7 +1523,7 @@ model Deal {
   /// global; agora é gerenciado em app layer (serviço deals.createDeal calcula
   /// `max(number) + 1` dentro de uma transação). Postgres sequences não
   /// suportam partição por coluna, então a responsabilidade subiu pro app.
-  number         Int
+  number         Int @default(0)
   title          String
   value          Decimal      @default(0) @db.Decimal(12, 2)
   status         DealStatus   @default(OPEN)
@@ -1630,7 +1630,7 @@ model Product {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   sku            String?
@@ -1797,7 +1797,7 @@ model OrgUnit {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   legalName      String?
   /// CNPJ (ou outro identificador fiscal). Texto livre, sem validação no schema.
@@ -2010,7 +2010,7 @@ model JobOpening {
   organizationId      String
   organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number              Int
+  number              Int @default(0)
   productId           String?
   product             Product?         @relation(fields: [productId], references: [id])
   clientCompanyId     String
@@ -2115,7 +2115,7 @@ model Catalog {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   /// Catálogo default da org (recebe os produtos legados no backfill).
@@ -2808,7 +2808,7 @@ model Conversation {
   /// Usado como "ticket number" nas UIs (ex.: #1234) — mesmo padrao de
   /// Contact.number / Deal.number. Atribuido em `createConversation`
   /// via `nextConversationNumber()` com retry P2002 em race.
-  number                 Int
+  number                 Int @default(0)
   /// ID externo (ex.: Meta thread id) — unicidade por organização.
   externalId             String?
   channel                String
@@ -3116,7 +3116,7 @@ model Automation {
   organizationId String
   organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/automations/7`.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   triggerType    String
@@ -3279,7 +3279,7 @@ model Channel {
   organizationId    String
   organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. Filtro inbox: `?channel=2`.
-  number            Int
+  number            Int @default(0)
   name              String
   type              ChannelType
   provider          ChannelProvider
@@ -3367,7 +3367,7 @@ model QuickReply {
   organizationId  String
   organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number          Int
+  number          Int @default(0)
   title           String
   content         String
   category        String?
@@ -3396,7 +3396,7 @@ model Department {
   organizationId           String
   organization             Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number                   Int
+  number                   Int @default(0)
   name                     String
   color                    String       @default("#6366f1")
   icon                     String       @default("🏢")
@@ -3564,7 +3564,7 @@ model Tabulation {
   /// Contact.number / Deal.number. PK continua CUID (FK em Conversation);
   /// este campo é o ID amigável na API/timeline. Atribuído em
   /// `createNode` via `nextTabulationNumber()` com retry em P2002.
-  number         Int
+  number         Int @default(0)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   departmentId   String
@@ -3645,7 +3645,7 @@ model MessageTemplate {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   content        String
   category       String?
@@ -3724,7 +3724,7 @@ model WhatsappFlowDefinition {
   organizationId   String
   organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/settings/message-models/flows/3`.
-  number           Int
+  number           Int @default(0)
   name             String
   status           WhatsappFlowStatus   @default(DRAFT)
   /// ID Graph retornado por POST /{waba-id}/flows após publicação.
@@ -3819,7 +3819,7 @@ model DistributionRule {
   organizationId String
   organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   mode           DistributionMode     @default(ROUND_ROBIN)
   pipelineId     String?
@@ -4246,7 +4246,7 @@ model Segment {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   filters        Json
   createdAt      DateTime     @default(now())
@@ -4264,7 +4264,7 @@ model Campaign {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/campaigns/8`.
-  number         Int
+  number         Int @default(0)
   name           String
   status         CampaignStatus @default(DRAFT)
   type           CampaignType
