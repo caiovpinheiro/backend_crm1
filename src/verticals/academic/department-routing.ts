@@ -3,13 +3,13 @@
  * com match flexível no banco (ex.: "Atendimento - SAC").
  */
 
-import { executeDistribution } from "@/services/distribution";
+import { executeDistribution } from "@/services/distribution/engine";
 import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
 import {
   ACADEMIC_DEPARTMENT_ALIASES,
   isAvaOrDisciplinesIntent,
-} from "@/lib/ai-agents/academic-atendimento-prompt";
+} from "@/verticals/academic/atendimento-prompt";
 import {
   matchesAnyKeyword,
   type InboxPolicy,
@@ -703,7 +703,7 @@ export async function executeAcademicDepartmentHandoff(args: {
 }> {
   try {
     const { ensureAcademicDepartmentRoster } = await import(
-      "@/services/ai/ensure-academic-dept-roster"
+      "@/verticals/academic/ensure-dept-roster"
     );
     await ensureAcademicDepartmentRoster({ force: true });
   } catch {

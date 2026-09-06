@@ -76,9 +76,9 @@ async function closeAttendanceIfFarewell(args: {
 }): Promise<void> {
   if (args.kind === "greeting" || args.kind === "off_hours") return;
   try {
-    const { closeIfAgentFarewellEndsAttendance } = await import(
-      "@/services/ai/academic-closure"
-    );
+    const { getVerticalPack } = await import("@/verticals");
+    const closeIfAgentFarewellEndsAttendance =
+      getVerticalPack("academic")?.ops.closeIfAgentFarewellEndsAttendance;
     await closeIfAgentFarewellEndsAttendance({
       conversationId: args.conversationId,
       contactId: args.contactId,

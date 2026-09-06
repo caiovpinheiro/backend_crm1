@@ -681,7 +681,7 @@ export async function closeAiOnlyConversation(args: {
   if (dealId || contactId) {
     try {
       const { restoreDealToAcademicOrigin } = await import(
-        "@/services/ai/academic-department-routing"
+        "@/verticals/academic/department-routing"
       );
       await restoreDealToAcademicOrigin({
         dealId: dealId ?? null,

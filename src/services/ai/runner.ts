@@ -25,27 +25,17 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { runWithActor } from "@/lib/request-context";
-import { estimateCost } from "@/lib/ai-agents/pricing";
-import {
-  normalizeOutputStyle,
-  normalizeQualificationQuestions,
-  normalizeAutoClosePolicy,
-} from "@/lib/ai-agents/piloting";
-import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
-import {
-  ACADEMIC_CURRICULUM_TCE_RULES,
-  academicExamModalityRules,
-  formatCanonicalPortalAccessHint,
-  formatExamAccessHint,
-  formatFirstAccessHint,
-  formatPasswordResetHint,
-  formatParticipationCertificateHint,
-  formatPoloAddressesHint,
-} from "@/lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "@/verticals";
+
 import {
   fallbackSteeringRules,
   renderSystemPrompt,
 } from "@/lib/ai-agents/system-prompt";
+import {
+  normalizeAutoClosePolicy,
+  normalizeOutputStyle,
+  normalizeQualificationQuestions,
+} from "@/lib/ai-agents/piloting";
 import {
   formatCampaignDispatchBlock,
   hydrateOutboundTemplateContent,
@@ -70,6 +60,11 @@ import {
   behaviorSliceFromAgent,
   hashAgentBehaviorConfig,
 } from "@/lib/ai-agents/observability";
+import { estimateCost } from "@/lib/ai-agents/pricing";
+import {
+  DEFAULT_CHAT_MODEL,
+  generateWithTools,
+} from "@/services/ai/provider";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 
 export type RunSource = "inbox" | "playground" | "automation" | "api";
@@ -214,10 +209,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
-    const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
-    // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
-    // de retenção fica em message-models-retrieval.
-    const retrievedModels = isAcademicAttendance
+    const pack = getVerticalPack(agent.verticalPack);
+    const packOps = pack?.ops ?? {};
+    // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
+    const hasPack = Boolean(pack);
+    // Modelos internos (tela Internos): preserva comportamento acadêmico
+    // para agentes com verticalPack=academic (backfill ATENDIMENTO).
+    const useMessageModelsRag = pack?.id === "academic";
+    const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
             console.warn(
@@ -227,7 +226,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           },
         )
       : [];
-    const messageModelsBlock = isAcademicAttendance
+    const messageModelsBlock = useMessageModelsRag
       ? formatMessageModelsBlock(retrievedModels)
       : "";
     const followUpMedia = pickFollowUpMedia(retrievedModels);
@@ -236,8 +235,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .slice(-4)
       .map((m) => m.content)
       .join("\n");
-    const portalAccessHint = isAcademicAttendance
-      ? formatCanonicalPortalAccessHint(args.userMessage, recentContextForHint)
+    const portalAccessHint = hasPack
+      ? (packOps.formatCanonicalPortalAccessHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
     const campaignCtx = await loadLastCampaignDispatchContext(
       args.conversationId ?? null,
@@ -251,36 +253,45 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // prova presencial, a org grava `ai.exams.onlineOnly=false` em
     // `PUT /api/settings/org` — sem deploy. Falha de contexto/org cai no
     // default seguro (online).
-    const examsOnlineOnly = isAcademicAttendance
+    const examsOnlineOnly = hasPack
       ? await getOrgSettingBool("ai.exams.onlineOnly", true).catch(() => true)
       : true;
-    const examAccessHint = isAcademicAttendance
-      ? formatExamAccessHint(
+    const examAccessHint = hasPack
+      ? (packOps.formatExamAccessHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
             .filter(Boolean)
             .join("\n"),
           examsOnlineOnly,
-        )
+        ) ?? "")
       : "";
-    const poloAddressesHint = isAcademicAttendance
-      ? formatPoloAddressesHint(args.userMessage, recentContextForHint)
+    const poloAddressesHint = hasPack
+      ? (packOps.formatPoloAddressesHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
-    const certificateHint = isAcademicAttendance
-      ? formatParticipationCertificateHint(
+    const certificateHint = hasPack
+      ? (packOps.formatParticipationCertificateHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
             .filter(Boolean)
             .join("\n"),
-        )
+        ) ?? "")
       : "";
-    const firstAccessHint = isAcademicAttendance
-      ? formatFirstAccessHint(args.userMessage, recentContextForHint)
+    const firstAccessHint = hasPack
+      ? (packOps.formatFirstAccessHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
-    const passwordResetHint = isAcademicAttendance
-      ? formatPasswordResetHint(args.userMessage, recentContextForHint)
+    const passwordResetHint = hasPack
+      ? (packOps.formatPasswordResetHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
-    const clockHint = isAcademicAttendance ? formatLocalClockHint() : "";
+    const clockHint = hasPack ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
       messageModelsBlock,
@@ -298,13 +309,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     const runtimeTools = agent.enabledTools;
     const steeringRules =
-      agent.steeringRules?.trim() || fallbackSteeringRules(agent.archetype);
+      agent.steeringRules?.trim() ||
+      fallbackSteeringRules(agent.archetype, agent.verticalPack);
+    const curriculumRules = hasPack
+      ? (pack?.constants.curriculumTceRules ?? "")
+      : "";
+    const examModalityRules = hasPack
+      ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
+      : "";
     const runtimeOverride =
       [
         agent.systemPromptOverride?.trim(),
         steeringRules,
-        isAcademicAttendance ? academicExamModalityRules(examsOnlineOnly) : "",
-        isAcademicAttendance ? ACADEMIC_CURRICULUM_TCE_RULES : "",
+        examModalityRules,
+        curriculumRules,
       ]
         .filter(Boolean)
         .join("\n\n") || null;
@@ -348,7 +366,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
-      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy),
+      verticalPack: agent.verticalPack ?? null,
+      inboxPolicy: normalizeInboxPolicy(
+        agent.inboxPolicy,
+        agent.verticalPack,
+      ),
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
     };
 

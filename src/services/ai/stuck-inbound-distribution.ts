@@ -15,7 +15,13 @@
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
-import { executeAcademicDepartmentHandoff } from "@/services/ai/academic-department-routing";
+import { getVerticalPack } from "@/verticals";
+
+function executeAcademicDepartmentHandoff(...args: any[]) {
+  const fn = getVerticalPack("academic")?.ops.executeAcademicDepartmentHandoff;
+  if (!fn) throw new Error("academic pack unavailable");
+  return fn(...args);
+}
 
 export const STUCK_INBOUND_MS = 15 * 60 * 1000;
 

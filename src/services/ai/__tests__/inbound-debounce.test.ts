@@ -50,7 +50,9 @@ import {
 } from "@/services/ai/inbound-debounce";
 import { assertAiStillAuthorized } from "@/services/ai/inbox-handler";
 import { matchHandoffKeyword } from "@/lib/ai-agents/piloting";
-import { ACADEMIC_HANDOFF_KEYWORDS } from "@/lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "@/verticals";
+const ACADEMIC_HANDOFF_KEYWORDS =
+  getVerticalPack("academic")!.constants.handoffKeywords;
 
 describe("inbound-debounce claim + cancel", () => {
   beforeEach(() => {

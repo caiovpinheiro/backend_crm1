@@ -5,12 +5,7 @@
 
 import type { AIAgentAutonomy } from "@prisma/client";
 
-import {
-  ACADEMIC_ATENDIMENTO_RULES,
-  ACADEMIC_CONFIDENCE_RULES,
-  ACADEMIC_CURRICULUM_TCE_RULES,
-  ACADEMIC_MEDIA_CAPABILITY_RULES,
-} from "@/lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "@/verticals";
 import type {
   OutputStyle,
   QualificationQuestion,
@@ -19,15 +14,13 @@ import type {
 /**
  * Regras de atendimento usadas quando `AIAgentConfig.steeringRules`
  * está vazio (agentes criados antes da pilotagem pelo CRM).
+ * Pack null/ausente → string vazia (sem regras de vertical).
  */
-export function fallbackSteeringRules(archetype: string): string {
-  if (archetype !== "ATENDIMENTO") return "";
-  return [
-    ACADEMIC_ATENDIMENTO_RULES,
-    ACADEMIC_CURRICULUM_TCE_RULES,
-    ACADEMIC_MEDIA_CAPABILITY_RULES,
-    ACADEMIC_CONFIDENCE_RULES,
-  ].join("\n\n");
+export function fallbackSteeringRules(
+  archetype: string,
+  verticalPack?: string | null,
+): string {
+  return getVerticalPack(verticalPack)?.fallbackRules(archetype) ?? "";
 }
 
 export type TemplateVars = {

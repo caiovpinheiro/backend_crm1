@@ -983,9 +983,8 @@ export async function executeDistribution(
       (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
   ) {
     try {
-      const { moveOpenDealToEmAtendimento } = await import(
-        "@/services/ai/academic-department-routing"
-      );
+      const { getVerticalPack } = await import("@/verticals");
+      const moveOpenDealToEmAtendimento = getVerticalPack("academic")!.ops.moveOpenDealToEmAtendimento;
       await moveOpenDealToEmAtendimento({
         dealId: assignedDealId,
         contactId: input.contactId ?? null,

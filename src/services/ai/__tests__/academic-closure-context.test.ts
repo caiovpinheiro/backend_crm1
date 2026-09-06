@@ -7,9 +7,9 @@
  *
  * As funções aqui são puras (regex), então testamos sem prisma.
  */
-import { describe, expect, it } from "vitest";
+import { getVerticalPack } from "@/verticals";
 
-import {
+const {
   agentReplyLooksLikeFarewell,
   shouldCloseAfterAgentFarewell,
   shouldCloseAiAfterStudentMessage,
@@ -19,7 +19,7 @@ import {
   userSaysGoodbye,
   userSaysThatsAll,
   userThanksInSentence,
-} from "@/services/ai/academic-closure";
+} = getVerticalPack("academic")!.ops;
 import { userWantsSoftAiClose } from "@/services/ai/idle-followup";
 
 const FAREWELL =

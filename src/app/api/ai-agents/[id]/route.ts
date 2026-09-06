@@ -133,6 +133,7 @@ export async function PUT(
         steeringRules: body.steeringRules,
         toolConfig: body.toolConfig,
         inboxPolicy: body.inboxPolicy,
+        verticalPack: body.verticalPack,
       }),
       auditSource: parseAuditSource(body.auditSource ?? body.source),
     };

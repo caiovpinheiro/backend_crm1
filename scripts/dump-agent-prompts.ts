@@ -44,10 +44,7 @@ async function main() {
     normalizeOutputStyle,
     normalizeQualificationQuestions,
   } = await import("../src/lib/ai-agents/piloting");
-  const {
-    ACADEMIC_CURRICULUM_TCE_RULES,
-    academicExamModalityRules,
-  } = await import("../src/lib/ai-agents/academic-atendimento-prompt");
+  const { getVerticalPack } = await import("../src/verticals");
   const {
     fallbackSteeringRules,
     renderSystemPrompt,
@@ -71,16 +68,25 @@ async function main() {
     );
 
     for (const agent of agents) {
-      const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
+      const pack = getVerticalPack(agent.verticalPack);
+      const packOps = pack?.ops ?? {};
+      const hasPack = Boolean(pack);
       const runtimeTools = agent.enabledTools ?? [];
       const steeringRules =
-        agent.steeringRules?.trim() || fallbackSteeringRules(agent.archetype);
+        agent.steeringRules?.trim() ||
+        fallbackSteeringRules(agent.archetype, agent.verticalPack);
+      const examModalityRules = hasPack
+        ? (packOps.academicExamModalityRules?.(true) ?? "")
+        : "";
+      const curriculumRules = hasPack
+        ? (pack?.constants.curriculumTceRules ?? "")
+        : "";
       const runtimeOverride =
         [
           agent.systemPromptOverride?.trim(),
           steeringRules,
-          isAcademicAttendance ? academicExamModalityRules(true) : "",
-          isAcademicAttendance ? ACADEMIC_CURRICULUM_TCE_RULES : "",
+          examModalityRules,
+          curriculumRules,
         ]
           .filter(Boolean)
           .join("\n\n") || null;
@@ -111,13 +117,16 @@ async function main() {
 
       const outPath = join(BASELINE_DIR, `${agent.id}.txt`);
       writeFileSync(outPath, prompt, "utf8");
-      console.log(`  OK ${agent.id} (${agent.archetype}) → ${outPath}`);
+      console.log(
+        `  OK ${agent.id} (${agent.archetype}/${agent.verticalPack ?? "none"}) → ${outPath}`,
+      );
     }
 
     console.log("Done.");
   } finally {
     await prisma.$disconnect();
   }
+  process.exit(0);
 }
 
 main().catch((err) => {

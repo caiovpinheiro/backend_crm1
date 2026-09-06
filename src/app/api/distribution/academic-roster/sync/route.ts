@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
-import { ensureAcademicDepartmentRoster } from "@/services/ai/ensure-academic-dept-roster";
+import { getVerticalPack } from "@/verticals";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -46,7 +46,7 @@ export async function POST() {
       throw e;
     }
 
-    const result = await ensureAcademicDepartmentRoster({ force: true });
+    const result = await getVerticalPack("academic")!.ops.ensureAcademicDepartmentRoster({ force: true });
     return NextResponse.json({
       ok: true,
       synced: result?.synced ?? 0,

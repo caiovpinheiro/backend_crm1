@@ -5,6 +5,7 @@ import {
   createAIAgent,
   listAIAgents,
   sanitizePilotingInput,
+  sanitizeVerticalPack,
   type CreateAIAgentInput,
 } from "@/services/ai-agents";
 import { parseAuditSource } from "@/lib/ai-agents/observability";
@@ -92,6 +93,10 @@ export async function POST(request: Request) {
       pipelineId: typeof body.pipelineId === "string" ? body.pipelineId : null,
       channelId: typeof body.channelId === "string" ? body.channelId : null,
       avatarUrl: typeof body.avatarUrl === "string" ? body.avatarUrl : null,
+      ...(() => {
+        const vp = sanitizeVerticalPack(body.verticalPack);
+        return vp !== undefined ? { verticalPack: vp } : {};
+      })(),
       ...sanitizePilotingInput({
         openingMessage: body.openingMessage,
         openingDelayMs: body.openingDelayMs,

@@ -35,6 +35,7 @@ import {
   type InboxPolicy,
   type ToolConfigMap,
 } from "@/lib/ai-agents/steering";
+import { listVerticalPackIds } from "@/verticals";
 import {
   auditDiffAsJson,
   buildAgentConfigDiff,
@@ -143,6 +144,9 @@ export type CreateAIAgentInput = {
   typingPerCharMs?: number;
   markMessagesRead?: boolean;
   autoClosePolicy?: AutoClosePolicy | null;
+
+  /// Vertical pack (`academic` | null). Novos agentes: null se omitido.
+  verticalPack?: string | null;
 
   /// Origem do save pra auditoria (Onda 0). Default: api.
   auditSource?: AuditSource;
@@ -281,10 +285,15 @@ export function sanitizeSteeringInput(input: {
   steeringRules?: unknown;
   toolConfig?: unknown;
   inboxPolicy?: unknown;
+  verticalPack?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
-    "systemPromptTemplate" | "steeringRules" | "toolConfig" | "inboxPolicy"
+    | "systemPromptTemplate"
+    | "steeringRules"
+    | "toolConfig"
+    | "inboxPolicy"
+    | "verticalPack"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -309,13 +318,33 @@ export function sanitizeSteeringInput(input: {
     out.toolConfig = normalizeToolConfig(input.toolConfig);
   }
 
+  const verticalPack = sanitizeVerticalPack(input.verticalPack);
+  if (verticalPack !== undefined) {
+    out.verticalPack = verticalPack;
+  }
+
   if (input.inboxPolicy === null) {
     out.inboxPolicy = null;
   } else if (input.inboxPolicy !== undefined) {
-    out.inboxPolicy = normalizeInboxPolicy(input.inboxPolicy);
+    out.inboxPolicy = normalizeInboxPolicy(
+      input.inboxPolicy,
+      verticalPack === undefined ? undefined : verticalPack,
+    );
   }
 
   return out;
+}
+
+/** `null` limpa; string conhecida aceita; desconhecida/omitida → undefined. */
+export function sanitizeVerticalPack(
+  v: unknown,
+): string | null | undefined {
+  if (v === null) return null;
+  if (v === undefined) return undefined;
+  if (typeof v !== "string") return undefined;
+  const id = v.trim();
+  if (!id) return null;
+  return listVerticalPackIds().includes(id) ? id : undefined;
 }
 
 export async function createAIAgent(input: CreateAIAgentInput) {
@@ -398,6 +427,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         autoClosePolicy:
           (input.autoClosePolicy as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
+        verticalPack: input.verticalPack ?? null,
       }),
     });
 
@@ -519,6 +549,9 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           : {}),
         ...(input.channelId !== undefined
           ? { channelId: input.channelId }
+          : {}),
+        ...(input.verticalPack !== undefined
+          ? { verticalPack: input.verticalPack }
           : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
 

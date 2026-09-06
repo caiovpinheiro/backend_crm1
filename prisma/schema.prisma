@@ -4657,6 +4657,11 @@ model AIAgentConfig {
   /// etapas e tags que o agente pode atender) e as mensagens de handoff.
   inboxPolicy Json?
 
+  /// Pack de vertical do agente (ex.: "academic"). Null = sem interceptos
+  /// de vertical. Backfill: todos os agentes existentes → "academic";
+  /// novos nascem null.
+  verticalPack String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

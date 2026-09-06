@@ -353,12 +353,12 @@ export function defaultInboxPolicy(): InboxPolicy {
   return {
     confidenceThreshold: null,
     lowConfidenceHandoff: true,
-    interceptRetention: true,
-    interceptCourseShopping: true,
+    interceptRetention: false,
+    interceptCourseShopping: false,
     retentionKeywords: [],
     courseShoppingKeywords: [],
     departmentAliases: { acolhimento: [], retencao: [], atendimento: [] },
-    inauguralEnabled: true,
+    inauguralEnabled: false,
     inauguralUrl: null,
     inauguralDates: [],
     scope: defaultAttendanceScope(),
@@ -371,8 +371,21 @@ function boolOr(v: unknown, fallback: boolean): boolean {
   return typeof v === "boolean" ? v : fallback;
 }
 
-export function normalizeInboxPolicy(v: unknown): InboxPolicy {
+/**
+ * Normaliza inboxPolicy. Com `verticalPack` setado, aplica defaults do pack
+ * (academic → interceptos ligados) como base antes do JSON salvo.
+ * Defaults hardcoded por id para evitar ciclo steering ↔ verticals.
+ */
+export function normalizeInboxPolicy(
+  v: unknown,
+  verticalPack?: string | null,
+): InboxPolicy {
   const base = defaultInboxPolicy();
+  if (verticalPack === "academic") {
+    base.interceptRetention = true;
+    base.interceptCourseShopping = true;
+    base.inauguralEnabled = true;
+  }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
 
