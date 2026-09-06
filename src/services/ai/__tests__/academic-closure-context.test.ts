@@ -7,6 +7,8 @@
  *
  * As funções aqui são puras (regex), então testamos sem prisma.
  */
+import { describe, expect, it } from "vitest";
+
 import { getVerticalPack } from "@/verticals";
 
 const {
