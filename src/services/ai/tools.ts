@@ -724,22 +724,22 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
-      "Use SOMENTE quando: o aluno pedir humano/consultor, for retenção, ou você NÃO puder " +
+      "Use SOMENTE quando: o contato pedir humano/atendente, for retenção, ou você NÃO puder " +
       "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
-      "Se você puder orientar o aluno, NÃO chame esta tool — responda você. " +
-      "Quando chamar, a distribuição EXECUTA de verdade; confirme ao aluno que um consultor vai ajudar. " +
-      "Prefira `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere.",
+      "Se você puder orientar o contato, NÃO chame esta tool — responda você. " +
+      "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
+      "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
     inputSchema: z.object({
       reason: z
         .string()
         .describe(
-          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelar matrícula').",
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelamento').",
         ),
       departmentName: z
         .string()
         .optional()
         .describe(
-          "Acolhimento | Retenção | Atendimento (ou Atendimento - SAC).",
+          "Nome do departamento de destino (opcional).",
         ),
     }),
     execute: async ({ reason, departmentName }) => {
@@ -747,7 +747,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
         if (!academicDistributionAllowed(ctx)) {
           return fail(
-            "Não distribua: o aluno não pediu humano e o tema ainda é atendimento da IA (portal, senha, Blackboard, prova, documento, cumprimento). Responda você.",
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
           );
         }
         const gate = departmentGate(policy, departmentName);
@@ -835,13 +835,13 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
 function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
-      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
+      "Roteia a conversa atual para um departamento com base no assunto do contato. NÃO tira a conversa do agente — apenas define o departamento responsável, usado pela Distribuição Inteligente para escolher o atendente certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
     inputSchema: z.object({
       departmentName: z
         .string()
         .min(1)
         .describe(
-          "Nome do departamento de destino (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC').",
+          "Nome do departamento de destino.",
         ),
     }),
     execute: async ({ departmentName }) => {
@@ -930,7 +930,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           return fail("Sem contato/negócio para distribuir.");
         if (!academicDistributionAllowed(ctx)) {
           return fail(
-            "Não distribua: o aluno não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida (portal, senha, Blackboard, prova, documento).",
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida.",
           );
         }
         const gate = departmentGate(policy, departmentName);
@@ -1134,12 +1134,12 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
 function closeConversationTool(ctx: RunContext) {
   return tool({
     description:
-      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir para encerrar/finalizar, agradecer de forma conclusiva ('muito grata', 'obrigada por toda ajuda') depois de já ter sido atendido, ou disser que volta depois/à noite e em seguida agradecer. NÃO use se já houver consultor humano na conversa. NÃO use só porque o aluno disse que vai estudar à noite — nesse caso confirme e continue; encerre no agradecimento seguinte.",
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o contato pedir para encerrar/finalizar, ou agradecer de forma conclusiva depois de já ter sido atendido. NÃO use se já houver atendente humano na conversa. NÃO use só porque o contato disse que volta depois — nesse caso confirme e continue; encerre no agradecimento seguinte.",
     inputSchema: z.object({
       reason: z
         .string()
         .optional()
-        .describe("Motivo curto do encerramento (ex.: 'Aluno pediu para encerrar')."),
+        .describe("Motivo curto do encerramento (ex.: 'Contato pediu para encerrar')."),
     }),
     execute: async ({ reason }) => {
       try {
@@ -1170,7 +1170,7 @@ function closeConversationTool(ctx: RunContext) {
         }
         return ok({
           closed: true,
-          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao aluno em uma frase curta.",
+          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao contato em uma frase curta.",
         });
       } catch (err) {
         return fail(

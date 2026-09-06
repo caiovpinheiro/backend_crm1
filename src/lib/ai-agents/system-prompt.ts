@@ -30,6 +30,69 @@ export function fallbackSteeringRules(archetype: string): string {
   ].join("\n\n");
 }
 
+export type TemplateVars = {
+  agent_name?: string | null;
+  company_name?: string | null;
+  tone?: string | null;
+  language?: string | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  contact_tags?: string | null;
+  deal_summary?: string | null;
+  deal_stage?: string | null;
+  deal_products?: string | null;
+  last_human_interaction?: string | null;
+};
+
+const TEMPLATE_VAR_KEYS: Array<keyof TemplateVars> = [
+  "agent_name",
+  "company_name",
+  "tone",
+  "language",
+  "contact_name",
+  "contact_phone",
+  "contact_tags",
+  "deal_summary",
+  "deal_stage",
+  "deal_products",
+  "last_human_interaction",
+];
+
+/**
+ * Substitui `{{var}}` no template. Se alguma var da linha não tiver valor,
+ * remove a linha inteira (não deixa string vazia).
+ */
+export function renderTemplateVars(
+  template: string,
+  vars: TemplateVars,
+): string {
+  const lines = template.split(/\r?\n/);
+  const out: string[] = [];
+  for (const line of lines) {
+    const placeholders = [...line.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)];
+    let drop = false;
+    for (const m of placeholders) {
+      const key = m[1] as keyof TemplateVars;
+      if (!TEMPLATE_VAR_KEYS.includes(key)) continue;
+      const val = vars[key];
+      if (val == null || String(val).trim() === "") {
+        drop = true;
+        break;
+      }
+    }
+    if (drop) continue;
+    let rendered = line;
+    for (const key of TEMPLATE_VAR_KEYS) {
+      const val = vars[key];
+      if (val == null || String(val).trim() === "") continue;
+      const re = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, "g");
+      rendered = rendered.replace(re, String(val).trim());
+    }
+    out.push(rendered);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export type RenderArgs = {
   template: string;
   override: string | null;
@@ -57,14 +120,38 @@ export type RenderArgs = {
   retrievalBlock: string;
   qualificationQuestions: QualificationQuestion[];
   outputStyle: OutputStyle;
+  /** Variáveis `{{...}}` do template. */
+  templateVars?: TemplateVars;
 };
 
 /** Render do system prompt — mesma função usada pelo runner em produção. */
 export function renderSystemPrompt(args: RenderArgs): string {
   const lines: string[] = [];
-  lines.push(args.template);
+  const rawTemplate = args.template ?? "";
+  const templateHadToneOrLang =
+    /\{\{\s*tone\s*\}\}/i.test(rawTemplate) ||
+    /\{\{\s*language\s*\}\}/i.test(rawTemplate);
+
+  const renderedTemplate = renderTemplateVars(rawTemplate, {
+    tone: args.tone,
+    language: args.language,
+    contact_name: args.contact?.name ?? null,
+    contact_phone: args.contact?.phone ?? null,
+    contact_tags:
+      args.contact?.tags.map((t) => t.tag.name).filter(Boolean).join(", ") ||
+      null,
+    deal_summary: args.deal?.title ?? null,
+    deal_stage: args.deal?.stage?.name ?? null,
+    ...args.templateVars,
+  });
+
+  if (renderedTemplate) lines.push(renderedTemplate);
   lines.push("");
-  lines.push(`Idioma: ${args.language}. Tom: ${args.tone}.`);
+
+  // Evita duplicar tom/idioma quando o template já usa {{tone}}/{{language}}.
+  if (!templateHadToneOrLang) {
+    lines.push(`Idioma: ${args.language}. Tom: ${args.tone}.`);
+  }
 
   if (args.autonomyMode === "DRAFT") {
     lines.push(
@@ -126,7 +213,7 @@ export function renderSystemPrompt(args: RenderArgs): string {
       "- Prefira 1 a 4 frases curtas. Pode terminar com UMA pergunta curta **só se** ainda faltar um dado para ajudar.",
     );
     lines.push(
-      "- Se o aluno já pediu o passo a passo/site/link ou disse sim/pode ser/envie: ENTREGUE a orientação (com link das refs se houver). NÃO termine de novo perguntando se ele quer as instruções.",
+      "- Se o contato já pediu o passo a passo/site/link ou disse sim/pode ser/envie: ENTREGUE a orientação (com link das refs se houver). NÃO termine de novo perguntando se ele quer as instruções.",
     );
     lines.push(
       "- PROIBIDO prometer ou fingir envio de vídeo/arquivo (ex.: 'vou te enviar o vídeo', '[Envio do vídeo]'). Sem URL nas refs, só texto; com URL, cole o link.",

@@ -101,6 +101,12 @@ async function main() {
           agent.qualificationQuestions,
         ),
         outputStyle: normalizeOutputStyle(agent.outputStyle),
+        templateVars: {
+          agent_name: "Baseline Agent",
+          company_name: "Baseline Company",
+          deal_products: null,
+          last_human_interaction: null,
+        },
       });
 
       const outPath = join(BASELINE_DIR, `${agent.id}.txt`);

@@ -29,6 +29,7 @@ import { estimateCost } from "@/lib/ai-agents/pricing";
 import {
   normalizeOutputStyle,
   normalizeQualificationQuestions,
+  normalizeAutoClosePolicy,
 } from "@/lib/ai-agents/piloting";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import {
@@ -308,6 +309,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         .filter(Boolean)
         .join("\n\n") || null;
 
+    const org = await prisma.organization.findUnique({
+      where: { id: agent.organizationId },
+      select: { name: true },
+    });
+
     const systemPrompt = renderSystemPrompt({
       template: agent.systemPromptTemplate,
       override: runtimeOverride,
@@ -322,6 +328,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       retrievalBlock: retrievalWithModels,
       qualificationQuestions,
       outputStyle,
+      templateVars: {
+        agent_name: agent.user?.name ?? null,
+        company_name: org?.name ?? null,
+        deal_products: null,
+        last_human_interaction: null,
+      },
     });
 
     await prisma.aIAgentRun.update({
@@ -337,6 +349,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
       inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy),
+      autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
     };
 
     const toolSet = buildToolSet(
