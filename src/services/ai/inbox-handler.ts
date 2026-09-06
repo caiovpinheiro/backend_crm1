@@ -59,7 +59,10 @@ import {
 } from "@/services/ai/inaugural-class-link";
 import {
   buildFirstAccessPackMessage,
+  buildFirstAccessStuckMessage,
   isFirstAccessIntent,
+  isFirstAccessStuckIntent,
+  messageLooksLikeFirstAccessPack,
 } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   buildAudioHandoffMessage,
@@ -148,6 +151,7 @@ function isAcademicSelfServeTurn(raw: string): boolean {
   if (/^\?+$/.test(trimmed)) return true;
   if (isBareGreetingMessage(trimmed)) return true;
   if (isFirstAccessIntent(trimmed)) return true;
+  if (isFirstAccessStuckIntent(trimmed)) return true;
   if (userWantsAiContinue(trimmed)) return true;
   return false;
 }
@@ -398,9 +402,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    // Primeiro acesso: pack oficial ANTES de fila/assignee/LLM.
-    // Ticket sem dono + pending à noite calava o aluno.
-    if (isFirstAccessIntent(args.userMessage)) {
+    // Primeiro acesso (pedido ou "não consegui entrar"): a IA atende.
+    // Não é fila humana — o template de 8h segunda é o caminho errado.
+    if (
+      isFirstAccessIntent(args.userMessage) ||
+      isFirstAccessStuckIntent(args.userMessage)
+    ) {
       const orgId = getOrgIdOrNull();
       let aiId: string | null = null;
       if (conversation?.assignedToId) {
@@ -423,6 +430,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         aiId = fallbackAi?.id ?? null;
       }
       if (aiId) {
+        const lastBotFa = await prisma.message.findFirst({
+          where: {
+            conversationId: args.conversationId,
+            direction: "out",
+            authorType: "bot",
+            isPrivate: false,
+            messageType: { not: "note" },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+        const alreadyPack = messageLooksLikeFirstAccessPack(lastBotFa?.content);
+        const text =
+          isFirstAccessStuckIntent(args.userMessage) || alreadyPack
+            ? buildFirstAccessStuckMessage()
+            : buildFirstAccessPackMessage();
         await prisma
           .$transaction(async (tx) => {
             await tx.conversation.update({
@@ -440,15 +463,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           contactId: args.contactId,
           agentUserId: aiId,
           autonomyMode: "AUTONOMOUS",
-          text: buildFirstAccessPackMessage(),
+          text,
           channel: args.channel,
           kind: "text",
           bypassAssigneeCheck: true,
         }).catch(() => null);
-        logAi("first_access_pack_sent", {
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-        });
+        logAi(
+          alreadyPack || isFirstAccessStuckIntent(args.userMessage)
+            ? "first_access_stuck_help"
+            : "first_access_pack_sent",
+          {
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+          },
+        );
         return;
       }
     }

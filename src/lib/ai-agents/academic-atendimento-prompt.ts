@@ -83,6 +83,25 @@ export function isFirstAccessIntent(userMessage: string): boolean {
   return FIRST_ACCESS_INTENT_RE.test((userMessage ?? "").trim());
 }
 
+/** Travou no acesso — ainda é suporte da IA, não fila humana. */
+export function isFirstAccessStuckIntent(userMessage: string): boolean {
+  const n = (userMessage ?? "").trim();
+  if (!n) return false;
+  return /n[aã]o (consegui|consigo) (acess|entrar|logar|abrir)|ainda n[aã]o (consegui|consigo)|n[aã]o (entra|abre|loga)|deu erro.*(acesso|senha|portal|login|duda)|senha (n[aã]o|nao) (funciona|aceita|chega|vem)/i.test(
+    n,
+  );
+}
+
+export function messageLooksLikeFirstAccessPack(
+  content?: string | null,
+): boolean {
+  const t = content ?? "";
+  return (
+    t.includes("youtu.be/vFJP7a1EMsU") ||
+    t.includes("passo a passo do primeiro acesso")
+  );
+}
+
 /** Pacote oficial — inbox manda isto sem passar por fila/LLM. */
 export function buildFirstAccessPackMessage(): string {
   return [
@@ -92,6 +111,22 @@ export function buildFirstAccessPackMessage(): string {
     `Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
     `Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
     `Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+  ].join("\n");
+}
+
+/** Follow-up: já mandou o pack e o aluno ainda não entrou. */
+export function buildFirstAccessStuckMessage(): string {
+  return [
+    "Beleza — vamos destravar isso juntos. Onde travou?",
+    "",
+    "1. No *Portal do Aluno* (criar senha / entrar)",
+    "2. No app *Duda*",
+    "3. A senha não chegou ou não aceita",
+    "",
+    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `Vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    "",
+    "Me diz qual desses e o que aparece na tela (se puder, o texto do erro).",
   ].join("\n");
 }
 

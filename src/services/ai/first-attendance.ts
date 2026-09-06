@@ -23,7 +23,10 @@ import {
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
-import { isFirstAccessIntent } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  isFirstAccessIntent,
+  isFirstAccessStuckIntent,
+} from "@/lib/ai-agents/academic-atendimento-prompt";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -387,7 +390,8 @@ export async function tryAssignFirstAttendanceAi(args: {
   if (waitingHuman) {
     const keepAiDespitePending =
       !isHumanAttendanceWindowOpen() ||
-      isFirstAccessIntent(args.userMessage ?? "");
+      isFirstAccessIntent(args.userMessage ?? "") ||
+      isFirstAccessStuckIntent(args.userMessage ?? "");
     if (!keepAiDespitePending) {
       logAi("first_attendance_skip_pending_human", {
         conversationId: args.conversationId,
