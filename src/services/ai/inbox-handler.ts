@@ -55,6 +55,32 @@ import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { runAgent } from "@/services/ai/runner";
 import { sendAgentFollowUpMedia } from "@/services/ai/send-agent-media";
+import {
+  metaClientFromConfig,
+  type MetaWhatsAppClient,
+} from "@/lib/meta-whatsapp/client";
+import {
+  computeTypingDelayMs,
+  normalizeBusinessHours,
+  type BusinessHoursConfig,
+} from "@/lib/ai-agents/piloting";
+import {
+  normalizeInboxPolicy,
+  type InboxPolicy,
+} from "@/lib/ai-agents/steering";
+import { cache } from "@/lib/cache";
+import { prisma } from "@/lib/prisma";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { sseBus } from "@/lib/sse-bus";
+import { createConversationEvent } from "@/services/conversation-events";
+import {
+  hasAgentGreetedInCurrentAssignment,
+  markAgentGreetedNow,
+  sendAgentMessage,
+} from "@/services/ai/piloting-actions";
+import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 export type InboundAIArgs = {
   conversationId: string;
@@ -517,7 +543,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             data: { assignedToId: aiAgent.id },
           });
         });
-        conversation = { ...conversation, assignedToId: aiAgent.id };
+        if (conversation) {
+          conversation = { ...conversation, assignedToId: aiAgent.id };
+        }
 
         // Não envia oferta aqui — a IA responde uma vez (evita bolha duplicada
         // oferta + LLM). Aviso de fila/indisponível fica no pós-handoff.
@@ -536,6 +564,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     }
 
+    if (!conversation?.assignedToId) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "no_assignee_after_pending",
+      });
+      return;
+    }
+    const assignedToId = conversation.assignedToId;
+
     const channelConfig = conversation.channelRef?.config as
       | Record<string, unknown>
       | null
@@ -543,7 +580,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     const metaClient: MetaWhatsAppClient = metaClientFromConfig(channelConfig);
 
     const assignee = await prisma.user.findUnique({
-      where: { id: conversation.assignedToId },
+      where: { id: assignedToId },
       select: {
         id: true,
         type: true,

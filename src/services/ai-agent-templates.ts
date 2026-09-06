@@ -6,7 +6,8 @@
  * expor `agentTemplate` tipado).
  */
 
-import type { AIAgentArchetype, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { AIAgentArchetype } from "@prisma/client";
 
 import { ARCHETYPES } from "@/lib/ai-agents/archetypes";
 import { prismaBase } from "@/lib/prisma-base";
