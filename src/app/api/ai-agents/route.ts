@@ -74,6 +74,14 @@ export async function POST(request: Request) {
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
       maxSteps:
         typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+      maxToolCallsPerRun:
+        typeof body.maxToolCallsPerRun === "number"
+          ? body.maxToolCallsPerRun
+          : undefined,
+      maxRepeatsPerTool:
+        typeof body.maxRepeatsPerTool === "number"
+          ? body.maxRepeatsPerTool
+          : undefined,
       templateId:
         typeof body.templateId === "string"
           ? body.templateId

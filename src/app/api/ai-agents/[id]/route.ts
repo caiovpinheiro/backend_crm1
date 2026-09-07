@@ -11,6 +11,8 @@ import {
 } from "@/services/ai-agents";
 import { AgentReadinessError } from "@/lib/ai-agents/readiness";
 import { parseAuditSource } from "@/lib/ai-agents/observability";
+import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
+import { validateUnknownAnswerAgainstGate } from "@/services/ai/transfer-gate";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 const ARCHETYPES: AIAgentArchetype[] = [
@@ -76,6 +78,14 @@ export async function PUT(
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
       maxSteps:
         typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+      maxToolCallsPerRun:
+        typeof body.maxToolCallsPerRun === "number"
+          ? body.maxToolCallsPerRun
+          : undefined,
+      maxRepeatsPerTool:
+        typeof body.maxRepeatsPerTool === "number"
+          ? body.maxRepeatsPerTool
+          : undefined,
       templateId:
         typeof body.templateId === "string"
           ? body.templateId
@@ -156,7 +166,18 @@ export async function PUT(
 
     try {
       const updated = await updateAIAgent(id, input);
-      return NextResponse.json(updated);
+      // Combinação que o runtime rebaixa silenciosamente (gate do pack x
+      // modo "não sei"): salva, mas devolve o aviso para a tela.
+      const warnings = validateUnknownAnswerAgainstGate({
+        verticalPack: updated.verticalPack,
+        unknownAnswerMode: normalizeInboxPolicy(
+          updated.inboxPolicy,
+          updated.verticalPack,
+        ).unknownAnswerMode,
+      });
+      return NextResponse.json(
+        warnings.length > 0 ? { ...updated, warnings } : updated,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro ao atualizar.";
       const status =

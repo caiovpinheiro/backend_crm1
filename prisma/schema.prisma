@@ -4605,6 +4605,17 @@ model AIAgentConfig {
   enabledTools         String[]         @default([])
   /// Limite defensivo diário em tokens (input+output). 0 = ilimitado.
   dailyTokenCap        Int              @default(0)
+
+  // ── Tetos do tool-loop ────────────────────────────────────
+  // O runner lia `maxSteps` de uma coluna que nunca existiu (cast
+  // silencioso), então o valor era sempre o default. Um run chegou a 42
+  // chamadas em cinco minutos repetindo o mesmo par de tools.
+  /// Passos do tool-loop por run. 0 = usa `AGENT_MAX_STEPS`.
+  maxSteps             Int              @default(0)
+  /// Teto global de chamadas de ferramenta por run. 0 = default seguro.
+  maxToolCallsPerRun   Int              @default(0)
+  /// Teto de chamadas da MESMA ferramenta por run. 0 = default seguro.
+  maxRepeatsPerTool    Int              @default(0)
   /// Pipeline preferencial para handoff / criação de deal. Se null,
   /// usa o pipeline default do contato (primeiro pipeline ativo).
   pipelineId           String?
@@ -4696,9 +4707,6 @@ model AIAgentConfig {
   /// o FE/migração não abandonam o enum legado.
   templateId String?
   template   AgentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-
-  /// Limite do tool-loop no runner (default 8).
-  maxSteps Int @default(8)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4864,6 +4872,10 @@ model AIAgentRun {
   llmInvoked           Boolean?
   /// true quando o tool-loop parou por atingir maxSteps.
   stepCountReached     Boolean?
+  /// Desfecho observado do run, derivado do estado final e não da intenção
+  /// do modelo. `status` continua existindo para não quebrar consumidores;
+  /// é `outcome` que diz a verdade. Ver `AIAgentRunOutcome`.
+  outcome              AIAgentRunOutcome?
   /// Turno lógico que originou o run (`ConversationTurn.id`). Null em run
   /// de playground/automação/API e em inbound antigo (pré Turn Manager).
   /// Sem relation de propósito: o turno pode ser purgado por retenção sem
@@ -4879,6 +4891,7 @@ model AIAgentRun {
   @@index([conversationId])
   @@index([status])
   @@index([turnId])
+  @@index([outcome])
   @@map("ai_agent_runs")
 }
 
@@ -4887,6 +4900,24 @@ enum AIAgentRunStatus {
   COMPLETED
   FAILED
   HANDOFF
+}
+
+/// Desfecho observado. `AIAgentRunStatus.HANDOFF` era gravado só porque uma
+/// tool de transferência foi CHAMADA, mesmo com a conversa seguindo atribuída
+/// à IA. Aqui o valor deriva do estado final. Runs antigos ficam NULL.
+enum AIAgentRunOutcome {
+  /// Respondeu ao cliente, sem efeito colateral pendente.
+  ANSWERED
+  /// A atribuição da conversa realmente saiu da IA.
+  HANDOFF_COMPLETED
+  /// O modelo tentou transferir e o gate recusou.
+  HANDOFF_BLOCKED_BY_GATE
+  /// Alguma ferramenta de efeito falhou.
+  TOOL_FAILED
+  /// Estourou teto de passos ou de chamadas de ferramenta.
+  STEP_LIMIT_REACHED
+  /// A recuperação não trouxe nenhum trecho relevante.
+  NO_CONTEXT
 }
 
 model AIAgentMessage {

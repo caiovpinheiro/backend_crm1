@@ -49,7 +49,13 @@ import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
-import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
+import { evaluateTransferGate } from "@/services/ai/transfer-gate";
+import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
+import {
+  denialPayload,
+  replayPayload,
+  type ToolCallGovernor,
+} from "@/services/ai/tool-governor";
 import type { ActivityType, Prisma } from "@prisma/client";
 import { getVerticalPack } from "@/verticals";
 
@@ -67,6 +73,8 @@ export type RunContext = {
   dealId?: string | null;
   /// Última mensagem do aluno (para inferir departamento no handoff).
   userMessage?: string | null;
+  /// Mensagens anteriores do cliente na conversa (gate de transferência).
+  priorUserMessages?: string[];
   /// Vertical pack do agente (`null` = sem ops de vertical).
   verticalPack?: string | null;
   /// Política de inbox do agente (aliases de departamento, keywords).
@@ -90,15 +98,14 @@ function fail(error: string) {
   return { ok: false as const, error };
 }
 
-/** Fila humana só se o aluno pediu consultor ou o tema exige depto (pack presente). */
+/** Fila humana só se o cliente pediu consultor ou o tema exige depto. */
 function academicDistributionAllowed(ctx: RunContext): boolean {
-  const ops = packOps(ctx);
-  if (!ops.isImmediateAcademicHandoffJustified) return false;
-  const msg = ctx.userMessage ?? "";
-  return (
-    userWantsHumanDistribution(msg) ||
-    ops.isImmediateAcademicHandoffJustified(msg, ctx.inboxPolicy)
-  );
+  return evaluateTransferGate({
+    verticalPack: ctx.verticalPack,
+    userMessage: ctx.userMessage,
+    priorUserMessages: ctx.priorUserMessages,
+    inboxPolicy: ctx.inboxPolicy,
+  }).allows;
 }
 
 // ── create_deal ────────────────────────────────────────────────
@@ -983,8 +990,9 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
               handoff.distribution?.reason === "NO_DEPARTMENT";
             return ok({
               assigned: Boolean(handoff.distribution?.success),
+              // `assignedUserId` saiu do payload: id interno de usuário não
+              // tem uso para o modelo e não precisa ser serializado.
               assignedTo: handoff.distribution?.selectedUserName ?? null,
-              assignedUserId: handoff.distribution?.selectedUserId ?? null,
               departmentName: handoff.departmentName,
               reason: handoff.distribution?.reason ?? null,
               queuedWaiting,
@@ -1039,7 +1047,6 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           return ok({
             assigned: true,
             assignedTo: result.selectedUserName,
-            assignedUserId: result.selectedUserId,
           });
         }
         // Não é erro de execução — é resultado de negócio (sem elegível, etc.).
@@ -1071,17 +1078,13 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
-const MATRICULA_POLITICA =
-  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
-
 function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
-  const politica = policy.policyText ?? MATRICULA_POLITICA;
   const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
   const copy = packToolCopy(ctx);
   return tool({
     description:
       copy?.consultarMatricula ??
-      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
+      "Verifica se o aluno em conversa tem acesso ativo ao portal/AVA. Devolve apenas `podeAcessarPortal` e uma orientação de rota — nunca curso, polo, série, situação ou documentos, porque esses dados não podem ser repassados ao aluno. O casamento é automático por telefone/e-mail do contato. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
     inputSchema: z.object({
       cpf: z
         .string()
@@ -1098,56 +1101,29 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
 
         const contact = await prisma.contact.findUnique({
           where: { id: ctx.contactId },
-          select: { phone: true, email: true, name: true },
+          select: { phone: true, email: true },
         });
         if (!contact) return fail("Contato não encontrado.");
 
-        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar a
-        // chance de ter contexto — sem risco de vazamento, pois o agente NÃO
-        // divulga estes dados ao aluno (uso interno + transferência segura).
+        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar
+        // a chance de achar o registro. O que o modelo vê sai do filtro
+        // abaixo — a busca ampla não vaza nada por si.
         const records = await lookupStudent(orgId, {
           phone: contact.phone,
           email: contact.email,
           cpf: cpf?.trim() || null,
         });
 
-        if (records.length === 0) {
-          return ok({
-            found: false,
-            politica,
+        // Filtro de saída: o modelo recebe só o status derivado. Antes o
+        // payload trazia curso, polo, série, situação e a instrução textual
+        // "NÃO DIVULGUE" — e o agente respondeu "seu curso está cancelado".
+        // Instrução dentro de payload não é mecanismo de segurança.
+        return ok(
+          enrollmentContextForModel({
+            situacoes: records.map((r) => r.situacao),
             transferMessage,
-            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
-          });
-        }
-
-        const matriculas = records.map((r) => ({
-          nome: r.nome,
-          curso: r.curso,
-          polo: r.polo,
-          serie: r.serie,
-          ciclo: r.ciclo,
-          situacao: r.situacao,
-          tipoMatricula: r.tipoMatricula,
-          instituicao: r.instituicao,
-          dataMatricula: r.dataMatricula
-            ? r.dataMatricula.toISOString().slice(0, 10)
-            : null,
-        }));
-        const ativo = records.some((r) =>
-          ["EM CURSO", "ATIVO", "CURSANDO"].some((s) =>
-            (r.situacao ?? "").toUpperCase().includes(s),
-          ),
+          }),
         );
-
-        return ok({
-          found: true,
-          politica,
-          transferMessage,
-          nome: records[0]?.nome ?? contact.name,
-          ativo,
-          totalMatriculas: matriculas.length,
-          matriculas,
-        });
       } catch (err) {
         return fail(
           err instanceof Error ? err.message : "Falha ao consultar matrícula.",
@@ -1262,17 +1238,51 @@ function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
   } as AnyTool;
 }
 
+/**
+ * Dedup + tetos por run. O modelo reexecutava a mesma tool porque o retorno
+ * anterior só repetia o erro, sem dizer "já tentou". Envelopa o `execute`
+ * depois do `withArgPolicy` para que a chave de dedup use os args já
+ * higienizados.
+ */
+function withCallGovernor(
+  id: string,
+  t: AnyTool,
+  governor: ToolCallGovernor,
+): AnyTool {
+  const execute = t.execute;
+  if (!execute) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>, options: unknown) => {
+      const decision = governor.decide(id, args);
+      if (decision.action === "replay") {
+        return replayPayload(id, decision.previousResult);
+      }
+      if (decision.action === "deny") {
+        return denialPayload(id, decision.reason);
+      }
+      const result = await execute(args as never, options as never);
+      governor.record(id, args, result);
+      return result;
+    }) as typeof execute,
+  } as AnyTool;
+}
+
 export function buildToolSet(
   ctx: RunContext,
   enabledIds: string[],
   toolConfig?: ToolConfigMap | null,
+  governor?: ToolCallGovernor,
 ): ToolSet {
   const set: Record<string, AnyTool> = {};
   for (const id of enabledIds) {
     const factory = FACTORY_MAP[id];
     if (!factory) continue;
     const policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
-    set[id] = withArgPolicy(factory(ctx, policy), policy);
+    const withPolicy = withArgPolicy(factory(ctx, policy), policy);
+    set[id] = governor
+      ? withCallGovernor(id, withPolicy, governor)
+      : withPolicy;
   }
   return set as ToolSet;
 }

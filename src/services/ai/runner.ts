@@ -69,6 +69,23 @@ import {
   generateWithTools,
 } from "@/services/ai/provider";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
+import {
+  evaluateTransferGate,
+  transferBlockedByGate,
+} from "@/services/ai/transfer-gate";
+import {
+  auditEffectClaims,
+  NEUTRAL_EFFECT_FALLBACK,
+} from "@/services/ai/effect-claims";
+import { buildRetrievalQuery } from "@/services/ai/retrieval-query";
+import {
+  deriveRunOutcome,
+  statusForOutcome,
+} from "@/services/ai/run-outcome";
+import {
+  normalizeToolCallLimits,
+  ToolCallGovernor,
+} from "@/services/ai/tool-governor";
 
 export type RunSource = "inbox" | "playground" | "automation" | "api";
 
@@ -204,17 +221,23 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       args.history ??
       (await loadHistoryFromConversation(args.conversationId ?? null));
 
-    // RAG: busca trechos da base de conhecimento do agente relevantes
-    // pra mensagem atual. Se não houver docs, retorna [] rapidamente.
+    const priorUserMessages = history
+      .filter((m) => m.role === "user")
+      .map((m) => m.content);
+
+    // RAG em TODO turno. A query sai da mensagem atual + últimas mensagens
+    // do cliente: com só a mensagem atual, continuações curtas ("ok", "Não
+    // fez ainda?") não recuperavam nada e o turno respondia sem base.
     const retrievedChunks = await retrieveRelevantChunks(
       agent.id,
-      args.userMessage,
+      buildRetrievalQuery({ userMessage: args.userMessage, priorUserMessages }),
       agentApiKey,
       4,
     ).catch((err) => {
       console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
       return [];
     });
+    const noRetrievalContext = retrievedChunks.length === 0;
     const retrievalBlock = formatRetrievalBlock(retrievedChunks);
 
     const qualificationQuestions = normalizeQualificationQuestions(
@@ -335,11 +358,22 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examModalityRules = hasPack
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
+    // Gate de transferência avaliado UMA vez, com o mesmo input que as
+    // tools vão usar: o prompt não pode instruir o que a tool vai recusar.
+    const transferGate = evaluateTransferGate({
+      verticalPack: agent.verticalPack,
+      userMessage: args.userMessage,
+      priorUserMessages,
+      inboxPolicy: inboxPolicyForRun,
+    });
+
     const runtimeOverride =
       [
         agent.systemPromptOverride?.trim(),
         steeringRules,
-        buildUnknownAnswerBlock(inboxPolicyForRun),
+        buildUnknownAnswerBlock(inboxPolicyForRun, {
+          transferBlocked: transferBlockedByGate(transferGate),
+        }),
         // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
         // ele ainda tentava `close_conversation` e levava erro da tool.
         buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
@@ -388,15 +422,23 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
+      priorUserMessages,
       verticalPack: agent.verticalPack ?? null,
       inboxPolicy: inboxPolicyForRun,
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
     };
 
+    const governor = new ToolCallGovernor(
+      normalizeToolCallLimits({
+        maxToolCallsPerRun: agent.maxToolCallsPerRun,
+        maxRepeatsPerTool: agent.maxRepeatsPerTool,
+      }),
+    );
     const toolSet = buildToolSet(
       ctx,
       runtimeTools,
       normalizeToolConfig(agent.toolConfig),
+      governor,
     );
 
     const messages: Array<{
@@ -414,13 +456,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       data: withOrgFromCtx({ runId: run.id, role: "user", content: args.userMessage }),
     });
 
-    const configuredMaxSteps = Number(
-      (agent as { maxSteps?: number | null }).maxSteps,
-    );
+    // `maxSteps` agora existe de fato no banco; o cast antigo escondia que
+    // a coluna nunca havia sido criada. 0 = usa o default do código.
     const maxSteps =
-      Number.isFinite(configuredMaxSteps) && configuredMaxSteps > 0
-        ? configuredMaxSteps
-        : AGENT_MAX_STEPS;
+      agent.maxSteps > 0 ? agent.maxSteps : AGENT_MAX_STEPS;
 
     const result = await generateWithTools({
       model: agent.model || DEFAULT_CHAT_MODEL,
@@ -463,27 +502,78 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       });
     }
 
+    // Guarda determinística: o modelo prometia ao cliente transferências que
+    // a tool tinha recusado. Compara o texto com o resultado real e descarta
+    // a resposta quando ela afirma efeito que não aconteceu.
+    const effectAudit = auditEffectClaims({
+      text: result.text,
+      toolCalls: result.toolCalls,
+    });
+    const finalText = effectAudit.blocked
+      ? NEUTRAL_EFFECT_FALLBACK
+      : result.text;
+    if (effectAudit.blocked) {
+      console.warn("[ai] resposta descartada — efeito afirmado sem execução", {
+        agentId: agent.id,
+        conversationId: args.conversationId ?? null,
+        unsupported: effectAudit.unsupported,
+      });
+      await prisma.aIAgentMessage.create({
+        data: withOrgFromCtx({
+          runId: run.id,
+          role: "system",
+          content: `[guardrail] resposta descartada: afirmou ${effectAudit.unsupported.join(", ")} sem ferramenta bem-sucedida`,
+          toolData: {
+            unsupported: effectAudit.unsupported,
+            achieved: effectAudit.achieved,
+            discardedText: result.text.slice(0, 1000),
+          } as Prisma.InputJsonValue,
+        }),
+      }).catch(() => null);
+    }
+
     const costUsd = estimateCost(
       agent.model,
       result.inputTokens,
       result.outputTokens,
     );
 
-    const hadTransfer = result.toolCalls.some((c) =>
-      [
-        "transfer_to_human",
-        "transfer_to_department",
-        "execute_distribution",
-      ].includes(c.toolName),
-    );
-    const status: RunResult["status"] = hadTransfer ? "HANDOFF" : "COMPLETED";
+    // Outcome derivado do ESTADO FINAL: relê a atribuição da conversa depois
+    // das tools. O código antigo olhava só o NOME da tool chamada e gravava
+    // HANDOFF em 26 runs cuja conversa continuou com a IA.
+    const finalAssigneeType = args.conversationId
+      ? (
+          await prisma.conversation.findUnique({
+            where: { id: args.conversationId },
+            select: { assignedTo: { select: { type: true } } },
+          })
+        )?.assignedTo?.type ?? null
+      : null;
+
+    const outcome = deriveRunOutcome({
+      toolCalls: result.toolCalls,
+      finalAssigneeType,
+      limitReached: stepCountReached || governor.limitHit,
+      noRetrievalContext,
+    });
+    const status: RunResult["status"] = statusForOutcome(outcome);
+
+    if (governor.limitHit || governor.replays > 0) {
+      console.warn("[ai] tetos de tool acionados", {
+        agentId: agent.id,
+        conversationId: args.conversationId ?? null,
+        ...governor.stats(),
+      });
+    }
 
     await prisma.aIAgentRun.update({
       where: { id: run.id },
       data: {
         status,
-        handoffReason: hadTransfer ? "tool_transfer" : null,
-        responsePreview: result.text.slice(0, 500),
+        outcome,
+        handoffReason:
+          outcome === "HANDOFF_COMPLETED" ? "tool_transfer" : null,
+        responsePreview: finalText.slice(0, 500),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         costUsd,
@@ -497,7 +587,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     return {
       runId: run.id,
-      text: result.text,
+      text: finalText,
       status,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,

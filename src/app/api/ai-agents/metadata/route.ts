@@ -7,6 +7,7 @@ import { defaultInboxPolicy } from "@/lib/ai-agents/steering";
 import { listAgentTemplates } from "@/services/ai-agent-templates";
 import { listVerticalPackIds } from "@/verticals";
 import { AGENT_MAX_STEPS } from "@/services/ai/runner";
+import { DEFAULT_TOOL_CALL_LIMITS } from "@/services/ai/tool-governor";
 
 /**
  * Fonte única de metadados do wizard/editor (Onda 3).
@@ -47,6 +48,8 @@ export async function GET() {
       defaults: {
         inboxPolicy: defaultInboxPolicy(),
         maxSteps: AGENT_MAX_STEPS,
+        maxToolCallsPerRun: DEFAULT_TOOL_CALL_LIMITS.maxToolCallsPerRun,
+        maxRepeatsPerTool: DEFAULT_TOOL_CALL_LIMITS.maxRepeatsPerTool,
         language: "pt-BR",
         temperature: 0.7,
         maxTokens: 1024,

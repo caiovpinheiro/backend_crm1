@@ -475,8 +475,15 @@ export function normalizeInboxPolicy(
  * `parseAgentConfidence` devolvia null e o handoff por baixa confiança
  * nunca disparava: o agente genérico preferia inventar a admitir.
  */
-export function buildUnknownAnswerBlock(policy: InboxPolicy): string {
+export function buildUnknownAnswerBlock(
+  policy: InboxPolicy,
+  opts?: { transferBlocked?: boolean },
+): string {
   const threshold = policy.confidenceThreshold ?? 0.4;
+  // Instruir `handoff` com o gate de transferência fechado fazia o modelo
+  // prometer ao cliente uma transferência que a tool ia recusar, e o turno
+  // seguinte repetia a promessa. O prompt nunca instrui o que o gate nega.
+  const mode = opts?.transferBlocked ? "acknowledge" : policy.unknownAnswerMode;
   const lines = ["## QUANDO VOCÊ NÃO SOUBER (regra dura)"];
 
   if (policy.lowConfidenceHandoff) {
@@ -499,11 +506,11 @@ export function buildUnknownAnswerBlock(policy: InboxPolicy): string {
     lines.push("Ao admitir que não sabe, seja direto e mantenha o tom configurado.");
   }
 
-  if (policy.unknownAnswerMode === "handoff") {
+  if (mode === "handoff") {
     lines.push(
       "Sem base: admita em uma frase e transfira para um humano na MESMA resposta, usando as tools de transferência.",
     );
-  } else if (policy.unknownAnswerMode === "clarify") {
+  } else if (mode === "clarify") {
     lines.push(
       "Sem base: faça UMA pergunta objetiva para tentar destravar.",
       "Se a resposta do cliente ainda não permitir responder com a base, aí sim admita e transfira.",

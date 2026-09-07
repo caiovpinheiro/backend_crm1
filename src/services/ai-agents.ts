@@ -142,7 +142,10 @@ export type CreateAIAgentInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /// Tetos do tool-loop. 0/omitido = default seguro do runtime.
   maxSteps?: number;
+  maxToolCallsPerRun?: number;
+  maxRepeatsPerTool?: number;
   systemPromptTemplate?: string;
   systemPromptOverride?: string | null;
   productPolicy?: string | null;
@@ -496,9 +499,12 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           Prisma.JsonNull,
         verticalPack,
         // Onda 3 — campos novos; cast até `prisma generate` no ambiente.
+        // Tetos em 0 = runtime usa o default seguro (AGENT_MAX_STEPS/24/3).
         ...( {
           templateId,
-          maxSteps: input.maxSteps ?? 8,
+          maxSteps: input.maxSteps ?? 0,
+          maxToolCallsPerRun: input.maxToolCallsPerRun ?? 0,
+          maxRepeatsPerTool: input.maxRepeatsPerTool ?? 0,
         } as Record<string, unknown>),
       } as Parameters<typeof tx.aIAgentConfig.create>[0]["data"]),
     });
@@ -609,6 +615,12 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
         ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
+        ...(input.maxToolCallsPerRun !== undefined
+          ? { maxToolCallsPerRun: input.maxToolCallsPerRun }
+          : {}),
+        ...(input.maxRepeatsPerTool !== undefined
+          ? { maxRepeatsPerTool: input.maxRepeatsPerTool }
+          : {}),
         ...(input.systemPromptTemplate !== undefined
           ? { systemPromptTemplate: input.systemPromptTemplate }
           : {}),
