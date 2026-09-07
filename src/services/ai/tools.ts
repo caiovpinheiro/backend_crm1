@@ -50,6 +50,15 @@ import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
 import { evaluateTransferGate } from "@/services/ai/transfer-gate";
+import {
+  departmentNotFoundMessage,
+  executeDepartmentHandoff,
+  resolveDepartmentForAgent,
+} from "@/services/ai/department-handoff";
+import {
+  buildQueuedWaitingHint,
+  humanQueueContextFromAgent,
+} from "@/services/ai/human-queue-policy";
 import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
 import {
   denialPayload,
@@ -91,6 +100,11 @@ function packToolCopy(ctx: RunContext) {
   return getVerticalPack(ctx.verticalPack)?.toolCopy;
 }
 
+/** Horário/cópia da fila humana configurados no agente (Fase 3). */
+function queueCtx(ctx: RunContext) {
+  return humanQueueContextFromAgent({ inboxPolicy: ctx.inboxPolicy ?? null });
+}
+
 function ok<T>(data: T) {
   return { ok: true as const, ...data } as { ok: true } & T;
 }
@@ -98,8 +112,8 @@ function fail(error: string) {
   return { ok: false as const, error };
 }
 
-/** Fila humana só se o cliente pediu consultor ou o tema exige depto. */
-function academicDistributionAllowed(ctx: RunContext): boolean {
+/** Fila humana conforme a política de transferência do agente. */
+function transferAllowed(ctx: RunContext): boolean {
   return evaluateTransferGate({
     verticalPack: ctx.verticalPack,
     userMessage: ctx.userMessage,
@@ -757,20 +771,17 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        if (!academicDistributionAllowed(ctx)) {
+        if (!transferAllowed(ctx)) {
           return fail(
             "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
           );
         }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
-        const executeHandoff = packOps(ctx).executeAcademicDepartmentHandoff;
-        if (!executeHandoff) {
-          return fail("Handoff de departamento não disponível neste agente.");
-        }
         // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
         // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
-        const result = await executeHandoff({
+        const result = await executeDepartmentHandoff({
+          ops: packOps(ctx),
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
@@ -835,9 +846,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
           assignedTo: result.distribution?.selectedUserName ?? null,
           distributionReason: result.distribution?.reason ?? null,
           queuedWaiting,
-          hint: queuedWaiting
-            ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
-            : undefined,
+          hint: queuedWaiting ? buildQueuedWaitingHint(queueCtx(ctx)) : undefined,
         });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
@@ -871,32 +880,39 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
         if (gate) return fail(gate);
 
         const ops = packOps(ctx);
-        // Últimas inbound — rematrícula / operacional forçam Atendimento
-        // (mesmo se o LLM mandar Acolhimento).
-        const recentIn = await prisma.message.findMany({
-          where: {
-            conversationId: ctx.conversationId,
-            direction: "in",
-            isPrivate: false,
-          },
-          orderBy: { createdAt: "desc" },
-          take: 6,
-          select: { content: true },
-        });
-        const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
-        let dept =
-          (ops.messageImpliesRematricula?.(inboundBlob) ||
-            ops.messageImpliesOperationalAtendimento?.(inboundBlob)) &&
-          ops.resolveDepartmentByKey
-            ? await ops.resolveDepartmentByKey("atendimento", ctx.inboxPolicy)
-            : null;
-        if (!dept && ops.resolveDepartmentByName) {
-          dept = await ops.resolveDepartmentByName(name, ctx.inboxPolicy);
+        // Refino do pack (opcional): últimas inbound podem forçar outro
+        // departamento. Sem pack, o nome pedido pelo modelo vale.
+        let dept: { id: string; name: string } | null = null;
+        if (ops.messageImpliesRematricula || ops.messageImpliesOperationalAtendimento) {
+          const recentIn = await prisma.message.findMany({
+            where: {
+              conversationId: ctx.conversationId,
+              direction: "in",
+              isPrivate: false,
+            },
+            orderBy: { createdAt: "desc" },
+            take: 6,
+            select: { content: true },
+          });
+          const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
+          if (
+            (ops.messageImpliesRematricula?.(inboundBlob) ||
+              ops.messageImpliesOperationalAtendimento?.(inboundBlob)) &&
+            ops.resolveDepartmentByKey
+          ) {
+            dept = await ops.resolveDepartmentByKey(
+              "atendimento",
+              ctx.inboxPolicy,
+            );
+          }
         }
-        if (!dept)
-          return fail(
-            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
-          );
+        if (!dept) {
+          dept = await resolveDepartmentForAgent(name, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+        }
+        if (!dept) return fail(await departmentNotFoundMessage(name));
         if (ops.enforceAtendimentoIfAcolhimentoBlocked) {
           dept = await ops.enforceAtendimentoIfAcolhimentoBlocked({
             contactId: ctx.contactId,
@@ -904,10 +920,7 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
             policy: ctx.inboxPolicy,
           });
         }
-        if (!dept)
-          return fail(
-            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
-          );
+        if (!dept) return fail(await departmentNotFoundMessage(name));
         await prisma.conversation.update({
           where: { id: ctx.conversationId },
           data: { departmentId: dept.id, updatedAt: new Date() },
@@ -954,7 +967,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
       try {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
-        if (!academicDistributionAllowed(ctx)) {
+        if (!transferAllowed(ctx)) {
           return fail(
             "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida.",
           );
@@ -963,20 +976,19 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
         if (gate) return fail(gate);
 
         const ops = packOps(ctx);
-        // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
-        // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
+        // Se a conversa está na IA, usa o handoff de departamento (limpa
+        // assignee + dept + reassign). Evita early-return "ASSIGNED"
+        // mantendo a IA.
         if (ctx.conversationId) {
           const conv = await prisma.conversation.findUnique({
             where: { id: ctx.conversationId },
             select: { assignedTo: { select: { type: true } } },
           });
           if (conv?.assignedTo?.type === "AI") {
-            if (!ops.executeAcademicDepartmentHandoff) {
-              return fail("Handoff de departamento não disponível neste agente.");
-            }
             // Tool chamada = handoff intencional. Não adiar (evita promessa
             // "vou conectar" sem fila real).
-            const handoff = await ops.executeAcademicDepartmentHandoff({
+            const handoff = await executeDepartmentHandoff({
+              ops,
               conversationId: ctx.conversationId,
               contactId: ctx.contactId ?? null,
               dealId: ctx.dealId,
@@ -997,7 +1009,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
               reason: handoff.distribution?.reason ?? null,
               queuedWaiting,
               hint: queuedWaiting
-                ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+                ? buildQueuedWaitingHint(queueCtx(ctx))
                 : undefined,
             });
           }
@@ -1005,15 +1017,11 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          if (!ops.resolveDepartmentByName) {
-            return fail(`Departamento "${departmentName}" não encontrado.`);
-          }
-          const dept = await ops.resolveDepartmentByName(
-            departmentName,
-            ctx.inboxPolicy,
-          );
-          if (!dept)
-            return fail(`Departamento "${departmentName}" não encontrado.`);
+          const dept = await resolveDepartmentForAgent(departmentName, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+          if (!dept) return fail(await departmentNotFoundMessage(departmentName));
           departmentId = dept.id;
           if (ctx.conversationId) {
             await prisma.conversation.update({
@@ -1055,7 +1063,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           reason: result.reason,
           hint:
             result.reason === "NO_ELIGIBLE_RESPONSIBLE"
-              ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+              ? buildQueuedWaitingHint(queueCtx(ctx))
               : result.reason === "NO_DEPARTMENT"
                 ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
                 : "Distribuição não realizada. Considere transferir para humano manualmente.",

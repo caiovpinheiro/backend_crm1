@@ -17,6 +17,10 @@
  */
 
 import { MEDIA_KINDS, type MediaKind } from "@/lib/ai-agents/media-placeholder";
+import {
+  normalizeBusinessHours,
+  type BusinessHoursConfig,
+} from "@/lib/ai-agents/piloting";
 
 // ── Tool config ───────────────────────────────────────────────
 
@@ -429,6 +433,81 @@ export function normalizeMediaInboundPolicy(v: unknown): MediaInboundPolicy {
   };
 }
 
+// ── Transferência para humano ─────────────────────────────────
+
+/**
+ * QUANDO o agente pode jogar a conversa na fila humana. Era método de
+ * vertical (`isImmediateAcademicHandoffJustified`), então agente sem pack
+ * não tinha política nenhuma e o gate ficava inerte.
+ *
+ *  - `always`             transfere sempre que julgar necessário.
+ *  - `on_request_or_topic` só quando o cliente pede atendente humano ou o
+ *    tema exige um departamento (o pack, se houver, define os temas).
+ */
+export type TransferPolicy = "always" | "on_request_or_topic";
+
+export const TRANSFER_POLICIES: TransferPolicy[] = [
+  "always",
+  "on_request_or_topic",
+];
+
+/** Rótulos da tela do agente — linguagem de operador, pt-BR. */
+export const TRANSFER_POLICY_LABELS: Array<{
+  id: TransferPolicy;
+  label: string;
+  hint: string;
+}> = [
+  {
+    id: "always",
+    label: "Sempre que o agente julgar necessário",
+    hint: "O agente pode passar a conversa para a equipe a qualquer momento.",
+  },
+  {
+    id: "on_request_or_topic",
+    label: "Só quando a pessoa pedir atendente ou o assunto exigir",
+    hint: "Nos outros casos o agente continua o atendimento em vez de transferir.",
+  },
+];
+
+function isTransferPolicy(v: unknown): v is TransferPolicy {
+  return (
+    typeof v === "string" && TRANSFER_POLICIES.includes(v as TransferPolicy)
+  );
+}
+
+// ── Atendimento humano (horário + cópia da fila) ──────────────
+
+/**
+ * Rótulos pt-BR do bloco "atendimento humano" na tela do agente. O nome
+ * técnico (`humanAttendanceHours`) nunca aparece para o operador.
+ */
+export const HUMAN_ATTENDANCE_LABELS = {
+  hours: {
+    label: "Horário em que há atendente humano",
+    hint: "Fora desse horário o agente avisa quando a equipe retoma, em vez de prometer consultor agora.",
+  },
+  preEndMinutes: {
+    label: "Parar de oferecer atendente antes do fim do horário (minutos)",
+    hint: "Evita colocar alguém na fila minutos antes de a equipe encerrar o dia.",
+  },
+  queueMessage: {
+    label: "Mensagem quando a pessoa entra na fila",
+    hint: "Vazio = o agente usa o texto padrão, que já cita o horário da equipe.",
+  },
+  assignedConsultantMessage: {
+    label: "Mensagem quando já há um atendente responsável",
+    hint: "Vazio = texto padrão.",
+  },
+  audioHandoffMessage: {
+    label: "Mensagem quando a pessoa manda áudio e o agente chama a equipe",
+    hint: "Vazio = texto padrão, que muda conforme o horário da equipe.",
+  },
+  humanRequestKeywords: {
+    label: "Termos que contam como pedido de atendente",
+    hint: "Somados aos termos que o sistema já reconhece — nunca no lugar deles.",
+  },
+} as const;
+
 export type InboxPolicy = {
   /// Abaixo disso o backend distribui para humano. `null` = usa o
   /// default do código (0.4).
@@ -486,6 +565,25 @@ export type InboxPolicy = {
   /// `0` = sem teto (comportamento antigo, que arrastou mensagens de 30
   /// minutos antes atrás de um "oi").
   inboundBatchWindowMinutes: number;
+
+  /// Quando o agente pode transferir para a fila humana.
+  transferPolicy: TransferPolicy;
+
+  /// Horário em que há atendente humano. `null` = usa o horário do
+  /// próprio agente (`businessHours`) e, na falta dele, o default do
+  /// código (seg–sex 8h–19h, sáb 9h–16h, America/Sao_Paulo).
+  humanAttendanceHours: BusinessHoursConfig | null;
+  /// Minutos antes do fim em que a fila para de oferecer consultor.
+  /// `null` = 30 (default do código).
+  humanAttendancePreEndMinutes: number | null;
+  /// Texto de "você está na fila" (com horário). `null` = padrão.
+  queueMessage: string | null;
+  /// Texto de "já tem consultor responsável". `null` = padrão.
+  assignedConsultantMessage: string | null;
+  /// Texto do aviso de áudio que dispara transferência. `null` = padrão.
+  audioHandoffMessage: string | null;
+  /// Termos EXTRA que contam como pedido explícito de atendente humano.
+  humanRequestKeywords: string[];
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -526,6 +624,13 @@ export function defaultInboxPolicy(): InboxPolicy {
     unknownAnswerMessage: null,
     media: defaultMediaInboundPolicy(),
     inboundBatchWindowMinutes: DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
+    transferPolicy: "always",
+    humanAttendanceHours: null,
+    humanAttendancePreEndMinutes: null,
+    queueMessage: null,
+    assignedConsultantMessage: null,
+    audioHandoffMessage: null,
+    humanRequestKeywords: [],
   };
 }
 
@@ -555,6 +660,10 @@ export function normalizeInboxPolicy(
     // Preserva o comportamento anterior, quando o RAG de modelos era
     // ligado por `pack?.id === "academic"` direto no runner.
     base.useMessageModels = true;
+    // O pack fechava a transferência por método (`isImmediateAcademic
+    // HandoffJustified`). Agora é declarativo — e o default preserva a
+    // regra que já vale em produção para esses agentes.
+    base.transferPolicy = "on_request_or_topic";
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
@@ -603,6 +712,20 @@ export function normalizeInboxPolicy(
       r.inboundBatchWindowMinutes,
       base.inboundBatchWindowMinutes,
     ),
+    transferPolicy: isTransferPolicy(r.transferPolicy)
+      ? r.transferPolicy
+      : base.transferPolicy,
+    humanAttendanceHours: normalizeBusinessHours(r.humanAttendanceHours),
+    humanAttendancePreEndMinutes:
+      typeof r.humanAttendancePreEndMinutes === "number" &&
+      Number.isFinite(r.humanAttendancePreEndMinutes) &&
+      r.humanAttendancePreEndMinutes >= 0
+        ? Math.floor(r.humanAttendancePreEndMinutes)
+        : null,
+    queueMessage: nullableText(r.queueMessage),
+    assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
+    audioHandoffMessage: nullableText(r.audioHandoffMessage),
+    humanRequestKeywords: strList(r.humanRequestKeywords),
   };
 }
 

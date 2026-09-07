@@ -10,7 +10,10 @@
  */
 
 import type { InboxPolicy } from "@/lib/ai-agents/steering";
-import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
+import {
+  humanQueueContextFromAgent,
+  userWantsHumanDistribution,
+} from "@/services/ai/human-queue-policy";
 import { getVerticalPack } from "@/verticals";
 
 /** Quantas mensagens anteriores do cliente contam como "já pediu humano". */
@@ -33,7 +36,13 @@ export type TransferGateState = {
   askedForHuman: boolean;
 };
 
-function gateFn(verticalPack?: string | null) {
+/**
+ * Refino do pack: dado o tema da mensagem, ele sabe dizer se um
+ * departamento da vertical é exigido. É OPCIONAL — sem pack, "tema que
+ * exige departamento" simplesmente não se aplica e sobra o pedido
+ * explícito de humano.
+ */
+function packTopicJustifies(verticalPack?: string | null) {
   const ops = getVerticalPack(verticalPack ?? null)?.ops as
     | {
         isImmediateAcademicHandoffJustified?: (
@@ -45,6 +54,20 @@ function gateFn(verticalPack?: string | null) {
   return ops?.isImmediateAcademicHandoffJustified;
 }
 
+/**
+ * A política é declarativa (`inboxPolicy.transferPolicy`). Antes, a
+ * ÚNICA condição possível era um método do pack acadêmico: agente sem
+ * vertical não tinha política alguma.
+ */
+function policyOf(input: {
+  verticalPack?: string | null;
+  inboxPolicy?: InboxPolicy | null;
+}): "always" | "on_request_or_topic" {
+  if (input.inboxPolicy) return input.inboxPolicy.transferPolicy;
+  // Config não carregada neste caminho: preserva o default do pack.
+  return input.verticalPack === "academic" ? "on_request_or_topic" : "always";
+}
+
 export function evaluateTransferGate(
   input: TransferGateInput,
 ): TransferGateState {
@@ -52,21 +75,26 @@ export function evaluateTransferGate(
   // O pedido explícito de humano vale para a conversa inteira. Olhar só a
   // mensagem atual fazia o gate esquecer o pedido no turno seguinte: o
   // cliente pedia consultor, mandava "ok" depois, e voltava para a IA.
+  const queueCtx = humanQueueContextFromAgent({
+    inboxPolicy: input.inboxPolicy ?? null,
+  });
   const askedForHuman = [
     ...(input.priorUserMessages ?? []).slice(-TRANSFER_GATE_HISTORY_DEPTH),
     current,
-  ].some((msg) => !!msg?.trim() && userWantsHumanDistribution(msg));
+  ].some((msg) => !!msg?.trim() && userWantsHumanDistribution(msg, queueCtx));
 
-  const justified = gateFn(input.verticalPack);
-  // Sem pack não existe gate. Antes o agente genérico caía no `return false`
-  // do pack acadêmico e nunca conseguia transferir.
-  if (!justified) return { active: false, allows: true, askedForHuman };
+  if (policyOf(input) === "always") {
+    return { active: false, allows: true, askedForHuman };
+  }
 
+  const topicJustifies = packTopicJustifies(input.verticalPack);
   return {
     active: true,
-    // O tema (retenção, curso, TCE) justifica pela mensagem ATUAL; o pedido
-    // explícito de humano persiste.
-    allows: askedForHuman || justified(current, input.inboxPolicy ?? null),
+    // O tema (quando o pack sabe classificá-lo) justifica pela mensagem
+    // ATUAL; o pedido explícito de humano persiste na conversa.
+    allows:
+      askedForHuman ||
+      Boolean(topicJustifies?.(current, input.inboxPolicy ?? null)),
     askedForHuman,
   };
 }
@@ -86,8 +114,9 @@ export type AgentConfigWarning = { field: string; message: string };
 export function validateUnknownAnswerAgainstGate(input: {
   verticalPack?: string | null;
   unknownAnswerMode?: string | null;
+  inboxPolicy?: InboxPolicy | null;
 }): AgentConfigWarning[] {
-  if (!gateFn(input.verticalPack)) return [];
+  if (policyOf(input) === "always") return [];
   if (input.unknownAnswerMode !== "handoff") return [];
   return [
     {
