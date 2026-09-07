@@ -114,9 +114,40 @@ describe("regras semeadas do pack academic", () => {
 
     expect(ids).toContain("academic-retencao-cancelamento");
     expect(ids).toContain("academic-retencao-troca-curso-polo");
+  });
+
+  it("cancelamento/trancamento/desistência responde com a base, não transfere", () => {
+    // Vinha do regex antigo, que só sabia transferir: o agente tem documento
+    // de cancelamento e de trancamento indexado e nunca chegava a usá-los.
+    const policy = normalizeInboxPolicy(null, "academic");
+
+    for (const phrase of [
+      "quero cancelar minha matrícula",
+      "quero trancar a matrícula",
+      "vou desistir do curso",
+    ]) {
+      const hit = evaluateMessageRules(phrase, policy.messageRules);
+      expect(hit?.rule.id, phrase).toBe("academic-retencao-cancelamento");
+      expect(hit?.rule.action, phrase).toBe("answer_with_knowledge");
+      expect(hit?.rule.department, phrase).toBeNull();
+    }
+  });
+
+  it("quem salvou a própria lista não é afetado pela semente", () => {
+    const saved = {
+      id: "cancelamento-proprio",
+      label: "Cancelamento",
+      action: "transfer_department",
+      department: "Retenção",
+      anyOf: ["cancel", "tranc"],
+    };
+    const policy = normalizeInboxPolicy({ messageRules: [saved] }, "academic");
+
+    expect(policy.messageRules.map((r) => r.id)).toEqual([
+      "cancelamento-proprio",
+    ]);
     expect(
-      evaluateMessageRules("quero trancar a matrícula", policy.messageRules)
-        ?.rule.action,
+      evaluateMessageRules("quero cancelar", policy.messageRules)?.rule.action,
     ).toBe("transfer_department");
   });
 
@@ -159,7 +190,18 @@ describe("inferDepartmentFromContext sem regex fixo", () => {
     }
   });
 
-  it("cancelamento continua indo para retenção pelas regras semeadas", () => {
+  it("troca de curso/polo continua indo para retenção pelas regras semeadas", () => {
+    const policy = normalizeInboxPolicy(null, "academic");
+
+    expect(
+      inferDepartmentFromContext({
+        userMessage: "quero trocar de curso",
+        policy,
+      }),
+    ).toBe("retencao");
+  });
+
+  it("cancelamento não devolve mais departamento — a regra manda responder", () => {
     const policy = normalizeInboxPolicy(null, "academic");
 
     expect(
@@ -167,10 +209,28 @@ describe("inferDepartmentFromContext sem regex fixo", () => {
         userMessage: "quero cancelar minha matrícula",
         policy,
       }),
-    ).toBe("retencao");
+    ).not.toBe("retencao");
+  });
+
+  it("operador que quer retenção no cancelamento continua sendo obedecido", () => {
+    const policy = normalizeInboxPolicy(
+      {
+        messageRules: [
+          {
+            id: "cancelamento-proprio",
+            label: "Cancelamento",
+            action: "transfer_department",
+            department: "Retenção",
+            anyOf: ["cancel"],
+          },
+        ],
+      },
+      "academic",
+    );
+
     expect(
       inferDepartmentFromContext({
-        userMessage: "quero trocar de curso",
+        userMessage: "quero cancelar minha matrícula",
         policy,
       }),
     ).toBe("retencao");
