@@ -3,7 +3,6 @@
  */
 
 import type {
-  VerticalIntercept,
   VerticalInterceptCtx,
   VerticalInterceptHit,
 } from "@/verticals/types";
@@ -1403,15 +1402,5 @@ export async function runAcademicInterceptPipeline(
   return null;
 }
 
-export const academicIntercepts: VerticalIntercept[] = [
-  {
-    name: "academic_pre_assignee",
-    phase: "pre_assignee",
-    run: (ctx) => runAcademicInterceptPipeline("pre_assignee", ctx),
-  },
-  {
-    name: "academic_post_assignee",
-    phase: "post_assignee",
-    run: (ctx) => runAcademicInterceptPipeline("post_assignee", ctx),
-  },
-];
+// A lista de interceptos (nome + fase) vive em `pack.ts`; aqui fica só o
+// corpo, carregado por `import()` no primeiro turno que precisa dele.

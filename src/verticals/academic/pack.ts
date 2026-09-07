@@ -27,29 +27,47 @@ import * as closure from "@/verticals/academic/closure";
 import * as routing from "@/verticals/academic/department-routing";
 import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept-roster";
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
-import type { VerticalIntercept, VerticalPack } from "@/verticals/types";
+import type {
+  VerticalIntercept,
+  VerticalInterceptCtx,
+  VerticalPack,
+} from "@/verticals/types";
 
 // `INAUGURAL_CLASS_YOUTUBE_URL` é constante, não op — fica fora de `ops`.
 const { INAUGURAL_CLASS_YOUTUBE_URL: _inauguralUrl, ...inauguralOps } =
   inaugural;
 
-let _intercepts: VerticalIntercept[] | null = null;
-function loadIntercepts(): VerticalIntercept[] {
-  if (!_intercepts) {
-    // Lazy: intercepts puxam services/ai e fecham ciclo com getVerticalPack.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    _intercepts = (
-      require("@/verticals/academic/intercepts") as typeof import("@/verticals/academic/intercepts")
-    ).academicIntercepts;
-  }
-  return _intercepts;
+// `intercepts` é array estático: era um getter que devolvia o valor cru de um
+// `require()` lazy (cast, sem checagem em runtime) e o consumidor quebrava com
+// `intercepts is not iterable` sempre que o módulo não estava pronto. O corpo
+// pesado segue lazy — `import()` dentro do `run`, já em request —, então o
+// ciclo intercepts ↔ services/ai continua fora do boot.
+async function runAcademicPipeline(
+  phase: VerticalIntercept["phase"],
+  ctx: VerticalInterceptCtx,
+) {
+  const { runAcademicInterceptPipeline } = await import(
+    "@/verticals/academic/intercepts"
+  );
+  return runAcademicInterceptPipeline(phase, ctx);
 }
+
+const academicIntercepts: VerticalIntercept[] = [
+  {
+    name: "academic_pre_assignee",
+    phase: "pre_assignee",
+    run: (ctx) => runAcademicPipeline("pre_assignee", ctx),
+  },
+  {
+    name: "academic_post_assignee",
+    phase: "post_assignee",
+    run: (ctx) => runAcademicPipeline("post_assignee", ctx),
+  },
+];
 
 export const academicPack: VerticalPack = {
   id: "academic",
-  get intercepts() {
-    return loadIntercepts();
-  },
+  intercepts: academicIntercepts,
   promptBlocks: (ctx) => {
     const blocks: string[] = [];
     if (ctx.archetype === "ATENDIMENTO" || !ctx.archetype) {
