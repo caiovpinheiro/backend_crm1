@@ -71,14 +71,22 @@ function sleep(ms: number): Promise<void> {
 async function closeAttendanceIfFarewell(args: {
   conversationId: string;
   contactId: string;
+  agentUserId?: string | null;
   kind?: "text" | "greeting" | "farewell" | "off_hours";
   text: string;
 }): Promise<void> {
   if (args.kind === "greeting" || args.kind === "off_hours") return;
   try {
-    const { getVerticalPack } = await import("@/verticals");
+    // Pack do agente que está falando, não "academic" fixo. Sem vertical,
+    // o encerramento por despedida não se aplica.
+    const { resolveAgentVerticalByAgentUserId } = await import(
+      "@/services/ai/agent-vertical"
+    );
+    const { ops } = await resolveAgentVerticalByAgentUserId(
+      args.agentUserId ?? null,
+    );
     const closeIfAgentFarewellEndsAttendance =
-      getVerticalPack("academic")?.ops.closeIfAgentFarewellEndsAttendance;
+      ops.closeIfAgentFarewellEndsAttendance;
     await closeIfAgentFarewellEndsAttendance?.({
       conversationId: args.conversationId,
       contactId: args.contactId,
@@ -331,6 +339,7 @@ export async function sendAgentMessage(args: {
     await closeAttendanceIfFarewell({
       conversationId: args.conversationId,
       contactId: args.contactId,
+      agentUserId: args.agentUserId,
       kind: args.kind,
       text,
     });
@@ -408,6 +417,7 @@ export async function sendAgentMessage(args: {
       await closeAttendanceIfFarewell({
         conversationId: args.conversationId,
         contactId: args.contactId,
+        agentUserId: args.agentUserId,
         kind: args.kind,
         text,
       });

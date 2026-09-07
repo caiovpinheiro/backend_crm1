@@ -1,17 +1,12 @@
-/**
+﻿/**
  * Encerramento de conversa feito pelo agente IA (somente atendimento IA).
  * Dispara o mesmo gatilho da ação manual (`conversation_tabulated`) para
  * a automação "Encerramento" devolver o card ao funil acadêmico.
  */
 
 import { normalizeAutoClosePolicy } from "@/lib/ai-agents/piloting";
-import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
-import { logEvent } from "@/services/activity-log";
-import { fireTrigger } from "@/services/automation-triggers";
-import { updateConversationStatusInDb } from "@/services/conversations";
-import { resolveAutoCloseTabulation, tabulationLogMeta } from "@/services/tabulations";
+import { closeAiOnlyConversation as closeAiConversation } from "@/services/ai/close-ai-conversation";
 
 function normalize(s: string): string {
   return s
@@ -563,6 +558,11 @@ export function attendanceEndedInFarewell(args: {
   return !hasPendingRequest(normalize(student));
 }
 
+/**
+ * Encerramento com o refino acadêmico: devolve o card ao funil de origem.
+ * O corpo genérico vive em `@/services/ai/close-ai-conversation` — duas
+ * cópias da mesma regra foi o que produziu o bug do commit ed97ffe.
+ */
 export async function closeAiOnlyConversation(args: {
   conversationId: string;
   contactId?: string | null;
@@ -570,154 +570,13 @@ export async function closeAiOnlyConversation(args: {
   /** Agradecimento conclusivo com a IA ainda responsável — fecha mesmo se um humano falou antes. */
   allowAfterHumanReply?: boolean;
 }): Promise<{ closed: boolean; reason: string }> {
-  const conv = await prisma.conversation.findUnique({
-    where: { id: args.conversationId },
-    select: {
-      id: true,
-      status: true,
-      contactId: true,
-      departmentId: true,
-      hasHumanReply: true,
-      assignedToId: true,
-      organizationId: true,
-      externalId: true,
-      assignedTo: { select: { type: true } },
-    },
-  });
-  if (!conv) return { closed: false, reason: "NOT_FOUND" };
-  if (conv.status === "RESOLVED") {
-    return { closed: false, reason: "ALREADY_CLOSED" };
-  }
-  // Somente atendimento da IA — se humano já respondeu, não encerra
-  // (salvo wrap-up natural: aluno agradeceu e a IA ainda é a responsável).
-  if (conv.hasHumanReply && !args.allowAfterHumanReply) {
-    return { closed: false, reason: "HAS_HUMAN_REPLY" };
-  }
-  if (conv.assignedTo?.type !== "AI") {
-    return { closed: false, reason: "NOT_AI_ASSIGNEE" };
-  }
-
-  const contactId = args.contactId ?? conv.contactId;
-
-  await prisma.distributionPending
-    .updateMany({
-      where: {
-        status: "PENDING",
-        OR: [
-          { conversationId: conv.id },
-          ...(contactId ? [{ contactId }] : []),
-        ],
-      },
-      data: { status: "CANCELLED" },
-    })
-    .catch(() => 0);
-
-  const [keepAgent, keepDepartment] = await Promise.all([
-    getOrgSettingBool("conversation.keepAgentOnEnd", false),
-    getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
-  ]);
-
-  // Tabulação padrão do departamento para encerramento automático. Sem ela
-  // a IA fecha sem tabular (comportamento anterior) — nunca bloqueia.
-  const autoTab = await resolveAutoCloseTabulation({
-    organizationId: conv.organizationId,
-    departmentId: conv.departmentId,
-  }).catch(() => null);
-
-  const updated = await updateConversationStatusInDb(conv.id, "RESOLVED", {
-    ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
-    clearAssignedTo: !keepAgent,
-    clearDepartment: !keepDepartment,
-  });
-
-  await logEvent({
-    type: "CONVERSATION_CLOSED",
-    entityType: "CONVERSATION",
-    entityId: conv.id,
-    entityLabel: updated.externalId ?? null,
-    conversationId: conv.id,
-    contactId,
-    field: "status",
-    oldValue: conv.status,
-    newValue: "RESOLVED",
-    meta: {
-      action: "ai_close",
-      source: "AI_AGENT",
-      reason: args.reason ?? null,
-    },
-  }).catch(() => null);
-
-  if (autoTab) {
-    await logEvent({
-      type: "CONVERSATION_TABULATED",
-      entityType: "CONVERSATION",
-      entityId: conv.id,
-      entityLabel: updated.externalId ?? null,
-      conversationId: conv.id,
-      contactId,
-      meta: tabulationLogMeta(
-        {
-          tabulationId: autoTab.tabulationId,
-          ancestorIds: autoTab.ancestorIds,
-          departmentId: conv.departmentId,
-          name: autoTab.name,
-          number: autoTab.number,
-        },
-        { source: "AI_AGENT", auto: true },
-      ),
-    }).catch(() => null);
-  }
-
-  try {
-    sseBus.publish("conversation_timeline_updated", {
-      organizationId: conv.organizationId,
-      conversationId: conv.id,
-      type: "CONVERSATION_CLOSED",
-    });
-  } catch {
-    /* best-effort */
-  }
-
-  let dealId: string | undefined;
-  if (contactId) {
-    const deal = await prisma.deal.findFirst({
-      where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    });
-    dealId = deal?.id;
-  }
-
-  // Encerrou o atendimento → devolve o card ao funil acadêmico de origem.
-  // Se o aluno não estava no funil de Atendimento, a função não mexe nele.
-  // Roda ANTES do gatilho para a automação "Encerramento" enxergar o
-  // estágio final (e não mover duas vezes).
-  if (dealId || contactId) {
-    try {
+  return closeAiConversation({
+    ...args,
+    onClosed: async ({ dealId, contactId }) => {
       const { restoreDealToAcademicOrigin } = await import(
         "@/verticals/academic/department-routing"
       );
-      await restoreDealToAcademicOrigin({
-        dealId: dealId ?? null,
-        contactId: contactId ?? null,
-      });
-    } catch (e) {
-      console.warn("[ai-close] restore academic stage failed", e);
-    }
-  }
-
-  await fireTrigger("conversation_tabulated", {
-    contactId: contactId ?? undefined,
-    dealId,
-    data: {
-      tabulationId: autoTab?.tabulationId ?? null,
-      ancestorIds: autoTab?.ancestorIds ?? [],
-      departmentId: conv.departmentId,
-      conversationId: conv.id,
-      source: "AI_AGENT",
-      reason: args.reason ?? null,
+      await restoreDealToAcademicOrigin({ dealId, contactId });
     },
-  }).catch(() => null);
-
-  return { closed: true, reason: "CLOSED" };
+  });
 }

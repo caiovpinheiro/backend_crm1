@@ -20,24 +20,15 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
-import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
-import { getVerticalPack } from "@/verticals";
-
-function academicOps() {
-  return getVerticalPack("academic")?.ops ?? {};
-}
-const contactHasCalouros1008Tag = (...a: any[]) =>
-  academicOps().contactHasCalouros1008Tag?.(...a);
-const isInauguralLinkWindow = (...a: any[]) =>
-  academicOps().isInauguralLinkWindow?.(...a);
-const isAvaOrDisciplinesIntent = (m: string) =>
-  Boolean(academicOps().isAvaOrDisciplinesIntent?.(m));
-const isFirstAccessIntent = (m: string) =>
-  Boolean(academicOps().isFirstAccessIntent?.(m));
-const isFirstAccessStuckIntent = (m: string) =>
-  Boolean(academicOps().isFirstAccessStuckIntent?.(m));
-const parseFirstAccessChoice = (m: string) =>
-  academicOps().parseFirstAccessChoice?.(m) ?? null;
+import {
+  humanQueueContextFromAgent,
+  isHumanAttendanceWindowOpen,
+} from "@/services/ai/human-queue-policy";
+import {
+  emptyAgentVertical,
+  resolveAgentVerticalByAgentUserId,
+  type AgentVertical,
+} from "@/services/ai/agent-vertical";
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -55,6 +46,15 @@ async function isFirstAttendanceEnabled(): Promise<boolean> {
     return true;
   }
 }
+
+/**
+ * Escopo de funil do agente. O nome com "academ" só conta para agente
+ * com o pack acadêmico — para os demais o escopo é o que o operador
+ * configurou (pipelineId do agente / org setting). Antes, agente sem
+ * vertical NUNCA assumia o primeiro atendimento: o gate exigia funil
+ * chamado "ACADEMICO".
+ */
+type PipeScope = { matchAcademicName: boolean };
 
 async function resolveFirstAttendanceAgent(): Promise<{
   userId: string;
@@ -144,11 +144,14 @@ async function resolveConfiguredPipelineIds(
  * `deal.stage.pipeline`. Select errado quebrava o 1º atendimento em
  * runtime (catch silencioso → ninguém recebia a IA).
  */
-async function isAcademicPipeContact(
+async function isContactInAgentScope(
   contactId: string,
   agentPipelineId: string | null,
+  scope: PipeScope,
 ): Promise<boolean> {
   const configured = await resolveConfiguredPipelineIds(agentPipelineId);
+  const nameMatches = (name: string | null | undefined) =>
+    scope.matchAcademicName && /academ/i.test(name ?? "");
   const openDeals = await prisma.deal.findMany({
     where: { contactId, status: "OPEN" },
     select: {
@@ -180,21 +183,24 @@ async function isAcademicPipeContact(
       const pipe = conv?.channelRef?.defaultPipeline;
       if (pipe) {
         if (configured.includes(pipe.id)) return true;
-        if (/academ/i.test(pipe.name ?? "")) return true;
+        if (nameMatches(pipe.name)) return true;
       }
     } catch (err) {
-      console.warn("[ai-attend] isAcademicPipeContact canal/default falhou", err);
+      console.warn("[ai-attend] isContactInAgentScope canal/default falhou", err);
     }
-    return configured.length > 0;
+    // Sem vertical e sem funil configurado, o agente atende: restringir
+    // por nome de funil é regra da vertical, não do CRM.
+    return configured.length > 0 || !scope.matchAcademicName;
   }
 
   for (const d of openDeals) {
     const pipe = d.stage?.pipeline;
     if (!pipe) continue;
     if (configured.includes(pipe.id)) return true;
-    if (/academ/i.test(pipe.name ?? "")) return true;
+    if (nameMatches(pipe.name)) return true;
   }
-  return false;
+  // Agente genérico sem restrição configurada atende qualquer funil.
+  return configured.length === 0 && !scope.matchAcademicName;
 }
 
 /**
@@ -261,6 +267,20 @@ export async function tryAssignFirstAttendanceAi(args: {
   assignedToId?: string | null;
   userMessage?: string | null;
 }): Promise<string | null> {
+  // Agente e vertical resolvidos UMA vez, sob demanda: os early-returns
+  // acima não pagam a query, e nada aqui pergunta pelo pack "academic"
+  // pelo nome.
+  let agentPromise: Promise<{
+    userId: string;
+    pipelineId: string | null;
+  } | null> | null = null;
+  const agentOnce = () => (agentPromise ??= resolveFirstAttendanceAgent());
+  let verticalPromise: Promise<AgentVertical> | null = null;
+  const verticalOnce = () =>
+    (verticalPromise ??= agentOnce().then((a) =>
+      a ? resolveAgentVerticalByAgentUserId(a.userId) : emptyAgentVertical(),
+    ));
+
   if (!(await isFirstAttendanceEnabled())) {
     logAi("first_attendance_disabled", {
       conversationId: args.conversationId,
@@ -340,9 +360,10 @@ export async function tryAssignFirstAttendanceAi(args: {
     );
     const activeCtxs = await getContactActiveContexts(args.contactId);
     if (activeCtxs.length > 0) {
+      const { ops } = await verticalOnce();
       const calourosPriority =
-        isInauguralLinkWindow() &&
-        (await contactHasCalouros1008Tag(args.contactId));
+        Boolean(ops.isInauguralLinkWindow?.()) &&
+        Boolean(await ops.contactHasCalouros1008Tag?.(args.contactId));
       if (!calourosPriority) {
         logAi("first_attendance_skip_automation_waiting", {
           conversationId: args.conversationId,
@@ -398,12 +419,22 @@ export async function tryAssignFirstAttendanceAi(args: {
     select: { id: true, triggerSource: true },
   });
   if (waitingHuman) {
+    const vertical = await verticalOnce();
+    const { ops } = vertical;
+    const msg = args.userMessage ?? "";
     const keepAiDespitePending =
-      !isHumanAttendanceWindowOpen() ||
-      isFirstAccessIntent(args.userMessage ?? "") ||
-      isFirstAccessStuckIntent(args.userMessage ?? "") ||
-      parseFirstAccessChoice(args.userMessage ?? "") !== null ||
-      isAvaOrDisciplinesIntent(args.userMessage ?? "");
+      // Horário de atendente humano DESTE agente (Fase 3).
+      !isHumanAttendanceWindowOpen(
+        new Date(),
+        humanQueueContextFromAgent({
+          inboxPolicy: vertical.inboxPolicy,
+          businessHours: vertical.businessHours,
+        }),
+      ) ||
+      Boolean(ops.isFirstAccessIntent?.(msg)) ||
+      Boolean(ops.isFirstAccessStuckIntent?.(msg)) ||
+      (ops.parseFirstAccessChoice?.(msg) ?? null) !== null ||
+      Boolean(ops.isAvaOrDisciplinesIntent?.(msg));
     if (!keepAiDespitePending) {
       logAi("first_attendance_skip_pending_human", {
         conversationId: args.conversationId,
@@ -469,7 +500,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     });
   }
 
-  const agent = await resolveFirstAttendanceAgent();
+  const agent = await agentOnce();
   if (!agent) {
     logAi("first_attendance_no_agent", {
       conversationId: args.conversationId,
@@ -492,10 +523,14 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  const academic = await isAcademicPipeContact(contactId, agent.pipelineId);
+  const vertical = await verticalOnce();
+  const inScope = await isContactInAgentScope(contactId, agent.pipelineId, {
+    matchAcademicName: Boolean(vertical.pack),
+  });
   const calourosPriority =
-    isInauguralLinkWindow() && (await contactHasCalouros1008Tag(contactId));
-  if (!academic && !calourosPriority) {
+    Boolean(vertical.ops.isInauguralLinkWindow?.()) &&
+    Boolean(await vertical.ops.contactHasCalouros1008Tag?.(contactId));
+  if (!inScope && !calourosPriority) {
     // Fora do acadêmico: se havia humano no contato/deal, devolve.
     const humanOwner =
       (args.assignedToId
@@ -527,17 +562,18 @@ export async function tryAssignFirstAttendanceAi(args: {
     }
     return null;
   }
-  if (calourosPriority && !academic) {
+  if (calourosPriority && !inScope) {
     logAi("first_attendance_calouros1008_any_stage", {
       conversationId: args.conversationId,
       contactId,
     });
   }
 
-  // Roster só depois de confirmar pipe acadêmico — senão qualquer inbound
-  // de outro tenant criava Acolhimento/SAC/Retenção na org errada.
+  // Roster é do pack: só depois de confirmar o escopo — senão qualquer
+  // inbound de outro tenant criava departamentos na org errada. Agente
+  // sem vertical não cria departamento nenhum.
   try {
-    await getVerticalPack("academic")?.ops.ensureAcademicDepartmentRoster?.();
+    await vertical.ops.ensureAcademicDepartmentRoster?.();
   } catch {
     /* ignore */
   }
