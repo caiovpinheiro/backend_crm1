@@ -86,6 +86,42 @@ export function renderTemplateVars(
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Fuso usado quando o chamador não resolve o fuso do agente. */
+export const DEFAULT_PROMPT_TIMEZONE = "America/Sao_Paulo";
+
+const DATE_REFERENCE_RULE =
+  'Calcule prazos, vencimentos e "hoje/amanhã/próxima" a partir dela. NUNCA infira nem invente outra data, ano, semestre ou período.';
+
+/**
+ * Data/hora atuais como FATO do sistema (não instrução comportamental).
+ * Sem isso o modelo não sabe se um prazo passou e chega a inventar
+ * datas/semestres que não existem em nenhum lugar do prompt.
+ */
+export function formatCurrentDateBlock(
+  now: Date = new Date(),
+  timeZone: string = DEFAULT_PROMPT_TIMEZONE,
+): string {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone,
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  const weekday = get("weekday");
+  const date = `${get("day")}/${get("month")}/${get("year")}`;
+  const time = `${get("hour")}:${get("minute")}`;
+  return [
+    `DATA E HORA ATUAIS (fato do sistema, fuso ${timeZone}): ${weekday}, ${date}, ${time}.`,
+    DATE_REFERENCE_RULE,
+  ].join("\n");
+}
+
 export type RenderArgs = {
   template: string;
   override: string | null;
@@ -115,6 +151,10 @@ export type RenderArgs = {
   outputStyle: OutputStyle;
   /** Variáveis `{{...}}` do template. */
   templateVars?: TemplateVars;
+  /** Fuso IANA do agente (`resolveAgentTimezone`). Default pt-BR. */
+  timezone?: string | null;
+  /** Instante de referência. Injeção pra teste; produção usa agora. */
+  now?: Date;
 };
 
 /** Render do system prompt — mesma função usada pelo runner em produção. */
@@ -140,6 +180,12 @@ export function renderSystemPrompt(args: RenderArgs): string {
 
   if (renderedTemplate) lines.push(renderedTemplate);
   lines.push("");
+  lines.push(
+    formatCurrentDateBlock(
+      args.now ?? new Date(),
+      args.timezone?.trim() || DEFAULT_PROMPT_TIMEZONE,
+    ),
+  );
 
   // Evita duplicar tom/idioma quando o template já usa {{tone}}/{{language}}.
   if (!templateHadToneOrLang) {

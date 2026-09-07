@@ -142,6 +142,15 @@ function resolveSchedule(ctx: HumanQueueContext): Schedule {
   };
 }
 
+/**
+ * Fuso efetivo do agente — mesma precedência do expediente humano
+ * (`inboxPolicy.humanAttendanceHours` → `businessHours` → default).
+ * Fonte única de fuso para quem precisa de relógio/data do agente.
+ */
+export function resolveAgentTimezone(hours?: HoursArg): string {
+  return resolveSchedule(asContext(hours)).timezone;
+}
+
 function normalizeMsg(raw: string): string {
   return raw
     .normalize("NFD")

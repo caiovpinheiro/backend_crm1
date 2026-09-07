@@ -45,6 +45,10 @@ import {
 } from "@/services/ai/campaign-context";
 import { formatLocalClockHint } from "@/services/ai/idle-followup";
 import {
+  humanQueueContextFromAgent,
+  resolveAgentTimezone,
+} from "@/services/ai/human-queue-policy";
+import {
   formatMessageModelsBlock,
   pickFollowUpMedia,
   retrieveRelevantMessageModels,
@@ -402,6 +406,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       retrievalBlock: retrievalWithModels,
       qualificationQuestions,
       outputStyle,
+      timezone: resolveAgentTimezone(
+        humanQueueContextFromAgent({
+          inboxPolicy: inboxPolicyForRun,
+          businessHours: agent.businessHours,
+        }),
+      ),
       templateVars: {
         agent_name: agent.user?.name ?? null,
         company_name: org?.name ?? null,
