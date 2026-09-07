@@ -21,6 +21,7 @@ import {
   decideInteractiveMenuInbound,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  waitForReplyHijacksAiTurn,
   decideFlowStepInbound,
 } from "@/services/automation-context";
 
@@ -512,6 +513,67 @@ describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
   it("flowReply false + sem id → false", () => {
     expect(
       shouldResumePausedMenuDespiteHumanAttendance({ flowReply: false }),
+    ).toBe(false);
+  });
+});
+
+/**
+ * Sintoma original (Marcelo, DEV, 07/09): a automação "Encerramento" ficou
+ * parada num `wait_for_reply` de 5 min. O aluno mandou "Primeiro acesso", o
+ * contexto consumiu a mensagem como resposta do robô, o fluxo mandou o menu
+ * "Voltar / Encerrar" e a conversa fechou. A Julia não rodou nenhuma vez.
+ */
+describe("waitForReplyHijacksAiTurn", () => {
+  it("texto livre com a conversa na IA não pode alimentar o wait_for_reply", () => {
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "wait_for_reply",
+        assigneeType: "AI",
+      }),
+    ).toBe(true);
+  });
+
+  it("clique de botão continua retomando o fluxo", () => {
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "wait_for_reply",
+        assigneeType: "AI",
+        interactiveId: "btn_0",
+      }),
+    ).toBe(false);
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "wait_for_reply",
+        assigneeType: "AI",
+        flowReply: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("sem IA atendendo o robô segue dono da resposta", () => {
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "wait_for_reply",
+        assigneeType: null,
+      }),
+    ).toBe(false);
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "wait_for_reply",
+        assigneeType: "AGENT",
+      }),
+    ).toBe(false);
+  });
+
+  it("menu que o próprio robô enviou não é afetado", () => {
+    expect(
+      waitForReplyHijacksAiTurn({
+        stepType: "send_whatsapp_interactive",
+        assigneeType: "AI",
+      }),
+    ).toBe(false);
+    expect(
+      waitForReplyHijacksAiTurn({ stepType: "question", assigneeType: "AI" }),
     ).toBe(false);
   });
 });
