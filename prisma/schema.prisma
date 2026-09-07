@@ -4861,6 +4861,8 @@ model AIAgentRun {
   /// Motivo do handoff quando status=HANDOFF:
   /// "keyword" | "low_confidence" | "tool_transfer" | "inactivity".
   handoffReason   String?
+  /// Erro do run (status=FAILED) OU, com outcome=RESPONSE_DISCARDED, o motivo
+  /// de a resposta não ter sido entregue (prefixo "[descartada]").
   errorMessage    String?
   /// Snapshot do system prompt efetivo neste run (observabilidade).
   systemPromptSnapshot String?  @db.Text
@@ -4910,6 +4912,11 @@ enum AIAgentRunOutcome {
   ANSWERED
   /// A atribuição da conversa realmente saiu da IA.
   HANDOFF_COMPLETED
+  /// A transferência foi enfileirada com sucesso, mas não havia responsável
+  /// elegível (`distribution_pending` PENDING / `NO_ELIGIBLE_RESPONSIBLE`) e a
+  /// conversa voltou para a IA. Enfileirar não é transferir — e também não é
+  /// falha de tool.
+  HANDOFF_QUEUED
   /// O modelo tentou transferir e o gate recusou.
   HANDOFF_BLOCKED_BY_GATE
   /// Alguma ferramenta de efeito falhou.
@@ -4918,6 +4925,10 @@ enum AIAgentRunOutcome {
   STEP_LIMIT_REACHED
   /// A recuperação não trouxe nenhum trecho relevante.
   NO_CONTEXT
+  /// Havia resposta (ou o cliente escreveu) e NADA foi entregue: guardrail
+  /// barrou, texto vazio, near-duplicate, autorização perdida antes do envio,
+  /// falha de envio. O motivo fica em `errorMessage`.
+  RESPONSE_DISCARDED
 }
 
 model AIAgentMessage {

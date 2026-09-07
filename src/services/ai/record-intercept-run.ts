@@ -1,9 +1,15 @@
 /**
  * Persiste AIAgentRun quando o inbox curto-circuita ANTES do runner/LLM.
- * Neutro em comportamento — só observabilidade (Onda 0).
+ * Só observabilidade — não muda o atendimento.
+ *
+ * O `outcome` nunca era preenchido: todo intercepto ficava
+ * `status=COMPLETED, outcome=null`, então a única transferência que de fato
+ * funcionou (áudio → humano) era indistinguível de uma resposta qualquer.
+ * Agora o desfecho é OBSERVADO do estado final (assignee da conversa + fila
+ * de distribuição), não declarado pelo intercepto.
  */
 
-import type { Prisma } from "@prisma/client";
+import type { AIAgentRunOutcome, Prisma } from "@prisma/client";
 
 import {
   behaviorSliceFromAgent,
@@ -11,6 +17,37 @@ import {
 } from "@/lib/ai-agents/observability";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { statusForOutcome } from "@/services/ai/run-outcome";
+
+/**
+ * Desfecho a partir do estado final da conversa. Escopo de tenant vem do
+ * `prisma` scoped — nenhuma query cruza organização.
+ */
+export async function observeInterceptOutcome(args: {
+  conversationId: string;
+  contactId: string;
+}): Promise<AIAgentRunOutcome> {
+  const conv = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { assignedTo: { select: { type: true } } },
+  });
+  const assigneeType = conv?.assignedTo?.type ?? null;
+  if (assigneeType && assigneeType !== "AI") return "HANDOFF_COMPLETED";
+
+  const queued = await prisma.distributionPending.findFirst({
+    where: {
+      status: "PENDING",
+      OR: [
+        { conversationId: args.conversationId },
+        { contactId: args.contactId },
+      ],
+    },
+    select: { id: true },
+  });
+  if (queued) return "HANDOFF_QUEUED";
+
+  return "ANSWERED";
+}
 
 export async function recordInboxInterceptRun(args: {
   agentId?: string | null;
@@ -20,6 +57,13 @@ export async function recordInboxInterceptRun(args: {
   contactId: string;
   interceptName: string;
   configHash?: string | null;
+  /**
+   * Desfecho explícito. Use quando o intercepto SABE que nada foi entregue
+   * (ex.: anexo ignorado por configuração). Omitido = observa o estado final.
+   */
+  outcome?: AIAgentRunOutcome | null;
+  /** Motivo persistido quando `outcome=RESPONSE_DISCARDED`. */
+  discardReason?: string | null;
 }): Promise<void> {
   try {
     let agentId = args.agentId ?? null;
@@ -63,13 +107,34 @@ export async function recordInboxInterceptRun(args: {
       }
     }
 
+    const outcome =
+      args.outcome ??
+      (await observeInterceptOutcome({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+      }).catch(() => "ANSWERED" as AIAgentRunOutcome));
+
     await prisma.aIAgentRun.create({
       data: withOrgFromCtx({
         agentId,
         source: "inbox",
         conversationId: args.conversationId,
         contactId: args.contactId,
-        status: "COMPLETED" as const,
+        status: statusForOutcome(outcome),
+        outcome,
+        handoffReason:
+          outcome === "HANDOFF_COMPLETED"
+            ? `intercept:${args.interceptName}`
+            : outcome === "HANDOFF_QUEUED"
+              ? `intercept_queued:${args.interceptName}`
+              : null,
+        errorMessage:
+          outcome === "RESPONSE_DISCARDED"
+            ? `[descartada] ${args.discardReason ?? args.interceptName}`.slice(
+                0,
+                500,
+              )
+            : null,
         llmInvoked: false,
         stepCountReached: false,
         interceptsFired: [args.interceptName] as unknown as Prisma.InputJsonValue,

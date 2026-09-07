@@ -83,6 +83,57 @@ describe("deriveRunOutcome", () => {
     ).toBe("ANSWERED");
   });
 
+  it("sintoma original: enfileirou com sucesso e voltou para a IA — não é ANSWERED nem TOOL_FAILED", () => {
+    // Distribuição rodou, `distribution_pending` ficou PENDING com
+    // NO_ELIGIBLE_RESPONSIBLE e o inbox devolveu a conversa para a IA.
+    const outcome = deriveRunOutcome({
+      ...base,
+      toolCalls: [
+        { toolName: "transfer_to_department", result: { ok: true } },
+        {
+          toolName: "execute_distribution",
+          result: { ok: true, assigned: false, queuedWaiting: true },
+        },
+      ],
+      finalAssigneeType: "AI",
+      responseText: "Já registrei seu pedido com a equipe.",
+    });
+    expect(outcome).toBe("HANDOFF_QUEUED");
+    expect(statusForOutcome(outcome)).toBe("HANDOFF");
+  });
+
+  it("sintoma original: responsePreview cheio sem nada entregue não é ANSWERED", () => {
+    expect(
+      deriveRunOutcome({
+        ...base,
+        responseText: "Oi! Segue o passo a passo…",
+        responseDiscarded: true,
+      }),
+    ).toBe("RESPONSE_DISCARDED");
+  });
+
+  it("resposta vazia do modelo nunca vira ANSWERED", () => {
+    expect(deriveRunOutcome({ ...base, responseText: "   " })).toBe(
+      "RESPONSE_DISCARDED",
+    );
+  });
+
+  it("resposta entregue com texto continua ANSWERED", () => {
+    expect(
+      deriveRunOutcome({ ...base, responseText: "Segue o link do portal." }),
+    ).toBe("ANSWERED");
+  });
+
+  it("descarte não esconde teto de passos, que é a causa raiz", () => {
+    expect(
+      deriveRunOutcome({
+        ...base,
+        limitReached: true,
+        responseText: "",
+      }),
+    ).toBe("STEP_LIMIT_REACHED");
+  });
+
   it("gate tem precedência sobre teto — não esconde o motivo real", () => {
     expect(
       deriveRunOutcome({

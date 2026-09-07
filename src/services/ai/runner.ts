@@ -555,6 +555,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       finalAssigneeType,
       limitReached: stepCountReached || governor.limitHit,
       noRetrievalContext,
+      // Sem isto, resposta vazia ou barrada pelo guardrail ainda era gravada
+      // como ANSWERED. Quem confirma a entrega de fato é o inbox
+      // (`markRunResponseDiscarded`).
+      responseText: finalText,
+      responseDiscarded: effectAudit.blocked,
     });
     const status: RunResult["status"] = statusForOutcome(outcome);
 
@@ -572,7 +577,17 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         status,
         outcome,
         handoffReason:
-          outcome === "HANDOFF_COMPLETED" ? "tool_transfer" : null,
+          outcome === "HANDOFF_COMPLETED"
+            ? "tool_transfer"
+            : outcome === "HANDOFF_QUEUED"
+              ? "tool_transfer_queued"
+              : null,
+        errorMessage:
+          outcome === "RESPONSE_DISCARDED"
+            ? effectAudit.blocked
+              ? `[descartada] effect_claim_blocked: afirmou ${effectAudit.unsupported.join(", ")} sem ferramenta bem-sucedida`
+              : "[descartada] empty_reply: modelo devolveu resposta vazia"
+            : null,
         responsePreview: finalText.slice(0, 500),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,

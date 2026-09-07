@@ -32,6 +32,20 @@ function refusedByGate(result: unknown): boolean {
   );
 }
 
+/**
+ * A distribuição rodou e o pedido ficou em fila: `distribution_pending`
+ * PENDING com `NO_ELIGIBLE_RESPONSIBLE` / `NO_DEPARTMENT`, que as tools de
+ * transferência já devolvem como `queuedWaiting`. A conversa volta para a IA
+ * (`inbox-handler`), então nunca virava HANDOFF_COMPLETED — e caía em
+ * ANSWERED ou TOOL_FAILED, escondendo a única transferência real.
+ */
+function transferQueuedWaiting(result: unknown): boolean {
+  if (!result || typeof result !== "object") return false;
+  const r = result as Record<string, unknown>;
+  if (r.ok === false) return false;
+  return r.queuedWaiting === true;
+}
+
 export type OutcomeInput = {
   toolCalls: Array<{ toolName: string; result?: unknown }>;
   /// Tipo do assignee da conversa DEPOIS do turno. null = sem conversa
@@ -41,17 +55,29 @@ export type OutcomeInput = {
   limitReached: boolean;
   /// A recuperação não trouxe nenhum trecho relevante.
   noRetrievalContext: boolean;
+  /// Texto final que o chamador vai (tentar) entregar. Quando informado,
+  /// texto vazio nunca vira ANSWERED. `undefined` = não observado.
+  responseText?: string | null;
+  /// A resposta foi barrada antes de sair (guardrail de efeito, dedupe,
+  /// autorização perdida, falha de envio).
+  responseDiscarded?: boolean;
 };
 
 /**
  * Ordem de precedência pensada para não esconder problema atrás de sucesso:
- * transferência confirmada > gate > falha de tool > teto > falta de base.
+ * transferência confirmada > fila > gate > falha de tool > teto >
+ * resposta não entregue > falta de base.
  */
 export function deriveRunOutcome(input: OutcomeInput): RunOutcome {
   const transferLeftTheAi =
     input.finalAssigneeType !== "AI" &&
     input.toolCalls.some((c) => TRANSFER_TOOLS.has(c.toolName));
   if (transferLeftTheAi) return "HANDOFF_COMPLETED";
+
+  const queued = input.toolCalls.some(
+    (c) => TRANSFER_TOOLS.has(c.toolName) && transferQueuedWaiting(c.result),
+  );
+  if (queued) return "HANDOFF_QUEUED";
 
   if (input.toolCalls.some((c) => refusedByGate(c.result))) {
     return "HANDOFF_BLOCKED_BY_GATE";
@@ -64,6 +90,14 @@ export function deriveRunOutcome(input: OutcomeInput): RunOutcome {
   if (effectFailed) return "TOOL_FAILED";
 
   if (input.limitReached) return "STEP_LIMIT_REACHED";
+
+  // ANSWERED exigia apenas "não deu erro". Um run com responsePreview cheio e
+  // nenhuma outbound ficava como respondido.
+  if (input.responseDiscarded) return "RESPONSE_DISCARDED";
+  if (typeof input.responseText === "string" && !input.responseText.trim()) {
+    return "RESPONSE_DISCARDED";
+  }
+
   if (input.noRetrievalContext) return "NO_CONTEXT";
   return "ANSWERED";
 }
@@ -72,5 +106,7 @@ export function deriveRunOutcome(input: OutcomeInput): RunOutcome {
 export function statusForOutcome(
   outcome: RunOutcome,
 ): "COMPLETED" | "HANDOFF" {
-  return outcome === "HANDOFF_COMPLETED" ? "HANDOFF" : "COMPLETED";
+  return outcome === "HANDOFF_COMPLETED" || outcome === "HANDOFF_QUEUED"
+    ? "HANDOFF"
+    : "COMPLETED";
 }
