@@ -51,6 +51,13 @@ import {
 } from "@/services/ai/human-queue-policy";
 import { debugInfo } from "@/lib/debug-log";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
+import {
+  buildMediaAskTextMessage,
+  buildMediaHandoffMessage,
+  evaluateInboundMedia,
+  queueMediaHandoff,
+} from "@/services/ai/media-inbound";
+import { markRunResponseDiscarded } from "@/services/ai/run-delivery";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { runAgent } from "@/services/ai/runner";
@@ -734,6 +741,87 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     }
 
+    // ── 3b. Mídia sem legenda → decisão determinística ────────
+    // O webhook grava "[Imagem]" / "[Documento]" / "[Vídeo]" como conteúdo.
+    // Isso não é pergunta do cliente: entregar ao modelo fez o agente
+    // responder sobre outro assunto. Vale para agente sem vertical pack —
+    // sem pack, o handoff usa a Distribuição Inteligente direto.
+    {
+      const mediaVerdict = await evaluateInboundMedia({
+        conversationId: args.conversationId,
+        userMessage: args.userMessage,
+        policy,
+      });
+      if (mediaVerdict.action) {
+        if (mediaVerdict.action === "handoff") {
+          await queueMediaHandoff({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            dealId: openDeal?.id ?? null,
+            userMessage: args.userMessage,
+            reason: `Cliente enviou ${mediaVerdict.kinds.join(", ")} sem texto — atendimento humano`,
+            policy,
+            packHandoff: packOps.executeAcademicDepartmentHandoff ?? null,
+          });
+          const gotHuman = await conversationAssignedToHuman(
+            args.conversationId,
+          );
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: buildMediaHandoffMessage({
+              kinds: mediaVerdict.kinds,
+              assignedToHuman: gotHuman,
+              policy,
+            }),
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        } else if (mediaVerdict.action === "ask_text") {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: buildMediaAskTextMessage({
+              kinds: mediaVerdict.kinds,
+              policy,
+            }),
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+        logAi("inbound_media", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          kinds: mediaVerdict.kinds,
+          action: mediaVerdict.action,
+          durationMs: Date.now() - startedAt.getTime(),
+        });
+        await recordInboxInterceptRun({
+          agentId: cfg.id,
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          interceptName: `inbound_media_${mediaVerdict.action}`,
+          outcome:
+            mediaVerdict.action === "ignore" ? "RESPONSE_DISCARDED" : null,
+          discardReason:
+            mediaVerdict.action === "ignore"
+              ? `media_ignored: ${mediaVerdict.kinds.join(", ")}`
+              : null,
+        });
+        return;
+      }
+    }
+
     // ── 4. Roda o LLM normalmente ─────────────────────────────
     const result = await runAgent({
       agentId: cfg.id,
@@ -1047,6 +1135,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           conversationId: args.conversationId,
           durationMs: Date.now() - startedAt.getTime(),
         });
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "near_duplicate",
+        });
         return;
       }
     }
@@ -1063,6 +1155,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       logAi("empty_reply", {
         conversationId: args.conversationId,
         durationMs: Date.now() - startedAt.getTime(),
+      });
+      await markRunResponseDiscarded({
+        runId: result.runId,
+        reason: "empty_reply",
       });
       return;
     }
@@ -1106,6 +1202,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         phase: "pre_send",
         durationMs: Date.now() - startedAt.getTime(),
       });
+      await markRunResponseDiscarded({
+        runId: result.runId,
+        reason: "not_authorized",
+        detail: `pre_send:${auth.reason}`,
+      });
       return;
     }
 
@@ -1113,6 +1214,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       if (!metaClient.configured) {
         console.warn("[ai-inbox] Meta não configurado para este canal; gravando como rascunho.");
         await saveDraft(assignee.id, args.conversationId, text);
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "channel_not_configured",
+        });
         return;
       }
       const contact = await prisma.contact.findUnique({
@@ -1121,6 +1226,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       });
       if (!contact?.phone) {
         await saveDraft(assignee.id, args.conversationId, text);
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "contact_without_phone",
+        });
         return;
       }
 
@@ -1144,6 +1253,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           reason: auth2.reason,
           phase: "pre_send_after_typing",
         });
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "not_authorized",
+          detail: `pre_send_after_typing:${auth2.reason}`,
+        });
         return;
       }
 
@@ -1160,6 +1274,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           error: err instanceof Error ? err.message : String(err),
         });
         await saveDraft(assignee.id, args.conversationId, text);
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "send_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
         return;
       }
       const saved = await prisma.message.create({
@@ -1248,6 +1367,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         channel: "baileys",
         durationMs: Date.now() - startedAt.getTime(),
       });
+      if (sendResult.status !== "sent") {
+        await markRunResponseDiscarded({
+          runId: result.runId,
+          reason: "send_failed",
+          detail: `baileys:${sendResult.status}`,
+        });
+      }
       if (sendResult.status === "sent") {
         if (result.followUpMedia?.length) {
           const mediaCount = await sendAgentFollowUpMedia({
