@@ -77,6 +77,10 @@ next-env.d.ts
 # CONTEM DADOS DE PRODUCAO — NUNCA versionar.
 /backups/
 
+# Scratch local: scripts de diagnostico, dumps e corpus extraido de
+# producao (tmp/corpus). CONTEM DADOS DE ALUNO — NUNCA versionar.
+/tmp/
+
 # IDE
 .vscode/
 .idea/
