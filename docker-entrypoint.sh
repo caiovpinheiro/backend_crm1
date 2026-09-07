@@ -66,9 +66,9 @@ fi
 APP_MODE="${APP_MODE:-api}"
 echo "[entrypoint] APP_MODE=${APP_MODE}"
 
-# Gate de criptografia. Segredos persistidos (chave OpenAI por agente,
-# token de canal, secret de MFA) são AES-256-GCM com chave derivada de
-# ENCRYPTION_KEY → NEXTAUTH_SECRET → AUTH_SECRET (src/lib/secret-crypto.ts).
+# Gate de criptografia. A chave de provedor de IA por agente é gravada em
+# AES-256-GCM com chave derivada de ENCRYPTION_KEY → NEXTAUTH_SECRET →
+# AUTH_SECRET (src/lib/secret-crypto.ts).
 #
 # Um processo sem nenhuma dessas variáveis sobe normal e só falha quando
 # tenta LER um segredo — e o auth tag inválido produz um erro genérico que
@@ -76,34 +76,46 @@ echo "[entrypoint] APP_MODE=${APP_MODE}"
 # o worker da IA em DEV: a API tinha NEXTAUTH_SECRET, o worker não, e todo
 # run morria em "chave OpenAI não pôde ser lida".
 #
-# Abortar aqui torna o env var faltando visível no deploy. Escape hatch:
-# ALLOW_MISSING_ENCRYPTION_KEY=1.
+# Logar aqui torna o env var faltando visível no deploy, mas este guard
+# NÃO derruba o boot. O segredo cobre apenas os blobs de
+# secret-crypto.ts (chave de provedor de IA por agente). Sem ele o inbox
+# continua funcionando: token de canal Meta e MFA vêm de crypto/secrets.ts,
+# que usa KEYRING_SECRET — variável separada e presente nos workers.
 #
-# Fatal só nos modos que realmente leem segredos. worker-etl, worker-leads
-# e worker-distribution nunca chamam secret-crypto: derrubá-los seria
-# parada gratuita (foi o que aconteceu no primeiro deploy deste guard).
+# Já derrubamos DEV duas vezes tratando isso como fatal. Na segunda, o
+# EasyPanel redeployou os serviços a partir do spec dele e apagou o
+# NEXTAUTH_SECRET adicionado à mão via `docker service update --env-add`;
+# worker-whatsapp, worker-meta-webhook e worker-automation ficaram 0/1 e o
+# inbox parou de receber e enviar (meta-webhook-events e meta-outbound sem
+# consumidor). Degradar uma feature de IA vale um aviso, não uma parada.
+#
+# Para tratar como fatal (ex.: ambiente onde a IA é obrigatória):
+# REQUIRE_ENCRYPTION_KEY=1.
 case "$APP_MODE" in
   api|api-public|worker-automation|worker-whatsapp|worker-meta-webhook)
-    CRYPTO_REQUIRED=1 ;;
+    CRYPTO_USED=1 ;;
   *)
-    CRYPTO_REQUIRED= ;;
+    CRYPTO_USED= ;;
 esac
 
 if [ -z "${ENCRYPTION_KEY}" ] && [ -z "${NEXTAUTH_SECRET}" ] && [ -z "${AUTH_SECRET}" ]; then
-  if [ -z "${CRYPTO_REQUIRED}" ]; then
-    echo "[entrypoint] aviso: sem segredo de criptografia (não exigido em ${APP_MODE})."
-  elif [ -n "${ALLOW_MISSING_ENCRYPTION_KEY}" ]; then
-    echo "[entrypoint] !! aviso: sem segredo de criptografia; leitura de segredos vai falhar."
+  if [ -z "${CRYPTO_USED}" ]; then
+    echo "[entrypoint] aviso: sem segredo de criptografia (não usado em ${APP_MODE})."
+  elif [ -n "${REQUIRE_ENCRYPTION_KEY}" ]; then
+    echo "[entrypoint] !! ERRO FATAL: nenhum segredo de criptografia definido"
+    echo "[entrypoint] !! e REQUIRE_ENCRYPTION_KEY=1. Abortando."
+    exit 1
   else
-    echo "[entrypoint] !! ERRO FATAL: nenhum segredo de criptografia definido."
-    echo "[entrypoint] !! Replique NEXTAUTH_SECRET (mesmo valor da API) neste"
-    echo "[entrypoint] !! serviço. Sem isso o processo não consegue ler chaves"
-    echo "[entrypoint] !! de API gravadas por outro serviço."
+    echo "[entrypoint] !! AVISO: nenhum segredo de criptografia definido em ${APP_MODE}."
+    echo "[entrypoint] !! Chaves de API de IA gravadas por outro serviço não poderão"
+    echo "[entrypoint] !! ser lidas ('chave OpenAI não pôde ser lida'). Inbox e canais"
+    echo "[entrypoint] !! Meta seguem normais (usam KEYRING_SECRET)."
+    echo "[entrypoint] !! Corrija replicando NEXTAUTH_SECRET (mesmo valor da API) neste"
+    echo "[entrypoint] !! serviço — pelo painel, não por 'docker service update', que o"
+    echo "[entrypoint] !! próximo redeploy apaga."
     echo "[entrypoint] !! Cuidado: ENCRYPTION_KEY também é lido por crypto/secrets.ts,"
     echo "[entrypoint] !! que exige base64 de 32 bytes. Só use ENCRYPTION_KEY se"
     echo "[entrypoint] !! KEYRING_SECRET estiver setado ou o valor for 'openssl rand -base64 32'."
-    echo "[entrypoint] !! Para subir mesmo assim: ALLOW_MISSING_ENCRYPTION_KEY=1"
-    exit 1
   fi
 else
   # Fingerprint (não reversível) do segredo em uso. Serviços que logam fp
