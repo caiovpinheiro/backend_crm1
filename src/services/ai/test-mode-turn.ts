@@ -21,6 +21,7 @@
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import type { InboxPolicy } from "@/lib/ai-agents/steering";
 import { debugInfo } from "@/lib/debug-log";
+import { parseAgentConfidence } from "@/services/ai/confidence";
 import { runAgent } from "@/services/ai/runner";
 
 export type AiTestTurnInput = {
@@ -79,7 +80,9 @@ export async function runAiTestTurn(input: AiTestTurnInput): Promise<void> {
     return;
   }
 
-  const reply = result.text.trim();
+  // O marcador [CONFIANCA:X.X] é interno: o inbox de produção o remove em
+  // parseAgentConfidence, e este caminho precisa remover também.
+  const reply = parseAgentConfidence(result.text).text.trim();
   if (reply) await input.sendText(reply);
 
   logTest("answered", {
