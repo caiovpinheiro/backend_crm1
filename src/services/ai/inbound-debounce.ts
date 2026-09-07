@@ -29,6 +29,10 @@ import {
 } from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import {
+  DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
+  normalizeInboxPolicy,
+} from "@/lib/ai-agents/steering";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 export const DEFAULT_AI_DEBOUNCE_MS = 2500;
@@ -356,12 +360,54 @@ export function kickAiAfterInboxAssign(args: {
 }
 
 /**
+ * Teto temporal do lote, em minutos, configurado no agente atribuído.
+ * Sem agente IA (ou sem contexto) cai no default seguro.
+ */
+async function resolveInboundBatchWindowMinutes(
+  conversationId: string,
+): Promise<number> {
+  try {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        assignedTo: {
+          select: {
+            type: true,
+            aiAgentConfig: {
+              select: { inboxPolicy: true, verticalPack: true },
+            },
+          },
+        },
+      },
+    });
+    const cfg =
+      conv?.assignedTo?.type === "AI" ? conv.assignedTo.aiAgentConfig : null;
+    if (!cfg) return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
+    return normalizeInboxPolicy(cfg.inboxPolicy, cfg.verticalPack)
+      .inboundBatchWindowMinutes;
+  } catch {
+    return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
+  }
+}
+
+/**
  * Concatena mensagens inbound do cliente desde a última outbound
  * (humano/bot), em ordem cronológica.
+ *
+ * Tem TETO TEMPORAL. Sem ele um "oi" às 16:43 arrastava mensagens de 16:13
+ * para o mesmo turno: o agente respondia perguntas velhas e um lote antigo
+ * casava com palavra-chave, disparando transferência indevida. A janela é
+ * ancorada na mensagem mais NOVA do lote (não em `now`), porque o worker
+ * pode processar o turno minutos depois de o cliente escrever.
  */
 export async function collectUnansweredInboundText(
   conversationId: string,
+  opts?: { windowMinutes?: number },
 ): Promise<string> {
+  const windowMinutes =
+    opts?.windowMinutes ??
+    (await resolveInboundBatchWindowMinutes(conversationId));
+
   const lastOut = await prisma.message.findFirst({
     where: {
       conversationId,
@@ -385,15 +431,28 @@ export async function collectUnansweredInboundText(
       content: true,
       authorType: true,
       messageType: true,
+      createdAt: true,
     },
   });
 
+  const fromClient = inbound.filter(
+    (m) =>
+      m.authorType !== "bot" &&
+      m.authorType !== "system" &&
+      m.messageType !== "note" &&
+      (m.content ?? "").trim().length > 0,
+  );
+
+  const newest = fromClient[fromClient.length - 1]?.createdAt;
+  const cutoff =
+    windowMinutes > 0 && newest
+      ? newest.getTime() - windowMinutes * 60_000
+      : null;
+
   const parts: string[] = [];
-  for (const m of inbound) {
-    if (m.authorType === "bot" || m.authorType === "system") continue;
-    if (m.messageType === "note") continue;
-    const t = (m.content ?? "").trim();
-    if (t) parts.push(t);
+  for (const m of fromClient) {
+    if (cutoff !== null && m.createdAt.getTime() < cutoff) continue;
+    parts.push((m.content ?? "").trim());
   }
   return parts.join("\n");
 }

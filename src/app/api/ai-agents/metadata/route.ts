@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { ARCHETYPES } from "@/lib/ai-agents/archetypes";
 import { TOOLS_CATALOG } from "@/lib/ai-agents/tools-catalog";
-import { defaultInboxPolicy } from "@/lib/ai-agents/steering";
+import {
+  defaultInboxPolicy,
+  MEDIA_INBOUND_LABELS,
+} from "@/lib/ai-agents/steering";
 import { listAgentTemplates } from "@/services/ai-agent-templates";
 import { listVerticalPackIds } from "@/verticals";
 import { AGENT_MAX_STEPS } from "@/services/ai/runner";
@@ -45,6 +48,9 @@ export async function GET() {
       })),
       tools: TOOLS_CATALOG,
       verticalPacks: listVerticalPackIds(),
+      // Rótulos em linguagem de operador para a tela do agente — o FE não
+      // deve traduzir "image"/"handoff" por conta própria.
+      mediaInbound: MEDIA_INBOUND_LABELS,
       defaults: {
         inboxPolicy: defaultInboxPolicy(),
         maxSteps: AGENT_MAX_STEPS,

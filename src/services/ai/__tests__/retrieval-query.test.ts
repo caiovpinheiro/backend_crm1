@@ -89,3 +89,51 @@ describe("buildRetrievalQuery", () => {
     ).toBe(false);
   });
 });
+
+describe("placeholder de mídia não contamina a query", () => {
+  it("sintoma original: '[Imagem]' arrastou perguntas de 40 minutos antes", () => {
+    // "[Imagem]" tem menos de 25 caracteres: era tratado como mensagem
+    // curta e autorizava puxar histórico. O agente respondeu sobre troca de
+    // polo e provas para quem estava tratando de cancelamento.
+    expect(needsHistoryContext("[Imagem]")).toBe(false);
+
+    const q = buildRetrievalQuery({
+      userMessage: "[Imagem]",
+      priorUserMessages: [
+        "como faço para trocar de polo",
+        "e a prova presencial tem que ir onde",
+      ],
+    });
+    expect(q).toBe("");
+    expect(q).not.toContain("polo");
+    expect(q).not.toContain("prova");
+  });
+
+  it("mensagem vazia também é ausência de conteúdo", () => {
+    expect(needsHistoryContext("   ")).toBe(false);
+    expect(
+      buildRetrievalQuery({
+        userMessage: "   ",
+        priorUserMessages: ["quero trancar a matrícula"],
+      }),
+    ).toBe("");
+  });
+
+  it("lote misto mantém só o que o cliente escreveu", () => {
+    const q = buildRetrievalQuery({
+      userMessage: "[Imagem]\nquero cancelar minha matrícula",
+      priorUserMessages: ["[Documento]", "bom dia"],
+    });
+    expect(q).toBe("bom dia\nquero cancelar minha matrícula");
+    expect(q).not.toContain("[Documento]");
+    expect(q).not.toContain("[Imagem]");
+  });
+
+  it("placeholder no histórico não entra na query", () => {
+    const q = buildRetrievalQuery({
+      userMessage: "e o prazo?",
+      priorUserMessages: ["[Áudio]", "quero trancar a matrícula"],
+    });
+    expect(q).toBe("quero trancar a matrícula\ne o prazo?");
+  });
+});

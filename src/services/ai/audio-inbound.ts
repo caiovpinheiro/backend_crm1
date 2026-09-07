@@ -11,6 +11,10 @@
  * Por isso a decisão é feita aqui, no inbound, sem depender do prompt.
  */
 
+import {
+  isContentlessInbound,
+  mediaPlaceholderKind,
+} from "@/lib/ai-agents/media-placeholder";
 import { prisma } from "@/lib/prisma";
 import {
   buildAssignedConsultantNotice,
@@ -20,12 +24,6 @@ import {
 
 /** `Message.messageType` gravados para áudio/voz nos canais WhatsApp. */
 const AUDIO_MESSAGE_TYPES = new Set(["audio", "ptt", "voice", "voice_note"]);
-
-/** Placeholders de conteúdo usados quando o áudio não tem texto. */
-const AUDIO_PLACEHOLDER_RE = /^\[\s*(audio|ptt|voice|voice_note)\s*\]/;
-
-/** Placeholder de qualquer mídia (`[Imagem]`, `[Documento]`, `[audio] 👁`…). */
-const MEDIA_PLACEHOLDER_RE = /^\[[^\]]{1,30}\]/;
 
 /** Ruído sem pedido útil: saudação, desculpa, ack curto. */
 const NOISE_TEXT_RE =
@@ -44,15 +42,13 @@ function normalize(raw: string): string {
 
 /** True se o conteúdo é só o placeholder de um áudio (sem transcrição). */
 export function isAudioPlaceholderText(content: string | null | undefined): boolean {
-  const n = normalize(content ?? "");
-  return AUDIO_PLACEHOLDER_RE.test(n);
+  return mediaPlaceholderKind(content) === "audio";
 }
 
 /** True se o texto não carrega pedido algum (placeholder de mídia, saudação, ack). */
 function isNoiseText(content: string | null | undefined): boolean {
+  if (isContentlessInbound(content)) return true;
   const n = normalize(content ?? "");
-  if (!n) return true;
-  if (MEDIA_PLACEHOLDER_RE.test(n)) return true;
   if (n.length <= 40 && NOISE_TEXT_RE.test(n)) return true;
   return false;
 }

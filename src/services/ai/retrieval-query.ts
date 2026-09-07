@@ -11,7 +11,19 @@
  * mais contexto e a atual deixa de dominar).
  *
  * Não mexe em CHUNK_SIZE, modelo de embedding, topK nem corte de distância.
+ *
+ * Cuidado que originou o ajuste de 07/09: mídia sem legenda chega como
+ * `"[Imagem]"`. Isso tem menos de 25 caracteres, então entrava como
+ * "mensagem curta" e AUTORIZAVA puxar histórico — o agente respondeu
+ * perguntas de 40 minutos antes para quem estava tratando de outro assunto.
+ * Placeholder de mídia e mensagem vazia são AUSÊNCIA de conteúdo: não entram
+ * na query e não disparam a heurística de histórico.
  */
+
+import {
+  isContentlessInbound,
+  stripMediaPlaceholders,
+} from "@/lib/ai-agents/media-placeholder";
 
 /** Mensagens do cliente consideradas quando a atual é curta. */
 const DEICTIC_HISTORY_DEPTH = 4;
@@ -38,7 +50,10 @@ export function isDeicticMessage(message: string): boolean {
 }
 
 export function needsHistoryContext(message: string): boolean {
-  const t = message.trim();
+  const t = (message ?? "").trim();
+  // Sem conteúdo do cliente não há pergunta para contextualizar. Tratar
+  // "[Imagem]" como continuação curta é o que arrastou histórico velho.
+  if (isContentlessInbound(t)) return false;
   return t.length < SHORT_MESSAGE_CHARS || isDeicticMessage(t);
 }
 
@@ -52,13 +67,19 @@ export function buildRetrievalQuery(input: {
   /// Mensagens anteriores do cliente, da mais antiga para a mais nova.
   priorUserMessages?: string[];
 }): string {
-  const current = (input.userMessage ?? "").trim();
+  // Lote agregado pode misturar placeholder e texto ("[Imagem]\nquero
+  // cancelar"): fica só o que o cliente escreveu.
+  const current = stripMediaPlaceholders(input.userMessage);
+  // Turno só de mídia: query vazia. A recuperação não devolve nada e o run
+  // fica NO_CONTEXT — honesto. Buscar "[Imagem]" trazia chunk aleatório.
+  if (!current) return "";
+
   const depth = needsHistoryContext(current)
     ? DEICTIC_HISTORY_DEPTH
     : DEFAULT_HISTORY_DEPTH;
 
   const history = (input.priorUserMessages ?? [])
-    .map((m) => (m ?? "").trim())
+    .map((m) => stripMediaPlaceholders(m))
     .filter((m) => m.length > 0 && !isDeicticMessage(m))
     .slice(-depth);
 

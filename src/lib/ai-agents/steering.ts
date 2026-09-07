@@ -16,6 +16,8 @@
  * Assim o primeiro deploy não muda nada até o consultor editar na tela.
  */
 
+import { MEDIA_KINDS, type MediaKind } from "@/lib/ai-agents/media-placeholder";
+
 // ── Tool config ───────────────────────────────────────────────
 
 export type ToolPolicy = {
@@ -313,6 +315,120 @@ export function isUnrestrictedScope(s: AttendanceScope): boolean {
   );
 }
 
+// ── Mídia inbound ─────────────────────────────────────────────
+
+/**
+ * O que fazer quando o cliente manda SÓ mídia (sem legenda). O conteúdo
+ * gravado é um placeholder (`[Imagem]`), nunca a pergunta dele — repassar
+ * isso ao modelo é o defeito que respondeu sobre polo/prova para quem
+ * perguntava de cancelamento.
+ *
+ *  - `handoff`  acolhe e passa para um atendente humano.
+ *  - `ask_text` pede em texto o que a pessoa precisa, sem chamar o modelo.
+ *  - `ignore`   não responde (registra o run com o motivo).
+ */
+export type MediaInboundAction = "handoff" | "ask_text" | "ignore";
+
+export const MEDIA_INBOUND_ACTIONS: MediaInboundAction[] = [
+  "handoff",
+  "ask_text",
+  "ignore",
+];
+
+export type MediaInboundPolicy = {
+  /// Ação por tipo de mídia. Default seguro: nunca entrega o placeholder
+  /// ao modelo.
+  actions: Record<MediaKind, MediaInboundAction>;
+  /// Frase enviada em `handoff`. `null` = texto padrão do código, que já
+  /// varia com o tipo de mídia.
+  handoffMessage: string | null;
+  /// Frase enviada em `ask_text`. `null` = texto padrão do código.
+  askTextMessage: string | null;
+};
+
+export function defaultMediaInboundPolicy(): MediaInboundPolicy {
+  return {
+    actions: {
+      image: "handoff",
+      video: "handoff",
+      audio: "handoff",
+      document: "handoff",
+      // Figurinha não carrega pedido: acionar humano por 👍 só gera fila.
+      sticker: "ignore",
+      location: "handoff",
+      contact: "handoff",
+      other: "handoff",
+    },
+    handoffMessage: null,
+    askTextMessage: null,
+  };
+}
+
+/**
+ * Rótulos da tela do agente — linguagem de operador, pt-BR. Servidos em
+ * `GET /api/ai-agents/metadata` para o frontend não inventar tradução do
+ * nome técnico.
+ */
+export const MEDIA_INBOUND_LABELS: {
+  kinds: Array<{ id: MediaKind; label: string }>;
+  actions: Array<{ id: MediaInboundAction; label: string; hint: string }>;
+} = {
+  kinds: [
+    { id: "image", label: "Quando o cliente enviar uma imagem" },
+    { id: "video", label: "Quando o cliente enviar um vídeo" },
+    { id: "audio", label: "Quando o cliente enviar um áudio" },
+    { id: "document", label: "Quando o cliente enviar um documento" },
+    { id: "sticker", label: "Quando o cliente enviar uma figurinha" },
+    { id: "location", label: "Quando o cliente enviar uma localização" },
+    { id: "contact", label: "Quando o cliente compartilhar um contato" },
+    { id: "other", label: "Quando o cliente enviar outro tipo de anexo" },
+  ],
+  actions: [
+    {
+      id: "handoff",
+      label: "Passar para um atendente",
+      hint: "O agente avisa que recebeu o anexo e coloca a conversa na fila humana.",
+    },
+    {
+      id: "ask_text",
+      label: "Pedir para escrever em texto",
+      hint: "O agente responde pedindo que a pessoa conte por escrito o que precisa.",
+    },
+    {
+      id: "ignore",
+      label: "Não responder",
+      hint: "O agente fica em silêncio e registra o anexo no histórico do atendimento.",
+    },
+  ],
+};
+
+function isMediaInboundAction(v: unknown): v is MediaInboundAction {
+  return (
+    typeof v === "string" &&
+    MEDIA_INBOUND_ACTIONS.includes(v as MediaInboundAction)
+  );
+}
+
+export function normalizeMediaInboundPolicy(v: unknown): MediaInboundPolicy {
+  const base = defaultMediaInboundPolicy();
+  if (!v || typeof v !== "object" || Array.isArray(v)) return base;
+  const r = v as Record<string, unknown>;
+  const rawActions =
+    r.actions && typeof r.actions === "object" && !Array.isArray(r.actions)
+      ? (r.actions as Record<string, unknown>)
+      : {};
+  const actions = { ...base.actions };
+  for (const kind of MEDIA_KINDS) {
+    const chosen = rawActions[kind];
+    if (isMediaInboundAction(chosen)) actions[kind] = chosen;
+  }
+  return {
+    actions,
+    handoffMessage: nullableText(r.handoffMessage),
+    askTextMessage: nullableText(r.askTextMessage),
+  };
+}
+
 export type InboxPolicy = {
   /// Abaixo disso o backend distribui para humano. `null` = usa o
   /// default do código (0.4).
@@ -361,7 +477,19 @@ export type InboxPolicy = {
   /// Frase que o agente deve usar ao admitir que não sabe. `null` =
   /// deixa o modelo formular com o tom configurado.
   unknownAnswerMessage: string | null;
+
+  /// O que fazer com mídia sem legenda (imagem, vídeo, documento…).
+  media: MediaInboundPolicy;
+
+  /// Teto temporal, em minutos, do lote de mensagens não respondidas que
+  /// forma o turno atual. Mensagens mais antigas que isso não entram.
+  /// `0` = sem teto (comportamento antigo, que arrastou mensagens de 30
+  /// minutos antes atrás de um "oi").
+  inboundBatchWindowMinutes: number;
 };
+
+/** Teto default do lote de inbound (minutos). */
+export const DEFAULT_INBOUND_BATCH_WINDOW_MINUTES = 15;
 
 export type UnknownAnswerMode = "handoff" | "clarify" | "acknowledge";
 
@@ -396,11 +524,18 @@ export function defaultInboxPolicy(): InboxPolicy {
     useMessageModels: false,
     unknownAnswerMode: "handoff",
     unknownAnswerMessage: null,
+    media: defaultMediaInboundPolicy(),
+    inboundBatchWindowMinutes: DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
   };
 }
 
 function boolOr(v: unknown, fallback: boolean): boolean {
   return typeof v === "boolean" ? v : fallback;
+}
+
+function nonNegativeInt(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return fallback;
+  return Math.floor(v);
 }
 
 /**
@@ -463,6 +598,11 @@ export function normalizeInboxPolicy(
       ? r.unknownAnswerMode
       : base.unknownAnswerMode,
     unknownAnswerMessage: nullableText(r.unknownAnswerMessage),
+    media: normalizeMediaInboundPolicy(r.media),
+    inboundBatchWindowMinutes: nonNegativeInt(
+      r.inboundBatchWindowMinutes,
+      base.inboundBatchWindowMinutes,
+    ),
   };
 }
 
