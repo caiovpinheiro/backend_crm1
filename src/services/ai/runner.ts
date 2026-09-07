@@ -28,6 +28,7 @@ import { runWithActor } from "@/lib/request-context";
 import { getVerticalPack } from "@/verticals";
 
 import {
+  composeRuntimeOverride,
   fallbackSteeringRules,
   renderSystemPrompt,
 } from "@/lib/ai-agents/system-prompt";
@@ -398,10 +399,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       inboxPolicy: inboxPolicyForRun,
     });
 
-    const runtimeOverride =
-      [
-        agent.systemPromptOverride?.trim(),
-        steeringRules,
+    // O override salvo é descartado quando é a cópia velha das mesmas
+    // regras que já entram por `steeringRules` — senão o mesmo documento
+    // ia duas vezes para o prompt, em versões divergentes.
+    const runtimeOverride = composeRuntimeOverride({
+      savedOverride: agent.systemPromptOverride,
+      steeringRules,
+      blocks: [
         buildUnknownAnswerBlock(inboxPolicyForRun, {
           transferBlocked: transferBlockedByGate(transferGate),
         }),
@@ -410,9 +414,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
         examModalityRules,
         curriculumRules,
-      ]
-        .filter(Boolean)
-        .join("\n\n") || null;
+      ],
+    });
 
     const org = await prisma.organization.findUnique({
       where: { id: agent.organizationId },

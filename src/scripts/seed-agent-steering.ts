@@ -13,6 +13,7 @@
  */
 import { getVerticalPack } from "../verticals";
 import { getArchetype } from "../lib/ai-agents/archetypes";
+import { duplicatesSteeringRules } from "../lib/ai-agents/system-prompt";
 
 const academic = getVerticalPack("academic")!;
 const ACADEMIC_ATENDIMENTO_RULES = academic.constants.atendimentoRules;
@@ -62,10 +63,16 @@ async function main() {
       );
       // O override antigo já continha as regras (script apply-*). Mantê-lo
       // duplicaria o texto no prompt agora que ele soma com steeringRules.
-      const overrideHadRules =
-        (a.systemPromptOverride ?? "").includes("## REGRAS ABSOLUTAS");
-      const templateHadRules =
-        (a.systemPromptTemplate ?? "").includes("## REGRAS ABSOLUTAS");
+      // Mesma checagem que o runtime usa para não injetar o documento duas
+      // vezes (`duplicatesSteeringRules`) — uma fonte só.
+      const overrideHadRules = duplicatesSteeringRules(
+        a.systemPromptOverride,
+        ACADEMIC_STEERING_RULES,
+      );
+      const templateHadRules = duplicatesSteeringRules(
+        a.systemPromptTemplate,
+        ACADEMIC_STEERING_RULES,
+      );
       const cleanTemplate = getArchetype("ATENDIMENTO").systemPromptTemplate;
 
       await prisma.aIAgentConfig.update({

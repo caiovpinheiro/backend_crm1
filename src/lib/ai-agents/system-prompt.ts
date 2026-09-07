@@ -23,6 +23,73 @@ export function fallbackSteeringRules(
   return getVerticalPack(verticalPack)?.fallbackRules(archetype) ?? "";
 }
 
+function normalizeRulesText(v?: string | null): string {
+  return (v ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Títulos de seção (`## …`) do texto, normalizados. */
+function sectionHeadings(v?: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const line of (v ?? "").split(/\r?\n/)) {
+    const m = /^\s*#{1,6}\s+(.+?)\s*$/.exec(line);
+    if (m) out.add(normalizeRulesText(m[1]));
+  }
+  return out;
+}
+
+/** A partir de quanta seção repetida dois textos são "o mesmo documento". */
+const DUPLICATE_HEADING_RATIO = 0.8;
+
+/**
+ * `systemPromptOverride` salvo no banco é a MESMA regra que já entra pelo
+ * steering/fallback? Era a checagem do seed (`## REGRAS ABSOLUTAS` literal),
+ * agora compartilhada e sem palavra de vertical no meio.
+ *
+ * Compara por conteúdo (um contém o outro) e, quando as cópias divergiram
+ * no tempo, pela sobreposição de seções — que é exatamente o caso que
+ * duplicou `## IDENTIDADE`/`## REGRAS ABSOLUTAS` em versões diferentes.
+ */
+export function duplicatesSteeringRules(
+  override?: string | null,
+  steeringRules?: string | null,
+): boolean {
+  const a = normalizeRulesText(override);
+  const b = normalizeRulesText(steeringRules);
+  if (!a || !b) return false;
+  if (a.includes(b) || b.includes(a)) return true;
+
+  const ha = sectionHeadings(override);
+  const hb = sectionHeadings(steeringRules);
+  const smaller = Math.min(ha.size, hb.size);
+  if (smaller === 0) return false;
+  let shared = 0;
+  for (const h of ha) if (hb.has(h)) shared += 1;
+  return shared / smaller >= DUPLICATE_HEADING_RATIO;
+}
+
+/**
+ * Bloco "INSTRUÇÕES ESPECÍFICAS" do runtime, na ordem em que o runner o
+ * montava — com o override salvo descartado quando ele é a cópia velha do
+ * mesmo documento que já vem pelo steering. Sem isso, o prompt levava as
+ * duas versões (45 mil caracteres, seções repetidas e divergentes) sempre
+ * que `steeringRules` estava vazio e o fallback do pack assumia.
+ */
+export function composeRuntimeOverride(input: {
+  savedOverride?: string | null;
+  steeringRules?: string | null;
+  blocks?: Array<string | null | undefined>;
+}): string | null {
+  const saved = (input.savedOverride ?? "").trim();
+  const rules = (input.steeringRules ?? "").trim();
+  const keepSaved = saved && !duplicatesSteeringRules(saved, rules);
+  return (
+    [keepSaved ? saved : "", rules, ...(input.blocks ?? [])]
+      .map((b) => (b ?? "").trim())
+      .filter(Boolean)
+      .join("\n\n") || null
+  );
+}
+
 export type TemplateVars = {
   agent_name?: string | null;
   company_name?: string | null;
