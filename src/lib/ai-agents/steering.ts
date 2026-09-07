@@ -18,9 +18,14 @@
 
 import { MEDIA_KINDS, type MediaKind } from "@/lib/ai-agents/media-placeholder";
 import {
+  normalizeMessageRules,
+  type MessageRule,
+} from "@/lib/ai-agents/message-rules";
+import {
   normalizeBusinessHours,
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
+import { academicDefaultMessageRules } from "@/verticals/academic/default-message-rules";
 
 // ── Tool config ───────────────────────────────────────────────
 
@@ -515,6 +520,11 @@ export type InboxPolicy = {
   /// Liga/desliga o handoff automático por baixa confiança.
   lowConfidenceHandoff: boolean;
 
+  /// "Quando a mensagem for sobre ISTO, o próximo passo é AQUILO".
+  /// Avaliadas NA ORDEM DA LISTA, antes de qualquer intercepto e antes do
+  /// modelo. A primeira que casa decide o turno.
+  messageRules: MessageRule[];
+
   /// Interceptos determinísticos do inbox-handler.
   interceptRetention: boolean;
   interceptCourseShopping: boolean;
@@ -613,6 +623,7 @@ export function defaultInboxPolicy(): InboxPolicy {
   return {
     confidenceThreshold: null,
     lowConfidenceHandoff: true,
+    messageRules: [],
     interceptRetention: false,
     interceptCourseShopping: false,
     retentionKeywords: [],
@@ -661,6 +672,11 @@ export function normalizeInboxPolicy(
   const base = defaultInboxPolicy();
   if (verticalPack === "academic") {
     base.interceptRetention = true;
+    // Regras que antes eram regex fixo no `department-routing`. Agente do
+    // pack que nunca salvou configuração continua com elas valendo.
+    base.messageRules = academicDefaultMessageRules({
+      interceptRetention: true,
+    });
     base.interceptCourseShopping = true;
     base.inauguralEnabled = true;
     // Preserva o comportamento anterior, quando o RAG de modelos era
@@ -685,10 +701,24 @@ export function normalizeInboxPolicy(
       ? (r.departmentAliases as Record<string, unknown>)
       : {};
 
+  const interceptRetention = boolOr(
+    r.interceptRetention,
+    base.interceptRetention,
+  );
+  // Lista salva vence sempre — inclusive vazia, que é o operador dizendo
+  // "removi as regras". Só quem NUNCA salvou herda a base do pack, e é isso
+  // que preserva o comportamento de hoje sem tocar em coluna nenhuma.
+  const messageRules = Array.isArray(r.messageRules)
+    ? normalizeMessageRules(r.messageRules)
+    : verticalPack === "academic"
+      ? academicDefaultMessageRules({ interceptRetention })
+      : base.messageRules;
+
   return {
     confidenceThreshold: threshold,
     lowConfidenceHandoff: boolOr(r.lowConfidenceHandoff, base.lowConfidenceHandoff),
-    interceptRetention: boolOr(r.interceptRetention, base.interceptRetention),
+    messageRules,
+    interceptRetention,
     interceptCourseShopping: boolOr(
       r.interceptCourseShopping,
       base.interceptCourseShopping,

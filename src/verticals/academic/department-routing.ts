@@ -10,6 +10,7 @@ import {
   ACADEMIC_DEPARTMENT_ALIASES,
   isAvaOrDisciplinesIntent,
 } from "@/verticals/academic/atendimento-prompt";
+import { departmentFromMessageRules } from "@/lib/ai-agents/message-rules";
 import {
   matchesAnyKeyword,
   type InboxPolicy,
@@ -197,14 +198,18 @@ export function inferDepartmentFromContext(args: {
   if (matchesAnyKeyword(args.userMessage, args.policy?.retentionKeywords ?? [])) {
     return "retencao";
   }
-  if (
-    /cancel|tranc|desist/.test(msg) ||
-    /transferenc\w*\s+(de\s+)?(curso|polo)/.test(msg) ||
-    /mudar\s+(de\s+)?(curso|polo)/.test(msg) ||
-    /trocar\s+(de\s+)?(curso|polo)/.test(msg)
-  ) {
-    return "retencao";
-  }
+  // O que era regex fixo aqui (cancelar/trancar/desistir, troca de curso ou
+  // de polo) virou regra de configuração: o operador vê, reordena e remove.
+  // Regra que manda RESPONDER não devolve departamento — e é justamente por
+  // isso que "trocar de polo" pode cair no modelo sem quebrar retenção.
+  const ruleDepartment = departmentFromMessageRules(
+    args.userMessage,
+    args.policy?.messageRules ?? [],
+  );
+  const ruleKey = ruleDepartment
+    ? classifyAcademicDepartmentKey(ruleDepartment)
+    : null;
+  if (ruleKey) return ruleKey;
 
   // Antes do funil Acolhimento: rematrícula / operacional (SAC).
   if (

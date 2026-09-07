@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { runAgent } from "@/services/ai/runner";
+import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 
 /**
@@ -69,9 +70,41 @@ export async function POST(
     const pack = getVerticalPack(agent.verticalPack);
     let interceptFired: string | null = null;
 
+    // Regras de mensagem do operador vêm antes de tudo, como no inbox real.
+    // Aqui é dry-run: nada é enviado nem distribuído, só reportado.
+    const testPolicy = normalizeInboxPolicy(
+      agent.inboxPolicy,
+      agent.verticalPack,
+    );
+    const ruleHit = evaluateMessageRules(userMessage, testPolicy.messageRules);
+    if (ruleHit && ruleHit.rule.action !== "answer_with_knowledge") {
+      return NextResponse.json({
+        runId: null,
+        text: `[regra] ${ruleHit.rule.label} → ${ruleHit.rule.action}${
+          ruleHit.rule.department ? ` (${ruleHit.rule.department})` : ""
+        }`,
+        status: "COMPLETED",
+        interceptFired: `message_rule:${ruleHit.rule.id}`,
+        messageRule: {
+          id: ruleHit.rule.id,
+          label: ruleHit.rule.label,
+          position: ruleHit.position,
+          action: ruleHit.rule.action,
+        },
+        llmInvoked: false,
+        systemPrompt: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        toolCalls: [],
+      });
+    }
+    // Regra que manda responder com a base pula os interceptos do pack.
+    const skipIntercepts = Boolean(ruleHit);
+
     // Simulação dry-run: env mínimo; interceptos que precisam de send/DB
     // reais devem no-op ou short-circuit via helpers ausentes.
-    if (pack) {
+    if (pack && !skipIntercepts) {
       const dryEnv: Record<string, unknown> = {
         args: {
           conversationId: "__playground__",

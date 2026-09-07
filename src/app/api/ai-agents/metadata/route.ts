@@ -7,6 +7,7 @@ import {
   defaultInboxPolicy,
   MEDIA_INBOUND_LABELS,
 } from "@/lib/ai-agents/steering";
+import { MESSAGE_RULE_LABELS } from "@/lib/ai-agents/message-rules";
 import { listAgentTemplates } from "@/services/ai-agent-templates";
 import { listVerticalPackIds } from "@/verticals";
 import { AGENT_MAX_STEPS } from "@/services/ai/runner";
@@ -51,6 +52,9 @@ export async function GET() {
       // Rótulos em linguagem de operador para a tela do agente — o FE não
       // deve traduzir "image"/"handoff" por conta própria.
       mediaInbound: MEDIA_INBOUND_LABELS,
+      // "Quando a mensagem for sobre" / "O que fazer" — rótulos de operador
+      // para a tela de regras de mensagem.
+      messageRules: MESSAGE_RULE_LABELS,
       defaults: {
         inboxPolicy: defaultInboxPolicy(),
         maxSteps: AGENT_MAX_STEPS,

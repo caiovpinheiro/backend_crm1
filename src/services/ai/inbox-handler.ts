@@ -60,6 +60,11 @@ import {
   queueMediaHandoff,
 } from "@/services/ai/media-inbound";
 import { markRunResponseDiscarded } from "@/services/ai/run-delivery";
+import {
+  evaluateMessageRules,
+  type MessageRuleHit,
+} from "@/lib/ai-agents/message-rules";
+import { executeMessageRule } from "@/services/ai/message-rule-runtime";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { runAgent } from "@/services/ai/runner";
@@ -438,8 +443,16 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     // Vertical pack — pre_assignee (first_access → greeting_self_serve)
     {
-      const earlyPack = await resolveInboxVerticalPack(conversation);
-      if (earlyPack) {
+      const early = await resolveInboxAgentSteering(conversation);
+      const earlyPack = early.pack;
+      // Regra do operador casou → nenhum intercepto do pack roda neste
+      // turno. Quem decide é a lista ordenada da tela, e ela é executada
+      // no bloco pós-assignee (onde há agente, canal e cópia de fila).
+      const earlyRule = evaluateMessageRules(
+        args.userMessage,
+        early.policy?.messageRules,
+      );
+      if (earlyPack && !earlyRule) {
         const env = makeInboxInterceptEnv({
           args,
           conversation,
@@ -728,11 +741,88 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       agentUserId: assignee.id,
     });
 
-    // Vertical pack — post_assignee (attendance_scope → greeting_only)
+    // ── 3a. Regras de mensagem do operador ────────────────────
+    // "Quando a mensagem for sobre ISTO, o próximo passo é AQUILO."
+    // Roda ANTES de qualquer intercepto: a precedência é a ordem da lista
+    // na tela do agente, e a primeira regra que casa resolve o turno.
+    // `answer_with_knowledge` é o passo que não existia — e é o único que
+    // deixa o modelo (e a base de conhecimento) atender o assunto.
     let openDeal: { id: string } | null = null;
     let sentOpeningThisTurn = false;
+    let ruleAnswersWithKnowledge = false;
     {
-      if (agentPack) {
+      const hit: MessageRuleHit | null = evaluateMessageRules(
+        args.userMessage,
+        policy.messageRules,
+      );
+      if (hit) {
+        const outcome = await executeMessageRule(hit, {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          policy,
+          ops: packOps,
+          sendNotice: async (text: string) => {
+            if (!text.trim()) return;
+            await sendAgentMessage({
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              agentUserId: assignee.id,
+              autonomyMode: cfg.autonomyMode,
+              text,
+              channel: args.channel,
+              kind: "text",
+              humanBehavior,
+              generationId: args.generationId,
+              bypassAssigneeCheck: true,
+            }).catch(() => null);
+          },
+          defaultQueueText: async ({ departmentName }) => {
+            const gotHuman = await conversationAssignedToHuman(
+              args.conversationId,
+            );
+            // Cópia específica de departamento é refino do pack; sem pack,
+            // sobra o texto de fila configurado na Pilotagem.
+            const isRetention = departmentName
+              ? packOps.classifyAcademicDepartmentKey?.(departmentName) ===
+                "retencao"
+              : false;
+            return studentNoticeAfterHandoff(
+              gotHuman,
+              isRetention
+                ? buildRetentionHandoffMessage(new Date(), policy, hours)
+                : buildGenericQueueHandoffMessage(new Date(), policy, hours),
+              queueCtxOf(policy, hours),
+            );
+          },
+        });
+        logAi("message_rule", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          rule: hit.rule.label,
+          ruleId: hit.rule.id,
+          position: hit.position,
+          action: hit.rule.action,
+          outcome: outcome.kind,
+          department:
+            outcome.kind === "handled" ? (outcome.departmentName ?? null) : null,
+        });
+        if (outcome.kind === "answer_with_knowledge") {
+          ruleAnswersWithKnowledge = true;
+        } else {
+          await recordInboxInterceptRun({
+            agentId: cfg.id,
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            interceptName: outcome.interceptName,
+          });
+          return;
+        }
+      }
+    }
+
+    // Vertical pack — post_assignee (attendance_scope → greeting_only)
+    {
+      if (agentPack && !ruleAnswersWithKnowledge) {
         const env = makeInboxInterceptEnv({
           args,
           conversation,
@@ -1548,32 +1638,57 @@ async function applyHumanBehaviorBeforeSend(args: {
 }
 
 
-async function resolveInboxVerticalPack(
+/**
+ * Pack + política do agente que vai atender, resolvidos ANTES do assignee.
+ * A política vem junto porque as regras de mensagem do operador precedem
+ * até os interceptos `pre_assignee` — precedência é a ordem que ele vê na
+ * tela, não a ordem em que o código foi escrito.
+ */
+async function resolveInboxAgentSteering(
   conversation: { assignedToId: string | null } | null,
-) {
+): Promise<{
+  pack: ReturnType<typeof getVerticalPack>;
+  policy: InboxPolicy | null;
+}> {
   if (conversation?.assignedToId) {
     const u = await prisma.user.findFirst({
       where: { id: conversation.assignedToId, type: "AI" },
       select: {
-        aiAgentConfig: { select: { verticalPack: true, active: true } },
+        aiAgentConfig: {
+          select: { verticalPack: true, active: true, inboxPolicy: true },
+        },
       },
     });
     if (u?.aiAgentConfig?.active) {
-      return getVerticalPack(u.aiAgentConfig.verticalPack);
+      return {
+        pack: getVerticalPack(u.aiAgentConfig.verticalPack),
+        policy: normalizeInboxPolicy(
+          u.aiAgentConfig.inboxPolicy,
+          u.aiAgentConfig.verticalPack,
+        ),
+      };
     }
   }
   const orgId = getOrgIdOrNull();
-  if (!orgId) return null;
+  if (!orgId) return { pack: null, policy: null };
   const fallback = await prisma.user.findFirst({
     where: {
       organizationId: orgId,
       type: "AI",
       aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
     },
-    select: { aiAgentConfig: { select: { verticalPack: true } } },
+    select: {
+      aiAgentConfig: { select: { verticalPack: true, inboxPolicy: true } },
+    },
     orderBy: { createdAt: "asc" },
   });
-  return getVerticalPack(fallback?.aiAgentConfig?.verticalPack);
+  const cfg = fallback?.aiAgentConfig ?? null;
+  return {
+    pack: getVerticalPack(cfg?.verticalPack),
+    policy: cfg
+      ? normalizeInboxPolicy(cfg.inboxPolicy, cfg.verticalPack)
+      : null,
+  };
 }
 
 function makeInboxInterceptEnv(input: {

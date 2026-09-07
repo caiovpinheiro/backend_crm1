@@ -130,6 +130,10 @@ export async function getAIAgent(id: string) {
   const { _count, ...rest } = row;
   return redactAgentOpenaiKey({
     ...rest,
+    // Devolve a política já normalizada: as regras de mensagem semeadas pelo
+    // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
+    // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
+    inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
     knowledgeDocsCount: _count.knowledgeDocs,
   });
 }
