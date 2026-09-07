@@ -78,8 +78,21 @@ echo "[entrypoint] APP_MODE=${APP_MODE}"
 #
 # Abortar aqui torna o env var faltando visível no deploy. Escape hatch:
 # ALLOW_MISSING_ENCRYPTION_KEY=1.
+#
+# Fatal só nos modos que realmente leem segredos. worker-etl, worker-leads
+# e worker-distribution nunca chamam secret-crypto: derrubá-los seria
+# parada gratuita (foi o que aconteceu no primeiro deploy deste guard).
+case "$APP_MODE" in
+  api|api-public|worker-automation|worker-whatsapp|worker-meta-webhook)
+    CRYPTO_REQUIRED=1 ;;
+  *)
+    CRYPTO_REQUIRED= ;;
+esac
+
 if [ -z "${ENCRYPTION_KEY}" ] && [ -z "${NEXTAUTH_SECRET}" ] && [ -z "${AUTH_SECRET}" ]; then
-  if [ -n "${ALLOW_MISSING_ENCRYPTION_KEY}" ]; then
+  if [ -z "${CRYPTO_REQUIRED}" ]; then
+    echo "[entrypoint] aviso: sem segredo de criptografia (não exigido em ${APP_MODE})."
+  elif [ -n "${ALLOW_MISSING_ENCRYPTION_KEY}" ]; then
     echo "[entrypoint] !! aviso: sem segredo de criptografia; leitura de segredos vai falhar."
   else
     echo "[entrypoint] !! ERRO FATAL: nenhum segredo de criptografia definido."
