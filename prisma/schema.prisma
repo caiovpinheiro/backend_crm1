@@ -4788,6 +4788,11 @@ model AIAgentKnowledgeDoc {
   agentId        String
   agent          AIAgentConfig          @relation(fields: [agentId], references: [id], onDelete: Cascade)
   title          String
+  /// Texto integral do documento, como o operador colou/editou. Fonte da
+  /// verdade para visualizar e reindexar. Null em docs criados antes da
+  /// migration `ai_agent_knowledge_doc_content` — nesses o texto é
+  /// remontado a partir dos chunks (`reconstructContentFromChunks`).
+  content        String?                @db.Text
   source         String                 @default("upload")
   mimeType       String?
   sizeBytes      Int                    @default(0)
