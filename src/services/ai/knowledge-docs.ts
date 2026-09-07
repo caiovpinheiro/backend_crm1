@@ -7,9 +7,19 @@
  * documento compartilhado entre agentes nem entre tenants.
  */
 
+import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  formatZonedDay,
+  resolveZonedDayEnd,
+  resolveZonedDayStart,
+} from "@/lib/zoned-date";
 import { scheduleIndexing } from "@/services/ai/embeddings";
+import {
+  humanQueueContextFromAgent,
+  resolveAgentTimezone,
+} from "@/services/ai/human-queue-policy";
 
 export const MAX_CONTENT_CHARS = 500_000;
 export const MAX_TITLE_CHARS = 200;
@@ -23,6 +33,8 @@ export const MAX_PER_PAGE = 100;
  */
 const OVERLAP_PROBE = 400;
 
+export const MAX_EXPIRED_INSTRUCTION_CHARS = 2_000;
+
 const DOC_LIST_SELECT = {
   id: true,
   title: true,
@@ -32,9 +44,90 @@ const DOC_LIST_SELECT = {
   status: true,
   errorMessage: true,
   chunkCount: true,
+  validFrom: true,
+  validUntil: true,
+  expiredBehavior: true,
+  expiredInstruction: true,
   createdAt: true,
   updatedAt: true,
 } as const;
+
+/** `silent` só para de servir o documento; `instruct` também orienta o agente. */
+export type ExpiredBehavior = "silent" | "instruct";
+
+export const EXPIRED_BEHAVIORS: ExpiredBehavior[] = ["silent", "instruct"];
+
+function normalizeExpiredBehavior(input: unknown): ExpiredBehavior {
+  return input === "silent" ? "silent" : "instruct";
+}
+
+function normalizeExpiredInstruction(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const text = input.trim().slice(0, MAX_EXPIRED_INSTRUCTION_CHARS);
+  return text || null;
+}
+
+type DocValidityRow = {
+  validFrom: Date | null;
+  validUntil: Date | null;
+};
+
+/**
+ * Campos derivados da validade para a tela: o dia no fuso do agente (o
+ * `<input type="date">` precisa de `YYYY-MM-DD`) e o selo de vencido, que sai
+ * do relógio do servidor e não do navegador do operador.
+ */
+function withValidityView<T extends DocValidityRow>(
+  doc: T,
+  timezone: string,
+  now: Date = new Date(),
+) {
+  return {
+    ...doc,
+    validFromDay: doc.validFrom ? formatZonedDay(doc.validFrom, timezone) : null,
+    validUntilDay: doc.validUntil
+      ? formatZonedDay(doc.validUntil, timezone)
+      : null,
+    expired:
+      doc.validUntil !== null && doc.validUntil.getTime() < now.getTime(),
+    notYetValid:
+      doc.validFrom !== null && doc.validFrom.getTime() > now.getTime(),
+    timezone,
+  };
+}
+
+/**
+ * `undefined` = campo ausente no payload (não mexe). `null`/`""` = o operador
+ * limpou a validade. String `YYYY-MM-DD` = dia ancorado no fuso do agente:
+ * início do dia em `validFrom`, fim do dia em `validUntil`, para o documento
+ * valer até o último minuto do último dia.
+ */
+function normalizeValidityInput(
+  input: unknown,
+  timezone: string,
+  edge: "start" | "end",
+): Date | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  if (typeof input !== "string") return undefined;
+  const raw = input.trim();
+  if (!raw) return null;
+  const parsed =
+    edge === "start"
+      ? resolveZonedDayStart(raw, timezone)
+      : resolveZonedDayEnd(raw, timezone);
+  if (!parsed) {
+    throw new KnowledgeDocError("Data de validade inválida.", 400);
+  }
+  return parsed;
+}
+
+export type KnowledgeValidityInput = {
+  validFrom?: unknown;
+  validUntil?: unknown;
+  expiredBehavior?: unknown;
+  expiredInstruction?: unknown;
+};
 
 export class KnowledgeDocError extends Error {
   constructor(
@@ -81,12 +174,28 @@ export function reconstructContentFromChunks(
   return out;
 }
 
-async function requireAgent(agentId: string): Promise<void> {
+/**
+ * Fuso do agente — MESMA resolução usada pelo prompt (`resolveAgentTimezone`).
+ * A validade do documento é comparada com o relógio que o agente já anuncia
+ * ao modelo; duas fontes de fuso não podem existir.
+ */
+async function requireAgentTimezone(agentId: string): Promise<string> {
   const agent = await prisma.aIAgentConfig.findUnique({
     where: { id: agentId },
-    select: { id: true },
+    select: {
+      id: true,
+      inboxPolicy: true,
+      businessHours: true,
+      verticalPack: true,
+    },
   });
   if (!agent) throw new KnowledgeDocError("Agente não encontrado.", 404);
+  return resolveAgentTimezone(
+    humanQueueContextFromAgent({
+      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy, agent.verticalPack),
+      businessHours: agent.businessHours,
+    }),
+  );
 }
 
 export function normalizeTitle(input: unknown): string {
@@ -107,6 +216,15 @@ function assertPayload(title: string, content: string): void {
   if (content.length > MAX_CONTENT_CHARS) {
     throw new KnowledgeDocError(
       `Conteúdo muito grande (limite ${MAX_CONTENT_CHARS.toLocaleString("pt-BR")} caracteres).`,
+      400,
+    );
+  }
+}
+
+function assertValidityOrder(from: Date | null, until: Date | null): void {
+  if (from && until && from.getTime() > until.getTime()) {
+    throw new KnowledgeDocError(
+      "A data inicial da validade não pode ser depois da data final.",
       400,
     );
   }
@@ -136,7 +254,7 @@ export async function listKnowledgeDocs({
       : {}),
   };
 
-  const [total, items] = await Promise.all([
+  const [total, items, timezone] = await Promise.all([
     prisma.aIAgentKnowledgeDoc.count({ where }),
     prisma.aIAgentKnowledgeDoc.findMany({
       where,
@@ -145,9 +263,16 @@ export async function listKnowledgeDocs({
       take: safePerPage,
       select: DOC_LIST_SELECT,
     }),
+    requireAgentTimezone(agentId),
   ]);
 
-  return { items, total, page: safePage, perPage: safePerPage };
+  const now = new Date();
+  return {
+    items: items.map((doc) => withValidityView(doc, timezone, now)),
+    total,
+    page: safePage,
+    perPage: safePerPage,
+  };
 }
 
 /**
@@ -161,9 +286,11 @@ export async function getKnowledgeDoc(agentId: string, docId: string) {
     select: { ...DOC_LIST_SELECT, content: true },
   });
   if (!doc) throw new KnowledgeDocError("Documento não encontrado.", 404);
+  const timezone = await requireAgentTimezone(agentId);
+  const view = withValidityView(doc, timezone);
 
   if (doc.content != null) {
-    return { ...doc, contentReconstructed: false };
+    return { ...view, contentReconstructed: false };
   }
 
   const chunks = await prisma.aIAgentKnowledgeChunk.findMany({
@@ -172,7 +299,7 @@ export async function getKnowledgeDoc(agentId: string, docId: string) {
     select: { content: true, position: true },
   });
   return {
-    ...doc,
+    ...view,
     content: reconstructContentFromChunks(chunks),
     contentReconstructed: chunks.length > 0,
   };
@@ -180,12 +307,15 @@ export async function getKnowledgeDoc(agentId: string, docId: string) {
 
 export async function createKnowledgeDoc(
   agentId: string,
-  input: { title: unknown; content: unknown },
+  input: { title: unknown; content: unknown } & KnowledgeValidityInput,
 ) {
   const title = normalizeTitle(input.title);
   const content = normalizeContent(input.content);
   assertPayload(title, content);
-  await requireAgent(agentId);
+  const timezone = await requireAgentTimezone(agentId);
+  const validFrom = normalizeValidityInput(input.validFrom, timezone, "start");
+  const validUntil = normalizeValidityInput(input.validUntil, timezone, "end");
+  assertValidityOrder(validFrom ?? null, validUntil ?? null);
 
   const doc = await prisma.aIAgentKnowledgeDoc.create({
     data: withOrgFromCtx({
@@ -196,12 +326,16 @@ export async function createKnowledgeDoc(
       mimeType: "text/plain",
       sizeBytes: Buffer.byteLength(content, "utf8"),
       status: "PENDING" as const,
+      validFrom: validFrom ?? null,
+      validUntil: validUntil ?? null,
+      expiredBehavior: normalizeExpiredBehavior(input.expiredBehavior),
+      expiredInstruction: normalizeExpiredInstruction(input.expiredInstruction),
     }),
     select: DOC_LIST_SELECT,
   });
 
   scheduleIndexing(doc.id, content);
-  return doc;
+  return withValidityView(doc, timezone);
 }
 
 /**
@@ -211,9 +345,16 @@ export async function createKnowledgeDoc(
 export async function updateKnowledgeDoc(
   agentId: string,
   docId: string,
-  input: { title?: unknown; content?: unknown },
+  input: { title?: unknown; content?: unknown } & KnowledgeValidityInput,
 ) {
   const current = await getKnowledgeDoc(agentId, docId);
+  const timezone = current.timezone;
+  const validFrom = normalizeValidityInput(input.validFrom, timezone, "start");
+  const validUntil = normalizeValidityInput(input.validUntil, timezone, "end");
+  assertValidityOrder(
+    validFrom === undefined ? current.validFrom : validFrom,
+    validUntil === undefined ? current.validUntil : validUntil,
+  );
 
   const title =
     input.title === undefined ? current.title : normalizeTitle(input.title);
@@ -243,12 +384,25 @@ export async function updateKnowledgeDoc(
       ...(contentChanged
         ? { status: "PENDING" as const, errorMessage: null }
         : {}),
+      // Validade e orientação são metadados: mudar não reindexa nada.
+      ...(validFrom === undefined ? {} : { validFrom }),
+      ...(validUntil === undefined ? {} : { validUntil }),
+      ...(input.expiredBehavior === undefined
+        ? {}
+        : { expiredBehavior: normalizeExpiredBehavior(input.expiredBehavior) }),
+      ...(input.expiredInstruction === undefined
+        ? {}
+        : {
+            expiredInstruction: normalizeExpiredInstruction(
+              input.expiredInstruction,
+            ),
+          }),
     },
     select: DOC_LIST_SELECT,
   });
 
   if (contentChanged) scheduleIndexing(docId, content);
-  return doc;
+  return withValidityView(doc, timezone);
 }
 
 /** Reindexa sem alterar o conteudo — usado para destravar doc FAILED. */
@@ -272,7 +426,7 @@ export async function reindexKnowledgeDoc(agentId: string, docId: string) {
     select: DOC_LIST_SELECT,
   });
   scheduleIndexing(docId, content);
-  return doc;
+  return withValidityView(doc, current.timezone);
 }
 
 export async function deleteKnowledgeDoc(agentId: string, docId: string) {

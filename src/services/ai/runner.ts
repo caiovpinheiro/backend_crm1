@@ -55,8 +55,9 @@ import {
   type AgentFaqMedia,
 } from "@/services/ai/message-models-retrieval";
 import {
+  formatExpiredKnowledgeBlock,
   formatRetrievalBlock,
-  retrieveRelevantChunks,
+  retrieveAgentKnowledge,
 } from "@/services/ai/retrieval";
 import {
   buildUnknownAnswerBlock,
@@ -232,15 +233,16 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // RAG em TODO turno. A query sai da mensagem atual + últimas mensagens
     // do cliente: com só a mensagem atual, continuações curtas ("ok", "Não
     // fez ainda?") não recuperavam nada e o turno respondia sem base.
-    const retrievedChunks = await retrieveRelevantChunks(
+    const knowledge = await retrieveAgentKnowledge(
       agent.id,
       buildRetrievalQuery({ userMessage: args.userMessage, priorUserMessages }),
       agentApiKey,
       4,
     ).catch((err) => {
       console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
-      return [];
+      return { chunks: [], expired: [] };
     });
+    const retrievedChunks = knowledge.chunks;
     const noRetrievalContext = retrievedChunks.length === 0;
     const retrievalBlock = formatRetrievalBlock(retrievedChunks);
 
@@ -259,6 +261,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const inboxPolicyForRun = normalizeInboxPolicy(
       agent.inboxPolicy,
       agent.verticalPack,
+    );
+    // Documento vencido não entra como fato (o corte é no SQL do retrieval);
+    // no lugar do vazio o operador escolhe o que o agente deve fazer. Bloco
+    // curto e só existe quando há documento vencido relevante DE FATO.
+    const expiredKnowledgeBlock = formatExpiredKnowledgeBlock(
+      knowledge.expired,
+      inboxPolicyForRun.knowledgeExpiredInstruction,
     );
     const useMessageModelsRag = inboxPolicyForRun.useMessageModels;
     const retrievedModels = useMessageModelsRag
@@ -339,6 +348,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const clockHint = hasPack ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
+      expiredKnowledgeBlock,
       messageModelsBlock,
       portalAccessHint,
       examAccessHint,

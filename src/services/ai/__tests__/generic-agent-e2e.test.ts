@@ -116,18 +116,20 @@ vi.mock("@/services/ai/retrieval", async (importOriginal) => {
     await importOriginal<typeof import("@/services/ai/retrieval")>();
   return {
     ...actual,
-    retrieveRelevantChunks: vi.fn(async (agentId: string) =>
-      agentId === AGENT_ID
-        ? [
-            {
-              docId: "doc-1",
-              docTitle: "Manual do cliente",
-              content: KNOWLEDGE_FACT,
-              score: 0.9,
-            },
-          ]
-        : [],
-    ),
+    retrieveAgentKnowledge: vi.fn(async (agentId: string) => ({
+      chunks:
+        agentId === AGENT_ID
+          ? [
+              {
+                docId: "doc-1",
+                docTitle: "Manual do cliente",
+                content: KNOWLEDGE_FACT,
+                score: 0.9,
+              },
+            ]
+          : [],
+      expired: [],
+    })),
   };
 });
 

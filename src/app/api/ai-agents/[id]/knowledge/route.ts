@@ -61,6 +61,10 @@ export async function POST(
       const doc = await createKnowledgeDoc(id, {
         title: body.title,
         content: body.content,
+        validFrom: body.validFrom,
+        validUntil: body.validUntil,
+        expiredBehavior: body.expiredBehavior,
+        expiredInstruction: body.expiredInstruction,
       });
       return NextResponse.json(doc, { status: 201 });
     } catch (e) {

@@ -61,6 +61,10 @@ export async function PUT(
       const doc = await updateKnowledgeDoc(id, docId, {
         title: body.title,
         content: body.content,
+        validFrom: body.validFrom,
+        validUntil: body.validUntil,
+        expiredBehavior: body.expiredBehavior,
+        expiredInstruction: body.expiredInstruction,
       });
       return NextResponse.json(doc);
     } catch (e) {

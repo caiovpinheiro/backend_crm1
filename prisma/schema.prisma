@@ -4800,6 +4800,19 @@ model AIAgentKnowledgeDoc {
   status         AIAgentKnowledgeStatus @default(PENDING)
   errorMessage   String?
   chunkCount     Int                    @default(0)
+  /// Janela de validade do conteúdo. Null nas duas pontas = fato atemporal
+  /// (comportamento anterior à migration `ai_agent_knowledge_validity`).
+  /// Fora da janela o documento NÃO alimenta a recuperação (`retrieval.ts`).
+  /// Instantes resolvidos no fuso do agente a partir da data que o operador
+  /// digitou (`resolveZonedDayStart` / `resolveZonedDayEnd`).
+  validFrom      DateTime?
+  validUntil     DateTime?
+  /// O que o agente faz quando a validade passa: `silent` só para de usar o
+  /// documento; `instruct` também injeta uma orientação no prompt.
+  expiredBehavior String                @default("instruct")
+  /// Orientação injetada quando `expiredBehavior = instruct`. Null = usa o
+  /// texto default do agente (`inboxPolicy.knowledgeExpiredInstruction`).
+  expiredInstruction String?            @db.Text
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
@@ -4807,6 +4820,7 @@ model AIAgentKnowledgeDoc {
 
   @@index([organizationId])
   @@index([agentId, status])
+  @@index([agentId, validUntil])
   @@map("ai_agent_knowledge_docs")
 }
 

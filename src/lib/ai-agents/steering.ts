@@ -557,6 +557,11 @@ export type InboxPolicy = {
   /// deixa o modelo formular com o tom configurado.
   unknownAnswerMessage: string | null;
 
+  /// Orientação default quando um documento da base VENCE e o operador não
+  /// escreveu um texto no próprio documento. `null` = o agente só para de
+  /// usar o documento, sem instrução extra no prompt.
+  knowledgeExpiredInstruction: string | null;
+
   /// O que fazer com mídia sem legenda (imagem, vídeo, documento…).
   media: MediaInboundPolicy;
 
@@ -622,6 +627,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     useMessageModels: false,
     unknownAnswerMode: "handoff",
     unknownAnswerMessage: null,
+    knowledgeExpiredInstruction: null,
     media: defaultMediaInboundPolicy(),
     inboundBatchWindowMinutes: DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
     transferPolicy: "always",
@@ -707,6 +713,7 @@ export function normalizeInboxPolicy(
       ? r.unknownAnswerMode
       : base.unknownAnswerMode,
     unknownAnswerMessage: nullableText(r.unknownAnswerMessage),
+    knowledgeExpiredInstruction: nullableText(r.knowledgeExpiredInstruction),
     media: normalizeMediaInboundPolicy(r.media),
     inboundBatchWindowMinutes: nonNegativeInt(
       r.inboundBatchWindowMinutes,
