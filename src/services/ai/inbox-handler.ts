@@ -43,7 +43,9 @@ import {
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
   humanAttendanceStartHint,
+  humanQueueContextFromAgent,
   isHumanAttendanceWindowOpen,
+  type HumanQueueContext,
   isNearDuplicateBotText,
   messageLooksLikeHumanQueueNotice,
   userWantsAiContinue,
@@ -161,20 +163,33 @@ function buildRetentionHandoffMessage(
   policy?: InboxPolicy | null,
   businessHours?: BusinessHoursConfig | null,
 ): string {
+  const queue = queueCtxOf(policy, businessHours);
   if (policy?.retentionHandoffMessage) return policy.retentionHandoffMessage;
-  if (isHumanAttendanceWindowOpen(now, businessHours)) {
+  if (isHumanAttendanceWindowOpen(now, queue)) {
     return (
       "Entendi! Sobre *trancamento/cancelamento* já pedi para o setor de *Retenção* " +
       "te atender. Assim que um(a) consultor(a) puder, continua com você. " +
       "Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo 💛"
     );
   }
-  const { startHour, dayLabel } = humanAttendanceStartHint(now);
+  const { startLabel, dayLabel } = humanAttendanceStartHint(now, queue);
   return (
     `Entendi! Sobre *trancamento/cancelamento* já registrei seu pedido com *Retenção*. ` +
-    `O atendimento humano retoma às *${startHour}h* ${dayLabel}. ` +
+    `O atendimento humano retoma às *${startLabel}* ${dayLabel}. ` +
     `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo 💛`
   );
+}
+
+/** Horário/cópia da fila configurados no agente (Fase 3). */
+function queueCtxOf(
+  policy?: InboxPolicy | null,
+  businessHours?: BusinessHoursConfig | null,
+) {
+  const ctx = humanQueueContextFromAgent({
+    inboxPolicy: policy ?? null,
+    businessHours,
+  });
+  return { ...ctx, offHoursMessage: businessHours?.offHoursMessage ?? null };
 }
 
 /** Mensagem genérica de fila — texto e horário vêm da Pilotagem. */
@@ -183,15 +198,18 @@ function buildGenericQueueHandoffMessage(
   policy?: InboxPolicy | null,
   businessHours?: BusinessHoursConfig | null,
 ): string {
-  return buildHumanUnavailableOfferMessage(now, {
-    businessHours,
-    handoffMessage: policy?.handoffMessage,
-    offHoursMessage: businessHours?.offHoursMessage,
-  });
+  return buildHumanUnavailableOfferMessage(
+    now,
+    queueCtxOf(policy, businessHours),
+  );
 }
 
-function studentNoticeAfterHandoff(gotHuman: boolean, queueText: string): string {
-  return gotHuman ? buildAssignedConsultantNotice() : queueText;
+function studentNoticeAfterHandoff(
+  gotHuman: boolean,
+  queueText: string,
+  queue?: HumanQueueContext,
+): string {
+  return gotHuman ? buildAssignedConsultantNotice(queue) : queueText;
 }
 
 /**
@@ -513,7 +531,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
                 type: "AI",
                 aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
               },
-              select: { id: true },
+              select: {
+                id: true,
+                aiAgentConfig: {
+                  select: { inboxPolicy: true, businessHours: true, verticalPack: true },
+                },
+              },
               orderBy: { createdAt: "asc" },
             })
           : null;
@@ -537,7 +560,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           select: { content: true },
         });
 
-        if (userWantsHumanDistribution(args.userMessage)) {
+        // Horário/cópia de fila do agente da org (Fase 3).
+        const waitingQueueCtx = queueCtxOf(
+          normalizeInboxPolicy(
+            aiAgent.aiAgentConfig?.inboxPolicy,
+            aiAgent.aiAgentConfig?.verticalPack,
+          ),
+          normalizeBusinessHours(aiAgent.aiAgentConfig?.businessHours ?? null),
+        );
+        if (userWantsHumanDistribution(args.userMessage, waitingQueueCtx)) {
           if (!messageLooksLikeHumanQueueNotice(lastBotOut?.content) ||
               !lastBotOut?.content?.includes("expediente inicia")) {
             await sendAgentMessage({
@@ -545,7 +576,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               contactId: args.contactId,
               agentUserId: aiAgent.id,
               autonomyMode: "AUTONOMOUS",
-              text: buildHumanQueueWithHoursMessage(),
+              text: buildHumanQueueWithHoursMessage(new Date(), waitingQueueCtx),
               channel: args.channel,
               kind: "text",
               bypassAssigneeCheck: true,
@@ -884,7 +915,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             autonomyMode: cfg.autonomyMode,
             text: studentNoticeAfterHandoff(
               gotHuman,
-              buildGenericQueueHandoffMessage(new Date(), policy, hours),            ),
+              buildGenericQueueHandoffMessage(new Date(), policy, hours),
+              queueCtxOf(policy, hours),
+            ),
             channel: args.channel,
             kind: "text",
             humanBehavior,
@@ -1026,6 +1059,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           userMessage: args.userMessage,
           policy,
         }) === "retencao";
+      const queue = queueCtxOf(policy, hours);
       const policyQueueText = retentionDept
         ? buildRetentionHandoffMessage(new Date(), policy, hours)
         : buildGenericQueueHandoffMessage(new Date(), policy, hours);
@@ -1047,7 +1081,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         ) {
           outbound = handoffText;
         } else {
-          outbound = buildAssignedConsultantNotice();
+          outbound = buildAssignedConsultantNotice(queue);
         }
       } else if (alreadyNoticed) {
         // Já avisou fila — não repete; só envia se o LLM trouxe info nova
@@ -1055,7 +1089,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (
           replyText.trim() &&
           !llmPromisesSoon &&
-          isHumanAttendanceWindowOpen(new Date(), hours) &&
+          isHumanAttendanceWindowOpen(new Date(), queue) &&
           !recentBot.some(
             (m) => m.content && isNearDuplicateBotText(handoffText, m.content),
           )
@@ -1063,7 +1097,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           outbound = handoffText;
         }
       } else if (
-        !isHumanAttendanceWindowOpen(new Date(), hours) ||
+        !isHumanAttendanceWindowOpen(new Date(), queue) ||
         llmPromisesSoon ||
         !llmCoversQueue
       ) {
@@ -1106,7 +1140,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       agentPack &&
       messageLooksLikeHumanQueueNotice(text) &&
       !justifiedHandoff &&
-      !userWantsHumanDistribution(args.userMessage)
+      !userWantsHumanDistribution(args.userMessage, queueCtxOf(policy, hours))
     ) {
       text =
         (packOps.isAvaOrDisciplinesIntent?.(args.userMessage)

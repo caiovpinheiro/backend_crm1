@@ -20,6 +20,7 @@ import {
   buildAssignedConsultantNotice,
   humanAttendanceStartHint,
   isHumanAttendanceWindowOpen,
+  type HumanQueueContext,
 } from "@/services/ai/human-queue-policy";
 
 /** `Message.messageType` gravados para áudio/voz nos canais WhatsApp. */
@@ -131,22 +132,27 @@ export async function detectInboundAudio(args: {
 export function buildAudioHandoffMessage(args: {
   assignedToHuman: boolean;
   now?: Date;
+  /** Horário e cópia configurados no agente. Ausente = default do código. */
+  queue?: HumanQueueContext;
 }): string {
   const now = args.now ?? new Date();
+  const queue = args.queue;
   if (args.assignedToHuman) {
-    return `Recebi seu áudio! 💛 ${buildAssignedConsultantNotice()}`;
+    return `Recebi seu áudio! 💛 ${buildAssignedConsultantNotice(queue)}`;
   }
-  if (isHumanAttendanceWindowOpen(now)) {
+  const custom = queue?.audioHandoffMessage?.trim();
+  if (custom) return custom;
+  if (isHumanAttendanceWindowOpen(now, queue)) {
     return (
       "Recebi seu áudio! 💛 Pra te ajudar do jeito certo, já pedi para um(a) " +
       "*consultor(a)* da equipe continuar com você por aqui. " +
       "Fica tranquila que seu pedido já está registrado, tá?"
     );
   }
-  const { startHour, dayLabel } = humanAttendanceStartHint(now);
+  const { startLabel, dayLabel } = humanAttendanceStartHint(now, queue);
   return (
     `Recebi seu áudio! 💛 Já registrei seu atendimento com a equipe. ` +
-    `O atendimento humano retoma às *${startHour}h* ${dayLabel} e ` +
+    `O atendimento humano retoma às *${startLabel}* ${dayLabel} e ` +
     `continuam com você por aqui, tá?`
   );
 }
