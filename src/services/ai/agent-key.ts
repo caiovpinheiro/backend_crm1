@@ -7,7 +7,7 @@
  */
 
 import { prismaBase } from "@/lib/prisma-base";
-import { decryptSecret } from "@/lib/secret-crypto";
+import { decryptSecret, hasCryptoSecret } from "@/lib/secret-crypto";
 
 const NO_KEY_MSG =
   "Este agente não tem chave OpenAI configurada. Cadastre a chave na tela do agente.";
@@ -33,7 +33,9 @@ export async function getAgentApiKey(agentId: string): Promise<string> {
     key = decryptSecret(row.openaiApiKeyEnc).trim();
   } catch {
     throw new Error(
-      "A chave OpenAI deste agente não pôde ser lida (ambiente com segredo de criptografia diferente). Re-cadastre a chave na tela do agente.",
+      hasCryptoSecret()
+        ? "A chave OpenAI deste agente não pôde ser lida (gravada com outro segredo de criptografia). Re-cadastre a chave na tela do agente."
+        : "Este processo não tem segredo de criptografia (ENCRYPTION_KEY/NEXTAUTH_SECRET ausente) e não consegue ler a chave OpenAI. Corrija o ambiente do serviço — não adianta re-cadastrar a chave.",
     );
   }
   if (!key) throw new Error(NO_KEY_MSG);

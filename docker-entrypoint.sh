@@ -66,6 +66,48 @@ fi
 APP_MODE="${APP_MODE:-api}"
 echo "[entrypoint] APP_MODE=${APP_MODE}"
 
+# Gate de criptografia. Segredos persistidos (chave OpenAI por agente,
+# token de canal, secret de MFA) são AES-256-GCM com chave derivada de
+# ENCRYPTION_KEY → NEXTAUTH_SECRET → AUTH_SECRET (src/lib/secret-crypto.ts).
+#
+# Um processo sem nenhuma dessas variáveis sobe normal e só falha quando
+# tenta LER um segredo — e o auth tag inválido produz um erro genérico que
+# aponta pro lugar errado ("re-cadastre a chave"). Foi o que aconteceu com
+# o worker da IA em DEV: a API tinha NEXTAUTH_SECRET, o worker não, e todo
+# run morria em "chave OpenAI não pôde ser lida".
+#
+# Abortar aqui torna o env var faltando visível no deploy. Escape hatch:
+# ALLOW_MISSING_ENCRYPTION_KEY=1.
+if [ -z "${ENCRYPTION_KEY}" ] && [ -z "${NEXTAUTH_SECRET}" ] && [ -z "${AUTH_SECRET}" ]; then
+  if [ -n "${ALLOW_MISSING_ENCRYPTION_KEY}" ]; then
+    echo "[entrypoint] !! aviso: sem segredo de criptografia; leitura de segredos vai falhar."
+  else
+    echo "[entrypoint] !! ERRO FATAL: nenhum segredo de criptografia definido."
+    echo "[entrypoint] !! Replique NEXTAUTH_SECRET (mesmo valor da API) neste"
+    echo "[entrypoint] !! serviço. Sem isso o processo não consegue ler chaves"
+    echo "[entrypoint] !! de API gravadas por outro serviço."
+    echo "[entrypoint] !! Cuidado: ENCRYPTION_KEY também é lido por crypto/secrets.ts,"
+    echo "[entrypoint] !! que exige base64 de 32 bytes. Só use ENCRYPTION_KEY se"
+    echo "[entrypoint] !! KEYRING_SECRET estiver setado ou o valor for 'openssl rand -base64 32'."
+    echo "[entrypoint] !! Para subir mesmo assim: ALLOW_MISSING_ENCRYPTION_KEY=1"
+    exit 1
+  fi
+else
+  # Fingerprint (não reversível) do segredo em uso. Serviços que logam fp
+  # diferente não conseguem ler os segredos um do outro.
+  echo "[entrypoint] cripto: $(node -e 'const c=require("node:crypto");const s=(process.env.ENCRYPTION_KEY||process.env.NEXTAUTH_SECRET||process.env.AUTH_SECRET).trim();const v=process.env.ENCRYPTION_KEY?"ENCRYPTION_KEY":process.env.NEXTAUTH_SECRET?"NEXTAUTH_SECRET":"AUTH_SECRET";console.log(v+" fp="+c.createHash("sha256").update(s).digest("hex").slice(0,12))')"
+
+  # ENCRYPTION_KEY é alias de KEYRING_SECRET em src/lib/crypto/secrets.ts,
+  # que exige 32 bytes em base64. Um valor arbitrário aqui derruba canais
+  # Meta / MFA sem relação aparente com o que foi mudado.
+  if [ -n "${ENCRYPTION_KEY}" ] && [ -z "${KEYRING_SECRET}" ]; then
+    if [ "$(printf %s "${ENCRYPTION_KEY}" | base64 -d 2>/dev/null | wc -c)" != "32" ]; then
+      echo "[entrypoint] !! aviso: ENCRYPTION_KEY não decodifica em 32 bytes e KEYRING_SECRET"
+      echo "[entrypoint] !! está vazio — tokens de canal e MFA vão falhar. Defina KEYRING_SECRET."
+    fi
+  fi
+fi
+
 # Migrations Prisma: rodam APENAS em APP_MODE=api. Workers no mesmo deploy
 # (worker-whatsapp, worker-leads) sobem em paralelo à API e podem ter race
 # condition se também tentarem aplicar migrations — basta um serviço aplicar.
