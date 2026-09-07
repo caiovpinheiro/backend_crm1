@@ -220,8 +220,22 @@ export function testModeStartedMessage(state: TestModeState): string {
   return `🧪 Modo de teste ligado: transferência, fila, negócio, etapa, template e encerramento estão desligados. Expira às ${clock(state.activeUntil)} (${TEST_MODE_TTL_MINUTES} min) ou com ${AI_TEST_COMMANDS.stop}.`;
 }
 
+/**
+ * `#iniciar` com o modo já ligado. Renovar em silêncio parece comando
+ * quebrado — o operador repete justamente quando não tem certeza se ainda
+ * está valendo, e é aí que a resposta mais importa.
+ */
+export function testModeRenewedMessage(state: TestModeState): string {
+  return `🧪 O modo de teste já estava ligado — prazo renovado. Agora expira às ${clock(state.activeUntil)} (mais ${TEST_MODE_TTL_MINUTES} min) ou com ${AI_TEST_COMMANDS.stop}.`;
+}
+
 export function testModeStoppedMessage(): string {
   return "🧪 Modo de teste desligado. A conversa voltou ao comportamento normal.";
+}
+
+/** `#fim` com o modo já desligado (ou expirado sozinho). */
+export function testModeAlreadyStoppedMessage(): string {
+  return "🧪 O modo de teste não estava ligado — a conversa já seguia no comportamento normal.";
 }
 
 // ── Comando vindo do WhatsApp ───────────────────────────────
@@ -285,10 +299,15 @@ export async function handleAiTestCommand(
 
   if (input.command === "stop") {
     if (current) await stopTestMode(input.conversationId);
-    await replyAsAgent(input, conversation, testModeStoppedMessage());
+    await replyAsAgent(
+      input,
+      conversation,
+      current ? testModeStoppedMessage() : testModeAlreadyStoppedMessage(),
+    );
     logTest("stopped", {
       conversationId: input.conversationId,
       userId: operator.userId,
+      wasActive: Boolean(current),
     });
     return true;
   }
@@ -301,18 +320,22 @@ export async function handleAiTestCommand(
   // ação explícita do operador autorizado — não é efeito do agente — e nunca
   // tira a conversa de um humano.
   const attached = await attachAiAgentIfFree(conversation);
+  const confirmation = current
+    ? testModeRenewedMessage(state)
+    : testModeStartedMessage(state);
   await replyAsAgent(
     input,
     { ...conversation, assignedTo: attached ?? conversation.assignedTo },
     attached
-      ? testModeStartedMessage(state)
-      : `${testModeStartedMessage(state)}\n\n⚠️ Esta conversa está com um atendente humano — o agente não vai responder até ela voltar para a IA.`,
+      ? confirmation
+      : `${confirmation}\n\n⚠️ Esta conversa está com um atendente humano — o agente não vai responder até ela voltar para a IA.`,
   );
   logTest("started", {
     conversationId: input.conversationId,
     userId: operator.userId,
     until: state.activeUntil.toISOString(),
     agentUserId: attached?.id ?? null,
+    renewed: Boolean(current),
   });
   return true;
 }
@@ -375,5 +398,8 @@ async function replyAsAgent(
     channel: input.channel === "messaging" ? "meta" : input.channel,
     kind: "text",
     bypassAssigneeCheck: true,
+    // Duas confirmações seguidas de `#iniciar` só diferem no horário: sem
+    // isto o anti-spam engole a segunda e o comando parece morto.
+    bypassDuplicateGuard: true,
   }).catch(() => null);
 }
