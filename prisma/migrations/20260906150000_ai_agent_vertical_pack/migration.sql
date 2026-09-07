@@ -1,4 +1,4 @@
-﻿-- verticalPack: existing agents → 'academic'; new agents → NULL (no DB default).
+-- verticalPack: existing agents → 'academic'; new agents → NULL (no DB default).
 ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "verticalPack" TEXT;
 
 UPDATE "ai_agent_configs" SET "verticalPack" = 'academic' WHERE "verticalPack" IS NULL;
