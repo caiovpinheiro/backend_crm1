@@ -201,15 +201,19 @@ describe("autorização por telefone", () => {
       messageId: "msg-4",
     });
 
+    const after = Date.now();
+
     expect(consumed).toBe(true);
     const write = conversationUpdate.mock.calls[0][0].data as {
       aiTestModeUntil: Date;
       aiTestModeById: string;
     };
     expect(write.aiTestModeById).toBe(OWNER.id);
-    const minutes = (write.aiTestModeUntil.getTime() - before) / 60_000;
-    expect(minutes).toBeGreaterThan(TEST_MODE_TTL_MINUTES - 1);
-    expect(minutes).toBeLessThanOrEqual(TEST_MODE_TTL_MINUTES);
+    const ttlMs = TEST_MODE_TTL_MINUTES * 60_000;
+    expect(write.aiTestModeUntil.getTime()).toBeGreaterThanOrEqual(
+      before + ttlMs,
+    );
+    expect(write.aiTestModeUntil.getTime()).toBeLessThanOrEqual(after + ttlMs);
 
     const sent = vi.mocked(sendAgentMessage).mock.calls[0]?.[0] as {
       text: string;
