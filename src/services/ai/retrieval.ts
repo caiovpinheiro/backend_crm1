@@ -173,8 +173,20 @@ export async function retrieveAgentKnowledge(
 }
 
 /**
+ * Precedência do que foi recuperado. Uma linha de "use para fundamentar"
+ * não disputa com as dezenas de linhas de transferência/roteamento que o
+ * resto do prompt traz: o modelo lia o bloco como material de apoio e
+ * encaminhava assunto que estava documentado na base.
+ *
+ * Genérica de propósito — nenhum tema, departamento ou vertical.
+ */
+export const KNOWLEDGE_PRECEDENCE_RULE =
+  "PRECEDÊNCIA: se as referências acima cobrem a pergunta, responda com elas nesta mensagem — não transfira nem encaminhe por esse assunto.";
+
+/**
  * Monta um bloco de texto pronto pra injetar no system prompt.
- * Retorna string vazia se nada relevante foi encontrado.
+ * Retorna string vazia se nada relevante foi encontrado — e sem trecho
+ * recuperado a regra de precedência também não entra no prompt.
  */
 export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
   if (chunks.length === 0) return "";
@@ -188,6 +200,7 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
     "",
     "BASE DE CONHECIMENTO (use para fundamentar respostas; cite [N] quando aplicável):",
     sections,
+    KNOWLEDGE_PRECEDENCE_RULE,
   ].join("\n");
 }
 
