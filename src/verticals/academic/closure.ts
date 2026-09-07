@@ -4,6 +4,7 @@
  * a automação "Encerramento" devolver o card ao funil acadêmico.
  */
 
+import { normalizeAutoClosePolicy } from "@/lib/ai-agents/piloting";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
@@ -435,7 +436,12 @@ export async function closeIfAgentFarewellEndsAttendance(args: {
     select: {
       status: true,
       contactId: true,
-      assignedTo: { select: { type: true } },
+      assignedTo: {
+        select: {
+          type: true,
+          aiAgentConfig: { select: { autoClosePolicy: true } },
+        },
+      },
     },
   });
   if (!conv || conv.status === "RESOLVED") {
@@ -443,6 +449,14 @@ export async function closeIfAgentFarewellEndsAttendance(args: {
   }
   // Já passou para humano: quem encerra é o consultor.
   if (conv.assignedTo?.type !== "AI") return { closed: false, reason: "NOT_AI" };
+  // Hook pós-envio: vale para qualquer rota de saída, então precisa
+  // respeitar "off" da pilotagem igual aos outros caminhos.
+  if (
+    normalizeAutoClosePolicy(conv.assignedTo.aiAgentConfig?.autoClosePolicy)
+      .mode === "off"
+  ) {
+    return { closed: false, reason: "AUTO_CLOSE_OFF" };
+  }
 
   const lastInbound = await prisma.message.findFirst({
     where: {

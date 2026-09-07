@@ -32,6 +32,7 @@ import {
   renderSystemPrompt,
 } from "@/lib/ai-agents/system-prompt";
 import {
+  buildAutoClosePromptBlock,
   normalizeAutoClosePolicy,
   normalizeOutputStyle,
   normalizeQualificationQuestions,
@@ -332,6 +333,9 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       [
         agent.systemPromptOverride?.trim(),
         steeringRules,
+        // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
+        // ele ainda tentava `close_conversation` e levava erro da tool.
+        buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
         examModalityRules,
         curriculumRules,
       ]

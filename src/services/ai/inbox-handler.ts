@@ -61,6 +61,7 @@ import {
 } from "@/lib/meta-whatsapp/client";
 import {
   computeTypingDelayMs,
+  normalizeAutoClosePolicy,
   normalizeBusinessHours,
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
@@ -208,9 +209,25 @@ async function closeAfterFarewellIfNeeded(args: {
   }
   const gate = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
-    select: { status: true, assignedTo: { select: { type: true } } },
+    select: {
+      status: true,
+      assignedTo: {
+        select: {
+          type: true,
+          aiAgentConfig: { select: { autoClosePolicy: true } },
+        },
+      },
+    },
   });
   if (gate?.status === "RESOLVED" || gate?.assignedTo?.type !== "AI") return;
+  // "off" na pilotagem tem que valer também aqui — esta rota fecha depois
+  // da despedida do agente, sem passar pela tool nem pelo intercepto.
+  if (
+    normalizeAutoClosePolicy(gate.assignedTo.aiAgentConfig?.autoClosePolicy)
+      .mode === "off"
+  ) {
+    return;
+  }
   const closed = await ops.closeAiOnlyConversation?.({
     conversationId: args.conversationId,
     contactId: args.contactId,

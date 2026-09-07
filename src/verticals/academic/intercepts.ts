@@ -63,7 +63,11 @@ import {
   isIdleNudgeContent,
   userWantsSoftAiClose,
 } from "@/services/ai/idle-followup";
-import { matchHandoffKeyword, renderTemplate } from "@/lib/ai-agents/piloting";
+import {
+  matchHandoffKeyword,
+  normalizeAutoClosePolicy,
+  renderTemplate,
+} from "@/lib/ai-agents/piloting";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 
@@ -870,10 +874,25 @@ export async function runAcademicInterceptPipeline(
               .map((m) => m.content ?? "")
               .filter((c) => c && c !== args.userMessage),
           });
+          // Pilotagem do encerramento (tela do agente). Até aqui só a tool
+          // `close_conversation` olhava o mode; o caminho determinístico
+          // abaixo fechava mesmo com "off" configurado.
+          const autoClose = normalizeAutoClosePolicy(cfg.autoClosePolicy);
+          const closeKeyword = matchHandoffKeyword(
+            args.userMessage ?? "",
+            autoClose.keywords,
+          );
           const wantsClose =
-            closeDecision.close ||
-            userWantsAiConversationClose(args.userMessage) ||
-            (afterIdleNudge && userWantsSoftAiClose(args.userMessage));
+            autoClose.mode === "off"
+              ? false
+              : autoClose.mode === "explicit"
+                ? // Só pedido explícito ou keyword — "obrigado"/despedida
+                  // não contam, conforme o bloco de prompt do modo.
+                  !!closeKeyword || userWantsAiConversationClose(args.userMessage)
+                : !!closeKeyword ||
+                  closeDecision.close ||
+                  userWantsAiConversationClose(args.userMessage) ||
+                  (afterIdleNudge && userWantsSoftAiClose(args.userMessage));
           if (wantsClose) {
             const closeGate = await prisma.conversation.findUnique({
               where: { id: args.conversationId },
@@ -884,19 +903,34 @@ export async function runAcademicInterceptPipeline(
               },
             });
             const wrapUpClose =
-              closeDecision.reason === "thanks_wrapup" ||
-              closeDecision.reason === "thanks_after_defer";
+              !closeKeyword &&
+              (closeDecision.reason === "thanks_wrapup" ||
+                closeDecision.reason === "thanks_after_defer");
             const canAiClose =
               closeGate?.status !== "RESOLVED" &&
               closeGate?.assignedTo?.type === "AI" &&
               (closeGate.hasHumanReply === false || wrapUpClose);
             if (canAiClose) {
-              const closeText = afterIdleNudge
-                ? buildSoftCloseAfterNudgeReply()
-                : closeDecision.reason === "thanks_wrapup" ||
-                    closeDecision.reason === "thanks_after_defer"
-                  ? buildNaturalAttendanceCloseReply()
-                  : "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂";
+              // `autoClosePolicy.message` vence os textos do código. Vazio
+              // = frase padrão, que varia com o motivo do encerramento.
+              const closeContact = autoClose.message
+                ? await prisma.contact.findUnique({
+                    where: { id: args.contactId },
+                    select: { name: true },
+                  })
+                : null;
+              const closeText =
+                (autoClose.message
+                  ? renderTemplate(autoClose.message, {
+                      contactName: closeContact?.name ?? null,
+                    })
+                  : null) ??
+                (afterIdleNudge
+                  ? buildSoftCloseAfterNudgeReply()
+                  : closeDecision.reason === "thanks_wrapup" ||
+                      closeDecision.reason === "thanks_after_defer"
+                    ? buildNaturalAttendanceCloseReply()
+                    : "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂");
               await sendAgentMessage({
                 conversationId: args.conversationId,
                 contactId: args.contactId,
