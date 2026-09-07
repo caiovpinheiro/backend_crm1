@@ -18,6 +18,7 @@ export async function GET(
       const result = await getCampaignRecipients({
         campaignId: id,
         status: searchParams.get("status") ?? undefined,
+        errorCode: searchParams.get("errorCode"),
         page: Number(searchParams.get("page")) || 1,
         perPage: Number(searchParams.get("perPage")) || 50,
       });

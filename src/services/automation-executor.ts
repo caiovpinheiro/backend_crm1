@@ -448,6 +448,7 @@ async function resolveOutboundAuthor(
   authorType: "bot" | "human";
   senderName: string;
   asHuman: boolean;
+  userId?: string | null;
 }> {
   const sendAs = sendAsRaw === "assignee" ? "assignee" : "bot";
   if (sendAs !== "assignee" || !conversationId) {
@@ -466,6 +467,7 @@ async function resolveOutboundAuthor(
       authorType: "human",
       senderName: assignee.name?.trim() || fallbackSenderName,
       asHuman: true,
+      userId: assignee.id,
     };
   }
 
@@ -2708,6 +2710,7 @@ async function executeStep(
               m.scheduleProcessPendingDistributionQueue({
                 trigger: "capacity_released",
                 delayMs: 400,
+                userId: author.userId ?? null,
               }),
             )
             .catch(() => {});

@@ -11,14 +11,14 @@
  * Uso (backend_crm1, com DATABASE_URL):
  *   npx tsx src/scripts/seed-agent-steering.ts [organizationId]
  */
-import { PrismaClient } from "@prisma/client";
-
-import {
-  ACADEMIC_ATENDIMENTO_RULES,
-  ACADEMIC_CONFIDENCE_RULES,
-  ACADEMIC_MEDIA_CAPABILITY_RULES,
-} from "../lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "../verticals";
 import { getArchetype } from "../lib/ai-agents/archetypes";
+
+const academic = getVerticalPack("academic")!;
+const ACADEMIC_ATENDIMENTO_RULES = academic.constants.atendimentoRules;
+const ACADEMIC_CONFIDENCE_RULES = academic.constants.confidenceRules;
+const ACADEMIC_MEDIA_CAPABILITY_RULES = academic.constants.mediaCapabilityRules;
+
 
 /** Tools que o runner injetava à força no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [

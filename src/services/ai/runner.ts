@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Runner principal do agente de IA.
  *
  * Um "run" é uma invocação completa do agente respondendo a um ponto
@@ -25,25 +25,18 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { runWithActor } from "@/lib/request-context";
-import { estimateCost } from "@/lib/ai-agents/pricing";
+import { getVerticalPack } from "@/verticals";
+
 import {
+  fallbackSteeringRules,
+  renderSystemPrompt,
+} from "@/lib/ai-agents/system-prompt";
+import {
+  normalizeAutoClosePolicy,
   normalizeOutputStyle,
   normalizeQualificationQuestions,
-  type OutputStyle,
-  type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
-import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
-import {
-  ACADEMIC_ATENDIMENTO_RULES,
-  ACADEMIC_CONFIDENCE_RULES,
-  ACADEMIC_MEDIA_CAPABILITY_RULES,
-  ACADEMIC_CURRICULUM_TCE_RULES,
-  academicExamModalityRules,
-  formatCanonicalPortalAccessHint,
-  formatExamAccessHint,
-  formatParticipationCertificateHint,
-  formatPoloAddressesHint,
-} from "@/lib/ai-agents/academic-atendimento-prompt";
+import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
   formatCampaignDispatchBlock,
   hydrateOutboundTemplateContent,
@@ -52,7 +45,9 @@ import {
 import { formatLocalClockHint } from "@/services/ai/idle-followup";
 import {
   formatMessageModelsBlock,
+  pickFollowUpMedia,
   retrieveRelevantMessageModels,
+  type AgentFaqMedia,
 } from "@/services/ai/message-models-retrieval";
 import {
   formatRetrievalBlock,
@@ -62,9 +57,27 @@ import {
   normalizeInboxPolicy,
   normalizeToolConfig,
 } from "@/lib/ai-agents/steering";
+import {
+  behaviorSliceFromAgent,
+  hashAgentBehaviorConfig,
+} from "@/lib/ai-agents/observability";
+import { estimateCost } from "@/lib/ai-agents/pricing";
+import {
+  DEFAULT_CHAT_MODEL,
+  generateWithTools,
+} from "@/services/ai/provider";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 
 export type RunSource = "inbox" | "playground" | "automation" | "api";
+
+/** Limite do tool-loop — NÃO alterar sem decisão explícita (Onda 0 só observa). */
+export const AGENT_MAX_STEPS = 8;
+
+export {
+  fallbackSteeringRules,
+  renderSystemPrompt,
+  type RenderArgs,
+} from "@/lib/ai-agents/system-prompt";
 
 export type RunArgs = {
   agentId: string;
@@ -78,6 +91,9 @@ export type RunArgs = {
   /// Turns anteriores (para manter contexto). Se omitido e tiver
   /// conversationId, o runner busca automaticamente as últimas 10.
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  /// `ConversationTurn.id` que originou o run (Turn Manager). Só gravado
+  /// no `AIAgentRun` — não altera o comportamento do agente.
+  turnId?: string | null;
 };
 
 export type RunResult = {
@@ -89,26 +105,12 @@ export type RunResult = {
   costUsd: number;
   autonomyMode: AIAgentAutonomy;
   toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
+  /// Tutorial do modelo interno casado — o inbox envia depois do texto.
+  followUpMedia?: AgentFaqMedia[];
   error?: string;
 };
 
 const MAX_HISTORY = 10;
-
-/**
- * Regras de atendimento usadas quando `AIAgentConfig.steeringRules`
- * está vazio (agentes criados antes da pilotagem pelo CRM). Uma vez
- * que o consultor salva as regras na tela, o banco manda — inclusive
- * nos blocos de mídia/confiança, que passam a ser editáveis.
- */
-export function fallbackSteeringRules(archetype: string): string {
-  if (archetype !== "ATENDIMENTO") return "";
-  return [
-    ACADEMIC_ATENDIMENTO_RULES,
-    ACADEMIC_CURRICULUM_TCE_RULES,
-    ACADEMIC_MEDIA_CAPABILITY_RULES,
-    ACADEMIC_CONFIDENCE_RULES,
-  ].join("\n\n");
-}
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   const agent = await prisma.aIAgentConfig.findUnique({
@@ -144,17 +146,29 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     }
   }
 
+  const configHash = hashAgentBehaviorConfig(behaviorSliceFromAgent(agent));
+
   const run = await prisma.aIAgentRun.create({
     data: withOrgFromCtx({
       agentId: agent.id,
       source: args.source,
       conversationId: args.conversationId ?? null,
       contactId: args.contactId ?? null,
+      turnId: args.turnId ?? null,
       status: "RUNNING" as const,
+      configHash,
+      llmInvoked: true,
+      interceptsFired: [] as unknown as Prisma.InputJsonValue,
+      stepCountReached: false,
     }),
   });
 
   try {
+    // Chave OpenAI do agente (obrigatória — CRM multi-tenant, sem chave
+    // global). Lança aqui → cai no catch e o run vira FAILED com mensagem
+    // acionável ("cadastre a chave na tela do agente").
+    const agentApiKey = await getAgentApiKey(agent.id);
+
     const contact = args.contactId
       ? await prisma.contact.findUnique({
           where: { id: args.contactId },
@@ -193,6 +207,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const retrievedChunks = await retrieveRelevantChunks(
       agent.id,
       args.userMessage,
+      agentApiKey,
       4,
     ).catch((err) => {
       console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
@@ -205,28 +220,37 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
-    const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
-    // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
-    // de retenção fica em message-models-retrieval.
-    const messageModelsBlock = isAcademicAttendance
-      ? formatMessageModelsBlock(
-          await retrieveRelevantMessageModels(args.userMessage, 3).catch(
-            (err) => {
-              console.warn(
-                `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
-              );
-              return [];
-            },
-          ),
+    const pack = getVerticalPack(agent.verticalPack);
+    const packOps = pack?.ops ?? {};
+    // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
+    const hasPack = Boolean(pack);
+    // Modelos internos (tela Internos): preserva comportamento acadêmico
+    // para agentes com verticalPack=academic (backfill ATENDIMENTO).
+    const useMessageModelsRag = pack?.id === "academic";
+    const retrievedModels = useMessageModelsRag
+      ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
+          (err) => {
+            console.warn(
+              `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
+            );
+            return [];
+          },
         )
+      : [];
+    const messageModelsBlock = useMessageModelsRag
+      ? formatMessageModelsBlock(retrievedModels)
       : "";
+    const followUpMedia = pickFollowUpMedia(retrievedModels);
     // Últimos turnos: "quero sim" herda o assunto (portal/AVA) da pergunta anterior.
     const recentContextForHint = history
       .slice(-4)
       .map((m) => m.content)
       .join("\n");
-    const portalAccessHint = isAcademicAttendance
-      ? formatCanonicalPortalAccessHint(args.userMessage, recentContextForHint)
+    const portalAccessHint = hasPack
+      ? (packOps.formatCanonicalPortalAccessHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
     const campaignCtx = await loadLastCampaignDispatchContext(
       args.conversationId ?? null,
@@ -240,30 +264,45 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // prova presencial, a org grava `ai.exams.onlineOnly=false` em
     // `PUT /api/settings/org` — sem deploy. Falha de contexto/org cai no
     // default seguro (online).
-    const examsOnlineOnly = isAcademicAttendance
+    const examsOnlineOnly = hasPack
       ? await getOrgSettingBool("ai.exams.onlineOnly", true).catch(() => true)
       : true;
-    const examAccessHint = isAcademicAttendance
-      ? formatExamAccessHint(
+    const examAccessHint = hasPack
+      ? (packOps.formatExamAccessHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
             .filter(Boolean)
             .join("\n"),
           examsOnlineOnly,
-        )
+        ) ?? "")
       : "";
-    const poloAddressesHint = isAcademicAttendance
-      ? formatPoloAddressesHint(args.userMessage, recentContextForHint)
+    const poloAddressesHint = hasPack
+      ? (packOps.formatPoloAddressesHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
       : "";
-    const certificateHint = isAcademicAttendance
-      ? formatParticipationCertificateHint(
+    const certificateHint = hasPack
+      ? (packOps.formatParticipationCertificateHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
             .filter(Boolean)
             .join("\n"),
-        )
+        ) ?? "")
       : "";
-    const clockHint = isAcademicAttendance ? formatLocalClockHint() : "";
+    const firstAccessHint = hasPack
+      ? (packOps.formatFirstAccessHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
+      : "";
+    const passwordResetHint = hasPack
+      ? (packOps.formatPasswordResetHint?.(
+          args.userMessage,
+          recentContextForHint,
+        ) ?? "")
+      : "";
+    const clockHint = hasPack ? formatLocalClockHint() : "";
     const retrievalWithModels = [
       retrievalBlock,
       messageModelsBlock,
@@ -271,6 +310,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       examAccessHint,
       poloAddressesHint,
       certificateHint,
+      firstAccessHint,
+      passwordResetHint,
       campaignDispatchBlock,
       clockHint,
     ]
@@ -279,16 +320,28 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     const runtimeTools = agent.enabledTools;
     const steeringRules =
-      agent.steeringRules?.trim() || fallbackSteeringRules(agent.archetype);
+      agent.steeringRules?.trim() ||
+      fallbackSteeringRules(agent.archetype, agent.verticalPack);
+    const curriculumRules = hasPack
+      ? (pack?.constants.curriculumTceRules ?? "")
+      : "";
+    const examModalityRules = hasPack
+      ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
+      : "";
     const runtimeOverride =
       [
         agent.systemPromptOverride?.trim(),
         steeringRules,
-        isAcademicAttendance ? academicExamModalityRules(examsOnlineOnly) : "",
-        isAcademicAttendance ? ACADEMIC_CURRICULUM_TCE_RULES : "",
+        examModalityRules,
+        curriculumRules,
       ]
         .filter(Boolean)
         .join("\n\n") || null;
+
+    const org = await prisma.organization.findUnique({
+      where: { id: agent.organizationId },
+      select: { name: true },
+    });
 
     const systemPrompt = renderSystemPrompt({
       template: agent.systemPromptTemplate,
@@ -304,6 +357,17 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       retrievalBlock: retrievalWithModels,
       qualificationQuestions,
       outputStyle,
+      templateVars: {
+        agent_name: agent.user?.name ?? null,
+        company_name: org?.name ?? null,
+        deal_products: null,
+        last_human_interaction: null,
+      },
+    });
+
+    await prisma.aIAgentRun.update({
+      where: { id: run.id },
+      data: { systemPromptSnapshot: systemPrompt },
     });
 
     const ctx: RunContext = {
@@ -313,7 +377,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
-      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy),
+      verticalPack: agent.verticalPack ?? null,
+      inboxPolicy: normalizeInboxPolicy(
+        agent.inboxPolicy,
+        agent.verticalPack,
+      ),
+      autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
     };
 
     const toolSet = buildToolSet(
@@ -337,15 +406,34 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       data: withOrgFromCtx({ runId: run.id, role: "user", content: args.userMessage }),
     });
 
+    const configuredMaxSteps = Number(
+      (agent as { maxSteps?: number | null }).maxSteps,
+    );
+    const maxSteps =
+      Number.isFinite(configuredMaxSteps) && configuredMaxSteps > 0
+        ? configuredMaxSteps
+        : AGENT_MAX_STEPS;
+
     const result = await generateWithTools({
       model: agent.model || DEFAULT_CHAT_MODEL,
+      apiKey: agentApiKey,
       system: systemPrompt,
       messages,
       tools: Object.keys(toolSet).length > 0 ? toolSet : undefined,
       temperature: agent.temperature,
       maxOutputTokens: agent.maxTokens,
-      maxSteps: 8,
+      maxSteps,
     });
+
+    const stepCountReached = result.steps >= maxSteps;
+    if (stepCountReached) {
+      console.warn("[ai] maxSteps reached", {
+        agentId: agent.id,
+        conversationId: args.conversationId ?? null,
+        steps: result.steps,
+        maxSteps,
+      });
+    }
 
     for (const call of result.toolCalls) {
       await prisma.aIAgentMessage.create({
@@ -392,6 +480,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         outputTokens: result.outputTokens,
         costUsd,
         finishedAt: new Date(),
+        systemPromptSnapshot: systemPrompt,
+        configHash,
+        llmInvoked: true,
+        stepCountReached,
       },
     });
 
@@ -408,6 +500,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         args: c.args,
         result: c.result,
       })),
+      followUpMedia: status === "COMPLETED" ? followUpMedia : [],
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -471,169 +564,4 @@ async function loadHistoryFromConversation(
     }),
   );
   return hydrated;
-}
-type RenderArgs = {
-  template: string;
-  override: string | null;
-  productPolicy: string | null;
-  hasProductSearch: boolean;
-  hasEnrollmentLookup: boolean;
-  tone: string;
-  language: string;
-  autonomyMode: AIAgentAutonomy;
-  contact: {
-    name: string | null;
-    email: string | null;
-    phone: string | null;
-    lifecycleStage: string | null;
-    tags: Array<{ tag: { name: string } }>;
-  } | null;
-  deal: {
-    title: string;
-    value: unknown;
-    stage: {
-      name: string;
-      pipeline?: { name: string } | null;
-    } | null;
-  } | null;
-  retrievalBlock: string;
-  qualificationQuestions: QualificationQuestion[];
-  outputStyle: OutputStyle;
-};
-
-function renderSystemPrompt(args: RenderArgs): string {
-  const lines: string[] = [];
-  lines.push(args.template);
-  lines.push("");
-  lines.push(`Idioma: ${args.language}. Tom: ${args.tone}.`);
-
-  if (args.autonomyMode === "DRAFT") {
-    lines.push(
-      "IMPORTANTE: você está em modo RASCUNHO. Sua resposta será revisada por um humano antes de ser enviada. Seja conciso.",
-    );
-  }
-
-  if (args.contact) {
-    lines.push("");
-    lines.push("CONTATO:");
-    if (args.contact.name) lines.push(`- Nome: ${args.contact.name}`);
-    if (args.contact.email) lines.push(`- Email: ${args.contact.email}`);
-    if (args.contact.phone) lines.push(`- Telefone: ${args.contact.phone}`);
-    if (args.contact.lifecycleStage)
-      lines.push(`- Estágio do ciclo: ${args.contact.lifecycleStage}`);
-    const tags = args.contact.tags
-      .map((t) => t.tag.name)
-      .filter(Boolean);
-    if (tags.length) lines.push(`- Tags: ${tags.join(", ")}`);
-  }
-
-  if (args.deal) {
-    lines.push("");
-    lines.push("DEAL ATUAL:");
-    lines.push(`- Título: ${args.deal.title}`);
-    if (args.deal.value) lines.push(`- Valor: R$ ${String(args.deal.value)}`);
-    if (args.deal.stage?.pipeline?.name)
-      lines.push(`- Funil: ${args.deal.stage.pipeline.name}`);
-    if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
-    lines.push(
-      "- Funil/Estágio é só contexto. NÃO transfira só por causa do funil — atenda primeiro; use departamento certo só quando for distribuir de verdade.",
-    );
-  }
-
-  // Só lembra da tool se ela estiver ligada no CRM — desligar a tool e
-  // continuar pedindo que o agente a chame gerava alucinação de matrícula.
-  if (args.hasEnrollmentLookup) {
-    lines.push("");
-    lines.push(
-      "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
-    );
-  }
-
-  if (args.override?.trim()) {
-    lines.push("");
-    lines.push("INSTRUÇÕES ESPECÍFICAS:");
-    lines.push(args.override.trim());
-  }
-
-  if (args.outputStyle === "conversational") {
-    lines.push("");
-    lines.push("ESTILO DE RESPOSTA (regra dura):");
-    lines.push(
-      "- Você está escrevendo no WhatsApp. Responda como atendente humano, em texto corrido. Nunca use listas com bullets, tabelas, cabeçalhos em markdown, ou frases template tipo 'Aqui estão os detalhes:'.",
-    );
-    lines.push(
-      "- PROIBIDO: formato de ficha técnica como '*Curso:* X', '*Modalidade:* Y', '*Duração:* Z' com ícones/emojis por linha. Isso soa robótico.",
-    );
-    lines.push(
-      "- Use no máximo 1–2 emojis discretos na mensagem inteira, e só se combinar com o tom.",
-    );
-    lines.push(
-      "- Prefira 1 a 4 frases curtas. Pode terminar com UMA pergunta curta **só se** ainda faltar um dado para ajudar.",
-    );
-    lines.push(
-      "- Se o aluno já pediu o passo a passo/site/link ou disse sim/pode ser/envie: ENTREGUE a orientação (com link das refs se houver). NÃO termine de novo perguntando se ele quer as instruções.",
-    );
-    lines.push(
-      "- PROIBIDO prometer ou fingir envio de vídeo/arquivo (ex.: 'vou te enviar o vídeo', '[Envio do vídeo]'). Sem URL nas refs, só texto; com URL, cole o link.",
-    );
-  }
-
-  if (args.qualificationQuestions.length > 0) {
-    lines.push("");
-    lines.push(
-      "QUALIFICAÇÃO — informações que você DEVE coletar antes de encerrar a conversa ou transferir para humano:",
-    );
-    for (const q of args.qualificationQuestions) {
-      const hint = q.hint ? ` (formato: ${q.hint})` : "";
-      lines.push(`- ${q.question}${hint}`);
-    }
-    lines.push(
-      "Regras: não peça tudo de uma vez. Vá coletando naturalmente no fluxo da conversa, uma pergunta por vez quando fizer sentido. NÃO chame `transfer_to_human` enquanto tiver informação pendente dessa lista, salvo se o cliente pedir explicitamente pra falar com atendente ou demonstrar irritação.",
-    );
-  }
-
-  if (args.hasProductSearch) {
-    lines.push("");
-    lines.push("CONSULTA DE PRODUTOS — regras obrigatórias:");
-    lines.push(
-      "- Sempre que o cliente mencionar um produto, curso, serviço, preço ou característica, chame `search_products` ANTES de responder. Nunca invente preço, duração, modalidade ou condição.",
-    );
-    lines.push(
-      "- Se a busca não encontrar, diga naturalmente que vai confirmar com o time e ofereça transferir pra um atendente. Não force uma resposta.",
-    );
-    lines.push("");
-    lines.push("COMO APRESENTAR O PRODUTO (MUITO IMPORTANTE):");
-    lines.push(
-      "- Responda como um atendente humano no WhatsApp, não como uma ficha técnica. O objetivo é avançar a conversa, não cuspir dados.",
-    );
-    lines.push(
-      "- PROIBIDO: listas com bullets de atributos (ex.: '*Nome:* ... *Preço:* ... *Duração:* ...'), markdown pesado, frases como 'Aqui estão os detalhes:'. Isso assusta o cliente e soa robótico.",
-    );
-    lines.push(
-      "- Responda em 1 a 3 frases curtas, em texto corrido, misturando as informações naturalmente. Ex.: 'O curso de Administração é EAD, dura 4 anos (8 semestres) e sai por R$ 145 por mês — e agora ainda tem 45% de desconto ativo. Quer que eu te ajude a seguir com a inscrição?'",
-    );
-    lines.push(
-      "- Sempre termine com UMA única pergunta curta que faça a conversa avançar (ex.: 'quer que eu te mande o link de inscrição?', 'faz sentido pra você começar em que mês?'). Evite múltiplas perguntas na mesma mensagem.",
-    );
-    lines.push(
-      "- Só detalhe (em texto corrido, ainda sem bullets) mais atributos se o cliente pedir explicitamente. Em dúvida, mostre o essencial e pergunte o que mais ele quer saber.",
-    );
-    lines.push(
-      "- Use no máximo 1 emoji discreto quando fizer sentido pelo tom configurado. Não repita emojis.",
-    );
-    lines.push(
-      "- Dados técnicos da tool (`priceFormatted`, `customFields`, etc.) servem como FONTE, não como TEMPLATE de saída. Transforme em fala natural.",
-    );
-    if (args.productPolicy?.trim()) {
-      lines.push("");
-      lines.push("POLÍTICA ADICIONAL DE APRESENTAÇÃO DE PRODUTOS (do operador):");
-      lines.push(args.productPolicy.trim());
-    }
-  }
-
-  if (args.retrievalBlock) {
-    lines.push(args.retrievalBlock);
-  }
-
-  return lines.join("\n");
 }

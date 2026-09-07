@@ -7,7 +7,62 @@ import type {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { resolveCampaignSendRate } from "@/lib/campaign-send-rate";
+import { csvDate, toCsv } from "@/lib/csv-stringify";
+import {
+  describeMetaError,
+  extractMetaErrorCode,
+  isMetaNonConversationErrorCode,
+} from "@/lib/meta-whatsapp/error-catalog";
 import type { SegmentFilters } from "./segments";
+
+export type FailureErrorCodeFilter = number | "other";
+
+const EXPORT_MAX_ROWS = 50_000;
+
+function parseErrorCodeFilter(
+  raw: string | null | undefined,
+): FailureErrorCodeFilter | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  if (value === "other") return "other";
+  const code = Number(value);
+  return Number.isFinite(code) ? code : undefined;
+}
+
+function recipientListWhere(params: {
+  campaignId: string;
+  status?: string;
+  errorCode?: FailureErrorCodeFilter;
+}): Prisma.CampaignRecipientWhereInput {
+  const where: Prisma.CampaignRecipientWhereInput = {
+    campaignId: params.campaignId,
+  };
+  if (params.status) where.status = params.status as never;
+  if (params.errorCode === "other") {
+    where.NOT = {
+      OR: [
+        { errorMessage: { contains: "(code ", mode: "insensitive" } },
+        { errorMessage: { contains: "(cód.", mode: "insensitive" } },
+      ],
+    };
+  } else if (typeof params.errorCode === "number") {
+    where.OR = [
+      {
+        errorMessage: {
+          contains: `(code ${params.errorCode}`,
+          mode: "insensitive",
+        },
+      },
+      {
+        errorMessage: {
+          contains: `(cód. ${params.errorCode}`,
+          mode: "insensitive",
+        },
+      },
+    ];
+  }
+  return where;
+}
 
 export type GetCampaignsParams = {
   status?: CampaignStatus;
@@ -219,18 +274,50 @@ export async function getCampaignStats(id: string) {
   const pendingCount =
     campaign.totalRecipients - campaign.sentCount - campaign.failedCount;
 
-  // Top motivos de falha (agrupado por errorMessage) para a UI de monitoramento.
+  // Top motivos de falha agrupados pelo código Meta (não pelo texto cru).
   const failureGroups = await prisma.campaignRecipient.groupBy({
     by: ["errorMessage"],
     where: { campaignId: id, status: "FAILED" },
     _count: { _all: true },
-    orderBy: { _count: { errorMessage: "desc" } },
-    take: 10,
   });
-  const failureReasons = failureGroups.map((g) => ({
-    reason: g.errorMessage ?? "Desconhecido",
-    count: g._count._all,
-  }));
+  const aggregated = new Map<
+    string,
+    {
+      reason: string;
+      count: number;
+      code: number | null;
+      action: string | null;
+      kind: "eligibility" | "operational";
+    }
+  >();
+  let eligibilityFailedCount = 0;
+  for (const g of failureGroups) {
+    const raw = g.errorMessage ?? "Desconhecido";
+    const code = extractMetaErrorCode(raw);
+    const catalog = code != null ? describeMetaError(code)?.reason ?? "" : "";
+    const reason =
+      catalog ||
+      raw.replace(/\s*\((?:code|c[oó]d\.)\s*\d+[^)]*\)\s*$/i, "").trim() ||
+      raw;
+    const key = code != null ? `code:${code}` : raw;
+    const prev = aggregated.get(key);
+    const action = code != null ? describeMetaError(code)?.action ?? null : null;
+    const kind = isMetaNonConversationErrorCode(code)
+      ? "eligibility"
+      : "operational";
+    if (prev) prev.count += g._count._all;
+    else aggregated.set(key, { reason, count: g._count._all, code, action, kind });
+    if (isMetaNonConversationErrorCode(code)) {
+      eligibilityFailedCount += g._count._all;
+    }
+  }
+  const failureReasons = [...aggregated.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+  const operationalFailedCount = Math.max(
+    0,
+    campaign.failedCount - eligibilityFailedCount,
+  );
 
   const pct = (n: number) =>
     campaign.sentCount > 0 ? Math.round((n / campaign.sentCount) * 100) : 0;
@@ -242,6 +329,8 @@ export async function getCampaignStats(id: string) {
     readRate: pct(campaign.readCount),
     replyRate: pct(campaign.repliedCount),
     failureReasons,
+    eligibilityFailedCount,
+    operationalFailedCount,
   };
 }
 
@@ -291,6 +380,7 @@ export async function markCampaignReplyByContact(
 export type GetRecipientsParams = {
   campaignId: string;
   status?: string;
+  errorCode?: string | null;
   page?: number;
   perPage?: number;
 };
@@ -299,11 +389,11 @@ export async function getCampaignRecipients(params: GetRecipientsParams) {
   const page = Math.max(1, params.page ?? 1);
   const perPage = Math.min(100, Math.max(1, params.perPage ?? 50));
   const skip = (page - 1) * perPage;
-
-  const where: Prisma.CampaignRecipientWhereInput = {
+  const where = recipientListWhere({
     campaignId: params.campaignId,
-  };
-  if (params.status) where.status = params.status as never;
+    status: params.status,
+    errorCode: parseErrorCodeFilter(params.errorCode),
+  });
 
   const [items, total] = await Promise.all([
     prisma.campaignRecipient.findMany({
@@ -319,6 +409,74 @@ export async function getCampaignRecipients(params: GetRecipientsParams) {
   ]);
 
   return { items, total, page, perPage, totalPages: Math.ceil(total / perPage) || 1 };
+}
+
+export type ExportRecipientsParams = {
+  campaignId: string;
+  status?: string;
+  errorCode?: string | null;
+};
+
+export async function listCampaignRecipientsForExport(
+  params: ExportRecipientsParams,
+) {
+  return prisma.campaignRecipient.findMany({
+    where: recipientListWhere({
+      campaignId: params.campaignId,
+      status: params.status,
+      errorCode: parseErrorCodeFilter(params.errorCode),
+    }),
+    take: EXPORT_MAX_ROWS,
+    orderBy: { createdAt: "desc" },
+    select: {
+      status: true,
+      errorMessage: true,
+      sentAt: true,
+      contact: { select: { id: true, name: true, phone: true } },
+    },
+  });
+}
+
+export function campaignRecipientsToCsv(
+  rows: Awaited<ReturnType<typeof listCampaignRecipientsForExport>>,
+): string {
+  const headers = [
+    "Nome",
+    "Telefone",
+    "ContatoId",
+    "Status",
+    "Codigo",
+    "Motivo",
+    "Erro",
+    "EnviadoEm",
+  ];
+  return toCsv(
+    headers,
+    rows.map((row) => {
+      const code = extractMetaErrorCode(row.errorMessage);
+      const motivo =
+        code != null ? describeMetaError(code)?.reason ?? "" : "";
+      return {
+        Nome: row.contact.name,
+        Telefone: row.contact.phone ?? "",
+        ContatoId: row.contact.id,
+        Status: row.status,
+        Codigo: code ?? "",
+        Motivo: motivo,
+        Erro: row.errorMessage ?? "",
+        EnviadoEm: csvDate(row.sentAt),
+      };
+    }),
+  );
+}
+
+export function campaignRecipientPhones(
+  rows: Awaited<ReturnType<typeof listCampaignRecipientsForExport>>,
+): string {
+  return rows
+    .map((row) => row.contact.phone?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**

@@ -9,6 +9,8 @@ import {
   updateAIAgent,
   type UpdateAIAgentInput,
 } from "@/services/ai-agents";
+import { AgentReadinessError } from "@/lib/ai-agents/readiness";
+import { parseAuditSource } from "@/lib/ai-agents/observability";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 const ARCHETYPES: AIAgentArchetype[] = [
@@ -72,6 +74,14 @@ export async function PUT(
         typeof body.temperature === "number" ? body.temperature : undefined,
       maxTokens:
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+      maxSteps:
+        typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+      templateId:
+        typeof body.templateId === "string"
+          ? body.templateId
+          : body.templateId === null
+            ? null
+            : undefined,
       systemPromptOverride:
         typeof body.systemPromptOverride === "string"
           ? body.systemPromptOverride
@@ -98,6 +108,7 @@ export async function PUT(
           : body.pipelineId === null
             ? null
             : undefined,
+      /** @deprecated Preferir canal da conversa. */
       channelId:
         typeof body.channelId === "string"
           ? body.channelId
@@ -108,6 +119,12 @@ export async function PUT(
         typeof body.avatarUrl === "string"
           ? body.avatarUrl
           : body.avatarUrl === null
+            ? null
+            : undefined,
+      openaiApiKey:
+        typeof body.openaiApiKey === "string"
+          ? body.openaiApiKey
+          : body.openaiApiKey === null
             ? null
             : undefined,
       active: typeof body.active === "boolean" ? body.active : undefined,
@@ -125,13 +142,16 @@ export async function PUT(
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,
+        autoClosePolicy: body.autoClosePolicy,
       }),
       ...sanitizeSteeringInput({
         systemPromptTemplate: body.systemPromptTemplate,
         steeringRules: body.steeringRules,
         toolConfig: body.toolConfig,
         inboxPolicy: body.inboxPolicy,
+        verticalPack: body.verticalPack,
       }),
+      auditSource: parseAuditSource(body.auditSource ?? body.source),
     };
 
     try {
@@ -139,7 +159,12 @@ export async function PUT(
       return NextResponse.json(updated);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro ao atualizar.";
-      const status = msg.includes("não encontrado") ? 404 : 500;
+      const status =
+        e instanceof AgentReadinessError
+          ? 400
+          : msg.includes("não encontrado")
+            ? 404
+            : 500;
       return NextResponse.json({ message: msg }, { status });
     }
   });

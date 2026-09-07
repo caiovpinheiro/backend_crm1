@@ -1,5 +1,8 @@
 name: Build & Deploy
 
+# Job `checks` (lint + vitest) roda ANTES e é pré-requisito do build: sem
+# ele, teste quebrado subia direto pra dev/prod.
+#
 # Buildamos a imagem no GitHub Actions (com cache persistente entre runs
 # via `type=gha`), publicamos em ghcr.io e disparamos um webhook do
 # Easypanel pra ele apenas fazer `docker pull` + restart. Deploy fim-a-fim
@@ -77,8 +80,59 @@ env:
   IMAGE_NAME: caiovpinheiro/backend_crm1
 
 jobs:
+  # Portão antes do build/deploy: lint + testes. Antes disso o pipeline ia
+  # direto pro `docker build`, então teste quebrado subia pra dev/prod.
+  #
+  # Ambos são BLOQUEANTES: `npm run lint` já sai 0 no repo (20 warnings,
+  # 0 errors), então não precisa de `continue-on-error`. Se alguém
+  # introduzir um error de lint, o deploy para — que é o objetivo.
+  #
+  # NÃO há step de typecheck: `tsc --noEmit` acusa ~143 erros pré-existentes
+  # no repo (na maioria `select` do Prisma sem a coluna usada depois), então
+  # um step de tsc nasceria vermelho. Não existe script `typecheck` no
+  # package.json de propósito. Quando o passivo zerar, adicionar aqui.
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 24 (npm 11) = a versão que GEROU o package-lock.json, não a
+          # do Dockerfile (node:22 / npm 10). Com npm 10 o `npm ci` aborta
+          # com "Missing: esbuild@0.28.2 from lock file": o resolvedor do
+          # npm 10 materializa outro `vite` para o vitest (a faixa é
+          # ^6 || ^7 || ^8) e exige um esbuild que o lock — resolvido pelo
+          # npm 11 para vite 8, que usa rolldown — não tem.
+          #
+          # O `docker build` não quebra com isso porque o Dockerfile tenta
+          # `npm ci` e CAI PARA `npm install` numa cadeia de retries, ou
+          # seja, a imagem pode estar sendo montada sem honrar o lock. Isso
+          # é um problema à parte, anterior a este job.
+          node-version: 24
+          cache: npm
+
+      # `postinstall` roda `prisma generate`, que precisa do DATABASE_URL
+      # apenas RESOLVÍVEL (não conecta em banco nenhum) — daí a URL de
+      # mentira. Nem lint nem os testes tocam o Postgres.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: checks
     permissions:
       contents: read
       packages: write

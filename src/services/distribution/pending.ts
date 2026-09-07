@@ -28,7 +28,7 @@ import {
   isFreshDrainEnqueue,
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
-import { debugWarn } from "@/lib/debug-log";
+import { debugInfo, debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -447,9 +447,9 @@ function logCooldownSkip(
 ) {
   if (state.cooldownSkipLogged) return;
   state.cooldownSkipLogged = true;
-  console.info(
+  debugInfo(
     "[distribution] processPending skip — cooldown após passagem vazia",
-    JSON.stringify({
+    () => JSON.stringify({
       orgId,
       trigger,
       via,
@@ -728,9 +728,9 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
   });
 
   if (res.count > 0) {
-    console.info(
+    debugInfo(
       "[distribution] purgeUnansweredFromPendingQueue",
-      JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
+      () => JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
     );
   }
   return res.count;
@@ -768,7 +768,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   // #region agent log
   debugWarn(
     "[DBG-e46688 maybeDist] entry",
-    JSON.stringify({
+    () => JSON.stringify({
       convId: input.conversationId,
       contactId: input.contactId,
       alreadyAssigned: !!input.assignedToId,
@@ -786,7 +786,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (keptHumanId) {
       debugWarn(
         "[DBG-e46688 maybeDist] keep_human_after_automation_close",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           humanUserId: keptHumanId,
         }),
@@ -806,7 +806,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (check.isAi) {
       debugWarn(
         "[DBG-e46688 maybeDist] keep_ai_assignee",
-        JSON.stringify({ convId: input.conversationId, assignee }),
+        () => JSON.stringify({ convId: input.conversationId, assignee }),
       );
       // Fora do expediente a IA pode falar, mas o lead entra na espera
       // para distribuir quando o primeiro consultor ficar elegível.
@@ -844,14 +844,14 @@ export async function maybeDistributeNewInboundTicket(input: {
         ) {
           debugWarn(
             "[DBG-e46688 maybeDist] keep_assigned_human",
-            JSON.stringify({ convId: input.conversationId, assignee }),
+            () => JSON.stringify({ convId: input.conversationId, assignee }),
           );
           return;
         }
         if (!conv?.hasHumanReply) {
           debugWarn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: input.conversationId,
               assignee,
             }),
@@ -872,7 +872,7 @@ export async function maybeDistributeNewInboundTicket(input: {
         } else {
           debugWarn(
             "[DBG-e46688 maybeDist] keep_eligible_assignee",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: input.conversationId,
               assignee,
               isAi: check.isAi,
@@ -883,7 +883,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       } else {
         debugWarn(
           "[DBG-e46688 maybeDist] keep_eligible_assignee",
-          JSON.stringify({
+          () => JSON.stringify({
             convId: input.conversationId,
             assignee,
             isAi: check.isAi,
@@ -894,7 +894,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     } else {
       debugWarn(
         "[DBG-e46688 maybeDist] clear_ineligible_assignee",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           assignee,
           reason: check.reason,
@@ -926,7 +926,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     if (aiUserId) {
       debugWarn(
         "[DBG-e46688 maybeDist] first_attendance_ai",
-        JSON.stringify({
+        () => JSON.stringify({
           convId: input.conversationId,
           aiUserId,
         }),
@@ -949,7 +949,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] widget check",
-      JSON.stringify({ widgetActive, convId: input.conversationId }),
+      () => JSON.stringify({ widgetActive, convId: input.conversationId }),
     );
     // #endregion
     if (!widgetActive) return;
@@ -987,7 +987,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] result",
-      JSON.stringify({
+      () => JSON.stringify({
         convId: input.conversationId,
         remappedPending: remapped.count,
         success: result.success,
@@ -1004,7 +1004,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] threw",
-      JSON.stringify({
+      () => JSON.stringify({
         convId: input.conversationId,
         err: e instanceof Error ? e.message : String(e),
       }),
@@ -1067,9 +1067,9 @@ export async function processPendingDistributionQueue(opts: {
     });
     if (!gate.proceed) {
       armFruitlessCooldown(state, "AT_CAPACITY", orgId);
-      console.info(
+      debugInfo(
         "[distribution] processPending skip — at capacity",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,
@@ -1109,9 +1109,9 @@ export async function processPendingDistributionQueue(opts: {
     // para não perder o dept de outro consultor que ficou elegível.
     if (!state.coalesceLogged) {
       state.coalesceLogged = true;
-      console.info(
+      debugInfo(
         "[distribution] processPending coalesce — already running",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           queuedTrigger: state.queuedTrigger,
@@ -1135,7 +1135,7 @@ export async function processPendingDistributionQueue(opts: {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
     debugWarn(
       "[DBG-e46688 retry] widget check",
-      JSON.stringify({
+      () => JSON.stringify({
         widgetActive,
         trigger: opts.trigger,
         userId: opts.userId ?? null,
@@ -1149,9 +1149,9 @@ export async function processPendingDistributionQueue(opts: {
     try {
       cancelledOrphans = await cancelStalePendingOrphans(orgId);
       if (cancelledOrphans > 0) {
-        console.info(
+        debugInfo(
           "[distribution] cancelStalePendingOrphans",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             cancelled: cancelledOrphans,
@@ -1177,9 +1177,9 @@ export async function processPendingDistributionQueue(opts: {
       const pending = await prisma.conversation.count({
         where: await getWaitingQueueWhere(),
       });
-      console.info(
+      debugInfo(
         "[distribution] processPending skip — nenhum consultor elegível",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           pending,
@@ -1207,9 +1207,9 @@ export async function processPendingDistributionQueue(opts: {
         const pending = await prisma.conversation.count({
           where: await getWaitingQueueWhere(),
         });
-        console.info(
+        debugInfo(
           "[distribution] processPending skip — userId não elegível",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             userId: opts.userId,
@@ -1324,9 +1324,9 @@ export async function processPendingDistributionQueue(opts: {
             assignedDeltaByUser,
           )
         ) {
-          console.info(
+          debugInfo(
             "[distribution] processPending cap — scope capacity exhausted",
-            JSON.stringify({
+            () => JSON.stringify({
               orgId,
               trigger: opts.trigger,
               userId: opts.userId ?? null,
@@ -1351,7 +1351,7 @@ export async function processPendingDistributionQueue(opts: {
           });
           debugWarn(
             "[DBG-e46688 retry] executeDistribution",
-            JSON.stringify({
+            () => JSON.stringify({
               convId: it.id,
               departmentId: it.departmentId,
               success: result.success,
@@ -1374,9 +1374,9 @@ export async function processPendingDistributionQueue(opts: {
                   focus &&
                   liveFreeCapacityForUser(focus, assignedDeltaByUser) <= 0
                 ) {
-                  console.info(
+                  debugInfo(
                     "[distribution] processPending cap — user budget exhausted",
-                    JSON.stringify({
+                    () => JSON.stringify({
                       orgId,
                       trigger: opts.trigger,
                       userId: opts.userId,
@@ -1441,9 +1441,9 @@ export async function processPendingDistributionQueue(opts: {
       opts.trigger === "manual" ||
       opts.trigger === "scheduled"
     ) {
-      console.info(
+      debugInfo(
         "[distribution] processPendingDistributionQueue",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,
@@ -1571,9 +1571,9 @@ export async function enqueueProcessPendingOrRun(opts: {
     if (shouldSkipCapacityReleasedFruitlessCooldown(opts.trigger, fruitless)) {
       if (!state.cooldownSkipLogged) {
         state.cooldownSkipLogged = true;
-        console.info(
+        debugInfo(
           "[distribution] drain enqueue skipped — fruitless cooldown armed",
-          JSON.stringify({
+          () => JSON.stringify({
             orgId,
             trigger: opts.trigger,
             ttlMs,
@@ -1599,9 +1599,9 @@ export async function enqueueProcessPendingOrRun(opts: {
   });
   if (queued) {
     if (isFreshDrainEnqueue(queued)) {
-      console.info(
+      debugInfo(
         "[distribution] drain enqueued",
-        JSON.stringify({
+        () => JSON.stringify({
           orgId,
           trigger: opts.trigger,
           userId: opts.userId ?? null,

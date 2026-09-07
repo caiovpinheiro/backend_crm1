@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Serviço de CRUD dos agentes de IA.
  *
  * O agente é persistido em DUAS tabelas (uma transação):
@@ -15,13 +15,21 @@ import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
+import { encryptSecret } from "@/lib/secret-crypto";
+import { apiKeyHint } from "@/services/ai/agent-key";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
+  assertAutonomousReadiness,
+} from "@/lib/ai-agents/readiness";
+import { findSystemTemplateByArchetype } from "@/services/ai-agent-templates";
+import {
   HANDOFF_MODES,
+  normalizeAutoClosePolicy,
   normalizeBusinessHours,
   normalizeOutputStyle,
   normalizeQualificationQuestions,
+  type AutoClosePolicy,
   type BusinessHoursConfig,
   type HandoffMode,
   type OutputStyle,
@@ -33,6 +41,13 @@ import {
   type InboxPolicy,
   type ToolConfigMap,
 } from "@/lib/ai-agents/steering";
+import { listVerticalPackIds } from "@/verticals";
+import {
+  auditDiffAsJson,
+  buildAgentConfigDiff,
+  parseAuditSource,
+  type AuditSource,
+} from "@/lib/ai-agents/observability";
 
 export type AIAgentRow = {
   id: string;
@@ -78,8 +93,25 @@ export async function listAIAgents(): Promise<AIAgentRow[]> {
   }));
 }
 
+/**
+ * Tira a chave OpenAI cifrada de qualquer row de `AIAgentConfig` que vá
+ * para o cliente. A UI só precisa do bit "tem chave própria?" e do hint
+ * (últimos 4 chars, coluna `openaiApiKeyHint`) — o `openaiApiKeyEnc`
+ * nunca sai do servidor.
+ *
+ * Único ponto de redaction: GET, PUT e qualquer rota nova passam por
+ * aqui. Antes o strip existia só no GET e o PUT devolvia o row cru do
+ * Prisma direto no JSON da resposta.
+ */
+export function redactAgentOpenaiKey<
+  T extends { openaiApiKeyEnc?: string | null },
+>(row: T): Omit<T, "openaiApiKeyEnc"> & { hasOwnOpenaiKey: boolean } {
+  const { openaiApiKeyEnc, ...safe } = row;
+  return { ...safe, hasOwnOpenaiKey: Boolean(openaiApiKeyEnc) };
+}
+
 export async function getAIAgent(id: string) {
-  return prisma.aIAgentConfig.findUnique({
+  const row = await prisma.aIAgentConfig.findUnique({
     where: { id },
     include: {
       user: {
@@ -91,16 +123,26 @@ export async function getAIAgent(id: string) {
           signature: true,
         },
       },
+      _count: { select: { knowledgeDocs: true } },
     },
+  });
+  if (!row) return null;
+  const { _count, ...rest } = row;
+  return redactAgentOpenaiKey({
+    ...rest,
+    knowledgeDocsCount: _count.knowledgeDocs,
   });
 }
 
 export type CreateAIAgentInput = {
   name: string;
   archetype: AIAgentArchetype;
+  /// Onda 3 — se omitido, resolve template de sistema pelo archetype.
+  templateId?: string | null;
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  maxSteps?: number;
   systemPromptTemplate?: string;
   systemPromptOverride?: string | null;
   productPolicy?: string | null;
@@ -115,8 +157,13 @@ export type CreateAIAgentInput = {
   enabledTools?: string[];
   dailyTokenCap?: number;
   pipelineId?: string | null;
+  /** @deprecated Preferir canal da conversa. */
   channelId?: string | null;
   avatarUrl?: string | null;
+  /// Chave OpenAI do agente (texto puro na entrada; cifrada no banco).
+  /// `""`/`null` limpa. CRM multi-tenant: não há chave global.
+  openaiApiKey?: string | null;
+  verticalPack?: string | null;
 
   // Piloting (controles operacionais).
   openingMessage?: string | null;
@@ -134,6 +181,10 @@ export type CreateAIAgentInput = {
   simulateTyping?: boolean;
   typingPerCharMs?: number;
   markMessagesRead?: boolean;
+  autoClosePolicy?: AutoClosePolicy | null;
+
+  /// Origem do save pra auditoria (Onda 0). Default: api.
+  auditSource?: AuditSource;
 };
 
 /**
@@ -155,6 +206,7 @@ export function sanitizePilotingInput(input: {
   simulateTyping?: unknown;
   typingPerCharMs?: unknown;
   markMessagesRead?: unknown;
+  autoClosePolicy?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
@@ -171,6 +223,7 @@ export function sanitizePilotingInput(input: {
     | "simulateTyping"
     | "typingPerCharMs"
     | "markMessagesRead"
+    | "autoClosePolicy"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -248,6 +301,12 @@ export function sanitizePilotingInput(input: {
     out.markMessagesRead = input.markMessagesRead;
   }
 
+  if (input.autoClosePolicy === null) {
+    out.autoClosePolicy = null;
+  } else if (input.autoClosePolicy !== undefined) {
+    out.autoClosePolicy = normalizeAutoClosePolicy(input.autoClosePolicy);
+  }
+
   return out;
 }
 
@@ -261,10 +320,15 @@ export function sanitizeSteeringInput(input: {
   steeringRules?: unknown;
   toolConfig?: unknown;
   inboxPolicy?: unknown;
+  verticalPack?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
-    "systemPromptTemplate" | "steeringRules" | "toolConfig" | "inboxPolicy"
+    | "systemPromptTemplate"
+    | "steeringRules"
+    | "toolConfig"
+    | "inboxPolicy"
+    | "verticalPack"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -289,17 +353,68 @@ export function sanitizeSteeringInput(input: {
     out.toolConfig = normalizeToolConfig(input.toolConfig);
   }
 
+  const verticalPack = sanitizeVerticalPack(input.verticalPack);
+  if (verticalPack !== undefined) {
+    out.verticalPack = verticalPack;
+  }
+
   if (input.inboxPolicy === null) {
     out.inboxPolicy = null;
   } else if (input.inboxPolicy !== undefined) {
-    out.inboxPolicy = normalizeInboxPolicy(input.inboxPolicy);
+    out.inboxPolicy = normalizeInboxPolicy(
+      input.inboxPolicy,
+      verticalPack === undefined ? undefined : verticalPack,
+    );
   }
 
   return out;
 }
 
+/**
+ * Traduz `input.openaiApiKey` (texto puro) nos campos de banco.
+ * `undefined` = não mexe. `""`/`null` = limpa. `"sk-…"` = cifra + hint.
+ */
+function openaiKeyFields(
+  raw: string | null | undefined,
+): { openaiApiKeyEnc: string | null; openaiApiKeyHint: string | null } | null {
+  if (raw === undefined) return null;
+  const key = (raw ?? "").trim();
+  if (!key) return { openaiApiKeyEnc: null, openaiApiKeyHint: null };
+  if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) {
+    throw new Error("Formato de chave OpenAI inválido. Esperado algo como sk-…");
+  }
+  return { openaiApiKeyEnc: encryptSecret(key), openaiApiKeyHint: apiKeyHint(key) };
+}
+
+/** `null` limpa; string conhecida aceita; desconhecida/omitida → undefined. */
+export function sanitizeVerticalPack(
+  v: unknown,
+): string | null | undefined {
+  if (v === null) return null;
+  if (v === undefined) return undefined;
+  if (typeof v !== "string") return undefined;
+  const id = v.trim();
+  if (!id) return null;
+  return listVerticalPackIds().includes(id) ? id : undefined;
+}
+
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
+  let systemTpl: Awaited<ReturnType<typeof findSystemTemplateByArchetype>> =
+    null;
+  try {
+    systemTpl = await findSystemTemplateByArchetype(input.archetype);
+  } catch {
+    /* migration ainda não aplicada */
+  }
+  const templateId =
+    input.templateId !== undefined
+      ? input.templateId
+      : (systemTpl?.id ?? null);
+  const verticalPack =
+    input.verticalPack !== undefined
+      ? input.verticalPack
+      : (systemTpl?.verticalPack ?? null);
 
   const safeSlug =
     input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") ||
@@ -375,10 +490,58 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         simulateTyping: input.simulateTyping ?? true,
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
+        ...(openaiKeyFields(input.openaiApiKey) ?? {}),
+        autoClosePolicy:
+          (input.autoClosePolicy as unknown as Prisma.InputJsonValue | undefined) ??
+          Prisma.JsonNull,
+        verticalPack,
+        // Onda 3 — campos novos; cast até `prisma generate` no ambiente.
+        ...( {
+          templateId,
+          maxSteps: input.maxSteps ?? 8,
+        } as Record<string, unknown>),
+      } as Parameters<typeof tx.aIAgentConfig.create>[0]["data"]),
+    });
+
+    const auditSource = parseAuditSource(input.auditSource);
+    const ctxUserId = getRequestContext()?.userId ?? null;
+    await tx.aIAgentConfigAudit.create({
+      data: withOrgFromCtx({
+        agentId: config.id,
+        userId: ctxUserId,
+        source: auditSource,
+        diff: auditDiffAsJson(
+          buildAgentConfigDiff(
+            {},
+            {
+              name: input.name,
+              archetype: input.archetype,
+              model: config.model,
+              temperature: config.temperature,
+              maxTokens: config.maxTokens,
+              systemPromptTemplate: config.systemPromptTemplate,
+              systemPromptOverride: config.systemPromptOverride,
+              productPolicy: config.productPolicy,
+              steeringRules: config.steeringRules,
+              toolConfig: config.toolConfig,
+              inboxPolicy: config.inboxPolicy,
+              tone: config.tone,
+              language: config.language,
+              autonomyMode: config.autonomyMode,
+              enabledTools: config.enabledTools,
+              dailyTokenCap: config.dailyTokenCap,
+              pipelineId: config.pipelineId,
+              channelId: config.channelId,
+              active: config.active,
+              openingMessage: config.openingMessage,
+              autoClosePolicy: config.autoClosePolicy,
+            },
+          ),
+        ),
       }),
     });
 
-    return { user, config };
+    return { user, config: redactAgentOpenaiKey(config) };
   });
 }
 
@@ -392,9 +555,23 @@ export type UpdateAIAgentInput = Partial<
 export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
   const existing = await prisma.aIAgentConfig.findUnique({
     where: { id },
-    include: { user: true },
+    include: {
+      user: true,
+      _count: { select: { knowledgeDocs: true } },
+    },
   });
   if (!existing) throw new Error("Agente não encontrado.");
+
+  const nextAutonomy = input.autonomyMode ?? existing.autonomyMode;
+  const nextActive = input.active ?? existing.active;
+  const nextInbox =
+    input.inboxPolicy !== undefined ? input.inboxPolicy : existing.inboxPolicy;
+  assertAutonomousReadiness({
+    nextAutonomy,
+    nextActive,
+    inboxPolicy: nextInbox,
+    knowledgeDocsCount: existing._count.knowledgeDocs,
+  });
 
   return prisma.$transaction(async (tx) => {
     if (input.name || input.avatarUrl !== undefined) {
@@ -409,15 +586,29 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
       });
     }
 
+    // Dual-write: se archetype muda e templateId não veio, aponta pro
+    // template de sistema correspondente.
+    let nextTemplateId = input.templateId;
+    if (
+      nextTemplateId === undefined &&
+      input.archetype &&
+      input.archetype !== existing.archetype
+    ) {
+      const tpl = await findSystemTemplateByArchetype(input.archetype);
+      nextTemplateId = tpl?.id ?? null;
+    }
+
     const config = await tx.aIAgentConfig.update({
       where: { id },
       data: {
         ...(input.archetype ? { archetype: input.archetype } : {}),
+        ...(nextTemplateId !== undefined ? { templateId: nextTemplateId } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.temperature !== undefined
           ? { temperature: input.temperature }
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
         ...(input.systemPromptTemplate !== undefined
           ? { systemPromptTemplate: input.systemPromptTemplate }
           : {}),
@@ -458,6 +649,10 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           : {}),
         ...(input.channelId !== undefined
           ? { channelId: input.channelId }
+          : {}),
+        ...(openaiKeyFields(input.openaiApiKey) ?? {}),
+        ...(input.verticalPack !== undefined
+          ? { verticalPack: input.verticalPack }
           : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
 
@@ -509,20 +704,183 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.outputStyle !== undefined
           ? { outputStyle: input.outputStyle }
           : {}),
+        ...(input.autoClosePolicy !== undefined
+          ? {
+              autoClosePolicy:
+                input.autoClosePolicy === null
+                  ? Prisma.JsonNull
+                  : (input.autoClosePolicy as unknown as Prisma.InputJsonValue),
+            }
+          : {}),
       },
     });
 
-    return config;
+    const changedKeys = Object.keys(input).filter((k) => k !== "auditSource");
+    if (changedKeys.length > 0) {
+      const beforeSnap: Record<string, unknown> = {
+        name: existing.user.name,
+        avatarUrl: existing.user.avatarUrl,
+        archetype: existing.archetype,
+        model: existing.model,
+        temperature: existing.temperature,
+        maxTokens: existing.maxTokens,
+        systemPromptTemplate: existing.systemPromptTemplate,
+        systemPromptOverride: existing.systemPromptOverride,
+        productPolicy: existing.productPolicy,
+        steeringRules: existing.steeringRules,
+        toolConfig: existing.toolConfig,
+        inboxPolicy: existing.inboxPolicy,
+        tone: existing.tone,
+        language: existing.language,
+        autonomyMode: existing.autonomyMode,
+        enabledTools: existing.enabledTools,
+        dailyTokenCap: existing.dailyTokenCap,
+        pipelineId: existing.pipelineId,
+        channelId: existing.channelId,
+        active: existing.active,
+        openingMessage: existing.openingMessage,
+        openingDelayMs: existing.openingDelayMs,
+        inactivityTimerMs: existing.inactivityTimerMs,
+        inactivityHandoffMode: existing.inactivityHandoffMode,
+        inactivityHandoffUserId: existing.inactivityHandoffUserId,
+        inactivityFarewellMessage: existing.inactivityFarewellMessage,
+        keywordHandoffs: existing.keywordHandoffs,
+        qualificationQuestions: existing.qualificationQuestions,
+        businessHours: existing.businessHours,
+        outputStyle: existing.outputStyle,
+        simulateTyping: existing.simulateTyping,
+        typingPerCharMs: existing.typingPerCharMs,
+        markMessagesRead: existing.markMessagesRead,
+        autoClosePolicy: existing.autoClosePolicy,
+      };
+      const afterSnap: Record<string, unknown> = {
+        ...beforeSnap,
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
+        ...(input.archetype !== undefined ? { archetype: input.archetype } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.temperature !== undefined
+          ? { temperature: input.temperature }
+          : {}),
+        ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.systemPromptTemplate !== undefined
+          ? { systemPromptTemplate: input.systemPromptTemplate }
+          : {}),
+        ...(input.systemPromptOverride !== undefined
+          ? { systemPromptOverride: input.systemPromptOverride }
+          : {}),
+        ...(input.steeringRules !== undefined
+          ? { steeringRules: input.steeringRules }
+          : {}),
+        ...(input.toolConfig !== undefined
+          ? { toolConfig: input.toolConfig }
+          : {}),
+        ...(input.inboxPolicy !== undefined
+          ? { inboxPolicy: input.inboxPolicy }
+          : {}),
+        ...(input.productPolicy !== undefined
+          ? { productPolicy: input.productPolicy }
+          : {}),
+        ...(input.tone !== undefined ? { tone: input.tone } : {}),
+        ...(input.language !== undefined ? { language: input.language } : {}),
+        ...(input.autonomyMode !== undefined
+          ? { autonomyMode: input.autonomyMode }
+          : {}),
+        ...(input.enabledTools !== undefined
+          ? { enabledTools: input.enabledTools }
+          : {}),
+        ...(input.dailyTokenCap !== undefined
+          ? { dailyTokenCap: input.dailyTokenCap }
+          : {}),
+        ...(input.pipelineId !== undefined
+          ? { pipelineId: input.pipelineId }
+          : {}),
+        ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+        ...(input.active !== undefined ? { active: input.active } : {}),
+        ...(input.openingMessage !== undefined
+          ? { openingMessage: input.openingMessage }
+          : {}),
+        ...(input.openingDelayMs !== undefined
+          ? { openingDelayMs: input.openingDelayMs }
+          : {}),
+        ...(input.inactivityTimerMs !== undefined
+          ? { inactivityTimerMs: input.inactivityTimerMs }
+          : {}),
+        ...(input.inactivityHandoffMode !== undefined
+          ? { inactivityHandoffMode: input.inactivityHandoffMode }
+          : {}),
+        ...(input.inactivityHandoffUserId !== undefined
+          ? { inactivityHandoffUserId: input.inactivityHandoffUserId }
+          : {}),
+        ...(input.inactivityFarewellMessage !== undefined
+          ? { inactivityFarewellMessage: input.inactivityFarewellMessage }
+          : {}),
+        ...(input.keywordHandoffs !== undefined
+          ? { keywordHandoffs: input.keywordHandoffs }
+          : {}),
+        ...(input.qualificationQuestions !== undefined
+          ? { qualificationQuestions: input.qualificationQuestions }
+          : {}),
+        ...(input.businessHours !== undefined
+          ? { businessHours: input.businessHours }
+          : {}),
+        ...(input.simulateTyping !== undefined
+          ? { simulateTyping: input.simulateTyping }
+          : {}),
+        ...(input.typingPerCharMs !== undefined
+          ? { typingPerCharMs: input.typingPerCharMs }
+          : {}),
+        ...(input.markMessagesRead !== undefined
+          ? { markMessagesRead: input.markMessagesRead }
+          : {}),
+        ...(input.outputStyle !== undefined
+          ? { outputStyle: input.outputStyle }
+          : {}),
+        ...(input.autoClosePolicy !== undefined
+          ? { autoClosePolicy: input.autoClosePolicy }
+          : {}),
+      };
+      const diff = buildAgentConfigDiff(beforeSnap, afterSnap, changedKeys);
+      if (diff.length > 0) {
+        await tx.aIAgentConfigAudit.create({
+          data: withOrgFromCtx({
+            agentId: id,
+            userId: getRequestContext()?.userId ?? null,
+            source: parseAuditSource(input.auditSource),
+            diff: auditDiffAsJson(diff),
+          }),
+        });
+      }
+    }
+
+    // Mesmo strip do GET: o `config` cru traz `openaiApiKeyEnc` e a rota
+    // PUT devolve este objeto direto no corpo da resposta.
+    return redactAgentOpenaiKey(config);
   });
 }
 
 export async function toggleAIAgentActive(id: string) {
-  const existing = await prisma.aIAgentConfig.findUnique({ where: { id } });
-  if (!existing) throw new Error("Agente não encontrado.");
-  return prisma.aIAgentConfig.update({
+  const existing = await prisma.aIAgentConfig.findUnique({
     where: { id },
-    data: { active: !existing.active },
+    include: { _count: { select: { knowledgeDocs: true } } },
   });
+  if (!existing) throw new Error("Agente não encontrado.");
+  const nextActive = !existing.active;
+  if (nextActive) {
+    assertAutonomousReadiness({
+      nextAutonomy: existing.autonomyMode,
+      nextActive,
+      inboxPolicy: existing.inboxPolicy,
+      knowledgeDocsCount: existing._count.knowledgeDocs,
+    });
+  }
+  const updated = await prisma.aIAgentConfig.update({
+    where: { id },
+    data: { active: nextActive },
+  });
+  // Hoje a rota devolve só `{ active }`, mas o row cru sai daqui — redige
+  // pra ninguém transformar isso em leak ao passar a devolver o objeto.
+  return redactAgentOpenaiKey(updated);
 }
 
 export async function deleteAIAgent(id: string) {

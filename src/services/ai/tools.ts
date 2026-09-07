@@ -13,14 +13,19 @@
  * falhas em vez de derrubar a run inteira.
  */
 
+
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-
 import {
   renderTemplatePreview,
   templateVariablesFromSendComponents,
 } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import {
+  llmMayCloseConversation,
+  normalizeAutoClosePolicy,
+  type AutoClosePolicy,
+} from "@/lib/ai-agents/piloting";
 import {
   applyArgPolicy,
   describeToolPolicy,
@@ -44,16 +49,9 @@ import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
-import {
-  resolveDepartmentByName,
-  resolveDepartmentByKey,
-  messageImpliesRematricula,
-  messageImpliesOperationalAtendimento,
-  executeAcademicDepartmentHandoff,
-  enforceAtendimentoIfAcolhimentoBlocked,
-} from "@/services/ai/academic-department-routing";
-import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
+import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 import type { ActivityType, Prisma } from "@prisma/client";
+import { getVerticalPack } from "@/verticals";
 
 export type RunContext = {
   /// User.id do agente AI (para logar autoria em atividades, deals etc).
@@ -69,15 +67,38 @@ export type RunContext = {
   dealId?: string | null;
   /// Última mensagem do aluno (para inferir departamento no handoff).
   userMessage?: string | null;
+  /// Vertical pack do agente (`null` = sem ops de vertical).
+  verticalPack?: string | null;
   /// Política de inbox do agente (aliases de departamento, keywords).
   inboxPolicy?: InboxPolicy | null;
+  /// Encerramento automático (pilotagem). Ausente = understood.
+  autoClosePolicy?: AutoClosePolicy | null;
 };
+
+function packOps(ctx: RunContext): Record<string, any> {
+  return getVerticalPack(ctx.verticalPack)?.ops ?? {};
+}
+
+function packToolCopy(ctx: RunContext) {
+  return getVerticalPack(ctx.verticalPack)?.toolCopy;
+}
 
 function ok<T>(data: T) {
   return { ok: true as const, ...data } as { ok: true } & T;
 }
 function fail(error: string) {
   return { ok: false as const, error };
+}
+
+/** Fila humana só se o aluno pediu consultor ou o tema exige depto (pack presente). */
+function academicDistributionAllowed(ctx: RunContext): boolean {
+  const ops = packOps(ctx);
+  if (!ops.isImmediateAcademicHandoffJustified) return false;
+  const msg = ctx.userMessage ?? "";
+  return (
+    userWantsHumanDistribution(msg) ||
+    ops.isImmediateAcademicHandoffJustified(msg, ctx.inboxPolicy)
+  );
 }
 
 // ── create_deal ────────────────────────────────────────────────
@@ -703,37 +724,48 @@ function departmentGate(
 }
 
 function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
+      copy?.transferToHuman ??
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
-      "Use SOMENTE quando: o aluno pedir humano/consultor, for retenção, ou você NÃO puder " +
-      "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
-      "Se você puder orientar o aluno, NÃO chame esta tool — responda você. " +
-      "Quando chamar, a distribuição EXECUTA de verdade; confirme ao aluno que um consultor vai ajudar. " +
-      "Prefira `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere.",
+        "Use SOMENTE quando: o contato pedir humano/atendente, for retenção, ou você NÃO puder " +
+        "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
+        "Se você puder orientar o contato, NÃO chame esta tool — responda você. " +
+        "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
+        "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
     inputSchema: z.object({
       reason: z
         .string()
         .describe(
-          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelar matrícula').",
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelamento').",
         ),
       departmentName: z
         .string()
         .optional()
         .describe(
-          "Acolhimento | Retenção | Atendimento (ou Atendimento - SAC).",
+          "Nome do departamento de destino (opcional).",
         ),
     }),
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (!academicDistributionAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
+        const executeHandoff = packOps(ctx).executeAcademicDepartmentHandoff;
+        if (!executeHandoff) {
+          return fail("Handoff de departamento não disponível neste agente.");
+        }
         // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
         // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
-        const result = await executeAcademicDepartmentHandoff({
+        const result = await executeHandoff({
           conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
+          contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
           departmentName: departmentName ?? null,
           userMessage: ctx.userMessage ?? null,
@@ -810,15 +842,17 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
 // ── transfer_to_department ─────────────────────────────────────
 
 function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
-      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
+      copy?.transferToDepartment ??
+      "Roteia a conversa atual para um departamento com base no assunto do contato. NÃO tira a conversa do agente — apenas define o departamento responsável, usado pela Distribuição Inteligente para escolher o atendente certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
     inputSchema: z.object({
       departmentName: z
         .string()
         .min(1)
         .describe(
-          "Nome do departamento de destino (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC').",
+          "Nome do departamento de destino.",
         ),
     }),
     execute: async ({ departmentName }) => {
@@ -829,6 +863,7 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
         const gate = departmentGate(policy, name);
         if (gate) return fail(gate);
 
+        const ops = packOps(ctx);
         // Últimas inbound — rematrícula / operacional forçam Atendimento
         // (mesmo se o LLM mandar Acolhimento).
         const recentIn = await prisma.message.findMany({
@@ -843,20 +878,25 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
         });
         const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
         let dept =
-          messageImpliesRematricula(inboundBlob) ||
-          messageImpliesOperationalAtendimento(inboundBlob)
-            ? await resolveDepartmentByKey("atendimento", ctx.inboxPolicy)
+          (ops.messageImpliesRematricula?.(inboundBlob) ||
+            ops.messageImpliesOperationalAtendimento?.(inboundBlob)) &&
+          ops.resolveDepartmentByKey
+            ? await ops.resolveDepartmentByKey("atendimento", ctx.inboxPolicy)
             : null;
-        if (!dept) dept = await resolveDepartmentByName(name, ctx.inboxPolicy);
+        if (!dept && ops.resolveDepartmentByName) {
+          dept = await ops.resolveDepartmentByName(name, ctx.inboxPolicy);
+        }
         if (!dept)
           return fail(
             `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
           );
-        dept = await enforceAtendimentoIfAcolhimentoBlocked({
-          contactId: ctx.contactId,
-          dept,
-          policy: ctx.inboxPolicy,
-        });
+        if (ops.enforceAtendimentoIfAcolhimentoBlocked) {
+          dept = await ops.enforceAtendimentoIfAcolhimentoBlocked({
+            contactId: ctx.contactId,
+            dept,
+            policy: ctx.inboxPolicy,
+          });
+        }
         if (!dept)
           return fail(
             `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
@@ -886,8 +926,10 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
 // ── execute_distribution ───────────────────────────────────────
 
 function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
+      copy?.executeDistribution ??
       "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor escolhe automaticamente quem recebe (menor fila, dentro do departamento roteado, respeitando horário e disponibilidade) — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
     inputSchema: z.object({
       departmentName: z
@@ -905,9 +947,15 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
       try {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
+        if (!academicDistributionAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida.",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
 
+        const ops = packOps(ctx);
         // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
         // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
         if (ctx.conversationId) {
@@ -916,9 +964,12 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
             select: { assignedTo: { select: { type: true } } },
           });
           if (conv?.assignedTo?.type === "AI") {
+            if (!ops.executeAcademicDepartmentHandoff) {
+              return fail("Handoff de departamento não disponível neste agente.");
+            }
             // Tool chamada = handoff intencional. Não adiar (evita promessa
             // "vou conectar" sem fila real).
-            const handoff = await executeAcademicDepartmentHandoff({
+            const handoff = await ops.executeAcademicDepartmentHandoff({
               conversationId: ctx.conversationId,
               contactId: ctx.contactId ?? null,
               dealId: ctx.dealId,
@@ -946,7 +997,10 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          const dept = await resolveDepartmentByName(
+          if (!ops.resolveDepartmentByName) {
+            return fail(`Departamento "${departmentName}" não encontrado.`);
+          }
+          const dept = await ops.resolveDepartmentByName(
             departmentName,
             ctx.inboxPolicy,
           );
@@ -1023,8 +1077,10 @@ const MATRICULA_POLITICA =
 function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
   const politica = policy.policyText ?? MATRICULA_POLITICA;
   const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
+  const copy = packToolCopy(ctx);
   return tool({
     description:
+      copy?.consultarMatricula ??
       "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
     inputSchema: z.object({
       cpf: z
@@ -1104,19 +1160,33 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
 // ── close_conversation ─────────────────────────────────────────
 
 function closeConversationTool(ctx: RunContext) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
-      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir para encerrar/finalizar, agradecer de forma conclusiva ('muito grata', 'obrigada por toda ajuda') depois de já ter sido atendido, ou disser que volta depois/à noite e em seguida agradecer. NÃO use se já houver consultor humano na conversa. NÃO use só porque o aluno disse que vai estudar à noite — nesse caso confirme e continue; encerre no agradecimento seguinte.",
+      copy?.closeConversation ??
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o contato pedir para encerrar/finalizar, ou agradecer de forma conclusiva depois de já ter sido atendido. NÃO use se já houver atendente humano na conversa. NÃO use só porque o contato disse que volta depois — nesse caso confirme e continue; encerre no agradecimento seguinte.",
     inputSchema: z.object({
       reason: z
         .string()
         .optional()
-        .describe("Motivo curto do encerramento (ex.: 'Aluno pediu para encerrar')."),
+        .describe("Motivo curto do encerramento (ex.: 'Contato pediu para encerrar')."),
     }),
     execute: async ({ reason }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        const result = await closeAiOnlyConversation({
+        const policy = normalizeAutoClosePolicy(ctx.autoClosePolicy);
+        if (!llmMayCloseConversation(policy)) {
+          return fail(
+            policy.mode === "off"
+              ? "Encerramento automático está desligado neste agente."
+              : "Neste agente só encerro com pedido explícito (encerrar/finalizar) ou palavra-chave. Não chame esta tool.",
+          );
+        }
+        const closeFn = packOps(ctx).closeAiOnlyConversation;
+        if (!closeFn) {
+          return fail("Encerramento automático não disponível neste agente.");
+        }
+        const result = await closeFn({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
           reason: reason ?? "close_conversation via IA",
@@ -1134,7 +1204,7 @@ function closeConversationTool(ctx: RunContext) {
         }
         return ok({
           closed: true,
-          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao aluno em uma frase curta.",
+          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao contato em uma frase curta.",
         });
       } catch (err) {
         return fail(

@@ -17,59 +17,40 @@ import {
   type ToolSet,
 } from "ai";
 
-import { getSecretSettingOrEnv } from "@/services/settings";
-
-export const AI_OPENAI_KEY_SETTING = "ai.openai.apiKey";
-
-// Provider OpenAI singleton — construído sob demanda, chave buscada
-// primeiro em `system_settings.ai.openai.apiKey` (criptografado) e só
-// depois cai para `process.env.OPENAI_API_KEY`. Assim o admin pode
-// configurar/rotacionar a chave pela UI sem reiniciar o processo.
-let cachedOpenAI: ReturnType<typeof createOpenAI> | null = null;
-let cachedKey: string | null = null;
-
-async function getOpenAI() {
-  const apiKey = (await getSecretSettingOrEnv(
-    AI_OPENAI_KEY_SETTING,
-    "OPENAI_API_KEY",
-  )).trim();
-  if (!apiKey) {
-    throw new Error(
-      "OPENAI_API_KEY não configurada. Cadastre a chave em Configurações → IA ou defina a variável de ambiente.",
-    );
-  }
-  if (cachedOpenAI && cachedKey === apiKey) return cachedOpenAI;
-  cachedOpenAI = createOpenAI({ apiKey });
-  cachedKey = apiKey;
-  return cachedOpenAI;
-}
+import { callLlmWithRetry } from "@/services/ai/llm-retry";
 
 /**
- * Invalida o cliente em cache — chamar sempre que a chave mudar na UI
- * para que a próxima chamada reinstancie o SDK com a nova credencial.
+ * Chave OpenAI: **sempre por agente** (`AIAgentConfig.openaiApiKeyEnc`).
+ * CRM multi-tenant — não há chave global, nem fallback pra `.env`. Quem
+ * chama (runner / retrieval / indexação) resolve a chave do agente e
+ * passa aqui. Sem chave → erro claro, o agente não roda.
  */
+const NO_KEY_MSG =
+  "Este agente não tem chave OpenAI configurada. Cadastre a chave na tela do agente.";
+
+// Clientes cacheados por chave (poucas chaves distintas por processo).
+const clientByKey = new Map<string, ReturnType<typeof createOpenAI>>();
+
+function getOpenAI(apiKey: string | null | undefined) {
+  const key = apiKey?.trim();
+  if (!key) throw new Error(NO_KEY_MSG);
+  const cached = clientByKey.get(key);
+  if (cached) return cached;
+  const client = createOpenAI({ apiKey: key });
+  clientByKey.set(key, client);
+  return client;
+}
+
+/** Invalida os clientes cacheados — chamar quando uma chave muda na UI. */
 export function resetAIProviderCache(): void {
-  cachedOpenAI = null;
-  cachedKey = null;
+  clientByKey.clear();
 }
 
-export async function getModel(modelName: string): Promise<LanguageModel> {
-  const openai = await getOpenAI();
-  return openai(modelName);
-}
-
-/**
- * Indica se a plataforma está pronta para falar com a OpenAI.
- * Usado pelos endpoints que precisam avisar o front quando "IA
- * está desativada" (sem chave configurada) antes de o usuário tentar
- * clicar em "Testar" e cair num erro.
- */
-export async function isAIConfigured(): Promise<boolean> {
-  const apiKey = (await getSecretSettingOrEnv(
-    AI_OPENAI_KEY_SETTING,
-    "OPENAI_API_KEY",
-  )).trim();
-  return apiKey.length > 0;
+export function getModel(
+  modelName: string,
+  apiKey: string | null | undefined,
+): LanguageModel {
+  return getOpenAI(apiKey)(modelName);
 }
 
 export const DEFAULT_CHAT_MODEL =
@@ -80,6 +61,8 @@ export const EMBEDDING_DIMENSIONS = 1536;
 
 export type GenerateArgs = {
   model: string;
+  /// Chave OpenAI do agente. Obrigatória — não há chave global.
+  apiKey: string;
   system: string;
   messages: ModelMessage[];
   tools?: ToolSet;
@@ -104,16 +87,29 @@ export type GenerateResult = {
 export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
-  const model = await getModel(args.model);
-  const result = await generateText({
-    model,
-    system: args.system,
-    messages: args.messages,
-    tools: args.tools,
-    temperature: args.temperature ?? 0.7,
-    maxOutputTokens: args.maxOutputTokens,
-    stopWhen: stepCountIs(args.maxSteps ?? 8),
-  });
+  const model = getModel(args.model, args.apiKey);
+  // `maxRetries: 0` desliga o retry interno do SDK de propósito: ele não
+  // conhece o nosso timeout (retentaria por dentro de uma tentativa que já
+  // deveria ter sido abortada) e não loga nada. Quem retenta é
+  // `callLlmWithRetry`, que também aplica o timeout por tentativa.
+  //
+  // O retry fica AQUI, antes de qualquer envio: o runner só recebe o texto
+  // final, então retentar nunca duplica mensagem para o cliente.
+  const result = await callLlmWithRetry(
+    (abortSignal) =>
+      generateText({
+        model,
+        system: args.system,
+        messages: args.messages,
+        tools: args.tools,
+        temperature: args.temperature ?? 0.7,
+        maxOutputTokens: args.maxOutputTokens,
+        stopWhen: stepCountIs(args.maxSteps ?? 8),
+        abortSignal,
+        maxRetries: 0,
+      }),
+    { label: `generateText ${args.model}` },
+  );
 
   const toolCalls: GenerateResult["toolCalls"] = [];
   for (const step of result.steps) {
@@ -144,15 +140,26 @@ export async function generateWithTools(
   };
 }
 
-export async function embedTexts(texts: string[]): Promise<{
+export async function embedTexts(
+  texts: string[],
+  apiKey: string,
+): Promise<{
   embeddings: number[][];
   inputTokens: number;
 }> {
-  const openai = await getOpenAI();
-  const result = await embedMany({
-    model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
-    values: texts,
-  });
+  const openai = getOpenAI(apiKey);
+  // Mesmo tratamento do generateText: embedding entra no caminho de
+  // retrieval do inbound, então pendurar aqui também segura o worker.
+  const result = await callLlmWithRetry(
+    (abortSignal) =>
+      embedMany({
+        model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
+        values: texts,
+        abortSignal,
+        maxRetries: 0,
+      }),
+    { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
+  );
   return {
     embeddings: result.embeddings,
     inputTokens: result.usage?.tokens ?? 0,

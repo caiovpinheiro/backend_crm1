@@ -107,6 +107,7 @@ model Organization {
   systemUsageSessions      SystemUsageSession[]
   systemActivitySessions   SystemActivitySession[]
   aiAgentConfigs           AIAgentConfig[]
+  aiAgentTemplates         AgentTemplate[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
   dataRequests             DataRequest[]
@@ -116,6 +117,8 @@ model Organization {
   aiAgentKnowledgeChunks   AIAgentKnowledgeChunk[]
   aiAgentRuns              AIAgentRun[]
   aiAgentMessages          AIAgentMessage[]
+  conversationTurns        ConversationTurn[]
+  aiAgentConfigAudits      AIAgentConfigAudit[]
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
   departmentMembers        DepartmentMember[]
@@ -169,6 +172,10 @@ model Organization {
   teamChatMembers          TeamChatMember[]
   teamChatMessages         TeamChatMessage[]
   teamChatNotes            TeamChatNote[]
+  teamChatWorkItems        TeamChatWorkItem[]
+  teamChatWorkItemEntries  TeamChatWorkItemEntry[]
+  teamChatMessageAnchors   TeamChatMessageAnchor[]
+  teamChatMessageForwards  TeamChatMessageForward[]
   activityAlertStates      ActivityAlertState[]
   dealStageDailySnapshots  DealStageDailySnapshot[]
 
@@ -600,6 +607,12 @@ model User {
   teamChatMemberships            TeamChatMember[]
   teamChatMessagesAuthored       TeamChatMessage[]         @relation("TeamChatMessageAuthor")
   teamChatNotesAuthored          TeamChatNote[]            @relation("TeamChatNoteAuthor")
+  teamChatWorkItemsCreated       TeamChatWorkItem[]        @relation("TeamChatWorkItemCreatedBy")
+  teamChatWorkItemEntriesAssigned TeamChatWorkItemEntry[]  @relation("TeamChatWorkItemEntryAssignee")
+  teamChatWorkItemEntriesDone    TeamChatWorkItemEntry[]   @relation("TeamChatWorkItemEntryCompletedBy")
+  teamChatWorkItemRevisions      TeamChatWorkItemEntryRevision[] @relation("TeamChatWorkItemRevisionAuthor")
+  teamChatForwardsSent           TeamChatMessageForward[]  @relation("TeamChatForwardFrom")
+  teamChatForwardsResponded      TeamChatMessageForward[]  @relation("TeamChatForwardResponder")
 
   @@index([type])
   @@index([organizationId])
@@ -1089,7 +1102,7 @@ model Contact {
   /// Número sequencial por organização (1, 2, 3...).
   /// Gerenciado no app layer via nextContactNumber() — ver services/contacts.ts.
   /// Sem default no banco; a camada de serviço atribui max+1 com retry em P2002.
-  number                 Int
+  number                 Int @default(0)
   /// ID no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo registro.
   /// Unicidade é por organização (cada empresa pode importar Kommos diferentes).
   externalId             String?        @map("external_id")
@@ -1182,17 +1195,17 @@ model Contact {
   @@unique([organizationId, whatsappBsuid])
   @@unique([organizationId, messengerPsid])
   @@unique([organizationId, instagramIgsid])
+  // Índices removidos em 2026-09-06 (0 scans/12d em prod, virada de mês
+  // inclusa — ver migration drop_dead_indexes_contacts_deals_automation):
+  //   (org,whatsappJid)  — inbound casa por whatsapp_bsuid, não jid
+  //   (org,leadScore), (org,companyId), (org,updatedAt)
+  //   (org,assignedToId) — prefixo de (org,assignedToId,lifecycleStage)
   @@index([organizationId])
   @@index([organizationId, number])
   @@index([organizationId, email])
   @@index([organizationId, phone])
-  @@index([organizationId, whatsappJid])
   @@index([organizationId, lifecycleStage])
-  @@index([organizationId, leadScore])
-  @@index([organizationId, companyId])
-  @@index([organizationId, assignedToId])
   @@index([organizationId, createdAt])
-  @@index([organizationId, updatedAt])
   @@index([organizationId, assignedToId, lifecycleStage])
   @@index([organizationId, lifecycleStage, createdAt])
   @@map("contacts")
@@ -1264,7 +1277,7 @@ model Company {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. PK continua CUID; URL usa `number` (`/companies/4`).
-  number         Int
+  number         Int @default(0)
   name           String
   domain         String?
   industry       String?
@@ -1301,7 +1314,7 @@ model Tag {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL/filtros usam `?tag=3`.
-  number         Int
+  number         Int @default(0)
   name           String
   color          String         @default("#6366f1")
   contacts       TagOnContact[]
@@ -1340,7 +1353,7 @@ model CustomField {
   organizationId       String
   organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number               Int
+  number               Int @default(0)
   name                 String
   label                String
   type                 CustomFieldType
@@ -1379,7 +1392,7 @@ model SavedFilter {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. Atalho `/pipeline/filter/3`.
-  number         Int
+  number         Int @default(0)
   entityType     String       @map("entityType")
   name           String
   filterConfig   Json         @default("{}") @map("filterConfig")
@@ -1452,7 +1465,7 @@ model Pipeline {
   /// Número sequencial por organização (1, 2, 3…). Mesmo padrão de
   /// Deal.number / Contact.number / Tabulation.number. PK continua CUID
   /// (FKs); este campo é o ID amigável na URL (`?pipeline=12`).
-  number               Int
+  number               Int @default(0)
   isDefault            Boolean              @default(false)
   /// Se true, marcar negócio como perdido neste funil exige motivo.
   lossReasonRequired   Boolean              @default(false)
@@ -1523,7 +1536,7 @@ model Deal {
   /// global; agora é gerenciado em app layer (serviço deals.createDeal calcula
   /// `max(number) + 1` dentro de uma transação). Postgres sequences não
   /// suportam partição por coluna, então a responsabilidade subiu pro app.
-  number         Int
+  number         Int @default(0)
   title          String
   value          Decimal      @default(0) @db.Decimal(12, 2)
   status         DealStatus   @default(OPEN)
@@ -1577,9 +1590,12 @@ model Deal {
 
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
+  // Índices removidos em 2026-09-06 (prod, virada de mês inclusa):
+  //   (org,stageId)   — prefixo de (org,stageId,status) 2,6M scans
+  //   (org,dealRole)  — 0 scans/12d
+  //   (org,orgUnitId) — 0 scans/12d
   @@index([organizationId])
   @@index([organizationId, status])
-  @@index([organizationId, stageId])
   @@index([organizationId, contactId])
   @@index([organizationId, ownerId])
   @@index([organizationId, createdAt])
@@ -1587,8 +1603,6 @@ model Deal {
   @@index([organizationId, stageId, status])
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
-  @@index([organizationId, dealRole])
-  @@index([organizationId, orgUnitId])
   @@map("deals")
 }
 
@@ -1629,7 +1643,7 @@ model Product {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   sku            String?
@@ -1796,7 +1810,7 @@ model OrgUnit {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   legalName      String?
   /// CNPJ (ou outro identificador fiscal). Texto livre, sem validação no schema.
@@ -2009,7 +2023,7 @@ model JobOpening {
   organizationId      String
   organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number              Int
+  number              Int @default(0)
   productId           String?
   product             Product?         @relation(fields: [productId], references: [id])
   clientCompanyId     String
@@ -2114,7 +2128,7 @@ model Catalog {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   /// Catálogo default da org (recebe os produtos legados no backfill).
@@ -2584,14 +2598,15 @@ model ActivityEvent {
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([id, occurredAt])
+  // Índices compostos removidos em 2026-09-06 (ver migration
+  // drop_activity_events_dead_composite_idx): entityType/entityId, dealId,
+  // contactId, actorUserId e actorType tinham <800 scans/12d em prod contra
+  // ~1,8 GB de disco. As FKs por dealId/contactId/conversationId/actorUserId
+  // (índices simples, criados por SQL, milhões de scans) cobrem os lookups de
+  // timeline; a ordenação por occurredAt cai no sort.
   @@index([organizationId, occurredAt(sort: Desc)])
-  @@index([organizationId, entityType, entityId, occurredAt(sort: Desc)])
-  @@index([organizationId, dealId, occurredAt(sort: Desc)])
-  @@index([organizationId, contactId, occurredAt(sort: Desc)])
   @@index([organizationId, conversationId, occurredAt(sort: Desc)])
-  @@index([organizationId, actorUserId, occurredAt(sort: Desc)])
   @@index([organizationId, type, occurredAt(sort: Desc)])
-  @@index([organizationId, actorType, occurredAt(sort: Desc)])
   @@map("activity_events")
 }
 
@@ -2806,7 +2821,7 @@ model Conversation {
   /// Usado como "ticket number" nas UIs (ex.: #1234) — mesmo padrao de
   /// Contact.number / Deal.number. Atribuido em `createConversation`
   /// via `nextConversationNumber()` com retry P2002 em race.
-  number                 Int
+  number                 Int @default(0)
   /// ID externo (ex.: Meta thread id) — unicidade por organização.
   externalId             String?
   channel                String
@@ -2905,7 +2920,9 @@ model Conversation {
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, status, updatedAt])
-  @@index([organizationId, contactId])
+  /// 3ª coluna cobre o MAX(updatedAt) por contato do board "Última interação"
+  /// (index-only). Serve também qualquer lookup por (organizationId, contactId).
+  @@index([organizationId, contactId, updatedAt])
   @@index([organizationId, assignedToId])
   @@index([organizationId, channelId])
   @@index([contactId, updatedAt])
@@ -3015,6 +3032,25 @@ model Message {
   @@index([channelId])
   @@index([externalId])
   @@index([aiAgentUserId, createdAt])
+  // Dedup de inbound garantida pelo BANCO. Antes disso a dedup era só o
+  // `findFirst({ externalId })` + create dentro da transação nos 3 ingests
+  // (meta-webhook/handler, meta-webhook/messaging-handler, baileys/
+  // message-handler). Com o worker Meta em concurrency 4, dois eventos do
+  // mesmo wamid liam "não existe" ao mesmo tempo e gravavam DUAS linhas —
+  // o que fazia a IA responder duas vezes a mesma mensagem do cliente.
+  //
+  // Escopo (organizationId, externalId), não `externalId` global: a dedup
+  // em código sempre foi por org (Message está em SCOPED_MODELS, então a
+  // extension injeta `organizationId` no where do findFirst), e o mesmo
+  // número/WABA pode estar conectado em duas orgs do mesmo banco (org de
+  // teste + org real) — unique global rejeitaria o ingest legítimo da
+  // segunda org. Mesma convenção de `Contact` e `Deal`
+  // (@@unique([organizationId, externalId])).
+  //
+  // `externalId` é nullable (mensagens internas/system não têm wamid) e o
+  // btree unique do Postgres trata NULL como distinto (NULLS DISTINCT, o
+  // default), então as linhas sem externalId não colidem entre si.
+  @@unique([organizationId, externalId])
   // Index isolado em createdAt: o relatório /api/reports/messaging
   // filtra mensagens por intervalo de datas em todo o sistema (sem
   // conversationId), e o índice composto acima não é usado nesse caso.
@@ -3112,7 +3148,7 @@ model Automation {
   organizationId String
   organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/automations/7`.
-  number         Int
+  number         Int @default(0)
   name           String
   description    String?
   triggerType    String
@@ -3260,8 +3296,6 @@ model MetaWebhookEvent {
   automationLogs AutomationLog[]
 
   @@index([organizationId, receivedAt(sort: Desc)])
-  @@index([waMessageId])
-  @@index([phoneNumberId, receivedAt(sort: Desc)])
   /// Recovery de backlog do worker-meta-webhook: eventos não processados
   /// (processed=false) em ordem de chegada.
   @@index([processed, receivedAt])
@@ -3277,7 +3311,7 @@ model Channel {
   organizationId    String
   organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. Filtro inbox: `?channel=2`.
-  number            Int
+  number            Int @default(0)
   name              String
   type              ChannelType
   provider          ChannelProvider
@@ -3365,7 +3399,7 @@ model QuickReply {
   organizationId  String
   organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number          Int
+  number          Int @default(0)
   title           String
   content         String
   category        String?
@@ -3394,7 +3428,7 @@ model Department {
   organizationId           String
   organization             Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number                   Int
+  number                   Int @default(0)
   name                     String
   color                    String       @default("#6366f1")
   icon                     String       @default("🏢")
@@ -3562,7 +3596,7 @@ model Tabulation {
   /// Contact.number / Deal.number. PK continua CUID (FK em Conversation);
   /// este campo é o ID amigável na API/timeline. Atribuído em
   /// `createNode` via `nextTabulationNumber()` com retry em P2002.
-  number         Int
+  number         Int @default(0)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   departmentId   String
@@ -3643,7 +3677,7 @@ model MessageTemplate {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   content        String
   category       String?
@@ -3722,7 +3756,7 @@ model WhatsappFlowDefinition {
   organizationId   String
   organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/settings/message-models/flows/3`.
-  number           Int
+  number           Int @default(0)
   name             String
   status           WhatsappFlowStatus   @default(DRAFT)
   /// ID Graph retornado por POST /{waba-id}/flows após publicação.
@@ -3817,7 +3851,7 @@ model DistributionRule {
   organizationId String
   organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   mode           DistributionMode     @default(ROUND_ROBIN)
   pipelineId     String?
@@ -4244,7 +4278,7 @@ model Segment {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org.
-  number         Int
+  number         Int @default(0)
   name           String
   filters        Json
   createdAt      DateTime     @default(now())
@@ -4262,7 +4296,7 @@ model Campaign {
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Número sequencial por org. URL: `/campaigns/8`.
-  number         Int
+  number         Int @default(0)
   name           String
   status         CampaignStatus @default(DRAFT)
   type           CampaignType
@@ -4546,6 +4580,12 @@ model AIAgentConfig {
   model                String           @default("gpt-4o-mini")
   temperature          Float            @default(0.7)
   maxTokens            Int              @default(1024)
+
+  /// Chave OpenAI própria deste agente (criptografada). Null = usa a
+  /// chave global de `Configurações → IA`. Nunca sai da API em claro —
+  /// o read expõe só `openaiApiKeyHint` (últimos 4 chars).
+  openaiApiKeyEnc  String?
+  openaiApiKeyHint String?
   /// Prompt-template do arquétipo (renderizado em tempo de execução
   /// com variáveis do contato/deal/conversa). Copiado do catálogo
   /// no momento da criação — depois vive por conta própria.
@@ -4568,8 +4608,9 @@ model AIAgentConfig {
   /// Pipeline preferencial para handoff / criação de deal. Se null,
   /// usa o pipeline default do contato (primeiro pipeline ativo).
   pipelineId           String?
-  /// Canal preferencial para envio de mensagens. Null = usa o canal
-  /// da conversa em que o agente está respondendo.
+  /// @deprecated Preferir o canal da conversa. Campo legado; não
+  /// usar em fluxos novos. Null = canal da conversa em que o agente
+  /// está respondendo.
   channelId            String?
   active               Boolean          @default(true)
 
@@ -4624,6 +4665,11 @@ model AIAgentConfig {
   /// acontece implicitamente na mesma chamada.
   markMessagesRead Boolean @default(true)
 
+  /// Encerramento automático (só atendimento IA). Formato:
+  /// `{ mode: off|explicit|understood, keywords: [], message }`.
+  /// Null = modo understood (comportamento atual: a IA pode encerrar).
+  autoClosePolicy Json?
+
   // ── Pilotagem profunda (editável no CRM, sem deploy) ──────
   /// Regras de atendimento injetadas no system prompt (o que antes era
   /// a constante `ACADEMIC_ATENDIMENTO_RULES`). Null/vazio = o runtime
@@ -4641,16 +4687,78 @@ model AIAgentConfig {
   /// etapas e tags que o agente pode atender) e as mensagens de handoff.
   inboxPolicy Json?
 
+  /// Pack de vertical do agente (ex.: "academic"). Null = sem interceptos
+  /// de vertical. Backfill: todos os agentes existentes → "academic";
+  /// novos nascem null.
+  verticalPack String?
+
+  /// Template de origem (Onda 3). Dual-write com `archetype` enquanto
+  /// o FE/migração não abandonam o enum legado.
+  templateId String?
+  template   AgentTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  /// Limite do tool-loop no runner (default 8).
+  maxSteps Int @default(8)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   knowledgeDocs AIAgentKnowledgeDoc[]
   runs          AIAgentRun[]
+  configAudits  AIAgentConfigAudit[]
 
   @@index([organizationId])
   @@index([organizationId, active])
   @@index([archetype])
+  @@index([templateId])
   @@map("ai_agent_configs")
+}
+
+/// Molde reutilizável de agente (sistema ou por org). Dual-write com
+/// AIAgentArchetype via `archetypeKey` enquanto o enum legado existe.
+model AgentTemplate {
+  id                   String   @id @default(cuid())
+  organizationId       String?
+  organization         Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                 String
+  description          String?  @db.Text
+  /// Espelha AIAgentArchetype (SDR|ATENDIMENTO|VENDEDOR|SUPORTE) p/ dual-write.
+  archetypeKey         String?
+  systemPromptTemplate String   @db.Text
+  defaultTools         String[] @default([])
+  defaultTone          String   @default("profissional e cordial")
+  defaultModel         String   @default("gpt-4o-mini")
+  defaultInboxPolicy   Json?
+  verticalPack         String?
+  isSystem             Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  agents AIAgentConfig[]
+
+  @@index([organizationId])
+  @@index([isSystem, archetypeKey])
+  @@map("ai_agent_templates")
+}
+
+/// Auditoria de create/update de AIAgentConfig (Onda 0 — observabilidade).
+/// `diff` = [{ field, before, after }, ...]. `source` = wizard|simple|advanced|api|script.
+model AIAgentConfigAudit {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          AIAgentConfig @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Quem salvou. Null em scripts/system sem sessão.
+  userId         String?
+  changedAt      DateTime      @default(now())
+  diff           Json
+  /// wizard | simple | advanced | api | script
+  source         String        @default("api")
+
+  @@index([organizationId])
+  @@index([agentId, changedAt])
+  @@map("ai_agent_config_audits")
 }
 
 enum AIAgentArchetype {
@@ -4746,6 +4854,21 @@ model AIAgentRun {
   /// "keyword" | "low_confidence" | "tool_transfer" | "inactivity".
   handoffReason   String?
   errorMessage    String?
+  /// Snapshot do system prompt efetivo neste run (observabilidade).
+  systemPromptSnapshot String?  @db.Text
+  /// Hash estável dos campos de config que afetam comportamento.
+  configHash           String?
+  /// Interceptos determinísticos disparados (ex.: ["inbound_audio"]).
+  interceptsFired      Json?
+  /// false quando o inbox curto-circuitou antes do LLM.
+  llmInvoked           Boolean?
+  /// true quando o tool-loop parou por atingir maxSteps.
+  stepCountReached     Boolean?
+  /// Turno lógico que originou o run (`ConversationTurn.id`). Null em run
+  /// de playground/automação/API e em inbound antigo (pré Turn Manager).
+  /// Sem relation de propósito: o turno pode ser purgado por retenção sem
+  /// arrastar o histórico de runs.
+  turnId               String?
   createdAt       DateTime         @default(now())
   finishedAt      DateTime?
 
@@ -4755,6 +4878,7 @@ model AIAgentRun {
   @@index([agentId, createdAt])
   @@index([conversationId])
   @@index([status])
+  @@index([turnId])
   @@map("ai_agent_runs")
 }
 
@@ -4783,6 +4907,101 @@ model AIAgentMessage {
   @@index([organizationId])
   @@index([runId, createdAt])
   @@map("ai_agent_messages")
+}
+
+// ──────────────────────────────────────────────
+// Turn Manager (runtime de IA — Fase 1)
+// ──────────────────────────────────────────────
+/// Turno lógico de conversa. O cliente manda "Oi" / "preciso" / "de ajuda"
+/// em bolhas separadas: cada bolha continua sendo uma `Message` própria
+/// (nada é fundido ou sobrescrito), e o turno apenas REFERENCIA os ids em
+/// `messageIds` e materializa o texto concatenado em `aggregatedText` no
+/// instante em que vira READY.
+///
+/// O estado de estabilização vive AQUI, não em memória de processo — é o
+/// que faz o agrupamento sobreviver a restart/deploy/crash e funcionar com
+/// várias réplicas. O `setTimeout` do fast path é só latência.
+model ConversationTurn {
+  id             String                 @id @default(cuid())
+  organizationId String
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Sem relation (mesma convenção de AIAgentRun.conversationId): o turno é
+  /// efêmero e não deve aparecer como include em nenhuma tela de conversa.
+  conversationId String
+  contactId      String?
+  /// "meta" | "baileys" | "messaging" — canal de ingestão da 1ª mensagem.
+  channel        String                 @default("meta")
+  status         ConversationTurnStatus @default(RECEIVING)
+  /// Sentinela do invariante "no máximo UM turno ACUMULANDO por conversa":
+  /// vale `conversationId` em RECEIVING/STABILIZING/READY e NULL a partir do
+  /// claim (PROCESSING) e nos terminais. Combinado com
+  /// @@unique([organizationId, openKey]) e o btree NULLS DISTINCT do
+  /// Postgres, dois ingests concorrentes na mesma conversa só conseguem
+  /// criar UM turno acumulando — o segundo toma P2002 e vira append.
+  ///
+  /// PROCESSING fica FORA de propósito: mensagem que chega com o turno já em
+  /// voo tem que abrir um turno NOVO (requisito: não perder input nem mexer
+  /// no turno em execução). Se PROCESSING travasse a sentinela, o ingest não
+  /// teria onde gravar.
+  ///
+  /// Unique parcial (WHERE status IN ...) daria o mesmo efeito, mas não é
+  /// expressável no schema.prisma e o DEV é gerenciado em estilo
+  /// `prisma db push`, que dropa índice fora do schema — uma constraint de
+  /// correção não pode depender disso.
+  openKey        String?
+  /// Ids das `Message` do turno, em ordem cronológica de ingestão.
+  messageIds     Json                   @default("[]")
+  /// Texto concatenado na ordem, materializado na promoção para READY.
+  aggregatedText String?                @db.Text
+  /// Janela de debounce efetiva deste turno (resolvida no ingest, onde o
+  /// RequestContext existe e `ai.inboundDebounceMs` da org é legível).
+  /// Congelar aqui deixa o sweeper — que roda cross-org com prismaBase —
+  /// decidir a promoção sem nenhum lookup de org setting.
+  debounceMs     Int                    @default(1500)
+  /// Teto rígido contado de `firstMessageAt`: libera o turno mesmo com o
+  /// cliente digitando sem parar.
+  maxWaitMs      Int                    @default(8000)
+  firstMessageAt DateTime               @default(now())
+  lastMessageAt  DateTime               @default(now())
+  readyAt        DateTime?
+  claimedAt      DateTime?
+  /// Identidade do processo que fez o claim (hostname:pid) — diagnóstico
+  /// de turno travado em PROCESSING.
+  claimedBy      String?
+  completedAt    DateTime?
+  attempts       Int                    @default(0)
+  lastError      String?                @db.Text
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  @@unique([organizationId, openKey])
+  @@index([conversationId, status])
+  @@index([status, readyAt])
+  /// Sweeper de promoção: varre abertos por lastMessageAt (janela de
+  /// debounce) sem escanear turnos terminais.
+  @@index([status, lastMessageAt])
+  /// Sweeper de stale reclaim: PROCESSING mais velho que o teto.
+  @@index([status, claimedAt])
+  @@index([organizationId, conversationId, createdAt])
+  @@map("conversation_turns")
+}
+
+enum ConversationTurnStatus {
+  /// Acumulando mensagens. Nenhum dispatch de fast path armado.
+  RECEIVING
+  /// Acumulando, com dispatch de fast path armado (setTimeout no processo
+  /// que ingeriu). O sweeper ignora a diferença — é só diagnóstico.
+  STABILIZING
+  /// Debounce venceu (ou MAX_WAIT estourou). Aguardando claim.
+  READY
+  /// Claimado por um worker, rodando o agente.
+  PROCESSING
+  /// Agente rodou até o fim.
+  COMPLETED
+  /// Cancelado antes de rodar (humano respondeu, assignee mudou, burst halt).
+  INVALIDATED
+  /// Estourou o teto de tentativas.
+  FAILED
 }
 
 // ──────────────────────────────────────────────
@@ -5605,7 +5824,7 @@ model TeamChatRoom {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// DM | GROUP
+  /// DM | GROUP | CHANNEL
   kind           String
   name           String?
   topic          String?
@@ -5621,6 +5840,7 @@ model TeamChatRoom {
   members  TeamChatMember[]
   messages TeamChatMessage[]
   notes    TeamChatNote[]
+  workItems TeamChatWorkItem[]
 
   @@unique([organizationId, dmKey])
   @@index([organizationId, lastMessageAt])
@@ -5662,6 +5882,10 @@ model TeamChatMessage {
   attachments    Json         @default("[]")
   createdAt      DateTime     @default(now())
 
+  anchor   TeamChatMessageAnchor?
+  forwardsFrom TeamChatMessageForward[] @relation("ForwardSourceMessage")
+  forwardsAsDest TeamChatMessageForward[] @relation("ForwardDestMessage")
+
   @@index([roomId, createdAt])
   @@index([organizationId])
   @@map("team_chat_messages")
@@ -5682,6 +5906,128 @@ model TeamChatNote {
   @@index([roomId, authorId])
   @@index([organizationId])
   @@map("team_chat_notes")
+}
+
+/// Checklist, ata, pauta, feedback ou reunião — um primitivo só (spec WiPO Chat).
+model TeamChatWorkItem {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// checklist | ata | pauta | feedback | meeting
+  type           String
+  title          String
+  /// room | meeting | message
+  originType     String
+  originId       String
+  /// Sala de origem quando originType=room (atalho de query).
+  roomId         String?
+  room           TeamChatRoom? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  /// deal | conversation | contact — opcional
+  anchorType     String?
+  anchorId       String?
+  /// canal | privado | participantes
+  visibility     String       @default("canal")
+  createdById    String
+  createdBy      User         @relation("TeamChatWorkItemCreatedBy", fields: [createdById], references: [id])
+  startsAt       DateTime?
+  endsAt         DateTime?
+  callUrl        String?
+  recurrenceKey  String?
+  /// Participantes da reunião (userIds).
+  participantIds Json         @default("[]")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  entries TeamChatWorkItemEntry[]
+
+  @@index([organizationId, createdById])
+  @@index([organizationId, type])
+  @@index([roomId])
+  @@index([anchorType, anchorId])
+  @@index([recurrenceKey])
+  @@map("team_chat_work_items")
+}
+
+model TeamChatWorkItemEntry {
+  id             String           @id @default(cuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workItemId     String
+  workItem       TeamChatWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  text           String
+  assigneeId     String?
+  assignee       User?            @relation("TeamChatWorkItemEntryAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  dueAt          DateTime?
+  /// open | done
+  status         String           @default("open")
+  sortOrder      Int              @default(0)
+  completedAt    DateTime?
+  completedById  String?
+  completedBy    User?            @relation("TeamChatWorkItemEntryCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+
+  revisions TeamChatWorkItemEntryRevision[]
+
+  @@index([workItemId, sortOrder])
+  @@index([organizationId, assigneeId, status])
+  @@index([dueAt])
+  @@map("team_chat_work_item_entries")
+}
+
+model TeamChatWorkItemEntryRevision {
+  id             String               @id @default(cuid())
+  organizationId String
+  entryId        String
+  entry          TeamChatWorkItemEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  changedById    String
+  changedBy      User                 @relation("TeamChatWorkItemRevisionAuthor", fields: [changedById], references: [id])
+  snapshot       Json
+  createdAt      DateTime             @default(now())
+
+  @@index([entryId, createdAt])
+  @@map("team_chat_work_item_entry_revisions")
+}
+
+/// Uma mensagem → zero ou uma âncora polimórfica (CRM ou work item).
+model TeamChatMessageAnchor {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messageId      String          @unique
+  message        TeamChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  /// deal | conversation | contact | work_item
+  anchorType     String
+  anchorId       String
+  createdAt      DateTime        @default(now())
+
+  @@index([organizationId, anchorType, anchorId])
+  @@map("team_chat_message_anchors")
+}
+
+model TeamChatMessageForward {
+  id               String          @id @default(cuid())
+  organizationId   String
+  organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceMessageId  String
+  sourceMessage    TeamChatMessage @relation("ForwardSourceMessage", fields: [sourceMessageId], references: [id], onDelete: Cascade)
+  destMessageId    String?
+  destMessage      TeamChatMessage? @relation("ForwardDestMessage", fields: [destMessageId], references: [id], onDelete: SetNull)
+  excerpt          String
+  note             String
+  /// correcao | atencao | reconhecimento
+  type             String
+  fromUserId       String
+  fromUser         User            @relation("TeamChatForwardFrom", fields: [fromUserId], references: [id])
+  destRoomId       String
+  createdAt        DateTime        @default(now())
+  respondedAt      DateTime?
+  responseNote     String?
+  respondedById    String?
+  respondedBy      User?           @relation("TeamChatForwardResponder", fields: [respondedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, destRoomId])
+  @@index([fromUserId, createdAt])
+  @@index([sourceMessageId])
+  @@map("team_chat_message_forwards")
 }
 
 /// Contador atômico do `number` sequencial por (organização, model).

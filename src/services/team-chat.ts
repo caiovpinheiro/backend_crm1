@@ -8,7 +8,15 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { extractCrmRefsFromText, stripCrmUrls } from "@/lib/crm-internal-url";
 import { getSystemPresenceMap } from "@/services/system-presence";
+import {
+  logAnchoredTimeline,
+  previewLabelForRef,
+  resolveAnchorInput,
+  resolveCrmCardForViewer,
+  type CrmCard,
+} from "@/services/team-chat-records";
 
 export type TeamChatAttachmentKind = "image" | "audio" | "video" | "file" | "sticker";
 
@@ -77,6 +85,33 @@ function parseAttachments(raw: unknown): TeamChatAttachment[] {
   return out;
 }
 
+export type TeamChatMessagePayload = {
+  id: string;
+  roomId: string;
+  authorId: string | null;
+  kind: "TEXT" | "SYSTEM";
+  content: string;
+  displayContent: string;
+  pinned: boolean;
+  reactions: ReturnType<typeof parseReactions>;
+  attachments: TeamChatAttachment[];
+  createdAt: string;
+  author: { id: string; name: string; avatarUrl: string | null } | null;
+  anchorRef: { type: string; id: string } | null;
+  card: CrmCard | null;
+  workItemId: string | null;
+  forward: {
+    id: string;
+    type: string;
+    excerpt: string;
+    note: string;
+    fromUserId: string;
+    fromUserName: string | null;
+    respondedAt: string | null;
+    responseNote: string | null;
+  } | null;
+};
+
 function shapeMessage(
   m: {
     id: string;
@@ -91,18 +126,32 @@ function shapeMessage(
     author: { id: string; name: string; avatarUrl: string | null } | null;
   },
   viewerId: string,
-) {
+  extra?: {
+    card?: CrmCard | null;
+    anchorRef?: { type: string; id: string } | null;
+    workItemId?: string | null;
+    forward?: TeamChatMessagePayload["forward"];
+  },
+): TeamChatMessagePayload {
+  const hasCard = !!extra?.card || !!extra?.workItemId || !!extra?.forward;
+  const rawContent =
+    m.kind === "SYSTEM" ? m.content.replace(/\u200b[\s\S]*$/, "").trim() : m.content;
   return {
     id: m.id,
     roomId: m.roomId,
     authorId: m.authorId,
     kind: m.kind as "TEXT" | "SYSTEM",
-    content: m.content,
+    content: rawContent,
+    displayContent: hasCard && extra?.card ? stripCrmUrls(rawContent) : rawContent,
     pinned: !!m.pinned,
     reactions: parseReactions(m.reactions, viewerId),
     attachments: parseAttachments(m.attachments),
     createdAt: m.createdAt.toISOString(),
     author: m.author,
+    anchorRef: extra?.anchorRef ?? null,
+    card: extra?.card ?? null,
+    workItemId: extra?.workItemId ?? null,
+    forward: extra?.forward ?? null,
   };
 }
 
@@ -139,7 +188,12 @@ export function isOwnedStorageUrl(url: string, organizationId: string) {
 }
 
 function publish(
-  event: "team_chat_message" | "team_chat_room_updated" | "team_chat_typing",
+  event:
+    | "team_chat_message"
+    | "team_chat_room_updated"
+    | "team_chat_typing"
+    | "team_chat_work_item_updated"
+    | "team_chat_forward_updated",
   organizationId: string,
   data: Record<string, unknown>,
 ) {
@@ -157,7 +211,7 @@ export async function signalTyping(viewer: TeamChatViewer, roomId: string, name:
   return { ok: true as const };
 }
 
-async function requireMember(viewer: TeamChatViewer, roomId: string) {
+export async function requireMember(viewer: TeamChatViewer, roomId: string) {
   const member = await prisma.teamChatMember.findFirst({
     where: { roomId, userId: viewer.userId },
     select: { id: true, lastReadAt: true },
@@ -190,8 +244,8 @@ function shapeRoom(
   const peer = room.kind === "DM" ? others[0]?.user ?? null : null;
   return {
     id: room.id,
-    kind: room.kind as "DM" | "GROUP",
-    name: room.kind === "DM" ? (peer?.name ?? "Conversa") : (room.name ?? "Grupo"),
+    kind: room.kind as "DM" | "GROUP" | "CHANNEL",
+    name: room.kind === "DM" ? (peer?.name ?? "Conversa") : (room.name ?? "Canal"),
     topic: room.topic,
     lastMessageAt: room.lastMessageAt.toISOString(),
     lastPreview: room.lastPreview,
@@ -227,22 +281,38 @@ export async function listRooms(viewer: TeamChatViewer) {
     userIds: [...new Set(rooms.flatMap((r) => r.members.map((m) => m.userId)))],
   }).catch(() => new Map());
 
-  const unreadByRoom = await Promise.all(
-    rooms.map(async (room) => {
-      const mine = room.members.find((m) => m.userId === viewer.userId);
-      if (!mine) return [room.id, 0] as const;
-      const unread = await prisma.teamChatMessage.count({
-        where: {
-          roomId: room.id,
-          createdAt: { gt: mine.lastReadAt },
-          OR: [{ authorId: null }, { authorId: { not: viewer.userId } }],
-          kind: "TEXT",
-        },
-      });
-      return [room.id, unread] as const;
-    }),
+  // 1 groupBy em vez de N COUNT (um por sala).
+  const roomUnreadFilters: Prisma.TeamChatMessageWhereInput[] = [];
+  for (const room of rooms) {
+    const mine = room.members.find((m) => m.userId === viewer.userId);
+    if (!mine) continue;
+    roomUnreadFilters.push({
+      roomId: room.id,
+      createdAt: { gt: mine.lastReadAt },
+    });
+  }
+  const unreadGroups =
+    roomUnreadFilters.length === 0
+      ? []
+      : await prisma.teamChatMessage.groupBy({
+          by: ["roomId"],
+          where: {
+            AND: [
+              { OR: roomUnreadFilters },
+              {
+                OR: [
+                  { authorId: null },
+                  { authorId: { not: viewer.userId } },
+                ],
+              },
+              { kind: "TEXT" },
+            ],
+          },
+          _count: { _all: true },
+        });
+  const unreadMap = new Map(
+    unreadGroups.map((g) => [g.roomId, g._count._all] as const),
   );
-  const unreadMap = new Map(unreadByRoom);
 
   return rooms.map((room) =>
     shapeRoom(room, viewer.userId, unreadMap.get(room.id) ?? 0, presence),
@@ -357,7 +427,7 @@ export async function createRoom(
   const memberIds = [viewer.userId, ...unique];
   const created = await prisma.teamChatRoom.create({
     data: withOrgFromCtx({
-      kind: "GROUP",
+      kind: "CHANNEL",
       name,
       topic: input.topic?.trim() || null,
       createdById: viewer.userId,
@@ -379,12 +449,12 @@ export async function createRoom(
       roomId: created.id,
       authorId: viewer.userId,
       kind: "SYSTEM",
-      content: `${me?.name ?? "Alguém"} criou o grupo ${name}`,
+      content: `${me?.name ?? "Alguém"} criou o canal #${name}`,
     }),
   });
   await prisma.teamChatRoom.update({
     where: { id: created.id },
-    data: { lastPreview: `${me?.name ?? "Alguém"} criou o grupo` },
+    data: { lastPreview: `${me?.name ?? "Alguém"} criou o canal` },
   });
 
   publish("team_chat_room_updated", viewer.organizationId, {
@@ -401,8 +471,8 @@ export async function addMembers(
 ) {
   const access = await getRoom(viewer, roomId);
   if ("error" in access) return access;
-  if (access.room.kind !== "GROUP") {
-    return { error: "Só grupos aceitam novos membros.", status: 400 as const };
+  if (access.room.kind !== "GROUP" && access.room.kind !== "CHANNEL") {
+    return { error: "Só canais e grupos aceitam novos membros.", status: 400 as const };
   }
 
   const unique = [...new Set(memberIds.filter((id) => id && id !== viewer.userId))];
@@ -470,22 +540,89 @@ export async function listMessages(
     select: MESSAGE_SELECT,
   });
 
+  const messageIds = rows.map((m) => m.id);
+  const [anchors, forwards] = await Promise.all([
+    prisma.teamChatMessageAnchor.findMany({
+      where: { messageId: { in: messageIds } },
+    }),
+    prisma.teamChatMessageForward.findMany({
+      where: { destMessageId: { in: messageIds } },
+      include: { fromUser: { select: { name: true } } },
+    }),
+  ]);
+  const anchorByMsg = new Map(anchors.map((a) => [a.messageId, a]));
+  const forwardByMsg = new Map(
+    forwards
+      .filter((f) => f.destMessageId)
+      .map((f) => [
+        f.destMessageId as string,
+        {
+          id: f.id,
+          type: f.type,
+          excerpt: f.excerpt,
+          note: f.note,
+          fromUserId: f.fromUserId,
+          fromUserName: f.fromUser?.name ?? null,
+          respondedAt: f.respondedAt?.toISOString() ?? null,
+          responseNote: f.responseNote,
+        },
+      ]),
+  );
+
+  const messages = [];
+  for (const m of rows.reverse()) {
+    const extra = await hydrateMessageExtra(viewer, m.id, anchorByMsg.get(m.id), forwardByMsg.get(m.id));
+    messages.push(shapeMessage(m, viewer.userId, extra));
+  }
+  return { messages };
+}
+
+async function hydrateMessageExtra(
+  viewer: TeamChatViewer,
+  messageId: string,
+  anchor?: { anchorType: string; anchorId: string } | null,
+  forward?: TeamChatMessagePayload["forward"] | null,
+) {
+  if (!anchor) {
+    return { card: null, anchorRef: null, workItemId: null, forward: forward ?? null };
+  }
+  if (anchor.anchorType === "work_item") {
+    return {
+      card: null,
+      anchorRef: { type: "work_item", id: anchor.anchorId },
+      workItemId: anchor.anchorId,
+      forward: forward ?? null,
+    };
+  }
+  const card = await resolveCrmCardForViewer(viewer, {
+    type: anchor.anchorType as "deal" | "conversation" | "contact",
+    id: anchor.anchorId,
+  });
   return {
-    messages: rows.reverse().map((m) => shapeMessage(m, viewer.userId)),
+    card,
+    anchorRef: { type: anchor.anchorType, id: anchor.anchorId },
+    workItemId: null as string | null,
+    forward: forward ?? null,
   };
 }
 
 export async function sendMessage(
   viewer: TeamChatViewer,
   roomId: string,
-  input: { content?: string; attachments?: TeamChatAttachment[] },
+  input: {
+    content?: string;
+    attachments?: TeamChatAttachment[];
+    anchor?: { type: string; id: string } | null;
+  },
 ) {
   const member = await requireMember(viewer, roomId);
   if (!member) return { error: "Conversa não encontrada.", status: 404 as const };
 
   const text = (input.content ?? "").trim();
   const attachments = (input.attachments ?? []).slice(0, 8);
-  if (!text && attachments.length === 0) return { error: "Mensagem vazia.", status: 400 as const };
+  if (!text && attachments.length === 0 && !input.anchor) {
+    return { error: "Mensagem vazia.", status: 400 as const };
+  }
   if (text.length > 4000) return { error: "Mensagem muito longa.", status: 400 as const };
 
   for (const att of attachments) {
@@ -493,6 +630,14 @@ export async function sendMessage(
     if (!isOwnedStorageUrl(att.url, viewer.organizationId)) {
       return { error: "Anexo inválido.", status: 400 as const };
     }
+  }
+
+  let resolved = input.anchor
+    ? await resolveAnchorInput(viewer.organizationId, input.anchor)
+    : null;
+  if (!resolved) {
+    const fromText = extractCrmRefsFromText(text)[0];
+    if (fromText) resolved = await resolveAnchorInput(viewer.organizationId, fromText);
   }
 
   const message = await prisma.teamChatMessage.create({
@@ -506,9 +651,41 @@ export async function sendMessage(
     select: MESSAGE_SELECT,
   });
 
+  if (resolved) {
+    await prisma.teamChatMessageAnchor.create({
+      data: withOrgFromCtx({
+        messageId: message.id,
+        anchorType: resolved.type,
+        anchorId: resolved.id,
+      }),
+    });
+    if (resolved.type !== "work_item") {
+      void logAnchoredTimeline({
+        type: resolved.type,
+        recordId: resolved.id,
+        roomId,
+        messageId: message.id,
+        authorName: message.author?.name ?? null,
+      });
+    }
+  }
+
+  let lastPreview = previewOfPayload(text, attachments);
+  if (resolved && resolved.type !== "work_item") {
+    lastPreview = await previewLabelForRef(viewer.organizationId, {
+      type: resolved.type,
+      id: resolved.id,
+    });
+  } else if (resolved?.type === "work_item") {
+    lastPreview = text || "Checklist";
+  } else {
+    const urls = extractCrmRefsFromText(text);
+    if (urls[0]) lastPreview = await previewLabelForRef(viewer.organizationId, urls[0]);
+  }
+
   const room = await prisma.teamChatRoom.update({
     where: { id: roomId },
-    data: { lastMessageAt: message.createdAt, lastPreview: previewOfPayload(text, attachments) },
+    data: { lastMessageAt: message.createdAt, lastPreview },
     select: { members: { select: { userId: true } } },
   });
 
@@ -517,13 +694,113 @@ export async function sendMessage(
     data: { lastReadAt: message.createdAt },
   });
 
-  const payload = shapeMessage(message, viewer.userId);
+  const extra = await hydrateMessageExtra(
+    viewer,
+    message.id,
+    resolved ? { anchorType: resolved.type, anchorId: resolved.id } : null,
+    null,
+  );
+  const payload = shapeMessage(message, viewer.userId, extra);
+  const ssePayload = { ...payload, card: null };
   publish("team_chat_message", viewer.organizationId, {
     roomId,
     memberIds: room.members.map((m) => m.userId),
-    message: payload,
+    message: ssePayload,
   });
   return { message: payload };
+}
+
+export async function postWorkItemMessage(
+  viewer: TeamChatViewer,
+  roomId: string,
+  workItemId: string,
+  title: string,
+) {
+  return sendMessage(viewer, roomId, {
+    content: title,
+    anchor: { type: "work_item", id: workItemId },
+  });
+}
+
+export async function sendSystemMessageThrottled(
+  viewer: TeamChatViewer,
+  roomId: string,
+  content: string,
+  throttleKey: string,
+  windowMs: number,
+) {
+  const since = new Date(Date.now() - windowMs);
+  const recent = await prisma.teamChatMessage.findFirst({
+    where: {
+      roomId,
+      kind: "SYSTEM",
+      content: { contains: throttleKey },
+      createdAt: { gte: since },
+    },
+    select: { id: true },
+  });
+  if (recent) return;
+  await prisma.teamChatMessage.create({
+    data: withOrgFromCtx({
+      roomId,
+      authorId: viewer.userId,
+      kind: "SYSTEM",
+      content: `${content}\u200b${throttleKey}`,
+    }),
+  });
+  publish("team_chat_room_updated", viewer.organizationId, { roomId });
+}
+
+export async function unifiedTeamChatSearch(viewer: TeamChatViewer, q: string) {
+  const term = q.trim();
+  if (term.length < 2) return { messages: [], workItems: [], records: [] };
+  const { searchCrmRecords } = await import("@/services/team-chat-records");
+  const rooms = await prisma.teamChatMember.findMany({
+    where: { userId: viewer.userId },
+    select: { roomId: true },
+  });
+  const roomIds = rooms.map((r) => r.roomId);
+  const [messages, workItems, records] = await Promise.all([
+    prisma.teamChatMessage.findMany({
+      where: {
+        roomId: { in: roomIds },
+        content: { contains: term, mode: "insensitive" },
+        kind: "TEXT",
+      },
+      orderBy: { createdAt: "desc" },
+      take: 15,
+      select: {
+        id: true,
+        roomId: true,
+        content: true,
+        createdAt: true,
+        author: { select: { name: true } },
+      },
+    }),
+    prisma.teamChatWorkItem.findMany({
+      where: {
+        AND: [
+          { title: { contains: term, mode: "insensitive" } },
+          { OR: [{ roomId: { in: roomIds } }, { createdById: viewer.userId }] },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 15,
+      select: { id: true, title: true, type: true, roomId: true },
+    }),
+    searchCrmRecords(viewer, term, 10),
+  ]);
+  return {
+    messages: messages.map((m) => ({
+      id: m.id,
+      roomId: m.roomId,
+      content: m.content,
+      createdAt: m.createdAt.toISOString(),
+      authorName: m.author?.name ?? null,
+    })),
+    workItems,
+    records: records.records,
+  };
 }
 
 export async function markRead(viewer: TeamChatViewer, roomId: string) {
@@ -622,8 +899,12 @@ export async function toggleReaction(
     data: { reactions: next },
     select: MESSAGE_SELECT,
   });
-  const payload = shapeMessage(updated, viewer.userId);
-  publish("team_chat_message", viewer.organizationId, { roomId, message: payload });
+  const extra = await extrasForMessage(viewer, messageId);
+  const payload = shapeMessage(updated, viewer.userId, extra);
+  publish("team_chat_message", viewer.organizationId, {
+    roomId,
+    message: { ...payload, card: null },
+  });
   return { message: payload };
 }
 
@@ -644,9 +925,78 @@ export async function togglePin(
     data: { pinned: !msg.pinned },
     select: MESSAGE_SELECT,
   });
-  const payload = shapeMessage(updated, viewer.userId);
-  publish("team_chat_message", viewer.organizationId, { roomId, message: payload });
+  const extra = await extrasForMessage(viewer, messageId);
+  const payload = shapeMessage(updated, viewer.userId, extra);
+  publish("team_chat_message", viewer.organizationId, {
+    roomId,
+    message: { ...payload, card: null },
+  });
   return { message: payload };
+}
+
+async function extrasForMessage(viewer: TeamChatViewer, messageId: string) {
+  const [anchor, forward] = await Promise.all([
+    prisma.teamChatMessageAnchor.findFirst({ where: { messageId } }),
+    prisma.teamChatMessageForward.findFirst({
+      where: { destMessageId: messageId },
+      include: { fromUser: { select: { name: true } } },
+    }),
+  ]);
+  return hydrateMessageExtra(
+    viewer,
+    messageId,
+    anchor,
+    forward
+      ? {
+          id: forward.id,
+          type: forward.type,
+          excerpt: forward.excerpt,
+          note: forward.note,
+          fromUserId: forward.fromUserId,
+          fromUserName: forward.fromUser?.name ?? null,
+          respondedAt: forward.respondedAt?.toISOString() ?? null,
+          responseNote: forward.responseNote,
+        }
+      : null,
+  );
+}
+
+export async function shareRecordToChat(
+  viewer: TeamChatViewer,
+  input: {
+    type: string;
+    id: string;
+    roomIds?: string[];
+    personIds?: string[];
+    content?: string;
+  },
+) {
+  const resolved = await resolveAnchorInput(viewer.organizationId, {
+    type: input.type,
+    id: input.id,
+  });
+  if (!resolved || resolved.type === "work_item") {
+    return { error: "Registro não encontrado.", status: 404 as const };
+  }
+
+  const roomIds = new Set(input.roomIds ?? []);
+  for (const personId of input.personIds ?? []) {
+    const created = await createRoom(viewer, { memberIds: [personId] });
+    if ("error" in created) return created;
+    roomIds.add(created.room.id);
+  }
+  if (roomIds.size === 0) return { error: "Escolha um destino.", status: 400 as const };
+
+  const messages = [];
+  for (const roomId of roomIds) {
+    const sent = await sendMessage(viewer, roomId, {
+      content: input.content ?? "",
+      anchor: { type: resolved.type, id: resolved.id },
+    });
+    if ("error" in sent) return sent;
+    messages.push(sent.message);
+  }
+  return { messages, count: messages.length };
 }
 
 function shapeNote(n: { id: string; content: string; pinned: boolean; createdAt: Date }) {

@@ -1,6 +1,19 @@
 /**
- * Debounce de mensagens inbound para o Agente IA.
+ * Debounce de mensagens inbound para o Agente IA — CAMINHO LEGADO.
  *
+ * APOSENTADO pelo `turn-manager.ts` (Fase 1 do runtime de IA). Com
+ * `AI_TURN_MANAGER=1` os 3 ingests chamam `onInboundMessageForAi` e
+ * `scheduleAiReply` não é mais alcançado; com a flag desligada (default)
+ * este arquivo continua sendo o caminho de produção. NÃO existem dois
+ * debounces ativos ao mesmo tempo — o entrypoint novo é quem decide, e é
+ * ele que delega para cá no modo legado.
+ *
+ * Continuam vivos e compartilhados pelos dois modos:
+ *   - `claimInboundMessageForAi` (claim Redis por messageId)
+ *   - `collectUnansweredInboundText` (batch de inbound sem resposta)
+ *   - `cancelAiReplyDebounce` (agora também invalida turnos)
+ *
+
  * Agrupa mensagens consecutivas do cliente (timer renovável) e garante
  * que só a última geração válida dispare `maybeReplyAsAIAgent`.
  *
@@ -9,7 +22,11 @@
  */
 
 import { cache } from "@/lib/cache";
-import { getOrgIdOrNull, runWithContext } from "@/lib/request-context";
+import {
+  getOrgIdOrNull,
+  getRequestContext,
+  runWithContext,
+} from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
@@ -83,6 +100,12 @@ export async function claimInboundMessageForAi(
 /**
  * Cancela debounce pendente (humano assumiu / enviou mensagem).
  * Sempre invalida generationId no cache (multi-réplica / pós-flush).
+ *
+ * Ponto ÚNICO de cancelamento: além do timer local e do generationId,
+ * invalida os `ConversationTurn` acumulando da conversa. Todos os call
+ * sites atuais (POST /messages, actions/assignee, halt-inbound-burst,
+ * moveConversationAssignee, farewell do inbox-handler, `ai_only_close`
+ * do vertical academic) ficam cobertos sem mudar nenhum deles.
  */
 export function cancelAiReplyDebounce(
   conversationId: string,
@@ -97,6 +120,19 @@ export function cancelAiReplyDebounce(
     pendingByConversation.delete(conversationId);
   }
   void cache.del(`ai:gen:${conversationId}`);
+  // Import dinâmico: turn-manager importa este módulo (claim + coletor de
+  // texto), então o estático fecharia ciclo.
+  void import("@/services/ai/turn-manager")
+    .then(({ invalidateOpenTurns }) =>
+      invalidateOpenTurns(conversationId, reason),
+    )
+    .catch((err) => {
+      console.error("[ai-attend] invalidateOpenTurns falhou", {
+        conversationId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   logAi("debounce_cancelled", { conversationId, reason, hadPending: Boolean(slot) });
 }
 
@@ -260,6 +296,63 @@ async function flushDebounce(
       err: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * Depois de atribuir/transferir no inbox para um User type=AI: responde
+ * inbound sem resposta, ou manda a saudação se o aluno ainda não falou.
+ * Fire-and-forget — o HTTP do assign não espera o LLM.
+ */
+export function kickAiAfterInboxAssign(args: {
+  conversationId: string;
+  contactId: string;
+}): void {
+  // Captura o ALS agora: o assign HTTP já pode ter encerrado quando o
+  // primeiro `await` abaixo roda, e o prisma scoped explode sem org.
+  const ctx = getRequestContext();
+  void (async () => {
+    const run = async () => {
+      try {
+        const text = await collectUnansweredInboundText(args.conversationId);
+        if (text.trim()) {
+          // Passa pelo entrypoint compartilhado: com AI_TURN_MANAGER=1 isso
+          // abre um turno em vez de armar o timer local. Sem isso, o assign
+          // ao agente IA seria um SEGUNDO debounce rodando em paralelo com
+          // o Turn Manager.
+          const { onInboundMessageForAi } = await import(
+            "@/services/ai/turn-manager"
+          );
+          await onInboundMessageForAi({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            userMessage: text,
+            channel: "meta",
+          });
+          return;
+        }
+        const conv = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedToId: true },
+        });
+        if (!conv?.assignedToId) return;
+        const { triggerAgentOpeningForContact } = await import(
+          "@/services/ai/piloting-actions"
+        );
+        await triggerAgentOpeningForContact({
+          contactId: args.contactId,
+          agentUserId: conv.assignedToId,
+          channel: "meta",
+        });
+      } catch (e) {
+        console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
+      }
+    };
+    if (ctx) {
+      await runWithContext(ctx, run);
+      return;
+    }
+    await run();
+  })();
 }
 
 /**

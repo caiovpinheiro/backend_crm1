@@ -60,7 +60,7 @@ export async function GET(request: Request) {
   if (denied) return denied;
   try {
     const result = await replayStuckAiInbox(parseOpts(request, false));
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ...result, ok: true as const });
   } catch (e) {
     console.error("[cron/replay-stuck-ai]", e);
     return NextResponse.json(
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
   if (denied) return denied;
   try {
     const result = await replayStuckAiInbox(parseOpts(request, true));
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ...result, ok: true as const });
   } catch (e) {
     console.error("[cron/replay-stuck-ai]", e);
     return NextResponse.json(

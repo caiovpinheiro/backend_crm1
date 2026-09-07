@@ -42,13 +42,14 @@ export type WebhookScope = {
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { createMessageDedup } from "@/lib/message-dedup";
 import {
   maybeDenyWhatsappCallConsent,
   maybeGrantWhatsappCallConsent,
 } from "@/services/whatsapp-call-consent-webhook";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
-import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
@@ -1884,8 +1885,12 @@ async function updateCampaignRecipientStatus(
       const code = typeof e.code === "number" ? e.code : null;
       const human =
         details || str(e.message) || str(e.title) || "Falha no envio";
-      data.errorMessage =
-        code != null ? `${human} (code ${code})` : human;
+      const catalog = code != null ? metaErrorReason(code) : "";
+      data.errorMessage = catalog
+        ? `${catalog} (Meta: ${human}) (code ${code})`
+        : code != null
+          ? `${human} (code ${code})`
+          : human;
     }
 
     // Kill switch: STATUS_WRITE_BUFFER_ENABLED=0 volta ao update individual.
@@ -2827,7 +2832,13 @@ export async function processMetaWebhookPayload(
             ? await resolveReplyContext(parsed.replyToWaMessageId)
             : null;
 
-          const msgCreated = await prisma.$transaction(async (tx) => {
+          // `createMessageDedup` fica FORA da transação de propósito: o
+          // P2002 aborta a tx no Postgres, então engolir o erro dentro do
+          // callback deixaria o COMMIT em estado inválido. Aqui a tx faz
+          // rollback e a duplicata volta como `null` — mesmo caminho do
+          // `findFirst` abaixo.
+          const msgCreated = await createMessageDedup(() =>
+            prisma.$transaction(async (tx) => {
               const existing = await tx.message.findFirst({
               where: { externalId: parsed.waMessageId },
               select: { id: true },
@@ -2853,7 +2864,8 @@ export async function processMetaWebhookPayload(
                   : {}),
               }),
             });
-          });
+          }),
+          );
 
           if (!msgCreated) {
             // Reentrega da Meta: a linha já existe, mas o grant pode ter
@@ -3114,6 +3126,7 @@ export async function processMetaWebhookPayload(
               await ensureInboundAiAttendance({
                 conversationId: conversation.id,
                 contactId: contact.id,
+                userMessage: parsed.text,
               });
             } catch (err) {
               log.error("Falha no ensureInboundAiAttendance:", err);
@@ -3171,7 +3184,7 @@ export async function processMetaWebhookPayload(
             // por texto livre / ponteiro morto) ninguém falou com o aluno:
             // silenciar a IA aí deixava a mensagem sem nenhuma resposta.
             if (!isSystemMessage && parsed.text && !salesbotReplied) {
-              void scheduleAiReply({
+              void onInboundMessageForAi({
                 conversationId: conversation.id,
                 contactId: contact.id,
                 messageId: msgCreated.id,
