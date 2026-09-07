@@ -168,12 +168,14 @@ export async function PUT(
       const updated = await updateAIAgent(id, input);
       // Combinação que o runtime rebaixa silenciosamente (gate do pack x
       // modo "não sei"): salva, mas devolve o aviso para a tela.
+      const updatedPolicy = normalizeInboxPolicy(
+        updated.inboxPolicy,
+        updated.verticalPack,
+      );
       const warnings = validateUnknownAnswerAgainstGate({
         verticalPack: updated.verticalPack,
-        unknownAnswerMode: normalizeInboxPolicy(
-          updated.inboxPolicy,
-          updated.verticalPack,
-        ).unknownAnswerMode,
+        unknownAnswerMode: updatedPolicy.unknownAnswerMode,
+        unknownAnswerMessage: updatedPolicy.unknownAnswerMessage,
       });
       return NextResponse.json(
         warnings.length > 0 ? { ...updated, warnings } : updated,

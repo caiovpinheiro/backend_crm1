@@ -9,7 +9,10 @@
  * leem daqui.
  */
 
-import type { InboxPolicy } from "@/lib/ai-agents/steering";
+import {
+  messagePromisesTransfer,
+  type InboxPolicy,
+} from "@/lib/ai-agents/steering";
 import {
   humanQueueContextFromAgent,
   userWantsHumanDistribution,
@@ -114,16 +117,37 @@ export type AgentConfigWarning = { field: string; message: string };
 export function validateUnknownAnswerAgainstGate(input: {
   verticalPack?: string | null;
   unknownAnswerMode?: string | null;
+  unknownAnswerMessage?: string | null;
   inboxPolicy?: InboxPolicy | null;
 }): AgentConfigWarning[] {
-  if (policyOf(input) === "always") return [];
-  if (input.unknownAnswerMode !== "handoff") return [];
-  return [
-    {
+  const gateCanBlock = policyOf(input) !== "always";
+  const warnings: AgentConfigWarning[] = [];
+
+  if (gateCanBlock && input.unknownAnswerMode === "handoff") {
+    warnings.push({
       field: "unknownAnswerMode",
       message:
         "Este agente só transfere quando o cliente pede atendimento humano ou o tema exige um departamento. " +
         'Nos demais casos, mesmo com "Admitir e transferir para humano", ele vai admitir que não sabe e seguir o atendimento.',
-    },
-  ];
+    });
+  }
+
+  // O runtime rebaixa o modo para "admitir e seguir", mas a frase escrita
+  // pelo operador continua prometendo transferência. Nesse turno a frase é
+  // descartada (`buildUnknownAnswerBlock`) — o operador precisa saber que o
+  // texto dele não vai ao ar como está.
+  const message =
+    input.unknownAnswerMessage ?? input.inboxPolicy?.unknownAnswerMessage ?? null;
+  const modeEndsInAcknowledge =
+    input.unknownAnswerMode === "acknowledge" || gateCanBlock;
+  if (modeEndsInAcknowledge && messagePromisesTransfer(message)) {
+    warnings.push({
+      field: "unknownAnswerMessage",
+      message:
+        "A frase de \"não sei\" promete transferir, mas neste agente o turno pode terminar sem transferência. " +
+        "Nesses casos o agente ignora a frase e admite com o tom configurado — reescreva-a sem prometer transferência.",
+    });
+  }
+
+  return warnings;
 }

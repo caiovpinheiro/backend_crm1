@@ -775,6 +775,26 @@ export function normalizeInboxPolicy(
  * `parseAgentConfidence` devolvia null e o handoff por baixa confiança
  * nunca disparava: o agente genérico preferia inventar a admitir.
  */
+/**
+ * A frase do operador promete transferência?
+ *
+ * Genérico: verbos de encaminhamento em pt-BR, nenhum tema de vertical.
+ * "Vou verificar com a equipe" (que é justamente o que o modo `acknowledge`
+ * manda dizer) NÃO conta — só a promessa de passar o atendimento adiante.
+ */
+export function messagePromisesTransfer(
+  message: string | null | undefined,
+): boolean {
+  const n = fold(message ?? "").replace(/\s+/g, " ");
+  if (!n) return false;
+  return (
+    /transfer|encaminh|redirecion|direcion|repass/.test(n) ||
+    /\b(te |voce |vc )?(passo|passar|passando|passei) (voce |vc |te )?(para|pra|pro)\b/.test(n) ||
+    /\b(te|voce|vc) (conecto|conectar|conectando|coloco|colocar) (com|na fila|para|pra|pro)\b/.test(n) ||
+    /\bvou (te |voce |vc )?(conectar|colocar na fila)\b/.test(n)
+  );
+}
+
 export function buildUnknownAnswerBlock(
   policy: InboxPolicy,
   opts?: { transferBlocked?: boolean },
@@ -800,8 +820,18 @@ export function buildUnknownAnswerBlock(
     "PROIBIDO usar \"geralmente\", \"normalmente\" ou \"acredito que\" para preencher lacuna.",
   );
 
-  if (policy.unknownAnswerMessage) {
-    lines.push(`Ao admitir que não sabe, use esta frase: "${policy.unknownAnswerMessage}"`);
+  // A frase do operador foi escrita para o modo dele, não para o modo que
+  // o gate impôs: mandar dizer "vou te transferir" no mesmo bloco que
+  // proíbe transferir era o próprio código produzindo a contradição.
+  // Descartada inteira (higienizar texto de operador é reescrever o que
+  // ele escreveu) — a validação de configuração avisa quem configurou.
+  const operatorMessage =
+    mode === "acknowledge" && messagePromisesTransfer(policy.unknownAnswerMessage)
+      ? null
+      : policy.unknownAnswerMessage;
+
+  if (operatorMessage) {
+    lines.push(`Ao admitir que não sabe, use esta frase: "${operatorMessage}"`);
   } else {
     lines.push("Ao admitir que não sabe, seja direto e mantenha o tom configurado.");
   }

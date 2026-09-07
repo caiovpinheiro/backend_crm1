@@ -112,4 +112,57 @@ describe("validateUnknownAnswerAgainstGate", () => {
       }),
     ).toHaveLength(0);
   });
+
+  it("avisa que a frase de \"não sei\" promete transferência que pode não acontecer", () => {
+    const warnings = validateUnknownAnswerAgainstGate({
+      verticalPack: "academic",
+      unknownAnswerMode: "acknowledge",
+      unknownAnswerMessage: "Vou te transferir para um consultor agora.",
+    });
+    expect(warnings.map((w) => w.field)).toEqual(["unknownAnswerMessage"]);
+  });
+
+  it("modo transferir + frase que promete: os dois avisos", () => {
+    const warnings = validateUnknownAnswerAgainstGate({
+      verticalPack: "academic",
+      unknownAnswerMode: "handoff",
+      unknownAnswerMessage: "Vou te transferir para um consultor agora.",
+    });
+    expect(warnings.map((w) => w.field)).toEqual([
+      "unknownAnswerMode",
+      "unknownAnswerMessage",
+    ]);
+  });
+
+  it("frase sem promessa, ou sem gate, não gera aviso", () => {
+    expect(
+      validateUnknownAnswerAgainstGate({
+        verticalPack: "academic",
+        unknownAnswerMode: "acknowledge",
+        unknownAnswerMessage: "Não sei te dizer isso, vou confirmar.",
+      }),
+    ).toHaveLength(0);
+    expect(
+      validateUnknownAnswerAgainstGate({
+        verticalPack: null,
+        unknownAnswerMode: "handoff",
+        unknownAnswerMessage: "Vou te transferir para um consultor agora.",
+      }),
+    ).toHaveLength(0);
+  });
+
+  it("lê a frase da própria inboxPolicy quando ela não vem solta", () => {
+    const warnings = validateUnknownAnswerAgainstGate({
+      verticalPack: "academic",
+      unknownAnswerMode: "acknowledge",
+      inboxPolicy: normalizeInboxPolicy(
+        {
+          transferPolicy: "on_request_or_topic",
+          unknownAnswerMessage: "Já vou te encaminhar para a equipe.",
+        },
+        "academic",
+      ),
+    });
+    expect(warnings.map((w) => w.field)).toEqual(["unknownAnswerMessage"]);
+  });
 });
