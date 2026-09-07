@@ -55,6 +55,7 @@ import {
   retrieveRelevantChunks,
 } from "@/services/ai/retrieval";
 import {
+  buildUnknownAnswerBlock,
   normalizeInboxPolicy,
   normalizeToolConfig,
 } from "@/lib/ai-agents/steering";
@@ -225,9 +226,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const packOps = pack?.ops ?? {};
     // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
     const hasPack = Boolean(pack);
-    // Modelos internos (tela Internos): preserva comportamento acadêmico
-    // para agentes com verticalPack=academic (backfill ATENDIMENTO).
-    const useMessageModelsRag = pack?.id === "academic";
+    // Modelos internos (tela Internos) como fonte de RAG. Era ligado por
+    // `pack?.id === "academic"`, o que escondia a base do time de qualquer
+    // agente genérico. Agora é configuração (default true no pack academic).
+    const inboxPolicyForRun = normalizeInboxPolicy(
+      agent.inboxPolicy,
+      agent.verticalPack,
+    );
+    const useMessageModelsRag = inboxPolicyForRun.useMessageModels;
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
@@ -333,6 +339,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       [
         agent.systemPromptOverride?.trim(),
         steeringRules,
+        buildUnknownAnswerBlock(inboxPolicyForRun),
         // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
         // ele ainda tentava `close_conversation` e levava erro da tool.
         buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
@@ -382,10 +389,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       dealId: args.dealId ?? null,
       userMessage: args.userMessage,
       verticalPack: agent.verticalPack ?? null,
-      inboxPolicy: normalizeInboxPolicy(
-        agent.inboxPolicy,
-        agent.verticalPack,
-      ),
+      inboxPolicy: inboxPolicyForRun,
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
     };
 

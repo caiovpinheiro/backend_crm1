@@ -347,7 +347,36 @@ export type InboxPolicy = {
   /// código, que já ajusta a frase ao expediente humano.
   handoffMessage: string | null;
   retentionHandoffMessage: string | null;
+
+  /// Usa os Modelos internos (`MessageTemplate`) como fonte de RAG,
+  /// além dos docs da base de conhecimento do agente. Era ligado só
+  /// para `verticalPack=academic`; agora é escolha de configuração.
+  useMessageModels: boolean;
+
+  /// O que fazer quando o agente NÃO tem base para responder.
+  ///  - `handoff`     admite e transfere para humano.
+  ///  - `clarify`     pergunta pra tentar destravar; só transfere se insistir.
+  ///  - `acknowledge` admite, registra a lacuna e segue o atendimento.
+  unknownAnswerMode: UnknownAnswerMode;
+  /// Frase que o agente deve usar ao admitir que não sabe. `null` =
+  /// deixa o modelo formular com o tom configurado.
+  unknownAnswerMessage: string | null;
 };
+
+export type UnknownAnswerMode = "handoff" | "clarify" | "acknowledge";
+
+export const UNKNOWN_ANSWER_MODES: UnknownAnswerMode[] = [
+  "handoff",
+  "clarify",
+  "acknowledge",
+];
+
+function isUnknownAnswerMode(v: unknown): v is UnknownAnswerMode {
+  return (
+    typeof v === "string" &&
+    UNKNOWN_ANSWER_MODES.includes(v as UnknownAnswerMode)
+  );
+}
 
 export function defaultInboxPolicy(): InboxPolicy {
   return {
@@ -364,6 +393,9 @@ export function defaultInboxPolicy(): InboxPolicy {
     scope: defaultAttendanceScope(),
     handoffMessage: null,
     retentionHandoffMessage: null,
+    useMessageModels: false,
+    unknownAnswerMode: "handoff",
+    unknownAnswerMessage: null,
   };
 }
 
@@ -385,6 +417,9 @@ export function normalizeInboxPolicy(
     base.interceptRetention = true;
     base.interceptCourseShopping = true;
     base.inauguralEnabled = true;
+    // Preserva o comportamento anterior, quando o RAG de modelos era
+    // ligado por `pack?.id === "academic"` direto no runner.
+    base.useMessageModels = true;
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
@@ -423,7 +458,64 @@ export function normalizeInboxPolicy(
     scope: normalizeAttendanceScope(r.scope),
     handoffMessage: nullableText(r.handoffMessage),
     retentionHandoffMessage: nullableText(r.retentionHandoffMessage),
+    useMessageModels: boolOr(r.useMessageModels, base.useMessageModels),
+    unknownAnswerMode: isUnknownAnswerMode(r.unknownAnswerMode)
+      ? r.unknownAnswerMode
+      : base.unknownAnswerMode,
+    unknownAnswerMessage: nullableText(r.unknownAnswerMessage),
   };
+}
+
+/**
+ * Bloco de prompt que ensina o modelo a reconhecer que NÃO tem base e o
+ * que fazer nesse caso.
+ *
+ * A regra de confiança morava em `pack.constants.confidenceRules`
+ * (acadêmico). Sem pack o modelo nunca emitia `[CONFIANCA:x]`, então
+ * `parseAgentConfidence` devolvia null e o handoff por baixa confiança
+ * nunca disparava: o agente genérico preferia inventar a admitir.
+ */
+export function buildUnknownAnswerBlock(policy: InboxPolicy): string {
+  const threshold = policy.confidenceThreshold ?? 0.4;
+  const lines = ["## QUANDO VOCÊ NÃO SOUBER (regra dura)"];
+
+  if (policy.lowConfidenceHandoff) {
+    lines.push(
+      `Termine SEMPRE a resposta com a linha [CONFIANCA:X.X] (0.0 a 1.0).`,
+      `- 0.85+ em saudação, agradecimento ou despedida — isso não é falta de base.`,
+      `- 0.8+ quando as referências e modelos cobrem o que foi perguntado.`,
+      `- abaixo de ${threshold.toFixed(2)} SÓ quando a pergunta é factual e nada na base cobre.`,
+    );
+  }
+
+  lines.push(
+    "PROIBIDO inventar dado, prazo, valor, link ou procedimento que não esteja nas referências.",
+    "PROIBIDO usar \"geralmente\", \"normalmente\" ou \"acredito que\" para preencher lacuna.",
+  );
+
+  if (policy.unknownAnswerMessage) {
+    lines.push(`Ao admitir que não sabe, use esta frase: "${policy.unknownAnswerMessage}"`);
+  } else {
+    lines.push("Ao admitir que não sabe, seja direto e mantenha o tom configurado.");
+  }
+
+  if (policy.unknownAnswerMode === "handoff") {
+    lines.push(
+      "Sem base: admita em uma frase e transfira para um humano na MESMA resposta, usando as tools de transferência.",
+    );
+  } else if (policy.unknownAnswerMode === "clarify") {
+    lines.push(
+      "Sem base: faça UMA pergunta objetiva para tentar destravar.",
+      "Se a resposta do cliente ainda não permitir responder com a base, aí sim admita e transfira.",
+    );
+  } else {
+    lines.push(
+      "Sem base: admita, diga que vai verificar com a equipe e siga o atendimento nos pontos que você domina.",
+      "NÃO transfira só por não saber um item — continue disponível.",
+    );
+  }
+
+  return lines.join("\n");
 }
 
 /** true se algum dos termos extras aparece na mensagem (sem acento/caixa). */
