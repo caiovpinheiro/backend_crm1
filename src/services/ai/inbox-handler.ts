@@ -96,6 +96,8 @@ import {
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { readTestMode } from "@/services/ai/test-mode";
+import { runAiTestTurn } from "@/services/ai/test-mode-turn";
 
 export type InboundAIArgs = {
   conversationId: string;
@@ -407,6 +409,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         assignedToId: true,
         contactId: true,
         hasHumanReply: true,
+        aiTestModeUntil: true,
+        aiTestModeById: true,
         channelRef: {
           select: {
             id: true,
@@ -418,6 +422,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         },
       },
     });
+    // Modo de teste sai da mesma linha que já buscamos — sem query extra e
+    // sem chance de divergir do estado da conversa. Expira por comparação de
+    // timestamp: worker que acordou depois da janela lê o modo desligado.
+    const testMode = readTestMode(conversation);
     if (isRetiredWhatsAppChannel(conversation?.channelRef)) {
       logAi("blocked", {
         conversationId: args.conversationId,
@@ -442,7 +450,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     }
 
     // Vertical pack — pre_assignee (first_access → greeting_self_serve)
-    {
+    // Em modo de teste os interceptos ficam de fora: eles transferem por
+    // dentro (`executeAcademicDepartmentHandoff`, escrita direta em
+    // `assignedToId`) e neutralizá-los um a um seria uma garantia frágil.
+    if (!testMode) {
       const early = await resolveInboxAgentSteering(conversation);
       const earlyPack = early.pack;
       // Regra do operador casou → nenhum intercepto do pack roda neste
@@ -483,6 +494,16 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (env.conversation) conversation = env.conversation;
         if (hit?.handled) return;
       }
+    }
+
+    if (!conversation?.assignedToId && testMode) {
+      // A rota de reassumir passa por `executeDistribution`. Em teste isso
+      // seria exatamente o efeito que o operador não quer sofrer.
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "test_mode_no_assignee",
+      });
+      return;
     }
 
     if (!conversation?.assignedToId) {
@@ -740,6 +761,52 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       model: cfg.model,
       agentUserId: assignee.id,
     });
+
+    // ── 3z. Modo de teste ─────────────────────────────────────
+    // Depois de todos os guardas (canal, agente ativo, org) e antes de
+    // qualquer caminho que transfira. O turno de teste roda num módulo
+    // próprio que só avalia regras, chama o modelo e envia texto.
+    if (testMode) {
+      await runAiTestTurn({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        userMessage: args.userMessage,
+        turnId: args.turnId ?? null,
+        agentConfigId: cfg.id,
+        policy,
+        sendText: async (text: string) => {
+          if (!text.trim()) return;
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        },
+        defaultQueueText: async ({ departmentName }) => {
+          const isRetention = departmentName
+            ? packOps.classifyAcademicDepartmentKey?.(departmentName) ===
+              "retencao"
+            : false;
+          return isRetention
+            ? buildRetentionHandoffMessage(new Date(), policy, hours)
+            : buildGenericQueueHandoffMessage(new Date(), policy, hours);
+        },
+      });
+      logAi("test_mode_turn", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        until: testMode.activeUntil.toISOString(),
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
 
     // ── 3a. Regras de mensagem do operador ────────────────────
     // "Quando a mensagem for sobre ISTO, o próximo passo é AQUILO."

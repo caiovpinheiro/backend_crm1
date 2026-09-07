@@ -12,7 +12,11 @@
 
 import type { AIAgentRunOutcome } from "@prisma/client";
 
-import { EFFECT_TOOLS, effectToolSucceeded } from "@/services/ai/effect-claims";
+import {
+  EFFECT_TOOLS,
+  effectToolSucceeded,
+  isSimulatedEffectResult,
+} from "@/services/ai/effect-claims";
 
 export type RunOutcome = AIAgentRunOutcome;
 
@@ -83,9 +87,14 @@ export function deriveRunOutcome(input: OutcomeInput): RunOutcome {
     return "HANDOFF_BLOCKED_BY_GATE";
   }
 
+  // Chamada simulada (modo de teste) não é tool que falhou: ela foi
+  // deliberadamente não executada. Sem esta exceção todo run de teste sairia
+  // como TOOL_FAILED e o desfecho gravado seria mentira.
   const effectFailed = input.toolCalls.some(
     (c) =>
-      EFFECT_TOOLS[c.toolName] && !effectToolSucceeded(c.toolName, c.result),
+      EFFECT_TOOLS[c.toolName] &&
+      !isSimulatedEffectResult(c.result) &&
+      !effectToolSucceeded(c.toolName, c.result),
   );
   if (effectFailed) return "TOOL_FAILED";
 

@@ -31,6 +31,13 @@ export async function GET(
     since.setDate(since.getDate() - days);
     since.setHours(0, 0, 0, 0);
 
+    // Run de teste (comando `/teste` no WhatsApp) usa o agente de verdade e
+    // gasta token de verdade, mas não é atendimento: contar custo, confiança
+    // média e desfecho junto com produção falsearia o painel. Fica fora dos
+    // agregados e continua aparecendo na lista dos últimos runs, onde a
+    // coluna `source` diz o que ele é.
+    const productionOnly = { source: { not: "inbox_test" } } as const;
+
     const [
       totals,
       statusBreak,
@@ -40,14 +47,14 @@ export async function GET(
       draftsPending,
     ] = await Promise.all([
         prisma.aIAgentRun.aggregate({
-          where: { agentId: id, createdAt: { gte: since } },
+          where: { agentId: id, createdAt: { gte: since }, ...productionOnly },
           _sum: { inputTokens: true, outputTokens: true, costUsd: true },
           _avg: { confidence: true },
           _count: { _all: true },
         }),
         prisma.aIAgentRun.groupBy({
           by: ["status"],
-          where: { agentId: id, createdAt: { gte: since } },
+          where: { agentId: id, createdAt: { gte: since }, ...productionOnly },
           _count: { _all: true },
         }),
         prisma.aIAgentRun.groupBy({
@@ -56,6 +63,7 @@ export async function GET(
             agentId: id,
             createdAt: { gte: since },
             handoffReason: { not: null },
+            ...productionOnly,
           },
           _count: { _all: true },
         }),
@@ -73,6 +81,7 @@ export async function GET(
            WHERE "agentId" = ${id}
              AND "createdAt" >= ${since}
              AND "organizationId" = ${orgIdFilter}
+             AND "source" <> 'inbox_test'
            GROUP BY DATE_TRUNC('day', "createdAt")
            ORDER BY day ASC
         `,

@@ -60,6 +60,7 @@ import {
   humanQueueContextFromAgent,
 } from "@/services/ai/human-queue-policy";
 import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
+import { isEffectTool, simulateEffectTool } from "@/services/ai/effect-claims";
 import {
   denialPayload,
   replayPayload,
@@ -90,6 +91,10 @@ export type RunContext = {
   inboxPolicy?: InboxPolicy | null;
   /// Encerramento automático (pilotagem). Ausente = understood.
   autoClosePolicy?: AutoClosePolicy | null;
+  /// Conversa em MODO DE TESTE (`src/services/ai/test-mode.ts`): nenhuma
+  /// ferramenta de efeito executa. O bloqueio é código, não instrução de
+  /// prompt — ver `withTestModeSimulation`.
+  testMode?: boolean;
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -1247,6 +1252,29 @@ function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
 }
 
 /**
+ * MODO DE TESTE: a ferramenta de efeito não roda.
+ *
+ * Este é o ponto onde o bloqueio acontece — um envelope no `execute`, o mesmo
+ * lugar por onde toda chamada de tool já passa. Determinístico: o modelo pode
+ * pedir `transfer_to_human` à vontade que a função real nunca é invocada. A
+ * lista de quem é "efeito" é `EFFECT_TOOLS` (`effect-claims.ts`), a mesma que
+ * a auditoria de efeito usa — não existe segunda lista para desincronizar.
+ *
+ * Consulta (`search_products`, `consultar_matricula`) e as tools que não
+ * mudam atribuição nem estado de atendimento continuam executando: o valor do
+ * teste é ver o agente real, e sem elas a resposta seria outra.
+ */
+function withTestModeSimulation(id: string, t: AnyTool): AnyTool {
+  const execute = t.execute;
+  if (!execute || !isEffectTool(id)) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>) =>
+      simulateEffectTool(id, args)) as typeof execute,
+  } as AnyTool;
+}
+
+/**
  * Dedup + tetos por run. O modelo reexecutava a mesma tool porque o retorno
  * anterior só repetia o erro, sem dizer "já tentou". Envelopa o `execute`
  * depois do `withArgPolicy` para que a chave de dedup use os args já
@@ -1287,10 +1315,11 @@ export function buildToolSet(
     const factory = FACTORY_MAP[id];
     if (!factory) continue;
     const policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
-    const withPolicy = withArgPolicy(factory(ctx, policy), policy);
-    set[id] = governor
-      ? withCallGovernor(id, withPolicy, governor)
-      : withPolicy;
+    let built = withArgPolicy(factory(ctx, policy), policy);
+    // Antes do governor: a chamada simulada continua contando para os tetos e
+    // para o dedup, senão um loop do modelo em modo de teste rodaria solto.
+    if (ctx.testMode) built = withTestModeSimulation(id, built);
+    set[id] = governor ? withCallGovernor(id, built, governor) : built;
   }
   return set as ToolSet;
 }

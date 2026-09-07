@@ -2862,6 +2862,20 @@ model Conversation {
   /// de atribuição ao agente, e não apenas na 1ª vida da conversa.
   aiGreetedAt            DateTime?
 
+  /// MODO DE TESTE do agente nesta conversa: até quando vale. Null (ou no
+  /// passado) = modo desligado. Ligado por comando vindo do WhatsApp de um
+  /// operador autorizado (`src/services/ai/test-mode.ts`).
+  ///
+  /// Vive em Postgres — e não em Redis — de propósito: o cache do projeto
+  /// degrada para um Map de processo quando o Redis pisca, e perder o estado
+  /// aqui significa executar de verdade a transferência que o operador estava
+  /// só simulando. Timestamp também expira sozinho na leitura, sem depender
+  /// de TTL de chave, e é a mesma linha que o inbox-handler já carrega.
+  aiTestModeUntil        DateTime?
+  /// Quem ligou o modo (User.id). Só auditoria — sem relation para não
+  /// segurar a exclusão do usuário por causa de um estado efêmero.
+  aiTestModeById         String?
+
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id])
 

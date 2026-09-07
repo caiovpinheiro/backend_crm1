@@ -29,6 +29,70 @@ export const EFFECT_TOOLS: Record<string, EffectKind> = {
 };
 
 /**
+ * Resultado devolvido ao modelo quando a conversa está em MODO DE TESTE.
+ *
+ * A ferramenta não roda: o payload é construído aqui, a partir da mesma lista
+ * canônica (`EFFECT_TOOLS`) que a auditoria usa. `simulated: true` é o que
+ * distingue este resultado de uma execução real em todo o resto do runtime
+ * (outcome do run, diagnóstico, auditoria) — nenhum consumidor precisa
+ * adivinhar pelo nome da tool.
+ *
+ * O texto é dirigido ao MODELO, não ao cliente: ele precisa saber que a ação
+ * não aconteceu para não chamar de novo, e ao mesmo tempo seguir a resposta
+ * que daria em produção — é justamente essa resposta que o operador quer ver.
+ */
+export type SimulatedEffectResult = {
+  ok: true;
+  simulated: true;
+  executed: false;
+  effect: EffectKind;
+  tool: string;
+  message: string;
+  /** Argumentos com que a ferramenta teria sido chamada (vão no diagnóstico). */
+  wouldHave: Record<string, unknown>;
+};
+
+export function isEffectTool(toolName: string): boolean {
+  return Boolean(EFFECT_TOOLS[toolName]);
+}
+
+export function simulateEffectTool(
+  toolName: string,
+  args: unknown,
+): SimulatedEffectResult | null {
+  const effect = EFFECT_TOOLS[toolName];
+  if (!effect) return null;
+  return {
+    ok: true,
+    simulated: true,
+    executed: false,
+    effect,
+    tool: toolName,
+    message:
+      `MODO DE TESTE: \`${toolName}\` NÃO foi executada. Nada mudou no CRM — ` +
+      "ninguém foi atribuído, nenhuma fila, nenhum registro. Considere a ação " +
+      "como concluída para efeito da sua resposta e siga o atendimento. Não " +
+      "repita a chamada.",
+    wouldHave:
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+  };
+}
+
+/** O resultado veio do modo de teste (não houve execução real). */
+export function isSimulatedEffectResult(
+  result: unknown,
+): result is SimulatedEffectResult {
+  return Boolean(
+    result &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      (result as Record<string, unknown>).simulated === true,
+  );
+}
+
+/**
  * Mensagem usada quando a resposta é descartada. Não promete nada e devolve
  * a palavra ao cliente. (Parametrizar isso na pilotagem é trabalho à parte —
  * hoje não existe campo para essa copy.)

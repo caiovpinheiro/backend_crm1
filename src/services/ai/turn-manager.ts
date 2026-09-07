@@ -31,6 +31,10 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import {
+  handleAiTestCommand,
+  parseAiTestCommand,
+} from "@/services/ai/test-mode";
+import {
   claimInboundMessageForAi,
   collectUnansweredInboundText,
 } from "@/services/ai/inbound-debounce";
@@ -310,6 +314,27 @@ function isUniqueViolation(err: unknown): boolean {
 export async function onInboundMessageForAi(
   input: InboundTurnInput,
 ): Promise<void> {
+  // Comando de teste ANTES de qualquer coisa — inclusive da allowlist e da
+  // escolha entre turno e debounce. É o único ponto por onde os 3 ingests
+  // passam, então o comando funciona igual no Meta, no Baileys e no
+  // Messenger/Instagram, e vale mesmo quando a conversa ainda não é da IA.
+  // Telefone não autorizado devolve `false` e a mensagem segue o fluxo
+  // normal: nada na resposta revela que o comando existe.
+  const testCommand = parseAiTestCommand(input.userMessage);
+  if (testCommand) {
+    const consumed = await handleAiTestCommand({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      command: testCommand,
+      channel: input.channel,
+      messageId: input.messageId,
+    }).catch((err) => {
+      console.error("[ai-test] comando falhou", err);
+      return false;
+    });
+    if (consumed) return;
+  }
+
   if (!isTurnManagerEnabled()) {
     const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
     await scheduleAiReply(input);

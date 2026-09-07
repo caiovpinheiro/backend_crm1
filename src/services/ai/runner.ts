@@ -92,7 +92,20 @@ import {
   ToolCallGovernor,
 } from "@/services/ai/tool-governor";
 
-export type RunSource = "inbox" | "playground" | "automation" | "api";
+/**
+ * `inbox_test` é o inbound normal rodando com o MODO DE TESTE ligado na
+ * conversa (`src/services/ai/test-mode.ts`). É um valor de `source` próprio, e
+ * não um flag separado, por dois motivos: o desfecho continua sendo derivado
+ * do estado real (nada de outcome inventado para teste) e as métricas do
+ * agente filtram por `source`, então o run de teste sai das contas de
+ * produção sem ninguém precisar lembrar de excluí-lo.
+ */
+export type RunSource =
+  | "inbox"
+  | "inbox_test"
+  | "playground"
+  | "automation"
+  | "api";
 
 /** Limite do tool-loop — NÃO alterar sem decisão explícita (Onda 0 só observa). */
 export const AGENT_MAX_STEPS = 8;
@@ -137,6 +150,10 @@ export type RunResult = {
 const MAX_HISTORY = 10;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
+  /// Modo de teste do inbox. Único lugar onde o runner precisa saber disso —
+  /// daqui em diante é `ctx.testMode` (bloqueio das tools) e o tratamento da
+  /// auditoria de efeito mais abaixo.
+  const testMode = args.source === "inbox_test";
   const agent = await prisma.aIAgentConfig.findUnique({
     where: { id: args.agentId },
     include: { user: { select: { id: true, name: true } } },
@@ -446,6 +463,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       verticalPack: agent.verticalPack ?? null,
       inboxPolicy: inboxPolicyForRun,
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
+      testMode,
     };
 
     const governor = new ToolCallGovernor(
@@ -529,10 +547,16 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       text: result.text,
       toolCalls: result.toolCalls,
     });
-    const finalText = effectAudit.blocked
-      ? NEUTRAL_EFFECT_FALLBACK
-      : result.text;
-    if (effectAudit.blocked) {
+    // Em modo de teste "não aconteceu" é o comportamento CORRETO — a
+    // ferramenta foi deliberadamente não executada — então a auditoria deixa
+    // de ser guardrail e vira diagnóstico: continua rodando e continua
+    // listando os efeitos afirmados, mas não troca o texto por
+    // `NEUTRAL_EFFECT_FALLBACK` nem marca a resposta como descartada. Trocar
+    // seria esconder do operador exatamente o que ele foi ver: a resposta que
+    // o cliente receberia. A auditoria de produção fica intacta.
+    const claimBlocked = effectAudit.blocked && !testMode;
+    const finalText = claimBlocked ? NEUTRAL_EFFECT_FALLBACK : result.text;
+    if (claimBlocked) {
       console.warn("[ai] resposta descartada — efeito afirmado sem execução", {
         agentId: agent.id,
         conversationId: args.conversationId ?? null,
@@ -579,7 +603,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       // como ANSWERED. Quem confirma a entrega de fato é o inbox
       // (`markRunResponseDiscarded`).
       responseText: finalText,
-      responseDiscarded: effectAudit.blocked,
+      responseDiscarded: claimBlocked,
     });
     const status: RunResult["status"] = statusForOutcome(outcome);
 
@@ -604,7 +628,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
               : null,
         errorMessage:
           outcome === "RESPONSE_DISCARDED"
-            ? effectAudit.blocked
+            ? claimBlocked
               ? `[descartada] effect_claim_blocked: afirmou ${effectAudit.unsupported.join(", ")} sem ferramenta bem-sucedida`
               : "[descartada] empty_reply: modelo devolveu resposta vazia"
             : null,
