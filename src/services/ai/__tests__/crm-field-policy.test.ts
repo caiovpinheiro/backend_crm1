@@ -259,6 +259,21 @@ describe("orientação e configuração", () => {
     }
   });
 
+  // A orientação vetava dado pessoal "mesmo que apareça em `fields` por
+  // configuração" — o contrário do que `partitionFieldValues` faz com um
+  // campo liberado. Só a credencial continua fora da configuração.
+  it("credencial é veto absoluto; o resto segue a allowlist", () => {
+    expect(CRM_SEARCH_GUIDANCE).toContain(
+      "Nunca repasse senha, token ou credencial de acesso",
+    );
+    expect(CRM_SEARCH_GUIDANCE).not.toContain(
+      "Nunca repasse documento, credencial, senha",
+    );
+    expect(CRM_SEARCH_GUIDANCE).toContain(
+      "só saem quando o operador liberou o campo e o valor veio em `fields`",
+    );
+  });
+
   it("a description avisa o modelo quando nada foi liberado", () => {
     expect(describeCrmExposure(emptyCrmFieldExposure())).toContain(
       "não liberou nenhum campo",

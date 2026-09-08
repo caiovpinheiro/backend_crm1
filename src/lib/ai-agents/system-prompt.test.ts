@@ -170,3 +170,32 @@ describe("override duplicado das regras de steering", () => {
     ).toBeNull();
   });
 });
+
+/**
+ * A regra absoluta proibia "e-mail acadêmico" pelo nome — o mesmo campo que
+ * o operador libera na allowlist de `search_crm_records`. Com a tool ligada
+ * o agente ficava com duas instruções opostas sobre o mesmo dado, e a de
+ * caixa alta ganhava. Agora a regra defere à configuração; senha, não.
+ */
+describe("dado pessoal liberado pelo operador", () => {
+  const rules = fallbackSteeringRules("ATENDIMENTO", "academic");
+
+  it("a regra absoluta defere à allowlist em vez de vetar pelo nome", () => {
+    expect(rules).not.toContain(
+      "NUNCA forneça dados pessoais sensíveis (RGM, e-mail acadêmico, senhas)",
+    );
+    expect(rules).toContain("SENHA você NUNCA fornece");
+    expect(rules).toContain("`fields` do `search_crm_records`");
+  });
+
+  it("o prompt montado não sobra com veto ao mesmo dado", () => {
+    const composed =
+      composeRuntimeOverride({ savedOverride: null, steeringRules: rules }) ??
+      "";
+    const proibicoes = composed
+      .split(/\r?\n/)
+      .filter((l) => /RGM|e-mail acadêmico/i.test(l))
+      .filter((l) => /NUNCA (forneça|informe|repasse|diga)/i.test(l));
+    expect(proibicoes).toEqual([]);
+  });
+});
