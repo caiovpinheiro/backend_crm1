@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { runAgent } from "@/services/ai/runner";
 import { parseAgentConfidence } from "@/services/ai/confidence";
+import { stripUnofficialUrls } from "@/verticals/academic/outbound-url-guard";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 
@@ -185,10 +186,14 @@ export async function POST(
       // marcador interno de confiança aparecia na tela do operador e virava
       // defeito fantasma no teste.
       const parsed = parseAgentConfidence(result.text ?? "");
+      const guarded = pack
+        ? stripUnofficialUrls(parsed.text)
+        : { text: parsed.text, removed: [] as string[] };
 
       return NextResponse.json({
         ...result,
-        text: parsed.text,
+        text: guarded.text,
+        strippedUrlHosts: guarded.removed,
         confidence: parsed.confidence,
         interceptFired: null,
         llmInvoked: true,

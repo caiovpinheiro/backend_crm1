@@ -66,6 +66,7 @@ import {
 } from "@/lib/ai-agents/message-rules";
 import { executeMessageRule } from "@/services/ai/message-rule-runtime";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
+import { stripUnofficialUrls } from "@/verticals/academic/outbound-url-guard";
 import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { runAgent } from "@/services/ai/runner";
 import { sendAgentFollowUpMedia } from "@/services/ai/send-agent-media";
@@ -1291,6 +1292,19 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = rewriteMismatchedDaypartWish(parsed.text);
+    // Link inventado é fato verificável, não questão de estilo: a proibição
+    // no prompt não segurou (o agente mandou passwordreset.microsoftonline.com
+    // para o aluno), então o corte é aqui.
+    if (agentPack) {
+      const guarded = stripUnofficialUrls(text);
+      if (guarded.removed.length > 0) {
+        logAi("unofficial_url_stripped", {
+          conversationId: args.conversationId,
+          hosts: guarded.removed,
+        });
+        text = guarded.text;
+      }
+    }
     // Reescrever "vou te passar pra alguém" em cópia acadêmica só faz
     // sentido com pack: sem pack o agente genérico mantém o texto do LLM.
     if (
