@@ -199,14 +199,26 @@ function tokens(s: string): string[] {
 
 /**
  * Termo curto (<=3 chars) casa só como palavra inteira; senão "rg" acenderia
- * o aviso em qualquer campo com "argumento" no nome. Termo longo casa como
- * prefixo/trecho, para "inadimpl" pegar "inadimplente".
+ * o aviso em qualquer campo com "argumento" no nome.
+ *
+ * Termo longo casa como PREFIXO de palavra, não como trecho no meio dela.
+ * Prefixo é o que "inadimpl" → "inadimplente" precisava, e trecho era mais
+ * do que isso: acendia o aviso em "Cidade"/"Unidade" (por "idade") e em
+ * "Merenda" (por "renda"), colocando selo de dado sensível ao lado de CPF
+ * em campo que não é. Termo genérico e flexão de plural continuam pegos
+ * ("Rendas", "Enderecos"), porque a diferença fica no fim da palavra.
  */
 function termMatches(term: string, haystackTokens: string[]): boolean {
   const t = fold(term);
   if (!t) return false;
+  // Jargão configurável pode vir com espaço ("data de nascimento"): casa na
+  // sequência de palavras, ainda ancorado em início de palavra.
+  if (t.includes(" ")) {
+    const haystack = haystackTokens.join(" ");
+    return haystack === t || haystack.startsWith(`${t} `) || haystack.includes(` ${t}`);
+  }
   if (t.length <= 3) return haystackTokens.includes(t);
-  return haystackTokens.some((tok) => tok.includes(t)) || haystackTokens.join(" ").includes(t);
+  return haystackTokens.some((tok) => tok.startsWith(t));
 }
 
 export function looksSensitive(

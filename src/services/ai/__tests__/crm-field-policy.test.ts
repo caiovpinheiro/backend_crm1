@@ -172,6 +172,42 @@ describe("aviso de sensibilidade", () => {
     expect(looksSensitive("argumento_venda", "Argumento de venda")).toBe(false);
   });
 
+  it("termo longo casa prefixo de palavra, não trecho no meio dela", () => {
+    // Campos builtin do próprio CRM: "idade" está dentro de "cidade" e de
+    // "unidade", e "renda" dentro de "merenda". Selo de sensível nesses
+    // campos corrói a confiança no selo onde ele importa (CPF, senha).
+    for (const [name, label] of [
+      ["city", "Cidade"],
+      ["unit", "Unidade"],
+      ["merenda", "Merenda escolar"],
+      ["modalidade", "Modalidade"],
+      ["quantidade", "Quantidade"],
+      ["resenha", "Resenha"],
+    ]) {
+      expect(looksSensitive(name, label), `${label} não deveria acender`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("o caso real que 'idade' queria pegar continua acendendo", () => {
+    // Data de nascimento (o dado pessoal de fato) e a própria idade.
+    expect(looksSensitive("data_nascimento", "Data de nascimento")).toBe(true);
+    expect(looksSensitive("idade", "Idade")).toBe(true);
+    // Flexão de plural continua pega — a diferença fica no fim da palavra.
+    expect(looksSensitive("rendas", "Rendas")).toBe(true);
+    expect(looksSensitive("inadimplente", "Inadimplente")).toBe(true);
+  });
+
+  it("jargão configurável acende inclusive com espaço no termo", () => {
+    // "RGM" (3 chars) casa palavra inteira.
+    expect(looksSensitive("rgm", "RGM", ["rgm"])).toBe(true);
+    // Termo com espaço casa a sequência de palavras — e só ela.
+    const termo = ["contrato de estagio"];
+    expect(looksSensitive("ctr_est", "Contrato de Estágio", termo)).toBe(true);
+    expect(looksSensitive("contrato", "Contrato", termo)).toBe(false);
+  });
+
   it("jargão da organização entra por configuração, não pelo código", () => {
     // "RGM" é o nome que UMA faculdade dá ao registro dela. O produto não
     // conhece esse termo; o operador declara.
