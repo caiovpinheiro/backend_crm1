@@ -50,12 +50,43 @@ export const TEST_MODE_TTL_MINUTES = 30;
 /** Permission que autoriza ligar o modo. Quem edita o agente pode testá-lo. */
 export const TEST_MODE_PERMISSION = "ai_agent:edit" as const;
 
-export type AiTestCommand = "start" | "stop";
+export type AiTestCommand =
+  | "start"
+  | "stop"
+  | "rule"
+  | "knowledge"
+  | "replay"
+  | "why"
+  | "undo";
 
 /** Os comandos, como o operador digita. Curtos e em pt-BR. */
 export const AI_TEST_COMMANDS: Record<AiTestCommand, string> = {
   start: "#iniciar",
   stop: "#fim",
+  rule: "#regra",
+  knowledge: "#base",
+  replay: "#refazer",
+  why: "#porque",
+  undo: "#desfazer",
+};
+
+/** Comandos que exigem o modo ligado — todos menos ligar e desligar. */
+const REQUIRES_TEST_MODE: ReadonlySet<AiTestCommand> = new Set<AiTestCommand>([
+  "rule",
+  "knowledge",
+  "replay",
+  "why",
+  "undo",
+]);
+
+export type ParsedAiTestCommand = {
+  command: AiTestCommand;
+  /**
+   * O que veio depois do comando, como o operador digitou — acento,
+   * maiúscula e pontuação preservados. É o texto que vira regra, então
+   * normalizar aqui seria reescrever a decisão de quem atende.
+   */
+  argument: string;
 };
 
 function fold(raw: string): string {
@@ -74,14 +105,20 @@ function fold(raw: string): string {
  */
 export function parseAiTestCommand(
   raw: string | null | undefined,
-): AiTestCommand | null {
-  const text = fold(raw ?? "").replace(/[.!?\s]+$/, "");
-  if (!text.startsWith("#")) return null;
-  const head = text.split(/\s+/)[0];
+): ParsedAiTestCommand | null {
+  const original = (raw ?? "").trim();
+  const parts = /^(#\S+)\s*([\s\S]*)$/.exec(original);
+  if (!parts) return null;
+
+  // Pontuação some só do comando: "#fim." é comando, e a regra escrita em
+  // "#regra não prometa transferência." mantém o ponto final.
+  const head = fold(parts[1]).replace(/[.!?,;:]+$/, "");
   for (const [command, literal] of Object.entries(AI_TEST_COMMANDS) as Array<
     [AiTestCommand, string]
   >) {
-    if (head === literal) return command;
+    if (head === literal) {
+      return { command, argument: (parts[2] ?? "").trim() };
+    }
   }
   return null;
 }
@@ -238,6 +275,64 @@ export function testModeAlreadyStoppedMessage(): string {
   return "🧪 O modo de teste não estava ligado — a conversa já seguia no comportamento normal.";
 }
 
+/**
+ * Confirmação de `#regra`. Repete o texto gravado porque o operador precisa
+ * ver que nada foi interpretado — o que ele leu de volta é o que vai para o
+ * prompt.
+ */
+export function testRuleSavedMessage(text: string): string {
+  return `🧪 Gravei nas Regras de condução, valendo já na próxima mensagem:\n\n"${text}"\n\nPara remover, ${AI_TEST_COMMANDS.undo}.`;
+}
+
+export function testRuleEmptyMessage(): string {
+  return `🧪 Escreva a orientação depois do comando. Ex.: ${AI_TEST_COMMANDS.rule} não prometa transferência quando o aluno não pediu.`;
+}
+
+export function testCommandNeedsTestModeMessage(): string {
+  return `🧪 Ligue o modo de teste com ${AI_TEST_COMMANDS.start} antes de usar este comando.`;
+}
+
+export function testRuleNothingToUndoMessage(): string {
+  return "🧪 Não há correção desta sessão de teste para desfazer.";
+}
+
+export function testRuleNoAgentMessage(): string {
+  return "🧪 Não encontrei o agente desta conversa para gravar a correção.";
+}
+
+/**
+ * Confirmação de `#base`. Diz que a indexação é assíncrona porque o operador
+ * que manda `#refazer` no mesmo segundo pode não ver o documento ainda.
+ */
+export function testKnowledgeSavedMessage(title: string): string {
+  return `🧪 Documento criado na base: "${title}".\n\nEm alguns segundos ele passa a ser consultado. Teste com ${AI_TEST_COMMANDS.replay}. Para remover, ${AI_TEST_COMMANDS.undo}.`;
+}
+
+/** `#base` sem o formato esperado. Mostra o exemplo em vez de explicar. */
+export function testKnowledgeFormatMessage(): string {
+  return `🧪 Escreva título e conteúdo separados por barra vertical:\n\n${AI_TEST_COMMANDS.knowledge} Prazo de cancelamento | Solicitações feitas até o dia 5 não geram cobrança do mês.\n\nTambém funciona com o título na primeira linha e o conteúdo nas seguintes.`;
+}
+
+export function testKnowledgeFailedMessage(reason: string): string {
+  return `🧪 Não consegui criar o documento: ${reason}`;
+}
+
+export function testUndoneRuleMessage(text: string): string {
+  return `🧪 Removi esta orientação das Regras de condução:\n\n"${text}"`;
+}
+
+export function testUndoneKnowledgeMessage(title: string): string {
+  return `🧪 Removi da base o documento "${title}".`;
+}
+
+export function testReplayHeaderMessage(question: string): string {
+  return `🧪 Refazendo com as correções aplicadas:\n\n"${question}"`;
+}
+
+export function testReplayNothingMessage(): string {
+  return "🧪 Não achei uma pergunta sua para refazer nesta conversa.";
+}
+
 // ── Comando vindo do WhatsApp ───────────────────────────────
 
 function logTest(event: string, payload: Record<string, unknown>) {
@@ -251,6 +346,8 @@ export type HandleTestCommandInput = {
   conversationId: string;
   contactId: string;
   command: AiTestCommand;
+  /** Texto depois do comando. Só `#regra` usa. */
+  argument?: string;
   channel: "meta" | "baileys" | "messaging";
   /** Id da Message — claim contra webhook repetido. */
   messageId?: string | null;
@@ -297,6 +394,18 @@ export async function handleAiTestCommand(
 
   const current = readTestMode(conversation);
 
+  if (REQUIRES_TEST_MODE.has(input.command)) {
+    // Exigem o modo ligado de propósito: a correção nasce de um desvio que o
+    // operador acabou de ver, e o modo é o que garante que ele pôde provocar
+    // o desvio sem transferir ninguém de verdade.
+    if (!current) {
+      await replyAsAgent(input, conversation, testCommandNeedsTestModeMessage());
+      return true;
+    }
+    await handleCorrectionCommand(input, conversation, operator);
+    return true;
+  }
+
   if (input.command === "stop") {
     if (current) await stopTestMode(input.conversationId);
     await replyAsAgent(
@@ -338,6 +447,199 @@ export async function handleAiTestCommand(
     renewed: Boolean(current),
   });
   return true;
+}
+
+/**
+ * Título e conteúdo de `#base`.
+ *
+ * Dois formatos, porque o teclado do celular briga com os dois de maneiras
+ * diferentes: `Título | conteúdo` numa linha só, ou título na primeira linha
+ * e conteúdo nas seguintes. Sem separador não há como adivinhar onde termina
+ * o título — e adivinhar errado cria documento com título de parágrafo.
+ */
+export function parseKnowledgeArgument(
+  raw: string,
+): { title: string; content: string } | null {
+  const text = raw.trim();
+  if (!text) return null;
+
+  const pipe = text.indexOf("|");
+  if (pipe > 0) {
+    const title = text.slice(0, pipe).trim();
+    const content = text.slice(pipe + 1).trim();
+    return title && content ? { title, content } : null;
+  }
+
+  const breakAt = text.indexOf("\n");
+  if (breakAt > 0) {
+    const title = text.slice(0, breakAt).trim();
+    const content = text.slice(breakAt + 1).trim();
+    return title && content ? { title, content } : null;
+  }
+
+  return null;
+}
+
+/** `#regra`, `#base`, `#refazer`, `#porque` e `#desfazer`. */
+async function handleCorrectionCommand(
+  input: HandleTestCommandInput,
+  conversation: { assignedTo: ConversationAssignee },
+  operator: TestModeOperator,
+): Promise<void> {
+  const text = (input.argument ?? "").trim();
+  if (input.command === "rule" && !text) {
+    await replyAsAgent(input, conversation, testRuleEmptyMessage());
+    return;
+  }
+
+  const {
+    resolveCorrectionTarget,
+    appendSteeringRule,
+    createKnowledgeCorrection,
+    undoLastCorrection,
+  } = await import("@/services/ai/test-mode-corrections");
+
+  const target = await resolveCorrectionTarget(input.conversationId);
+  if (!target) {
+    await replyAsAgent(input, conversation, testRuleNoAgentMessage());
+    return;
+  }
+
+  if (input.command === "rule") {
+    const saved = await appendSteeringRule({
+      target,
+      text,
+      conversationId: input.conversationId,
+      messageId: input.messageId ?? null,
+      userId: operator.userId,
+    });
+    await replyAsAgent(
+      input,
+      conversation,
+      saved ? testRuleSavedMessage(saved) : testRuleNoAgentMessage(),
+    );
+    logTest("rule_saved", {
+      conversationId: input.conversationId,
+      userId: operator.userId,
+      agentConfigId: target.agentConfigId,
+      chars: saved?.length ?? 0,
+    });
+    return;
+  }
+
+  if (input.command === "knowledge") {
+    const parsed = parseKnowledgeArgument(text);
+    if (!parsed) {
+      await replyAsAgent(input, conversation, testKnowledgeFormatMessage());
+      return;
+    }
+    try {
+      const doc = await createKnowledgeCorrection({
+        target,
+        title: parsed.title,
+        content: parsed.content,
+        conversationId: input.conversationId,
+        messageId: input.messageId ?? null,
+        userId: operator.userId,
+      });
+      await replyAsAgent(
+        input,
+        conversation,
+        testKnowledgeSavedMessage(doc.title),
+      );
+      logTest("knowledge_saved", {
+        conversationId: input.conversationId,
+        userId: operator.userId,
+        agentConfigId: target.agentConfigId,
+        docId: doc.docId,
+      });
+    } catch (err) {
+      // O serviço da tela valida tamanho e campos e lança com mensagem já
+      // escrita para operador — repassar é melhor que inventar outra.
+      const reason = err instanceof Error ? err.message : "erro inesperado";
+      await replyAsAgent(input, conversation, testKnowledgeFailedMessage(reason));
+      logTest("knowledge_failed", {
+        conversationId: input.conversationId,
+        userId: operator.userId,
+        reason,
+      });
+    }
+    return;
+  }
+
+  if (input.command === "replay" || input.command === "why") {
+    await handleInspectionCommand(input, conversation, target.agentConfigId);
+    return;
+  }
+
+  const undone = await undoLastCorrection({
+    target,
+    conversationId: input.conversationId,
+    userId: operator.userId,
+  });
+  await replyAsAgent(
+    input,
+    conversation,
+    !undone
+      ? testRuleNothingToUndoMessage()
+      : undone.field === "steeringRules"
+        ? testUndoneRuleMessage(undone.text)
+        : testUndoneKnowledgeMessage(undone.title),
+  );
+  logTest("correction_undone", {
+    conversationId: input.conversationId,
+    userId: operator.userId,
+    agentConfigId: target.agentConfigId,
+    field: undone?.field ?? null,
+  });
+}
+
+/**
+ * `#refazer` e `#porque`. Os dois partem da última pergunta do cliente, e é
+ * por isso que dividem o mesmo caminho: sem pergunta não há o que refazer
+ * nem o que explicar.
+ */
+async function handleInspectionCommand(
+  input: HandleTestCommandInput,
+  conversation: { assignedTo: ConversationAssignee },
+  agentConfigId: string,
+): Promise<void> {
+  const { findLastCustomerQuestion, replayLastQuestion } = await import(
+    "@/services/ai/test-mode-replay"
+  );
+  const question = await findLastCustomerQuestion(input.conversationId);
+  if (!question) {
+    await replyAsAgent(input, conversation, testReplayNothingMessage());
+    return;
+  }
+
+  if (input.command === "why") {
+    const { buildWhyReport, formatWhyReport } = await import(
+      "@/services/ai/test-mode-why"
+    );
+    const report = await buildWhyReport({
+      agentConfigId,
+      conversationId: input.conversationId,
+      question,
+    });
+    await replyAsAgent(input, conversation, formatWhyReport(report));
+    logTest("why", {
+      conversationId: input.conversationId,
+      agentConfigId,
+      matchedRule: report.rule?.label ?? null,
+      documents: report.documents.length,
+    });
+    return;
+  }
+
+  await replyAsAgent(input, conversation, testReplayHeaderMessage(question));
+  logTest("replay", { conversationId: input.conversationId, agentConfigId });
+  await replayLastQuestion({
+    conversationId: input.conversationId,
+    contactId: input.contactId,
+    channel: input.channel === "baileys" ? "baileys" : "meta",
+    question,
+  });
 }
 
 type ConversationAssignee = { id: string; type: string } | null;

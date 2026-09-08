@@ -325,7 +325,8 @@ export async function onInboundMessageForAi(
     const consumed = await handleAiTestCommand({
       conversationId: input.conversationId,
       contactId: input.contactId,
-      command: testCommand,
+      command: testCommand.command,
+      argument: testCommand.argument,
       channel: input.channel,
       messageId: input.messageId,
     }).catch((err) => {

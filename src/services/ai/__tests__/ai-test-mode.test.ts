@@ -109,11 +109,30 @@ beforeEach(() => {
 });
 
 describe("parseAiTestCommand", () => {
-  it("reconhece os dois comandos, com e sem pontuação", () => {
-    expect(parseAiTestCommand("#iniciar")).toBe("start");
-    expect(parseAiTestCommand("  #INICIAR  ")).toBe("start");
-    expect(parseAiTestCommand("#iniciar.")).toBe("start");
-    expect(parseAiTestCommand("#fim")).toBe("stop");
+  it("reconhece os comandos, com e sem pontuação", () => {
+    expect(parseAiTestCommand("#iniciar")?.command).toBe("start");
+    expect(parseAiTestCommand("  #INICIAR  ")?.command).toBe("start");
+    expect(parseAiTestCommand("#iniciar.")?.command).toBe("start");
+    expect(parseAiTestCommand("#fim")?.command).toBe("stop");
+    expect(parseAiTestCommand("#desfazer")?.command).toBe("undo");
+  });
+
+  it("devolve a orientação de `#regra` como o operador digitou", () => {
+    const parsed = parseAiTestCommand(
+      "#regra Não prometa transferência quando o aluno não pediu.",
+    );
+    expect(parsed?.command).toBe("rule");
+    // Acento, maiúscula e ponto final preservados: o texto vira prompt.
+    expect(parsed?.argument).toBe(
+      "Não prometa transferência quando o aluno não pediu.",
+    );
+  });
+
+  it("`#regra` sem texto vem com argumento vazio, não vira conversa", () => {
+    expect(parseAiTestCommand("#regra")).toEqual({
+      command: "rule",
+      argument: "",
+    });
   });
 
   it("não confunde conversa com comando", () => {
