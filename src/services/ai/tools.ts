@@ -1097,8 +1097,10 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
             "Responda usando apenas `fields`, em fala natural. Não repasse documento, credencial nem situação financeira.";
         }
 
+        // O termo NÃO volta no payload: quando o cliente digita o próprio
+        // CPF para se identificar, ecoar a busca reinjetaria o documento no
+        // contexto do modelo pela porta dos fundos.
         return ok({
-          query: term,
           scope: orgWide ? "organization" : "current_contact",
           total: trimmed.length,
           records: trimmed,
