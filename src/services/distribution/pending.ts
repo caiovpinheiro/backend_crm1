@@ -50,7 +50,7 @@ import {
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
-import { executeDistribution } from "./engine";
+import { executeDistribution, isDistributionEnabled } from "./engine";
 import { evaluateCapacityReleasedDrain } from "./capacity-released-gate";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,
@@ -988,6 +988,14 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
 
+    if (!(await isDistributionEnabled())) {
+      debugWarn(
+        "[DBG-e46688 maybeDist] distribution_disabled",
+        () => JSON.stringify({ convId: input.conversationId }),
+      );
+      return;
+    }
+
     // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
     // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.
 
@@ -1175,7 +1183,7 @@ export async function processPendingDistributionQueue(opts: {
         userId: opts.userId ?? null,
       }),
     );
-    if (!widgetActive) {
+    if (!widgetActive || !(await isDistributionEnabled())) {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 

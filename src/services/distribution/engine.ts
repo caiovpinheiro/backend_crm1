@@ -48,9 +48,21 @@ export type DistributionTriggerSource =
 export type DistributionReason =
   | "ASSIGNED"
   | "SMART_DISTRIBUTION_NOT_ENABLED"
+  | "DISTRIBUTION_DISABLED"
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
   | "RETIRED_WHATSAPP_CHANNEL";
+
+/** Kill switch da org. Default ligado. O toggle da UI grava esta chave. */
+export const DISTRIBUTION_ENABLED_KEY = "distribution.enabled";
+
+export async function isDistributionEnabled(): Promise<boolean> {
+  try {
+    return await getOrgSettingBool(DISTRIBUTION_ENABLED_KEY, true);
+  } catch {
+    return true;
+  }
+}
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
@@ -534,6 +546,16 @@ export async function executeDistribution(
     return {
       success: false,
       reason: "SMART_DISTRIBUTION_NOT_ENABLED",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated: [],
+    };
+  }
+
+  if (!(await isDistributionEnabled())) {
+    return {
+      success: false,
+      reason: "DISTRIBUTION_DISABLED",
       selectedUserId: null,
       selectedUserName: null,
       evaluated: [],
@@ -1086,6 +1108,16 @@ export async function simulateDistribution(
     return {
       success: false,
       reason: "SMART_DISTRIBUTION_NOT_ENABLED",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated: [],
+    };
+  }
+
+  if (!(await isDistributionEnabled())) {
+    return {
+      success: false,
+      reason: "DISTRIBUTION_DISABLED",
       selectedUserId: null,
       selectedUserName: null,
       evaluated: [],
