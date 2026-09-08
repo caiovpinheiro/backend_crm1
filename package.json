@@ -87,6 +87,7 @@
     "date-fns": "^4.1.0",
     "fflate": "^0.8.3",
     "ffmpeg-static": "^5.3.0",
+    "imapflow": "^2.0.0",
     "ioredis": "^5.10.1",
     "next": "^15.5.15",
     "next-auth": "^5.0.0-beta.30",
