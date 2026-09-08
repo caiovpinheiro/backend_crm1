@@ -12,7 +12,8 @@ vi.mock("@/services/distribution/responsibles", () => ({
     getDistributionResponsibles(...a),
 }));
 
-const { isAssigneeCurrentlyEligible } = await import("../assignee-eligibility");
+const { isAssigneeCurrentlyEligible, shouldKeepAssigneeInAttendance } =
+  await import("../assignee-eligibility");
 
 const ACOLHIMENTO = "dept_acolhimento";
 const RETENCAO = "dept_retencao";
@@ -72,5 +73,55 @@ describe("isAssigneeCurrentlyEligible — fronteira de departamento", () => {
 
     expect(check.eligible).toBe(true);
     expect(getDistributionResponsibles).toHaveBeenCalledWith({});
+  });
+});
+
+/**
+ * Incidente 08/set/26: o atendente perdia o aluno da tela no meio da conversa
+ * porque o passo pedia outro departamento. Conversa trabalhada fica com quem
+ * está atendendo; sem resposta humana, redistribui (caso Danubia).
+ */
+describe("shouldKeepAssigneeInAttendance", () => {
+  const base = {
+    departmentScoped: true,
+    eligibleInDepartment: false,
+    eligibleOutsideDepartment: true,
+    hasHumanReply: true,
+    isAi: false,
+  };
+
+  it("conversa já respondida por humano de outro departamento: mantém o dono", () => {
+    expect(shouldKeepAssigneeInAttendance(base)).toBe(true);
+  });
+
+  it("dono de outro departamento SEM resposta humana: redistribui", () => {
+    expect(
+      shouldKeepAssigneeInAttendance({ ...base, hasHumanReply: false }),
+    ).toBe(false);
+  });
+
+  it("dono offline não é protegido — barreira não é o departamento", () => {
+    expect(
+      shouldKeepAssigneeInAttendance({
+        ...base,
+        eligibleOutsideDepartment: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("dono elegível no próprio departamento não precisa da salvaguarda", () => {
+    expect(
+      shouldKeepAssigneeInAttendance({ ...base, eligibleInDepartment: true }),
+    ).toBe(false);
+  });
+
+  it("passo sem departamento não aciona a salvaguarda", () => {
+    expect(
+      shouldKeepAssigneeInAttendance({ ...base, departmentScoped: false }),
+    ).toBe(false);
+  });
+
+  it("IA nunca é preservada como atendimento humano", () => {
+    expect(shouldKeepAssigneeInAttendance({ ...base, isAi: true })).toBe(false);
   });
 });

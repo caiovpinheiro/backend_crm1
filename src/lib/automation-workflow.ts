@@ -200,6 +200,38 @@ export function readStepDistributionDepartmentIds(
   return inherited === "" ? null : [inherited];
 }
 
+/**
+ * Escopo do passo `execute_distribution` COM a origem do departamento.
+ *
+ * A origem decide o que acontece quando o pool fica sem ninguém elegível:
+ *  - `explicit`: o operador escolheu o departamento no nó. É regra — pool
+ *    fechado, o lead espera na fila daquele departamento.
+ *  - `inherited`: campo vazio, departamento veio da conversa. É palpite do
+ *    sistema — tenta o departamento, mas cai para org-wide em vez de prender
+ *    o aluno numa fila que ninguém drena (incidente 08/set/26: leads presos
+ *    no Acolhimento à noite, com o pool de 4 pessoas offline).
+ *  - `org-wide`: nem passo nem conversa têm departamento.
+ */
+export type StepDistributionScope = {
+  departmentIds: string[] | null;
+  origin: "explicit" | "inherited" | "org-wide";
+};
+
+export function resolveStepDistributionScope(
+  cfg: unknown,
+  conversationDepartmentId?: string | null,
+): StepDistributionScope {
+  const explicit = readStepDistributionDepartmentIds(cfg);
+  if (explicit) return { departmentIds: explicit, origin: "explicit" };
+  const inherited = readStepDistributionDepartmentIds(
+    cfg,
+    conversationDepartmentId,
+  );
+  return inherited
+    ? { departmentIds: inherited, origin: "inherited" }
+    : { departmentIds: null, origin: "org-wide" };
+}
+
 export function inheritedChannelFromTrigger(triggerConfig: unknown): string {
   const ids = readTriggerChannelIds(triggerConfig);
   return ids.length === 1 ? ids[0]! : "";

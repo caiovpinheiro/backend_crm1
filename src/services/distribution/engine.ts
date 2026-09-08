@@ -27,10 +27,13 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
+import { getHumanAttendanceForConversation } from "@/services/attendance-guards";
+
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
   shouldClearOwnershipOnIneligible,
+  shouldKeepAssigneeInAttendance,
 } from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
@@ -53,6 +56,13 @@ export type DistributionReason =
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
   | "RETIRED_WHATSAPP_CHANNEL";
+
+/**
+ * Só para o `DistributionLog` (coluna livre): registra que a redistribuição
+ * foi pulada porque a conversa estava em atendimento humano. O resultado do
+ * motor continua `ASSIGNED` — o contrato público não muda.
+ */
+type DistributionLogReason = DistributionReason | "KEPT_HUMAN_ATTENDING";
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
@@ -453,7 +463,7 @@ async function resolveLogDepartmentId(
 async function writeLog(
   input: ExecuteDistributionInput,
   success: boolean,
-  reason: DistributionReason,
+  reason: DistributionLogReason,
   selectedUserId: string | null,
   evaluated: EvaluatedResponsibleSummary[],
 ): Promise<void> {
@@ -656,12 +666,49 @@ export async function executeDistribution(
         already.assignedToId,
         explicitDeptIds,
       );
+      // Atendimento em curso não é redistribuído por divergência de
+      // departamento: o consultor perde o aluno da tela no meio da conversa
+      // (incidente 08/set/26). Só vale quando o departamento é a ÚNICA
+      // barreira — offline / fora do expediente seguem liberando.
+      let keptInAttendance = false;
+      if (!check.eligible && !check.isAi && explicitDeptIds.length > 0) {
+        const orgWide = await isAssigneeCurrentlyEligible(already.assignedToId);
+        const attendance = await getHumanAttendanceForConversation(
+          input.conversationId,
+        );
+        keptInAttendance = shouldKeepAssigneeInAttendance({
+          departmentScoped: true,
+          eligibleInDepartment: check.eligible,
+          eligibleOutsideDepartment: orgWide.eligible,
+          hasHumanReply: Boolean(attendance?.hasHumanReply),
+          isAi: check.isAi,
+        });
+        if (keptInAttendance) {
+          console.warn(
+            "[distribution] redistribuição pulada — conversa em atendimento",
+            JSON.stringify({
+              conversationId: input.conversationId,
+              assignedToId: already.assignedToId,
+              departamentoEsperado: explicitDeptIds,
+              triggerSource: input.triggerSource,
+            }),
+          );
+          await writeLog(
+            input,
+            true,
+            "KEPT_HUMAN_ATTENDING",
+            already.assignedToId,
+            [],
+          );
+        }
+      }
       // O teto de fila barra lead NOVO; não tira de quem já é responsável.
       // Soltar o dono por fila cheia jogaria o ticket na fila de espera sem
       // ninguém elegível. Offline / fora do expediente seguem liberando.
       const keepHumanAssignee =
         !check.isAi &&
         (check.eligible ||
+          keptInAttendance ||
           !shouldClearOwnershipOnIneligible(
             check.reason,
             check.blockedReasons,

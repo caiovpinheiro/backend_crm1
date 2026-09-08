@@ -31,6 +31,32 @@ export function shouldClearOwnershipOnIneligible(
 }
 
 /**
+ * Conversa já trabalhada por humano não troca de dono só porque o passo da
+ * automação pede outro departamento. Divergência de departamento é
+ * roteamento; atendimento em curso é fato — e foi o que arrancou o aluno da
+ * tela do consultor em 08/set/26. Indisponibilidade real (offline, fora do
+ * expediente, dono que saiu da distribuição) continua liberando o lead.
+ */
+export function shouldKeepAssigneeInAttendance(args: {
+  /** O passo pediu um pool de departamentos. */
+  departmentScoped: boolean;
+  /** Dono é elegível DENTRO do pool pedido. */
+  eligibleInDepartment: boolean;
+  /** Dono é elegível ignorando o departamento — só o depto o barra. */
+  eligibleOutsideDepartment: boolean;
+  /** Humano já respondeu NESTA conversa. */
+  hasHumanReply: boolean;
+  isAi: boolean;
+}): boolean {
+  if (args.isAi) return false;
+  if (!args.departmentScoped) return false;
+  if (args.eligibleInDepartment) return false;
+  // Barrado por algo além do departamento (offline etc.) → redistribui.
+  if (!args.eligibleOutsideDepartment) return false;
+  return args.hasHumanReply;
+}
+
+/**
  * @param departmentIds Pool de departamentos pedido por quem chamou (passo
  * `execute_distribution`, handoff). Quando preenchido, o dono atual só é
  * considerado elegível se for membro de um deles — senão volta

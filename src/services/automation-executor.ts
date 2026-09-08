@@ -19,7 +19,7 @@ import {
 } from "@/lib/automation-round-robin";
 import {
   readStepAllowedChannelIds,
-  readStepDistributionDepartmentIds,
+  resolveStepDistributionScope,
   triggerTypeLabel,
 } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
@@ -2197,16 +2197,13 @@ async function executeStep(
       // (marcado por transferências / `set_department`). Só cai em org-wide
       // quando a conversa também não tem departamento — antes, passo vazio
       // era sempre org-wide e vazava lead para fora do departamento.
-      let departmentIds = readStepDistributionDepartmentIds(cfg);
-      if (!departmentIds && conversationId) {
+      let scope = resolveStepDistributionScope(cfg);
+      if (scope.origin === "org-wide" && conversationId) {
         const conv = await prisma.conversation.findUnique({
           where: { id: conversationId },
           select: { departmentId: true },
         });
-        departmentIds = readStepDistributionDepartmentIds(
-          cfg,
-          conv?.departmentId ?? null,
-        );
+        scope = resolveStepDistributionScope(cfg, conv?.departmentId ?? null);
       }
 
       const result = await executeDistribution({
@@ -2215,7 +2212,10 @@ async function executeStep(
         conversationId,
         triggerSource: "AUTOMATION",
         distributionType,
-        departmentIds,
+        departmentIds: scope.departmentIds,
+        // Herdado é palpite: pool sem elegível cai para org-wide. Escolhido
+        // pelo operador é regra: espera na fila do departamento.
+        allowOrgWideFallback: scope.origin === "inherited",
       });
 
       if (result.success) {
