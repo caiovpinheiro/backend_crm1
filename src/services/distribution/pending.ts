@@ -50,7 +50,8 @@ import {
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
-import { executeDistribution, isDistributionEnabled } from "./engine";
+import { executeDistribution } from "./engine";
+import { isDistributionEnabled } from "./enabled";
 import { evaluateCapacityReleasedDrain } from "./capacity-released-gate";
 import {
   CAPACITY_RELEASED_COOLDOWN_MS,

@@ -27,6 +27,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { getOrgSettingBool, setOrgSettingBool } from "@/lib/org-settings";
+import { DISTRIBUTION_ENABLED_KEY } from "@/services/distribution/enabled";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -34,7 +35,7 @@ import {
 
 const RESPECT_DEPT_KEY = "distribution.respectDepartment";
 const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
-const ENABLED_KEY = "distribution.enabled";
+const ENABLED_KEY = DISTRIBUTION_ENABLED_KEY;
 
 async function guard(session: {
   user: { id: string; organizationId: string | null; isSuperAdmin: boolean };

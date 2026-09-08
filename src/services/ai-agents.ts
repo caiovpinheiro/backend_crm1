@@ -42,7 +42,14 @@ import {
   type ToolConfigMap,
 } from "@/lib/ai-agents/steering";
 import { getVerticalPack, listVerticalPackIds } from "@/verticals";
+import {
+  auditDiffAsJson,
+  buildAgentConfigDiff,
+  parseAuditSource,
+  type AuditSource,
+} from "@/lib/ai-agents/observability";
 
+/** Tools que o runtime injeta no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [
   "consultar_matricula",
   "transfer_to_department",
@@ -61,30 +68,30 @@ function academicSteeringRulesFallback(): string {
   ].join("\n\n");
 }
 
-function withDisplayedAcademicDefaults<T extends {
-  archetype: string;
-  verticalPack?: string | null;
-  steeringRules?: string | null;
-  enabledTools?: string[] | null;
-}>(row: T): T {
+/**
+ * O que o agente já faz hoje precisa APARECER na tela mesmo com as colunas
+ * vazias — senão o editor abre em branco e o primeiro Salvar apagaria o
+ * comportamento herdado do pack. Só afeta a leitura; nada é gravado aqui.
+ */
+function withDisplayedAcademicDefaults<
+  T extends {
+    archetype: string;
+    verticalPack?: string | null;
+    steeringRules?: string | null;
+    enabledTools?: string[] | null;
+  },
+>(row: T): T {
   const isAcademic =
     row.verticalPack === "academic" || row.archetype === "ATENDIMENTO";
   if (!isAcademic) return row;
   const steeringRules = row.steeringRules?.trim()
     ? row.steeringRules
     : academicSteeringRulesFallback() || row.steeringRules;
-  const currentTools = row.enabledTools ?? [];
   const enabledTools = Array.from(
-    new Set([...currentTools, ...ACADEMIC_RUNTIME_TOOLS]),
+    new Set([...(row.enabledTools ?? []), ...ACADEMIC_RUNTIME_TOOLS]),
   );
   return { ...row, steeringRules, enabledTools };
 }
-import {
-  auditDiffAsJson,
-  buildAgentConfigDiff,
-  parseAuditSource,
-  type AuditSource,
-} from "@/lib/ai-agents/observability";
 
 export type AIAgentRow = {
   id: string;
