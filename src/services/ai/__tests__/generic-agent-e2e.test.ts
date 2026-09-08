@@ -347,6 +347,8 @@ import {
 } from "@/services/ai/human-queue-policy";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { runAgent } from "@/services/ai/runner";
+import { KNOWLEDGE_ANSWER_RULES } from "@/services/ai/retrieval";
+import { ACADEMIC_EXAM_CALENDAR_RULES } from "@/verticals/academic/atendimento-prompt";
 
 function agentQueueContext() {
   // Mesmo caminho do runtime: JSON salvo → normalize → contexto de fila.
@@ -392,6 +394,60 @@ describe("agente novo, outra org, verticalPack = null", () => {
     expect(result.status).toBe("COMPLETED");
     expect(state.system).toContain(KNOWLEDGE_FACT);
     expect(result.text).toContain("portal do cliente");
+  });
+
+  /**
+   * Entregar o dado que está na base (em vez de apontar onde consultar),
+   * não truncar enumeração e não fundir rótulo com data é comportamento de
+   * PRODUTO. Um agente sem vertical, de outra org, com base que não tem
+   * nada a ver com faculdade, tem que receber essas regras.
+   */
+  it("1b) recebe as regras de resposta da base, sem nada de vertical", async () => {
+    await runTurn("como emito a segunda via do boleto?");
+
+    // Chegaram ao prompt do agente sem pack.
+    expect(state.system).toContain(KNOWLEDGE_ANSWER_RULES);
+
+    // As três ideias estão lá.
+    expect(state.system).toContain("PONTEIRO NÃO VENCE DADO");
+    expect(state.system).toContain("ENUMERAÇÃO COMPLETA");
+    expect(state.system).toContain("RÓTULO NÃO É A DATA DO EVENTO");
+
+    // Brevidade não autoriza omitir item — a causa da lista parcial.
+    expect(KNOWLEDGE_ANSWER_RULES).toMatch(
+      /Responder curto NÃO autoriza omitir item/,
+    );
+
+    // E nada de vocabulário de segmento nas regras genéricas.
+    for (const termo of [
+      "prova",
+      "aluno",
+      "disciplina",
+      "matrícula",
+      "calendário",
+      "semestre",
+      "curso",
+      "polo",
+      "boleto",
+      "fatura",
+    ]) {
+      expect(KNOWLEDGE_ANSWER_RULES.toLowerCase()).not.toContain(termo);
+    }
+  });
+
+  /**
+   * O pack acadêmico não pode reimplementar o que já é genérico: se as duas
+   * camadas descrevem a mesma ideia, elas divergem na primeira edição.
+   */
+  it("1c) o pack acadêmico só guarda o que é dele (nomes próprios)", () => {
+    // Nomes próprios da operação — nenhuma regra genérica os conhece.
+    expect(ACADEMIC_EXAM_CALENDAR_RULES).toContain("Plataforma de Provas");
+    expect(ACADEMIC_EXAM_CALENDAR_RULES).toContain("Avisos");
+
+    // Ideias genéricas NÃO ficam duplicadas no vertical.
+    expect(ACADEMIC_EXAM_CALENDAR_RULES).not.toMatch(/todos os meses/i);
+    expect(ACADEMIC_EXAM_CALENDAR_RULES).not.toMatch(/EIXO M[ÊE]S/i);
+    expect(ACADEMIC_EXAM_CALENDAR_RULES).not.toMatch(/enumera/i);
   });
 
   it("2) transfere para um departamento da própria organização", async () => {

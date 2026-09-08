@@ -184,24 +184,33 @@ export const KNOWLEDGE_PRECEDENCE_RULE =
   "PRECEDÊNCIA: se as referências acima cobrem a pergunta, responda com elas nesta mensagem — não transfira nem encaminhe por esse assunto.";
 
 /**
- * Precedência do DADO sobre o "onde consultar", e cobertura do que foi
- * recuperado.
+ * Como RESPONDER com o que foi recuperado. Três falhas medidas em produção,
+ * todas com o dado correto dentro do prompt:
  *
- * Medição do prompt real: numa pergunta por datas de prova, dos 4 trechos
- * recuperados três diziam apenas ONDE procurar a data ("aba Avisos da
- * disciplina", "cronograma do semestre", "plataforma") e só um trazia o
- * calendário com as datas. O modelo respondia com o "onde procurar" e
- * negava ter a data que estava no próprio contexto. Na vez em que
- * entregava, resumia um documento de quatro meses em duas frases e pulava
- * um mês inteiro sem avisar.
+ * 1. Ponteiro ganhando do dado — dos 4 trechos recuperados, três diziam
+ *    apenas ONDE consultar ("aba de avisos", "cronograma", "plataforma") e
+ *    só um trazia o dado. O modelo respondia com o "onde consultar" e
+ *    negava ter a informação que estava no próprio contexto.
+ * 2. Enumeração truncada — a referência listava quatro períodos, o modelo
+ *    resumia em duas frases (a instrução de brevidade do canal) e omitia um
+ *    período inteiro sem avisar que havia mais.
+ * 3. Rótulo fundido com a data — a referência liga um rótulo a uma data de
+ *    execução diferente ("item de <mês A>" → executa em <mês B>) e o modelo
+ *    juntava os dois num só, ou escolhia uma linha da enumeração em
+ *    silêncio como se fosse a única resposta.
  *
- * Genérica de propósito — nenhum tema, departamento ou vertical.
+ * Comportamento de produto, não de vertical: vale para qualquer agente de
+ * qualquer organização que tenha base de conhecimento. Nenhum tema,
+ * departamento, produto ou vocabulário de segmento entra aqui.
  */
-export const KNOWLEDGE_FACTS_PRECEDENCE_RULE = [
-  "DADO EXPLÍCITO NAS REFERÊNCIAS É FATO: se uma referência traz a data, o prazo ou o valor, ENTREGUE o dado nesta mensagem.",
-  'PROIBIDO responder que "varia", que "depende" ou mandar consultar em outro canal (aviso, mural, plataforma, e-mail, outro setor) um dado que já está nas referências.',
-  'Se uma referência diz ONDE consultar e outra traz o dado em si, vale a que traz o DADO. O "onde consultar" só entra depois, como complemento.',
-  "COBERTURA: ao resumir uma referência com vários períodos ou itens (meses, etapas, prazos), não omita nenhum que a pergunta abranja. Se não couber tudo, diga quantos são — PROIBIDO apresentar lista parcial como se fosse completa.",
+export const KNOWLEDGE_ANSWER_RULES = [
+  "DADO EXPLÍCITO NA REFERÊNCIA É FATO: se uma referência traz a data, o prazo, o valor ou a condição, ENTREGUE o dado nesta mensagem.",
+  'PROIBIDO responder que "varia", que "depende" ou mandar consultar em outro canal (aviso, mural, painel, portal, plataforma, e-mail, outro setor) um dado que já está nas referências.',
+  'PONTEIRO NÃO VENCE DADO: se uma referência diz apenas ONDE consultar e outra traz o dado em si, vale a que traz o DADO. O "onde consultar" entra depois, como complemento — nunca no lugar da resposta.',
+  "ENUMERAÇÃO COMPLETA: quando a referência lista vários itens, períodos ou faixas e a pergunta abrange o conjunto, cite TODOS. Responder curto NÃO autoriza omitir item de uma enumeração.",
+  "Se de fato não couber tudo, diga QUANTOS itens existem, entregue os que couberem e ofereça detalhar o resto. PROIBIDO apresentar lista parcial como se fosse completa.",
+  'RÓTULO NÃO É A DATA DO EVENTO: quando a referência liga um rótulo (item, período de referência, competência, ciclo, turma, faixa) a uma data de execução diferente, diga os DOIS. PROIBIDO fundir num só ("o de <rótulo> é dia <N>") o que a referência separa.',
+  "Se o rótulo muda o dado (um prazo por item, um valor por faixa), a pergunta genérica tem MAIS DE UMA resposta: dê as principais com o rótulo de cada uma, ou pergunte qual é o caso dele. PROIBIDO escolher uma linha da enumeração em silêncio como se fosse a única.",
 ].join("\n");
 
 /**
@@ -223,7 +232,7 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
     // fazia o índice do chunk chegar no WhatsApp do aluno.
     "BASE DE CONHECIMENTO (use para fundamentar respostas). O [N] é índice interno: PROIBIDO escrever [1], [2] ou qualquer marcador de fonte na resposta ao cliente.",
     sections,
-    KNOWLEDGE_FACTS_PRECEDENCE_RULE,
+    KNOWLEDGE_ANSWER_RULES,
     KNOWLEDGE_PRECEDENCE_RULE,
   ].join("\n");
 }

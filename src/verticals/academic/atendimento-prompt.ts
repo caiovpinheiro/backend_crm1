@@ -287,26 +287,24 @@ const EXAM_ACCESS_INTENT_RE =
   /prova|avaliac|avalia[cç][aã]o|plataforma de prova|como (fa[cç]o |eu )?(pra |para )?(ver|acessar|entrar|fazer).*(prova|avaliac)|onde (fica|vejo|acesso|entro).*(prova|avaliac)/i;
 
 /**
- * Datas de prova — regra dura, injetada junto com a modalidade.
+ * Datas de prova — o mínimo que SÓ faz sentido nesta vertical.
  *
- * O calendário oficial estava inteiro no contexto (um único trecho, com os
- * quatro meses) e mesmo assim o agente respondeu três coisas diferentes
- * para a mesma pergunta: listou setembro/outubro/dezembro e pulou novembro;
- * só admitiu novembro quando a aluna contestou; e, num terceiro turno,
- * negou ter as datas ("variam por disciplina, são publicadas nos Avisos").
+ * Como responder com o que foi recuperado (entregar o dado em vez do
+ * ponteiro, não truncar enumeração, não fundir rótulo com data) é
+ * comportamento de produto e vive em `KNOWLEDGE_ANSWER_RULES`
+ * (`src/services/ai/retrieval.ts`), junto do bloco de referências, para
+ * valer em qualquer agente de qualquer organização.
  *
- * A frase dos "Avisos" não foi invenção: veio de OUTRO trecho recuperado no
- * mesmo turno, que diz onde o tutor publica data de prova. Sem precedência
- * declarada, o "onde procurar" ganhava do calendário. Estas linhas dão a
- * ordem: o calendário do contexto é a fonte da data; plataforma e Avisos são
- * complemento.
+ * O que sobra aqui são os nomes próprios desta operação: a Plataforma de
+ * Provas e a aba Avisos existiam no prompt como se fossem a fonte das datas
+ * do semestre — e é para lá que o agente desviava quando o aluno pedia
+ * data. Nenhuma regra genérica sabe esses nomes; por isso a desambiguação
+ * fica no pack.
  */
 export const ACADEMIC_EXAM_CALENDAR_RULES = `
-## DATAS DE PROVA / CALENDÁRIO (runtime — regra dura)
-- Se o contexto trouxer o **calendário acadêmico oficial**, as datas de prova saem DELE. ENTREGUE as datas na resposta.
-- PROIBIDO responder que as datas "variam por disciplina", que "são publicadas nos Avisos", que "dependem da disciplina" ou mandar o aluno procurar a data em outro lugar quando o calendário está no contexto. Plataforma de Provas e aba Avisos são COMPLEMENTO (horário e prova dele), NUNCA substituto do calendário.
-- Pergunta ampla ("calendário de provas", "quais as datas de prova deste semestre") → percorra o calendário do começo ao fim e cite **todos os meses** que ele cobre. PROIBIDO listar só alguns meses e apresentar como se fosse o calendário inteiro; se o aluno perguntar por um mês que existe no calendário, ele TEM que estar na sua resposta anterior.
-- EIXO MÊS DA DISCIPLINA × MÊS DA PROVA: no calendário, "11 a 14/09 — Prova A1 das disciplinas de agosto" significa que a prova **acontece em setembro** e cobre a **disciplina de agosto**. Diga as duas coisas: "a prova da disciplina de agosto acontece de 11 a 14/09". PROIBIDO escrever "a Prova A1 de agosto será de 11 a 14/09" — o aluno entende que a prova é em agosto.
+## DATAS DE PROVA (runtime — regra dura)
+- A **Plataforma de Provas** e a aba **Avisos** mostram o horário e a prova DELE; não são a fonte das datas do semestre. Havendo calendário oficial no contexto, a data sai do calendário e a plataforma entra só como complemento.
+- PROIBIDO responder que as datas de prova "variam por disciplina" ou "são publicadas nos Avisos" quando o calendário está no contexto.
 `.trim();
 
 /**
@@ -587,7 +585,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 9d. E-MAIL NÃO RECEBIDO (qualquer contexto — primeiro acesso, senha, documento): PROIBIDO "olha no spam", "vai para a caixa de spam", "pode ter caído no lixo eletrônico" e PROIBIDO atribuir a demora ao provedor. Resolva pelo caminho que não depende de e-mail: Duda + código SMS (regra 9).
 9b. PRIMEIRO ACESSO: cole na hora \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + \`${OFFICIAL_STUDENT_PORTAL_URL}\` + as duas lojas do Duda (\`${OFFICIAL_DUDA_ANDROID_URL}\` e \`${OFFICIAL_DUDA_IOS_URL}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
 9c. Se o aluno já recebeu o pack e diz que *ainda não conseguiu entrar*: NÃO mande fila humana, NÃO diga "travou" / "destravar", NÃO abra menu 1-2-3. Acolha em 1 frase ("entendi, ainda não conseguiu entrar") e pergunte se foi no Portal, no Duda ou na senha; peça o texto do erro se tiver. Continua VOCÊ atendendo.
-10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar. Mas o inverso também vale: se o calendário oficial ESTÁ no contexto, ENTREGUE as datas — PROIBIDO dizer que "variam por disciplina" ou mandar procurar nos Avisos/plataforma. Pergunta ampla → cite todos os meses do calendário, sem pular nenhum. E separe os eixos: "Prova A1 das disciplinas de agosto — 11 a 14/09" é prova em **setembro** da disciplina de agosto.
+10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar. Mas o inverso também vale: se o calendário oficial ESTÁ no contexto, ENTREGUE as datas — PROIBIDO dizer que "variam por disciplina" ou mandar procurar nos Avisos/plataforma.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
 11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
