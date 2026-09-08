@@ -310,6 +310,12 @@ export function renderSystemPrompt(args: RenderArgs): string {
     lines.push(
       "Antes de responder sobre o que está registrado no cadastro da pessoa (etapa, status, prazos, campos preenchidos pela empresa), chame `search_crm_records`. Não responda de memória e não deduza.",
       "Leia só o que vier em `fields`. O que vier em `hiddenFields` você não pode repassar — nesse caso encaminhe para a equipe.",
+      // Precedência. A description da tool já dizia que campo parecido não é
+      // o campo pedido, mas com duas ferramentas ligadas quem responde é a
+      // anunciada primeiro: um booleano de status de outra ferramenta virou
+      // resposta sobre um sistema que a pessoa nomeou.
+      "PRECEDÊNCIA ENTRE FERRAMENTAS: quando a pergunta for sobre um item nomeado (um sistema, uma ferramenta, um documento, um prazo específico), a resposta é o campo do CRM. Nenhuma outra ferramenta responde por ele — o retorno de uma ferramenta que responde OUTRA pergunta, inclusive um booleano de status, NÃO vira afirmação sobre o item que a pessoa nomeou.",
+      "Se o nome que ela usou não voltou em `fields`, você não tem a resposta: não substitua por um campo parecido e não deduza a partir do retorno de outra ferramenta.",
     );
   }
 

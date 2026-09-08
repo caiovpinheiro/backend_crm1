@@ -390,6 +390,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examModalityRules = hasPack
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
+    // Alcance da tool de matrícula. Preso ao turno em que a tool existe:
+    // regra sobre ferramenta desligada é ruído no prompt. Vem por aqui e não
+    // pelo texto canônico do pack porque o `steeringRules` salvo do agente
+    // pode estar defasado — e aí o texto canônico não chega ao prompt.
+    const enrollmentScopeRules =
+      hasPack && runtimeTools.includes("consultar_matricula")
+        ? (pack?.constants.enrollmentScopeRules ?? "")
+        : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as
     // tools vão usar: o prompt não pode instruir o que a tool vai recusar.
     const transferGate = evaluateTransferGate({
@@ -414,6 +422,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
         examModalityRules,
         curriculumRules,
+        enrollmentScopeRules,
       ],
     });
 

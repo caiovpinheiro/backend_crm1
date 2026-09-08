@@ -682,6 +682,30 @@ export const ACADEMIC_CURRICULUM_TCE_RULES = `
 - TCE só de **prazo ou documentos** → oriente a ver na disciplina de estágio no AVA (Portal do Aluno → Ambiente Virtual). Não invente prazo/lista. Não transfira só por isso.
 `.trim();
 
+/**
+ * Alcance de `consultar_matricula` — injetado sempre no runtime quando a
+ * tool está no turno, porque `steeringRules`/`systemPromptOverride` do banco
+ * podem estar defasados em relação a `ACADEMIC_ATENDIMENTO_RULES`.
+ *
+ * O agente afirmou a uma aluna que o acesso dela ao Blackboard estava
+ * liberado: recebeu `podeAcessarPortal: true`, ela perguntou pelo Blackboard
+ * e o modelo generalizou "portal" para o nome que ela citou — enquanto um
+ * campo do CRM registrava o contrário.
+ *
+ * A precedência em si — item nomeado se responde pelo campo do CRM, e o
+ * retorno de uma ferramenta não vira resposta de outra — é comportamento de
+ * produto e vive em `renderSystemPrompt` (`src/lib/ai-agents/system-prompt.ts`),
+ * junto do empurrão de `search_crm_records`, para valer em qualquer agente de
+ * qualquer organização. Aqui ficam só os nomes próprios do pack: a tool e o
+ * booleano que ela devolve.
+ */
+export const ACADEMIC_ENROLLMENT_SCOPE_RULES = `
+## ALCANCE DE \`consultar_matricula\` (runtime — regra dura)
+- \`consultar_matricula\` responde UMA pergunta: "o portal está liberado?". É só isso que \`podeAcessarPortal\` significa.
+- Se a pessoa nomeou um sistema, uma ferramenta, um documento ou um prazo específico, \`consultar_matricula\` NÃO responde por ele. PROIBIDO virar \`podeAcessarPortal\` em afirmação sobre outra coisa, mesmo que o nome pareça relacionado ao portal.
+- Sem o dado do item que ela nomeou, você não tem a resposta: PROIBIDO dizer que está liberado e PROIBIDO dizer que não está. Diga que confirma com a equipe e siga a regra de transferência.
+`.trim();
+
 export const ACADEMIC_MEDIA_CAPABILITY_RULES = `
 ## MÍDIA / VÍDEO (runtime — regra dura)
 - Se o modelo interno tiver TUTORIAL ANEXO, o sistema envia o arquivo depois do seu texto. Diga em 1 frase que segue o vídeo/print.

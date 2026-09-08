@@ -66,6 +66,9 @@ export async function POST(request: Request) {
         steeringRules,
         pack ? pack.ops.academicExamModalityRules?.(examsOnlineOnly) ?? "" : "",
         pack?.constants.curriculumTceRules ?? "",
+        enabledTools.includes("consultar_matricula")
+          ? (pack?.constants.enrollmentScopeRules ?? "")
+          : "",
       ]
         .filter(Boolean)
         .join("\n\n") || null;

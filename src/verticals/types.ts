@@ -101,6 +101,8 @@ export type VerticalPack = {
     atendimentoRules: string;
     confidenceRules: string;
     curriculumTceRules: string;
+    /** Limite de alcance da tool de matrícula. Só entra se a tool está no turno. */
+    enrollmentScopeRules: string;
     mediaCapabilityRules: string;
     systemPromptOverride: string;
   };
