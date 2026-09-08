@@ -32,13 +32,14 @@ export {
   executeDistribution,
   simulateDistribution,
   selectResponsible,
-  isDistributionEnabled,
   type DistributionResult,
   type DistributionReason,
   type DistributionTriggerSource,
   type EvaluatedResponsibleSummary,
   type ExecuteDistributionInput,
 } from "./engine";
+
+export { DISTRIBUTION_ENABLED_KEY, isDistributionEnabled } from "./enabled";
 
 export {
   ABERTA_SEM_RESPONSAVEL,

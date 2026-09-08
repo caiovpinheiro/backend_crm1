@@ -15,6 +15,7 @@ import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { getOrgSettingBool } from "@/lib/org-settings";
+import { isDistributionEnabled } from "./enabled";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
@@ -52,17 +53,6 @@ export type DistributionReason =
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
   | "RETIRED_WHATSAPP_CHANNEL";
-
-/** Kill switch da org. Default ligado. O toggle da UI grava esta chave. */
-export const DISTRIBUTION_ENABLED_KEY = "distribution.enabled";
-
-export async function isDistributionEnabled(): Promise<boolean> {
-  try {
-    return await getOrgSettingBool(DISTRIBUTION_ENABLED_KEY, true);
-  } catch {
-    return true;
-  }
-}
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
