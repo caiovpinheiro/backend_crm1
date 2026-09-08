@@ -36,6 +36,15 @@ vi.mock("@/services/ai/phone-allowlist", () => ({
   isContactAllowedForAi: vi.fn(async () => true),
 }));
 
+// `ai.newAttendanceEnabled` é default OFF: sem ligar o gate, o handler
+// devolve antes do LLM e o pós-LLM aqui testado nunca roda.
+vi.mock("@/services/ai/attendance-gate", () => ({
+  AI_NEW_ATTENDANCE_SETTING: "ai.newAttendanceEnabled",
+  isAiAttendanceEnabled: vi.fn(async () => true),
+  inheritContactAssigneeForNewTicket: vi.fn(async () => null),
+  releaseAiAssigneeIfDisabled: vi.fn(async () => false),
+}));
+
 vi.mock("@/lib/meta-whatsapp/client", () => ({
   metaClientFromConfig: () => ({ configured: false }),
 }));
