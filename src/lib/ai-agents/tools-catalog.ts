@@ -61,6 +61,14 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     defaultForArchetypes: ["SDR", "VENDEDOR"],
   },
   {
+    id: "search_crm_records",
+    label: "Consultar campos do CRM",
+    description:
+      "Procura informação em todos os campos do CRM — colunas fixas e campos personalizados de contato, empresa e negócio. A busca varre tudo (é assim que o cliente que informa o CPF acha o próprio cadastro), mas o agente só LÊ os campos que você liberar em 'Campos legíveis'. Sem liberação, ele confirma que existe cadastro e encaminha para um consultor: nenhum valor chega ao modelo.",
+    category: "crm",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE", "VENDEDOR"],
+  },
+  {
     id: "consultar_matricula",
     label: "Consultar matrícula do aluno",
     description:

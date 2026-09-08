@@ -55,6 +55,16 @@ export type ToolPolicy = {
   // consultar_matricula
   policyText: string | null;
   transferMessage: string | null;
+
+  // search_crm_records
+  /// Campos que o agente pode LER, no formato "entidade.campo"
+  /// (ex.: "deal.curso"). Aceita curinga "deal.*" e "*". Vazio = nenhum
+  /// valor é devolvido ao modelo: a busca só confirma que há registro.
+  /// A lista é do operador — o código não libera campo por conta própria.
+  readableFields: string[];
+  /// Permite procurar registros de terceiros (`scope: "organization"`).
+  /// Falso = o agente só lê o cadastro de quem está na conversa.
+  allowOrgWideSearch: boolean;
 };
 
 export type ToolConfigMap = Record<string, ToolPolicy>;
@@ -72,6 +82,8 @@ export function emptyToolPolicy(): ToolPolicy {
     defaultType: null,
     policyText: null,
     transferMessage: null,
+    readableFields: [],
+    allowOrgWideSearch: false,
   };
 }
 
@@ -118,6 +130,8 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     defaultType: nullableText(r.defaultType),
     policyText: nullableText(r.policyText),
     transferMessage: nullableText(r.transferMessage),
+    readableFields: strList(r.readableFields),
+    allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
   };
 }
 
@@ -134,7 +148,9 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     p.allowedTypes.length === 0 &&
     !p.defaultType &&
     !p.policyText &&
-    !p.transferMessage
+    !p.transferMessage &&
+    p.readableFields.length === 0 &&
+    !p.allowOrgWideSearch
   );
 }
 

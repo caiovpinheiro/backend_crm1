@@ -60,6 +60,18 @@ import {
   humanQueueContextFromAgent,
 } from "@/services/ai/human-queue-policy";
 import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
+import {
+  CRM_SEARCH_ENTITIES,
+  CRM_SEARCH_GUIDANCE,
+  describeCrmExposure,
+  loadCrmFieldCatalog,
+  matchFieldValues,
+  partitionFieldValues,
+  type CrmFieldDescriptor,
+  type CrmFieldExposure,
+  type CrmFieldValue,
+  type CrmSearchEntity,
+} from "@/services/ai/crm-field-policy";
 import { isEffectTool, simulateEffectTool } from "@/services/ai/effect-claims";
 import {
   denialPayload,
@@ -728,6 +740,379 @@ function searchProductsTool(_ctx: RunContext) {
   });
 }
 
+// ── search_crm_records ─────────────────────────────────────────
+
+/**
+ * Busca ampla, leitura estreita.
+ *
+ * A varredura passa por TODOS os campos (fixos e personalizados) — é assim
+ * que o aluno que digita o próprio CPF acha o próprio cadastro. O que sai
+ * para o modelo é só o que o operador liberou em
+ * `toolConfig.search_crm_records.readableFields`; o resto vira rótulo em
+ * `hiddenFields`, sem valor. Ver `crm-field-policy.ts` para o porquê.
+ */
+function crmValuesFromRecord(
+  catalog: CrmFieldDescriptor[],
+  entity: CrmSearchEntity,
+  builtin: Record<string, unknown>,
+  custom: Array<{ name: string; value: string }>,
+): CrmFieldValue[] {
+  const out: CrmFieldValue[] = [];
+  for (const field of catalog) {
+    if (field.entity !== entity) continue;
+    const raw =
+      field.source === "builtin"
+        ? builtin[field.name]
+        : custom.find((c) => c.name === field.name)?.value;
+    if (raw === null || raw === undefined) continue;
+    const value =
+      raw instanceof Date
+        ? raw.toLocaleDateString("pt-BR")
+        : String(raw);
+    if (!value.trim()) continue;
+    out.push({ field, value });
+  }
+  return out;
+}
+
+type CrmRecordPayload = {
+  entity: CrmSearchEntity;
+  ref: string;
+  fields: Array<{ label: string; value: string }>;
+  hiddenFields: string[];
+  matchedFields: string[];
+};
+
+function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
+  const exposure: CrmFieldExposure = {
+    readableKeys: policy.readableFields,
+    orgWide: policy.allowOrgWideSearch,
+  };
+  return tool({
+    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(exposure)}`,
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .describe(
+          "Termo livre: as palavras da pergunta ('documento pendente', 'curso') ou o dado que a pessoa informou (CPF, RGM, e-mail). Tolera acento e maiúscula.",
+        ),
+      entity: z
+        .enum(["contact", "company", "deal", "product", "any"])
+        .optional()
+        .describe(
+          "Onde procurar. 'deal' é o negócio/matrícula da pessoa, 'contact' o cadastro dela. Omita para procurar em tudo.",
+        ),
+      scope: z
+        .enum(["current_contact", "organization"])
+        .optional()
+        .describe(
+          "'current_contact' (padrão) lê só o cadastro de quem está na conversa. 'organization' procura registros de terceiros e só funciona se o operador tiver liberado.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Máximo de registros a retornar (1-10, padrão 5)."),
+    }),
+    execute: async ({ query, entity, scope, limit }) => {
+      try {
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const term = query.trim();
+        if (!term) return fail("Busca vazia.");
+        const take = Math.min(Math.max(limit ?? 5, 1), 5);
+        const wanted: CrmSearchEntity[] =
+          !entity || entity === "any"
+            ? CRM_SEARCH_ENTITIES
+            : [entity as CrmSearchEntity];
+
+        const orgWide = scope === "organization";
+        if (orgWide && !exposure.orgWide) {
+          return fail(
+            "Busca em cadastros de terceiros não está liberada neste agente. Use scope 'current_contact' ou transfira para um consultor.",
+          );
+        }
+        if (!orgWide && !ctx.contactId) {
+          return fail("Sem contato associado à conversa.");
+        }
+
+        const catalog = await loadCrmFieldCatalog();
+        const records: CrmRecordPayload[] = [];
+
+        const push = (
+          recordEntity: CrmSearchEntity,
+          ref: string,
+          values: CrmFieldValue[],
+        ) => {
+          const { matched, matchedLabels } = matchFieldValues(values, term);
+          // No escopo do próprio contato o cadastro é devolvido mesmo sem
+          // casar o termo: a pergunta pode ser vaga ("e a minha situação?")
+          // e o registro certo é um só. Em busca ampla, sem match não entra.
+          if (orgWide && !matched) return;
+          const { visible, hiddenLabels } = partitionFieldValues(
+            values,
+            exposure,
+          );
+          records.push({
+            entity: recordEntity,
+            ref,
+            fields: visible,
+            hiddenFields: hiddenLabels,
+            matchedFields: matchedLabels,
+          });
+        };
+
+        const customOf = (
+          rows: Array<{ value: string; customField: { name: string } }>,
+        ) => rows.map((r) => ({ name: r.customField.name, value: r.value }));
+
+        if (!orgWide) {
+          const contact = await prisma.contact.findUnique({
+            where: { id: ctx.contactId as string },
+            include: {
+              company: true,
+              customFields: {
+                include: { customField: { select: { name: true } } },
+              },
+            },
+          });
+          if (!contact) return fail("Contato não encontrado.");
+
+          if (wanted.includes("contact")) {
+            push(
+              "contact",
+              `contato #${contact.number}`,
+              crmValuesFromRecord(
+                catalog,
+                "contact",
+                contact as unknown as Record<string, unknown>,
+                customOf(contact.customFields),
+              ),
+            );
+          }
+
+          if (wanted.includes("company") && contact.company) {
+            push(
+              "company",
+              `empresa #${contact.company.number}`,
+              crmValuesFromRecord(
+                catalog,
+                "company",
+                contact.company as unknown as Record<string, unknown>,
+                [],
+              ),
+            );
+          }
+
+          if (wanted.includes("deal")) {
+            const deals = await prisma.deal.findMany({
+              where: { contactId: contact.id },
+              orderBy: [{ updatedAt: "desc" }],
+              take,
+              include: {
+                stage: { select: { name: true } },
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const d of deals) {
+              push(
+                "deal",
+                `negócio #${d.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "deal",
+                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+                  customOf(d.customFields),
+                ),
+              );
+            }
+          }
+        } else {
+          if (wanted.includes("contact")) {
+            const contacts = await prisma.contact.findMany({
+              where: {
+                OR: [
+                  { name: { contains: term, mode: "insensitive" } },
+                  { email: { contains: term, mode: "insensitive" } },
+                  { phone: { contains: term } },
+                  {
+                    customFields: {
+                      some: { value: { contains: term, mode: "insensitive" } },
+                    },
+                  },
+                ],
+              },
+              take,
+              include: {
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const c of contacts) {
+              push(
+                "contact",
+                `contato #${c.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "contact",
+                  c as unknown as Record<string, unknown>,
+                  customOf(c.customFields),
+                ),
+              );
+            }
+          }
+
+          if (wanted.includes("deal")) {
+            const deals = await prisma.deal.findMany({
+              where: {
+                OR: [
+                  { title: { contains: term, mode: "insensitive" } },
+                  {
+                    customFields: {
+                      some: { value: { contains: term, mode: "insensitive" } },
+                    },
+                  },
+                ],
+              },
+              take,
+              include: {
+                stage: { select: { name: true } },
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const d of deals) {
+              push(
+                "deal",
+                `negócio #${d.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "deal",
+                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+                  customOf(d.customFields),
+                ),
+              );
+            }
+          }
+
+          if (wanted.includes("company")) {
+            const companies = await prisma.company.findMany({
+              where: {
+                OR: [
+                  { name: { contains: term, mode: "insensitive" } },
+                  { domain: { contains: term, mode: "insensitive" } },
+                  { city: { contains: term, mode: "insensitive" } },
+                ],
+              },
+              take,
+            });
+            for (const co of companies) {
+              push(
+                "company",
+                `empresa #${co.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "company",
+                  co as unknown as Record<string, unknown>,
+                  [],
+                ),
+              );
+            }
+          }
+        }
+
+        // Catálogo é a mesma lista para todo mundo — não é dado de pessoa,
+        // então a busca de produto é sempre ampla, independente do escopo.
+        if (wanted.includes("product")) {
+          const products = await prisma.product.findMany({
+            where: {
+              isActive: true,
+              OR: [
+                { name: { contains: term, mode: "insensitive" } },
+                { sku: { contains: term, mode: "insensitive" } },
+                { description: { contains: term, mode: "insensitive" } },
+                {
+                  customValues: {
+                    some: { value: { contains: term, mode: "insensitive" } },
+                  },
+                },
+              ],
+            },
+            take,
+            include: {
+              customValues: {
+                include: { customField: { select: { name: true } } },
+              },
+            },
+          });
+          for (const p of products) {
+            const values = crmValuesFromRecord(
+              catalog,
+              "product",
+              { ...p, price: Number(p.price) },
+              customOf(p.customValues),
+            );
+            const { matched, matchedLabels } = matchFieldValues(values, term);
+            if (!matched) continue;
+            const { visible, hiddenLabels } = partitionFieldValues(
+              values,
+              exposure,
+            );
+            records.push({
+              entity: "product",
+              ref: `item #${p.number}`,
+              fields: visible,
+              hiddenFields: hiddenLabels,
+              matchedFields: matchedLabels,
+            });
+          }
+        }
+
+        const trimmed = records.slice(0, take);
+        const anyVisible = trimmed.some((r) => r.fields.length > 0);
+        const anyHidden = trimmed.some((r) => r.hiddenFields.length > 0);
+
+        let hint: string;
+        if (trimmed.length === 0) {
+          hint =
+            "Nenhum registro para este termo. Não invente e não deduza: diga que não localizou e ofereça falar com um consultor.";
+        } else if (!anyVisible && exposure.readableKeys.length === 0) {
+          hint =
+            "O registro existe, mas o operador não liberou nenhum campo para leitura. Confirme que localizou o cadastro, NÃO afirme nada sobre o conteúdo e encaminhe para um consultor.";
+        } else if (!anyVisible) {
+          hint =
+            "Nenhum dos campos deste registro está liberado para você. Não deduza o conteúdo — encaminhe para um consultor.";
+        } else if (anyHidden) {
+          hint =
+            "Responda usando apenas `fields`, em fala natural. Os rótulos em `hiddenFields` existem mas você não pode ler nem repassar — se a pessoa pedir um deles, transfira para um consultor.";
+        } else {
+          hint =
+            "Responda usando apenas `fields`, em fala natural. Não repasse documento, credencial nem situação financeira.";
+        }
+
+        return ok({
+          query: term,
+          scope: orgWide ? "organization" : "current_contact",
+          total: trimmed.length,
+          records: trimmed,
+          hint,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao consultar o CRM.",
+        );
+      }
+    },
+  });
+}
+
 // ── transfer_to_human ──────────────────────────────────────────
 
 /**
@@ -1219,6 +1604,7 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   add_tag: addTagTool,
   create_activity: createActivityTool,
   search_products: searchProductsTool,
+  search_crm_records: searchCrmRecordsTool,
   send_whatsapp_template: sendWhatsappTemplateTool,
   transfer_to_department: transferToDepartmentTool,
   execute_distribution: executeDistributionTool,
