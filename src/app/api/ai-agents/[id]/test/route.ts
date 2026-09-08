@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getVerticalPack, runVerticalIntercepts } from "@/verticals";
 import { runAgent } from "@/services/ai/runner";
+import { parseAgentConfidence } from "@/services/ai/confidence";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 
@@ -180,8 +181,15 @@ export async function POST(
         select: { systemPromptSnapshot: true },
       });
 
+      // O playground precisa mostrar o que o aluno veria. Sem isso o
+      // marcador interno de confiança aparecia na tela do operador e virava
+      // defeito fantasma no teste.
+      const parsed = parseAgentConfidence(result.text ?? "");
+
       return NextResponse.json({
         ...result,
+        text: parsed.text,
+        confidence: parsed.confidence,
         interceptFired: null,
         llmInvoked: true,
         systemPrompt: run?.systemPromptSnapshot ?? null,

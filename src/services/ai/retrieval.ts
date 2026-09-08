@@ -198,7 +198,9 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
     .join("\n\n---\n\n");
   return [
     "",
-    "BASE DE CONHECIMENTO (use para fundamentar respostas; cite [N] quando aplicável):",
+    // O [N] numera os trechos só para o modelo se orientar. Mandar "cite [N]"
+    // fazia o índice do chunk chegar no WhatsApp do aluno.
+    "BASE DE CONHECIMENTO (use para fundamentar respostas). O [N] é índice interno: PROIBIDO escrever [1], [2] ou qualquer marcador de fonte na resposta ao cliente.",
     sections,
     KNOWLEDGE_PRECEDENCE_RULE,
   ].join("\n");

@@ -157,7 +157,8 @@ export function renderTemplateVars(
 export const DEFAULT_PROMPT_TIMEZONE = "America/Sao_Paulo";
 
 const DATE_REFERENCE_RULE =
-  'Calcule prazos, vencimentos e "hoje/amanhã/próxima" a partir dela. NUNCA infira nem invente outra data, ano, semestre ou período.';
+  'Calcule prazos, vencimentos e "hoje/amanhã/próxima" a partir dela. NUNCA infira nem invente outra data, ano, semestre ou período.\n' +
+  'Compare a data antes de escolher o tempo verbal: data POSTERIOR a hoje vai no futuro ("será liberada em DD/MM"), nunca no passado ("foi liberada em DD/MM"). O aluno age em cima disso.';
 
 /**
  * Data/hora atuais como FATO do sistema (não instrução comportamental).

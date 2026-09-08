@@ -15,8 +15,16 @@ export const LOW_CONFIDENCE_HANDOFF_MESSAGE =
 const CONFIDENCE_RE =
   /\[CONFIANCA\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*\]/gi;
 
+/**
+ * Índice de trecho da base (`[1]`, `[2][3]`) que o modelo às vezes copia do
+ * bloco de referências para a resposta. É numeração interna do retrieval —
+ * no WhatsApp do aluno não significa nada. Só casa colchete com dígitos, para
+ * não comer `[1]` de uma citação legítima com texto dentro.
+ */
+const SOURCE_MARKER_RE = /\s*\[\d{1,2}\](?=\s|$|[.,;:!?])/g;
+
 export type ParsedAgentConfidence = {
-  /** Texto sem o marcador (e sem linhas vazias extras no fim). */
+  /** Texto sem os marcadores internos (e sem linhas vazias extras no fim). */
   text: string;
   /** Score 0–1, ou null se o modelo não enviou o marcador. */
   confidence: number | null;
@@ -33,7 +41,11 @@ export function parseAgentConfidence(raw: string): ParsedAgentConfidence {
       confidence = Math.max(0, Math.min(1, n));
     }
   }
-  text = text.replace(CONFIDENCE_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  text = text
+    .replace(CONFIDENCE_RE, "")
+    .replace(SOURCE_MARKER_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   return { text, confidence };
 }
 
