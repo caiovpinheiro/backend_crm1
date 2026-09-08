@@ -17,6 +17,10 @@ import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import {
+  isAiAttendanceEnabled,
+  releaseAiAssigneeIfDisabled,
+} from "@/services/ai/attendance-gate";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
@@ -280,6 +284,18 @@ export async function tryAssignFirstAttendanceAi(args: {
     (verticalPromise ??= agentOnce().then((a) =>
       a ? resolveAgentVerticalByAgentUserId(a.userId) : emptyAgentVertical(),
     ));
+
+  if (!(await isAiAttendanceEnabled())) {
+    const released = await releaseAiAssigneeIfDisabled({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+    });
+    logAi("first_attendance_kill_switch", {
+      conversationId: args.conversationId,
+      released,
+    });
+    return null;
+  }
 
   if (!(await isFirstAttendanceEnabled())) {
     logAi("first_attendance_disabled", {
@@ -619,6 +635,21 @@ export async function ensureInboundAiAttendance(args: {
   userMessage?: string | null;
 }): Promise<string | null> {
   try {
+    if (!(await isAiAttendanceEnabled())) {
+      await releaseAiAssigneeIfDisabled({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+      });
+      const { maybeDistributeNewInboundTicket } = await import(
+        "@/services/distribution"
+      );
+      await maybeDistributeNewInboundTicket({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        assignedToId: null,
+      });
+      return null;
+    }
     return await tryAssignFirstAttendanceAi({
       conversationId: args.conversationId,
       contactId: args.contactId,

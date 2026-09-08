@@ -56,6 +56,7 @@ import {
   nextDealNumber,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
@@ -2046,6 +2047,15 @@ async function executeStep(
       // userId vazio/whitespace = desatribuir (ownerId null), não erro.
       const rawUserId = readString(cfg, "userId");
       const ownerId = rawUserId?.trim() ? rawUserId.trim() : null;
+      if (ownerId && !(await isAiAttendanceEnabled())) {
+        const owner = await prisma.user.findUnique({
+          where: { id: ownerId },
+          select: { type: true },
+        });
+        if (owner?.type === "AI") {
+          return {};
+        }
+      }
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
       const targetDealId = rt.dealId ?? readString(cfg, "dealId");
       const targetContactId = rt.contactId ?? readString(cfg, "contactId");

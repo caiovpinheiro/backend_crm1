@@ -96,6 +96,7 @@ import {
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { readTestMode } from "@/services/ai/test-mode";
 import { runAiTestTurn } from "@/services/ai/test-mode-turn";
@@ -387,6 +388,26 @@ export async function assertAiStillAuthorized(args: {
 export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
   const startedAt = new Date();
   try {
+    if (!(await isAiAttendanceEnabled())) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "ai_attendance_disabled",
+      });
+      const conv = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { assignedToId: true },
+      });
+      const { maybeDistributeNewInboundTicket } = await import(
+        "@/services/distribution"
+      );
+      await maybeDistributeNewInboundTicket({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        assignedToId: conv?.assignedToId ?? null,
+      });
+      return;
+    }
+
     // Defesa em profundidade: nunca envia se telefone fora da allowlist.
     try {
       const allowed = await isContactAllowedForAi(args.contactId);
@@ -625,6 +646,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         }
 
         // Reassume IA (fila permanece) para continuar o atendimento se o aluno quiser.
+        if (!(await isAiAttendanceEnabled())) {
+          logAi("waiting_queue_ai_reassume_blocked", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
+          });
+          return;
+        }
         await prisma.$transaction(async (tx) => {
           await tx.conversation.update({
             where: { id: args.conversationId },

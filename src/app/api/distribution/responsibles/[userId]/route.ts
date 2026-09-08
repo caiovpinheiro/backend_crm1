@@ -138,6 +138,7 @@ export async function PATCH(request: Request, context: RouteContext) {
           const currentIds = new Set(current.map((c) => c.departmentId));
           const toAdd = [...desired].filter((id) => !currentIds.has(id));
           const toRemove = [...currentIds].filter((id) => !desired.has(id));
+          const savedIds = [...desired];
           await prisma.$transaction([
             ...(toRemove.length
               ? [
@@ -151,6 +152,17 @@ export async function PATCH(request: Request, context: RouteContext) {
                 data: { organizationId: orgId, userId, departmentId },
               }),
             ),
+            prisma.agentPermission.upsert({
+              where: {
+                organizationId_userId: { organizationId: orgId, userId },
+              },
+              create: {
+                organizationId: orgId,
+                userId,
+                allowedDepartmentIds: savedIds,
+              },
+              update: { allowedDepartmentIds: savedIds },
+            }),
           ]);
         } catch (e) {
           console.error("[PATCH responsibles] falha ao sincronizar departamentos", e);

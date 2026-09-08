@@ -38,6 +38,7 @@ import {
 } from "@/lib/request-context";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
@@ -737,12 +738,12 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
 }
 
 /**
- * Após criar um NOVO ticket OPEN inbound (modelo: RESOLVED não reabre),
- * tenta distribuir imediatamente se ainda não há responsável.
+ * Inbound do aluno (ticket novo OU conversa OPEN reusada): tenta
+ * atribuir um consultor elegível; sem elegíveis, entra na fila de espera.
  *
- * Cobre o caso Anna: distribuição falhou de manhã → ticket RESOLVED sem
- * assign → aluno volta → novo #N sem `execute_distribution` da automação.
- * Remapeia `distribution_pending` órfãs para o conversationId novo.
+ * Com o kill-switch de IA, o 1º atendimento não assume — o card não
+ * fica em Agente IA. Remapeia `distribution_pending` órfãs para o
+ * conversationId atual.
  *
  * Nunca propaga erro ao webhook — falha só loga.
  */
@@ -802,23 +803,45 @@ export async function maybeDistributeNewInboundTicket(input: {
   let assignee = input.assignedToId ?? null;
   if (assignee) {
     const check = await isAssigneeCurrentlyEligible(assignee);
-    // AI owner: keep regardless of eligible flag — first-attendance guard handles post-handoff.
+    // AI owner: keep only while the attendance kill-switch allows it.
     if (check.isAi) {
-      debugWarn(
-        "[DBG-e46688 maybeDist] keep_ai_assignee",
-        () => JSON.stringify({ convId: input.conversationId, assignee }),
-      );
-      // Fora do expediente a IA pode falar, mas o lead entra na espera
-      // para distribuir quando o primeiro consultor ficar elegível.
-      if (!isHumanAttendanceWindowOpen()) {
-        await ensureConversationInWaitingQueue({
-          conversationId: input.conversationId,
-          contactId: input.contactId,
-          triggerSource: "SYSTEM",
-        }).catch(() => null);
+      if (!(await isAiAttendanceEnabled())) {
+        debugWarn(
+          "[DBG-e46688 maybeDist] drop_ai_assignee_kill_switch",
+          () => JSON.stringify({ convId: input.conversationId, assignee }),
+        );
+        try {
+          await clearOwnershipForRedistribution({
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+          });
+        } catch (e) {
+          console.error(
+            "[distribution] clearOwnershipForRedistribution failed",
+            e,
+          );
+          return;
+        }
+        assignee = null;
+      } else {
+        debugWarn(
+          "[DBG-e46688 maybeDist] keep_ai_assignee",
+          () => JSON.stringify({ convId: input.conversationId, assignee }),
+        );
+        // Fora do expediente a IA pode falar, mas o lead entra na espera
+        // para distribuir quando o primeiro consultor ficar elegível.
+        if (!isHumanAttendanceWindowOpen()) {
+          await ensureConversationInWaitingQueue({
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            triggerSource: "SYSTEM",
+          }).catch(() => null);
+        }
+        return;
       }
-      return;
     }
+    // Kill-switch soltou a IA: assignee=null → 1º atendimento (no-op) + fila humana.
+    if (assignee) {
     // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
     // contato já é dele. Offline / fora do expediente seguem liberando.
     const keepHumanAssignee =
@@ -912,7 +935,8 @@ export async function maybeDistributeNewInboundTicket(input: {
         );
         return;
       }
-      assignee = null;
+        assignee = null;
+    }
     }
   }
 
@@ -952,7 +976,17 @@ export async function maybeDistributeNewInboundTicket(input: {
       () => JSON.stringify({ widgetActive, convId: input.conversationId }),
     );
     // #endregion
-    if (!widgetActive) return;
+    if (!widgetActive) {
+      // IA off e sem widget: ainda assim o aluno não pode ficar sem fila.
+      if (!(await isAiAttendanceEnabled())) {
+        await ensureConversationInWaitingQueue({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          triggerSource: "SYSTEM",
+        });
+      }
+      return;
+    }
 
     // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
     // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.

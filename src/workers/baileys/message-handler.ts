@@ -14,6 +14,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
@@ -283,13 +284,15 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     if (Object.keys(updates).length > 0) {
       await prisma.conversation.update({ where: { id: existing.id }, data: updates });
     }
+    await maybeDistributeNewInboundTicket({
+      conversationId: existing.id,
+      contactId,
+      assignedToId: existing.assignedToId ?? null,
+    });
     return existing;
   }
 
-  const contact = await prisma.contact.findUnique({
-    where: { id: contactId },
-    select: { assignedToId: true },
-  });
+  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -301,7 +304,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
           channelId,
           waJid: rawJid,
           status: "OPEN" as const,
-          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+          ...(inheritAssignee ? { assignedToId: inheritAssignee } : {}),
         }),
         select: CONV_SELECT,
       }),
@@ -309,7 +312,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     await maybeDistributeNewInboundTicket({
       conversationId: created.id,
       contactId,
-      assignedToId: contact?.assignedToId ?? null,
+      assignedToId: inheritAssignee,
     });
     return created;
   } catch (err) {
