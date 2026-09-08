@@ -38,6 +38,7 @@ import {
 } from "@/lib/request-context";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
@@ -802,23 +803,45 @@ export async function maybeDistributeNewInboundTicket(input: {
   let assignee = input.assignedToId ?? null;
   if (assignee) {
     const check = await isAssigneeCurrentlyEligible(assignee);
-    // AI owner: keep regardless of eligible flag — first-attendance guard handles post-handoff.
+    // AI owner: keep only while the attendance kill-switch allows it.
     if (check.isAi) {
-      debugWarn(
-        "[DBG-e46688 maybeDist] keep_ai_assignee",
-        () => JSON.stringify({ convId: input.conversationId, assignee }),
-      );
-      // Fora do expediente a IA pode falar, mas o lead entra na espera
-      // para distribuir quando o primeiro consultor ficar elegível.
-      if (!isHumanAttendanceWindowOpen()) {
-        await ensureConversationInWaitingQueue({
-          conversationId: input.conversationId,
-          contactId: input.contactId,
-          triggerSource: "SYSTEM",
-        }).catch(() => null);
+      if (!(await isAiAttendanceEnabled())) {
+        debugWarn(
+          "[DBG-e46688 maybeDist] drop_ai_assignee_kill_switch",
+          () => JSON.stringify({ convId: input.conversationId, assignee }),
+        );
+        try {
+          await clearOwnershipForRedistribution({
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+          });
+        } catch (e) {
+          console.error(
+            "[distribution] clearOwnershipForRedistribution failed",
+            e,
+          );
+          return;
+        }
+        assignee = null;
+      } else {
+        debugWarn(
+          "[DBG-e46688 maybeDist] keep_ai_assignee",
+          () => JSON.stringify({ convId: input.conversationId, assignee }),
+        );
+        // Fora do expediente a IA pode falar, mas o lead entra na espera
+        // para distribuir quando o primeiro consultor ficar elegível.
+        if (!isHumanAttendanceWindowOpen()) {
+          await ensureConversationInWaitingQueue({
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            triggerSource: "SYSTEM",
+          }).catch(() => null);
+        }
+        return;
       }
-      return;
     }
+    // Kill-switch soltou a IA: assignee=null → 1º atendimento (no-op) + fila humana.
+    if (assignee) {
     // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
     // contato já é dele. Offline / fora do expediente seguem liberando.
     const keepHumanAssignee =
@@ -912,7 +935,8 @@ export async function maybeDistributeNewInboundTicket(input: {
         );
         return;
       }
-      assignee = null;
+        assignee = null;
+    }
     }
   }
 

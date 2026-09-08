@@ -96,6 +96,7 @@ import {
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { readTestMode } from "@/services/ai/test-mode";
 import { runAiTestTurn } from "@/services/ai/test-mode-turn";
@@ -387,6 +388,14 @@ export async function assertAiStillAuthorized(args: {
 export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
   const startedAt = new Date();
   try {
+    if (!(await isAiAttendanceEnabled())) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "ai_attendance_disabled",
+      });
+      return;
+    }
+
     // Defesa em profundidade: nunca envia se telefone fora da allowlist.
     try {
       const allowed = await isContactAllowedForAi(args.contactId);
