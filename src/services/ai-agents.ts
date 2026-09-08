@@ -41,7 +41,44 @@ import {
   type InboxPolicy,
   type ToolConfigMap,
 } from "@/lib/ai-agents/steering";
-import { listVerticalPackIds } from "@/verticals";
+import { getVerticalPack, listVerticalPackIds } from "@/verticals";
+
+const ACADEMIC_RUNTIME_TOOLS = [
+  "consultar_matricula",
+  "transfer_to_department",
+  "execute_distribution",
+  "transfer_to_human",
+  "close_conversation",
+];
+
+function academicSteeringRulesFallback(): string {
+  const academic = getVerticalPack("academic");
+  if (!academic) return "";
+  return [
+    academic.constants.atendimentoRules,
+    academic.constants.mediaCapabilityRules,
+    academic.constants.confidenceRules,
+  ].join("\n\n");
+}
+
+function withDisplayedAcademicDefaults<T extends {
+  archetype: string;
+  verticalPack?: string | null;
+  steeringRules?: string | null;
+  enabledTools?: string[] | null;
+}>(row: T): T {
+  const isAcademic =
+    row.verticalPack === "academic" || row.archetype === "ATENDIMENTO";
+  if (!isAcademic) return row;
+  const steeringRules = row.steeringRules?.trim()
+    ? row.steeringRules
+    : academicSteeringRulesFallback() || row.steeringRules;
+  const currentTools = row.enabledTools ?? [];
+  const enabledTools = Array.from(
+    new Set([...currentTools, ...ACADEMIC_RUNTIME_TOOLS]),
+  );
+  return { ...row, steeringRules, enabledTools };
+}
 import {
   auditDiffAsJson,
   buildAgentConfigDiff,
@@ -128,14 +165,16 @@ export async function getAIAgent(id: string) {
   });
   if (!row) return null;
   const { _count, ...rest } = row;
-  return redactAgentOpenaiKey({
-    ...rest,
-    // Devolve a política já normalizada: as regras de mensagem semeadas pelo
-    // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
-    // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
-    inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
-    knowledgeDocsCount: _count.knowledgeDocs,
-  });
+  return redactAgentOpenaiKey(
+    withDisplayedAcademicDefaults({
+      ...rest,
+      // Devolve a política já normalizada: as regras de mensagem semeadas pelo
+      // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
+      // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
+      inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
+      knowledgeDocsCount: _count.knowledgeDocs,
+    }),
+  );
 }
 
 export type CreateAIAgentInput = {
