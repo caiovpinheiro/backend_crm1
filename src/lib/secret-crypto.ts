@@ -20,12 +20,26 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 const ALGO = "aes-256-gcm";
 const PREFIX = "enc:v1:";
 
-function getKey(): Buffer {
-  const secret =
+function readSecret(): string {
+  return (
     process.env.ENCRYPTION_KEY?.trim() ||
     process.env.NEXTAUTH_SECRET?.trim() ||
     process.env.AUTH_SECRET?.trim() ||
-    "";
+    ""
+  );
+}
+
+/**
+ * `false` quando o processo não tem segredo de criptografia. Serve pra
+ * distinguir "ambiente mal configurado" de "blob gravado com outro
+ * segredo" — os dois falham em `decryptSecret`, mas a correção é oposta.
+ */
+export function hasCryptoSecret(): boolean {
+  return readSecret() !== "";
+}
+
+function getKey(): Buffer {
+  const secret = readSecret();
   if (!secret) {
     throw new Error(
       "Nenhum segredo disponível para criptografar (defina ENCRYPTION_KEY ou NEXTAUTH_SECRET).",

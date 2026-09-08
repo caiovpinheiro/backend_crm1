@@ -10,6 +10,8 @@
 
 ---
 
+### 2026-09-05 — Auto-preenchimento da Informação rastreada no CTWA
+
 **Decisão.** No webhook Meta, ao identificar referral CTWA: (1) grava referral básico; (2) `resolveAdAndPersistAsync` busca metadados + `url_tags` tanto para `source_type=ad` quanto `post`; (3) parseia `source_url` e preenche UTMs/click IDs (`utm_*`, gclid, fbclid, ttad_*, referrer) sem sobrescrever o que já estava preenchido.
 
 **Contexto.** Card Contato mostra os campos, mas `source_type=ad` só copiava o id — UTMs não entravam.

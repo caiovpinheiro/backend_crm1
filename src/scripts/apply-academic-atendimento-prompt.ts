@@ -5,13 +5,13 @@
  * Uso (backend_crm1, com DATABASE_URL):
  *   npx tsx src/scripts/apply-academic-atendimento-prompt.ts [organizationId]
  */
-import { PrismaClient } from "@prisma/client";
-
-import {
-  ACADEMIC_HANDOFF_KEYWORDS,
-  ACADEMIC_SYSTEM_PROMPT_OVERRIDE,
-} from "../lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "../verticals";
 import { getArchetype } from "../lib/ai-agents/archetypes";
+
+const academic = getVerticalPack("academic")!;
+const ACADEMIC_HANDOFF_KEYWORDS = academic.constants.handoffKeywords;
+const ACADEMIC_SYSTEM_PROMPT_OVERRIDE = academic.constants.systemPromptOverride;
+
 
 /** Atendimento com distribuição por departamento (substitui INICIO-PIPE). */
 const ACADEMIC_TOOLS = [

@@ -50,7 +50,9 @@ import {
 } from "@/services/ai/inbound-debounce";
 import { assertAiStillAuthorized } from "@/services/ai/inbox-handler";
 import { matchHandoffKeyword } from "@/lib/ai-agents/piloting";
-import { ACADEMIC_HANDOFF_KEYWORDS } from "@/lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "@/verticals";
+const ACADEMIC_HANDOFF_KEYWORDS =
+  getVerticalPack("academic")!.constants.handoffKeywords;
 
 describe("inbound-debounce claim + cancel", () => {
   beforeEach(() => {
@@ -107,22 +109,19 @@ describe("assertAiStillAuthorized", () => {
     expect(r).toEqual({ ok: false, reason: "assignee_not_ai" });
   });
 
-  it("bloqueia se last outbound é humana", async () => {
+  it("autoriza agente AI mesmo com outbound humana histórica", async () => {
     cacheStore.set("ai:gen:c1", "gen-1");
     vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
       assignedToId: "ai-user",
       hasHumanReply: true,
       assignedTo: { type: "AI" },
     } as never);
-    vi.mocked(prisma.message.findFirst).mockResolvedValue({
-      authorType: "human",
-    } as never);
     const r = await assertAiStillAuthorized({
       conversationId: "c1",
       expectedAgentUserId: "ai-user",
       generationId: "gen-1",
     });
-    expect(r).toEqual({ ok: false, reason: "human_last_outbound" });
+    expect(r).toEqual({ ok: true });
   });
 
   it("autoriza agente AI sem outbound humana", async () => {

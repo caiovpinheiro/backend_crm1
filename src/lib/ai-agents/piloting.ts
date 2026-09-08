@@ -12,10 +12,11 @@
  *  - `qualificationQuestions`  — perguntas obrigatórias.
  *  - `businessHours`           — horário de atendimento.
  *  - `outputStyle`             — estilo de saída (conversational|structured).
+ *  - `autoClosePolicy`         — quando a IA pode encerrar o ticket.
  *
- * O schema guarda `qualificationQuestions` e `businessHours` como
- * JSONB; este módulo centraliza a normalização e validação pra que
- * o resto do código nunca precise lidar com `unknown`.
+ * O schema guarda `qualificationQuestions`, `businessHours` e
+ * `autoClosePolicy` como JSONB; este módulo centraliza a normalização
+ * e validação pra que o resto do código nunca precise lidar com `unknown`.
  */
 
 export type HandoffMode = "KEEP_OWNER" | "SPECIFIC_USER" | "UNASSIGN";
@@ -230,6 +231,85 @@ export function matchHandoffKeyword(
 
 function stripAccents(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+// ── Encerramento automático ──────────────────────────────────
+
+export type AutoCloseMode = "off" | "explicit" | "understood";
+
+export const AUTO_CLOSE_MODES: AutoCloseMode[] = [
+  "off",
+  "explicit",
+  "understood",
+];
+
+export function isAutoCloseMode(v: unknown): v is AutoCloseMode {
+  return typeof v === "string" && AUTO_CLOSE_MODES.includes(v as AutoCloseMode);
+}
+
+export type AutoClosePolicy = {
+  /// off = nunca encerra. explicit = só detector/keywords.
+  /// understood = detector + a IA pode chamar close_conversation.
+  mode: AutoCloseMode;
+  /// Termos extras (além do detector do código) que forçam encerrar.
+  keywords: string[];
+  /// Texto enviado ao encerrar. Null = frase padrão do código.
+  message: string | null;
+};
+
+export function defaultAutoClosePolicy(): AutoClosePolicy {
+  return { mode: "understood", keywords: [], message: null };
+}
+
+export function normalizeAutoClosePolicy(v: unknown): AutoClosePolicy {
+  const base = defaultAutoClosePolicy();
+  if (!v || typeof v !== "object" || Array.isArray(v)) return base;
+  const r = v as Record<string, unknown>;
+  const keywords: string[] = [];
+  if (Array.isArray(r.keywords)) {
+    for (const raw of r.keywords) {
+      if (typeof raw !== "string") continue;
+      const s = raw.trim();
+      if (s && !keywords.includes(s)) keywords.push(s);
+    }
+  }
+  return {
+    mode: isAutoCloseMode(r.mode) ? r.mode : base.mode,
+    keywords,
+    message:
+      typeof r.message === "string" && r.message.trim()
+        ? r.message.trim()
+        : null,
+  };
+}
+
+/** Tool `close_conversation` só no modo understood. */
+export function llmMayCloseConversation(policy: AutoClosePolicy): boolean {
+  return policy.mode === "understood";
+}
+
+/** Bloco injetado no system prompt — vale acima da regra do arquétipo. */
+export function buildAutoClosePromptBlock(policy: AutoClosePolicy): string {
+  if (policy.mode === "off") {
+    return [
+      "ENCERRAMENTO AUTOMÁTICO (pilotagem): DESLIGADO.",
+      "NÃO chame `close_conversation`. Nunca encerre o ticket.",
+      "Se o aluno se despedir, responda com educação e continue disponível.",
+    ].join("\n");
+  }
+  if (policy.mode === "explicit") {
+    return [
+      "ENCERRAMENTO AUTOMÁTICO (pilotagem): só pedido explícito.",
+      "NÃO chame `close_conversation`. O sistema encerra sozinho quando o aluno pedir para encerrar/finalizar ou usar uma palavra-chave configurada.",
+      "Não interprete \"obrigado\", \"boa noite\" ou \"qualquer dúvida eu pergunto\" como encerramento.",
+    ].join("\n");
+  }
+  return [
+    "ENCERRAMENTO AUTOMÁTICO (pilotagem): a IA pode encerrar.",
+    "Chame `close_conversation` quando entender que o aluno concluiu (não precisa mais, despedida clara, \"era só isso\") e AINDA NÃO houve consultor humano.",
+    "NÃO encerre só por \"obrigado\", \"ok\" ou \"boa noite\" se o assunto ainda estiver aberto.",
+    "Não peça confirmação extra se a intenção de encerrar estiver clara.",
+  ].join("\n");
 }
 
 // ── Opening message templating ───────────────────────────────

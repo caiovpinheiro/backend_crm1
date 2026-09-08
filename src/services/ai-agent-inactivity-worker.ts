@@ -17,6 +17,7 @@
  * Opt-out do worker inteiro: `AI_AGENT_INACTIVITY_WORKER=0`.
  */
 
+
 import { prisma } from "@/lib/prisma";
 // prismaBase para o $queryRaw cross-tenant da listagem; dispatchOne
 // acessa models scoped e precisa rodar em withSystemContext.
@@ -27,10 +28,8 @@ import {
   renderTemplate,
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
-import {
-  attendanceEndedInFarewell,
-  closeAiOnlyConversation,
-} from "@/services/ai/academic-closure";
+import { resolveAgentVerticalByAgentUserId } from "@/services/ai/agent-vertical";
+import { closeAiOnlyConversation } from "@/services/ai/close-ai-conversation";
 import {
   IDLE_CLOSE_AFTER_NUDGE_MS,
   IDLE_NUDGE_MS,
@@ -47,6 +46,17 @@ import {
   retryUnansweredAiInbound,
 } from "@/services/ai/retry-unanswered-ai-inbound";
 import { STUCK_INBOUND_MS } from "@/services/ai/stuck-inbound-distribution";
+
+/**
+ * Ops do agente atribuído à conversa. Sem vertical, `{}`: o encerramento
+ * por despedida é comportamento de pack, não do worker.
+ */
+function agentOps(row: { assigned_to_id: string; organization_id: string }) {
+  return resolveAgentVerticalByAgentUserId(
+    row.assigned_to_id,
+    row.organization_id,
+  ).then((v) => v.ops);
+}
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
 const BATCH_SIZE = 50;
@@ -190,6 +200,7 @@ async function processIdleAiOnly(
   let nudged = 0;
 
   for (const row of rows) {
+    const ops = await agentOps(row);
     const isNudge = isIdleNudgeContent(row.last_out_content);
     const ageMs = now.getTime() - new Date(row.last_out_at).getTime();
     const canText = windowOpen(row.last_inbound_at, now);
@@ -197,7 +208,7 @@ async function processIdleAiOnly(
     // ajudar?" reabre uma conversa encerrada. Encerra direto.
     const endedInFarewell =
       !isNudge &&
-      attendanceEndedInFarewell({
+      ops.attendanceEndedInFarewell?.({
         lastAgentText: row.last_out_content,
         lastStudentText: row.last_in_content,
       });
@@ -211,8 +222,11 @@ async function processIdleAiOnly(
 
     try {
       if (shouldClose) {
+        // Encerrar ticket é genérico; o pack só refina (funil de origem).
+        const closeConversation =
+          ops.closeAiOnlyConversation ?? closeAiOnlyConversation;
         const result = await withSystemContext(row.organization_id, () =>
-          closeAiOnlyConversation({
+          closeConversation({
             conversationId: row.conversation_id,
             contactId: row.contact_id,
             reason: endedInFarewell

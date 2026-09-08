@@ -71,15 +71,23 @@ function sleep(ms: number): Promise<void> {
 async function closeAttendanceIfFarewell(args: {
   conversationId: string;
   contactId: string;
+  agentUserId?: string | null;
   kind?: "text" | "greeting" | "farewell" | "off_hours";
   text: string;
 }): Promise<void> {
   if (args.kind === "greeting" || args.kind === "off_hours") return;
   try {
-    const { closeIfAgentFarewellEndsAttendance } = await import(
-      "@/services/ai/academic-closure"
+    // Pack do agente que está falando, não "academic" fixo. Sem vertical,
+    // o encerramento por despedida não se aplica.
+    const { resolveAgentVerticalByAgentUserId } = await import(
+      "@/services/ai/agent-vertical"
     );
-    await closeIfAgentFarewellEndsAttendance({
+    const { ops } = await resolveAgentVerticalByAgentUserId(
+      args.agentUserId ?? null,
+    );
+    const closeIfAgentFarewellEndsAttendance =
+      ops.closeIfAgentFarewellEndsAttendance;
+    await closeIfAgentFarewellEndsAttendance?.({
       conversationId: args.conversationId,
       contactId: args.contactId,
       replyText: args.text,
@@ -131,38 +139,47 @@ export async function sendAgentMessage(args: {
    * e o aluno fica sem resposta.
    */
   bypassAssigneeCheck?: boolean;
+  /**
+   * Resposta a um comando explícito do operador. O anti-spam existe para o
+   * agente não repetir informação que ninguém pediu; confirmação de comando
+   * é o oposto — repetir `#iniciar` deve confirmar de novo, e sem isto a
+   * segunda confirmação (que só muda o horário) morre como near-duplicate.
+   */
+  bypassDuplicateGuard?: boolean;
 }): Promise<SendAgentMessageResult> {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
 
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
-  try {
-    const { isNearDuplicateBotText } = await import(
-      "@/services/ai/human-queue-policy"
-    );
-    const recentBot = await prisma.message.findMany({
-      where: {
-        conversationId: args.conversationId,
-        direction: "out",
-        authorType: "bot",
-        isPrivate: false,
-        messageType: { not: "note" },
-        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 6,
-      select: { content: true },
-    });
-    if (
-      recentBot.some(
-        (m) => m.content && isNearDuplicateBotText(text, m.content),
-      )
-    ) {
-      return { status: "skipped", reason: "near_duplicate" };
+  if (!args.bypassDuplicateGuard) {
+    try {
+      const { isNearDuplicateBotText } = await import(
+        "@/services/ai/human-queue-policy"
+      );
+      const recentBot = await prisma.message.findMany({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+          createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { content: true },
+      });
+      if (
+        recentBot.some(
+          (m) => m.content && isNearDuplicateBotText(text, m.content),
+        )
+      ) {
+        return { status: "skipped", reason: "near_duplicate" };
+      }
+    } catch {
+      /* best-effort */
     }
-  } catch {
-    /* best-effort */
   }
 
   // Kill-switch absoluto: não envia WhatsApp fora da allowlist.
@@ -331,6 +348,7 @@ export async function sendAgentMessage(args: {
     await closeAttendanceIfFarewell({
       conversationId: args.conversationId,
       contactId: args.contactId,
+      agentUserId: args.agentUserId,
       kind: args.kind,
       text,
     });
@@ -408,6 +426,7 @@ export async function sendAgentMessage(args: {
       await closeAttendanceIfFarewell({
         conversationId: args.conversationId,
         contactId: args.contactId,
+        agentUserId: args.agentUserId,
         kind: args.kind,
         text,
       });

@@ -9,7 +9,9 @@
  */
 import { describe, expect, it } from "vitest";
 
-import {
+import { getVerticalPack } from "@/verticals";
+
+const {
   agentReplyLooksLikeFarewell,
   shouldCloseAfterAgentFarewell,
   shouldCloseAiAfterStudentMessage,
@@ -19,7 +21,10 @@ import {
   userSaysGoodbye,
   userSaysThatsAll,
   userThanksInSentence,
-} from "@/services/ai/academic-closure";
+} = getVerticalPack("academic")!.ops as Record<
+  string,
+  (...args: any[]) => any
+>;
 import { userWantsSoftAiClose } from "@/services/ai/idle-followup";
 
 const FAREWELL =

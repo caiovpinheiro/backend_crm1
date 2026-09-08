@@ -1,6 +1,19 @@
 /**
- * Debounce de mensagens inbound para o Agente IA.
+ * Debounce de mensagens inbound para o Agente IA — CAMINHO LEGADO.
  *
+ * APOSENTADO pelo `turn-manager.ts` (Fase 1 do runtime de IA). Com
+ * `AI_TURN_MANAGER=1` os 3 ingests chamam `onInboundMessageForAi` e
+ * `scheduleAiReply` não é mais alcançado; com a flag desligada (default)
+ * este arquivo continua sendo o caminho de produção. NÃO existem dois
+ * debounces ativos ao mesmo tempo — o entrypoint novo é quem decide, e é
+ * ele que delega para cá no modo legado.
+ *
+ * Continuam vivos e compartilhados pelos dois modos:
+ *   - `claimInboundMessageForAi` (claim Redis por messageId)
+ *   - `collectUnansweredInboundText` (batch de inbound sem resposta)
+ *   - `cancelAiReplyDebounce` (agora também invalida turnos)
+ *
+
  * Agrupa mensagens consecutivas do cliente (timer renovável) e garante
  * que só a última geração válida dispare `maybeReplyAsAIAgent`.
  *
@@ -9,9 +22,17 @@
  */
 
 import { cache } from "@/lib/cache";
-import { getOrgIdOrNull, runWithContext } from "@/lib/request-context";
+import {
+  getOrgIdOrNull,
+  getRequestContext,
+  runWithContext,
+} from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import {
+  DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
+  normalizeInboxPolicy,
+} from "@/lib/ai-agents/steering";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 export const DEFAULT_AI_DEBOUNCE_MS = 2500;
@@ -83,6 +104,12 @@ export async function claimInboundMessageForAi(
 /**
  * Cancela debounce pendente (humano assumiu / enviou mensagem).
  * Sempre invalida generationId no cache (multi-réplica / pós-flush).
+ *
+ * Ponto ÚNICO de cancelamento: além do timer local e do generationId,
+ * invalida os `ConversationTurn` acumulando da conversa. Todos os call
+ * sites atuais (POST /messages, actions/assignee, halt-inbound-burst,
+ * moveConversationAssignee, farewell do inbox-handler, `ai_only_close`
+ * do vertical academic) ficam cobertos sem mudar nenhum deles.
  */
 export function cancelAiReplyDebounce(
   conversationId: string,
@@ -97,6 +124,19 @@ export function cancelAiReplyDebounce(
     pendingByConversation.delete(conversationId);
   }
   void cache.del(`ai:gen:${conversationId}`);
+  // Import dinâmico: turn-manager importa este módulo (claim + coletor de
+  // texto), então o estático fecharia ciclo.
+  void import("@/services/ai/turn-manager")
+    .then(({ invalidateOpenTurns }) =>
+      invalidateOpenTurns(conversationId, reason),
+    )
+    .catch((err) => {
+      console.error("[ai-attend] invalidateOpenTurns falhou", {
+        conversationId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   logAi("debounce_cancelled", { conversationId, reason, hadPending: Boolean(slot) });
 }
 
@@ -263,12 +303,111 @@ async function flushDebounce(
 }
 
 /**
+ * Depois de atribuir/transferir no inbox para um User type=AI: responde
+ * inbound sem resposta, ou manda a saudação se o aluno ainda não falou.
+ * Fire-and-forget — o HTTP do assign não espera o LLM.
+ */
+export function kickAiAfterInboxAssign(args: {
+  conversationId: string;
+  contactId: string;
+}): void {
+  // Captura o ALS agora: o assign HTTP já pode ter encerrado quando o
+  // primeiro `await` abaixo roda, e o prisma scoped explode sem org.
+  const ctx = getRequestContext();
+  void (async () => {
+    const run = async () => {
+      try {
+        const text = await collectUnansweredInboundText(args.conversationId);
+        if (text.trim()) {
+          // Passa pelo entrypoint compartilhado: com AI_TURN_MANAGER=1 isso
+          // abre um turno em vez de armar o timer local. Sem isso, o assign
+          // ao agente IA seria um SEGUNDO debounce rodando em paralelo com
+          // o Turn Manager.
+          const { onInboundMessageForAi } = await import(
+            "@/services/ai/turn-manager"
+          );
+          await onInboundMessageForAi({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            userMessage: text,
+            channel: "meta",
+          });
+          return;
+        }
+        const conv = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedToId: true },
+        });
+        if (!conv?.assignedToId) return;
+        const { triggerAgentOpeningForContact } = await import(
+          "@/services/ai/piloting-actions"
+        );
+        await triggerAgentOpeningForContact({
+          contactId: args.contactId,
+          agentUserId: conv.assignedToId,
+          channel: "meta",
+        });
+      } catch (e) {
+        console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
+      }
+    };
+    if (ctx) {
+      await runWithContext(ctx, run);
+      return;
+    }
+    await run();
+  })();
+}
+
+/**
+ * Teto temporal do lote, em minutos, configurado no agente atribuído.
+ * Sem agente IA (ou sem contexto) cai no default seguro.
+ */
+async function resolveInboundBatchWindowMinutes(
+  conversationId: string,
+): Promise<number> {
+  try {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        assignedTo: {
+          select: {
+            type: true,
+            aiAgentConfig: {
+              select: { inboxPolicy: true, verticalPack: true },
+            },
+          },
+        },
+      },
+    });
+    const cfg =
+      conv?.assignedTo?.type === "AI" ? conv.assignedTo.aiAgentConfig : null;
+    if (!cfg) return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
+    return normalizeInboxPolicy(cfg.inboxPolicy, cfg.verticalPack)
+      .inboundBatchWindowMinutes;
+  } catch {
+    return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
+  }
+}
+
+/**
  * Concatena mensagens inbound do cliente desde a última outbound
  * (humano/bot), em ordem cronológica.
+ *
+ * Tem TETO TEMPORAL. Sem ele um "oi" às 16:43 arrastava mensagens de 16:13
+ * para o mesmo turno: o agente respondia perguntas velhas e um lote antigo
+ * casava com palavra-chave, disparando transferência indevida. A janela é
+ * ancorada na mensagem mais NOVA do lote (não em `now`), porque o worker
+ * pode processar o turno minutos depois de o cliente escrever.
  */
 export async function collectUnansweredInboundText(
   conversationId: string,
+  opts?: { windowMinutes?: number },
 ): Promise<string> {
+  const windowMinutes =
+    opts?.windowMinutes ??
+    (await resolveInboundBatchWindowMinutes(conversationId));
+
   const lastOut = await prisma.message.findFirst({
     where: {
       conversationId,
@@ -292,15 +431,28 @@ export async function collectUnansweredInboundText(
       content: true,
       authorType: true,
       messageType: true,
+      createdAt: true,
     },
   });
 
+  const fromClient = inbound.filter(
+    (m) =>
+      m.authorType !== "bot" &&
+      m.authorType !== "system" &&
+      m.messageType !== "note" &&
+      (m.content ?? "").trim().length > 0,
+  );
+
+  const newest = fromClient[fromClient.length - 1]?.createdAt;
+  const cutoff =
+    windowMinutes > 0 && newest
+      ? newest.getTime() - windowMinutes * 60_000
+      : null;
+
   const parts: string[] = [];
-  for (const m of inbound) {
-    if (m.authorType === "bot" || m.authorType === "system") continue;
-    if (m.messageType === "note") continue;
-    const t = (m.content ?? "").trim();
-    if (t) parts.push(t);
+  for (const m of fromClient) {
+    if (cutoff !== null && m.createdAt.getTime() < cutoff) continue;
+    parts.push((m.content ?? "").trim());
   }
   return parts.join("\n");
 }

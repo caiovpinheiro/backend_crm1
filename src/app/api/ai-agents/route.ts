@@ -5,8 +5,10 @@ import {
   createAIAgent,
   listAIAgents,
   sanitizePilotingInput,
+  sanitizeVerticalPack,
   type CreateAIAgentInput,
 } from "@/services/ai-agents";
+import { parseAuditSource } from "@/lib/ai-agents/observability";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 const ARCHETYPES: AIAgentArchetype[] = [
@@ -70,6 +72,22 @@ export async function POST(request: Request) {
         typeof body.temperature === "number" ? body.temperature : undefined,
       maxTokens:
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+      maxSteps:
+        typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+      maxToolCallsPerRun:
+        typeof body.maxToolCallsPerRun === "number"
+          ? body.maxToolCallsPerRun
+          : undefined,
+      maxRepeatsPerTool:
+        typeof body.maxRepeatsPerTool === "number"
+          ? body.maxRepeatsPerTool
+          : undefined,
+      templateId:
+        typeof body.templateId === "string"
+          ? body.templateId
+          : body.templateId === null
+            ? null
+            : undefined,
       systemPromptOverride:
         typeof body.systemPromptOverride === "string"
           ? body.systemPromptOverride
@@ -91,6 +109,12 @@ export async function POST(request: Request) {
       pipelineId: typeof body.pipelineId === "string" ? body.pipelineId : null,
       channelId: typeof body.channelId === "string" ? body.channelId : null,
       avatarUrl: typeof body.avatarUrl === "string" ? body.avatarUrl : null,
+      openaiApiKey:
+        typeof body.openaiApiKey === "string" ? body.openaiApiKey : undefined,
+      ...(() => {
+        const vp = sanitizeVerticalPack(body.verticalPack);
+        return vp !== undefined ? { verticalPack: vp } : {};
+      })(),
       ...sanitizePilotingInput({
         openingMessage: body.openingMessage,
         openingDelayMs: body.openingDelayMs,
@@ -105,7 +129,9 @@ export async function POST(request: Request) {
         simulateTyping: body.simulateTyping,
         typingPerCharMs: body.typingPerCharMs,
         markMessagesRead: body.markMessagesRead,
+        autoClosePolicy: body.autoClosePolicy,
       }),
+      auditSource: parseAuditSource(body.auditSource ?? body.source),
     };
 
     try {

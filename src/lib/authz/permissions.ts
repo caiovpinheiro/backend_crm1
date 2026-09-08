@@ -270,6 +270,8 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "view", label: "Ver conversas e mensagens" },
       { action: "send", label: "Enviar mensagens" },
       { action: "create_room", label: "Abrir DM ou criar grupo" },
+      { action: "work_item", label: "Criar e editar checklists, atas e reuniões" },
+      { action: "forward", label: "Encaminhar mensagem com anotação" },
     ],
   },
   {

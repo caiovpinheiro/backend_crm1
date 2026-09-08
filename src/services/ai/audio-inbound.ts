@@ -11,21 +11,20 @@
  * Por isso a decisão é feita aqui, no inbound, sem depender do prompt.
  */
 
+import {
+  isContentlessInbound,
+  mediaPlaceholderKind,
+} from "@/lib/ai-agents/media-placeholder";
 import { prisma } from "@/lib/prisma";
 import {
   buildAssignedConsultantNotice,
   humanAttendanceStartHint,
   isHumanAttendanceWindowOpen,
+  type HumanQueueContext,
 } from "@/services/ai/human-queue-policy";
 
 /** `Message.messageType` gravados para áudio/voz nos canais WhatsApp. */
 const AUDIO_MESSAGE_TYPES = new Set(["audio", "ptt", "voice", "voice_note"]);
-
-/** Placeholders de conteúdo usados quando o áudio não tem texto. */
-const AUDIO_PLACEHOLDER_RE = /^\[\s*(audio|ptt|voice|voice_note)\s*\]/;
-
-/** Placeholder de qualquer mídia (`[Imagem]`, `[Documento]`, `[audio] 👁`…). */
-const MEDIA_PLACEHOLDER_RE = /^\[[^\]]{1,30}\]/;
 
 /** Ruído sem pedido útil: saudação, desculpa, ack curto. */
 const NOISE_TEXT_RE =
@@ -44,15 +43,13 @@ function normalize(raw: string): string {
 
 /** True se o conteúdo é só o placeholder de um áudio (sem transcrição). */
 export function isAudioPlaceholderText(content: string | null | undefined): boolean {
-  const n = normalize(content ?? "");
-  return AUDIO_PLACEHOLDER_RE.test(n);
+  return mediaPlaceholderKind(content) === "audio";
 }
 
 /** True se o texto não carrega pedido algum (placeholder de mídia, saudação, ack). */
 function isNoiseText(content: string | null | undefined): boolean {
+  if (isContentlessInbound(content)) return true;
   const n = normalize(content ?? "");
-  if (!n) return true;
-  if (MEDIA_PLACEHOLDER_RE.test(n)) return true;
   if (n.length <= 40 && NOISE_TEXT_RE.test(n)) return true;
   return false;
 }
@@ -135,22 +132,27 @@ export async function detectInboundAudio(args: {
 export function buildAudioHandoffMessage(args: {
   assignedToHuman: boolean;
   now?: Date;
+  /** Horário e cópia configurados no agente. Ausente = default do código. */
+  queue?: HumanQueueContext;
 }): string {
   const now = args.now ?? new Date();
+  const queue = args.queue;
   if (args.assignedToHuman) {
-    return `Recebi seu áudio! 💛 ${buildAssignedConsultantNotice()}`;
+    return `Recebi seu áudio! 💛 ${buildAssignedConsultantNotice(queue)}`;
   }
-  if (isHumanAttendanceWindowOpen(now)) {
+  const custom = queue?.audioHandoffMessage?.trim();
+  if (custom) return custom;
+  if (isHumanAttendanceWindowOpen(now, queue)) {
     return (
       "Recebi seu áudio! 💛 Pra te ajudar do jeito certo, já pedi para um(a) " +
       "*consultor(a)* da equipe continuar com você por aqui. " +
       "Fica tranquila que seu pedido já está registrado, tá?"
     );
   }
-  const { startHour, dayLabel } = humanAttendanceStartHint(now);
+  const { startLabel, dayLabel } = humanAttendanceStartHint(now, queue);
   return (
     `Recebi seu áudio! 💛 Já registrei seu atendimento com a equipe. ` +
-    `O atendimento humano retoma às *${startHour}h* ${dayLabel} e ` +
+    `O atendimento humano retoma às *${startLabel}* ${dayLabel} e ` +
     `continuam com você por aqui, tá?`
   );
 }

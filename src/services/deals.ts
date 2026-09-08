@@ -1759,77 +1759,25 @@ type BoardStageWithDeals = Prisma.StageGetPayload<{
  * Caminho alternativo do board quando `sortField === "lastInteraction"`.
  *
  * Por que separado: o Prisma não suporta ordenar `Deal` por agregação
- * de uma relação distante (`Deal → Contact → Conversations`). A
- * solução é fazer em 3 passos:
+ * de uma relação distante (`Deal → Contact → Conversations`). Passos:
  *
- *   1) Por etapa, `ORDER BY MAX(conversation.updatedAt) LIMIT` (SQL),
- *      sem dump de todos os OPEN da org.
- *   2) Filtros complexos: recorte por stage com teto, depois o mesmo
- *      ORDER BY + LIMIT.
- *   3) `findMany` completo só dos IDs já paginados.
+ *   1) Candidatos por etapa via findMany (id + contactId + position),
+ *      indexado, com teto por coluna.
+ *   2) UMA agregação `MAX(conversations.updatedAt)` por contato para o
+ *      board inteiro (antes: LEFT JOIN LATERAL por etapa, ~25% do tempo
+ *      total do banco em prod).
+ *   3) Ordena/pagina cada etapa em memória; `findMany` completo só dos
+ *      IDs já paginados.
+ */
+/**
+ * Teto de deals por etapa antes de ordenar por última interação. Pega os N
+ * mais recentemente mexidos (`deal.updatedAt` desc — bom proxy de atividade)
+ * e reordena esse recorte por recência de conversa. Uma coluna com mais de
+ * N deals perde exatidão só no fim da ordenação (irrelevante — o board
+ * mostra ~dezenas de cards). Mantido em 2.500, o valor calibrado em
+ * 2e3fda3.
  */
 const LAST_INTERACTION_STAGE_SCAN_CAP = 2_500;
-
-function flattenDealAnd(where: Prisma.DealWhereInput): Prisma.DealWhereInput[] {
-  if (!where || Object.keys(where).length === 0) return [];
-  if (where.AND) {
-    const and = Array.isArray(where.AND) ? where.AND : [where.AND];
-    const rest = { ...where };
-    delete rest.AND;
-    return [
-      ...and.flatMap((w) =>
-        w && typeof w === "object" ? flattenDealAnd(w as Prisma.DealWhereInput) : [],
-      ),
-      ...(Object.keys(rest).length > 0 ? flattenDealAnd(rest) : []),
-    ];
-  }
-  return [where];
-}
-
-function dealWhereSqlHints(where: Prisma.DealWhereInput): {
-  status: DealStatus | null;
-  ownerId: string | null;
-  ownerIdIsNull: boolean;
-  ownerIdNotNull: boolean;
-  complex: boolean;
-} {
-  let status: DealStatus | null = null;
-  let ownerId: string | null = null;
-  let ownerIdIsNull = false;
-  let ownerIdNotNull = false;
-  let complex = false;
-  for (const p of flattenDealAnd(where)) {
-    const keys = Object.keys(p).filter(
-      (k) => p[k as keyof Prisma.DealWhereInput] !== undefined,
-    );
-    if (keys.length === 0) continue;
-    if (keys.length === 1 && keys[0] === "status" && typeof p.status === "string") {
-      status = p.status;
-      continue;
-    }
-    if (keys.length === 1 && keys[0] === "ownerId") {
-      if (p.ownerId === null) {
-        ownerIdIsNull = true;
-        continue;
-      }
-      if (typeof p.ownerId === "string") {
-        ownerId = p.ownerId;
-        continue;
-      }
-      if (
-        p.ownerId &&
-        typeof p.ownerId === "object" &&
-        "not" in p.ownerId &&
-        p.ownerId.not === null
-      ) {
-        ownerIdNotNull = true;
-        continue;
-      }
-    }
-    complex = true;
-  }
-  return { status, ownerId, ownerIdIsNull, ownerIdNotNull, complex };
-}
 
 async function loadBoardStagesByLastInteraction(
   pipelineId: string,
@@ -1845,57 +1793,70 @@ async function loadBoardStagesByLastInteraction(
   });
   if (stagesRaw.length === 0) return [];
 
-  const dirSql = direction === "desc" ? Prisma.sql`DESC` : Prisma.sql`ASC`;
-  const hints = dealWhereSqlHints(dealWhere);
-
-  const perStageIds = await Promise.all(
-    stagesRaw.map(async (stage) => {
+  // 1) Candidatos por etapa (mesmos filtros do board), os mais recentes
+  //    primeiro. Indexado; não traz conversa nenhuma aqui.
+  const candidatesByStage = await Promise.all(
+    stagesRaw.map((stage) => {
       const extra = offsetByStage[stage.id] ?? 0;
       const limit = perStage + extra;
-
-      let extraFilter = Prisma.empty;
-      if (hints.complex) {
-        const matched = await prisma.deal.findMany({
-          where: { ...dealWhere, stageId: stage.id },
-          select: { id: true },
-          orderBy: { updatedAt: "desc" },
-          take: Math.max(limit, LAST_INTERACTION_STAGE_SCAN_CAP),
-        });
-        if (matched.length === 0) return [] as string[];
-        extraFilter = Prisma.sql`AND d.id = ANY(${matched.map((m) => m.id)})`;
-      } else {
-        const bits: Prisma.Sql[] = [];
-        if (hints.status) {
-          bits.push(Prisma.sql`AND d.status = ${hints.status}::"DealStatus"`);
-        }
-        if (hints.ownerIdIsNull) bits.push(Prisma.sql`AND d."ownerId" IS NULL`);
-        else if (hints.ownerIdNotNull) bits.push(Prisma.sql`AND d."ownerId" IS NOT NULL`);
-        else if (hints.ownerId) bits.push(Prisma.sql`AND d."ownerId" = ${hints.ownerId}`);
-        extraFilter = bits.length > 0 ? Prisma.join(bits, " ") : Prisma.empty;
-      }
-
-      const rows = await prisma.$queryRaw<{ id: string }[]>`
-        SELECT d.id
-        FROM deals d
-        LEFT JOIN LATERAL (
-          SELECT MAX(conv."updatedAt") AS last_at
-          FROM conversations conv
-          WHERE conv."contactId" = d."contactId"
-            AND conv."organizationId" = ${orgId}
-        ) li ON true
-        WHERE d."organizationId" = ${orgId}
-          AND d."stageId" = ${stage.id}
-          ${extraFilter}
-        ORDER BY li.last_at ${dirSql} NULLS LAST, d.position ASC
-        LIMIT ${limit}
-      `;
-      return rows.map((r) => r.id);
+      return prisma.deal.findMany({
+        where: { ...dealWhere, stageId: stage.id },
+        select: { id: true, contactId: true, position: true },
+        orderBy: { updatedAt: "desc" },
+        take: Math.max(limit, LAST_INTERACTION_STAGE_SCAN_CAP),
+      });
     }),
   );
 
+  // 2) UMA agregação para o board inteiro: última atividade de conversa por
+  //    contato. Antes era um LEFT JOIN LATERAL por etapa que calculava
+  //    MAX(updatedAt) para TODO deal da coluna antes do LIMIT — ~25% do
+  //    tempo total do banco em prod.
+  const contactIds = [
+    ...new Set(
+      candidatesByStage
+        .flat()
+        .map((d) => d.contactId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const lastByContact = new Map<string, number>();
+  if (contactIds.length > 0) {
+    const grouped = await prisma.$queryRaw<
+      { contactId: string; last_at: Date | null }[]
+    >`
+      SELECT "contactId", MAX("updatedAt") AS last_at
+      FROM conversations
+      WHERE "organizationId" = ${orgId}
+        AND "contactId" = ANY(${contactIds})
+      GROUP BY "contactId"
+    `;
+    for (const g of grouped) {
+      if (g.contactId && g.last_at) {
+        lastByContact.set(g.contactId, new Date(g.last_at).getTime());
+      }
+    }
+  }
+
+  // 3) Ordena/pagina cada etapa em memória: last_at (dir, NULLS LAST) e
+  //    desempate estável por position.
+  const dirMul = direction === "desc" ? -1 : 1;
   const paginatedIdsByStage = new Map<string, string[]>();
   stagesRaw.forEach((stage, i) => {
-    paginatedIdsByStage.set(stage.id, perStageIds[i] ?? []);
+    const extra = offsetByStage[stage.id] ?? 0;
+    const limit = perStage + extra;
+    const sorted = [...(candidatesByStage[i] ?? [])].sort((a, b) => {
+      const la = a.contactId ? lastByContact.get(a.contactId) : undefined;
+      const lb = b.contactId ? lastByContact.get(b.contactId) : undefined;
+      if (la != null && lb != null && la !== lb) return (la - lb) * dirMul;
+      if (la != null && lb == null) return -1; // NULLS LAST
+      if (la == null && lb != null) return 1;
+      return a.position - b.position;
+    });
+    paginatedIdsByStage.set(
+      stage.id,
+      sorted.slice(0, limit).map((d) => d.id),
+    );
   });
 
   const allPaginatedIds = Array.from(paginatedIdsByStage.values()).flat();

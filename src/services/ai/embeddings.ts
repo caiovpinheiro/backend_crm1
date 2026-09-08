@@ -17,6 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts, EMBEDDING_DIMENSIONS } from "@/services/ai/provider";
+import { getAgentApiKey } from "@/services/ai/agent-key";
 
 const CHUNK_SIZE = 3200;
 const CHUNK_OVERLAP = 300;
@@ -59,6 +60,14 @@ export async function indexKnowledgeDoc(docId: string, rawText: string) {
   });
 
   try {
+    const doc = await prisma.aIAgentKnowledgeDoc.findUnique({
+      where: { id: docId },
+      select: { agentId: true },
+    });
+    if (!doc) throw new Error("Documento não encontrado.");
+    // Embeddings usam a chave OpenAI do próprio agente (sem chave global).
+    const apiKey = await getAgentApiKey(doc.agentId);
+
     await prisma.aIAgentKnowledgeChunk.deleteMany({ where: { docId } });
 
     const chunks = chunkText(rawText);
@@ -75,6 +84,7 @@ export async function indexKnowledgeDoc(docId: string, rawText: string) {
       const batch = chunks.slice(i, i + EMBED_BATCH);
       const { embeddings, inputTokens } = await embedTexts(
         batch.map((c) => c.content),
+        apiKey,
       );
       totalTokens += inputTokens;
 

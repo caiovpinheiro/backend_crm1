@@ -3,10 +3,14 @@
  * com match flexível no banco (ex.: "Atendimento - SAC").
  */
 
-import { executeDistribution } from "@/services/distribution";
+import { executeDistribution } from "@/services/distribution/engine";
 import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
-import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  ACADEMIC_DEPARTMENT_ALIASES,
+  isAvaOrDisciplinesIntent,
+} from "@/verticals/academic/atendimento-prompt";
+import { departmentFromMessageRules } from "@/lib/ai-agents/message-rules";
 import {
   matchesAnyKeyword,
   type InboxPolicy,
@@ -194,14 +198,18 @@ export function inferDepartmentFromContext(args: {
   if (matchesAnyKeyword(args.userMessage, args.policy?.retentionKeywords ?? [])) {
     return "retencao";
   }
-  if (
-    /cancel|tranc|desist/.test(msg) ||
-    /transferenc\w*\s+(de\s+)?(curso|polo)/.test(msg) ||
-    /mudar\s+(de\s+)?(curso|polo)/.test(msg) ||
-    /trocar\s+(de\s+)?(curso|polo)/.test(msg)
-  ) {
-    return "retencao";
-  }
+  // O que era regex fixo aqui (cancelar/trancar/desistir, troca de curso ou
+  // de polo) virou regra de configuração: o operador vê, reordena e remove.
+  // Regra que manda RESPONDER não devolve departamento — e é justamente por
+  // isso que "trocar de polo" pode cair no modelo sem quebrar retenção.
+  const ruleDepartment = departmentFromMessageRules(
+    args.userMessage,
+    args.policy?.messageRules ?? [],
+  );
+  const ruleKey = ruleDepartment
+    ? classifyAcademicDepartmentKey(ruleDepartment)
+    : null;
+  if (ruleKey) return ruleKey;
 
   // Antes do funil Acolhimento: rematrícula / operacional (SAC).
   if (
@@ -530,6 +538,13 @@ export function isCourseShoppingInquiry(
 ): boolean {
   const msg = normalize(userMessage);
   if (!msg) return false;
+  if (
+    /como ver|onde (vejo|fica)|ver minhas disciplinas|minhas disciplinas|blackboard|ambiente virtual/.test(
+      msg,
+    )
+  ) {
+    return false;
+  }
   if (matchesAnyKeyword(userMessage, policy?.courseShoppingKeywords ?? [])) {
     return true;
   }
@@ -597,6 +612,9 @@ export function messageAsksCurriculumExistence(
 ): boolean {
   const msg = normalize(userMessage ?? "");
   if (!msg) return false;
+  if (/como ver|onde (vejo|fica)|ver minhas disciplinas|minhas disciplinas/.test(msg)) {
+    return false;
+  }
   if (/\b(dp|dependenc|reprovad|rematric)/.test(msg)) return false;
   if (messageAsksTceDeadlineOrDocuments(msg)) return false;
   if (messageAsksTceSignature(msg)) return false;
@@ -642,6 +660,7 @@ export function isImmediateAcademicHandoffJustified(
 ): boolean {
   const msg = (userMessage ?? "").trim();
   if (!msg) return false;
+  if (isAvaOrDisciplinesIntent(msg)) return false;
   if (userWantsHumanDistribution(msg)) return true;
   if (isCourseShoppingInquiry(msg, policy)) return true;
   if (shouldHandoffCurriculumOrTce(msg)) return true;
@@ -689,7 +708,7 @@ export async function executeAcademicDepartmentHandoff(args: {
 }> {
   try {
     const { ensureAcademicDepartmentRoster } = await import(
-      "@/services/ai/ensure-academic-dept-roster"
+      "@/verticals/academic/ensure-dept-roster"
     );
     await ensureAcademicDepartmentRoster({ force: true });
   } catch {

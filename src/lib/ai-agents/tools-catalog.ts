@@ -61,6 +61,14 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     defaultForArchetypes: ["SDR", "VENDEDOR"],
   },
   {
+    id: "search_crm_records",
+    label: "Consultar campos do CRM",
+    description:
+      "Procura informação em todos os campos do CRM — colunas fixas e campos personalizados de contato, empresa e negócio. A busca varre tudo (é assim que o cliente que informa o CPF acha o próprio cadastro), mas o agente só LÊ os campos que você liberar em 'Campos legíveis'. Sem liberação, ele confirma que existe cadastro e encaminha para um consultor: nenhum valor chega ao modelo.",
+    category: "crm",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE", "VENDEDOR"],
+  },
+  {
     id: "consultar_matricula",
     label: "Consultar matrícula do aluno",
     description:
@@ -104,7 +112,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "close_conversation",
     label: "Encerrar conversa (só IA)",
     description:
-      "Encerra o ticket quando o aluno pede encerramento e o atendimento foi somente da IA. Dispara a automação Encerramento.",
+      "Encerra o ticket quando o contato pede encerramento e o atendimento foi somente da IA. Dispara a automação Encerramento.",
     category: "handoff",
     defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
   },

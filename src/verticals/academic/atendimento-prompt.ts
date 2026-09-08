@@ -69,8 +69,243 @@ export function formatCanonicalPortalAccessHint(
   ].join("\n");
 }
 
+/** Tutorial oficial do time (modelo "Primeiro Acesso - MSG"). */
+export const OFFICIAL_FIRST_ACCESS_VIDEO_URL = "https://youtu.be/vFJP7a1EMsU";
+export const OFFICIAL_DUDA_ANDROID_URL =
+  "https://play.google.com/store/apps/details?id=br.com.cruzeirodosulvirtual";
+export const OFFICIAL_DUDA_IOS_URL =
+  "https://apps.apple.com/us/app/duda-aplicativo-do-estudante/id6451416655";
+
+const FIRST_ACCESS_INTENT_RE =
+  /primeiro\s*acesso|1[oº]?\s*acesso|nunca (acessei|entrei|loguei)|ainda n[aã]o (acessei|entrei|tenho senha|criei senha)|criar (minha )?senha|cadastrar senha|senha (inicial|provis[oó]ria)|como (fa[cç]o|eu )?(pra |para )?(entrar|acessar|criar senha).*(primeira|primeiro)/i;
+
+export function isFirstAccessIntent(userMessage: string): boolean {
+  return FIRST_ACCESS_INTENT_RE.test((userMessage ?? "").trim());
+}
+
+/** Travou no acesso — ainda é suporte da IA, não fila humana. */
+export function isFirstAccessStuckIntent(userMessage: string): boolean {
+  const n = (userMessage ?? "").trim();
+  if (!n) return false;
+  return /n[aã]o (consegui|consigo) (acess|entrar|logar|abrir)|ainda n[aã]o (consegui|consigo)|n[aã]o (entra|abre|loga)|deu erro.*(acesso|senha|portal|login|duda)|senha (n[aã]o|nao) (funciona|aceita|chega|vem)/i.test(
+    n,
+  );
+}
+
+export function messageLooksLikeFirstAccessPack(
+  content?: string | null,
+): boolean {
+  const t = content ?? "";
+  return (
+    t.includes("youtu.be/vFJP7a1EMsU") ||
+    t.includes("passo a passo do primeiro acesso")
+  );
+}
+
+export function messageLooksLikeFirstAccessHelp(
+  content?: string | null,
+): boolean {
+  const t = content ?? "";
+  return (
+    messageLooksLikeFirstAccessPack(t) ||
+    t.includes("ainda não conseguiu entrar") ||
+    t.includes("foi no *Portal do Aluno*")
+  );
+}
+
+/** "1" / portal / Duda / senha depois do pack — continua o acesso, não fila. */
+export function parseFirstAccessChoice(
+  userMessage: string,
+): "portal" | "duda" | "senha" | null {
+  const n = (userMessage ?? "").trim().toLowerCase();
+  if (!n || n.length > 60) return null;
+  if (/^[1①]([).:\-]|º|o)?$/.test(n) || /^portal\b/.test(n)) return "portal";
+  if (/^[2②]([).:\-]|º|o)?$/.test(n) || /^duda\b/.test(n)) return "duda";
+  if (
+    /^[3③]([).:\-]|º|o)?$/.test(n) ||
+    /^(a )?senha\b/.test(n) ||
+    /senha (n[aã]o|nao) (chegou|aceita|funciona)/.test(n)
+  ) {
+    return "senha";
+  }
+  return null;
+}
+
+/** Pacote oficial — inbox manda isto sem passar por fila/LLM. */
+export function buildFirstAccessPackMessage(): string {
+  return [
+    "Te mando o vídeo com o passo a passo do primeiro acesso:",
+    "",
+    `Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+    `Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+  ].join("\n");
+}
+
+/** Follow-up: já mandou o pack e o aluno ainda não entrou. */
+export function buildFirstAccessStuckMessage(): string {
+  return [
+    "Entendi, ainda não conseguiu entrar. Me conta o que aconteceu: foi no *Portal do Aluno*, no app *Duda*, ou na senha (não chegou / não aceita)?",
+    "",
+    "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento o próximo passo.",
+    "",
+    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `Vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+  ].join("\n");
+}
+
+/** Ver aulas/disciplinas no AVA — operacional, não fila humana. */
+export function isAvaOrDisciplinesIntent(userMessage: string): boolean {
+  const n = (userMessage ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .trim();
+  if (!n) return false;
+  if (
+    /\b(blackboard|\bava\b|ambiente virtual)\b/.test(n) &&
+    /(ajuda|ajudar|acess|entrar|ver|onde|como|disciplina|aula|materia)/.test(n)
+  ) {
+    return true;
+  }
+  if (/(tem|existe|no meu curso|grade curricular|matriz curricular)/.test(n)) {
+    return false;
+  }
+  return (
+    /como ver (as |minhas )?disciplinas/.test(n) ||
+    /onde (vejo|fica|estao) (as |minhas )?disciplinas/.test(n) ||
+    /ver minhas disciplinas/.test(n) ||
+    /minhas disciplinas/.test(n)
+  );
+}
+
+export function buildAvaDisciplinesMessage(): string {
+  return [
+    "Para ver as *disciplinas* no computador: entra no *Portal do Aluno* e abre o *Ambiente Virtual* (Blackboard).",
+    "",
+    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    "",
+    "No celular também dá pelo app *Duda*. Se alguma disciplina não aparecer, me diz o que está na tela.",
+  ].join("\n");
+}
+
+export function buildFirstAccessChoiceMessage(
+  choice: "portal" | "duda" | "senha",
+): string {
+  if (choice === "duda") {
+    return [
+      "No celular o acesso é pelo app *Duda*. Instala pela loja do seu sistema e entra com o mesmo CPF do Portal.",
+      "",
+      `Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+      `iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+      "",
+      "Se o app recusar o login, tenta primeiro criar a senha no Portal do Aluno e depois volta no Duda.",
+      `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+      "Quando aparecer um erro, cola o texto aqui.",
+    ].join("\n");
+  }
+  if (choice === "senha") {
+    return [
+      "A senha do primeiro acesso é criada no *Portal do Aluno*, não por aqui.",
+      "",
+      `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+      "",
+      "Se a senha não chegou no e-mail ou o portal não aceita, me diz a mensagem que aparece na tela que eu te oriento o próximo passo.",
+    ].join("\n");
+  }
+  return [
+    "No computador o primeiro acesso é pelo *Portal do Aluno*.",
+    "",
+    `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o passo a passo do vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    "",
+    "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento.",
+  ].join("\n");
+}
+
+const PASSWORD_RESET_INTENT_RE =
+  /esqueci.*(senha)|n[aã]o (lembro|sei) (a |minha )?senha|recuperar senha|redefinir senha|trocar senha|alterar senha|resetar senha/i;
+
+/**
+ * Primeiro acesso ao portal — só o que o time manda: vídeo + link + Duda.
+ * PROIBIDO inventar botão "Primeiro Acesso" (o modelo não tem esse clique).
+ */
+export function formatFirstAccessHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  if (PASSWORD_RESET_INTENT_RE.test(q)) return "";
+  const inherited =
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    FIRST_ACCESS_INTENT_RE.test(recentContext);
+  if (!FIRST_ACCESS_INTENT_RE.test(q) && !inherited) return "";
+  return [
+    "",
+    "PRIMEIRO ACESSO — ENTREGA OBRIGATÓRIA (copie este pacote, sem enfeite):",
+    "A mensagem 'Primeiro Acesso' é o botão do fluxo. Já é o pedido. ENTREGUE agora.",
+    "Texto-base do time (pode encurtar, mas TODOS os links abaixo têm que ir na mensagem):",
+    `1. Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `2. Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `3. Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
+    `4. Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+    "5. Uma frase: 'te mando o vídeo com o passo a passo'.",
+    "PROIBIDO fechar com 'tá pra te ajudar?', 'qualquer dúvida', 'quer que eu explique?', 'posso te ajudar nisso?'.",
+    "PROIBIDO 'clique em Primeiro Acesso' no site. PROIBIDO senha Nome123@.",
+    "PROIBIDO só citar 'app Duda' sem colar as duas URLs da loja.",
+  ].join("\n");
+}
+
+/**
+ * Esqueci a senha — fluxo Duda/SMS do modelo "Alterar Senha (Duda)".
+ */
+export function formatPasswordResetHint(
+  userMessage: string,
+  recentContext?: string,
+): string {
+  const q = userMessage.trim();
+  if (!q) return "";
+  const inherited =
+    looksLikeAffirmative(q) &&
+    !!recentContext &&
+    PASSWORD_RESET_INTENT_RE.test(recentContext);
+  if (!PASSWORD_RESET_INTENT_RE.test(q) && !inherited) return "";
+  return [
+    "",
+    "ESQUECI A SENHA — FONTE OFICIAL DO TIME (modelo Alterar Senha Duda):",
+    "1. Abra o *Duda* e informe o e-mail acadêmico",
+    "2. Toque em *Esqueci minha senha*",
+    "3. Confirme o telefone cadastrado e use o código **SMS**",
+    "PROIBIDO: link no e-mail, CPF+e-mail, 'olha no spam', botão inventado *Primeiro Acesso*.",
+    "Se o modelo tiver TUTORIAL ANEXO, o sistema envia o vídeo. Diga que segue o tutorial.",
+  ].join("\n");
+}
+
 const EXAM_ACCESS_INTENT_RE =
   /prova|avaliac|avalia[cç][aã]o|plataforma de prova|como (fa[cç]o |eu )?(pra |para )?(ver|acessar|entrar|fazer).*(prova|avaliac)|onde (fica|vejo|acesso|entro).*(prova|avaliac)/i;
+
+/**
+ * Datas de prova — o mínimo que SÓ faz sentido nesta vertical.
+ *
+ * Como responder com o que foi recuperado (entregar o dado em vez do
+ * ponteiro, não truncar enumeração, não fundir rótulo com data) é
+ * comportamento de produto e vive em `KNOWLEDGE_ANSWER_RULES`
+ * (`src/services/ai/retrieval.ts`), junto do bloco de referências, para
+ * valer em qualquer agente de qualquer organização.
+ *
+ * O que sobra aqui são os nomes próprios desta operação: a Plataforma de
+ * Provas e a aba Avisos existiam no prompt como se fossem a fonte das datas
+ * do semestre — e é para lá que o agente desviava quando o aluno pedia
+ * data. Nenhuma regra genérica sabe esses nomes; por isso a desambiguação
+ * fica no pack.
+ */
+export const ACADEMIC_EXAM_CALENDAR_RULES = `
+## DATAS DE PROVA (runtime — regra dura)
+- A **Plataforma de Provas** e a aba **Avisos** mostram o horário e a prova DELE; não são a fonte das datas do semestre. Havendo calendário oficial no contexto, a data sai do calendário e a plataforma entra só como complemento.
+- PROIBIDO responder que as datas de prova "variam por disciplina" ou "são publicadas nos Avisos" quando o calendário está no contexto.
+`.trim();
 
 /**
  * Modalidade da prova — regra dura, injetada no hint de prova E sempre no
@@ -87,10 +322,12 @@ export const ACADEMIC_EXAM_MODALITY_RULES = `
 ## MODALIDADE DA PROVA (runtime — fato, regra dura)
 - TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Isso é fato: afirme direto, sem hesitar e sem hedge.
 - "A prova é presencial ou online?" → responda na hora: é **online**, feita na *Plataforma de provas* — Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. PROIBIDO "confira lá qual é a modalidade", PROIBIDO pedir mais dados e PROIBIDO transferir por isso.
-- A Plataforma de Provas é onde ele confere **data, horário e disciplina** — a modalidade você já sabe: online.
+- A Plataforma de Provas é onde ele confere o **horário e a disciplina da prova dele** — a modalidade você já sabe: online.
 - PROIBIDO afirmar ou insinuar que prova, aula ou avaliação é **presencial**. PROIBIDO "é feita no campus", "no campus vinculado ao polo", "você comparece ao polo".
 - PROIBIDO inferir modalidade a partir do **polo** do aluno. Ter polo cadastrado NÃO significa prova presencial.
 - PROIBIDO oferecer endereço de polo, mapa ou "te passo o endereço certinho" como resposta a dúvida de prova.
+
+${ACADEMIC_EXAM_CALENDAR_RULES}
 `.trim();
 
 /**
@@ -101,11 +338,13 @@ export const ACADEMIC_EXAM_MODALITY_RULES = `
 export const ACADEMIC_EXAM_MODALITY_RULES_MIXED = `
 ## MODALIDADE DA PROVA (runtime — regra dura, SUBSTITUI o texto acima)
 - A modalidade da prova VARIA. Ignore qualquer regra anterior que diga que toda prova é online.
-- Dúvida de modalidade → acolha em 1 frase e mande conferir na **Plataforma de Provas**: Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem modalidade, data, horário e disciplina.
+- Dúvida de modalidade → acolha em 1 frase e mande conferir na **Plataforma de Provas**: Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem a modalidade e o horário da prova dele.
 - PROIBIDO afirmar que a prova é presencial ou online por conta própria. PROIBIDO "é feita no campus", "você comparece ao polo".
 - PROIBIDO inferir modalidade a partir do **polo** do aluno.
 - PROIBIDO oferecer endereço de polo como resposta a dúvida de prova.
 - NÃO transfira só por essa dúvida.
+
+${ACADEMIC_EXAM_CALENDAR_RULES}
 `.trim();
 
 /** Bloco de modalidade conforme a setting da org (default: só online). */
@@ -136,6 +375,7 @@ export function formatExamAccessHint(
     "",
     "PLATAFORMA DE PROVAS — CAMINHO OFICIAL (entregue na hora, com empatia):",
     "Acolha em 1 frase (ex.: 'Te explico o caminho da prova, é rapidinho.').",
+    "ANTES DO CAMINHO: se o aluno pediu DATA de prova e o calendário oficial está no contexto, as datas vêm PRIMEIRO. O caminho abaixo é complemento — nunca resposta no lugar da data.",
     `1. Abra a Área do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
     "2. Vá em *Vida acadêmica*",
     "3. Abra *Plataforma de provas*",
@@ -340,12 +580,16 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 8. INÍCIO DAS AULAS: depende da turma. Sem data → diga que depende da turma/turma no portal e oriente a ver na Área do Aluno. NÃO chame transfer/execute_distribution nesta dúvida — responda você. Só distribua se o aluno **pedir** humano/consultor ou insistir após sua orientação.
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
 8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
-9. ESQUECI MINHA SENHA: fluxo por SMS + telefone atualizado. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam".
-10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar.
+9. ESQUECI MINHA SENHA: Duda → *Esqueci minha senha* → telefone cadastrado → código **SMS**. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam", inventar botão *Primeiro Acesso*.
+9a. PROIBIDO mandar página de redefinição de senha de terceiro (Microsoft/Office 365/\`passwordreset.microsoftonline.com\`, Google, qualquer domínio fora da ${OFFICIAL_INSTITUTION_NAME}). O caminho de senha é o da regra 9. Se não tiver o link oficial no contexto, descreva o caminho sem URL.
+9d. E-MAIL NÃO RECEBIDO (qualquer contexto — primeiro acesso, senha, documento): PROIBIDO "olha no spam", "vai para a caixa de spam", "pode ter caído no lixo eletrônico" e PROIBIDO atribuir a demora ao provedor. Resolva pelo caminho que não depende de e-mail: Duda + código SMS (regra 9).
+9b. PRIMEIRO ACESSO: cole na hora \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + \`${OFFICIAL_STUDENT_PORTAL_URL}\` + as duas lojas do Duda (\`${OFFICIAL_DUDA_ANDROID_URL}\` e \`${OFFICIAL_DUDA_IOS_URL}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
+9c. Se o aluno já recebeu o pack e diz que *ainda não conseguiu entrar*: NÃO mande fila humana, NÃO diga "travou" / "destravar", NÃO abra menu 1-2-3. Acolha em 1 frase ("entendi, ainda não conseguiu entrar") e pergunte se foi no Portal, no Duda ou na senha; peça o texto do erro se tiver. Continua VOCÊ atendendo.
+10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar. Mas o inverso também vale: se o calendário oficial ESTÁ no contexto, ENTREGUE as datas — PROIBIDO dizer que "variam por disciplina" ou mandar procurar nos Avisos/plataforma.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
 11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
 11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
-11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. É lá que ele confere data, horário e disciplina. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
+11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. É lá que ele confere o horário e a prova dele. Se a pergunta for por DATA e o calendário oficial estiver no contexto, a data vem primeiro (regra 10) e o caminho é complemento. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
 11e. MODALIDADE DA PROVA (fato, regra dura):
 - TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Afirme direto, sem hedge.
 - "A prova é presencial ou online?" → responda na hora que é **online**, na Plataforma de provas, e entregue o caminho da regra 11d. PROIBIDO "confira lá a modalidade", PROIBIDO pedir mais dados, PROIBIDO transferir por isso.
@@ -438,12 +682,35 @@ export const ACADEMIC_CURRICULUM_TCE_RULES = `
 - TCE só de **prazo ou documentos** → oriente a ver na disciplina de estágio no AVA (Portal do Aluno → Ambiente Virtual). Não invente prazo/lista. Não transfira só por isso.
 `.trim();
 
+/**
+ * Alcance de `consultar_matricula` — injetado sempre no runtime quando a
+ * tool está no turno, porque `steeringRules`/`systemPromptOverride` do banco
+ * podem estar defasados em relação a `ACADEMIC_ATENDIMENTO_RULES`.
+ *
+ * O agente afirmou a uma aluna que o acesso dela ao Blackboard estava
+ * liberado: recebeu `podeAcessarPortal: true`, ela perguntou pelo Blackboard
+ * e o modelo generalizou "portal" para o nome que ela citou — enquanto um
+ * campo do CRM registrava o contrário.
+ *
+ * A precedência em si — item nomeado se responde pelo campo do CRM, e o
+ * retorno de uma ferramenta não vira resposta de outra — é comportamento de
+ * produto e vive em `renderSystemPrompt` (`src/lib/ai-agents/system-prompt.ts`),
+ * junto do empurrão de `search_crm_records`, para valer em qualquer agente de
+ * qualquer organização. Aqui ficam só os nomes próprios do pack: a tool e o
+ * booleano que ela devolve.
+ */
+export const ACADEMIC_ENROLLMENT_SCOPE_RULES = `
+## ALCANCE DE \`consultar_matricula\` (runtime — regra dura)
+- \`consultar_matricula\` responde UMA pergunta: "o portal está liberado?". É só isso que \`podeAcessarPortal\` significa.
+- Se a pessoa nomeou um sistema, uma ferramenta, um documento ou um prazo específico, \`consultar_matricula\` NÃO responde por ele. PROIBIDO virar \`podeAcessarPortal\` em afirmação sobre outra coisa, mesmo que o nome pareça relacionado ao portal.
+- Sem o dado do item que ela nomeou, você não tem a resposta: PROIBIDO dizer que está liberado e PROIBIDO dizer que não está. Diga que confirma com a equipe e siga a regra de transferência.
+`.trim();
+
 export const ACADEMIC_MEDIA_CAPABILITY_RULES = `
 ## MÍDIA / VÍDEO (runtime — regra dura)
-- Você NÃO envia vídeo/imagem/áudio/arquivo neste WhatsApp — só texto e URLs.
-- PROIBIDO oferecer "vídeo com passo a passo", prometer envio de mídia ou escrever "[Envio do vídeo]" / similares.
-- Com URL de tutorial nas refs/modelos: cole o link. Sem URL: oriente em texto; não invente mídia.
-- Se o passo a passo em texto já foi dado na conversa, NÃO ofereça vídeo depois.
+- Se o modelo interno tiver TUTORIAL ANEXO, o sistema envia o arquivo depois do seu texto. Diga em 1 frase que segue o vídeo/print.
+- PROIBIDO inventar URL de arquivo, escrever "[Envio do vídeo]" ou prometer tutorial que o modelo não tem.
+- Sem anexo no modelo: oriente só em texto + links https. Não ofereça vídeo depois se o passo a passo já foi dado.
 - ÁUDIO DO ALUNO ("[Áudio]"): PROIBIDO dizer que não conseguiu ouvir/entender o áudio e PROIBIDO pedir para ele escrever/digitar/repetir o que falou. Acolha em uma frase e transfira com \`transfer_to_department\` + \`execute_distribution\` na mesma resposta.
 `.trim();
 

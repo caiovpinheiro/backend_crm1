@@ -1,0 +1,409 @@
+/**
+ * Montagem do system prompt do agente (puro — sem side effects).
+ * Usado pelo runner e pelo dump de baseline (Onda 0).
+ */
+
+import type { AIAgentAutonomy } from "@prisma/client";
+
+import { getVerticalPack } from "@/verticals";
+import type {
+  OutputStyle,
+  QualificationQuestion,
+} from "@/lib/ai-agents/piloting";
+
+/**
+ * Regras de atendimento usadas quando `AIAgentConfig.steeringRules`
+ * está vazio (agentes criados antes da pilotagem pelo CRM).
+ * Pack null/ausente → string vazia (sem regras de vertical).
+ */
+export function fallbackSteeringRules(
+  archetype: string,
+  verticalPack?: string | null,
+): string {
+  return getVerticalPack(verticalPack)?.fallbackRules(archetype) ?? "";
+}
+
+function normalizeRulesText(v?: string | null): string {
+  return (v ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Títulos de seção (`## …`) do texto, normalizados. */
+function sectionHeadings(v?: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const line of (v ?? "").split(/\r?\n/)) {
+    const m = /^\s*#{1,6}\s+(.+?)\s*$/.exec(line);
+    if (m) out.add(normalizeRulesText(m[1]));
+  }
+  return out;
+}
+
+/** A partir de quanta seção repetida dois textos são "o mesmo documento". */
+const DUPLICATE_HEADING_RATIO = 0.8;
+
+/**
+ * `systemPromptOverride` salvo no banco é a MESMA regra que já entra pelo
+ * steering/fallback? Era a checagem do seed (`## REGRAS ABSOLUTAS` literal),
+ * agora compartilhada e sem palavra de vertical no meio.
+ *
+ * Compara por conteúdo (um contém o outro) e, quando as cópias divergiram
+ * no tempo, pela sobreposição de seções — que é exatamente o caso que
+ * duplicou `## IDENTIDADE`/`## REGRAS ABSOLUTAS` em versões diferentes.
+ */
+export function duplicatesSteeringRules(
+  override?: string | null,
+  steeringRules?: string | null,
+): boolean {
+  const a = normalizeRulesText(override);
+  const b = normalizeRulesText(steeringRules);
+  if (!a || !b) return false;
+  if (a.includes(b) || b.includes(a)) return true;
+
+  const ha = sectionHeadings(override);
+  const hb = sectionHeadings(steeringRules);
+  const smaller = Math.min(ha.size, hb.size);
+  if (smaller === 0) return false;
+  let shared = 0;
+  for (const h of ha) if (hb.has(h)) shared += 1;
+  return shared / smaller >= DUPLICATE_HEADING_RATIO;
+}
+
+/**
+ * Bloco "INSTRUÇÕES ESPECÍFICAS" do runtime, na ordem em que o runner o
+ * montava — com o override salvo descartado quando ele é a cópia velha do
+ * mesmo documento que já vem pelo steering. Sem isso, o prompt levava as
+ * duas versões (45 mil caracteres, seções repetidas e divergentes) sempre
+ * que `steeringRules` estava vazio e o fallback do pack assumia.
+ */
+export function composeRuntimeOverride(input: {
+  savedOverride?: string | null;
+  steeringRules?: string | null;
+  blocks?: Array<string | null | undefined>;
+}): string | null {
+  const saved = (input.savedOverride ?? "").trim();
+  const rules = (input.steeringRules ?? "").trim();
+  const keepSaved = saved && !duplicatesSteeringRules(saved, rules);
+  return (
+    [keepSaved ? saved : "", rules, ...(input.blocks ?? [])]
+      .map((b) => (b ?? "").trim())
+      .filter(Boolean)
+      .join("\n\n") || null
+  );
+}
+
+export type TemplateVars = {
+  agent_name?: string | null;
+  company_name?: string | null;
+  tone?: string | null;
+  language?: string | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  contact_tags?: string | null;
+  deal_summary?: string | null;
+  deal_stage?: string | null;
+  deal_products?: string | null;
+  last_human_interaction?: string | null;
+};
+
+const TEMPLATE_VAR_KEYS: Array<keyof TemplateVars> = [
+  "agent_name",
+  "company_name",
+  "tone",
+  "language",
+  "contact_name",
+  "contact_phone",
+  "contact_tags",
+  "deal_summary",
+  "deal_stage",
+  "deal_products",
+  "last_human_interaction",
+];
+
+/**
+ * Substitui `{{var}}` no template. Se alguma var da linha não tiver valor,
+ * remove a linha inteira (não deixa string vazia).
+ */
+export function renderTemplateVars(
+  template: string,
+  vars: TemplateVars,
+): string {
+  const lines = template.split(/\r?\n/);
+  const out: string[] = [];
+  for (const line of lines) {
+    const placeholders = [...line.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)];
+    let drop = false;
+    for (const m of placeholders) {
+      const key = m[1] as keyof TemplateVars;
+      if (!TEMPLATE_VAR_KEYS.includes(key)) continue;
+      const val = vars[key];
+      if (val == null || String(val).trim() === "") {
+        drop = true;
+        break;
+      }
+    }
+    if (drop) continue;
+    let rendered = line;
+    for (const key of TEMPLATE_VAR_KEYS) {
+      const val = vars[key];
+      if (val == null || String(val).trim() === "") continue;
+      const re = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, "g");
+      rendered = rendered.replace(re, String(val).trim());
+    }
+    out.push(rendered);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Fuso usado quando o chamador não resolve o fuso do agente. */
+export const DEFAULT_PROMPT_TIMEZONE = "America/Sao_Paulo";
+
+const DATE_REFERENCE_RULE =
+  'Calcule prazos, vencimentos e "hoje/amanhã/próxima" a partir dela. NUNCA infira nem invente outra data, ano, semestre ou período.\n' +
+  'Compare a data antes de escolher o tempo verbal: data POSTERIOR a hoje vai no futuro ("será liberada em DD/MM"), nunca no passado ("foi liberada em DD/MM"). O aluno age em cima disso.';
+
+/**
+ * Data/hora atuais como FATO do sistema (não instrução comportamental).
+ * Sem isso o modelo não sabe se um prazo passou e chega a inventar
+ * datas/semestres que não existem em nenhum lugar do prompt.
+ */
+export function formatCurrentDateBlock(
+  now: Date = new Date(),
+  timeZone: string = DEFAULT_PROMPT_TIMEZONE,
+): string {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone,
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  const weekday = get("weekday");
+  const date = `${get("day")}/${get("month")}/${get("year")}`;
+  const time = `${get("hour")}:${get("minute")}`;
+  return [
+    `DATA E HORA ATUAIS (fato do sistema, fuso ${timeZone}): ${weekday}, ${date}, ${time}.`,
+    DATE_REFERENCE_RULE,
+  ].join("\n");
+}
+
+export type RenderArgs = {
+  template: string;
+  override: string | null;
+  productPolicy: string | null;
+  hasProductSearch: boolean;
+  hasEnrollmentLookup: boolean;
+  /// `search_crm_records` habilitada. A orientação de uso fica na
+  /// description da tool; aqui só entra o empurrão para chamá-la.
+  hasCrmFieldSearch: boolean;
+  tone: string;
+  language: string;
+  autonomyMode: AIAgentAutonomy;
+  contact: {
+    name: string | null;
+    email: string | null;
+    phone: string | null;
+    lifecycleStage: string | null;
+    tags: Array<{ tag: { name: string } }>;
+  } | null;
+  deal: {
+    title: string;
+    value: unknown;
+    stage: {
+      name: string;
+      pipeline?: { name: string } | null;
+    } | null;
+  } | null;
+  retrievalBlock: string;
+  qualificationQuestions: QualificationQuestion[];
+  outputStyle: OutputStyle;
+  /** Variáveis `{{...}}` do template. */
+  templateVars?: TemplateVars;
+  /** Fuso IANA do agente (`resolveAgentTimezone`). Default pt-BR. */
+  timezone?: string | null;
+  /** Instante de referência. Injeção pra teste; produção usa agora. */
+  now?: Date;
+};
+
+/** Render do system prompt — mesma função usada pelo runner em produção. */
+export function renderSystemPrompt(args: RenderArgs): string {
+  const lines: string[] = [];
+  const rawTemplate = args.template ?? "";
+  const templateHadToneOrLang =
+    /\{\{\s*tone\s*\}\}/i.test(rawTemplate) ||
+    /\{\{\s*language\s*\}\}/i.test(rawTemplate);
+
+  const renderedTemplate = renderTemplateVars(rawTemplate, {
+    tone: args.tone,
+    language: args.language,
+    contact_name: args.contact?.name ?? null,
+    contact_phone: args.contact?.phone ?? null,
+    contact_tags:
+      args.contact?.tags.map((t) => t.tag.name).filter(Boolean).join(", ") ||
+      null,
+    deal_summary: args.deal?.title ?? null,
+    deal_stage: args.deal?.stage?.name ?? null,
+    ...args.templateVars,
+  });
+
+  if (renderedTemplate) lines.push(renderedTemplate);
+  lines.push("");
+  lines.push(
+    formatCurrentDateBlock(
+      args.now ?? new Date(),
+      args.timezone?.trim() || DEFAULT_PROMPT_TIMEZONE,
+    ),
+  );
+
+  // Evita duplicar tom/idioma quando o template já usa {{tone}}/{{language}}.
+  if (!templateHadToneOrLang) {
+    lines.push(`Idioma: ${args.language}. Tom: ${args.tone}.`);
+  }
+
+  if (args.autonomyMode === "DRAFT") {
+    lines.push(
+      "IMPORTANTE: você está em modo RASCUNHO. Sua resposta será revisada por um humano antes de ser enviada. Seja conciso.",
+    );
+  }
+
+  if (args.contact) {
+    lines.push("");
+    lines.push("CONTATO:");
+    if (args.contact.name) lines.push(`- Nome: ${args.contact.name}`);
+    if (args.contact.email) lines.push(`- Email: ${args.contact.email}`);
+    if (args.contact.phone) lines.push(`- Telefone: ${args.contact.phone}`);
+    if (args.contact.lifecycleStage)
+      lines.push(`- Estágio do ciclo: ${args.contact.lifecycleStage}`);
+    const tags = args.contact.tags.map((t) => t.tag.name).filter(Boolean);
+    if (tags.length) lines.push(`- Tags: ${tags.join(", ")}`);
+  }
+
+  if (args.deal) {
+    lines.push("");
+    lines.push("DEAL ATUAL:");
+    lines.push(`- Título: ${args.deal.title}`);
+    if (args.deal.value) lines.push(`- Valor: R$ ${String(args.deal.value)}`);
+    if (args.deal.stage?.pipeline?.name)
+      lines.push(`- Funil: ${args.deal.stage.pipeline.name}`);
+    if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
+    lines.push(
+      "- Funil/Estágio é só contexto. NÃO transfira só por causa do funil — atenda primeiro; use departamento certo só quando for distribuir de verdade.",
+    );
+  }
+
+  if (args.hasEnrollmentLookup) {
+    lines.push("");
+    lines.push(
+      "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+    );
+  }
+
+  // Sem este empurrão a tool ficava inerte: com `consultar_matricula`
+  // anunciada aqui e a busca de campos só na própria description, o modelo
+  // usava a primeira para tudo. A orientação de uso NÃO se repete aqui —
+  // ela vive em `CRM_SEARCH_GUIDANCE`, na description da tool.
+  if (args.hasCrmFieldSearch) {
+    lines.push("");
+    lines.push(
+      "Antes de responder sobre o que está registrado no cadastro da pessoa (etapa, status, prazos, campos preenchidos pela empresa), chame `search_crm_records`. Não responda de memória e não deduza.",
+      "Leia só o que vier em `fields`. O que vier em `hiddenFields` você não pode repassar — nesse caso encaminhe para a equipe.",
+      // Precedência. A description da tool já dizia que campo parecido não é
+      // o campo pedido, mas com duas ferramentas ligadas quem responde é a
+      // anunciada primeiro: um booleano de status de outra ferramenta virou
+      // resposta sobre um sistema que a pessoa nomeou.
+      "PRECEDÊNCIA ENTRE FERRAMENTAS: quando a pergunta for sobre um item nomeado (um sistema, uma ferramenta, um documento, um prazo específico), a resposta é o campo do CRM. Nenhuma outra ferramenta responde por ele — o retorno de uma ferramenta que responde OUTRA pergunta, inclusive um booleano de status, NÃO vira afirmação sobre o item que a pessoa nomeou.",
+      "Se o nome que ela usou não voltou em `fields`, você não tem a resposta: não substitua por um campo parecido e não deduza a partir do retorno de outra ferramenta.",
+    );
+  }
+
+  if (args.override?.trim()) {
+    lines.push("");
+    lines.push("INSTRUÇÕES ESPECÍFICAS:");
+    lines.push(args.override.trim());
+  }
+
+  if (args.outputStyle === "conversational") {
+    lines.push("");
+    lines.push("ESTILO DE RESPOSTA (regra dura):");
+    lines.push(
+      "- Você está escrevendo no WhatsApp. Responda como atendente humano, em texto corrido. Nunca use listas com bullets, tabelas, cabeçalhos em markdown, ou frases template tipo 'Aqui estão os detalhes:'.",
+    );
+    lines.push(
+      "- PROIBIDO: formato de ficha técnica como '*Curso:* X', '*Modalidade:* Y', '*Duração:* Z' com ícones/emojis por linha. Isso soa robótico.",
+    );
+    lines.push(
+      "- Use no máximo 1–2 emojis discretos na mensagem inteira, e só se combinar com o tom.",
+    );
+    lines.push(
+      "- Prefira 1 a 4 frases curtas. Pode terminar com UMA pergunta curta **só se** ainda faltar um dado para ajudar.",
+    );
+    lines.push(
+      "- Se o contato já pediu o passo a passo/site/link ou disse sim/pode ser/envie: ENTREGUE a orientação (com link das refs se houver). NÃO termine de novo perguntando se ele quer as instruções.",
+    );
+    lines.push(
+      "- PROIBIDO prometer ou fingir envio de vídeo/arquivo (ex.: 'vou te enviar o vídeo', '[Envio do vídeo]'). Sem URL nas refs, só texto; com URL, cole o link.",
+    );
+  }
+
+  if (args.qualificationQuestions.length > 0) {
+    lines.push("");
+    lines.push(
+      "QUALIFICAÇÃO — informações que você DEVE coletar antes de encerrar a conversa ou transferir para humano:",
+    );
+    for (const q of args.qualificationQuestions) {
+      const hint = q.hint ? ` (formato: ${q.hint})` : "";
+      lines.push(`- ${q.question}${hint}`);
+    }
+    lines.push(
+      "Regras: não peça tudo de uma vez. Vá coletando naturalmente no fluxo da conversa, uma pergunta por vez quando fizer sentido. NÃO chame `transfer_to_human` enquanto tiver informação pendente dessa lista, salvo se o cliente pedir explicitamente pra falar com atendente ou demonstrar irritação.",
+    );
+  }
+
+  if (args.hasProductSearch) {
+    lines.push("");
+    lines.push("CONSULTA DE PRODUTOS — regras obrigatórias:");
+    lines.push(
+      "- Sempre que o cliente mencionar um produto, curso, serviço, preço ou característica, chame `search_products` ANTES de responder. Nunca invente preço, duração, modalidade ou condição.",
+    );
+    lines.push(
+      "- Se a busca não encontrar, diga naturalmente que vai confirmar com o time e ofereça transferir pra um atendente. Não force uma resposta.",
+    );
+    lines.push("");
+    lines.push("COMO APRESENTAR O PRODUTO (MUITO IMPORTANTE):");
+    lines.push(
+      "- Responda como um atendente humano no WhatsApp, não como uma ficha técnica. O objetivo é avançar a conversa, não cuspir dados.",
+    );
+    lines.push(
+      "- PROIBIDO: listas com bullets de atributos (ex.: '*Nome:* ... *Preço:* ... *Duração:* ...'), markdown pesado, frases como 'Aqui estão os detalhes:'. Isso assusta o cliente e soa robótico.",
+    );
+    lines.push(
+      "- Responda em 1 a 3 frases curtas, em texto corrido, misturando as informações naturalmente. Ex.: 'O curso de Administração é EAD, dura 4 anos (8 semestres) e sai por R$ 145 por mês — e agora ainda tem 45% de desconto ativo. Quer que eu te ajude a seguir com a inscrição?'",
+    );
+    lines.push(
+      "- Sempre termine com UMA única pergunta curta que faça a conversa avançar (ex.: 'quer que eu te mande o link de inscrição?', 'faz sentido pra você começar em que mês?'). Evite múltiplas perguntas na mesma mensagem.",
+    );
+    lines.push(
+      "- Só detalhe (em texto corrido, ainda sem bullets) mais atributos se o cliente pedir explicitamente. Em dúvida, mostre o essencial e pergunte o que mais ele quer saber.",
+    );
+    lines.push(
+      "- Use no máximo 1 emoji discreto quando fizer sentido pelo tom configurado. Não repita emojis.",
+    );
+    lines.push(
+      "- Dados técnicos da tool (`priceFormatted`, `customFields`, etc.) servem como FONTE, não como TEMPLATE de saída. Transforme em fala natural.",
+    );
+    if (args.productPolicy?.trim()) {
+      lines.push("");
+      lines.push("POLÍTICA ADICIONAL DE APRESENTAÇÃO DE PRODUTOS (do operador):");
+      lines.push(args.productPolicy.trim());
+    }
+  }
+
+  if (args.retrievalBlock) {
+    lines.push(args.retrievalBlock);
+  }
+
+  return lines.join("\n");
+}

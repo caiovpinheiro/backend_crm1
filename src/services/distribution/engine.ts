@@ -983,10 +983,16 @@ export async function executeDistribution(
       (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
   ) {
     try {
-      const { moveOpenDealToEmAtendimento } = await import(
-        "@/services/ai/academic-department-routing"
+      // Funil operacional é refino de vertical: quem define é o pack do
+      // agente da conversa. Sem pack, o card não muda de etapa — nunca
+      // aplicamos o funil de uma organização em outra.
+      const { resolveAgentVerticalForConversation } = await import(
+        "@/services/ai/agent-vertical"
       );
-      await moveOpenDealToEmAtendimento({
+      const { ops } = await resolveAgentVerticalForConversation(
+        input.conversationId ?? null,
+      );
+      await ops.moveOpenDealToEmAtendimento?.({
         dealId: assignedDealId,
         contactId: input.contactId ?? null,
       });

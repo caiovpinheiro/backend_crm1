@@ -12,17 +12,23 @@
  *  - Desliga com `ai.firstAttendanceEnabled=false`.
  */
 
+
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import {
-  contactHasCalouros1008Tag,
-  isInauguralLinkWindow,
-} from "@/services/ai/inaugural-class-link";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
+import {
+  humanQueueContextFromAgent,
+  isHumanAttendanceWindowOpen,
+} from "@/services/ai/human-queue-policy";
+import {
+  emptyAgentVertical,
+  resolveAgentVerticalByAgentUserId,
+  type AgentVertical,
+} from "@/services/ai/agent-vertical";
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -40,6 +46,15 @@ async function isFirstAttendanceEnabled(): Promise<boolean> {
     return true;
   }
 }
+
+/**
+ * Escopo de funil do agente. O nome com "academ" só conta para agente
+ * com o pack acadêmico — para os demais o escopo é o que o operador
+ * configurou (pipelineId do agente / org setting). Antes, agente sem
+ * vertical NUNCA assumia o primeiro atendimento: o gate exigia funil
+ * chamado "ACADEMICO".
+ */
+type PipeScope = { matchAcademicName: boolean };
 
 async function resolveFirstAttendanceAgent(): Promise<{
   userId: string;
@@ -129,11 +144,14 @@ async function resolveConfiguredPipelineIds(
  * `deal.stage.pipeline`. Select errado quebrava o 1º atendimento em
  * runtime (catch silencioso → ninguém recebia a IA).
  */
-async function isAcademicPipeContact(
+async function isContactInAgentScope(
   contactId: string,
   agentPipelineId: string | null,
+  scope: PipeScope,
 ): Promise<boolean> {
   const configured = await resolveConfiguredPipelineIds(agentPipelineId);
+  const nameMatches = (name: string | null | undefined) =>
+    scope.matchAcademicName && /academ/i.test(name ?? "");
   const openDeals = await prisma.deal.findMany({
     where: { contactId, status: "OPEN" },
     select: {
@@ -147,33 +165,42 @@ async function isAcademicPipeContact(
     },
   });
   if (openDeals.length === 0) {
-    // Sem deal: ainda assim atende se o canal default aponta p/ acadêmico
-    // (mensagens iniciais antes do deal). Heurística pelo nome do pipeline
-    // default do canal da conversa mais recente.
-    const conv = await prisma.conversation.findFirst({
-      where: { contactId, status: { not: "RESOLVED" } },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        channelRef: {
-          select: {
-            defaultPipeline: { select: { id: true, name: true } },
+    // Sem deal: canal com funil acadêmico OU agente com pipelineId
+    // configurado (lead novo / canal sem default). Sem isso o inbox
+    // recebia o "oi" e a IA nunca assumia (DEV: canal 2310).
+    try {
+      const conv = await prisma.conversation.findFirst({
+        where: { contactId, status: { not: "RESOLVED" } },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          channelRef: {
+            select: {
+              defaultPipeline: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-    });
-    const pipe = conv?.channelRef?.defaultPipeline;
-    if (!pipe) return false;
-    if (configured.includes(pipe.id)) return true;
-    return /academ/i.test(pipe.name ?? "");
+      });
+      const pipe = conv?.channelRef?.defaultPipeline;
+      if (pipe) {
+        if (configured.includes(pipe.id)) return true;
+        if (nameMatches(pipe.name)) return true;
+      }
+    } catch (err) {
+      console.warn("[ai-attend] isContactInAgentScope canal/default falhou", err);
+    }
+    // Sem vertical e sem funil configurado, o agente atende: restringir
+    // por nome de funil é regra da vertical, não do CRM.
+    return configured.length > 0 || !scope.matchAcademicName;
   }
 
   for (const d of openDeals) {
     const pipe = d.stage?.pipeline;
     if (!pipe) continue;
     if (configured.includes(pipe.id)) return true;
-    if (/academ/i.test(pipe.name ?? "")) return true;
+    if (nameMatches(pipe.name)) return true;
   }
-  return false;
+  // Agente genérico sem restrição configurada atende qualquer funil.
+  return configured.length === 0 && !scope.matchAcademicName;
 }
 
 /**
@@ -219,6 +246,7 @@ async function assignConversationToHuman(args: {
     await tx.contact.update({
       where: { id: args.contactId },
       data: { assignedToId: args.humanUserId },
+      select: { id: true, assignedToId: true },
     });
     await tx.deal.updateMany({
       where: { contactId: args.contactId, status: "OPEN" },
@@ -237,7 +265,22 @@ export async function tryAssignFirstAttendanceAi(args: {
   conversationId: string;
   contactId: string;
   assignedToId?: string | null;
+  userMessage?: string | null;
 }): Promise<string | null> {
+  // Agente e vertical resolvidos UMA vez, sob demanda: os early-returns
+  // acima não pagam a query, e nada aqui pergunta pelo pack "academic"
+  // pelo nome.
+  let agentPromise: Promise<{
+    userId: string;
+    pipelineId: string | null;
+  } | null> | null = null;
+  const agentOnce = () => (agentPromise ??= resolveFirstAttendanceAgent());
+  let verticalPromise: Promise<AgentVertical> | null = null;
+  const verticalOnce = () =>
+    (verticalPromise ??= agentOnce().then((a) =>
+      a ? resolveAgentVerticalByAgentUserId(a.userId) : emptyAgentVertical(),
+    ));
+
   if (!(await isFirstAttendanceEnabled())) {
     logAi("first_attendance_disabled", {
       conversationId: args.conversationId,
@@ -317,9 +360,10 @@ export async function tryAssignFirstAttendanceAi(args: {
     );
     const activeCtxs = await getContactActiveContexts(args.contactId);
     if (activeCtxs.length > 0) {
+      const { ops } = await verticalOnce();
       const calourosPriority =
-        isInauguralLinkWindow() &&
-        (await contactHasCalouros1008Tag(args.contactId));
+        Boolean(ops.isInauguralLinkWindow?.()) &&
+        Boolean(await ops.contactHasCalouros1008Tag?.(args.contactId));
       if (!calourosPriority) {
         logAi("first_attendance_skip_automation_waiting", {
           conversationId: args.conversationId,
@@ -355,62 +399,10 @@ export async function tryAssignFirstAttendanceAi(args: {
   const contactId = conv.contactId ?? args.contactId;
   if (!contactId) return null;
 
-  // Já está na IA: verifica handoff/pending antes de confirmar.
+  // Já está na IA: não desatribui. Handoff para depto já zera assignedToId
+  // no próprio passo; o bloco antigo (clear_ai_dept_handoff) apagava a IA
+  // no próximo "oi" depois do operador devolver o ticket ao agente.
   if (conv.assignedToId && conv.assignedTo?.type === "AI") {
-    // Handoff activo em fila → limpa IA e devolve para fila humana.
-    const aiWaitingHuman = await prisma.distributionPending.findFirst({
-      where: {
-        status: "PENDING",
-        OR: [{ conversationId: args.conversationId }, { contactId }],
-      },
-      select: { id: true, triggerSource: true },
-    });
-    if (aiWaitingHuman) {
-      // Mantém a IA: fila PENDING permanece para redistribuição humana, mas o
-      // aluno pode continuar com o agente até pedir fila/humano (inbox-handler).
-      logAi("first_attendance_keep_ai_pending", {
-        conversationId: args.conversationId,
-        contactId,
-        pendingId: aiWaitingHuman.id,
-        triggerSource: aiWaitingHuman.triggerSource,
-      });
-      return conv.assignedToId;
-    }
-    // Conversa foi roteada para depto via handoff IA recente → não reclama.
-    if (conv.departmentId) {
-      const recentAiHandoff = await prisma.distributionPending.findFirst({
-        where: {
-          triggerSource: { contains: "AI_AGENT" },
-          status: { in: ["PENDING", "RESOLVED"] },
-          createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-          OR: [{ conversationId: args.conversationId }, { contactId }],
-        },
-        select: { id: true },
-      });
-      if (recentAiHandoff) {
-        await prisma.$transaction(async (tx) => {
-          await tx.conversation.update({
-            where: { id: args.conversationId },
-            data: { assignedToId: null },
-          });
-          await tx.contact.update({
-            where: { id: contactId },
-            data: { assignedToId: null },
-          });
-          await tx.deal.updateMany({
-            where: { contactId, status: "OPEN" },
-            data: { ownerId: null },
-          });
-        });
-        logAi("first_attendance_clear_ai_dept_handoff", {
-          conversationId: args.conversationId,
-          contactId,
-          departmentId: conv.departmentId,
-          distributionPendingId: recentAiHandoff.id,
-        });
-        return null;
-      }
-    }
     return conv.assignedToId;
   }
 
@@ -427,37 +419,41 @@ export async function tryAssignFirstAttendanceAi(args: {
     select: { id: true, triggerSource: true },
   });
   if (waitingHuman) {
-    logAi("first_attendance_skip_pending_human", {
+    const vertical = await verticalOnce();
+    const { ops } = vertical;
+    const msg = args.userMessage ?? "";
+    const keepAiDespitePending =
+      // Horário de atendente humano DESTE agente (Fase 3).
+      !isHumanAttendanceWindowOpen(
+        new Date(),
+        humanQueueContextFromAgent({
+          inboxPolicy: vertical.inboxPolicy,
+          businessHours: vertical.businessHours,
+        }),
+      ) ||
+      Boolean(ops.isFirstAccessIntent?.(msg)) ||
+      Boolean(ops.isFirstAccessStuckIntent?.(msg)) ||
+      (ops.parseFirstAccessChoice?.(msg) ?? null) !== null ||
+      Boolean(ops.isAvaOrDisciplinesIntent?.(msg));
+    if (!keepAiDespitePending) {
+      logAi("first_attendance_skip_pending_human", {
+        conversationId: args.conversationId,
+        contactId,
+        pendingId: waitingHuman.id,
+        triggerSource: waitingHuman.triggerSource,
+      });
+      return null;
+    }
+    logAi("first_attendance_keep_ai_despite_pending", {
       conversationId: args.conversationId,
       contactId,
       pendingId: waitingHuman.id,
       triggerSource: waitingHuman.triggerSource,
     });
-    return null;
   }
 
-  // Conversa já foi roteada para um departamento por handoff IA e tem um
-  // DistributionPending recente do agente → não reclama a conversa.
-  if (conv.departmentId) {
-    const recentAiHandoff = await prisma.distributionPending.findFirst({
-      where: {
-        triggerSource: { contains: "AI_AGENT" },
-        status: { in: ["PENDING", "RESOLVED"] },
-        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        OR: [{ conversationId: args.conversationId }, { contactId }],
-      },
-      select: { id: true },
-    });
-    if (recentAiHandoff) {
-      logAi("first_attendance_skip_dept_handoff", {
-        conversationId: args.conversationId,
-        contactId,
-        departmentId: conv.departmentId,
-        distributionPendingId: recentAiHandoff.id,
-      });
-      return null;
-    }
-  }
+  // Handoff RESOLVIDO (últimas 24h) não bloqueia: o operador já devolveu
+  // ao agente ou o ticket está livre. Só PENDING (acima) segura a fila.
 
   // Humano já respondeu nesta conversa → não rouba.
   if (conv.hasHumanReply && conv.assignedTo?.type === "HUMAN") {
@@ -499,11 +495,12 @@ export async function tryAssignFirstAttendanceAi(args: {
       await tx.contact.update({
         where: { id: contactId },
         data: { assignedToId: null },
+        select: { id: true, assignedToId: true },
       });
     });
   }
 
-  const agent = await resolveFirstAttendanceAgent();
+  const agent = await agentOnce();
   if (!agent) {
     logAi("first_attendance_no_agent", {
       conversationId: args.conversationId,
@@ -526,10 +523,14 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  const academic = await isAcademicPipeContact(contactId, agent.pipelineId);
+  const vertical = await verticalOnce();
+  const inScope = await isContactInAgentScope(contactId, agent.pipelineId, {
+    matchAcademicName: Boolean(vertical.pack),
+  });
   const calourosPriority =
-    isInauguralLinkWindow() && (await contactHasCalouros1008Tag(contactId));
-  if (!academic && !calourosPriority) {
+    Boolean(vertical.ops.isInauguralLinkWindow?.()) &&
+    Boolean(await vertical.ops.contactHasCalouros1008Tag?.(contactId));
+  if (!inScope && !calourosPriority) {
     // Fora do acadêmico: se havia humano no contato/deal, devolve.
     const humanOwner =
       (args.assignedToId
@@ -561,20 +562,18 @@ export async function tryAssignFirstAttendanceAi(args: {
     }
     return null;
   }
-  if (calourosPriority && !academic) {
+  if (calourosPriority && !inScope) {
     logAi("first_attendance_calouros1008_any_stage", {
       conversationId: args.conversationId,
       contactId,
     });
   }
 
-  // Roster só depois de confirmar pipe acadêmico — senão qualquer inbound
-  // de outro tenant criava Acolhimento/SAC/Retenção na org errada.
+  // Roster é do pack: só depois de confirmar o escopo — senão qualquer
+  // inbound de outro tenant criava departamentos na org errada. Agente
+  // sem vertical não cria departamento nenhum.
   try {
-    const { ensureAcademicDepartmentRoster } = await import(
-      "@/services/ai/ensure-academic-dept-roster"
-    );
-    await ensureAcademicDepartmentRoster();
+    await vertical.ops.ensureAcademicDepartmentRoster?.();
   } catch {
     /* ignore */
   }
@@ -594,6 +593,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     await tx.contact.update({
       where: { id: contactId },
       data: { assignedToId: aiUserId },
+      select: { id: true, assignedToId: true },
     });
     await tx.deal.updateMany({
       where: { contactId, status: "OPEN" },
@@ -616,12 +616,14 @@ export async function tryAssignFirstAttendanceAi(args: {
 export async function ensureInboundAiAttendance(args: {
   conversationId: string;
   contactId: string;
+  userMessage?: string | null;
 }): Promise<string | null> {
   try {
     return await tryAssignFirstAttendanceAi({
       conversationId: args.conversationId,
       contactId: args.contactId,
       assignedToId: null,
+      userMessage: args.userMessage,
     });
   } catch (e) {
     console.error("[ai] ensureInboundAiAttendance failed", e);

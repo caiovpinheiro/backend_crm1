@@ -4,6 +4,7 @@ import crypto from "crypto";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { createMessageDedup } from "@/lib/message-dedup";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
@@ -13,7 +14,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
-import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -570,26 +571,31 @@ export async function handleBaileysMessage(
       log.debug("Falha ao sincronizar avatar (não-fatal):", err),
     );
 
-    const msgCreated = await prisma.$transaction(async (tx) => {
-      const dup = await tx.message.findFirst({
-        where: { externalId: parsed.externalId },
-        select: { id: true },
-      });
-      if (dup) return null;
+    // `createMessageDedup` fora da transação: o P2002 aborta a tx no
+    // Postgres, então engolir dentro do callback deixaria o COMMIT em
+    // estado inválido. Aqui a tx faz rollback e a duplicata volta `null`.
+    const msgCreated = await createMessageDedup(() =>
+      prisma.$transaction(async (tx) => {
+        const dup = await tx.message.findFirst({
+          where: { externalId: parsed.externalId },
+          select: { id: true },
+        });
+        if (dup) return null;
 
-      return tx.message.create({
-        data: withOrgFromCtx({
-          conversationId: conversation.id,
-          channelId,
-          content: parsed.text,
-          direction: "in",
-          messageType: parsed.messageType,
-          externalId: parsed.externalId,
-          senderName: msg.pushName ?? contact.name,
-          mediaUrl: parsed.mediaUrl,
-        }),
-      });
-    });
+        return tx.message.create({
+          data: withOrgFromCtx({
+            conversationId: conversation.id,
+            channelId,
+            content: parsed.text,
+            direction: "in",
+            messageType: parsed.messageType,
+            externalId: parsed.externalId,
+            senderName: msg.pushName ?? contact.name,
+            mediaUrl: parsed.mediaUrl,
+          }),
+        });
+      }),
+    );
 
     if (!msgCreated) return;
 
@@ -668,7 +674,7 @@ export async function handleBaileysMessage(
     }
 
     if (parsed.text) {
-      void scheduleAiReply({
+      void onInboundMessageForAi({
         conversationId: conversation.id,
         contactId: contact.id,
         messageId: msgCreated.id,

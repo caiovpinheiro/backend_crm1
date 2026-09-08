@@ -142,10 +142,19 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "SystemUsageSession",
   "SystemActivitySession",
   "AIAgentConfig",
+  "AIAgentConfigAudit",
   "AIAgentKnowledgeDoc",
   "AIAgentKnowledgeChunk",
   "AIAgentRun",
   "AIAgentMessage",
+  // Turn Manager (Fase 1). Entra aqui pelo mesmo motivo de BulkOperation:
+  // `organizationId` eh NOT NULL e os callsites de ingest (turn-manager)
+  // confiam na extension pra injetar no create; sem isso o create falha.
+  // E findFirst do turno aberto sem filtro de org acharia turno de OUTRO
+  // tenant (o `conversationId` eh cuid, mas o where do sweeper por status
+  // eh cross-conversa — leak real). O sweeper roda cross-org e por isso
+  // usa `prismaBase` com organizationId explicito, igual aos workers.
+  "ConversationTurn",
   "OrganizationInvite",
   // Authz Foundation (Fase 1) — esses 3 modelos sao tenant-scoped.
   // Sem isso, prisma.role.findMany() leakaria roles de OUTROS tenants

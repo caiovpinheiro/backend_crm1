@@ -30,9 +30,23 @@ export async function GET(request: Request) {
           }[]
         >`
           SELECT t.id, t.name, t.color,
-            (SELECT COUNT(*)::int FROM tags_on_deals  tod JOIN deals d ON d.id = tod."dealId" WHERE tod."tagId" = t.id AND d."organizationId" = ${orgId}) AS "dealCount",
-            (SELECT COUNT(*)::int FROM tags_on_contacts toc JOIN contacts c ON c.id = toc."contactId" WHERE toc."tagId" = t.id AND c."organizationId" = ${orgId}) AS "contactCount"
+            COALESCE(dc.n, 0)::int AS "dealCount",
+            COALESCE(cc.n, 0)::int AS "contactCount"
           FROM tags t
+          LEFT JOIN (
+            SELECT tod."tagId" AS tid, COUNT(*) AS n
+            FROM tags_on_deals tod
+            JOIN deals d ON d.id = tod."dealId"
+            WHERE d."organizationId" = ${orgId}
+            GROUP BY tod."tagId"
+          ) dc ON dc.tid = t.id
+          LEFT JOIN (
+            SELECT toc."tagId" AS tid, COUNT(*) AS n
+            FROM tags_on_contacts toc
+            JOIN contacts c ON c.id = toc."contactId"
+            WHERE c."organizationId" = ${orgId}
+            GROUP BY toc."tagId"
+          ) cc ON cc.tid = t.id
           WHERE t."organizationId" = ${orgId}
           ORDER BY t.name
         `;

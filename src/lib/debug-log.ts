@@ -9,23 +9,30 @@
  *
  * Ficam DESLIGADOS por padrão em produção e LIGADOS em dev. Para
  * reativá-los temporariamente em produção, defina `DEBUG_VERBOSE_LOGS=1`.
+ *
+ * Args lazy: passe `() => valor` para adiar `JSON.stringify` / `.map` /
+ * templates caros até o gate permitir emitir.
  */
 export function isVerboseLogging(): boolean {
   if (process.env.DEBUG_VERBOSE_LOGS === "1") return true;
   return process.env.NODE_ENV !== "production";
 }
 
+function resolveLogArgs(args: unknown[]): unknown[] {
+  return args.map((a) => (typeof a === "function" ? (a as () => unknown)() : a));
+}
+
 /** console.log condicional — só emite quando `isVerboseLogging()`. */
 export function debugLog(...args: unknown[]): void {
-  if (isVerboseLogging()) console.log(...args);
+  if (isVerboseLogging()) console.log(...resolveLogArgs(args));
 }
 
 /** console.info condicional — só emite quando `isVerboseLogging()`. */
 export function debugInfo(...args: unknown[]): void {
-  if (isVerboseLogging()) console.info(...args);
+  if (isVerboseLogging()) console.info(...resolveLogArgs(args));
 }
 
 /** console.warn condicional — só emite quando `isVerboseLogging()`. */
 export function debugWarn(...args: unknown[]): void {
-  if (isVerboseLogging()) console.warn(...args);
+  if (isVerboseLogging()) console.warn(...resolveLogArgs(args));
 }

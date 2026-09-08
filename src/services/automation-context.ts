@@ -294,6 +294,26 @@ export function shouldResumePausedMenuDespiteHumanAttendance(opts?: {
 }
 
 /**
+ * `wait_for_reply` captura QUALQUER texto livre. Com a conversa atribuída à
+ * IA, um contexto parado nesse passo engolia a pergunta do cliente antes de
+ * o agente rodar: o inbound virava "resposta do robô", o fluxo seguia para o
+ * próximo passo e `replied: true` silenciava a IA no webhook.
+ *
+ * Clique de botão/lista e `nfm_reply` continuam retomando o fluxo — ali o
+ * cliente respondeu ao robô de propósito.
+ */
+export function waitForReplyHijacksAiTurn(input: {
+  stepType: string;
+  assigneeType?: string | null;
+  interactiveId?: string | null;
+  flowReply?: boolean;
+}): boolean {
+  if (input.stepType !== "wait_for_reply") return false;
+  if (input.assigneeType !== "AI") return false;
+  return !shouldResumePausedMenuDespiteHumanAttendance(input);
+}
+
+/**
  * Casa resposta de botão/lista com a opção do config.
  * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
  * o JSON salvo não tem `id`, o `list_reply.id`/`button_reply.id` ainda casa
@@ -629,11 +649,13 @@ export async function processIncomingMessage(
   // para NÃO disparar automações novas nos triggers — aqui não usamos,
   // senão o clique na lista/botão morre se a IA já era assignee antes do
   // gatilho manual.
+  let assigneeType: string | null = null;
   try {
     const { getHumanAttendanceForContact } = await import(
       "@/services/attendance-guards"
     );
     const snap = await getHumanAttendanceForContact(contactId);
+    assigneeType = snap?.assigneeType ?? null;
     if (snap?.humanAttending) {
       if (shouldResumePausedMenuDespiteHumanAttendance(opts)) {
         log.info(
@@ -694,6 +716,22 @@ export async function processIncomingMessage(
       // consultor). wait_for_reply / menu / template seguem abaixo.
       log.info(
         `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) currentStep=${currentStep.type} não espera resposta`,
+      );
+      await cancelContext(ctx.id);
+      continue;
+    }
+    if (
+      waitForReplyHijacksAiTurn({
+        stepType: currentStep.type,
+        assigneeType,
+        interactiveId: opts?.interactiveId,
+        flowReply: opts?.flowReply,
+      })
+    ) {
+      // A conversa é da IA e o cliente escreveu texto livre. Consumir aqui
+      // roubava o turno do agente (ver `waitForReplyHijacksAiTurn`).
+      log.info(
+        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) wait_for_reply com IA atendendo; mensagem segue para o agente`,
       );
       await cancelContext(ctx.id);
       continue;

@@ -66,6 +66,73 @@ fi
 APP_MODE="${APP_MODE:-api}"
 echo "[entrypoint] APP_MODE=${APP_MODE}"
 
+# Gate de criptografia. A chave de provedor de IA por agente é gravada em
+# AES-256-GCM com chave derivada de ENCRYPTION_KEY → NEXTAUTH_SECRET →
+# AUTH_SECRET (src/lib/secret-crypto.ts).
+#
+# Um processo sem nenhuma dessas variáveis sobe normal e só falha quando
+# tenta LER um segredo — e o auth tag inválido produz um erro genérico que
+# aponta pro lugar errado ("re-cadastre a chave"). Foi o que aconteceu com
+# o worker da IA em DEV: a API tinha NEXTAUTH_SECRET, o worker não, e todo
+# run morria em "chave OpenAI não pôde ser lida".
+#
+# Logar aqui torna o env var faltando visível no deploy, mas este guard
+# NÃO derruba o boot. O segredo cobre apenas os blobs de
+# secret-crypto.ts (chave de provedor de IA por agente). Sem ele o inbox
+# continua funcionando: token de canal Meta e MFA vêm de crypto/secrets.ts,
+# que usa KEYRING_SECRET — variável separada e presente nos workers.
+#
+# Já derrubamos DEV duas vezes tratando isso como fatal. Na segunda, o
+# EasyPanel redeployou os serviços a partir do spec dele e apagou o
+# NEXTAUTH_SECRET adicionado à mão via `docker service update --env-add`;
+# worker-whatsapp, worker-meta-webhook e worker-automation ficaram 0/1 e o
+# inbox parou de receber e enviar (meta-webhook-events e meta-outbound sem
+# consumidor). Degradar uma feature de IA vale um aviso, não uma parada.
+#
+# Para tratar como fatal (ex.: ambiente onde a IA é obrigatória):
+# REQUIRE_ENCRYPTION_KEY=1.
+case "$APP_MODE" in
+  api|api-public|worker-automation|worker-whatsapp|worker-meta-webhook)
+    CRYPTO_USED=1 ;;
+  *)
+    CRYPTO_USED= ;;
+esac
+
+if [ -z "${ENCRYPTION_KEY}" ] && [ -z "${NEXTAUTH_SECRET}" ] && [ -z "${AUTH_SECRET}" ]; then
+  if [ -z "${CRYPTO_USED}" ]; then
+    echo "[entrypoint] aviso: sem segredo de criptografia (não usado em ${APP_MODE})."
+  elif [ -n "${REQUIRE_ENCRYPTION_KEY}" ]; then
+    echo "[entrypoint] !! ERRO FATAL: nenhum segredo de criptografia definido"
+    echo "[entrypoint] !! e REQUIRE_ENCRYPTION_KEY=1. Abortando."
+    exit 1
+  else
+    echo "[entrypoint] !! AVISO: nenhum segredo de criptografia definido em ${APP_MODE}."
+    echo "[entrypoint] !! Chaves de API de IA gravadas por outro serviço não poderão"
+    echo "[entrypoint] !! ser lidas ('chave OpenAI não pôde ser lida'). Inbox e canais"
+    echo "[entrypoint] !! Meta seguem normais (usam KEYRING_SECRET)."
+    echo "[entrypoint] !! Corrija replicando NEXTAUTH_SECRET (mesmo valor da API) neste"
+    echo "[entrypoint] !! serviço — pelo painel, não por 'docker service update', que o"
+    echo "[entrypoint] !! próximo redeploy apaga."
+    echo "[entrypoint] !! Cuidado: ENCRYPTION_KEY também é lido por crypto/secrets.ts,"
+    echo "[entrypoint] !! que exige base64 de 32 bytes. Só use ENCRYPTION_KEY se"
+    echo "[entrypoint] !! KEYRING_SECRET estiver setado ou o valor for 'openssl rand -base64 32'."
+  fi
+else
+  # Fingerprint (não reversível) do segredo em uso. Serviços que logam fp
+  # diferente não conseguem ler os segredos um do outro.
+  echo "[entrypoint] cripto: $(node -e 'const c=require("node:crypto");const s=(process.env.ENCRYPTION_KEY||process.env.NEXTAUTH_SECRET||process.env.AUTH_SECRET).trim();const v=process.env.ENCRYPTION_KEY?"ENCRYPTION_KEY":process.env.NEXTAUTH_SECRET?"NEXTAUTH_SECRET":"AUTH_SECRET";console.log(v+" fp="+c.createHash("sha256").update(s).digest("hex").slice(0,12))')"
+
+  # ENCRYPTION_KEY é alias de KEYRING_SECRET em src/lib/crypto/secrets.ts,
+  # que exige 32 bytes em base64. Um valor arbitrário aqui derruba canais
+  # Meta / MFA sem relação aparente com o que foi mudado.
+  if [ -n "${ENCRYPTION_KEY}" ] && [ -z "${KEYRING_SECRET}" ]; then
+    if [ "$(printf %s "${ENCRYPTION_KEY}" | base64 -d 2>/dev/null | wc -c)" != "32" ]; then
+      echo "[entrypoint] !! aviso: ENCRYPTION_KEY não decodifica em 32 bytes e KEYRING_SECRET"
+      echo "[entrypoint] !! está vazio — tokens de canal e MFA vão falhar. Defina KEYRING_SECRET."
+    fi
+  fi
+fi
+
 # Migrations Prisma: rodam APENAS em APP_MODE=api. Workers no mesmo deploy
 # (worker-whatsapp, worker-leads) sobem em paralelo à API e podem ter race
 # condition se também tentarem aplicar migrations — basta um serviço aplicar.

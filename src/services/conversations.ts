@@ -42,14 +42,12 @@ import {
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
-
 /**
- * Frescura dos badges vem da invalidação (mensagem nova via `sse-bus`,
- * mudança de status aqui, jobs de bulk), não do TTL. Com TTL de 5s o refetch
- * que o SSE dispara ~1s depois caía fora da janela em ~metade das vezes e
- * recomputava a agregação (1,2-2,3s medidos em produção). O TTL agora é só
- * rede de segurança contra invalidação perdida. 90s reduz recomputo
- * das badges quando o SSE dispara refetch em rajada.
+ * Badges aceitam stale até o TTL. Não invalidar em cada `new_message`
+ * (preview) — isso matava o Redis e o `?counts=1` seguinte rodava o
+ * COUNT FILTER (200ms–1s). Invalidar só quando o ticket muda de aba
+ * (assign / resolve / reopen / transfer / departamento / status).
+ * 90s é rede de segurança se a invalidação falhar.
  */
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
 
@@ -492,7 +490,7 @@ function tabToWhere(
  * Só OPEN + hasError. Encerrar (individual ou massa) zera a flag;
  * RESOLVED com hasError sticky não entra.
  *
- * Códigos Meta de elegibilidade (131047, 131049, 131026, 130472, 133010)
+ * Códigos Meta de elegibilidade (131047, 131049, 131026, 130472, 131050, 133010)
  * deixam de marcar hasError em envios novos, mas NÃO são excluídos
  * daqui: tickets já flagados continuam visíveis até encerrar. Excluir
  * só do badge (e não da lista) recria o 233 zumbi.
@@ -1346,20 +1344,29 @@ const TAB_LIST = INBOX_TAB_LIST;
  */
 type AssigneeIdsByType = { HUMAN: string[]; AI: string[] };
 
+/**
+ * IDs de users HUMAN/AI da org — só muda quando alguém entra/sai da equipe
+ * ou vira agente IA. Recomputado a cada `computeTabCounts` custava ~136k
+ * queries em 12d (pg_stat). Cache de 60s sem invalidação explícita: a lista
+ * alimenta só o rewrite de `assignedTo: { type }` nas contagens de aba, que
+ * já são cacheadas 90s downstream e toleram stale.
+ */
 async function loadAssigneeIdsByType(): Promise<AssigneeIdsByType> {
   const orgId = getOrgIdOrNull();
   if (!orgId) return { HUMAN: [], AI: [] };
-  const rows = await prisma.user.findMany({
-    where: { organizationId: orgId, type: { in: ["HUMAN", "AI"] } },
-    select: { id: true, type: true },
+  return cache.wrap(`assignee_ids_by_type:${orgId}`, 60, async () => {
+    const rows = await prisma.user.findMany({
+      where: { organizationId: orgId, type: { in: ["HUMAN", "AI"] } },
+      select: { id: true, type: true },
+    });
+    const HUMAN: string[] = [];
+    const AI: string[] = [];
+    for (const r of rows) {
+      if (r.type === "AI") AI.push(r.id);
+      else HUMAN.push(r.id);
+    }
+    return { HUMAN, AI };
   });
-  const HUMAN: string[] = [];
-  const AI: string[] = [];
-  for (const r of rows) {
-    if (r.type === "AI") AI.push(r.id);
-    else HUMAN.push(r.id);
-  }
-  return { HUMAN, AI };
 }
 
 function rewriteAssignedToType(
@@ -1611,6 +1618,7 @@ function sqlConversationWhere(
     ["channel", Prisma.sql`c.channel`],
     ["status", Prisma.sql`c.status`, "ConversationStatus"],
     ["closedAt", Prisma.sql`c."closedAt"`],
+    ["followUpAt", Prisma.sql`c."followUpAt"`],
     ["hasError", Prisma.sql`c."hasError"`],
     ["hasHumanReply", Prisma.sql`c."hasHumanReply"`],
     ["hasAgentReply", Prisma.sql`c."hasAgentReply"`],
@@ -1672,6 +1680,7 @@ function sqlConversationWhere(
     "channel",
     "status",
     "closedAt",
+    "followUpAt",
     "hasError",
     "hasHumanReply",
     "hasAgentReply",
@@ -1771,7 +1780,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 8,
+          k: 9,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -2028,8 +2037,9 @@ async function computeTabCounts(
   });
   if (oneSql) return oneSql;
 
-  // Fallback: where não traduziu (filtro raro) — sequencial pra não
-  // esgotar o pool com 8 COUNT em paralelo.
+  // Fallback: where não traduziu (filtro raro). Paraleliza COUNT se o
+  // pool (DB_POOL_MAX) couber; senão sequencial — a agregada (oneSql)
+  // já foi tentada acima e falhou por where não traduzível.
   const lightTabs = TAB_LIST.filter(
     (t) => t !== "finalizados" && t !== "resolvidos",
   );
@@ -2050,14 +2060,7 @@ async function computeTabCounts(
       assigneeIdsByType,
     );
   };
-
-  const lightResults: Array<readonly [InboxCategoryTab, number]> = [];
-  for (const tab of lightTabs) {
-    lightResults.push([tab, await countTab(tab)]);
-  }
-  const resolvidos = await countTab("resolvidos");
-  const finalizados = await countTab("finalizados");
-  const abertas = await (() => {
+  const countAbertas = () => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
@@ -2067,8 +2070,8 @@ async function computeTabCounts(
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  })();
-  const ligar = await (() => {
+  };
+  const countLigar = () => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
       conditions.push(visibilityCollapsed);
@@ -2078,7 +2081,59 @@ async function computeTabCounts(
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(conditions, false, assigneeIdsByType);
+  };
+
+  // Mirror de defaultPoolMax em prisma-base (api=20) — sem export novo.
+  const poolMax = (() => {
+    const raw = process.env.DB_POOL_MAX?.trim();
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    const mode = (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
+    if (mode === "api-public") return 10;
+    if (!mode.startsWith("worker")) return 20;
+    if (mode === "worker-whatsapp") return 8;
+    if (mode === "worker-campaigns") return 16;
+    if (mode === "worker-meta-webhook") return 16;
+    if (mode === "worker-leads") return 10;
+    if (mode === "worker-distribution") return 4;
+    if (mode === "worker-automation") return 6;
+    return 4;
   })();
+  const parallelBudget = lightTabs.length + 4; // +resolvidos +finalizados +abertas +ligar
+
+  let lightResults: Array<readonly [InboxCategoryTab, number]>;
+  let resolvidos: number;
+  let finalizados: number;
+  let abertas: number;
+  let ligar: number;
+
+  if (poolMax < parallelBudget) {
+    lightResults = [];
+    for (const tab of lightTabs) {
+      lightResults.push([tab, await countTab(tab)]);
+    }
+    resolvidos = await countTab("resolvidos");
+    finalizados = await countTab("finalizados");
+    abertas = await countAbertas();
+    ligar = await countLigar();
+  } else {
+    const [light, res, fin, ab, lig] = await Promise.all([
+      Promise.all(
+        lightTabs.map(async (tab) => [tab, await countTab(tab)] as const),
+      ),
+      countTab("resolvidos"),
+      countTab("finalizados"),
+      countAbertas(),
+      countLigar(),
+    ]);
+    lightResults = light;
+    resolvidos = res;
+    finalizados = fin;
+    abertas = ab;
+    ligar = lig;
+  }
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
   record.resolvidos = resolvidos;
@@ -2299,6 +2354,9 @@ export async function assignConversationAssignedTo(
       await tx.contact.update({
         where: { id: conv.contactId },
         data: { assignedToId: newAssigneeId },
+        // RETURNING * puxa utm_id etc. e quebra se a migration de
+        // attribution ainda não rodou no DEV (SKIP_PRISMA_MIGRATE).
+        select: { id: true, assignedToId: true },
       });
       await tx.deal.updateMany({
         where: { contactId: conv.contactId, status: "OPEN" },
@@ -2636,8 +2694,7 @@ export async function updateConversationStatusInDb(
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 
-  // Badges Redis (TTL 45s) sem invalidação sobreviviam ao F5 — Erro 233
-  // com lista já vazia. Encerrou/reabriu/acompanhou → zera o cache da org.
+  // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
   if (status === "RESOLVED" || status === "OPEN") {
     const orgId = getOrgIdOrNull();
     if (orgId) void invalidateInboxTabCounts(orgId);
@@ -2657,14 +2714,16 @@ export async function updateConversationStatusInDb(
     }
   }
 
-  // Encerrou atendimento → liberou capacidade na fila do responsável.
-  // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).
+  // Encerrou atendimento → saiu de Entrada/Aguardando. Enfileira drain;
+  // o worker confere o teto (queueLimit) antes de varrer a espera.
   if (status === "RESOLVED" && !followUp) {
+    const capacityUserId = clearedAssignee?.id ?? updated.assignedToId ?? null;
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({
           trigger: "capacity_released",
           delayMs: 400,
+          userId: capacityUserId,
         }),
       )
       .catch(() => {});
@@ -3016,7 +3075,9 @@ export async function resolveConversationsInline(params: {
 
   if (updated > 0) {
     const orgId = getOrgIdOrNull();
-    if (orgId) void invalidateInboxTabCounts(orgId);
+    if (orgId) {
+      void invalidateInboxTabCounts(orgId);
+    }
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({

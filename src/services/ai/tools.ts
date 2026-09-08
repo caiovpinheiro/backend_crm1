@@ -13,14 +13,19 @@
  * falhas em vez de derrubar a run inteira.
  */
 
+
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-
 import {
   renderTemplatePreview,
   templateVariablesFromSendComponents,
 } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import {
+  llmMayCloseConversation,
+  normalizeAutoClosePolicy,
+  type AutoClosePolicy,
+} from "@/lib/ai-agents/piloting";
 import {
   applyArgPolicy,
   describeToolPolicy,
@@ -44,16 +49,37 @@ import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
+import { evaluateTransferGate } from "@/services/ai/transfer-gate";
 import {
-  resolveDepartmentByName,
-  resolveDepartmentByKey,
-  messageImpliesRematricula,
-  messageImpliesOperationalAtendimento,
-  executeAcademicDepartmentHandoff,
-  enforceAtendimentoIfAcolhimentoBlocked,
-} from "@/services/ai/academic-department-routing";
-import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
+  departmentNotFoundMessage,
+  executeDepartmentHandoff,
+  resolveDepartmentForAgent,
+} from "@/services/ai/department-handoff";
+import {
+  buildQueuedWaitingHint,
+  humanQueueContextFromAgent,
+} from "@/services/ai/human-queue-policy";
+import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
+import {
+  CRM_RECORD_SOURCES,
+  CRM_SEARCH_GUIDANCE,
+  describeCrmExposure,
+  loadCrmFieldCatalog,
+  matchFieldValues,
+  partitionFieldValues,
+  type CrmFieldDescriptor,
+  type CrmFieldExposure,
+  type CrmFieldValue,
+  type CrmSearchEntity,
+} from "@/services/ai/crm-field-policy";
+import { isEffectTool, simulateEffectTool } from "@/services/ai/effect-claims";
+import {
+  denialPayload,
+  replayPayload,
+  type ToolCallGovernor,
+} from "@/services/ai/tool-governor";
 import type { ActivityType, Prisma } from "@prisma/client";
+import { getVerticalPack } from "@/verticals";
 
 export type RunContext = {
   /// User.id do agente AI (para logar autoria em atividades, deals etc).
@@ -69,15 +95,48 @@ export type RunContext = {
   dealId?: string | null;
   /// Última mensagem do aluno (para inferir departamento no handoff).
   userMessage?: string | null;
+  /// Mensagens anteriores do cliente na conversa (gate de transferência).
+  priorUserMessages?: string[];
+  /// Vertical pack do agente (`null` = sem ops de vertical).
+  verticalPack?: string | null;
   /// Política de inbox do agente (aliases de departamento, keywords).
   inboxPolicy?: InboxPolicy | null;
+  /// Encerramento automático (pilotagem). Ausente = understood.
+  autoClosePolicy?: AutoClosePolicy | null;
+  /// Conversa em MODO DE TESTE (`src/services/ai/test-mode.ts`): nenhuma
+  /// ferramenta de efeito executa. O bloqueio é código, não instrução de
+  /// prompt — ver `withTestModeSimulation`.
+  testMode?: boolean;
 };
+
+function packOps(ctx: RunContext): Record<string, any> {
+  return getVerticalPack(ctx.verticalPack)?.ops ?? {};
+}
+
+function packToolCopy(ctx: RunContext) {
+  return getVerticalPack(ctx.verticalPack)?.toolCopy;
+}
+
+/** Horário/cópia da fila humana configurados no agente (Fase 3). */
+function queueCtx(ctx: RunContext) {
+  return humanQueueContextFromAgent({ inboxPolicy: ctx.inboxPolicy ?? null });
+}
 
 function ok<T>(data: T) {
   return { ok: true as const, ...data } as { ok: true } & T;
 }
 function fail(error: string) {
   return { ok: false as const, error };
+}
+
+/** Fila humana conforme a política de transferência do agente. */
+function transferAllowed(ctx: RunContext): boolean {
+  return evaluateTransferGate({
+    verticalPack: ctx.verticalPack,
+    userMessage: ctx.userMessage,
+    priorUserMessages: ctx.priorUserMessages,
+    inboxPolicy: ctx.inboxPolicy,
+  }).allows;
 }
 
 // ── create_deal ────────────────────────────────────────────────
@@ -681,6 +740,383 @@ function searchProductsTool(_ctx: RunContext) {
   });
 }
 
+// ── search_crm_records ─────────────────────────────────────────
+
+/**
+ * Busca ampla, leitura estreita.
+ *
+ * A varredura passa por TODOS os campos (fixos e personalizados) — é assim
+ * que o aluno que digita o próprio CPF acha o próprio cadastro. O que sai
+ * para o modelo é só o que o operador liberou em
+ * `toolConfig.search_crm_records.readableFields`; o resto vira rótulo em
+ * `hiddenFields`, sem valor. Ver `crm-field-policy.ts` para o porquê.
+ */
+function crmValuesFromRecord(
+  catalog: CrmFieldDescriptor[],
+  entity: CrmSearchEntity,
+  builtin: Record<string, unknown>,
+  custom: Array<{ name: string; value: string }>,
+): CrmFieldValue[] {
+  const out: CrmFieldValue[] = [];
+  for (const field of catalog) {
+    if (field.entity !== entity) continue;
+    const raw =
+      field.source === "builtin"
+        ? builtin[field.name]
+        : custom.find((c) => c.name === field.name)?.value;
+    if (raw === null || raw === undefined) continue;
+    const value =
+      raw instanceof Date
+        ? raw.toLocaleDateString("pt-BR")
+        : String(raw);
+    if (!value.trim()) continue;
+    out.push({ field, value });
+  }
+  return out;
+}
+
+type CrmRecordPayload = {
+  entity: CrmSearchEntity;
+  ref: string;
+  fields: Array<{ label: string; value: string }>;
+  hiddenFields: string[];
+  matchedFields: string[];
+};
+
+function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
+  const exposure: CrmFieldExposure = {
+    readableKeys: policy.readableFields,
+    orgWide: policy.allowOrgWideSearch,
+  };
+  return tool({
+    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(exposure)}`,
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .describe(
+          "Termo livre: as palavras da pergunta ('documento pendente', 'curso') ou o dado que a pessoa informou (CPF, RGM, e-mail). Tolera acento e maiúscula.",
+        ),
+      entity: z
+        .enum(["contact", "company", "deal", "product", "any"])
+        .optional()
+        .describe(
+          "Onde procurar. 'deal' é o negócio/matrícula da pessoa, 'contact' o cadastro dela. Omita para procurar em tudo.",
+        ),
+      scope: z
+        .enum(["current_contact", "organization"])
+        .optional()
+        .describe(
+          "'current_contact' (padrão) lê só o cadastro de quem está na conversa. 'organization' procura registros de terceiros e só funciona se o operador tiver liberado.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Máximo de registros a retornar (1-10, padrão 5)."),
+    }),
+    execute: async ({ query, entity, scope, limit }) => {
+      try {
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const term = query.trim();
+        if (!term) return fail("Busca vazia.");
+        const take = Math.min(Math.max(limit ?? 5, 1), 5);
+        const wanted: CrmSearchEntity[] =
+          !entity || entity === "any"
+            ? [...CRM_RECORD_SOURCES]
+            : [entity as CrmSearchEntity];
+
+        const orgWide = scope === "organization";
+        if (orgWide && !exposure.orgWide) {
+          return fail(
+            "Busca em cadastros de terceiros não está liberada neste agente. Use scope 'current_contact' ou transfira para um consultor.",
+          );
+        }
+        if (!orgWide && !ctx.contactId) {
+          return fail("Sem contato associado à conversa.");
+        }
+
+        const { fields: catalog } = await loadCrmFieldCatalog({
+          sensitiveTerms: policy.sensitiveTerms,
+        });
+        const records: CrmRecordPayload[] = [];
+
+        const push = (
+          recordEntity: CrmSearchEntity,
+          ref: string,
+          values: CrmFieldValue[],
+        ) => {
+          const { matched, matchedLabels } = matchFieldValues(values, term);
+          // No escopo do próprio contato o cadastro é devolvido mesmo sem
+          // casar o termo: a pergunta pode ser vaga ("e a minha situação?")
+          // e o registro certo é um só. Em busca ampla, sem match não entra.
+          if (orgWide && !matched) return;
+          const { visible, hiddenLabels } = partitionFieldValues(
+            values,
+            exposure,
+          );
+          records.push({
+            entity: recordEntity,
+            ref,
+            fields: visible,
+            hiddenFields: hiddenLabels,
+            matchedFields: matchedLabels,
+          });
+        };
+
+        const customOf = (
+          rows: Array<{ value: string; customField: { name: string } }>,
+        ) => rows.map((r) => ({ name: r.customField.name, value: r.value }));
+
+        if (!orgWide) {
+          const contact = await prisma.contact.findUnique({
+            where: { id: ctx.contactId as string },
+            include: {
+              company: true,
+              customFields: {
+                include: { customField: { select: { name: true } } },
+              },
+            },
+          });
+          if (!contact) return fail("Contato não encontrado.");
+
+          if (wanted.includes("contact")) {
+            push(
+              "contact",
+              `contato #${contact.number}`,
+              crmValuesFromRecord(
+                catalog,
+                "contact",
+                contact as unknown as Record<string, unknown>,
+                customOf(contact.customFields),
+              ),
+            );
+          }
+
+          if (wanted.includes("company") && contact.company) {
+            push(
+              "company",
+              `empresa #${contact.company.number}`,
+              crmValuesFromRecord(
+                catalog,
+                "company",
+                contact.company as unknown as Record<string, unknown>,
+                [],
+              ),
+            );
+          }
+
+          if (wanted.includes("deal")) {
+            const deals = await prisma.deal.findMany({
+              where: { contactId: contact.id },
+              orderBy: [{ updatedAt: "desc" }],
+              take,
+              include: {
+                stage: { select: { name: true } },
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const d of deals) {
+              push(
+                "deal",
+                `negócio #${d.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "deal",
+                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+                  customOf(d.customFields),
+                ),
+              );
+            }
+          }
+        } else {
+          if (wanted.includes("contact")) {
+            const contacts = await prisma.contact.findMany({
+              where: {
+                OR: [
+                  { name: { contains: term, mode: "insensitive" } },
+                  { email: { contains: term, mode: "insensitive" } },
+                  { phone: { contains: term } },
+                  {
+                    customFields: {
+                      some: { value: { contains: term, mode: "insensitive" } },
+                    },
+                  },
+                ],
+              },
+              take,
+              include: {
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const c of contacts) {
+              push(
+                "contact",
+                `contato #${c.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "contact",
+                  c as unknown as Record<string, unknown>,
+                  customOf(c.customFields),
+                ),
+              );
+            }
+          }
+
+          if (wanted.includes("deal")) {
+            const deals = await prisma.deal.findMany({
+              where: {
+                OR: [
+                  { title: { contains: term, mode: "insensitive" } },
+                  {
+                    customFields: {
+                      some: { value: { contains: term, mode: "insensitive" } },
+                    },
+                  },
+                ],
+              },
+              take,
+              include: {
+                stage: { select: { name: true } },
+                customFields: {
+                  include: { customField: { select: { name: true } } },
+                },
+              },
+            });
+            for (const d of deals) {
+              push(
+                "deal",
+                `negócio #${d.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "deal",
+                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+                  customOf(d.customFields),
+                ),
+              );
+            }
+          }
+
+          if (wanted.includes("company")) {
+            const companies = await prisma.company.findMany({
+              where: {
+                OR: [
+                  { name: { contains: term, mode: "insensitive" } },
+                  { domain: { contains: term, mode: "insensitive" } },
+                  { city: { contains: term, mode: "insensitive" } },
+                ],
+              },
+              take,
+            });
+            for (const co of companies) {
+              push(
+                "company",
+                `empresa #${co.number}`,
+                crmValuesFromRecord(
+                  catalog,
+                  "company",
+                  co as unknown as Record<string, unknown>,
+                  [],
+                ),
+              );
+            }
+          }
+        }
+
+        // Catálogo é a mesma lista para todo mundo — não é dado de pessoa,
+        // então a busca de produto é sempre ampla, independente do escopo.
+        if (wanted.includes("product")) {
+          const products = await prisma.product.findMany({
+            where: {
+              isActive: true,
+              OR: [
+                { name: { contains: term, mode: "insensitive" } },
+                { sku: { contains: term, mode: "insensitive" } },
+                { description: { contains: term, mode: "insensitive" } },
+                {
+                  customValues: {
+                    some: { value: { contains: term, mode: "insensitive" } },
+                  },
+                },
+              ],
+            },
+            take,
+            include: {
+              customValues: {
+                include: { customField: { select: { name: true } } },
+              },
+            },
+          });
+          for (const p of products) {
+            const values = crmValuesFromRecord(
+              catalog,
+              "product",
+              { ...p, price: Number(p.price) },
+              customOf(p.customValues),
+            );
+            const { matched, matchedLabels } = matchFieldValues(values, term);
+            if (!matched) continue;
+            const { visible, hiddenLabels } = partitionFieldValues(
+              values,
+              exposure,
+            );
+            records.push({
+              entity: "product",
+              ref: `item #${p.number}`,
+              fields: visible,
+              hiddenFields: hiddenLabels,
+              matchedFields: matchedLabels,
+            });
+          }
+        }
+
+        const trimmed = records.slice(0, take);
+        const anyVisible = trimmed.some((r) => r.fields.length > 0);
+        const anyHidden = trimmed.some((r) => r.hiddenFields.length > 0);
+
+        let hint: string;
+        if (trimmed.length === 0) {
+          hint =
+            "Nenhum registro para este termo. Não invente e não deduza: diga que não localizou e ofereça atendimento humano.";
+        } else if (!anyVisible && exposure.readableKeys.length === 0) {
+          hint =
+            "O registro existe, mas o operador não liberou nenhum campo para leitura. Confirme que localizou o cadastro, NÃO afirme nada sobre o conteúdo e encaminhe para a equipe.";
+        } else if (!anyVisible) {
+          hint =
+            "Nenhum dos campos deste registro está liberado para você. Não deduza o conteúdo — encaminhe para a equipe.";
+        } else if (anyHidden) {
+          hint =
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Os rótulos em `hiddenFields` existem mas você não pode ler nem repassar: se a pessoa pedir um deles, encaminhe para a equipe.";
+        } else {
+          hint =
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Não repasse documento, credencial nem dado financeiro.";
+        }
+
+        // O termo NÃO volta no payload: quando o cliente digita o próprio
+        // CPF para se identificar, ecoar a busca reinjetaria o documento no
+        // contexto do modelo pela porta dos fundos.
+        return ok({
+          scope: orgWide ? "organization" : "current_contact",
+          total: trimmed.length,
+          records: trimmed,
+          hint,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao consultar o CRM.",
+        );
+      }
+    },
+  });
+}
+
 // ── transfer_to_human ──────────────────────────────────────────
 
 /**
@@ -703,37 +1139,45 @@ function departmentGate(
 }
 
 function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
+      copy?.transferToHuman ??
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
-      "Use SOMENTE quando: o aluno pedir humano/consultor, for retenção, ou você NÃO puder " +
-      "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
-      "Se você puder orientar o aluno, NÃO chame esta tool — responda você. " +
-      "Quando chamar, a distribuição EXECUTA de verdade; confirme ao aluno que um consultor vai ajudar. " +
-      "Prefira `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere.",
+        "Use SOMENTE quando: o contato pedir humano/atendente, for retenção, ou você NÃO puder " +
+        "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
+        "Se você puder orientar o contato, NÃO chame esta tool — responda você. " +
+        "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
+        "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
     inputSchema: z.object({
       reason: z
         .string()
         .describe(
-          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelar matrícula').",
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelamento').",
         ),
       departmentName: z
         .string()
         .optional()
         .describe(
-          "Acolhimento | Retenção | Atendimento (ou Atendimento - SAC).",
+          "Nome do departamento de destino (opcional).",
         ),
     }),
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (!transferAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
         // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
         // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
-        const result = await executeAcademicDepartmentHandoff({
+        const result = await executeDepartmentHandoff({
+          ops: packOps(ctx),
           conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
+          contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
           departmentName: departmentName ?? null,
           userMessage: ctx.userMessage ?? null,
@@ -796,9 +1240,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
           assignedTo: result.distribution?.selectedUserName ?? null,
           distributionReason: result.distribution?.reason ?? null,
           queuedWaiting,
-          hint: queuedWaiting
-            ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
-            : undefined,
+          hint: queuedWaiting ? buildQueuedWaitingHint(queueCtx(ctx)) : undefined,
         });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
@@ -810,15 +1252,17 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
 // ── transfer_to_department ─────────────────────────────────────
 
 function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
-      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
+      copy?.transferToDepartment ??
+      "Roteia a conversa atual para um departamento com base no assunto do contato. NÃO tira a conversa do agente — apenas define o departamento responsável, usado pela Distribuição Inteligente para escolher o atendente certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
     inputSchema: z.object({
       departmentName: z
         .string()
         .min(1)
         .describe(
-          "Nome do departamento de destino (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC').",
+          "Nome do departamento de destino.",
         ),
     }),
     execute: async ({ departmentName }) => {
@@ -829,38 +1273,48 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
         const gate = departmentGate(policy, name);
         if (gate) return fail(gate);
 
-        // Últimas inbound — rematrícula / operacional forçam Atendimento
-        // (mesmo se o LLM mandar Acolhimento).
-        const recentIn = await prisma.message.findMany({
-          where: {
-            conversationId: ctx.conversationId,
-            direction: "in",
-            isPrivate: false,
-          },
-          orderBy: { createdAt: "desc" },
-          take: 6,
-          select: { content: true },
-        });
-        const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
-        let dept =
-          messageImpliesRematricula(inboundBlob) ||
-          messageImpliesOperationalAtendimento(inboundBlob)
-            ? await resolveDepartmentByKey("atendimento", ctx.inboxPolicy)
-            : null;
-        if (!dept) dept = await resolveDepartmentByName(name, ctx.inboxPolicy);
-        if (!dept)
-          return fail(
-            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
-          );
-        dept = await enforceAtendimentoIfAcolhimentoBlocked({
-          contactId: ctx.contactId,
-          dept,
-          policy: ctx.inboxPolicy,
-        });
-        if (!dept)
-          return fail(
-            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
-          );
+        const ops = packOps(ctx);
+        // Refino do pack (opcional): últimas inbound podem forçar outro
+        // departamento. Sem pack, o nome pedido pelo modelo vale.
+        let dept: { id: string; name: string } | null = null;
+        if (ops.messageImpliesRematricula || ops.messageImpliesOperationalAtendimento) {
+          const recentIn = await prisma.message.findMany({
+            where: {
+              conversationId: ctx.conversationId,
+              direction: "in",
+              isPrivate: false,
+            },
+            orderBy: { createdAt: "desc" },
+            take: 6,
+            select: { content: true },
+          });
+          const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
+          if (
+            (ops.messageImpliesRematricula?.(inboundBlob) ||
+              ops.messageImpliesOperationalAtendimento?.(inboundBlob)) &&
+            ops.resolveDepartmentByKey
+          ) {
+            dept = await ops.resolveDepartmentByKey(
+              "atendimento",
+              ctx.inboxPolicy,
+            );
+          }
+        }
+        if (!dept) {
+          dept = await resolveDepartmentForAgent(name, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+        }
+        if (!dept) return fail(await departmentNotFoundMessage(name));
+        if (ops.enforceAtendimentoIfAcolhimentoBlocked) {
+          dept = await ops.enforceAtendimentoIfAcolhimentoBlocked({
+            contactId: ctx.contactId,
+            dept,
+            policy: ctx.inboxPolicy,
+          });
+        }
+        if (!dept) return fail(await departmentNotFoundMessage(name));
         await prisma.conversation.update({
           where: { id: ctx.conversationId },
           data: { departmentId: dept.id, updatedAt: new Date() },
@@ -886,8 +1340,10 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
 // ── execute_distribution ───────────────────────────────────────
 
 function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
+      copy?.executeDistribution ??
       "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor escolhe automaticamente quem recebe (menor fila, dentro do departamento roteado, respeitando horário e disponibilidade) — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
     inputSchema: z.object({
       departmentName: z
@@ -905,11 +1361,18 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
       try {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
+        if (!transferAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida.",
+          );
+        }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
 
-        // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
-        // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
+        const ops = packOps(ctx);
+        // Se a conversa está na IA, usa o handoff de departamento (limpa
+        // assignee + dept + reassign). Evita early-return "ASSIGNED"
+        // mantendo a IA.
         if (ctx.conversationId) {
           const conv = await prisma.conversation.findUnique({
             where: { id: ctx.conversationId },
@@ -918,7 +1381,8 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           if (conv?.assignedTo?.type === "AI") {
             // Tool chamada = handoff intencional. Não adiar (evita promessa
             // "vou conectar" sem fila real).
-            const handoff = await executeAcademicDepartmentHandoff({
+            const handoff = await executeDepartmentHandoff({
+              ops,
               conversationId: ctx.conversationId,
               contactId: ctx.contactId ?? null,
               dealId: ctx.dealId,
@@ -932,13 +1396,14 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
               handoff.distribution?.reason === "NO_DEPARTMENT";
             return ok({
               assigned: Boolean(handoff.distribution?.success),
+              // `assignedUserId` saiu do payload: id interno de usuário não
+              // tem uso para o modelo e não precisa ser serializado.
               assignedTo: handoff.distribution?.selectedUserName ?? null,
-              assignedUserId: handoff.distribution?.selectedUserId ?? null,
               departmentName: handoff.departmentName,
               reason: handoff.distribution?.reason ?? null,
               queuedWaiting,
               hint: queuedWaiting
-                ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+                ? buildQueuedWaitingHint(queueCtx(ctx))
                 : undefined,
             });
           }
@@ -946,12 +1411,11 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          const dept = await resolveDepartmentByName(
-            departmentName,
-            ctx.inboxPolicy,
-          );
-          if (!dept)
-            return fail(`Departamento "${departmentName}" não encontrado.`);
+          const dept = await resolveDepartmentForAgent(departmentName, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+          if (!dept) return fail(await departmentNotFoundMessage(departmentName));
           departmentId = dept.id;
           if (ctx.conversationId) {
             await prisma.conversation.update({
@@ -985,7 +1449,6 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           return ok({
             assigned: true,
             assignedTo: result.selectedUserName,
-            assignedUserId: result.selectedUserId,
           });
         }
         // Não é erro de execução — é resultado de negócio (sem elegível, etc.).
@@ -994,7 +1457,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           reason: result.reason,
           hint:
             result.reason === "NO_ELIGIBLE_RESPONSIBLE"
-              ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+              ? buildQueuedWaitingHint(queueCtx(ctx))
               : result.reason === "NO_DEPARTMENT"
                 ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
                 : "Distribuição não realizada. Considere transferir para humano manualmente.",
@@ -1017,15 +1480,25 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
-const MATRICULA_POLITICA =
-  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
+/**
+ * Limite de alcance de `podeAcessarPortal`, anexado à description mesmo
+ * quando o vertical pack traz cópia própria.
+ *
+ * O modelo respondeu "seu acesso ao Blackboard está liberado" a partir de
+ * `podeAcessarPortal: true`, enquanto o campo do CRM registrava o contrário.
+ * O bit é sobre UM acesso; generalizar para outros sistemas é invenção.
+ */
+const MATRICULA_SCOPE_NOTE =
+  "ALCANCE: `podeAcessarPortal` responde UMA pergunta — o acesso ao portal está ativo. Não vale como resposta sobre nenhum outro sistema, ferramenta, produto ou campo do cadastro, mesmo que o nome pareça relacionado. Se a pergunta é sobre um item específico registrado no cadastro, esta ferramenta não responde: consulte os campos do CRM. Nunca converta este bit em afirmação sobre outra coisa.";
 
 function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
-  const politica = policy.policyText ?? MATRICULA_POLITICA;
   const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
+  const copy = packToolCopy(ctx);
   return tool({
-    description:
-      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
+    description: `${
+      copy?.consultarMatricula ??
+      "Verifica se o aluno em conversa tem acesso ativo ao portal/AVA. Devolve apenas `podeAcessarPortal` e uma orientação de rota — nunca curso, polo, série, situação ou documentos, porque esses dados não podem ser repassados ao aluno. O casamento é automático por telefone/e-mail do contato. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar."
+    }\n\n${MATRICULA_SCOPE_NOTE}`,
     inputSchema: z.object({
       cpf: z
         .string()
@@ -1042,56 +1515,29 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
 
         const contact = await prisma.contact.findUnique({
           where: { id: ctx.contactId },
-          select: { phone: true, email: true, name: true },
+          select: { phone: true, email: true },
         });
         if (!contact) return fail("Contato não encontrado.");
 
-        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar a
-        // chance de ter contexto — sem risco de vazamento, pois o agente NÃO
-        // divulga estes dados ao aluno (uso interno + transferência segura).
+        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar
+        // a chance de achar o registro. O que o modelo vê sai do filtro
+        // abaixo — a busca ampla não vaza nada por si.
         const records = await lookupStudent(orgId, {
           phone: contact.phone,
           email: contact.email,
           cpf: cpf?.trim() || null,
         });
 
-        if (records.length === 0) {
-          return ok({
-            found: false,
-            politica,
+        // Filtro de saída: o modelo recebe só o status derivado. Antes o
+        // payload trazia curso, polo, série, situação e a instrução textual
+        // "NÃO DIVULGUE" — e o agente respondeu "seu curso está cancelado".
+        // Instrução dentro de payload não é mecanismo de segurança.
+        return ok(
+          enrollmentContextForModel({
+            situacoes: records.map((r) => r.situacao),
             transferMessage,
-            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
-          });
-        }
-
-        const matriculas = records.map((r) => ({
-          nome: r.nome,
-          curso: r.curso,
-          polo: r.polo,
-          serie: r.serie,
-          ciclo: r.ciclo,
-          situacao: r.situacao,
-          tipoMatricula: r.tipoMatricula,
-          instituicao: r.instituicao,
-          dataMatricula: r.dataMatricula
-            ? r.dataMatricula.toISOString().slice(0, 10)
-            : null,
-        }));
-        const ativo = records.some((r) =>
-          ["EM CURSO", "ATIVO", "CURSANDO"].some((s) =>
-            (r.situacao ?? "").toUpperCase().includes(s),
-          ),
+          }),
         );
-
-        return ok({
-          found: true,
-          politica,
-          transferMessage,
-          nome: records[0]?.nome ?? contact.name,
-          ativo,
-          totalMatriculas: matriculas.length,
-          matriculas,
-        });
       } catch (err) {
         return fail(
           err instanceof Error ? err.message : "Falha ao consultar matrícula.",
@@ -1104,19 +1550,33 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
 // ── close_conversation ─────────────────────────────────────────
 
 function closeConversationTool(ctx: RunContext) {
+  const copy = packToolCopy(ctx);
   return tool({
     description:
-      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir para encerrar/finalizar, agradecer de forma conclusiva ('muito grata', 'obrigada por toda ajuda') depois de já ter sido atendido, ou disser que volta depois/à noite e em seguida agradecer. NÃO use se já houver consultor humano na conversa. NÃO use só porque o aluno disse que vai estudar à noite — nesse caso confirme e continue; encerre no agradecimento seguinte.",
+      copy?.closeConversation ??
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o contato pedir para encerrar/finalizar, ou agradecer de forma conclusiva depois de já ter sido atendido. NÃO use se já houver atendente humano na conversa. NÃO use só porque o contato disse que volta depois — nesse caso confirme e continue; encerre no agradecimento seguinte.",
     inputSchema: z.object({
       reason: z
         .string()
         .optional()
-        .describe("Motivo curto do encerramento (ex.: 'Aluno pediu para encerrar')."),
+        .describe("Motivo curto do encerramento (ex.: 'Contato pediu para encerrar')."),
     }),
     execute: async ({ reason }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        const result = await closeAiOnlyConversation({
+        const policy = normalizeAutoClosePolicy(ctx.autoClosePolicy);
+        if (!llmMayCloseConversation(policy)) {
+          return fail(
+            policy.mode === "off"
+              ? "Encerramento automático está desligado neste agente."
+              : "Neste agente só encerro com pedido explícito (encerrar/finalizar) ou palavra-chave. Não chame esta tool.",
+          );
+        }
+        const closeFn = packOps(ctx).closeAiOnlyConversation;
+        if (!closeFn) {
+          return fail("Encerramento automático não disponível neste agente.");
+        }
+        const result = await closeFn({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
           reason: reason ?? "close_conversation via IA",
@@ -1134,7 +1594,7 @@ function closeConversationTool(ctx: RunContext) {
         }
         return ok({
           closed: true,
-          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao aluno em uma frase curta.",
+          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao contato em uma frase curta.",
         });
       } catch (err) {
         return fail(
@@ -1160,6 +1620,7 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   add_tag: addTagTool,
   create_activity: createActivityTool,
   search_products: searchProductsTool,
+  search_crm_records: searchCrmRecordsTool,
   send_whatsapp_template: sendWhatsappTemplateTool,
   transfer_to_department: transferToDepartmentTool,
   execute_distribution: executeDistributionTool,
@@ -1192,17 +1653,75 @@ function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
   } as AnyTool;
 }
 
+/**
+ * MODO DE TESTE: a ferramenta de efeito não roda.
+ *
+ * Este é o ponto onde o bloqueio acontece — um envelope no `execute`, o mesmo
+ * lugar por onde toda chamada de tool já passa. Determinístico: o modelo pode
+ * pedir `transfer_to_human` à vontade que a função real nunca é invocada. A
+ * lista de quem é "efeito" é `EFFECT_TOOLS` (`effect-claims.ts`), a mesma que
+ * a auditoria de efeito usa — não existe segunda lista para desincronizar.
+ *
+ * Consulta (`search_products`, `consultar_matricula`) e as tools que não
+ * mudam atribuição nem estado de atendimento continuam executando: o valor do
+ * teste é ver o agente real, e sem elas a resposta seria outra.
+ */
+function withTestModeSimulation(id: string, t: AnyTool): AnyTool {
+  const execute = t.execute;
+  if (!execute || !isEffectTool(id)) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>) =>
+      simulateEffectTool(id, args)) as typeof execute,
+  } as AnyTool;
+}
+
+/**
+ * Dedup + tetos por run. O modelo reexecutava a mesma tool porque o retorno
+ * anterior só repetia o erro, sem dizer "já tentou". Envelopa o `execute`
+ * depois do `withArgPolicy` para que a chave de dedup use os args já
+ * higienizados.
+ */
+function withCallGovernor(
+  id: string,
+  t: AnyTool,
+  governor: ToolCallGovernor,
+): AnyTool {
+  const execute = t.execute;
+  if (!execute) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>, options: unknown) => {
+      const decision = governor.decide(id, args);
+      if (decision.action === "replay") {
+        return replayPayload(id, decision.previousResult);
+      }
+      if (decision.action === "deny") {
+        return denialPayload(id, decision.reason);
+      }
+      const result = await execute(args as never, options as never);
+      governor.record(id, args, result);
+      return result;
+    }) as typeof execute,
+  } as AnyTool;
+}
+
 export function buildToolSet(
   ctx: RunContext,
   enabledIds: string[],
   toolConfig?: ToolConfigMap | null,
+  governor?: ToolCallGovernor,
 ): ToolSet {
   const set: Record<string, AnyTool> = {};
   for (const id of enabledIds) {
     const factory = FACTORY_MAP[id];
     if (!factory) continue;
     const policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
-    set[id] = withArgPolicy(factory(ctx, policy), policy);
+    let built = withArgPolicy(factory(ctx, policy), policy);
+    // Antes do governor: a chamada simulada continua contando para os tetos e
+    // para o dedup, senão um loop do modelo em modo de teste rodaria solto.
+    if (ctx.testMode) built = withTestModeSimulation(id, built);
+    set[id] = governor ? withCallGovernor(id, built, governor) : built;
   }
   return set as ToolSet;
 }

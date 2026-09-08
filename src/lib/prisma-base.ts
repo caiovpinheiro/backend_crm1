@@ -58,7 +58,7 @@ function appMode(): string {
  *   paralelo ao job e não são contabilizadas pela concurrency)
  * - worker-leads: 10 (concurrency 5 + semáforo de efeitos colaterais do
  *   bulk-move-stage, limitado a 3 em voo por processo + folga)
- * - worker-distribution: 4 (concurrency 1 no drain; honor DB_POOL_MAX)
+ * - worker-distribution: 4 (drain 1 + execute 2; honor DB_POOL_MAX)
  * - worker-automation: 6 (concurrency 4 + folga p/ enqueue/log)
  * - worker-etl: 4 (concurrency 1, mas o import grava em várias tabelas
  *   por linha)

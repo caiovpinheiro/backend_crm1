@@ -13,6 +13,7 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
+import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
 
 const log = getLogger("worker.meta-webhook");
 
@@ -95,6 +96,11 @@ export function startMetaWebhookWorker() {
   worker.on("error", (err) => {
     log.error({ err: err?.message ?? String(err) }, "Erro no worker meta-webhook");
   });
+
+  // Turn Manager (AI_TURN_MANAGER=1): tick que promove turnos vencidos e
+  // recupera PROCESSING travado. No-op com a flag desligada. É aqui porque
+  // este worker é quem ingere o inbound Meta — o turno nasce neste processo.
+  startAiTurnSweeper();
 
   log.info({ concurrency }, "worker-meta-webhook iniciado");
   return worker;

@@ -78,11 +78,14 @@ type IgIdentity = {
 };
 
 function sanitizeMetaAccessToken(raw: string): string {
+  // O prefixo `Bearer ` tem que sair ANTES da limpeza de espaços/aspas, e
+  // o `^` só casa se nada vier antes dele. Token colado da UI vem com
+  // espaço/aspas na frente (`  Bearer "EAA…"`), então o `^Bearer` não
+  // casava e a limpeza colava o literal no token: `BearerEAA…`.
   return raw
-    .replace(/^\uFEFF/, "")
+    .replace(/^[\uFEFF\s"'`]+/, "")
     .replace(/^Bearer\s+/i, "")
-    .replace(/[\s"'`]+/g, "")
-    .trim();
+    .replace(/[\s"'`]+/g, "");
 }
 
 function graphErrorMessage(data: { error?: GraphErr }, fallback: string): string {

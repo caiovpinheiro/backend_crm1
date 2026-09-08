@@ -11,14 +11,15 @@
  * Uso (backend_crm1, com DATABASE_URL):
  *   npx tsx src/scripts/seed-agent-steering.ts [organizationId]
  */
-import { PrismaClient } from "@prisma/client";
-
-import {
-  ACADEMIC_ATENDIMENTO_RULES,
-  ACADEMIC_CONFIDENCE_RULES,
-  ACADEMIC_MEDIA_CAPABILITY_RULES,
-} from "../lib/ai-agents/academic-atendimento-prompt";
+import { getVerticalPack } from "../verticals";
 import { getArchetype } from "../lib/ai-agents/archetypes";
+import { duplicatesSteeringRules } from "../lib/ai-agents/system-prompt";
+
+const academic = getVerticalPack("academic")!;
+const ACADEMIC_ATENDIMENTO_RULES = academic.constants.atendimentoRules;
+const ACADEMIC_CONFIDENCE_RULES = academic.constants.confidenceRules;
+const ACADEMIC_MEDIA_CAPABILITY_RULES = academic.constants.mediaCapabilityRules;
+
 
 /** Tools que o runner injetava à força no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [
@@ -62,10 +63,16 @@ async function main() {
       );
       // O override antigo já continha as regras (script apply-*). Mantê-lo
       // duplicaria o texto no prompt agora que ele soma com steeringRules.
-      const overrideHadRules =
-        (a.systemPromptOverride ?? "").includes("## REGRAS ABSOLUTAS");
-      const templateHadRules =
-        (a.systemPromptTemplate ?? "").includes("## REGRAS ABSOLUTAS");
+      // Mesma checagem que o runtime usa para não injetar o documento duas
+      // vezes (`duplicatesSteeringRules`) — uma fonte só.
+      const overrideHadRules = duplicatesSteeringRules(
+        a.systemPromptOverride,
+        ACADEMIC_STEERING_RULES,
+      );
+      const templateHadRules = duplicatesSteeringRules(
+        a.systemPromptTemplate,
+        ACADEMIC_STEERING_RULES,
+      );
       const cleanTemplate = getArchetype("ATENDIMENTO").systemPromptTemplate;
 
       await prisma.aIAgentConfig.update({

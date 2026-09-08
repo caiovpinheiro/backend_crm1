@@ -55,6 +55,7 @@ export const META_NON_CONVERSATION_ERROR_CODES = new Set([
   131049, // Meta limitou marketing para preservar engajamento
   131026, // mensagem não entregue ao destinatário (sem WhatsApp / não aceitou termos)
   130472, // número faz parte de experimento da Meta (marketing)
+  131050, // destinatário recusou mensagens de marketing (opt-out)
   133010, // conta não existe na Cloud API (número perdido/não registrado)
 ]);
 
@@ -158,6 +159,11 @@ const CATALOG: Record<number, MetaErrorInfo> = {
     reason: "Número do usuário faz parte de um experimento da Meta (marketing).",
     action: "Comportamento esperado em alguns números; tente outro destinatário.",
   },
+  131050: {
+    reason: "O destinatário recusou mensagens de marketing neste WhatsApp.",
+    action:
+      "Não reenvie marketing a este número. Use conversa de serviço (janela 24h) ou outro canal.",
+  },
   131021: {
     reason: "O destinatário não pode ser o próprio remetente.",
     action: "Use um número de destino diferente do número de envio.",
@@ -255,4 +261,16 @@ export function metaErrorReason(code: number | null | undefined): string {
   const info = describeMetaError(code);
   if (!info) return "";
   return info.action ? `${info.reason} ${info.action}` : info.reason;
+}
+
+/** Extrai o `code N` persistido em `errorMessage` / `sendError`. */
+export function extractMetaErrorCode(
+  message: string | null | undefined,
+): number | null {
+  if (!message) return null;
+  const labeled =
+    message.match(/\bcode\s+(\d+)/i) ?? message.match(/\bc[oó]d\.\s*(\d+)/i);
+  if (!labeled) return null;
+  const code = Number(labeled[1]);
+  return Number.isFinite(code) ? code : null;
 }
