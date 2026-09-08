@@ -413,9 +413,12 @@ describe("agente novo, outra org, verticalPack = null", () => {
     expect(state.system).toContain("ENUMERAÇÃO COMPLETA");
     expect(state.system).toContain("RÓTULO NÃO É A DATA DO EVENTO");
 
-    // Brevidade não autoriza omitir item — a causa da lista parcial.
+    // Brevidade não autoriza truncar — a causa da lista parcial. E a saída
+    // "não couber tudo" exige avisar que há mais, senão o modelo tomava o
+    // atalho calado e a lista parcial passava por completa.
+    expect(KNOWLEDGE_ANSWER_RULES).toMatch(/Ser breve NÃO autoriza parar/);
     expect(KNOWLEDGE_ANSWER_RULES).toMatch(
-      /Responder curto NÃO autoriza omitir item/,
+      /lista parcial sem avisar que há mais é resposta ERRADA/,
     );
 
     // E nada de vocabulário de segmento nas regras genéricas.

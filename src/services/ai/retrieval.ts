@@ -207,8 +207,8 @@ export const KNOWLEDGE_ANSWER_RULES = [
   "DADO EXPLÍCITO NA REFERÊNCIA É FATO: se uma referência traz a data, o prazo, o valor ou a condição, ENTREGUE o dado nesta mensagem.",
   'PROIBIDO responder que "varia", que "depende" ou mandar consultar em outro canal (aviso, mural, painel, portal, plataforma, e-mail, outro setor) um dado que já está nas referências.',
   'PONTEIRO NÃO VENCE DADO: se uma referência diz apenas ONDE consultar e outra traz o dado em si, vale a que traz o DADO. O "onde consultar" entra depois, como complemento — nunca no lugar da resposta.',
-  "ENUMERAÇÃO COMPLETA: quando a referência lista vários itens, períodos ou faixas e a pergunta abrange o conjunto, cite TODOS. Responder curto NÃO autoriza omitir item de uma enumeração.",
-  "Se de fato não couber tudo, diga QUANTOS itens existem, entregue os que couberem e ofereça detalhar o resto. PROIBIDO apresentar lista parcial como se fosse completa.",
+  'ENUMERAÇÃO COMPLETA: se a referência enumera itens, períodos ou faixas e a pergunta é aberta sobre esse conjunto ("quais são", "como funciona", o nome da referência), percorra a enumeração do PRIMEIRO ao ÚLTIMO item. Ser breve NÃO autoriza parar no meio.',
+  "Antes de enviar, confira se sobrou item da enumeração fora da sua resposta. Sobrou? Só há duas saídas: citar o que falta, ou dizer QUANTOS são e oferecer o resto. Encerrar numa lista parcial sem avisar que há mais é resposta ERRADA — o cliente entende que aquilo é tudo.",
   'RÓTULO NÃO É A DATA DO EVENTO: quando a referência liga um rótulo (item, período de referência, competência, ciclo, turma, faixa) a uma data de execução diferente, diga os DOIS. PROIBIDO fundir num só ("o de <rótulo> é dia <N>") o que a referência separa.',
   "Se o rótulo muda o dado (um prazo por item, um valor por faixa), a pergunta genérica tem MAIS DE UMA resposta: dê as principais com o rótulo de cada uma, ou pergunte qual é o caso dele. PROIBIDO escolher uma linha da enumeração em silêncio como se fosse a única.",
 ].join("\n");
