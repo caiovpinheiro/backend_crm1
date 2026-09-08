@@ -155,6 +155,9 @@ const PUBLIC_PATHS = new Set([
 const PUBLIC_API_PATHS = new Set([
   "/api/signup",
   "/api/organization/by-slug",
+  // Convite de membro: o convidado ainda não tem sessão.
+  "/api/invites/validate",
+  "/api/invites/accept",
 ]);
 
 const PWA_PUBLIC_PATHS = new Set([
