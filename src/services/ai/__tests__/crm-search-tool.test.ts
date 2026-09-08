@@ -156,7 +156,7 @@ describe("search_crm_records", () => {
     expect(deal(out)?.fields).toEqual([]);
     // Saber que o dado existe é o que permite encaminhar em vez de negar.
     expect(deal(out)?.hiddenFields).toContain("Curso");
-    expect(out.hint).toContain("encaminhe para um consultor");
+    expect(out.hint).toContain("encaminhe para a equipe");
 
     const serialized = JSON.stringify(out);
     for (const leak of [CPF, RGM, "GESTÃO DE RECURSOS HUMANOS", "Vila Prudente"]) {

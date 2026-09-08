@@ -61,7 +61,7 @@ import {
 } from "@/services/ai/human-queue-policy";
 import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
 import {
-  CRM_SEARCH_ENTITIES,
+  CRM_RECORD_SOURCES,
   CRM_SEARCH_GUIDANCE,
   describeCrmExposure,
   loadCrmFieldCatalog,
@@ -826,7 +826,7 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         const take = Math.min(Math.max(limit ?? 5, 1), 5);
         const wanted: CrmSearchEntity[] =
           !entity || entity === "any"
-            ? CRM_SEARCH_ENTITIES
+            ? [...CRM_RECORD_SOURCES]
             : [entity as CrmSearchEntity];
 
         const orgWide = scope === "organization";
@@ -839,7 +839,9 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
           return fail("Sem contato associado à conversa.");
         }
 
-        const catalog = await loadCrmFieldCatalog();
+        const { fields: catalog } = await loadCrmFieldCatalog({
+          sensitiveTerms: policy.sensitiveTerms,
+        });
         const records: CrmRecordPayload[] = [];
 
         const push = (
@@ -1082,19 +1084,19 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         let hint: string;
         if (trimmed.length === 0) {
           hint =
-            "Nenhum registro para este termo. Não invente e não deduza: diga que não localizou e ofereça falar com um consultor.";
+            "Nenhum registro para este termo. Não invente e não deduza: diga que não localizou e ofereça atendimento humano.";
         } else if (!anyVisible && exposure.readableKeys.length === 0) {
           hint =
-            "O registro existe, mas o operador não liberou nenhum campo para leitura. Confirme que localizou o cadastro, NÃO afirme nada sobre o conteúdo e encaminhe para um consultor.";
+            "O registro existe, mas o operador não liberou nenhum campo para leitura. Confirme que localizou o cadastro, NÃO afirme nada sobre o conteúdo e encaminhe para a equipe.";
         } else if (!anyVisible) {
           hint =
-            "Nenhum dos campos deste registro está liberado para você. Não deduza o conteúdo — encaminhe para um consultor.";
+            "Nenhum dos campos deste registro está liberado para você. Não deduza o conteúdo — encaminhe para a equipe.";
         } else if (anyHidden) {
           hint =
-            "Responda usando apenas `fields`, em fala natural. Os rótulos em `hiddenFields` existem mas você não pode ler nem repassar — se a pessoa pedir um deles, transfira para um consultor.";
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Os rótulos em `hiddenFields` existem mas você não pode ler nem repassar: se a pessoa pedir um deles, encaminhe para a equipe.";
         } else {
           hint =
-            "Responda usando apenas `fields`, em fala natural. Não repasse documento, credencial nem situação financeira.";
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Não repasse documento, credencial nem dado financeiro.";
         }
 
         // O termo NÃO volta no payload: quando o cliente digita o próprio
@@ -1478,13 +1480,25 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
 const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
+/**
+ * Limite de alcance de `podeAcessarPortal`, anexado à description mesmo
+ * quando o vertical pack traz cópia própria.
+ *
+ * O modelo respondeu "seu acesso ao Blackboard está liberado" a partir de
+ * `podeAcessarPortal: true`, enquanto o campo do CRM registrava o contrário.
+ * O bit é sobre UM acesso; generalizar para outros sistemas é invenção.
+ */
+const MATRICULA_SCOPE_NOTE =
+  "ALCANCE: `podeAcessarPortal` responde UMA pergunta — o acesso ao portal está ativo. Não vale como resposta sobre nenhum outro sistema, ferramenta, produto ou campo do cadastro, mesmo que o nome pareça relacionado. Se a pergunta é sobre um item específico registrado no cadastro, esta ferramenta não responde: consulte os campos do CRM. Nunca converta este bit em afirmação sobre outra coisa.";
+
 function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
   const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
   const copy = packToolCopy(ctx);
   return tool({
-    description:
+    description: `${
       copy?.consultarMatricula ??
-      "Verifica se o aluno em conversa tem acesso ativo ao portal/AVA. Devolve apenas `podeAcessarPortal` e uma orientação de rota — nunca curso, polo, série, situação ou documentos, porque esses dados não podem ser repassados ao aluno. O casamento é automático por telefone/e-mail do contato. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
+      "Verifica se o aluno em conversa tem acesso ativo ao portal/AVA. Devolve apenas `podeAcessarPortal` e uma orientação de rota — nunca curso, polo, série, situação ou documentos, porque esses dados não podem ser repassados ao aluno. O casamento é automático por telefone/e-mail do contato. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar."
+    }\n\n${MATRICULA_SCOPE_NOTE}`,
     inputSchema: z.object({
       cpf: z
         .string()

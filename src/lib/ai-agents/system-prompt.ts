@@ -308,8 +308,8 @@ export function renderSystemPrompt(args: RenderArgs): string {
   if (args.hasCrmFieldSearch) {
     lines.push("");
     lines.push(
-      "Antes de responder sobre o cadastro da pessoa (etapa, documentos, status, campos que a instituição registrou), chame `search_crm_records`. Não responda de memória e não deduza.",
-      "Leia só o que vier em `fields`. O que vier em `hiddenFields` você não pode repassar — nesse caso encaminhe para um consultor.",
+      "Antes de responder sobre o que está registrado no cadastro da pessoa (etapa, status, prazos, campos preenchidos pela empresa), chame `search_crm_records`. Não responda de memória e não deduza.",
+      "Leia só o que vier em `fields`. O que vier em `hiddenFields` você não pode repassar — nesse caso encaminhe para a equipe.",
     );
   }
 

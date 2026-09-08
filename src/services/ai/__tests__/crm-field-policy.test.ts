@@ -22,7 +22,8 @@ import {
 function field(
   name: string,
   label: string,
-  entity: CrmFieldDescriptor["entity"] = "deal",
+  entity = "deal",
+  extraTerms: string[] = [],
 ): CrmFieldDescriptor {
   return {
     key: crmFieldKey(entity, name),
@@ -31,11 +32,13 @@ function field(
     label,
     source: "custom",
     type: "TEXT",
-    sensitiveHint: looksSensitive(name, label),
+    sensitiveHint: looksSensitive(name, label, extraTerms),
+    valueAvailable: true,
   };
 }
 
-/// Espelha os campos personalizados reais da org acadêmica em DEV.
+/// Campos personalizados de uma organização qualquer — aqui uma faculdade,
+/// só porque é o caso que originou a feature. Nada disso vive no código.
 const values: CrmFieldValue[] = [
   { field: field("curso", "Curso"), value: "PEDAGOGIA" },
   { field: field("cpf", "CPF"), value: "12345678901" },
@@ -87,7 +90,9 @@ describe("exposição de campo (default-deny)", () => {
     const exposure = { readableKeys: ["deal.*"], orgWide: false };
     expect(isFieldReadable(exposure, "deal.cpf")).toBe(true);
     expect(isFieldReadable(exposure, "contact.email")).toBe(false);
-    expect(isFieldReadable({ readableKeys: ["*"], orgWide: false }, "contact.email")).toBe(true);
+    expect(
+      isFieldReadable({ readableKeys: ["*"], orgWide: false }, "contact.email"),
+    ).toBe(true);
   });
 
   it("a chave tolera acento e caixa", () => {
@@ -106,7 +111,7 @@ describe("exposição de campo (default-deny)", () => {
 
 describe("busca ampla", () => {
   it("casa pelo valor de um campo que o modelo não pode ler", () => {
-    // O aluno digita o próprio CPF: a busca acha, o valor não volta.
+    // A pessoa digita o próprio documento: a busca acha, o valor não volta.
     const { matched, matchedLabels } = matchFieldValues(values, "12345678901");
     expect(matched).toBe(true);
     expect(matchedLabels).toEqual(["CPF"]);
@@ -133,32 +138,89 @@ describe("busca ampla", () => {
   });
 });
 
-describe("aviso de sensibilidade (só aviso)", () => {
-  it("marca os campos pessoais da org", () => {
+describe("aviso de sensibilidade", () => {
+  it("marca dado pessoal que existe em qualquer ramo", () => {
     for (const [name, label] of [
       ["cpf", "CPF"],
-      ["rgm", "RGM"],
+      ["cnpj_empresa", "CNPJ"],
       ["data_de_nascimento", "Data Nascimento"],
-      ["email_academico", "Email acadêmico"],
+      ["email_alternativo", "E-mail alternativo"],
+      ["senha_portal", "Senha do portal"],
+      ["renda_familiar", "Renda familiar"],
       ["inadimplente", "Inadimplente"],
-      ["situacao_matricula", "Situação Matrícula"],
     ]) {
-      expect(looksSensitive(name, label)).toBe(true);
+      expect(looksSensitive(name, label), `${name} deveria acender`).toBe(true);
     }
   });
 
   it("não marca campo operacional", () => {
-    expect(looksSensitive("curso", "Curso")).toBe(false);
-    expect(looksSensitive("polo", "Polo")).toBe(false);
+    for (const [name, label] of [
+      ["curso", "Curso"],
+      ["polo", "Polo"],
+      ["codigo_imovel", "Código do imóvel"],
+      ["etapa", "Etapa"],
+    ]) {
+      expect(looksSensitive(name, label), `${name} não deveria acender`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("termo curto casa palavra inteira, não trecho de outra palavra", () => {
+    // "rg" não pode acender em "argumento" nem em "rgm".
+    expect(looksSensitive("rg", "RG")).toBe(true);
+    expect(looksSensitive("argumento_venda", "Argumento de venda")).toBe(false);
+  });
+
+  it("jargão da organização entra por configuração, não pelo código", () => {
+    // "RGM" é o nome que UMA faculdade dá ao registro dela. O produto não
+    // conhece esse termo; o operador declara.
+    expect(looksSensitive("rgm", "RGM")).toBe(false);
+    expect(looksSensitive("rgm", "RGM", ["rgm"])).toBe(true);
+    expect(looksSensitive("prontuario", "Prontuário", ["prontuario"])).toBe(
+      true,
+    );
+  });
+
+  it("o aviso NÃO bloqueia leitura — só a allowlist decide", () => {
+    const cpf = field("cpf", "CPF");
+    expect(cpf.sensitiveHint).toBe(true);
+    const { visible, hiddenLabels } = partitionFieldValues(
+      [{ field: cpf, value: "12345678901" }],
+      { readableKeys: ["deal.cpf"], orgWide: false },
+    );
+    // O operador liberou: o valor sai, apesar do aviso.
+    expect(visible).toEqual([{ label: "CPF", value: "12345678901" }]);
+    expect(hiddenLabels).toEqual([]);
   });
 });
 
 describe("orientação e configuração", () => {
-  it("a orientação proíbe explicitamente os dados sensíveis", () => {
-    for (const termo of ["CPF", "RGM", "senha", "inadimplência"]) {
+  it("a orientação não usa vocabulário de nenhum ramo", () => {
+    const proibidos = [
+      "aluno",
+      "matrícula",
+      "matricula",
+      "curso",
+      "instituição",
+      "faculdade",
+      "acadêmic",
+      "RGM",
+      "paciente",
+      "imóvel",
+    ];
+    const texto = CRM_SEARCH_GUIDANCE.toLowerCase();
+    for (const termo of proibidos) {
+      expect(texto, `orientação cita "${termo}"`).not.toContain(
+        termo.toLowerCase(),
+      );
+    }
+  });
+
+  it("a orientação cobre busca, redação e proibição", () => {
+    for (const termo of ["hiddenFields", "fields", "QUANDO USAR", "NUNCA"]) {
       expect(CRM_SEARCH_GUIDANCE).toContain(termo);
     }
-    expect(CRM_SEARCH_GUIDANCE).toContain("hiddenFields");
   });
 
   it("a description avisa o modelo quando nada foi liberado", () => {
@@ -174,15 +236,18 @@ describe("orientação e configuração", () => {
     const policy = normalizeToolPolicy({
       readableFields: ["deal.curso", "deal.polo", "  ", "deal.curso"],
       allowOrgWideSearch: true,
+      sensitiveTerms: ["rgm"],
     });
     expect(policy.readableFields).toEqual(["deal.curso", "deal.polo"]);
     expect(policy.allowOrgWideSearch).toBe(true);
+    expect(policy.sensitiveTerms).toEqual(["rgm"]);
   });
 
   it("policy default não libera nada nem é persistida", () => {
     const base = emptyToolPolicy();
     expect(base.readableFields).toEqual([]);
     expect(base.allowOrgWideSearch).toBe(false);
+    expect(base.sensitiveTerms).toEqual([]);
     expect(isEmptyToolPolicy(base)).toBe(true);
     expect(normalizeToolConfig({ search_crm_records: {} })).toEqual({});
   });

@@ -65,6 +65,11 @@ export type ToolPolicy = {
   /// Permite procurar registros de terceiros (`scope: "organization"`).
   /// Falso = o agente só lê o cadastro de quem está na conversa.
   allowOrgWideSearch: boolean;
+  /// Jargão desta organização que deve acender o aviso de "campo sensível"
+  /// na tela de configuração (ex.: o nome que ela dá ao número de
+  /// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do
+  /// produto. É só aviso visual — não bloqueia leitura nem busca.
+  sensitiveTerms: string[];
 };
 
 export type ToolConfigMap = Record<string, ToolPolicy>;
@@ -84,6 +89,7 @@ export function emptyToolPolicy(): ToolPolicy {
     transferMessage: null,
     readableFields: [],
     allowOrgWideSearch: false,
+    sensitiveTerms: [],
   };
 }
 
@@ -132,6 +138,7 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     transferMessage: nullableText(r.transferMessage),
     readableFields: strList(r.readableFields),
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
+    sensitiveTerms: strList(r.sensitiveTerms),
   };
 }
 
@@ -150,7 +157,8 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     !p.policyText &&
     !p.transferMessage &&
     p.readableFields.length === 0 &&
-    !p.allowOrgWideSearch
+    !p.allowOrgWideSearch &&
+    p.sensitiveTerms.length === 0
   );
 }
 
