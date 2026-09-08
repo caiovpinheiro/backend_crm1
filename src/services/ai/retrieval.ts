@@ -184,6 +184,27 @@ export const KNOWLEDGE_PRECEDENCE_RULE =
   "PRECEDÊNCIA: se as referências acima cobrem a pergunta, responda com elas nesta mensagem — não transfira nem encaminhe por esse assunto.";
 
 /**
+ * Precedência do DADO sobre o "onde consultar", e cobertura do que foi
+ * recuperado.
+ *
+ * Medição do prompt real: numa pergunta por datas de prova, dos 4 trechos
+ * recuperados três diziam apenas ONDE procurar a data ("aba Avisos da
+ * disciplina", "cronograma do semestre", "plataforma") e só um trazia o
+ * calendário com as datas. O modelo respondia com o "onde procurar" e
+ * negava ter a data que estava no próprio contexto. Na vez em que
+ * entregava, resumia um documento de quatro meses em duas frases e pulava
+ * um mês inteiro sem avisar.
+ *
+ * Genérica de propósito — nenhum tema, departamento ou vertical.
+ */
+export const KNOWLEDGE_FACTS_PRECEDENCE_RULE = [
+  "DADO EXPLÍCITO NAS REFERÊNCIAS É FATO: se uma referência traz a data, o prazo ou o valor, ENTREGUE o dado nesta mensagem.",
+  'PROIBIDO responder que "varia", que "depende" ou mandar consultar em outro canal (aviso, mural, plataforma, e-mail, outro setor) um dado que já está nas referências.',
+  'Se uma referência diz ONDE consultar e outra traz o dado em si, vale a que traz o DADO. O "onde consultar" só entra depois, como complemento.',
+  "COBERTURA: ao resumir uma referência com vários períodos ou itens (meses, etapas, prazos), não omita nenhum que a pergunta abranja. Se não couber tudo, diga quantos são — PROIBIDO apresentar lista parcial como se fosse completa.",
+].join("\n");
+
+/**
  * Monta um bloco de texto pronto pra injetar no system prompt.
  * Retorna string vazia se nada relevante foi encontrado — e sem trecho
  * recuperado a regra de precedência também não entra no prompt.
@@ -202,6 +223,7 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
     // fazia o índice do chunk chegar no WhatsApp do aluno.
     "BASE DE CONHECIMENTO (use para fundamentar respostas). O [N] é índice interno: PROIBIDO escrever [1], [2] ou qualquer marcador de fonte na resposta ao cliente.",
     sections,
+    KNOWLEDGE_FACTS_PRECEDENCE_RULE,
     KNOWLEDGE_PRECEDENCE_RULE,
   ].join("\n");
 }

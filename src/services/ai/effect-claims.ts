@@ -151,9 +151,17 @@ export function effectToolSucceeded(
 const CLAIM_PATTERNS: Record<EffectKind, RegExp[]> = {
   transfer: [
     /\b(vou|irei|ja vou)\s+(te\s+)?(transferir|passar|conectar|encaminhar|direcionar)/,
+    // Gerúndio: "Estou conectando você com um(a) consultor(a)" passou pela
+    // auditoria e chegou ao aluno com o gate de transferência fechado —
+    // promessa idêntica às de cima, só que sem o verbo no futuro.
+    /\b(estou|to|tou)\s+(te\s+)?(transferindo|passando|conectando|encaminhando|direcionando)/,
     /\bja\s+(te\s+)?(transferi|passei|conectei|encaminhei|direcionei)/,
     /\bja\s+(registrei|iniciei|pedi|chamei|acionei|solicitei)\b[^.!?]{0,60}\b(consultor|consultora|atendente|humano|equipe|setor|departamento|secretaria)/,
     /\b(voce|vc)\s+(ja\s+)?esta\s+(na\s+)?fila\b/,
+    // "já vai entrar na fila" / "coloquei você na fila": afirma a fila sem
+    // dizer "você está na fila", que era a única forma coberta.
+    /\b(ja\s+)?vai\s+entrar\s+na\s+fila\b/,
+    /\b(coloquei|botei|inclui)\s+(voce|vc|te)?\s*na\s+fila\b/,
     /\b(um|uma)\s+(consultor|consultora|atendente)\s+(vai|ira|já vai)\s+(te\s+)?(atender|falar|continuar|assumir)/,
     /\bte\s+(passei|passo|coloquei)\s+(para|pro|pra)\b/,
     /\bseu (pedido|atendimento) (ja )?(esta|foi) (com|encaminhad|transferid)/,
