@@ -178,6 +178,10 @@ export const RLS_PROTECTED_TABLES = [
   "ai_agent_runs",
   "ai_agent_messages",
   "organization_invites",
+  "email_accounts",
+  "emails",
+  "email_custom_folders",
+  "email_rules",
 ] as const;
 
 export type RlsProtectedTable = (typeof RLS_PROTECTED_TABLES)[number];

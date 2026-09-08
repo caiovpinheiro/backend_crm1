@@ -1,0 +1,27 @@
+import { NextResponse } from "next/server";
+
+import { requireAuth } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
+import { disconnectEmailAccount, getAccessibleAccount, resolveEmailAccess } from "@/services/email-accounts";
+
+export const dynamic = "force-dynamic";
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
+  const denied = await requirePermission(r.session.user, "email_account:connect");
+  if (denied) return denied;
+
+  const { id } = await params;
+  const access = await resolveEmailAccess(r.session.user);
+  const account = await getAccessibleAccount(id, access);
+  if (!account) {
+    return NextResponse.json({ message: "Conta não encontrada." }, { status: 404 });
+  }
+
+  await disconnectEmailAccount(id);
+  return NextResponse.json({ ok: true });
+}

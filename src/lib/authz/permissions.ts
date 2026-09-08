@@ -294,6 +294,16 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "email_account",
+    label: "Contas de e-mail",
+    description: "Caixas IMAP/SMTP conectadas ao CRM.",
+    actions: [
+      { action: "view", label: "Ver caixas compartilhadas" },
+      { action: "view_own", label: "Ver a própria caixa pessoal" },
+      { action: "connect", label: "Conectar / desconectar conta" },
+    ],
+  },
+  {
     resource: "template",
     label: "Templates de Mensagem",
     actions: [
@@ -343,6 +353,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "calls",        label: "Chamadas (histórico)" },
       { action: "demands",      label: "Demandas (roadmap)" },
       { action: "team-chat",    label: "Chat interno" },
+      { action: "email",        label: "E-mail (caixa IMAP)" },
     ],
   },
 ];

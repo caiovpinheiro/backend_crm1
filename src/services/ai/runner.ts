@@ -83,7 +83,10 @@ import {
   auditEffectClaims,
   NEUTRAL_EFFECT_FALLBACK,
 } from "@/services/ai/effect-claims";
-import { buildRetrievalQuery } from "@/services/ai/retrieval-query";
+import {
+  buildRetrievalQuery,
+  trimToRecentSession,
+} from "@/services/ai/retrieval-query";
 import {
   deriveRunOutcome,
   statusForOutcome,
@@ -128,7 +131,14 @@ export type RunArgs = {
   dealId?: string | null;
   /// Turns anteriores (para manter contexto). Se omitido e tiver
   /// conversationId, o runner busca automaticamente as últimas 10.
-  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  /// `at` só existe no histórico carregado do banco e serve para recortar a
+  /// query de recuperação na conversa contígua — quem passa histórico na mão
+  /// (playground) manda um bloco só e não precisa do corte.
+  history?: Array<{
+    role: "user" | "assistant";
+    content: string;
+    at?: Date | null;
+  }>;
   /// `ConversationTurn.id` que originou o run (Turn Manager). Só gravado
   /// no `AIAgentRun` — não altera o comportamento do agente.
   turnId?: string | null;
@@ -240,11 +250,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         })
       : null;
 
-    const history =
+    const timedHistory =
       args.history ??
       (await loadHistoryFromConversation(args.conversationId ?? null));
+    // O modelo continua lendo a janela inteira; o `at` é só para recortar a
+    // busca, e não pode vazar para as `ModelMessage` do provider.
+    const history = timedHistory.map(({ role, content }) => ({
+      role,
+      content,
+    }));
 
-    const priorUserMessages = history
+    // Só o trecho contíguo: depois de meia hora de silêncio o assunto virou
+    // outro. Sem esse corte, pergunta morta de horas antes entrava na query e
+    // afundava o documento que respondia a pergunta de agora.
+    const priorUserMessages = trimToRecentSession(timedHistory)
       .filter((m) => m.role === "user")
       .map((m) => m.content);
 
@@ -700,7 +719,9 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
 async function loadHistoryFromConversation(
   conversationId: string | null,
-): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+): Promise<
+  Array<{ role: "user" | "assistant"; content: string; at: Date | null }>
+> {
   if (!conversationId) return [];
   const msgs = await prisma.message.findMany({
     where: { conversationId },
@@ -712,6 +733,7 @@ async function loadHistoryFromConversation(
       messageType: true,
       templateConfigId: true,
       senderName: true,
+      createdAt: true,
     },
   });
   const chronological = msgs.reverse().filter((m) => !!m.content);
@@ -730,6 +752,7 @@ async function loadHistoryFromConversation(
       return {
         role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
         content,
+        at: m.createdAt ?? null,
       };
     }),
   );

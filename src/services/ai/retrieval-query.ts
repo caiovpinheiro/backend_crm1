@@ -18,6 +18,14 @@
  * perguntas de 40 minutos antes para quem estava tratando de outro assunto.
  * Placeholder de mídia e mensagem vazia são AUSÊNCIA de conteúdo: não entram
  * na query e não disparam a heurística de histórico.
+ *
+ * Mesma família de falha medida em 08/09, agora pelo peso do histórico:
+ * "Sobre as provas? / Quando / Nao tem as datas?" recuperou os documentos de
+ * prova mas NÃO o calendário, que tinha as datas. A janela de histórico ainda
+ * continha "qual é meu email academico?" repetido, de 2h40 antes; repetido, o
+ * assunto morto dominou o embedding e empurrou o calendário para fora do
+ * topK. Daí os dois cortes abaixo: `trimToRecentSession` (silêncio longo
+ * encerra o assunto) e a deduplicação (mensagem repetida não vale mais).
  */
 
 import {
@@ -31,6 +39,12 @@ const DEICTIC_HISTORY_DEPTH = 4;
 const DEFAULT_HISTORY_DEPTH = 2;
 /** Abaixo disso a mensagem não carrega assunto sozinha. */
 const SHORT_MESSAGE_CHARS = 25;
+/**
+ * Silêncio que encerra o assunto. Mesma ordem de grandeza do check-in de
+ * inatividade da IA (`IDLE_NUDGE_MS`), mas constante própria: mudar o tempo
+ * do nudge não deve mexer no que a busca enxerga.
+ */
+export const RETRIEVAL_SESSION_GAP_MS = 30 * 60 * 1000;
 
 /**
  * Mensagens que só apontam para o que já foi dito. Sem assunto próprio:
@@ -47,6 +61,37 @@ export function isDeicticMessage(message: string): boolean {
   const t = message.trim();
   if (!t) return true;
   return DEICTIC_PATTERNS.some((p) => p.test(t));
+}
+
+/**
+ * Recorta o histórico na conversa contígua mais recente: anda de trás para
+ * frente e para no primeiro silêncio maior que `gapMs`. O que veio antes do
+ * silêncio é assunto encerrado — continua valendo para o modelo ler, mas não
+ * pode pesar na busca.
+ *
+ * Itens sem `at` (playground, que manda o histórico na mão) não cortam nada.
+ */
+export function trimToRecentSession<T extends object>(
+  messages: T[],
+  gapMs: number = RETRIEVAL_SESSION_GAP_MS,
+): T[] {
+  const sentAt = (message: T | undefined): Date | null => {
+    const value = (message as { at?: Date | null } | undefined)?.at;
+    return value instanceof Date ? value : null;
+  };
+
+  for (let i = messages.length - 1; i > 0; i -= 1) {
+    const current = sentAt(messages[i]);
+    const previous = sentAt(messages[i - 1]);
+    if (!current || !previous) continue;
+    if (current.getTime() - previous.getTime() > gapMs) return messages.slice(i);
+  }
+  return messages;
+}
+
+/** Chave de comparação: a mesma pergunta repetida não vale duas vezes. */
+function dedupKey(message: string): string {
+  return message.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 export function needsHistoryContext(message: string): boolean {
@@ -78,10 +123,23 @@ export function buildRetrievalQuery(input: {
     ? DEICTIC_HISTORY_DEPTH
     : DEFAULT_HISTORY_DEPTH;
 
-  const history = (input.priorUserMessages ?? [])
+  const candidates = (input.priorUserMessages ?? [])
     .map((m) => stripMediaPlaceholders(m))
-    .filter((m) => m.length > 0 && !isDeicticMessage(m))
-    .slice(-depth);
+    .filter((m) => m.length > 0 && !isDeicticMessage(m));
 
-  return [...history, current].filter(Boolean).join("\n");
+  // De trás para frente para manter a ocorrência mais recente, e só então
+  // cortar em `depth`: repetição não pode consumir as vagas do histórico.
+  // A mensagem atual já entra no fim da query — no inbox ela também está no
+  // histórico carregado do banco, e entrava duas vezes.
+  const seen = new Set<string>([dedupKey(current)]);
+  const history: string[] = [];
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    const message = candidates[i] as string;
+    const key = dedupKey(message);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    history.unshift(message);
+  }
+
+  return [...history.slice(-depth), current].filter(Boolean).join("\n");
 }
