@@ -30,8 +30,43 @@ export function shouldClearOwnershipOnIneligible(
   return reasons.some((r) => r !== "QUEUE_LIMIT_REACHED");
 }
 
+/**
+ * Conversa já trabalhada por humano não troca de dono só porque o passo da
+ * automação pede outro departamento. Divergência de departamento é
+ * roteamento; atendimento em curso é fato — e foi o que arrancou o aluno da
+ * tela do consultor em 08/set/26. Indisponibilidade real (offline, fora do
+ * expediente, dono que saiu da distribuição) continua liberando o lead.
+ */
+export function shouldKeepAssigneeInAttendance(args: {
+  /** O passo pediu um pool de departamentos. */
+  departmentScoped: boolean;
+  /** Dono é elegível DENTRO do pool pedido. */
+  eligibleInDepartment: boolean;
+  /** Dono é elegível ignorando o departamento — só o depto o barra. */
+  eligibleOutsideDepartment: boolean;
+  /** Humano já respondeu NESTA conversa. */
+  hasHumanReply: boolean;
+  isAi: boolean;
+}): boolean {
+  if (args.isAi) return false;
+  if (!args.departmentScoped) return false;
+  if (args.eligibleInDepartment) return false;
+  // Barrado por algo além do departamento (offline etc.) → redistribui.
+  if (!args.eligibleOutsideDepartment) return false;
+  return args.hasHumanReply;
+}
+
+/**
+ * @param departmentIds Pool de departamentos pedido por quem chamou (passo
+ * `execute_distribution`, handoff). Quando preenchido, o dono atual só é
+ * considerado elegível se for membro de um deles — senão volta
+ * `DEPARTMENT_MISMATCH` e o lead é redistribuído dentro do departamento
+ * pedido. Vazio/omitido = sem restrição de departamento (comportamento
+ * anterior).
+ */
 export async function isAssigneeCurrentlyEligible(
   userId: string,
+  departmentIds?: readonly string[] | null,
 ): Promise<{
   eligible: boolean;
   isAi: boolean;
@@ -46,7 +81,11 @@ export async function isAssigneeCurrentlyEligible(
   if (user.type === "AI") return { eligible: false, isAi: true, reason: "AI_NOT_HUMAN_DISTRIBUTION" };
 
   try {
-    const views = await getDistributionResponsibles();
+    const views = await getDistributionResponsibles(
+      departmentIds && departmentIds.length > 0
+        ? { departmentIds: [...departmentIds] }
+        : {},
+    );
     const view = views.find((r) => r.userId === userId);
     if (!view) {
       // Humano fora do módulo de distribuição: não herdar automaticamente.

@@ -174,6 +174,64 @@ export function readStepAllowedChannelIds(cfg: unknown): string[] | null {
   return unique.length > 0 ? unique : null;
 }
 
+/**
+ * Departamentos do passo `execute_distribution`. Campo preenchido manda
+ * exatamente o que o operador escolheu. Campo VAZIO significa "usar o
+ * departamento da conversa" (`Conversation.departmentId`); só quando a
+ * conversa também não tem departamento o motor distribui org-wide (`null`).
+ */
+export function readStepDistributionDepartmentIds(
+  cfg: unknown,
+  conversationDepartmentId?: string | null,
+): string[] | null {
+  const c = asRecord(cfg);
+  const many = Array.isArray(c.departmentIds)
+    ? c.departmentIds
+        .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((s) => s.trim())
+    : [];
+  // Retrocompat: config antiga com `departmentId` singular.
+  if (typeof c.departmentId === "string" && c.departmentId.trim() !== "") {
+    many.push(c.departmentId.trim());
+  }
+  const unique = [...new Set(many)];
+  if (unique.length > 0) return unique;
+  const inherited = conversationDepartmentId?.trim() ?? "";
+  return inherited === "" ? null : [inherited];
+}
+
+/**
+ * Escopo do passo `execute_distribution` COM a origem do departamento.
+ *
+ * A origem decide o que acontece quando o pool fica sem ninguém elegível:
+ *  - `explicit`: o operador escolheu o departamento no nó. É regra — pool
+ *    fechado, o lead espera na fila daquele departamento.
+ *  - `inherited`: campo vazio, departamento veio da conversa. É palpite do
+ *    sistema — tenta o departamento, mas cai para org-wide em vez de prender
+ *    o aluno numa fila que ninguém drena (incidente 08/set/26: leads presos
+ *    no Acolhimento à noite, com o pool de 4 pessoas offline).
+ *  - `org-wide`: nem passo nem conversa têm departamento.
+ */
+export type StepDistributionScope = {
+  departmentIds: string[] | null;
+  origin: "explicit" | "inherited" | "org-wide";
+};
+
+export function resolveStepDistributionScope(
+  cfg: unknown,
+  conversationDepartmentId?: string | null,
+): StepDistributionScope {
+  const explicit = readStepDistributionDepartmentIds(cfg);
+  if (explicit) return { departmentIds: explicit, origin: "explicit" };
+  const inherited = readStepDistributionDepartmentIds(
+    cfg,
+    conversationDepartmentId,
+  );
+  return inherited
+    ? { departmentIds: inherited, origin: "inherited" }
+    : { departmentIds: null, origin: "org-wide" };
+}
+
 export function inheritedChannelFromTrigger(triggerConfig: unknown): string {
   const ids = readTriggerChannelIds(triggerConfig);
   return ids.length === 1 ? ids[0]! : "";

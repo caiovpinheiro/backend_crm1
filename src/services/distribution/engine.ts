@@ -27,10 +27,13 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
+import { getHumanAttendanceForConversation } from "@/services/attendance-guards";
+
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
   shouldClearOwnershipOnIneligible,
+  shouldKeepAssigneeInAttendance,
 } from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
@@ -53,6 +56,13 @@ export type DistributionReason =
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
   | "RETIRED_WHATSAPP_CHANNEL";
+
+/**
+ * Só para o `DistributionLog` (coluna livre): registra que a redistribuição
+ * foi pulada porque a conversa estava em atendimento humano. O resultado do
+ * motor continua `ASSIGNED` — o contrato público não muda.
+ */
+type DistributionLogReason = DistributionReason | "KEPT_HUMAN_ATTENDING";
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
@@ -453,7 +463,7 @@ async function resolveLogDepartmentId(
 async function writeLog(
   input: ExecuteDistributionInput,
   success: boolean,
-  reason: DistributionReason,
+  reason: DistributionLogReason,
   selectedUserId: string | null,
   evaluated: EvaluatedResponsibleSummary[],
 ): Promise<void> {
@@ -581,6 +591,37 @@ export async function executeDistribution(
 
   const input = await hydrateDistributionIds(rawInput);
 
+  // Pool explícito (departmentIds) ou departmentId da conversa — força
+  // o escopo mesmo com respectDepartment=false. Sem isso a drenagem
+  // SYSTEM entregava lead de Retenção para Atendimento. Sem departmentId
+  // o lead continua org-wide.
+  //
+  // Resolvido ANTES do atalho "já tem responsável": aquele caminho também
+  // precisa saber qual departamento foi pedido, senão mantém um dono de
+  // fora dele (ver `isAssigneeCurrentlyEligible` abaixo).
+  const requestedDeptIds = Array.from(
+    new Set(
+      [
+        ...(input.departmentIds ?? []),
+        ...(input.departmentId ? [input.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  // Nunca aceita departmentId de outra organização (cross-tenant).
+  const orgIdForDept = getOrgIdOrThrow();
+  const explicitDeptIds =
+    requestedDeptIds.length > 0
+      ? (
+          await prisma.department.findMany({
+            where: {
+              organizationId: orgIdForDept,
+              id: { in: requestedDeptIds },
+            },
+            select: { id: true },
+          })
+        ).map((d) => d.id)
+      : [];
+
   // Snapshot ANTES do reassign limpar o assignee — usado para disparar
   // `lead_distributed` quando um HUMAN assume vindo de IA/sem dono
   // (mesmo se a conversa já teve resposta humana antes).
@@ -621,13 +662,53 @@ export async function executeDistribution(
     });
     if (already?.assignedToId) {
       const contactId = input.contactId ?? already.contactId ?? null;
-      const check = await isAssigneeCurrentlyEligible(already.assignedToId);
+      const check = await isAssigneeCurrentlyEligible(
+        already.assignedToId,
+        explicitDeptIds,
+      );
+      // Atendimento em curso não é redistribuído por divergência de
+      // departamento: o consultor perde o aluno da tela no meio da conversa
+      // (incidente 08/set/26). Só vale quando o departamento é a ÚNICA
+      // barreira — offline / fora do expediente seguem liberando.
+      let keptInAttendance = false;
+      if (!check.eligible && !check.isAi && explicitDeptIds.length > 0) {
+        const orgWide = await isAssigneeCurrentlyEligible(already.assignedToId);
+        const attendance = await getHumanAttendanceForConversation(
+          input.conversationId,
+        );
+        keptInAttendance = shouldKeepAssigneeInAttendance({
+          departmentScoped: true,
+          eligibleInDepartment: check.eligible,
+          eligibleOutsideDepartment: orgWide.eligible,
+          hasHumanReply: Boolean(attendance?.hasHumanReply),
+          isAi: check.isAi,
+        });
+        if (keptInAttendance) {
+          console.warn(
+            "[distribution] redistribuição pulada — conversa em atendimento",
+            JSON.stringify({
+              conversationId: input.conversationId,
+              assignedToId: already.assignedToId,
+              departamentoEsperado: explicitDeptIds,
+              triggerSource: input.triggerSource,
+            }),
+          );
+          await writeLog(
+            input,
+            true,
+            "KEPT_HUMAN_ATTENDING",
+            already.assignedToId,
+            [],
+          );
+        }
+      }
       // O teto de fila barra lead NOVO; não tira de quem já é responsável.
       // Soltar o dono por fila cheia jogaria o ticket na fila de espera sem
       // ninguém elegível. Offline / fora do expediente seguem liberando.
       const keepHumanAssignee =
         !check.isAi &&
         (check.eligible ||
+          keptInAttendance ||
           !shouldClearOwnershipOnIneligible(
             check.reason,
             check.blockedReasons,
@@ -698,7 +779,10 @@ export async function executeDistribution(
     if (contactId) {
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
-        const healCheck = await isAssigneeCurrentlyEligible(healed);
+        const healCheck = await isAssigneeCurrentlyEligible(
+          healed,
+          explicitDeptIds,
+        );
         const healKeep =
           !healCheck.isAi &&
           (healCheck.eligible ||
@@ -785,33 +869,6 @@ export async function executeDistribution(
       }
     }
   }
-
-  // Pool explícito (departmentIds) ou departmentId da conversa — força
-  // o escopo mesmo com respectDepartment=false. Sem isso a drenagem
-  // SYSTEM entregava lead de Retenção para Atendimento. Sem departmentId
-  // o lead continua org-wide.
-  const requestedDeptIds = Array.from(
-    new Set(
-      [
-        ...(input.departmentIds ?? []),
-        ...(input.departmentId ? [input.departmentId] : []),
-      ].filter((id): id is string => typeof id === "string" && id.length > 0),
-    ),
-  );
-  // Nunca aceita departmentId de outra organização (cross-tenant).
-  const orgIdForDept = getOrgIdOrThrow();
-  const explicitDeptIds =
-    requestedDeptIds.length > 0
-      ? (
-          await prisma.department.findMany({
-            where: {
-              organizationId: orgIdForDept,
-              id: { in: requestedDeptIds },
-            },
-            select: { id: true },
-          })
-        ).map((d) => d.id)
-      : [];
 
   let responsibles;
   let departmentScoped = false;
