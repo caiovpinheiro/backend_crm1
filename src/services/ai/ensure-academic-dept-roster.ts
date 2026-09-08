@@ -1,10 +1,10 @@
 /**
  * Garante roster acadêmico de departamentos + membros (idempotente).
  *
- * Regras de membership (produção):
- *  - Wesley, Danúbia → Acolhimento + Retenção
- *  - Marília → Acolhimento
- *  - Demais consultores do roster → Atendimento (- SAC)
+ * O mapa de e-mails abaixo é só SEED inicial: aplica se o consultor
+ * ainda não tem nenhum departamento acadêmico. Quem já foi editado na
+ * tela (ex.: Danúbia só em Acolhimento) NÃO é reescrito — senão o
+ * handoff / sync de 5 min devolvia Retenção.
  *
  * Também liga `distributionEnabled` nos 3 departamentos para o motor
  * filtrar por dept no handoff da IA.
@@ -238,6 +238,17 @@ export async function ensureAcademicDepartmentRoster(opts?: {
       });
       if (!user) {
         missing.push(row.email);
+        continue;
+      }
+
+      const alreadyConfigured = await prisma.departmentMember.count({
+        where: {
+          userId: user.id,
+          organizationId: orgId,
+          departmentId: { in: [...academicIdSet] },
+        },
+      });
+      if (alreadyConfigured > 0) {
         continue;
       }
 
