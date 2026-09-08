@@ -174,6 +174,32 @@ export function readStepAllowedChannelIds(cfg: unknown): string[] | null {
   return unique.length > 0 ? unique : null;
 }
 
+/**
+ * Departamentos do passo `execute_distribution`. Campo preenchido manda
+ * exatamente o que o operador escolheu. Campo VAZIO significa "usar o
+ * departamento da conversa" (`Conversation.departmentId`); só quando a
+ * conversa também não tem departamento o motor distribui org-wide (`null`).
+ */
+export function readStepDistributionDepartmentIds(
+  cfg: unknown,
+  conversationDepartmentId?: string | null,
+): string[] | null {
+  const c = asRecord(cfg);
+  const many = Array.isArray(c.departmentIds)
+    ? c.departmentIds
+        .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((s) => s.trim())
+    : [];
+  // Retrocompat: config antiga com `departmentId` singular.
+  if (typeof c.departmentId === "string" && c.departmentId.trim() !== "") {
+    many.push(c.departmentId.trim());
+  }
+  const unique = [...new Set(many)];
+  if (unique.length > 0) return unique;
+  const inherited = conversationDepartmentId?.trim() ?? "";
+  return inherited === "" ? null : [inherited];
+}
+
 export function inheritedChannelFromTrigger(triggerConfig: unknown): string {
   const ids = readTriggerChannelIds(triggerConfig);
   return ids.length === 1 ? ids[0]! : "";

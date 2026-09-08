@@ -17,7 +17,11 @@ import {
   normalizeRoundRobinConfig,
   roundRobinOptionsSignature,
 } from "@/lib/automation-round-robin";
-import { readStepAllowedChannelIds, triggerTypeLabel } from "@/lib/automation-workflow";
+import {
+  readStepAllowedChannelIds,
+  readStepDistributionDepartmentIds,
+  triggerTypeLabel,
+} from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
@@ -2184,21 +2188,26 @@ async function executeStep(
       // aqui só decidimos qual ramo do fluxo seguir. Não lançamos erro: a
       // ausência de agente é um resultado de negócio esperado, não falha.
       const distributionType = readString(cfg, "distributionType") ?? null;
-      const departmentIdsRaw = Array.isArray(cfg.departmentIds)
-        ? cfg.departmentIds
-        : [];
-      const departmentIds = departmentIdsRaw
-        .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-        .map((v) => v.trim());
-      // Retrocompat: config antiga com departmentId singular.
-      const legacyDept = readString(cfg, "departmentId");
-      if (legacyDept && !departmentIds.includes(legacyDept)) {
-        departmentIds.push(legacyDept);
-      }
       const conversationId =
         rt.conversation && typeof rt.conversation === "object"
           ? ((rt.conversation as { id?: string }).id ?? null)
           : null;
+
+      // Campo de departamento vazio no nó = herda o departamento da conversa
+      // (marcado por transferências / `set_department`). Só cai em org-wide
+      // quando a conversa também não tem departamento — antes, passo vazio
+      // era sempre org-wide e vazava lead para fora do departamento.
+      let departmentIds = readStepDistributionDepartmentIds(cfg);
+      if (!departmentIds && conversationId) {
+        const conv = await prisma.conversation.findUnique({
+          where: { id: conversationId },
+          select: { departmentId: true },
+        });
+        departmentIds = readStepDistributionDepartmentIds(
+          cfg,
+          conv?.departmentId ?? null,
+        );
+      }
 
       const result = await executeDistribution({
         dealId: rt.dealId ?? null,
@@ -2206,7 +2215,7 @@ async function executeStep(
         conversationId,
         triggerSource: "AUTOMATION",
         distributionType,
-        departmentIds: departmentIds.length > 0 ? departmentIds : null,
+        departmentIds,
       });
 
       if (result.success) {
