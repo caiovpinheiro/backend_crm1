@@ -196,6 +196,9 @@ export type RenderArgs = {
   productPolicy: string | null;
   hasProductSearch: boolean;
   hasEnrollmentLookup: boolean;
+  /// `search_crm_records` habilitada. A orientação de uso fica na
+  /// description da tool; aqui só entra o empurrão para chamá-la.
+  hasCrmFieldSearch: boolean;
   tone: string;
   language: string;
   autonomyMode: AIAgentAutonomy;
@@ -295,6 +298,18 @@ export function renderSystemPrompt(args: RenderArgs): string {
     lines.push("");
     lines.push(
       "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+    );
+  }
+
+  // Sem este empurrão a tool ficava inerte: com `consultar_matricula`
+  // anunciada aqui e a busca de campos só na própria description, o modelo
+  // usava a primeira para tudo. A orientação de uso NÃO se repete aqui —
+  // ela vive em `CRM_SEARCH_GUIDANCE`, na description da tool.
+  if (args.hasCrmFieldSearch) {
+    lines.push("");
+    lines.push(
+      "Antes de responder sobre o cadastro da pessoa (etapa, documentos, status, campos que a instituição registrou), chame `search_crm_records`. Não responda de memória e não deduza.",
+      "Leia só o que vier em `fields`. O que vier em `hiddenFields` você não pode repassar — nesse caso encaminhe para um consultor.",
     );
   }
 

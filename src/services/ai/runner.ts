@@ -428,6 +428,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       productPolicy: agent.productPolicy,
       hasProductSearch: runtimeTools.includes("search_products"),
       hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
+      hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),
       tone: agent.tone,
       language: agent.language,
       autonomyMode: agent.autonomyMode,

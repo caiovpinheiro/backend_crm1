@@ -21,6 +21,7 @@ const BASE: RenderArgs = {
   productPolicy: null,
   hasProductSearch: false,
   hasEnrollmentLookup: false,
+  hasCrmFieldSearch: false,
   tone: "profissional",
   language: "pt-BR",
   autonomyMode: "AUTONOMOUS",

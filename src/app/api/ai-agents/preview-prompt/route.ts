@@ -77,6 +77,7 @@ export async function POST(request: Request) {
         typeof body.productPolicy === "string" ? body.productPolicy : null,
       hasProductSearch: enabledTools.includes("search_products"),
       hasEnrollmentLookup: enabledTools.includes("consultar_matricula"),
+      hasCrmFieldSearch: enabledTools.includes("search_crm_records"),
       tone: typeof body.tone === "string" ? body.tone : "profissional",
       language: typeof body.language === "string" ? body.language : "pt-BR",
       autonomyMode:
