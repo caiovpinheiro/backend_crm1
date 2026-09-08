@@ -581,6 +581,37 @@ export async function executeDistribution(
 
   const input = await hydrateDistributionIds(rawInput);
 
+  // Pool explícito (departmentIds) ou departmentId da conversa — força
+  // o escopo mesmo com respectDepartment=false. Sem isso a drenagem
+  // SYSTEM entregava lead de Retenção para Atendimento. Sem departmentId
+  // o lead continua org-wide.
+  //
+  // Resolvido ANTES do atalho "já tem responsável": aquele caminho também
+  // precisa saber qual departamento foi pedido, senão mantém um dono de
+  // fora dele (ver `isAssigneeCurrentlyEligible` abaixo).
+  const requestedDeptIds = Array.from(
+    new Set(
+      [
+        ...(input.departmentIds ?? []),
+        ...(input.departmentId ? [input.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  // Nunca aceita departmentId de outra organização (cross-tenant).
+  const orgIdForDept = getOrgIdOrThrow();
+  const explicitDeptIds =
+    requestedDeptIds.length > 0
+      ? (
+          await prisma.department.findMany({
+            where: {
+              organizationId: orgIdForDept,
+              id: { in: requestedDeptIds },
+            },
+            select: { id: true },
+          })
+        ).map((d) => d.id)
+      : [];
+
   // Snapshot ANTES do reassign limpar o assignee — usado para disparar
   // `lead_distributed` quando um HUMAN assume vindo de IA/sem dono
   // (mesmo se a conversa já teve resposta humana antes).
@@ -621,7 +652,10 @@ export async function executeDistribution(
     });
     if (already?.assignedToId) {
       const contactId = input.contactId ?? already.contactId ?? null;
-      const check = await isAssigneeCurrentlyEligible(already.assignedToId);
+      const check = await isAssigneeCurrentlyEligible(
+        already.assignedToId,
+        explicitDeptIds,
+      );
       // O teto de fila barra lead NOVO; não tira de quem já é responsável.
       // Soltar o dono por fila cheia jogaria o ticket na fila de espera sem
       // ninguém elegível. Offline / fora do expediente seguem liberando.
@@ -698,7 +732,10 @@ export async function executeDistribution(
     if (contactId) {
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
-        const healCheck = await isAssigneeCurrentlyEligible(healed);
+        const healCheck = await isAssigneeCurrentlyEligible(
+          healed,
+          explicitDeptIds,
+        );
         const healKeep =
           !healCheck.isAi &&
           (healCheck.eligible ||
@@ -785,33 +822,6 @@ export async function executeDistribution(
       }
     }
   }
-
-  // Pool explícito (departmentIds) ou departmentId da conversa — força
-  // o escopo mesmo com respectDepartment=false. Sem isso a drenagem
-  // SYSTEM entregava lead de Retenção para Atendimento. Sem departmentId
-  // o lead continua org-wide.
-  const requestedDeptIds = Array.from(
-    new Set(
-      [
-        ...(input.departmentIds ?? []),
-        ...(input.departmentId ? [input.departmentId] : []),
-      ].filter((id): id is string => typeof id === "string" && id.length > 0),
-    ),
-  );
-  // Nunca aceita departmentId de outra organização (cross-tenant).
-  const orgIdForDept = getOrgIdOrThrow();
-  const explicitDeptIds =
-    requestedDeptIds.length > 0
-      ? (
-          await prisma.department.findMany({
-            where: {
-              organizationId: orgIdForDept,
-              id: { in: requestedDeptIds },
-            },
-            select: { id: true },
-          })
-        ).map((d) => d.id)
-      : [];
 
   let responsibles;
   let departmentScoped = false;

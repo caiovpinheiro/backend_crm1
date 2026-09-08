@@ -30,8 +30,17 @@ export function shouldClearOwnershipOnIneligible(
   return reasons.some((r) => r !== "QUEUE_LIMIT_REACHED");
 }
 
+/**
+ * @param departmentIds Pool de departamentos pedido por quem chamou (passo
+ * `execute_distribution`, handoff). Quando preenchido, o dono atual só é
+ * considerado elegível se for membro de um deles — senão volta
+ * `DEPARTMENT_MISMATCH` e o lead é redistribuído dentro do departamento
+ * pedido. Vazio/omitido = sem restrição de departamento (comportamento
+ * anterior).
+ */
 export async function isAssigneeCurrentlyEligible(
   userId: string,
+  departmentIds?: readonly string[] | null,
 ): Promise<{
   eligible: boolean;
   isAi: boolean;
@@ -46,7 +55,11 @@ export async function isAssigneeCurrentlyEligible(
   if (user.type === "AI") return { eligible: false, isAi: true, reason: "AI_NOT_HUMAN_DISTRIBUTION" };
 
   try {
-    const views = await getDistributionResponsibles();
+    const views = await getDistributionResponsibles(
+      departmentIds && departmentIds.length > 0
+        ? { departmentIds: [...departmentIds] }
+        : {},
+    );
     const view = views.find((r) => r.userId === userId);
     if (!view) {
       // Humano fora do módulo de distribuição: não herdar automaticamente.
