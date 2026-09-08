@@ -836,6 +836,11 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
         data: { channelId: targetChannel.id },
       });
     }
+    await maybeDistributeNewInboundTicket({
+      conversationId: existing.id,
+      contactId,
+      assignedToId: existing.assignedToId ?? null,
+    });
     return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 

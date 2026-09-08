@@ -283,6 +283,11 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     if (Object.keys(updates).length > 0) {
       await prisma.conversation.update({ where: { id: existing.id }, data: updates });
     }
+    await maybeDistributeNewInboundTicket({
+      conversationId: existing.id,
+      contactId,
+      assignedToId: existing.assignedToId ?? null,
+    });
     return existing;
   }
 

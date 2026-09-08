@@ -738,12 +738,12 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
 }
 
 /**
- * Após criar um NOVO ticket OPEN inbound (modelo: RESOLVED não reabre),
- * tenta distribuir imediatamente se ainda não há responsável.
+ * Inbound do aluno (ticket novo OU conversa OPEN reusada): tenta
+ * atribuir um consultor elegível; sem elegíveis, entra na fila de espera.
  *
- * Cobre o caso Anna: distribuição falhou de manhã → ticket RESOLVED sem
- * assign → aluno volta → novo #N sem `execute_distribution` da automação.
- * Remapeia `distribution_pending` órfãs para o conversationId novo.
+ * Com o kill-switch de IA, o 1º atendimento não assume — o card não
+ * fica em Agente IA. Remapeia `distribution_pending` órfãs para o
+ * conversationId atual.
  *
  * Nunca propaga erro ao webhook — falha só loga.
  */
@@ -976,7 +976,17 @@ export async function maybeDistributeNewInboundTicket(input: {
       () => JSON.stringify({ widgetActive, convId: input.conversationId }),
     );
     // #endregion
-    if (!widgetActive) return;
+    if (!widgetActive) {
+      // IA off e sem widget: ainda assim o aluno não pode ficar sem fila.
+      if (!(await isAiAttendanceEnabled())) {
+        await ensureConversationInWaitingQueue({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          triggerSource: "SYSTEM",
+        });
+      }
+      return;
+    }
 
     // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
     // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.

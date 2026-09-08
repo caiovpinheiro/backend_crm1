@@ -393,6 +393,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         reason: "ai_attendance_disabled",
       });
+      const conv = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { assignedToId: true },
+      });
+      const { maybeDistributeNewInboundTicket } = await import(
+        "@/services/distribution"
+      );
+      await maybeDistributeNewInboundTicket({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        assignedToId: conv?.assignedToId ?? null,
+      });
       return;
     }
 
