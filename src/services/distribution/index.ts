@@ -32,6 +32,7 @@ export {
   executeDistribution,
   simulateDistribution,
   selectResponsible,
+  isDistributionEnabled,
   type DistributionResult,
   type DistributionReason,
   type DistributionTriggerSource,

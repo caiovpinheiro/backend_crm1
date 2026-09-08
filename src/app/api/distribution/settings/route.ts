@@ -9,6 +9,9 @@
  *       - true: quando a conversa tem um departamento com distribuição automática
  *         ligada, restringe aos membros desse departamento; sem departamento cai
  *         no org-wide.
+ *   - `enabled`:
+ *       - true (default): motor atribui e drena a fila.
+ *       - false: kill switch — inbound, automação, IA e drenagem não atribuem.
  *   - `autoOnInbound`:
  *       - true (default): todo ticket OPEN sem responsável entra na fila de
  *         espera (legado acadêmico — não exige passo na automação).
@@ -31,6 +34,7 @@ import {
 
 const RESPECT_DEPT_KEY = "distribution.respectDepartment";
 const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
+const ENABLED_KEY = "distribution.enabled";
 
 async function guard(session: {
   user: { id: string; organizationId: string | null; isSuperAdmin: boolean };
@@ -64,11 +68,12 @@ async function guard(session: {
 }
 
 async function readSettings() {
-  const [respectDepartment, autoOnInbound] = await Promise.all([
+  const [respectDepartment, autoOnInbound, enabled] = await Promise.all([
     getOrgSettingBool(RESPECT_DEPT_KEY, false),
     getOrgSettingBool(AUTO_ON_INBOUND_KEY, true),
+    getOrgSettingBool(ENABLED_KEY, true),
   ]);
-  return { respectDepartment, autoOnInbound };
+  return { respectDepartment, autoOnInbound, enabled };
 }
 
 export async function GET() {
@@ -86,6 +91,7 @@ export async function PUT(req: Request) {
     const body = (await req.json().catch(() => ({}))) as {
       respectDepartment?: unknown;
       autoOnInbound?: unknown;
+      enabled?: unknown;
     };
 
     // Atualização PARCIAL: só toca as chaves presentes no corpo.
@@ -94,6 +100,9 @@ export async function PUT(req: Request) {
     }
     if ("autoOnInbound" in body) {
       await setOrgSettingBool(AUTO_ON_INBOUND_KEY, Boolean(body.autoOnInbound));
+    }
+    if ("enabled" in body) {
+      await setOrgSettingBool(ENABLED_KEY, Boolean(body.enabled));
     }
 
     return NextResponse.json(await readSettings());
