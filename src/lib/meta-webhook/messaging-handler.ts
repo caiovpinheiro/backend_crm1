@@ -27,6 +27,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -549,10 +550,7 @@ async function findOrCreateConversation(
     return { id: existing.id, assignedToId: existing.assignedToId ?? null };
   }
 
-  const contact = await prisma.contact.findUnique({
-    where: { id: contactId },
-    select: { assignedToId: true },
-  });
+  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -563,7 +561,7 @@ async function findOrCreateConversation(
           channel: channelSlug,
           channelId,
           status: "OPEN" as const,
-          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+          ...(inheritAssignee ? { assignedToId: inheritAssignee } : {}),
         }),
         select: { id: true, assignedToId: true },
       }),
@@ -571,11 +569,11 @@ async function findOrCreateConversation(
     await maybeDistributeNewInboundTicket({
       conversationId: created.id,
       contactId,
-      assignedToId: contact?.assignedToId ?? null,
+      assignedToId: inheritAssignee,
     });
     return {
       id: created.id,
-      assignedToId: created.assignedToId ?? contact?.assignedToId ?? null,
+      assignedToId: created.assignedToId ?? inheritAssignee,
     };
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {

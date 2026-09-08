@@ -18,6 +18,24 @@ export async function isAiAttendanceEnabled(): Promise<boolean> {
   }
 }
 
+/** Herança do contato no ticket novo: nunca copia responsável IA com o gate off. */
+export async function inheritContactAssigneeForNewTicket(
+  contactId: string,
+): Promise<string | null> {
+  const contact = await prisma.contact.findUnique({
+    where: { id: contactId },
+    select: {
+      assignedToId: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (!contact?.assignedToId) return null;
+  if (contact.assignedTo?.type === "AI" && !(await isAiAttendanceEnabled())) {
+    return null;
+  }
+  return contact.assignedToId;
+}
+
 /** Se o gate estiver off e o responsável for IA, zera assignee (vai pra Entrada). */
 export async function releaseAiAssigneeIfDisabled(args: {
   conversationId: string;

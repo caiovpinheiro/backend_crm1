@@ -646,6 +646,13 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         }
 
         // Reassume IA (fila permanece) para continuar o atendimento se o aluno quiser.
+        if (!(await isAiAttendanceEnabled())) {
+          logAi("waiting_queue_ai_reassume_blocked", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
+          });
+          return;
+        }
         await prisma.$transaction(async (tx) => {
           await tx.conversation.update({
             where: { id: args.conversationId },

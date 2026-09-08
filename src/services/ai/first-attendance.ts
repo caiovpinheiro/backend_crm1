@@ -635,6 +635,21 @@ export async function ensureInboundAiAttendance(args: {
   userMessage?: string | null;
 }): Promise<string | null> {
   try {
+    if (!(await isAiAttendanceEnabled())) {
+      await releaseAiAssigneeIfDisabled({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+      });
+      const { maybeDistributeNewInboundTicket } = await import(
+        "@/services/distribution"
+      );
+      await maybeDistributeNewInboundTicket({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        assignedToId: null,
+      });
+      return null;
+    }
     return await tryAssignFirstAttendanceAi({
       conversationId: args.conversationId,
       contactId: args.contactId,

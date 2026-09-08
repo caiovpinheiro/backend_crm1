@@ -15,6 +15,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -844,10 +845,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 
-  const contact = await prisma.contact.findUnique({
-    where: { id: contactId },
-    select: { assignedToId: true },
-  });
+  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -858,7 +856,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
           channel: "whatsapp",
           channelId: targetChannel?.id,
           status: "OPEN" as const,
-          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+          ...(inheritAssignee ? { assignedToId: inheritAssignee } : {}),
         }),
         select: convSelect,
       }),
@@ -867,7 +865,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     await maybeDistributeNewInboundTicket({
       conversationId: created.id,
       contactId,
-      assignedToId: contact?.assignedToId ?? null,
+      assignedToId: inheritAssignee,
     });
     return created;
   } catch (err) {
