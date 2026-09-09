@@ -63,6 +63,10 @@ const nextConfig: NextConfig = {
     "pgpass",
     "@prisma/adapter-pg",
     "@prisma/client",
+    // `unpdf` embute o build serverless do PDF.js num arquivo só. Passar
+    // isso pelo webpack estoura o tempo de build sem ganho — o Node
+    // resolve de node_modules em runtime.
+    "unpdf",
     // OpenTelemetry: auto-instrumentations usam require dinâmico de muitos
     // módulos; bundlear via webpack/turbopack quebra. Mantém como deps
     // externas — Node carrega de node_modules em runtime. Lista explícita

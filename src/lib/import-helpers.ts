@@ -42,7 +42,7 @@ export async function findUserIdByEmailCI(email: string): Promise<string | null>
 
 /**
  * Lê o conteúdo de um arquivo enviado via multipart e devolve headers + rows.
- * Suporta CSV (qualquer delimitador) e XLSX/XLS/ODS via SheetJS.
+ * Suporta CSV (qualquer delimitador) e XLSX/XLSM/XLS/ODS via SheetJS.
  *
  * @param file Arquivo recebido em FormData
  * @param explicitDelimiter Se informado, força o delimitador. Caso contrário, detecta.
@@ -66,8 +66,13 @@ export async function readTableFromBuffer(
   explicitDelimiter?: CsvDelimiter,
 ): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
   const name = fileName.toLowerCase();
+  // `.xlsm` é xlsx com macro: mesmo container OOXML, o SheetJS lê igual.
+  // As macros ficam num stream separado que nem chegamos a abrir.
   const isSpreadsheet =
-    name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".ods");
+    name.endsWith(".xlsx") ||
+    name.endsWith(".xlsm") ||
+    name.endsWith(".xls") ||
+    name.endsWith(".ods");
 
   if (isSpreadsheet) {
     const XLSX = await import("xlsx");

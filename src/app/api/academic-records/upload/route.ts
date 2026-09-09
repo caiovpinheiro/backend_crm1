@@ -51,9 +51,12 @@ export async function POST(request: Request) {
   }
   const originalName = file.name ?? "matriculados.xlsx";
   const lower = originalName.toLowerCase();
-  if (!/\.(xlsx|xls|ods|csv)$/.test(lower)) {
+  if (!/\.(xlsx|xlsm|xls|ods|csv)$/.test(lower)) {
     return NextResponse.json(
-      { message: "Formato não suportado. Envie .xlsx, .xls, .ods ou .csv." },
+      {
+        message:
+          "Formato não suportado. Envie .xlsx, .xlsm, .xls, .ods ou .csv.",
+      },
       { status: 415 },
     );
   }
@@ -66,13 +69,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
     }
 
+    // A extensão precisa sobreviver até o worker: é por ela que o
+    // `readTableFromBuffer` decide entre SheetJS e parser de CSV.
     const ext = lower.endsWith(".csv")
       ? "csv"
-      : lower.endsWith(".xls")
-        ? "xls"
-        : lower.endsWith(".ods")
-          ? "ods"
-          : "xlsx";
+      : lower.endsWith(".xlsm")
+        ? "xlsm"
+        : lower.endsWith(".xls")
+          ? "xls"
+          : lower.endsWith(".ods")
+            ? "ods"
+            : "xlsx";
     const fileName = generateFileName({ prefix: "academic", ext });
     await saveFile({ orgId, bucket: "imports", fileName, buffer });
 

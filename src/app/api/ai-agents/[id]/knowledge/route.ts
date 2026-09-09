@@ -20,10 +20,10 @@ import {
  *
  *  - `application/json` com `{ title, content }` — texto colado na tela;
  *  - `multipart/form-data` com o campo `file` — arquivo, cujo texto sai
- *    de `extractKnowledgeText` (txt, md, csv, tsv, docx).
+ *    de `extractKnowledgeText` (txt, md, csv, tsv, docx, pdf).
  *
- * PDF é rejeitado com mensagem explícita pelo extrator, e imagem exigiria
- * visão/OCR — ver o cabeçalho de `knowledge-extract.ts`.
+ * PDF digitalizado (sem camada de texto) e imagem são rejeitados com
+ * mensagem explícita — ver o cabeçalho de `knowledge-extract.ts`.
  *
  * A extração roda inline: é O(tamanho) em memória, sem I/O de rede, e o
  * upload é limitado a 10 MB. O trabalho pesado (chunking + embeddings)
@@ -122,7 +122,7 @@ async function inputFromUpload(request: Request): Promise<CreateInput> {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const extracted = extractKnowledgeText(file.name, buffer);
+  const extracted = await extractKnowledgeText(file.name, buffer);
   const field = (name: string) => {
     const v = form.get(name);
     return typeof v === "string" && v.trim() ? v : undefined;
