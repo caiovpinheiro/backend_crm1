@@ -28,10 +28,18 @@ const CONNECT_TIMEOUT_MS = 15_000;
 // ─── Relay / smarthost (fallback de saída) ───────────────────
 // Provedores de cloud (DigitalOcean) bloqueiam 465/587 de saída na borda
 // de rede. Com SMTP_RELAY_* configurado, uma falha de CONEXÃO no SMTP
-// direto da conta cai para o relay (ex.: Mailjet in-v3.mailjet.com:2525).
-// Erro de AUTH (535) NÃO cai no relay — senha errada é erro do usuário e
-// o relay mascararia isso no teste de conexão. Sem SMTP_RELAY_HOST o
-// comportamento é exatamente o de antes (opt-in).
+// direto da conta cai para o relay. Erro de AUTH (535) NÃO cai no relay —
+// senha errada é erro do usuário e o relay mascararia isso no teste de
+// conexão. Sem SMTP_RELAY_HOST o comportamento é exatamente o de antes
+// (opt-in — nunca cair automaticamente nas credenciais transacionais).
+//
+// O relay NÃO é a conta transacional do CRM (SMTP_USER/SMTP_PASS do
+// Mailjet). O From continua o e-mail da caixa conectada do usuário, então
+// o relay precisa ser um smarthost autorizado a enviar por AQUELE domínio:
+// o SMTP do próprio cliente, um smarthost dedicado da operação ou um
+// serviço onde o domínio do cliente esteja verificado. Pela conta
+// transacional o From quebra SPF/DKIM e o CRM passa a enviar em nome de
+// domínios arbitrários.
 
 export type SmtpRelayConfig = {
   host: string;
