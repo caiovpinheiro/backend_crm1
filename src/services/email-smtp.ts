@@ -2,7 +2,6 @@ import nodemailer from "nodemailer";
 import type { EmailEncryption } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
-import { runtimeEnv } from "@/lib/runtime-env";
 import {
   flattenMailerError,
   implicitTlsForPort,
@@ -12,6 +11,7 @@ import {
   type EmailFieldError,
   type EmailOk,
 } from "@/services/email-imap";
+import { getSmtpRelayConfig, type SmtpRelayConfig } from "@/services/smtp-relay";
 
 const log = getLogger("email-smtp");
 
@@ -26,49 +26,13 @@ export type SmtpConnectInput = {
 const CONNECT_TIMEOUT_MS = 15_000;
 
 // ─── Relay / smarthost (fallback de saída) ───────────────────
-// Provedores de cloud (DigitalOcean) bloqueiam 465/587 de saída na borda
-// de rede. Com SMTP_RELAY_* configurado, uma falha de CONEXÃO no SMTP
-// direto da conta cai para o relay. Erro de AUTH (535) NÃO cai no relay —
-// senha errada é erro do usuário e o relay mascararia isso no teste de
-// conexão. Sem SMTP_RELAY_HOST o comportamento é exatamente o de antes
-// (opt-in — nunca cair automaticamente nas credenciais transacionais).
-//
-// O relay NÃO é a conta transacional do CRM (SMTP_USER/SMTP_PASS do
-// Mailjet). O From continua o e-mail da caixa conectada do usuário, então
-// o relay precisa ser um smarthost autorizado a enviar por AQUELE domínio:
-// o SMTP do próprio cliente, um smarthost dedicado da operação ou um
-// serviço onde o domínio do cliente esteja verificado. Pela conta
-// transacional o From quebra SPF/DKIM e o CRM passa a enviar em nome de
-// domínios arbitrários.
-
-export type SmtpRelayConfig = {
-  host: string;
-  port: number;
-  secure: boolean;
-  user?: string;
-  pass?: string;
-};
-
-/** Nomes montados em runtime — o bundler não consegue inlinear `undefined`. */
-function relayKey(part: "HOST" | "PORT" | "USER" | "PASS" | "SECURE"): string {
-  return ["SMTP", "RELAY", part].join("_");
-}
-
-export function getSmtpRelayConfig(): SmtpRelayConfig | null {
-  const host = runtimeEnv(relayKey("HOST"));
-  if (!host) return null;
-  const portRaw = Number(runtimeEnv(relayKey("PORT")) ?? "2525");
-  const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw <= 65535 ? portRaw : 2525;
-  const secureRaw = (runtimeEnv(relayKey("SECURE")) ?? "").toLowerCase();
-  const secure = secureRaw ? ["1", "true", "yes", "on"].includes(secureRaw) : port === 465;
-  return {
-    host,
-    port,
-    secure,
-    user: runtimeEnv(relayKey("USER")),
-    pass: runtimeEnv(relayKey("PASS")),
-  };
-}
+// A resolução da config mora em `@/services/smtp-relay` (DB por org →
+// env SMTP_RELAY_* legada → null). Aqui fica só a política de QUANDO
+// usar: uma falha de CONEXÃO no SMTP direto da conta cai para o relay.
+// Erro de AUTH (535) NÃO cai no relay — senha errada é erro do usuário
+// e o relay mascararia isso no teste de conexão. Sem relay configurado
+// o comportamento é exatamente o de antes (opt-in — nunca cair
+// automaticamente nas credenciais transacionais).
 
 /** Só falha de rede justifica relay — auth/TLS do servidor alvo, não. */
 function isConnectionFailure(err: unknown): boolean {
@@ -185,7 +149,7 @@ export async function testSmtpConnection(input: SmtpConnectInput): Promise<Email
     await transport.verify();
     return { ok: true };
   } catch (err) {
-    const relay = getSmtpRelayConfig();
+    const relay = await getSmtpRelayConfig();
     if (!relay || !isConnectionFailure(err)) {
       return mapSmtpError(err, input.smtpHost);
     }
@@ -222,7 +186,7 @@ export async function sendSmtpMail(
     });
     return { ok: true, messageId: info.messageId || `smtp-${Date.now()}@${input.smtpHost}` };
   } catch (err) {
-    const relay = getSmtpRelayConfig();
+    const relay = await getSmtpRelayConfig();
     if (!relay || !isConnectionFailure(err)) {
       return mapSmtpError(err, input.smtpHost);
     }

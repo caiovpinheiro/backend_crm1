@@ -331,6 +331,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "lgpd", label: "Privacidade / LGPD" },
       { action: "groups", label: "Grupos e filas (Fase 3)" },
       { action: "security", label: "Segurança / RBAC avançado" },
+      { action: "email", label: "E-mail / relay SMTP (smarthost)" },
     ],
   },
   {

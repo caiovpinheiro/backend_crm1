@@ -147,6 +147,7 @@ model Organization {
   emails                   Email[]
   emailCustomFolders       EmailCustomFolder[]
   emailRules               EmailRule[]
+  smtpRelayConfig          SmtpRelayConfig?
   sipExtensions            SipExtension[]
   calls                    Call[]
   callEvents               CallEvent[]
@@ -5332,6 +5333,38 @@ model EmailAccount {
   @@index([organizationId])
   @@index([organizationId, ownerUserId])
   @@map("email_accounts")
+}
+
+/// Relay SMTP (smarthost) por org — fallback de saída quando o provedor
+/// de cloud bloqueia 465/587 na borda de rede. Um por org. Editável em
+/// /settings/smtp-relay; tem precedência sobre as envs SMTP_RELAY_*
+/// (legado global). O relay NUNCA é a conta transacional do CRM: precisa
+/// ser um smarthost autorizado a enviar pelo domínio do remetente.
+model SmtpRelayConfig {
+  id             String @id @default(cuid())
+  organizationId String @unique
+
+  host String
+  port Int    @default(587)
+  /// TLS implícito (porta 465). STARTTLS/plain nas demais.
+  secure Boolean @default(false)
+
+  username String?
+  /// Senha criptografada com encryptSecret() (@/lib/crypto/secrets,
+  /// KEYRING_SECRET) — mesmo padrão de EmailAccount.passwordEncrypted.
+  /// Nunca exposta em respostas de API nem em logs.
+  passwordEncrypted String? @map("password_encrypted")
+
+  /// Toggle mestre. `false` desliga o relay pra org mesmo com host
+  /// preenchido (e também impede o fallback pra env legada).
+  enabled Boolean @default(true)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("smtp_relay_configs")
 }
 
 /// Mensagem de e-mail sincronizada via IMAP ou enviada via SMTP.

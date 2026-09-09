@@ -160,6 +160,8 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "Email",
   "EmailCustomFolder",
   "EmailRule",
+  // Relay SMTP por org (smarthost de saída) — 1:1 com Organization.
+  "SmtpRelayConfig",
   // Authz Foundation (Fase 1) — esses 3 modelos sao tenant-scoped.
   // Sem isso, prisma.role.findMany() leakaria roles de OUTROS tenants
   // pra um Admin tentando listar permissoes da propria org.
