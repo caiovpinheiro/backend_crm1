@@ -72,7 +72,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "consultar_matricula",
     label: "Consultar matrícula do aluno",
     description:
-      "Consulta os dados acadêmicos do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Casa por telefone/e-mail do contato.",
+      "Consulta o registro do aluno em conversa no relatório de matriculados. Casa por telefone/e-mail do contato. Devolve sempre o acesso ao portal; curso, polo, série e os demais campos só chegam ao agente se você liberar em 'Campos do relatório'. Sem liberação, ele encaminha para um consultor em vez de responder.",
     category: "crm",
     defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
   },

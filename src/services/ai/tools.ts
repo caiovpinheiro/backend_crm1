@@ -59,7 +59,11 @@ import {
   buildQueuedWaitingHint,
   humanQueueContextFromAgent,
 } from "@/services/ai/human-queue-policy";
-import { enrollmentContextForModel } from "@/services/ai/sensitive-fields";
+import { academicLookupForModel } from "@/services/ai/sensitive-fields";
+import {
+  ACADEMIC_LOOKUP_GUIDANCE,
+  describeAcademicExposure,
+} from "@/services/ai/academic-record-policy";
 import {
   CRM_RECORD_SOURCES,
   CRM_SEARCH_GUIDANCE,
@@ -1494,20 +1498,32 @@ const MATRICULA_SCOPE_NOTE =
 function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
   const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
   const copy = packToolCopy(ctx);
+  // A allowlist do operador mora no mesmo campo que `search_crm_records`
+  // usa (`toolConfig[tool].readableFields`); a normalização descarta o que
+  // não é coluna do relatório.
+  const readableFields = policy.readableFields;
   return tool({
     description: `${
       copy?.consultarMatricula ??
-      "Verifica se o aluno em conversa tem acesso ativo ao portal/AVA. Devolve apenas `podeAcessarPortal` e uma orientação de rota — nunca curso, polo, série, situação ou documentos, porque esses dados não podem ser repassados ao aluno. O casamento é automático por telefone/e-mail do contato. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar."
-    }\n\n${MATRICULA_SCOPE_NOTE}`,
+      "Consulta o registro do aluno em conversa no relatório de matriculados. Devolve sempre `podeAcessarPortal` (acesso ao portal/AVA) e, dos demais dados, SOMENTE os campos que o operador liberou na configuração desta ferramenta. O casamento é automático por telefone/e-mail do contato."
+    }\n\n${ACADEMIC_LOOKUP_GUIDANCE}\n\n${describeAcademicExposure(
+      readableFields,
+    )}\n\n${MATRICULA_SCOPE_NOTE}`,
     inputSchema: z.object({
       cpf: z
         .string()
         .optional()
         .describe(
-          "CPF informado pelo aluno no chat (opcional). Só use se o telefone/e-mail não localizar a matrícula.",
+          "CPF informado pelo aluno no chat (opcional). Só use se o telefone/e-mail não localizar a matrícula. PROIBIDO pedir o CPF ao aluno para desempatar identidade — para isso use `nomeCompleto`.",
+        ),
+      nomeCompleto: z
+        .string()
+        .optional()
+        .describe(
+          "Nome completo que o aluno confirmou no chat. Use quando a chamada anterior devolveu `identidade: \"confirmar_identidade\"`.",
         ),
     }),
-    execute: async ({ cpf }) => {
+    execute: async ({ cpf, nomeCompleto }) => {
       try {
         const orgId = getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
@@ -1528,14 +1544,18 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
           cpf: cpf?.trim() || null,
         });
 
-        // Filtro de saída: o modelo recebe só o status derivado. Antes o
-        // payload trazia curso, polo, série, situação e a instrução textual
-        // "NÃO DIVULGUE" — e o agente respondeu "seu curso está cancelado".
-        // Instrução dentro de payload não é mecanismo de segurança.
+        // Filtro de saída: o status derivado sai sempre; os campos do
+        // relatório só quando o operador liberou nominalmente. Antes o
+        // payload trazia curso, polo, série e situação com um "NÃO
+        // DIVULGUE" textual — e o agente respondeu "seu curso está
+        // cancelado". Instrução dentro de payload não é mecanismo de
+        // segurança; allowlist é.
         return ok(
-          enrollmentContextForModel({
-            situacoes: records.map((r) => r.situacao),
+          academicLookupForModel({
+            records,
+            readableFields,
             transferMessage,
+            nomeCompleto: nomeCompleto ?? null,
           }),
         );
       } catch (err) {
