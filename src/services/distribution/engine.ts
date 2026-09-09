@@ -666,20 +666,29 @@ export async function executeDistribution(
         already.assignedToId,
         explicitDeptIds,
       );
-      // Atendimento em curso não é redistribuído por divergência de
-      // departamento: o consultor perde o aluno da tela no meio da conversa
-      // (incidente 08/set/26). Só vale quando o departamento é a ÚNICA
-      // barreira — offline / fora do expediente seguem liberando.
+      // Atendimento em curso não é redistribuído: almoço / offline / outro
+      // departamento (08/set e 09/set/26). Sem reply, só o mismatch de
+      // departamento é protegido quando o dono continua elegível org-wide.
       let keptInAttendance = false;
-      if (!check.eligible && !check.isAi && explicitDeptIds.length > 0) {
-        const orgWide = await isAssigneeCurrentlyEligible(already.assignedToId);
+      if (!check.isAi) {
         const attendance = await getHumanAttendanceForConversation(
           input.conversationId,
         );
+        let eligibleOutsideDepartment = check.eligible;
+        if (
+          !check.eligible &&
+          !attendance?.hasHumanReply &&
+          explicitDeptIds.length > 0
+        ) {
+          const orgWide = await isAssigneeCurrentlyEligible(
+            already.assignedToId,
+          );
+          eligibleOutsideDepartment = orgWide.eligible;
+        }
         keptInAttendance = shouldKeepAssigneeInAttendance({
-          departmentScoped: true,
+          departmentScoped: explicitDeptIds.length > 0,
           eligibleInDepartment: check.eligible,
-          eligibleOutsideDepartment: orgWide.eligible,
+          eligibleOutsideDepartment,
           hasHumanReply: Boolean(attendance?.hasHumanReply),
           isAi: check.isAi,
         });

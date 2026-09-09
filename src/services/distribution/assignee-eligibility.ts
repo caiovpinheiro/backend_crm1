@@ -31,11 +31,11 @@ export function shouldClearOwnershipOnIneligible(
 }
 
 /**
- * Conversa já trabalhada por humano não troca de dono só porque o passo da
- * automação pede outro departamento. Divergência de departamento é
- * roteamento; atendimento em curso é fato — e foi o que arrancou o aluno da
- * tela do consultor em 08/set/26. Indisponibilidade real (offline, fora do
- * expediente, dono que saiu da distribuição) continua liberando o lead.
+ * Conversa já respondida por humano não troca de dono no inbound / motor
+ * sem `reassign`. Almoço (`PRE_LUNCH`), offline, pausa ou outro departamento
+ * param lead NOVO — não arrancam o aluno no meio do "ótimo" (09/set/26
+ * #359447 e 08/set/26). Sem resposta humana, divergência de departamento
+ * ainda redistribui; offline / fora do expediente também.
  */
 export function shouldKeepAssigneeInAttendance(args: {
   /** O passo pediu um pool de departamentos. */
@@ -49,11 +49,13 @@ export function shouldKeepAssigneeInAttendance(args: {
   isAi: boolean;
 }): boolean {
   if (args.isAi) return false;
+  // Atendimento em curso: inelegibilidade transitória não solta o dono.
+  if (args.hasHumanReply) return true;
   if (!args.departmentScoped) return false;
   if (args.eligibleInDepartment) return false;
   // Barrado por algo além do departamento (offline etc.) → redistribui.
   if (!args.eligibleOutsideDepartment) return false;
-  return args.hasHumanReply;
+  return false;
 }
 
 /**

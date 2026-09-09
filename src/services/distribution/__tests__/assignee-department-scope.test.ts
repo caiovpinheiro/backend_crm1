@@ -77,9 +77,9 @@ describe("isAssigneeCurrentlyEligible — fronteira de departamento", () => {
 });
 
 /**
- * Incidente 08/set/26: o atendente perdia o aluno da tela no meio da conversa
- * porque o passo pedia outro departamento. Conversa trabalhada fica com quem
- * está atendendo; sem resposta humana, redistribui (caso Danubia).
+ * Incidente 08/set/26 + 09/set/26 (#359447): o atendente perdia o aluno
+ * no inbound (almoço / outro departamento). Conversa já respondida fica
+ * com quem está atendendo; sem reply, redistribui (caso Danubia / offline).
  */
 describe("shouldKeepAssigneeInAttendance", () => {
   const base = {
@@ -100,24 +100,40 @@ describe("shouldKeepAssigneeInAttendance", () => {
     ).toBe(false);
   });
 
-  it("dono offline não é protegido — barreira não é o departamento", () => {
+  it("dono em almoço/offline COM resposta humana: mantém o dono", () => {
     expect(
       shouldKeepAssigneeInAttendance({
         ...base,
+        departmentScoped: false,
+        eligibleInDepartment: false,
+        eligibleOutsideDepartment: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("dono offline SEM resposta humana: redistribui", () => {
+    expect(
+      shouldKeepAssigneeInAttendance({
+        ...base,
+        hasHumanReply: false,
         eligibleOutsideDepartment: false,
       }),
     ).toBe(false);
   });
 
-  it("dono elegível no próprio departamento não precisa da salvaguarda", () => {
+  it("dono elegível no próprio departamento COM reply: mantém", () => {
     expect(
       shouldKeepAssigneeInAttendance({ ...base, eligibleInDepartment: true }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("passo sem departamento não aciona a salvaguarda", () => {
+  it("passo sem departamento e sem reply não aciona a salvaguarda", () => {
     expect(
-      shouldKeepAssigneeInAttendance({ ...base, departmentScoped: false }),
+      shouldKeepAssigneeInAttendance({
+        ...base,
+        departmentScoped: false,
+        hasHumanReply: false,
+      }),
     ).toBe(false);
   });
 
