@@ -209,6 +209,7 @@ export async function getDistributionResponsibles(
           (
             await prisma.departmentMember.findMany({
               where: {
+                organizationId: orgId,
                 departmentId: { in: scopeDeptIds },
                 userId: { in: userIds },
               },
