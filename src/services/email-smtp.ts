@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import type { EmailEncryption } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
+import { runtimeEnv } from "@/lib/runtime-env";
 import {
   flattenMailerError,
   implicitTlsForPort,
@@ -23,6 +24,76 @@ export type SmtpConnectInput = {
 };
 
 const CONNECT_TIMEOUT_MS = 15_000;
+
+// ─── Relay / smarthost (fallback de saída) ───────────────────
+// Provedores de cloud (DigitalOcean) bloqueiam 465/587 de saída na borda
+// de rede. Com SMTP_RELAY_* configurado, uma falha de CONEXÃO no SMTP
+// direto da conta cai para o relay (ex.: Mailjet in-v3.mailjet.com:2525).
+// Erro de AUTH (535) NÃO cai no relay — senha errada é erro do usuário e
+// o relay mascararia isso no teste de conexão. Sem SMTP_RELAY_HOST o
+// comportamento é exatamente o de antes (opt-in).
+
+export type SmtpRelayConfig = {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  pass?: string;
+};
+
+/** Nomes montados em runtime — o bundler não consegue inlinear `undefined`. */
+function relayKey(part: "HOST" | "PORT" | "USER" | "PASS" | "SECURE"): string {
+  return ["SMTP", "RELAY", part].join("_");
+}
+
+export function getSmtpRelayConfig(): SmtpRelayConfig | null {
+  const host = runtimeEnv(relayKey("HOST"));
+  if (!host) return null;
+  const portRaw = Number(runtimeEnv(relayKey("PORT")) ?? "2525");
+  const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw <= 65535 ? portRaw : 2525;
+  const secureRaw = (runtimeEnv(relayKey("SECURE")) ?? "").toLowerCase();
+  const secure = secureRaw ? ["1", "true", "yes", "on"].includes(secureRaw) : port === 465;
+  return {
+    host,
+    port,
+    secure,
+    user: runtimeEnv(relayKey("USER")),
+    pass: runtimeEnv(relayKey("PASS")),
+  };
+}
+
+/** Só falha de rede justifica relay — auth/TLS do servidor alvo, não. */
+function isConnectionFailure(err: unknown): boolean {
+  const raw = `${flattenMailerError(err)} ${mailerMeta(err).code ?? ""}`.toLowerCase();
+  return (
+    raw.includes("timeout") ||
+    raw.includes("timed out") ||
+    raw.includes("etimedout") ||
+    raw.includes("econnrefused") ||
+    raw.includes("econnreset") ||
+    raw.includes("ehostunreach") ||
+    raw.includes("enetunreach") ||
+    raw.includes("enotfound") ||
+    raw.includes("eai_again") ||
+    raw.includes("epipe")
+  );
+}
+
+function createRelayTransport(relay: SmtpRelayConfig) {
+  return nodemailer.createTransport({
+    host: relay.host,
+    port: relay.port,
+    secure: relay.secure,
+    ...(relay.user ? { auth: { user: relay.user, pass: relay.pass ?? "" } } : {}),
+    connectionTimeout: CONNECT_TIMEOUT_MS,
+    greetingTimeout: CONNECT_TIMEOUT_MS,
+    socketTimeout: CONNECT_TIMEOUT_MS,
+    tls: {
+      servername: relay.host,
+      minVersion: "TLSv1.2",
+    },
+  });
+}
 
 function createTransport(input: SmtpConnectInput) {
   const implicitTls = implicitTlsForPort(input.smtpPort, input.smtpEncryption);
@@ -106,7 +177,23 @@ export async function testSmtpConnection(input: SmtpConnectInput): Promise<Email
     await transport.verify();
     return { ok: true };
   } catch (err) {
-    return mapSmtpError(err, input.smtpHost);
+    const relay = getSmtpRelayConfig();
+    if (!relay || !isConnectionFailure(err)) {
+      return mapSmtpError(err, input.smtpHost);
+    }
+    log.warn(
+      { err: flattenMailerError(err), host: input.smtpHost, relayHost: relay.host, relayPort: relay.port },
+      "SMTP direto inacessível — testando via relay",
+    );
+    const relayTransport = createRelayTransport(relay);
+    try {
+      await relayTransport.verify();
+      return { ok: true };
+    } catch (relayErr) {
+      return mapSmtpError(relayErr, relay.host);
+    } finally {
+      relayTransport.close();
+    }
   } finally {
     transport.close();
   }
@@ -127,7 +214,31 @@ export async function sendSmtpMail(
     });
     return { ok: true, messageId: info.messageId || `smtp-${Date.now()}@${input.smtpHost}` };
   } catch (err) {
-    return mapSmtpError(err, input.smtpHost);
+    const relay = getSmtpRelayConfig();
+    if (!relay || !isConnectionFailure(err)) {
+      return mapSmtpError(err, input.smtpHost);
+    }
+    log.warn(
+      { err: flattenMailerError(err), host: input.smtpHost, relayHost: relay.host, relayPort: relay.port },
+      "SMTP direto inacessível — enviando via relay",
+    );
+    // From continua o e-mail da conta: o relay precisa aceitar esse remetente
+    // (sender verificado / domínio autorizado no provedor do relay).
+    const relayTransport = createRelayTransport(relay);
+    try {
+      const info = await relayTransport.sendMail({
+        from: input.email,
+        to: mail.to,
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+      });
+      return { ok: true, messageId: info.messageId || `relay-${Date.now()}@${relay.host}` };
+    } catch (relayErr) {
+      return mapSmtpError(relayErr, relay.host);
+    } finally {
+      relayTransport.close();
+    }
   } finally {
     transport.close();
   }
