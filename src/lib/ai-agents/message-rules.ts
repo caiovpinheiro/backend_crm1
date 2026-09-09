@@ -22,13 +22,19 @@ export type MessageRuleAction =
   /// Transfere para a fila humana, sem fixar departamento.
   | "transfer_human"
   /// Responde um texto fixo, sem chamar o modelo.
-  | "fixed_reply";
+  | "fixed_reply"
+  /// Marca uma tag no contato, o que dispara as automações de gatilho
+  /// `tag_added`. É a ponte entre a regra do agente e o motor de
+  /// automações: até aqui só o modelo chamando `add_tag` conseguia
+  /// disparar uma, e "o modelo lembrou" não é garantia.
+  | "add_tag";
 
 export const MESSAGE_RULE_ACTIONS: MessageRuleAction[] = [
   "answer_with_knowledge",
   "transfer_department",
   "transfer_human",
   "fixed_reply",
+  "add_tag",
 ];
 
 export type MessageRule = {
@@ -47,7 +53,13 @@ export type MessageRule = {
   department: string | null;
   /// `fixed_reply`: o texto (obrigatório). Transferências: texto do aviso
   /// ao cliente (`null` = o agente usa o texto de fila já configurado).
+  /// `add_tag`: texto opcional enviado junto (`null` = não responde nada).
   message: string | null;
+  /// Só em `add_tag`: nome da tag, exatamente como está no CRM. A tag
+  /// precisa existir — a regra não cria tag nova, pelo mesmo motivo que a
+  /// tool não cria quando há allowlist: tag inventada não dispara
+  /// automação nenhuma e ninguém descobre por quê.
+  tagName: string | null;
 };
 
 /** Rótulos pt-BR de operador. O FE não deve traduzir o nome técnico. */
@@ -81,6 +93,11 @@ export const MESSAGE_RULE_LABELS: {
       id: "fixed_reply",
       label: "Responder com um texto fixo",
       hint: "O agente envia exatamente o texto escrito, sem chamar o modelo.",
+    },
+    {
+      id: "add_tag",
+      label: "Marcar uma tag no contato",
+      hint: "Dispara as automações com gatilho 'Tag adicionada'. A tag precisa já existir no CRM.",
     },
   ],
 };
@@ -133,8 +150,11 @@ export function normalizeMessageRules(v: unknown): MessageRule[] {
     if (anyOf.length === 0 && allOf.length === 0) continue;
     const department = text(r.department);
     const message = text(r.message);
+    const tagName = text(r.tagName);
     if (action === "transfer_department" && !department) continue;
     if (action === "fixed_reply" && !message) continue;
+    // Regra de tag sem tag não tem próximo passo executável.
+    if (action === "add_tag" && !tagName) continue;
     const id = text(r.id) ?? `regra-${out.length + 1}`;
     if (out.some((existing) => existing.id === id)) continue;
     out.push({
@@ -147,6 +167,7 @@ export function normalizeMessageRules(v: unknown): MessageRule[] {
       action,
       department: action === "transfer_department" ? department : null,
       message: action === "answer_with_knowledge" ? null : message,
+      tagName: action === "add_tag" ? tagName : null,
     });
   }
   return out;

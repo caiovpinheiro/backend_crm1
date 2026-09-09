@@ -191,6 +191,7 @@ const POLO_RULE: MessageRule = {
   action: "answer_with_knowledge",
   department: null,
   message: null,
+  tagName: null,
 };
 
 function mockRun() {
