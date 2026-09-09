@@ -51,7 +51,7 @@ function isConnectionFailure(err: unknown): boolean {
   );
 }
 
-function createRelayTransport(relay: SmtpRelayConfig) {
+function createRelayTransport(relay: SmtpRelayConfig, tlsServername?: string) {
   return nodemailer.createTransport({
     host: relay.host,
     port: relay.port,
@@ -64,10 +64,55 @@ function createRelayTransport(relay: SmtpRelayConfig) {
     greetingTimeout: CONNECT_TIMEOUT_MS,
     socketTimeout: CONNECT_TIMEOUT_MS,
     tls: {
-      servername: relay.host,
+      // Túnel TCP transparente (ex.: socat na 2525 → SMTP real na 465): o
+      // certificado apresentado é o do DESTINO — o caller passa o servername
+      // dele no retry de withRelay(). Smarthost normal usa relay.host.
+      servername: tlsServername ?? relay.host,
       minVersion: "TLSv1.2",
     },
   });
+}
+
+/** Cert recebido não casa com o hostname do relay = túnel transparente? */
+function isCertHostnameMismatch(err: unknown): boolean {
+  const raw = `${flattenMailerError(err)} ${mailerMeta(err).code ?? ""}`.toLowerCase();
+  return raw.includes("err_tls_cert_altname_invalid") || raw.includes("altnames");
+}
+
+/**
+ * Roda `fn` (verify/sendMail) contra o relay. Se o relay apresentar o
+ * certificado do SERVIDOR DE DESTINO (túnel TCP transparente — a sessão TLS
+ * é fim-a-fim com o SMTP real e o relay só repassa bytes), o hostname do
+ * relay não casa com o cert: refaz UMA vez com o servername do destino.
+ * Smarthost real (cert do próprio relay, ex.: Mailjet) funciona na primeira
+ * tentativa e nunca cai no retry. Verificar contra o destino NÃO afrouxa a
+ * segurança: um cert válido pro destino só existe no destino real.
+ */
+async function withRelay<T>(
+  relay: SmtpRelayConfig,
+  destinationHost: string,
+  fn: (transport: ReturnType<typeof nodemailer.createTransport>) => Promise<T>,
+): Promise<T> {
+  const first = createRelayTransport(relay);
+  try {
+    return await fn(first);
+  } catch (err) {
+    if (!isCertHostnameMismatch(err) || destinationHost.toLowerCase() === relay.host.toLowerCase()) {
+      throw err;
+    }
+    log.warn(
+      { relayHost: relay.host, relayPort: relay.port, destinationHost },
+      "relay apresentou certificado do destino (túnel transparente) — retentando com servername do destino",
+    );
+    const second = createRelayTransport(relay, destinationHost);
+    try {
+      return await fn(second);
+    } finally {
+      second.close();
+    }
+  } finally {
+    first.close();
+  }
 }
 
 function createTransport(input: SmtpConnectInput) {
@@ -160,14 +205,11 @@ export async function testSmtpConnection(input: SmtpConnectInput): Promise<Email
       { err: flattenMailerError(err), host: input.smtpHost, relayHost: relay.host, relayPort: relay.port },
       "SMTP direto inacessível — testando via relay",
     );
-    const relayTransport = createRelayTransport(relay);
     try {
-      await relayTransport.verify();
+      await withRelay(relay, input.smtpHost, (t) => t.verify());
       return { ok: true };
     } catch (relayErr) {
       return mapSmtpError(relayErr, relay.host);
-    } finally {
-      relayTransport.close();
     }
   } finally {
     transport.close();
@@ -199,20 +241,19 @@ export async function sendSmtpMail(
     );
     // From continua o e-mail da conta: o relay precisa aceitar esse remetente
     // (sender verificado / domínio autorizado no provedor do relay).
-    const relayTransport = createRelayTransport(relay);
     try {
-      const info = await relayTransport.sendMail({
-        from: input.email,
-        to: mail.to,
-        subject: mail.subject,
-        text: mail.text,
-        html: mail.html,
-      });
+      const info = await withRelay(relay, input.smtpHost, (t) =>
+        t.sendMail({
+          from: input.email,
+          to: mail.to,
+          subject: mail.subject,
+          text: mail.text,
+          html: mail.html,
+        }),
+      );
       return { ok: true, messageId: info.messageId || `relay-${Date.now()}@${relay.host}` };
     } catch (relayErr) {
       return mapSmtpError(relayErr, relay.host);
-    } finally {
-      relayTransport.close();
     }
   } finally {
     transport.close();
