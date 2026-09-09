@@ -2660,7 +2660,12 @@ export async function updateConversationStatusInDb(
 
   // Snapshot ANTES do update: precisamos de quem era o atendente para
   // logar a remoção e limpar deal/contato (abaixo).
-  let clearedAssignee: { id: string; name: string | null } | null = null;
+  let clearedAssignee: {
+    id: string;
+    name: string | null;
+    archetype?: string | null;
+    enabledTools?: string[] | null;
+  } | null = null;
   let closeContactId: string | null = null;
   if (status === "RESOLVED" && extra?.clearAssignedTo) {
     const prev = await prisma.conversation.findUnique({
@@ -2668,13 +2673,20 @@ export async function updateConversationStatusInDb(
       select: {
         assignedToId: true,
         contactId: true,
-        assignedTo: { select: { name: true } },
+        assignedTo: {
+          select: {
+            name: true,
+            aiAgentConfig: { select: { archetype: true, enabledTools: true } },
+          },
+        },
       },
     });
     if (prev?.assignedToId) {
       clearedAssignee = {
         id: prev.assignedToId,
         name: prev.assignedTo?.name ?? null,
+        archetype: prev.assignedTo?.aiAgentConfig?.archetype ?? null,
+        enabledTools: prev.assignedTo?.aiAgentConfig?.enabledTools ?? null,
       };
       closeContactId = prev.contactId ?? null;
     }
@@ -2734,30 +2746,42 @@ export async function updateConversationStatusInDb(
   // deals.ts é pesado e este arquivo é importado por webhooks quentes.
   if (clearedAssignee) {
     const orgId = getOrgIdOrNull();
-    await logEvent({
-      type: "ASSIGNEE_CHANGED",
-      entityType: "CONVERSATION",
-      entityId: id,
-      entityLabel: updated.externalId ?? null,
-      conversationId: id,
-      contactId: closeContactId,
-      field: "assignedTo",
-      oldValue: clearedAssignee.name,
-      newValue: null,
-      meta: {
-        fromUserId: clearedAssignee.id,
-        toUserId: null,
-        reason: "conversation_closed",
-      },
+    const { isTabulationClassifier } = await import(
+      "@/lib/ai-agents/tabulation-classifier"
+    );
+    // Classificador só carimba a folha. O Encerrar tira o responsável —
+    // "Tabulador removida da conversa" parece que a tabulação caiu.
+    const skipUnassignLog = isTabulationClassifier({
+      archetype: clearedAssignee.archetype,
+      enabledTools: clearedAssignee.enabledTools,
+      name: clearedAssignee.name,
     });
-    try {
-      sseBus.publish("conversation_timeline_updated", {
-        organizationId: orgId,
-        conversationId: id,
+    if (!skipUnassignLog) {
+      await logEvent({
         type: "ASSIGNEE_CHANGED",
+        entityType: "CONVERSATION",
+        entityId: id,
+        entityLabel: updated.externalId ?? null,
+        conversationId: id,
+        contactId: closeContactId,
+        field: "assignedTo",
+        oldValue: clearedAssignee.name,
+        newValue: null,
+        meta: {
+          fromUserId: clearedAssignee.id,
+          toUserId: null,
+          reason: "conversation_closed",
+        },
       });
-    } catch {
-      /* best-effort */
+      try {
+        sseBus.publish("conversation_timeline_updated", {
+          organizationId: orgId,
+          conversationId: id,
+          type: "ASSIGNEE_CHANGED",
+        });
+      } catch {
+        /* best-effort */
+      }
     }
     if (closeContactId) {
       const { clearContactOwnershipOnClose } = await import("@/services/deals");
