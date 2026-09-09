@@ -128,7 +128,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "tabulate_conversation",
     label: "Tabular conversa",
     description:
-      "Aplica uma folha da árvore de tabulação à conversa e encerra se ainda estiver aberta. Não envia mensagem ao cliente.",
+      "Aplica uma folha da árvore de tabulação à conversa (motivo da demanda). Não encerra e não envia mensagem ao cliente.",
     category: "handoff",
     defaultForArchetypes: ["TABULACAO"],
   },

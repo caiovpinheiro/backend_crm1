@@ -549,17 +549,29 @@ async function finishConversationsForContact(
       externalId: true,
       organizationId: true,
       departmentId: true,
+      tabulationId: true,
     },
   });
 
   const orgId = getOrgIdOrNull();
-  const { resolveAutoCloseTabulation } = await import("@/services/tabulations");
+  const { resolveAutoCloseTabulation, resolveTabulationForStep } = await import(
+    "@/services/tabulations"
+  );
   for (const c of convs) {
     const rowOrg = c.organizationId ?? orgId;
-    // A escolha do passo vence a tabulação padrão do departamento. Ausentes as
-    // duas => encerra sem tabular (comportamento anterior).
+    // Passo explícito > folha já gravada pelo classificador > padrão do depto.
+    // Sem isso, Encerrar conversa depois do Tabulador apagava a escolha da IA
+    // (ou encerrava sem motivo).
+    const alreadyApplied =
+      !chosen && rowOrg && c.tabulationId
+        ? await resolveTabulationForStep({
+            organizationId: rowOrg,
+            tabulationId: c.tabulationId,
+          }).catch(() => null)
+        : null;
     const autoTab =
       chosen ??
+      alreadyApplied ??
       (rowOrg
         ? await resolveAutoCloseTabulation({
             organizationId: rowOrg,
@@ -584,7 +596,7 @@ async function finishConversationsForContact(
           number: autoTab.number,
           // Sem escolha explícita, `autoTab` veio da árvore do próprio
           // departamento da conversa — os dois valores coincidem.
-          departmentId: chosen ? chosen.departmentId : c.departmentId,
+          departmentId: chosen?.departmentId ?? alreadyApplied?.departmentId ?? c.departmentId,
         },
         chosen ? { step: "tabulate_conversation" } : { auto: true },
       );
@@ -2251,6 +2263,7 @@ async function executeStep(
         select: {
           id: true,
           type: true,
+          name: true,
           aiAgentConfig: {
             select: {
               active: true,
@@ -2314,31 +2327,40 @@ async function executeStep(
         const { isTabulationClassifier } = await import(
           "@/lib/ai-agents/tabulation-classifier"
         );
-        if (isTabulationClassifier(agentUser.aiAgentConfig)) {
-          try {
-            const { triggerTabulationClassifyForContact } = await import(
-              "@/services/ai/tabulation-classify"
+        if (
+          isTabulationClassifier({
+            ...agentUser.aiAgentConfig,
+            name: agentUser.name,
+          })
+        ) {
+          const { triggerTabulationClassifyForContact } = await import(
+            "@/services/ai/tabulation-classify"
+          );
+          const classified = await triggerTabulationClassifyForContact({
+            contactId: contactForOpening,
+            agentUserId,
+          });
+          if (classified.status === "failed") {
+            throw new Error(
+              `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
             );
-            const classified = await triggerTabulationClassifyForContact({
-              contactId: contactForOpening,
-              agentUserId,
-            });
-            if (classified.status === "skipped") {
-              log.info(
-                `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
-              );
-            } else if (classified.status === "failed") {
-              log.warn(
-                `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
-              );
-            } else {
-              log.info(
-                `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
-              );
-            }
-          } catch (err) {
-            log.warn("transfer_to_ai_agent: falha na classificação:", err);
           }
+          if (classified.status === "skipped") {
+            log.info(
+              `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
+            );
+            return { note: `classificação pulada (${classified.reason})` };
+          }
+          const label = classified.tabulationName ?? classified.tabulationId;
+          log.info(
+            `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
+          );
+          return {
+            note:
+              classified.status === "fallback"
+                ? `tabulou fallback: ${label}`
+                : `tabulou: ${label}`,
+          };
         } else {
           try {
             const opening = await triggerAgentOpeningForContact({

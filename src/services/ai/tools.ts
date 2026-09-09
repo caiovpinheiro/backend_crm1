@@ -1678,7 +1678,7 @@ function listTabulationsTool(ctx: RunContext) {
 function tabulateConversationTool(ctx: RunContext) {
   return tool({
     description:
-      "Aplica uma tabulação FOLHA à conversa atual (motivo da demanda). Se a conversa ainda estiver aberta, encerra junto. Use somente um id devolvido por list_tabulations ou listado no catálogo do prompt. Não envia mensagem ao cliente.",
+      "Aplica uma tabulação FOLHA à conversa atual (motivo da demanda). Não encerra e não envia mensagem ao cliente. Use somente um id devolvido por list_tabulations ou listado no catálogo do prompt.",
     inputSchema: z.object({
       tabulationId: z
         .string()
@@ -1703,7 +1703,7 @@ function tabulateConversationTool(ctx: RunContext) {
           tabulationId,
           contactId: ctx.contactId ?? null,
           source: "AI_AGENT",
-          closeIfOpen: true,
+          closeIfOpen: false,
         });
         if (!result.ok) return fail(result.error);
         return ok({

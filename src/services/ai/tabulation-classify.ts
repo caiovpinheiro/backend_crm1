@@ -19,7 +19,10 @@ import {
   resolveTabulationForStep,
   tabulationLogMeta,
 } from "@/services/tabulations";
-import { isTabulationClassifier } from "@/lib/ai-agents/tabulation-classifier";
+import {
+  isTabulationClassifier,
+  TABULATION_CLASSIFIER_TOOLS,
+} from "@/lib/ai-agents/tabulation-classifier";
 
 const CLASSIFY_USER_MESSAGE =
   "Classifique esta conversa. Leia o histórico. Chame `tabulate_conversation` com a folha que melhor descreve a demanda. Se a confiança for baixa, use o fallback do catálogo. Não escreva mensagem para o cliente.";
@@ -69,7 +72,7 @@ export async function applyConversationTabulation(args: {
   if (!conv) return { ok: false, error: "Conversa não encontrada." };
 
   const contactId = args.contactId ?? conv.contactId;
-  const closeIfOpen = args.closeIfOpen !== false;
+  const closeIfOpen = args.closeIfOpen === true;
   const alreadySame = conv.tabulationId === chosen.tabulationId;
   const shouldClose = closeIfOpen && conv.status !== "RESOLVED";
 
@@ -203,8 +206,8 @@ export async function loadTabulationCatalogForConversation(args: {
 }
 
 export type ClassifyTriggerResult =
-  | { status: "classified"; tabulationId: string }
-  | { status: "fallback"; tabulationId: string }
+  | { status: "classified"; tabulationId: string; tabulationName?: string }
+  | { status: "fallback"; tabulationId: string; tabulationName?: string }
   | {
       status: "skipped";
       reason:
@@ -224,6 +227,7 @@ export async function triggerTabulationClassifyForContact(args: {
     select: {
       id: true,
       type: true,
+      name: true,
       aiAgentConfig: {
         select: {
           id: true,
@@ -239,7 +243,7 @@ export async function triggerTabulationClassifyForContact(args: {
   }
   const cfg = assignee.aiAgentConfig;
   if (!cfg.active) return { status: "skipped", reason: "agent_inactive" };
-  if (!isTabulationClassifier(cfg)) {
+  if (!isTabulationClassifier({ ...cfg, name: assignee.name })) {
     return { status: "skipped", reason: "not_classifier" };
   }
 
@@ -262,6 +266,9 @@ export async function triggerTabulationClassifyForContact(args: {
   });
 
   const { runAgent } = await import("@/services/ai/runner");
+  const classifyTools = Array.from(
+    new Set([...(cfg.enabledTools ?? []), ...TABULATION_CLASSIFIER_TOOLS]),
+  );
   const result = await runAgent({
     agentId: cfg.id,
     source: "automation",
@@ -269,6 +276,7 @@ export async function triggerTabulationClassifyForContact(args: {
     conversationId: conversation.id,
     contactId: args.contactId,
     dealId: openDeal?.id ?? null,
+    enabledTools: classifyTools,
   });
 
   const tabulated = result.toolCalls.find(
@@ -284,7 +292,15 @@ export async function triggerTabulationClassifyForContact(args: {
       "string"
         ? (tabulated.result as { tabulationId: string }).tabulationId
         : "";
-    return { status: "classified", tabulationId };
+    return {
+      status: "classified",
+      tabulationId,
+      tabulationName:
+        typeof (tabulated.result as { tabulationName?: unknown }).tabulationName ===
+        "string"
+          ? (tabulated.result as { tabulationName: string }).tabulationName
+          : undefined,
+    };
   }
 
   const fallback = await resolveAutoCloseTabulation({
@@ -304,10 +320,14 @@ export async function triggerTabulationClassifyForContact(args: {
     tabulationId: fallback.tabulationId,
     contactId: args.contactId,
     source: "AI_AGENT",
-    closeIfOpen: true,
+    closeIfOpen: false,
   });
   if (!applied.ok) {
     return { status: "failed", reason: applied.error };
   }
-  return { status: "fallback", tabulationId: fallback.tabulationId };
+  return {
+    status: "fallback",
+    tabulationId: fallback.tabulationId,
+    tabulationName: fallback.name,
+  };
 }

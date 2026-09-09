@@ -9,7 +9,10 @@ export const TABULATION_CLASSIFIER_TOOLS = [
 export function isTabulationClassifier(agent: {
   archetype?: string | null;
   enabledTools?: string[] | null;
+  name?: string | null;
 }): boolean {
   if (agent.archetype === TABULATION_CLASSIFIER_ARCHETYPE) return true;
-  return (agent.enabledTools ?? []).includes("tabulate_conversation");
+  if ((agent.enabledTools ?? []).includes("tabulate_conversation")) return true;
+  // Agente criado com outro arquétipo e só renomeado (ex.: "Tabulador").
+  return /tabul/i.test(agent.name ?? "");
 }

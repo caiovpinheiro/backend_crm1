@@ -142,6 +142,10 @@ export type RunArgs = {
   /// `ConversationTurn.id` que originou o run (Turn Manager). Só gravado
   /// no `AIAgentRun` — não altera o comportamento do agente.
   turnId?: string | null;
+  /// Sobrescreve `enabledTools` do agente neste run (classificador via
+  /// automação injeta `tabulate_conversation` mesmo se o admin criou o
+  /// agente com outro arquétipo).
+  enabledTools?: string[];
 };
 
 export type RunResult = {
@@ -383,7 +387,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         ) ?? "")
       : "";
     const clockHint = hasPack ? formatLocalClockHint() : "";
-    const runtimeTools = agent.enabledTools;
+    const runtimeTools = args.enabledTools ?? agent.enabledTools;
     const tabulationCatalog =
       runtimeTools.includes("tabulate_conversation") ||
       runtimeTools.includes("list_tabulations")
