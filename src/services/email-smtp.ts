@@ -55,7 +55,10 @@ function createRelayTransport(relay: SmtpRelayConfig) {
   return nodemailer.createTransport({
     host: relay.host,
     port: relay.port,
-    secure: relay.secure,
+    // 465 é SEMPRE TLS implícito (mesma regra de implicitTlsForPort das
+    // contas de e-mail) — mesmo que o toggle tenha vindo desmarcado.
+    // Nas demais portas respeita o flag salvo (STARTTLS quando false).
+    secure: relay.secure || relay.port === 465,
     ...(relay.user ? { auth: { user: relay.user, pass: relay.pass ?? "" } } : {}),
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
