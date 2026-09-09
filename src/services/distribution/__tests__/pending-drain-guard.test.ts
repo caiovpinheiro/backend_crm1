@@ -5,6 +5,8 @@ import {
   consultantHasFreeSlot,
   fruitlessCooldownIsArmed,
   fruitlessPassNeedsCooldown,
+  shouldAutoDistributeInbound,
+  shouldIncludeOrgWideDrain,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
   shouldSkipCapacityReleasedFruitlessCooldown,
@@ -99,5 +101,38 @@ describe("pending drain guard", () => {
 
   it("does not schedule a retry timer when the fruitless cooldown is active", () => {
     expect(shouldScheduleRetryOnCooldownSkip()).toBe(false);
+  });
+});
+
+describe("shouldIncludeOrgWideDrain", () => {
+  it("modo clássico (auto inbound + sem respeitar depto) drena org-wide", () => {
+    expect(
+      shouldIncludeOrgWideDrain({ autoOnInbound: true, respectDepartment: false }),
+    ).toBe(true);
+  });
+
+  it("respeitar departamento: conversa sem depto não cai no pool geral", () => {
+    expect(
+      shouldIncludeOrgWideDrain({ autoOnInbound: true, respectDepartment: true }),
+    ).toBe(false);
+  });
+
+  it("autoOnInbound desligado: só execute_distribution atribui", () => {
+    expect(
+      shouldIncludeOrgWideDrain({ autoOnInbound: false, respectDepartment: false }),
+    ).toBe(false);
+    expect(
+      shouldIncludeOrgWideDrain({ autoOnInbound: false, respectDepartment: true }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldAutoDistributeInbound", () => {
+  it("ligado: inbound dispara o motor", () => {
+    expect(shouldAutoDistributeInbound(true)).toBe(true);
+  });
+
+  it("desligado: inbound não atribui — espera o passo da automação", () => {
+    expect(shouldAutoDistributeInbound(false)).toBe(false);
   });
 });
