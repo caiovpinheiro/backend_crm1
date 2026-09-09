@@ -65,6 +65,22 @@ export function isMetaNonConversationErrorCode(
   return typeof code === "number" && META_NON_CONVERSATION_ERROR_CODES.has(code);
 }
 
+/**
+ * `error_subcode` ainda aparece em rejeições de template/WABA (v21).
+ * Catalogar aqui quando o `code` genérico (ex.: 100 Invalid parameter)
+ * não distingue o motivo real.
+ */
+const SUBCODE_CATALOG: Record<number, MetaErrorInfo> = {
+  // OAuthException + "WhatsApp accounts cannot be used with this API."
+  // Listar templates na WABA pode funcionar; criar/alterar pela Graph não.
+  2388339: {
+    reason:
+      "Esta conta WhatsApp não pode criar ou alterar templates pela Cloud API.",
+    action:
+      "A WABA do canal não é elegível para a API de modelos (app WhatsApp Business / coexistência / número não migrado para a plataforma). Reconecte o canal como Cloud API no Embedded Signup ou crie o template no Gerenciador do WhatsApp da Meta.",
+  },
+};
+
 const CATALOG: Record<number, MetaErrorInfo> = {
   // ── Genéricos / infra ───────────────────────────────────────
   1: {
@@ -246,7 +262,14 @@ const CATALOG: Record<number, MetaErrorInfo> = {
  * Retorna a explicação PT-BR de um código de erro da Meta, ou `null` se
  * o código não estiver catalogado.
  */
-export function describeMetaError(code: number | null | undefined): MetaErrorInfo | null {
+export function describeMetaError(
+  code: number | null | undefined,
+  subcode?: number | null,
+): MetaErrorInfo | null {
+  if (typeof subcode === "number") {
+    const bySub = SUBCODE_CATALOG[subcode];
+    if (bySub) return bySub;
+  }
   if (typeof code !== "number") return null;
   return CATALOG[code] ?? null;
 }
@@ -257,8 +280,11 @@ export function describeMetaError(code: number | null | undefined): MetaErrorInf
  *       Adicione um cartão no Billing Hub da Meta..."
  * Retorna string vazia quando o código não está catalogado.
  */
-export function metaErrorReason(code: number | null | undefined): string {
-  const info = describeMetaError(code);
+export function metaErrorReason(
+  code: number | null | undefined,
+  subcode?: number | null,
+): string {
+  const info = describeMetaError(code, subcode);
   if (!info) return "";
   return info.action ? `${info.reason} ${info.action}` : info.reason;
 }
