@@ -7,6 +7,7 @@ import {
   implicitTlsForPort,
   mailAuthMessage,
   mailboxProviderKind,
+  mailerMeta,
   type EmailFieldError,
   type EmailOk,
 } from "@/services/email-imap";
@@ -25,12 +26,15 @@ const CONNECT_TIMEOUT_MS = 15_000;
 
 function createTransport(input: SmtpConnectInput) {
   const implicitTls = implicitTlsForPort(input.smtpPort, input.smtpEncryption);
+  const uol = mailboxProviderKind(input.smtpHost) === "uol";
   return nodemailer.createTransport({
     host: input.smtpHost,
     port: input.smtpPort,
     secure: implicitTls,
     requireTLS: !implicitTls && input.smtpEncryption === "STARTTLS",
     auth: { user: input.email, pass: input.password },
+    // PLAIN = senha com ! @ # em base64. LOGIN quoted falha em alguns Dovecot/UOL.
+    ...(uol ? { authMethod: "PLAIN" } : {}),
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
     socketTimeout: CONNECT_TIMEOUT_MS,
@@ -54,7 +58,8 @@ function looksLikeAppPasswordRequired(lower: string): boolean {
 
 export function mapSmtpError(err: unknown, host = ""): EmailFieldError {
   const raw = flattenMailerError(err);
-  const lower = raw.toLowerCase();
+  const meta = mailerMeta(err);
+  const lower = `${raw} ${meta.responseText ?? ""} ${meta.serverResponseCode ?? ""}`.toLowerCase();
   const kind = mailboxProviderKind(host);
   if (lower.includes("timeout")) {
     return { ok: false, field: "smtp_host", message: "Tempo esgotado ao conectar no SMTP. Verifique servidor e porta." };
@@ -85,7 +90,7 @@ export function mapSmtpError(err: unknown, host = ""): EmailFieldError {
   if (lower.includes("certificate") || lower.includes("cert_") || lower.includes("ssl") || lower.includes("tls")) {
     return { ok: false, field: "smtp_encryption", message: "Falha de TLS no SMTP. Na porta 465 use SSL/TLS (implícito), não STARTTLS." };
   }
-  log.warn({ err: raw, host }, "erro SMTP");
+  log.warn({ err: raw, host, ...meta }, "erro SMTP");
   return {
     ok: false,
     field: "smtp_host",
