@@ -76,6 +76,13 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
     locked: false,
     requiredPermission: "nav:team-chat",
   },
+  {
+    key: "bwipo-keeps",
+    title: "Bwipo Keeps",
+    href: "/bwipo-keeps",
+    locked: false,
+    requiredPermission: "nav:bwipo-keeps",
+  },
   // "Chamadas" foi movido do trilho para dentro de Logs (aba "Chamadas").
   // O histórico segue acessível via /widgets/calls (gate `calls_history`),
   // mas deixou de ser um item independente/customizável da sidebar.

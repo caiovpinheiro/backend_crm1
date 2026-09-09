@@ -78,6 +78,8 @@ export const BUCKETS = [
   // ETL — arquivos de importação (CSV/XLSX) enviados pela tela de contatos.
   // Lidos pelo etl-worker via readStoredFile no volume compartilhado.
   "imports",
+  // Bwipo Keeps — anexos e imagens de notas (não misturar com attachments de conversa).
+  "keeps",
 ] as const;
 export type StorageBucket = (typeof BUCKETS)[number];
 

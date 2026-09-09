@@ -179,6 +179,9 @@ model Organization {
   teamChatMessageForwards  TeamChatMessageForward[]
   activityAlertStates      ActivityAlertState[]
   dealStageDailySnapshots  DealStageDailySnapshot[]
+  keepNotes                KeepNote[]
+  keepAttachments          KeepAttachment[]
+  keepImports              KeepImport[]
 
   @@index([status])
   @@map("organizations")
@@ -614,6 +617,9 @@ model User {
   teamChatWorkItemRevisions      TeamChatWorkItemEntryRevision[] @relation("TeamChatWorkItemRevisionAuthor")
   teamChatForwardsSent           TeamChatMessageForward[]  @relation("TeamChatForwardFrom")
   teamChatForwardsResponded      TeamChatMessageForward[]  @relation("TeamChatForwardResponder")
+  keepNotes                    KeepNote[]
+  keepAttachments              KeepAttachment[]
+  keepImports                  KeepImport[]
 
   @@index([type])
   @@index([organizationId])
@@ -6138,6 +6144,76 @@ model TeamChatMessageForward {
   @@index([fromUserId, createdAt])
   @@index([sourceMessageId])
   @@map("team_chat_message_forwards")
+}
+
+// ──────────────────────────────────────────────
+// Bwipo Keeps (notas pessoais por usuário/tenant)
+// Não confundir com `Note` (timeline de contato/negócio).
+// ──────────────────────────────────────────────
+
+model KeepNote {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String    @default("")
+  /// Documento TipTap (JSON), nunca HTML bruto.
+  content        Json
+  /// Texto plano derivado do JSON — busca e preview.
+  plainText      String    @default("")
+  pinned         Boolean   @default(false)
+  archived       Boolean   @default(false)
+  trashed        Boolean   @default(false)
+  trashedAt      DateTime?
+  /// Ordem no mural (Keep). Menor = mais à frente / acima.
+  position       Float     @default(0)
+  /// manual | google_keep_html
+  source         String    @default("manual")
+  importBatchId  String?
+  importBatch    KeepImport? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  attachments    KeepAttachment[]
+
+  @@index([organizationId, userId, trashed, archived, pinned, position], map: "keep_notes_owner_folder_idx")
+  @@index([organizationId, importBatchId])
+  @@map("keep_notes")
+}
+
+model KeepAttachment {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteId         String
+  note           KeepNote  @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  fileName       String
+  mimeType       String
+  fileSize       Int
+  storageKey     String
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, noteId])
+  @@map("keep_attachments")
+}
+
+model KeepImport {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fileName       String
+  fileHash       String
+  noteCount      Int      @default(0)
+  createdAt      DateTime @default(now())
+  notes          KeepNote[]
+
+  @@unique([organizationId, userId, fileHash])
+  @@index([organizationId, userId])
+  @@map("keep_imports")
 }
 
 /// Contador atômico do `number` sequencial por (organização, model).
