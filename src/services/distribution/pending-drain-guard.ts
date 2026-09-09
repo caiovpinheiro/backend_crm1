@@ -75,3 +75,31 @@ export function fruitlessPassNeedsCooldown(opts: {
 }): boolean {
   return opts.resolved === 0 && opts.pending > 0;
 }
+
+/**
+ * Drenagem do bucket "sem departamento" (org-wide).
+ *
+ * Cruzeiro EaD / Danubia (set/26): com departamentos ligados OU
+ * `autoOnInbound=false`, a drenagem ainda entregava conversa sem depto
+ * para qualquer elegível — Acolhimento recebia SAC/Retenção.
+ *
+ * `autoOnInbound=false` = só `execute_distribution` (automação/IA/manual)
+ * atribui. `respectDepartment=true` = conversa sem depto espera o
+ * roteamento; não cai no pool geral.
+ */
+export function shouldIncludeOrgWideDrain(opts: {
+  autoOnInbound: boolean;
+  respectDepartment: boolean;
+}): boolean {
+  if (opts.respectDepartment) return false;
+  if (!opts.autoOnInbound) return false;
+  return true;
+}
+
+/**
+ * Inbound sem dono: só dispara o motor quando a org pediu auto-distribuição.
+ * Desligado = a automação/IA/manual é quem chama `execute_distribution`.
+ */
+export function shouldAutoDistributeInbound(autoOnInbound: boolean): boolean {
+  return autoOnInbound;
+}

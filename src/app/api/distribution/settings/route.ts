@@ -7,8 +7,8 @@
  *       - false (default): distribuição CLÁSSICA org-wide (todos os elegíveis),
  *         ignorando departamento — nada fica preso na fila por falta de roteamento.
  *       - true: quando a conversa tem um departamento com distribuição automática
- *         ligada, restringe aos membros desse departamento; sem departamento cai
- *         no org-wide.
+ *         ligada, restringe aos membros desse departamento; sem departamento o lead
+ *         espera na fila até a automação/IA definir o departamento.
  *   - `enabled`:
  *       - true (default): motor atribui e drena a fila.
  *       - false: kill switch — inbound, automação, IA e drenagem não atribuem.

@@ -58,6 +58,8 @@ import {
   CAPACITY_RELEASED_COOLDOWN_MS,
   fruitlessCooldownIsArmed,
   fruitlessPassNeedsCooldown,
+  shouldAutoDistributeInbound,
+  shouldIncludeOrgWideDrain,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
   shouldSkipCapacityReleasedFruitlessCooldown,
@@ -1021,8 +1023,17 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
 
-    // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
-    // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.
+    // autoOnInbound=false: a org optou por NÃO atribuir no inbound.
+    // Só `execute_distribution` (automação, IA, redistribuição manual)
+    // escolhe o consultor — senão o lead vaza org-wide para o
+    // departamento errado (Cruzeiro EaD / Danubia, set/26).
+    if (!shouldAutoDistributeInbound(await isDistributionAutoOnInbound())) {
+      debugWarn(
+        "[DBG-e46688 maybeDist] autoOnInbound_off",
+        () => JSON.stringify({ convId: input.conversationId }),
+      );
+      return;
+    }
 
     const remapped = await prisma.distributionPending.updateMany({
       where: { status: "PENDING", contactId: input.contactId },
@@ -1266,6 +1277,14 @@ export async function processPendingDistributionQueue(opts: {
 
     // Depts a drenar nesta passagem.
     let targetDeptIds: string[] = [];
+    const [autoOnInbound, respectDepartment] = await Promise.all([
+      isDistributionAutoOnInbound(),
+      getOrgSettingBool("distribution.respectDepartment", false),
+    ]);
+    const allowOrgWideBucket = shouldIncludeOrgWideDrain({
+      autoOnInbound,
+      respectDepartment,
+    });
     let includeOrgWide = false;
 
     if (opts.userId) {
@@ -1292,10 +1311,8 @@ export async function processPendingDistributionQueue(opts: {
         };
       }
       targetDeptIds = focus.departments.map((d) => d.id);
-      // Sem dept: pode receber leads org-wide (sem departmentId na conversa).
-      includeOrgWide = targetDeptIds.length === 0;
-      // Com dept(s): também tenta org-wide (pool humano elegível inclui esta pessoa).
-      if (targetDeptIds.length > 0) includeOrgWide = true;
+      // Sem dept cadastrado: só org-wide se a org ainda opera no modo clássico.
+      includeOrgWide = allowOrgWideBucket;
     } else {
       const deptSet = new Set<string>();
       for (const r of eligible) {
@@ -1311,7 +1328,7 @@ export async function processPendingDistributionQueue(opts: {
         if (w.departmentId) deptSet.add(w.departmentId);
       }
       targetDeptIds = Array.from(deptSet);
-      includeOrgWide = true;
+      includeOrgWide = allowOrgWideBucket;
     }
 
     let resolved = 0;
@@ -1320,10 +1337,14 @@ export async function processPendingDistributionQueue(opts: {
     const assignedDeltaByUser = new Map<string, number>();
 
     const drainBucket = async (departmentId: string | null) => {
-      // Sem membro elegível neste depto: ainda puxa o lote com capacidade
-      // org-wide. O motor aplica respectDepartment (atribui ou recusa).
+      // Só puxa o lote com capacidade de quem pertence ao depto. Sem
+      // membro elegível, o lead espera — não usa capacidade org-wide
+      // para drenar outro departamento (Cruzeiro EaD / Danubia).
       const inDept = eligibleInDeptScope(eligible, departmentId);
-      const capDeptId = inDept.length > 0 ? departmentId : null;
+      if (departmentId !== null && inDept.length === 0) {
+        return;
+      }
+      const capDeptId = departmentId;
 
       if (
         !hasRemainingCapacityInScope(
