@@ -518,7 +518,9 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           Prisma.JsonNull,
         tone: input.tone ?? archetype.defaultTone,
         language: input.language ?? "pt-BR",
-        autonomyMode: input.autonomyMode ?? "DRAFT",
+        autonomyMode:
+          input.autonomyMode ??
+          (input.archetype === "ENCERRAMENTO" ? "AUTONOMOUS" : "DRAFT"),
         enabledTools,
         dailyTokenCap: input.dailyTokenCap ?? 0,
         pipelineId: input.pipelineId ?? null,
@@ -549,7 +551,13 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         ...(openaiKeyFields(input.openaiApiKey) ?? {}),
         autoClosePolicy:
           (input.autoClosePolicy as unknown as Prisma.InputJsonValue | undefined) ??
-          Prisma.JsonNull,
+          (input.archetype === "ENCERRAMENTO"
+            ? ({
+                mode: "understood",
+                keywords: [],
+                message: "Obrigado. Se precisar estamos aqui para ajudar",
+              } as unknown as Prisma.InputJsonValue)
+            : Prisma.JsonNull),
         verticalPack,
         // Onda 3 — campos novos; cast até `prisma generate` no ambiente.
         // Tetos em 0 = runtime usa o default seguro (AGENT_MAX_STEPS/24/3).

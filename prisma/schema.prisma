@@ -4790,6 +4790,7 @@ enum AIAgentArchetype {
   VENDEDOR
   SUPORTE
   TABULACAO
+  ENCERRAMENTO
 }
 
 enum AIAgentAutonomy {

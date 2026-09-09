@@ -566,7 +566,8 @@ export type TriggerOpeningResult =
         | "already_greeted"
         | "off_hours"
         | "no_contact"
-        | "tabulation_classifier";
+        | "tabulation_classifier"
+        | "farewell_closer";
     };
 
 /**
@@ -605,6 +606,7 @@ export async function triggerAgentOpeningForContact(args: {
     where: { id: args.agentUserId },
     select: {
       id: true,
+      name: true,
       type: true,
       aiAgentConfig: {
         select: {
@@ -634,6 +636,10 @@ export async function triggerAgentOpeningForContact(args: {
   );
   if (isTabulationClassifier(cfg)) {
     return { status: "skipped", reason: "tabulation_classifier" };
+  }
+  const { isFarewellCloser } = await import("@/lib/ai-agents/farewell-closer");
+  if (isFarewellCloser({ ...cfg, name: assignee.name })) {
+    return { status: "skipped", reason: "farewell_closer" };
   }
   if (!cfg.openingMessage?.trim()) {
     return { status: "skipped", reason: "no_opening_message" };

@@ -2749,13 +2749,21 @@ export async function updateConversationStatusInDb(
     const { isTabulationClassifier } = await import(
       "@/lib/ai-agents/tabulation-classifier"
     );
-    // Classificador só carimba a folha. O Encerrar tira o responsável —
-    // "Tabulador removida da conversa" parece que a tabulação caiu.
-    const skipUnassignLog = isTabulationClassifier({
-      archetype: clearedAssignee.archetype,
-      enabledTools: clearedAssignee.enabledTools,
-      name: clearedAssignee.name,
-    });
+    const { isFarewellCloser } = await import(
+      "@/lib/ai-agents/farewell-closer"
+    );
+    // Classificador / despedida só carimbam. O Encerrar tira o responsável
+    // e o log "X removida da conversa" parece que a ação caiu.
+    const skipUnassignLog =
+      isTabulationClassifier({
+        archetype: clearedAssignee.archetype,
+        enabledTools: clearedAssignee.enabledTools,
+        name: clearedAssignee.name,
+      }) ||
+      isFarewellCloser({
+        archetype: clearedAssignee.archetype,
+        name: clearedAssignee.name,
+      });
     if (!skipUnassignLog) {
       await logEvent({
         type: "ASSIGNEE_CHANGED",

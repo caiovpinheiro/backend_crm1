@@ -703,6 +703,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       where: { id: assignedToId },
       select: {
         id: true,
+        name: true,
         type: true,
         organizationId: true,
         aiAgentConfig: {
@@ -775,6 +776,27 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       logAi("blocked", {
         conversationId: args.conversationId,
         reason: "tabulation_classifier_silent",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
+    const { isFarewellCloser, handleFarewellCloserInbound } = await import(
+      "@/services/ai/farewell-close"
+    );
+    if (isFarewellCloser({ ...cfg, name: assignee.name })) {
+      const outcome = await handleFarewellCloserInbound({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        userMessage: args.userMessage,
+        autonomyMode: cfg.autonomyMode,
+        simulateTyping: cfg.simulateTyping,
+        typingPerCharMs: cfg.typingPerCharMs,
+        markMessagesRead: cfg.markMessagesRead,
+      });
+      logAi("farewell_closer", {
+        conversationId: args.conversationId,
+        reason: outcome,
         agentUserId: assignee.id,
       });
       return;

@@ -17,6 +17,7 @@ const ARCHETYPES: AIAgentArchetype[] = [
   "VENDEDOR",
   "SUPORTE",
   "TABULACAO",
+  "ENCERRAMENTO",
 ];
 const AUTONOMIES: AIAgentAutonomy[] = ["AUTONOMOUS", "DRAFT"];
 

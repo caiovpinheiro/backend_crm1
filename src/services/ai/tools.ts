@@ -113,6 +113,8 @@ export type RunContext = {
   testMode?: boolean;
   /// Org do run (worker/automação). Tools de tabulação não dependem só do ALS.
   organizationId?: string | null;
+  archetype?: string | null;
+  agentName?: string | null;
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -1594,14 +1596,21 @@ function closeConversationTool(ctx: RunContext) {
               : "Neste agente só encerro com pedido explícito (encerrar/finalizar) ou palavra-chave. Não chame esta tool.",
           );
         }
-        const closeFn = packOps(ctx).closeAiOnlyConversation;
-        if (!closeFn) {
-          return fail("Encerramento automático não disponível neste agente.");
-        }
+        const closeFn =
+          packOps(ctx).closeAiOnlyConversation ??
+          (await import("@/services/ai/close-ai-conversation"))
+            .closeAiOnlyConversation;
+        const { isFarewellCloser } = await import(
+          "@/lib/ai-agents/farewell-closer"
+        );
         const result = await closeFn({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
           reason: reason ?? "close_conversation via IA",
+          allowAfterHumanReply: isFarewellCloser({
+            archetype: ctx.archetype,
+            name: ctx.agentName,
+          }),
         });
         if (!result.closed) {
           return fail(

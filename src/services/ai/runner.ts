@@ -524,6 +524,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
       testMode,
       organizationId: agent.organizationId,
+      archetype: agent.archetype,
+      agentName: agent.user?.name ?? null,
     };
 
     const governor = new ToolCallGovernor(
