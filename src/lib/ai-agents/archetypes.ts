@@ -175,6 +175,33 @@ Diagnosticar e resolver problemas técnicos de primeiro nível. Quando o problem
 - Cliente: {{contact_name}}
 - Ticket/deal: {{deal_summary}}`,
   },
+  {
+    id: "TABULACAO",
+    label: "Tabulação — Classificar demanda",
+    shortDescription:
+      "Lê a conversa encerrada e aplica a folha de tabulação certa.",
+    longDescription:
+      "Não conversa com o cliente. A automação transfere a conversa para este agente; ele lê o histórico, escolhe uma folha da árvore de tabulações do departamento e grava o motivo. Use no fluxo que encerra o robô.",
+    defaultTools: ["list_tabulations", "tabulate_conversation"],
+    defaultTone: "objetivo e analítico",
+    suggestedModel: "gpt-4o-mini",
+    systemPromptTemplate: `Você é {{agent_name}}, classificador interno da {{company_name}}. Você NÃO atende o cliente e NÃO envia WhatsApp.
+
+## Sua missão
+Ler o histórico da conversa e aplicar a tabulação FOLHA que melhor descreve a demanda.
+
+## Regras
+- Use SOMENTE IDs do catálogo de tabulações (prompt ou tool \`list_tabulations\`).
+- Sempre chame \`tabulate_conversation\` com um id de folha.
+- Se a confiança for baixa ou o assunto não casar, use o fallback do catálogo.
+- Nunca invente ID. Nunca escolha uma categoria pai.
+- Não chame tools de conversa (transfer, close_conversation, send_whatsapp_template, add_tag).
+- A resposta textual pode ser um resumo interno de uma linha. O sistema não envia ao cliente.
+
+## Contexto
+- Contato: {{contact_name}} ({{contact_phone}})
+- Deal: {{deal_summary}}`,
+  },
 ];
 
 export const ARCHETYPE_MAP: Record<ArchetypeId, ArchetypeDescriptor> =

@@ -16,7 +16,8 @@ export type EffectKind =
   | "deal_created"
   | "stage_moved"
   | "template_sent"
-  | "conversation_closed";
+  | "conversation_closed"
+  | "conversation_tabulated";
 
 export const EFFECT_TOOLS: Record<string, EffectKind> = {
   execute_distribution: "transfer",
@@ -26,6 +27,7 @@ export const EFFECT_TOOLS: Record<string, EffectKind> = {
   move_stage: "stage_moved",
   send_whatsapp_template: "template_sent",
   close_conversation: "conversation_closed",
+  tabulate_conversation: "conversation_tabulated",
 };
 
 /**
@@ -143,6 +145,8 @@ export function effectToolSucceeded(
       return typeof r.externalId === "string" && r.externalId.length > 0;
     case "close_conversation":
       return r.closed === true;
+    case "tabulate_conversation":
+      return r.tabulated === true;
     default:
       return false;
   }
@@ -178,6 +182,10 @@ const CLAIM_PATTERNS: Record<EffectKind, RegExp[]> = {
   conversation_closed: [
     /\b(vou|irei)\s+encerrar\s+(o\s+)?(atendimento|conversa)/,
     /\b(atendimento|conversa)\s+(foi\s+)?encerrad[ao]\b/,
+  ],
+  conversation_tabulated: [
+    /\b(vou|irei|ja)\s+tabular/,
+    /\bconversa\s+(foi\s+)?tabulad[ao]\b/,
   ],
 };
 

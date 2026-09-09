@@ -565,7 +565,8 @@ export type TriggerOpeningResult =
         | "no_opening_message"
         | "already_greeted"
         | "off_hours"
-        | "no_contact";
+        | "no_contact"
+        | "tabulation_classifier";
     };
 
 /**
@@ -615,6 +616,8 @@ export async function triggerAgentOpeningForContact(args: {
           simulateTyping: true,
           typingPerCharMs: true,
           markMessagesRead: true,
+          archetype: true,
+          enabledTools: true,
         },
       },
     },
@@ -625,6 +628,12 @@ export async function triggerAgentOpeningForContact(args: {
   const cfg = assignee.aiAgentConfig;
   if (!cfg?.active) {
     return { status: "skipped", reason: "agent_inactive" };
+  }
+  const { isTabulationClassifier } = await import(
+    "@/lib/ai-agents/tabulation-classifier"
+  );
+  if (isTabulationClassifier(cfg)) {
+    return { status: "skipped", reason: "tabulation_classifier" };
   }
   if (!cfg.openingMessage?.trim()) {
     return { status: "skipped", reason: "no_opening_message" };

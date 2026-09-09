@@ -727,3 +727,106 @@ export async function deleteNode(id: string) {
   // Cascade por FK. Conversation.tabulationId -> SET NULL preserva historico.
   await prisma.tabulation.delete({ where: { id } });
 }
+
+export type TabulationLeafOption = {
+  id: string;
+  number: number;
+  path: string;
+  departmentId: string;
+  departmentName: string;
+};
+
+function flattenActiveLeaves(
+  nodes: TabulationNode[],
+  prefix: string[],
+): Array<{ id: string; number: number; path: string }> {
+  const out: Array<{ id: string; number: number; path: string }> = [];
+  for (const n of nodes) {
+    if (!n.active) continue;
+    const path = [...prefix, n.name];
+    if (n.children.length === 0) {
+      out.push({ id: n.id, number: n.number, path: path.join(" > ") });
+    } else {
+      out.push(...flattenActiveLeaves(n.children, path));
+    }
+  }
+  return out;
+}
+
+/**
+ * Folhas ativas para o classificador de IA. Sem `departmentId`, lista a
+ * árvore de todos os departamentos da org (conversa sem depto).
+ */
+export async function listActiveTabulationLeaves(args: {
+  organizationId: string;
+  departmentId?: string | null;
+}): Promise<TabulationLeafOption[]> {
+  const depts = await prisma.department.findMany({
+    where: {
+      organizationId: args.organizationId,
+      ...(args.departmentId ? { id: args.departmentId } : {}),
+    },
+    select: { id: true, name: true },
+    orderBy: { name: "asc" },
+  });
+  if (depts.length === 0) return [];
+
+  const rows = await prisma.tabulation.findMany({
+    where: {
+      organizationId: args.organizationId,
+      departmentId: { in: depts.map((d) => d.id) },
+      active: true,
+    },
+    orderBy: [{ position: "asc" }, { name: "asc" }],
+  });
+  const byDept = new Map<string, TabulationRow[]>();
+  for (const row of rows) {
+    const list = byDept.get(row.departmentId) ?? [];
+    list.push(row);
+    byDept.set(row.departmentId, list);
+  }
+
+  const out: TabulationLeafOption[] = [];
+  for (const d of depts) {
+    const leaves = flattenActiveLeaves(
+      buildTreeFromRows(byDept.get(d.id) ?? []),
+      [],
+    );
+    for (const leaf of leaves) {
+      out.push({
+        ...leaf,
+        departmentId: d.id,
+        departmentName: d.name,
+      });
+    }
+  }
+  return out;
+}
+
+export function formatTabulationCatalogBlock(
+  leaves: TabulationLeafOption[],
+  fallback: { id: string; path: string } | null,
+): string {
+  const lines = [
+    "",
+    "## Catálogo de tabulações (somente folhas)",
+    "Use SOMENTE um destes IDs em `tabulate_conversation`. Não invente.",
+  ];
+  if (leaves.length === 0) {
+    lines.push("Nenhuma folha ativa neste departamento.");
+    return lines.join("\n");
+  }
+  for (const l of leaves) {
+    const dept =
+      leaves.some((x) => x.departmentId !== l.departmentId)
+        ? `${l.departmentName} / `
+        : "";
+    lines.push(`- ${dept}${l.path} [${l.number}] id=${l.id}`);
+  }
+  if (fallback) {
+    lines.push(
+      `Fallback (baixa confiança / sem casamento): ${fallback.path} id=${fallback.id}`,
+    );
+  }
+  return lines.join("\n");
+}

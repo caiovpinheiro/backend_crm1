@@ -383,6 +383,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         ) ?? "")
       : "";
     const clockHint = hasPack ? formatLocalClockHint() : "";
+    const runtimeTools = agent.enabledTools;
+    const tabulationCatalog =
+      runtimeTools.includes("tabulate_conversation") ||
+      runtimeTools.includes("list_tabulations")
+        ? await (async () => {
+            const { loadTabulationCatalogForConversation } = await import(
+              "@/services/ai/tabulation-classify"
+            );
+            return loadTabulationCatalogForConversation({
+              organizationId: agent.organizationId,
+              conversationId: args.conversationId ?? null,
+            });
+          })().catch(() => "")
+        : "";
     const retrievalWithModels = [
       retrievalBlock,
       expiredKnowledgeBlock,
@@ -395,11 +409,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       passwordResetHint,
       campaignDispatchBlock,
       clockHint,
+      tabulationCatalog,
     ]
       .filter(Boolean)
       .join("\n");
-
-    const runtimeTools = agent.enabledTools;
     const steeringRules =
       agent.steeringRules?.trim() ||
       fallbackSteeringRules(agent.archetype, agent.verticalPack);

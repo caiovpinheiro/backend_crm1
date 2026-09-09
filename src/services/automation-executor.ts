@@ -2251,7 +2251,13 @@ async function executeStep(
         select: {
           id: true,
           type: true,
-          aiAgentConfig: { select: { active: true } },
+          aiAgentConfig: {
+            select: {
+              active: true,
+              archetype: true,
+              enabledTools: true,
+            },
+          },
         },
       });
       if (!agentUser || agentUser.type !== "AI") {
@@ -2305,23 +2311,53 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        try {
-          const opening = await triggerAgentOpeningForContact({
-            contactId: contactForOpening,
-            agentUserId,
-            channel: "meta",
-          });
-          if (opening.status === "skipped") {
-            log.info(
-              `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
+        const { isTabulationClassifier } = await import(
+          "@/lib/ai-agents/tabulation-classifier"
+        );
+        if (isTabulationClassifier(agentUser.aiAgentConfig)) {
+          try {
+            const { triggerTabulationClassifyForContact } = await import(
+              "@/services/ai/tabulation-classify"
             );
-          } else {
-            log.info(
-              `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
-            );
+            const classified = await triggerTabulationClassifyForContact({
+              contactId: contactForOpening,
+              agentUserId,
+            });
+            if (classified.status === "skipped") {
+              log.info(
+                `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
+              );
+            } else if (classified.status === "failed") {
+              log.warn(
+                `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
+              );
+            } else {
+              log.info(
+                `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
+              );
+            }
+          } catch (err) {
+            log.warn("transfer_to_ai_agent: falha na classificação:", err);
           }
-        } catch (err) {
-          log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
+        } else {
+          try {
+            const opening = await triggerAgentOpeningForContact({
+              contactId: contactForOpening,
+              agentUserId,
+              channel: "meta",
+            });
+            if (opening.status === "skipped") {
+              log.info(
+                `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
+              );
+            } else {
+              log.info(
+                `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+              );
+            }
+          } catch (err) {
+            log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
+          }
         }
       }
       return {};

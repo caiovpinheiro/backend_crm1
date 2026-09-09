@@ -722,6 +722,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             model: true,
             inboxPolicy: true,
             verticalPack: true,
+            archetype: true,
+            enabledTools: true,
           },
         },
       },
@@ -766,6 +768,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // run continua abortando em `assertAiStillAuthorized({ since })`.
 
     const cfg = assignee.aiAgentConfig;
+    const { isTabulationClassifier } = await import(
+      "@/lib/ai-agents/tabulation-classifier"
+    );
+    if (isTabulationClassifier(cfg)) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "tabulation_classifier_silent",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
     // Política editável na tela do agente. Campo vazio = defaults do
     // código, então agentes antigos seguem se comportando igual.
     const policy: InboxPolicy = normalizeInboxPolicy(

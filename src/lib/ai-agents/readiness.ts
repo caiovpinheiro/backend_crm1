@@ -23,14 +23,16 @@ export function isAutonomousReady(args: {
   return !isUnrestrictedScope(policy.scope) || args.knowledgeDocsCount > 0;
 }
 
-/** Gate: AUTONOMOUS exige escopo ou KB. */
+/** Gate: AUTONOMOUS exige escopo ou KB. Classificador não fala com o cliente. */
 export function assertAutonomousReadiness(args: {
   nextAutonomy: AIAgentAutonomy;
   nextActive: boolean;
   inboxPolicy: unknown;
   knowledgeDocsCount: number;
+  archetype?: string | null;
 }): void {
   if (args.nextAutonomy !== "AUTONOMOUS") return;
+  if (args.archetype === "TABULACAO") return;
   if (
     !isAutonomousReady({
       inboxPolicy: args.inboxPolicy,

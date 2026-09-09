@@ -1625,6 +1625,104 @@ function closeConversationTool(ctx: RunContext) {
   });
 }
 
+// ── list_tabulations / tabulate_conversation ───────────────────
+
+function listTabulationsTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Lista as tabulações FOLHA ativas do departamento da conversa (motivos de encerramento). Use antes de tabulate_conversation se o catálogo do prompt estiver incompleto. Não envia mensagem ao cliente.",
+    inputSchema: z.object({}),
+    execute: async () => {
+      try {
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const { listActiveTabulationLeaves, resolveAutoCloseTabulation } =
+          await import("@/services/tabulations");
+        let departmentId: string | null = null;
+        if (ctx.conversationId) {
+          const conv = await prisma.conversation.findFirst({
+            where: { id: ctx.conversationId, organizationId: orgId },
+            select: { departmentId: true },
+          });
+          departmentId = conv?.departmentId ?? null;
+        }
+        const leaves = await listActiveTabulationLeaves({
+          organizationId: orgId,
+          departmentId,
+        });
+        const fallback = departmentId
+          ? await resolveAutoCloseTabulation({
+              organizationId: orgId,
+              departmentId,
+            }).catch(() => null)
+          : null;
+        return ok({
+          leaves: leaves.map((l) => ({
+            id: l.id,
+            number: l.number,
+            path: l.path,
+            departmentName: l.departmentName,
+          })),
+          fallbackId: fallback?.tabulationId ?? null,
+          fallbackName: fallback?.name ?? null,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao listar tabulações.",
+        );
+      }
+    },
+  });
+}
+
+function tabulateConversationTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Aplica uma tabulação FOLHA à conversa atual (motivo da demanda). Se a conversa ainda estiver aberta, encerra junto. Use somente um id devolvido por list_tabulations ou listado no catálogo do prompt. Não envia mensagem ao cliente.",
+    inputSchema: z.object({
+      tabulationId: z
+        .string()
+        .min(1)
+        .describe("ID da folha de tabulação (não use categoria pai)."),
+      reason: z
+        .string()
+        .optional()
+        .describe("Resumo interno curto do porquê desta folha."),
+    }),
+    execute: async ({ tabulationId }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const { applyConversationTabulation } = await import(
+          "@/services/ai/tabulation-classify"
+        );
+        const result = await applyConversationTabulation({
+          conversationId: ctx.conversationId,
+          organizationId: orgId,
+          tabulationId,
+          contactId: ctx.contactId ?? null,
+          source: "AI_AGENT",
+          closeIfOpen: true,
+        });
+        if (!result.ok) return fail(result.error);
+        return ok({
+          tabulated: true,
+          alreadyApplied: result.alreadyApplied,
+          closed: result.closed,
+          tabulationId: result.tabulation.tabulationId,
+          tabulationName: result.tabulation.name,
+          tabulationNumber: result.tabulation.number,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao tabular conversa.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -1647,6 +1745,8 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
   close_conversation: closeConversationTool,
+  list_tabulations: listTabulationsTool,
+  tabulate_conversation: tabulateConversationTool,
 };
 
 /**

@@ -4788,6 +4788,7 @@ enum AIAgentArchetype {
   ATENDIMENTO
   VENDEDOR
   SUPORTE
+  TABULACAO
 }
 
 enum AIAgentAutonomy {

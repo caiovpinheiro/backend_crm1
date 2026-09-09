@@ -18,6 +18,7 @@ const SYSTEM_IDS: Record<AIAgentArchetype, string> = {
   ATENDIMENTO: "tmpl_sys_atendimento",
   VENDEDOR: "tmpl_sys_vendedor",
   SUPORTE: "tmpl_sys_suporte",
+  TABULACAO: "tmpl_sys_tabulacao",
 };
 
 type TemplateRow = {

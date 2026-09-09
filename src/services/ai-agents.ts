@@ -539,8 +539,11 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         businessHours:
           (input.businessHours as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
-        outputStyle: input.outputStyle ?? "conversational",
-        simulateTyping: input.simulateTyping ?? true,
+        outputStyle:
+          input.outputStyle ??
+          (input.archetype === "TABULACAO" ? "structured" : "conversational"),
+        simulateTyping:
+          input.simulateTyping ?? input.archetype !== "TABULACAO",
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
         ...(openaiKeyFields(input.openaiApiKey) ?? {}),
@@ -627,6 +630,7 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
     nextActive,
     inboxPolicy: nextInbox,
     knowledgeDocsCount: existing._count.knowledgeDocs,
+    archetype: input.archetype ?? existing.archetype,
   });
 
   return prisma.$transaction(async (tx) => {
@@ -934,6 +938,7 @@ export async function toggleAIAgentActive(id: string) {
       nextActive,
       inboxPolicy: existing.inboxPolicy,
       knowledgeDocsCount: existing._count.knowledgeDocs,
+      archetype: existing.archetype,
     });
   }
   const updated = await prisma.aIAgentConfig.update({
