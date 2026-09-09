@@ -64,10 +64,10 @@ describe("readStepDistributionDepartmentIds", () => {
 });
 
 /**
- * A origem do departamento decide o fallback: escolha do operador é regra
- * (fila do departamento), herança da conversa é palpite (cai para org-wide).
- * Sem isso, o lead herdado ficava preso numa fila que ninguém drena —
- * `allowOrgWideFallback` é `false` inclusive na drenagem.
+ * A origem do departamento decide o que acontece quando o pool fica sem
+ * ninguém elegível. O executor trata as duas origens iguais: pool fechado,
+ * o lead espera na fila daquele departamento (sem fallback org-wide).
+ * `origin` continua no contrato para diagnóstico e para a UI do canvas.
  */
 describe("resolveStepDistributionScope — origem do departamento", () => {
   /** Espelha a decisão do executor: só herdado libera o fallback. */
@@ -93,7 +93,7 @@ describe("resolveStepDistributionScope — origem do departamento", () => {
     );
   });
 
-  it("campo vazio com conversa em departamento: herda e libera o fallback", () => {
+  it("campo vazio com conversa em departamento: herda (origin inherited)", () => {
     const scope = resolveStepDistributionScope({}, ACOLHIMENTO);
 
     expect(scope).toEqual({
