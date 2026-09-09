@@ -168,7 +168,7 @@ describe("capacity_released producer vs worker", () => {
 
     const { enqueueProcessPendingOrRun } = await import("../pending");
     const result = await enqueueProcessPendingOrRun({
-      trigger: "capacity_released",
+      trigger: "agent_online",
       userId: "u1",
     });
 
