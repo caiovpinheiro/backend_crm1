@@ -94,3 +94,7 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 - Deal não tem `pipelineId`; funil vem do `Stage`.
 - “Lead” no jargão = Deal.
 - Inbound cai no pipeline `isDefault` (canal → funil ainda não existe).
+
+## Decisões técnicas
+
+- 2026-09-09 — Cursor Grok 4.6 — **Bwipo Keeps** usa models `KeepNote` / `KeepAttachment` / `KeepImport` (`keep_notes`), não o `Note` de contato/negócio. Conteúdo é JSON TipTap. Arquivos no bucket de storage `keeps`. Permissões `keep:*` + `nav:bwipo-keeps`. Notas são por `organizationId` + `userId` (sem compartilhamento nesta versão). Ordem do mural: `KeepNote.position` (float); `PATCH /api/keeps/reorder`.

@@ -355,6 +355,18 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "demands",      label: "Demandas (roadmap)" },
       { action: "team-chat",    label: "Chat interno" },
       { action: "email",        label: "E-mail (caixa IMAP)" },
+      { action: "bwipo-keeps",  label: "Bwipo Keeps" },
+    ],
+  },
+  {
+    resource: "keep",
+    label: "Bwipo Keeps",
+    description: "Notas pessoais do usuário na organização (texto, listas, anexos).",
+    actions: [
+      { action: "view", label: "Visualizar notas" },
+      { action: "create", label: "Criar nota" },
+      { action: "edit", label: "Editar nota" },
+      { action: "delete", label: "Excluir nota", destructive: true },
     ],
   },
 ];
