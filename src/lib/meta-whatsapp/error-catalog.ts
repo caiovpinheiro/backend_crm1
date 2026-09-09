@@ -77,7 +77,7 @@ const SUBCODE_CATALOG: Record<number, MetaErrorInfo> = {
     reason:
       "A Meta recusou criar/alterar template nesta WABA (Invalid WhatsApp account usage).",
     action:
-      "O token do canal lista templates, mas o POST na Graph é bloqueado para esta WABA. No App Meta que gerou o token: WABA adicionada no produto WhatsApp, system user com whatsapp_business_management e controle da conta. Confira também se o mesmo phone_number_id não está em outra WABA. Se o WhatsApp Manager também recusar, é restrição da conta — use o fbtrace_id no suporte Meta.",
+      "GET (listar) nesta WABA funciona; POST (criar/alterar) pela Graph é recusado pela Meta — inclusive no Graph Explorer com o app inscrito. Não é falha do CRM. Crie o template no WhatsApp Manager e envie pelo CRM. Ticket Meta com o fbtrace_id da resposta.",
   },
 };
 
