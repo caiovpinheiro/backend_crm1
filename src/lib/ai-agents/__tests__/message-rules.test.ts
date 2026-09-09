@@ -31,6 +31,7 @@ function rule(over: Partial<MessageRule>): MessageRule {
     action: "answer_with_knowledge",
     department: null,
     message: null,
+    tagName: null,
     ...over,
   };
 }
