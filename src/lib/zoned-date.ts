@@ -97,6 +97,28 @@ export function resolveZonedDayEnd(
   );
 }
 
+/**
+ * Início da janela do Tabulador: mensagens de hoje no fuso.
+ * Sábado inclui sexta (D-1). Domingo inclui sexta (D-2).
+ * Dias úteis não puxam o histórico de ontem.
+ */
+export function tabulationHistoryWindowStart(
+  now: Date,
+  timeZone: string,
+): Date {
+  const today = formatZonedDay(now, timeZone);
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+  }).format(now);
+  const daysBack = weekday === "Sat" ? 1 : weekday === "Sun" ? 2 : 0;
+  const [y, m, d] = today.split("-").map(Number);
+  const ymd = new Date(Date.UTC(y!, m! - 1, d! - daysBack))
+    .toISOString()
+    .slice(0, 10);
+  return resolveZonedDayStart(ymd, timeZone) ?? new Date(now);
+}
+
 /** `2026-12-21` no fuso, para devolver ao formulário sem deslocar o dia. */
 export function formatZonedDay(instant: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {

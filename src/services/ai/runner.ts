@@ -146,6 +146,12 @@ export type RunArgs = {
   /// automação injeta `tabulate_conversation` mesmo se o admin criou o
   /// agente com outro arquétipo).
   enabledTools?: string[];
+  /// Obriga o modelo a chamar `tabulate_conversation` (run silencioso).
+  forceTabulateTool?: boolean;
+  /// Quantas mensagens do histórico carregar. Default `MAX_HISTORY`.
+  historyLimit?: number;
+  /// Só mensagens a partir deste instante (Tabulador: janela do dia).
+  historySince?: Date;
 };
 
 export type RunResult = {
@@ -256,7 +262,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     const timedHistory =
       args.history ??
-      (await loadHistoryFromConversation(args.conversationId ?? null));
+      (await loadHistoryFromConversation(
+        args.conversationId ?? null,
+        args.historyLimit,
+        args.historySince,
+      ));
     // O modelo continua lendo a janela inteira; o `at` é só para recortar a
     // busca, e não pode vazar para as `ModelMessage` do provider.
     const history = timedHistory.map(({ role, content }) => ({
@@ -513,6 +523,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       inboxPolicy: inboxPolicyForRun,
       autoClosePolicy: normalizeAutoClosePolicy(agent.autoClosePolicy),
       testMode,
+      organizationId: agent.organizationId,
     };
 
     const governor = new ToolCallGovernor(
@@ -557,6 +568,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       temperature: agent.temperature,
       maxOutputTokens: agent.maxTokens,
       maxSteps,
+      toolChoice:
+        args.forceTabulateTool && runtimeTools.includes("tabulate_conversation")
+          ? { type: "tool", toolName: "tabulate_conversation" }
+          : undefined,
     });
 
     const stepCountReached = result.steps >= maxSteps;
@@ -736,14 +751,19 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
 async function loadHistoryFromConversation(
   conversationId: string | null,
+  take = MAX_HISTORY,
+  since?: Date,
 ): Promise<
   Array<{ role: "user" | "assistant"; content: string; at: Date | null }>
 > {
   if (!conversationId) return [];
   const msgs = await prisma.message.findMany({
-    where: { conversationId },
+    where: {
+      conversationId,
+      ...(since ? { createdAt: { gte: since } } : {}),
+    },
     orderBy: { createdAt: "desc" },
-    take: MAX_HISTORY,
+    take: Math.min(Math.max(take, 1), 80),
     select: {
       content: true,
       direction: true,

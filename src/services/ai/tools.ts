@@ -111,6 +111,8 @@ export type RunContext = {
   /// ferramenta de efeito executa. O bloqueio é código, não instrução de
   /// prompt — ver `withTestModeSimulation`.
   testMode?: boolean;
+  /// Org do run (worker/automação). Tools de tabulação não dependem só do ALS.
+  organizationId?: string | null;
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -1630,32 +1632,22 @@ function closeConversationTool(ctx: RunContext) {
 function listTabulationsTool(ctx: RunContext) {
   return tool({
     description:
-      "Lista as tabulações FOLHA ativas do departamento da conversa (motivos de encerramento). Use antes de tabulate_conversation se o catálogo do prompt estiver incompleto. Não envia mensagem ao cliente.",
+      "Lista TODAS as tabulações FOLHA ativas da organização (todos os departamentos). Use para achar a folha mais próxima da dúvida ou problema do contato. Não envia mensagem ao cliente.",
     inputSchema: z.object({}),
     execute: async () => {
       try {
-        const orgId = getOrgIdOrNull();
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
-        const { listActiveTabulationLeaves, resolveAutoCloseTabulation } =
-          await import("@/services/tabulations");
-        let departmentId: string | null = null;
-        if (ctx.conversationId) {
-          const conv = await prisma.conversation.findFirst({
-            where: { id: ctx.conversationId, organizationId: orgId },
-            select: { departmentId: true },
-          });
-          departmentId = conv?.departmentId ?? null;
-        }
+        const {
+          listActiveTabulationLeaves,
+          resolveClassifierFallbackTabulation,
+        } = await import("@/services/tabulations");
         const leaves = await listActiveTabulationLeaves({
           organizationId: orgId,
-          departmentId,
         });
-        const fallback = departmentId
-          ? await resolveAutoCloseTabulation({
-              organizationId: orgId,
-              departmentId,
-            }).catch(() => null)
-          : null;
+        const fallback = await resolveClassifierFallbackTabulation({
+          organizationId: orgId,
+        }).catch(() => null);
         return ok({
           leaves: leaves.map((l) => ({
             id: l.id,
@@ -1692,7 +1684,7 @@ function tabulateConversationTool(ctx: RunContext) {
     execute: async ({ tabulationId }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        const orgId = getOrgIdOrNull();
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
         const { applyConversationTabulation } = await import(
           "@/services/ai/tabulation-classify"

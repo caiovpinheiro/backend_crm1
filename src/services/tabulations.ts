@@ -284,6 +284,45 @@ export async function resolveAutoCloseTabulation(args: {
 }
 
 /**
+ * Fallback do classificador: padrão do departamento da conversa; se a
+ * conversa não tem depto ou o depto não tem autoClose, usa o primeiro
+ * departamento da org que tenha tabulação padrão de encerramento.
+ */
+export async function resolveClassifierFallbackTabulation(args: {
+  organizationId: string;
+  departmentId?: string | null;
+}): Promise<{
+  tabulationId: string;
+  ancestorIds: string[];
+  name: string;
+  number: number;
+} | null> {
+  const primary = await resolveAutoCloseTabulation({
+    organizationId: args.organizationId,
+    departmentId: args.departmentId,
+  }).catch(() => null);
+  if (primary) return primary;
+
+  const depts = await prisma.department.findMany({
+    where: {
+      organizationId: args.organizationId,
+      autoCloseTabulationId: { not: null },
+    },
+    select: { id: true },
+    orderBy: { name: "asc" },
+  });
+  for (const d of depts) {
+    if (d.id === args.departmentId) continue;
+    const tab = await resolveAutoCloseTabulation({
+      organizationId: args.organizationId,
+      departmentId: d.id,
+    }).catch(() => null);
+    if (tab) return tab;
+  }
+  return null;
+}
+
+/**
  * Tabulacao escolhida no passo `tabulate_conversation` de uma automacao.
  * Revalida na hora do uso, como `resolveAutoCloseTabulation`: a arvore pode
  * ter sido reorganizada ou desativada depois de o fluxo ser montado, e nesse
@@ -761,6 +800,18 @@ export async function listActiveTabulationLeaves(args: {
   organizationId: string;
   departmentId?: string | null;
 }): Promise<TabulationLeafOption[]> {
+  const scoped = await listActiveTabulationLeavesStrict(args);
+  if (scoped.length > 0 || !args.departmentId) return scoped;
+  // Departamento sem folhas: o classificador precisa da árvore da org.
+  return listActiveTabulationLeavesStrict({
+    organizationId: args.organizationId,
+  });
+}
+
+async function listActiveTabulationLeavesStrict(args: {
+  organizationId: string;
+  departmentId?: string | null;
+}): Promise<TabulationLeafOption[]> {
   const depts = await prisma.department.findMany({
     where: {
       organizationId: args.organizationId,
@@ -809,19 +860,15 @@ export function formatTabulationCatalogBlock(
 ): string {
   const lines = [
     "",
-    "## Catálogo de tabulações (somente folhas)",
-    "Use SOMENTE um destes IDs em `tabulate_conversation`. Não invente.",
+    "## Catálogo de tabulações (organização inteira, somente folhas)",
+    "Escolha a folha cujo caminho mais se aproxima da dúvida ou problema do contato. Use SOMENTE estes IDs. Não invente. O departamento da conversa NÃO limita a escolha.",
   ];
   if (leaves.length === 0) {
-    lines.push("Nenhuma folha ativa neste departamento.");
+    lines.push("Nenhuma folha ativa na organização.");
     return lines.join("\n");
   }
   for (const l of leaves) {
-    const dept =
-      leaves.some((x) => x.departmentId !== l.departmentId)
-        ? `${l.departmentName} / `
-        : "";
-    lines.push(`- ${dept}${l.path} [${l.number}] id=${l.id}`);
+    lines.push(`- ${l.departmentName} / ${l.path} [${l.number}] id=${l.id}`);
   }
   if (fallback) {
     lines.push(

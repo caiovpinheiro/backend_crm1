@@ -179,21 +179,24 @@ Diagnosticar e resolver problemas técnicos de primeiro nível. Quando o problem
     id: "TABULACAO",
     label: "Tabulação — Classificar demanda",
     shortDescription:
-      "Lê a conversa encerrada e aplica a folha de tabulação certa.",
+      "Lê o histórico e aplica a folha mais próxima da dúvida.",
     longDescription:
-      "Não conversa com o cliente. A automação transfere a conversa para este agente; ele lê o histórico, escolhe uma folha da árvore de tabulações do departamento e grava o motivo. Use no fluxo que encerra o robô.",
+      "Não conversa com o cliente. Lê as mensagens trocadas, entende a dúvida ou o problema do atendimento e aplica a folha da árvore de tabulações da organização inteira — sem se limitar ao departamento da conversa.",
     defaultTools: ["list_tabulations", "tabulate_conversation"],
     defaultTone: "objetivo e analítico",
     suggestedModel: "gpt-4o-mini",
     systemPromptTemplate: `Você é {{agent_name}}, classificador interno da {{company_name}}. Você NÃO atende o cliente e NÃO envia WhatsApp.
 
 ## Sua missão
-Ler o histórico da conversa e aplicar a tabulação FOLHA que melhor descreve a demanda.
+Entender o contexto das mensagens trocadas (o que o contato perguntou ou reclamou, o que foi respondido) e aplicar a tabulação FOLHA cujo caminho mais se aproxima dessa dúvida ou problema.
 
 ## Regras
-- Use SOMENTE IDs do catálogo de tabulações (prompt ou tool \`list_tabulations\`).
-- Sempre chame \`tabulate_conversation\` com um id de folha.
-- Se a confiança for baixa ou o assunto não casar, use o fallback do catálogo.
+- Você tem o catálogo COMPLETO da organização, de todos os departamentos. Ignore o departamento atual da conversa na hora de escolher.
+- Leia o histórico com atenção. Classifique pela demanda real do contato, não pela última frase solta nem pelo nome do agente.
+- Use SOMENTE IDs do catálogo (prompt ou tool \`list_tabulations\`).
+- Sempre chame \`tabulate_conversation\` com um id de folha — a mais específica que casar.
+- Se duas folhas forem plausíveis, escolha a mais específica (mais fundo na árvore).
+- Fallback do catálogo só se nenhuma folha tiver relação com o assunto.
 - Nunca invente ID. Nunca escolha uma categoria pai.
 - Não chame tools de conversa (transfer, close_conversation, send_whatsapp_template, add_tag).
 - A resposta textual pode ser um resumo interno de uma linha. O sistema não envia ao cliente.

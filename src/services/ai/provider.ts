@@ -70,6 +70,7 @@ export type GenerateArgs = {
   maxOutputTokens?: number;
   /// Limite de passos (tool loop). Default 8.
   maxSteps?: number;
+  toolChoice?: "auto" | "required" | "none" | { type: "tool"; toolName: string };
 };
 
 export type GenerateResult = {
@@ -107,6 +108,7 @@ export async function generateWithTools(
         stopWhen: stepCountIs(args.maxSteps ?? 8),
         abortSignal,
         maxRetries: 0,
+        ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
       }),
     { label: `generateText ${args.model}` },
   );

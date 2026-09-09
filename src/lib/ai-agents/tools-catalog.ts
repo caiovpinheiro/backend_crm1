@@ -120,7 +120,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "list_tabulations",
     label: "Listar tabulações",
     description:
-      "Lista as folhas ativas da árvore de tabulação do departamento da conversa. Só leitura — o classificador usa para escolher o motivo.",
+      "Lista todas as folhas ativas da organização (todos os departamentos). O classificador escolhe a mais próxima da dúvida do contato.",
     category: "crm",
     defaultForArchetypes: ["TABULACAO"],
   },
