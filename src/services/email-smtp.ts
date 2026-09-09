@@ -29,14 +29,38 @@ function createTransport(input: SmtpConnectInput) {
   });
 }
 
+function looksLikeAppPasswordRequired(lower: string): boolean {
+  return (
+    lower.includes("application-specific password") ||
+    lower.includes("app password") ||
+    lower.includes("app-password") ||
+    lower.includes("web login required") ||
+    lower.includes("via your web browser") ||
+    lower.includes("please log in via")
+  );
+}
+
 export function mapSmtpError(err: unknown): EmailFieldError {
   const raw = err instanceof Error ? err.message : String(err);
   const lower = raw.toLowerCase();
   if (lower.includes("timeout")) {
     return { ok: false, field: "smtp_host", message: "Tempo esgotado ao conectar no SMTP. Verifique servidor e porta." };
   }
+  if (looksLikeAppPasswordRequired(lower)) {
+    return {
+      ok: false,
+      field: "password",
+      message:
+        "O provedor recusou a senha. Gmail e Outlook exigem senha de app — não use a senha da conta.",
+    };
+  }
   if (lower.includes("auth") || lower.includes("invalid login") || lower.includes("535") || lower.includes("534")) {
-    return { ok: false, field: "password", message: "Falha na autenticação SMTP. Confira e-mail e senha." };
+    return {
+      ok: false,
+      field: "password",
+      message:
+        "Falha na autenticação SMTP. Confira e-mail e senha. No Gmail/Outlook, use uma senha de app.",
+    };
   }
   if (lower.includes("enotfound") || lower.includes("econnrefused") || lower.includes("eai_again")) {
     return { ok: false, field: "smtp_host", message: "Servidor SMTP inacessível. Confira o host e a porta." };
