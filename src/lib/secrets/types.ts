@@ -45,6 +45,12 @@ export type SecretKey =
   | "SMTP_FROM"
   | "SMTP_FROM_EMAIL"
   | "SMTP_FROM_NAME"
+  // Relay/smarthost p/ e-mail das contas conectadas (fallback de saída bloqueada)
+  | "SMTP_RELAY_HOST"
+  | "SMTP_RELAY_PORT"
+  | "SMTP_RELAY_USER"
+  | "SMTP_RELAY_PASS"
+  | "SMTP_RELAY_SECURE"
   // ── AI ───────────────────────────────────────────────────
   | "OPENAI_API_KEY"
   | "ANTHROPIC_API_KEY"
