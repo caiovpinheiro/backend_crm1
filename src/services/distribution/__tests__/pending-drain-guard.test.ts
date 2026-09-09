@@ -65,6 +65,13 @@ describe("pending drain guard", () => {
       shouldSkipCapacityReleasedFruitlessCooldown("capacity_released", true),
     ).toBe(true);
     expect(
+      shouldSkipCapacityReleasedFruitlessCooldown(
+        "capacity_released",
+        true,
+        true,
+      ),
+    ).toBe(false);
+    expect(
       shouldSkipCapacityReleasedFruitlessCooldown("capacity_released", false),
     ).toBe(false);
     expect(
