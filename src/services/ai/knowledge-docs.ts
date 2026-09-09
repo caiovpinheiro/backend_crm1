@@ -307,7 +307,15 @@ export async function getKnowledgeDoc(agentId: string, docId: string) {
 
 export async function createKnowledgeDoc(
   agentId: string,
-  input: { title: unknown; content: unknown } & KnowledgeValidityInput,
+  input: {
+    title: unknown;
+    content: unknown;
+    /// Procedência do doc. `paste` = texto colado na tela; `upload` = veio
+    /// de arquivo, e aí `mimeType`/`sizeBytes` são os do arquivo original,
+    /// não os do texto extraído — é o que permite a tela mostrar "planilha
+    /// de 2 MB" em vez de "texto de 40 KB".
+    origin?: { source: string; mimeType: string; sizeBytes: number } | null;
+  } & KnowledgeValidityInput,
 ) {
   const title = normalizeTitle(input.title);
   const content = normalizeContent(input.content);
@@ -322,9 +330,9 @@ export async function createKnowledgeDoc(
       agentId,
       title,
       content,
-      source: "paste",
-      mimeType: "text/plain",
-      sizeBytes: Buffer.byteLength(content, "utf8"),
+      source: input.origin?.source ?? "paste",
+      mimeType: input.origin?.mimeType ?? "text/plain",
+      sizeBytes: input.origin?.sizeBytes ?? Buffer.byteLength(content, "utf8"),
       status: "PENDING" as const,
       validFrom: validFrom ?? null,
       validUntil: validUntil ?? null,
