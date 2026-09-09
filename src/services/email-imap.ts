@@ -31,6 +31,10 @@ export type FetchedImapMessage = {
 
 const CONNECT_TIMEOUT_MS = 15_000;
 
+/** UOL Dovecot: AUTH=PLAIN AUTH=LOGIN + SASL-IR. LOGIN command last — special chars in senha break quoted LOGIN. */
+const IMAP_LOGIN_METHODS = ["AUTH=PLAIN", "AUTH=LOGIN", "LOGIN"] as const;
+type ImapLoginMethod = (typeof IMAP_LOGIN_METHODS)[number];
+
 type MailerErrShape = {
   message?: string;
   code?: string;
@@ -42,6 +46,27 @@ type MailerErrShape = {
   tlsFailed?: boolean;
   cause?: unknown;
 };
+
+type MailerMeta = {
+  serverResponseCode: string | null;
+  responseText: string | null;
+  authenticationFailed: boolean;
+  code: string | null;
+};
+
+export function mailerMeta(err: unknown): MailerMeta {
+  const o = (err && typeof err === "object" ? err : {}) as MailerErrShape;
+  const responseText =
+    typeof o.responseText === "string"
+      ? o.responseText.replace(/\s+/g, " ").trim().slice(0, 180)
+      : null;
+  return {
+    serverResponseCode: o.serverResponseCode ? String(o.serverResponseCode) : null,
+    responseText: responseText || null,
+    authenticationFailed: Boolean(o.authenticationFailed),
+    code: o.code ? String(o.code) : null,
+  };
+}
 
 export function flattenMailerError(err: unknown): string {
   const parts: string[] = [];
@@ -107,7 +132,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
-function createClient(input: ImapConnectInput) {
+function createClient(input: ImapConnectInput, loginMethod: ImapLoginMethod) {
   const implicitTls = implicitTlsForPort(input.imapPort, input.imapEncryption);
   return new ImapFlow({
     host: input.imapHost,
@@ -117,9 +142,10 @@ function createClient(input: ImapConnectInput) {
       ? {}
       : { doSTARTTLS: input.imapEncryption === "STARTTLS" }),
     servername: input.imapHost,
-    // LOGIN = senha normal (Thunderbird). Sem SPA/NTLM/XOAUTH2.
-    auth: { user: input.email, pass: input.password, loginMethod: "LOGIN" },
+    // PLAIN first: UOL/Dovecot + senhas com ! @ #. Thunderbird "detect automatically" = PLAIN, não IMAP LOGIN.
+    auth: { user: input.email, pass: input.password, loginMethod },
     logger: false,
+    disableAutoIdle: true,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
     socketTimeout: CONNECT_TIMEOUT_MS,
@@ -128,6 +154,52 @@ function createClient(input: ImapConnectInput) {
       minVersion: "TLSv1.2",
     },
   });
+}
+
+function looksLikeMethodUnsupported(lower: string): boolean {
+  return (
+    lower.includes("logindisabled") ||
+    lower.includes("unsupported") ||
+    lower.includes("unknown authentication") ||
+    lower.includes("authentication mechanism") ||
+    lower.includes("command unknown") ||
+    lower.includes("invalid command") ||
+    (lower.includes("bad") && (lower.includes("authenticate") || lower.includes("login")))
+  );
+}
+
+async function safeLogout(client: ImapFlow) {
+  try {
+    await client.logout();
+  } catch {
+    /* ignore */
+  }
+}
+
+async function connectImap(input: ImapConnectInput): Promise<ImapFlow> {
+  let lastErr: unknown;
+  for (let i = 0; i < IMAP_LOGIN_METHODS.length; i++) {
+    const loginMethod = IMAP_LOGIN_METHODS[i];
+    const client = createClient(input, loginMethod);
+    try {
+      await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "IMAP");
+      return client;
+    } catch (err) {
+      lastErr = err;
+      await safeLogout(client);
+      const raw = flattenMailerError(err);
+      const lower = raw.toLowerCase();
+      log.warn(
+        { host: input.imapHost, loginMethod, ...mailerMeta(err), err: raw },
+        "imap connect failed",
+      );
+      const authFail = looksLikeAuthFailure(lower) || mailerMeta(err).authenticationFailed;
+      if (authFail && !looksLikeMethodUnsupported(lower)) {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function looksLikeAppPasswordRequired(lower: string): boolean {
@@ -145,7 +217,12 @@ function looksLikeImapDisabled(lower: string): boolean {
   return (
     (lower.includes("imap") && (lower.includes("disabled") || lower.includes("desativ") || lower.includes("not enabled"))) ||
     lower.includes("protocol not available") ||
-    lower.includes("login disabled")
+    lower.includes("protocol disabled") ||
+    lower.includes("login disabled") ||
+    lower.includes("logindisabled") ||
+    lower.includes("acesso imap") ||
+    lower.includes("servico desabilitado") ||
+    lower.includes("serviço desabilitado")
   );
 }
 
@@ -166,7 +243,7 @@ function looksLikeAuthFailure(lower: string): boolean {
 
 export function mailAuthMessage(kind: ReturnType<typeof mailboxProviderKind>, proto: "IMAP" | "SMTP"): string {
   if (kind === "uol") {
-    return `Falha na autenticação ${proto}. Use o e-mail completo e a senha da caixa. No UOL Host, ative o IMAP em Webmail → Configurar IMAP/POP.`;
+    return `O ${proto} recusou usuário ou senha. Use o e-mail completo e a senha da caixa.`;
   }
   if (kind === "gmail-outlook") {
     return `Falha na autenticação ${proto}. Confira e-mail e senha. No Gmail/Outlook, use uma senha de app.`;
@@ -174,22 +251,22 @@ export function mailAuthMessage(kind: ReturnType<typeof mailboxProviderKind>, pr
   return `Falha na autenticação ${proto}. Confira o e-mail completo e a senha da caixa.`;
 }
 
+export function mailImapDisabledMessage(kind: ReturnType<typeof mailboxProviderKind>): string {
+  return kind === "uol"
+    ? "IMAP desativado nesta caixa. No UOL Host, abra a caixa em Webmail → Configurar IMAP/POP e ative o IMAP."
+    : "O provedor recusou IMAP nesta caixa. Ative o acesso IMAP nas configurações da conta.";
+}
+
 export function mapImapError(err: unknown, host = ""): EmailFieldError {
   const raw = flattenMailerError(err);
-  const lower = raw.toLowerCase();
+  const meta = mailerMeta(err);
+  const lower = `${raw} ${meta.responseText ?? ""} ${meta.serverResponseCode ?? ""}`.toLowerCase();
   const kind = mailboxProviderKind(host);
   if (lower.includes("timeout") || raw.includes("_TIMEOUT")) {
     return { ok: false, field: "imap_host", message: "Tempo esgotado ao conectar no IMAP. Verifique servidor, porta e se o IMAP está liberado." };
   }
   if (looksLikeImapDisabled(lower)) {
-    return {
-      ok: false,
-      field: "password",
-      message:
-        kind === "uol"
-          ? "IMAP desativado nesta caixa. No UOL Host, abra a caixa em Webmail → Configurar IMAP/POP e ative o IMAP."
-          : "O provedor recusou IMAP nesta caixa. Ative o acesso IMAP nas configurações da conta.",
-    };
+    return { ok: false, field: "password", message: mailImapDisabledMessage(kind) };
   }
   if (looksLikeAppPasswordRequired(lower)) {
     return {
@@ -199,7 +276,7 @@ export function mapImapError(err: unknown, host = ""): EmailFieldError {
         "O provedor recusou a senha. Gmail e Outlook exigem senha de app — não use a senha da conta.",
     };
   }
-  if (looksLikeAuthFailure(lower)) {
+  if (looksLikeAuthFailure(lower) || meta.authenticationFailed) {
     return { ok: false, field: "password", message: mailAuthMessage(kind, "IMAP") };
   }
   if (lower.includes("enotfound") || lower.includes("econnrefused") || lower.includes("eai_again")) {
@@ -211,7 +288,7 @@ export function mapImapError(err: unknown, host = ""): EmailFieldError {
   if (lower.includes("certificate") || lower.includes("cert_") || lower.includes("ssl") || lower.includes("tls") || lower.includes("tlsfailed")) {
     return { ok: false, field: "imap_encryption", message: "Falha de TLS no IMAP. Na porta 993 use SSL/TLS (implícito), não STARTTLS." };
   }
-  log.warn({ err: raw, host }, "erro IMAP");
+  log.warn({ err: raw, host, ...meta }, "erro IMAP");
   return {
     ok: false,
     field: "imap_host",
@@ -222,17 +299,11 @@ export function mapImapError(err: unknown, host = ""): EmailFieldError {
 }
 
 export async function testImapConnection(input: ImapConnectInput): Promise<EmailOk | EmailFieldError> {
-  const client = createClient(input);
   try {
-    await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "IMAP");
-    await client.logout();
+    const client = await connectImap(input);
+    await safeLogout(client);
     return { ok: true };
   } catch (err) {
-    try {
-      await client.logout();
-    } catch {
-      /* ignore */
-    }
     return mapImapError(err, input.imapHost);
   }
 }
@@ -264,9 +335,13 @@ export async function fetchRecentInbox(
   input: ImapConnectInput,
   limit = 80,
 ): Promise<{ ok: true; messages: FetchedImapMessage[] } | EmailFieldError> {
-  const client = createClient(input);
+  let client: ImapFlow;
   try {
-    await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "IMAP");
+    client = await connectImap(input);
+  } catch (err) {
+    return mapImapError(err, input.imapHost);
+  }
+  try {
     const lock = await client.getMailboxLock("INBOX");
     const messages: FetchedImapMessage[] = [];
     try {
@@ -305,14 +380,10 @@ export async function fetchRecentInbox(
     } finally {
       lock.release();
     }
-    await client.logout();
+    await safeLogout(client);
     return { ok: true, messages };
   } catch (err) {
-    try {
-      await client.logout();
-    } catch {
-      /* ignore */
-    }
+    await safeLogout(client);
     return mapImapError(err, input.imapHost);
   }
 }
