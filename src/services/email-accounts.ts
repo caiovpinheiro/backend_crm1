@@ -52,8 +52,23 @@ export function isEmailFieldError(v: ConnectEmailInput | EmailFieldError): v is 
   return "ok" in v && v.ok === false;
 }
 
+function readString(body: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = body[key];
+    if (typeof value === "string") return value.trim();
+  }
+  return "";
+}
+
+function readRaw(body: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (key in body && body[key] !== undefined) return body[key];
+  }
+  return undefined;
+}
+
 export function parseConnectInput(body: Record<string, unknown>): ConnectEmailInput | EmailFieldError {
-  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const email = readString(body, "email").toLowerCase();
   if (!email || !EMAIL_RE.test(email)) {
     return { ok: false, field: "email", message: "Insira um endereço de e-mail válido." };
   }
@@ -61,32 +76,35 @@ export function parseConnectInput(body: Record<string, unknown>): ConnectEmailIn
   if (!password) {
     return { ok: false, field: "password", message: "Senha do e-mail é obrigatória." };
   }
-  const imapHost = typeof body.imapHost === "string" ? body.imapHost.trim() : "";
+  const imapHost = readString(body, "imapHost", "imap_host");
   if (!imapHost) return { ok: false, field: "imap_host", message: "Servidor IMAP é obrigatório." };
-  const smtpHost = typeof body.smtpHost === "string" ? body.smtpHost.trim() : "";
+  const smtpHost = readString(body, "smtpHost", "smtp_host");
   if (!smtpHost) return { ok: false, field: "smtp_host", message: "Servidor SMTP é obrigatório." };
 
-  const imapPort = Number(body.imapPort);
+  const imapPort = Number(readRaw(body, "imapPort", "imap_port"));
   if (!Number.isInteger(imapPort) || imapPort < 1 || imapPort > 65535) {
     return { ok: false, field: "imap_port", message: "Porta IMAP inválida." };
   }
-  const smtpPort = Number(body.smtpPort);
+  const smtpPort = Number(readRaw(body, "smtpPort", "smtp_port"));
   if (!Number.isInteger(smtpPort) || smtpPort < 1 || smtpPort > 65535) {
     return { ok: false, field: "smtp_port", message: "Porta SMTP inválida." };
   }
 
-  const imapEncryption = body.imapEncryption as EmailEncryption;
+  const imapEncryption = readRaw(body, "imapEncryption", "imap_encryption") as EmailEncryption;
   if (!ENCRYPTIONS.has(imapEncryption)) {
     return { ok: false, field: "imap_encryption", message: "Criptografia IMAP inválida." };
   }
-  const smtpEncryption = body.smtpEncryption as EmailEncryption;
+  const smtpEncryption = readRaw(body, "smtpEncryption", "smtp_encryption") as EmailEncryption;
   if (!ENCRYPTIONS.has(smtpEncryption)) {
     return { ok: false, field: "smtp_encryption", message: "Criptografia SMTP inválida." };
   }
-  const visibility = (body.visibility as EmailVisibility) ?? "SHARED";
+  const visibility = (readRaw(body, "visibility") as EmailVisibility) ?? "SHARED";
   if (!VISIBILITIES.has(visibility)) {
     return { ok: false, field: "visibility", message: "Visibilidade inválida." };
   }
+
+  const groupInThreads = readRaw(body, "groupInThreads", "group_in_threads") !== false;
+  const createContactsForReplies = readRaw(body, "createContactsForReplies", "create_contacts_for_replies") === true;
 
   return {
     email,
@@ -98,8 +116,8 @@ export function parseConnectInput(body: Record<string, unknown>): ConnectEmailIn
     smtpPort,
     smtpEncryption,
     visibility,
-    groupInThreads: body.groupInThreads !== false,
-    createContactsForReplies: body.createContactsForReplies === true,
+    groupInThreads,
+    createContactsForReplies,
   };
 }
 
@@ -207,7 +225,10 @@ export async function connectEmailAccount(
   actorUserId: string,
 ): Promise<{ ok: true; account: SerializedEmailAccount } | EmailFieldError> {
   const tested = await testEmailAccountConnection(input);
-  if (!tested.ok) return tested;
+  if (!tested.ok) {
+    log.warn({ field: tested.field, email: input.email }, "falha ao testar conexão de e-mail");
+    return tested;
+  }
 
   const existing = await prisma.emailAccount.findFirst({
     where: { email: input.email },

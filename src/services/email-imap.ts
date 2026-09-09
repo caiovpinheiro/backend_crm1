@@ -60,14 +60,38 @@ function createClient(input: ImapConnectInput) {
   });
 }
 
+function looksLikeAppPasswordRequired(lower: string): boolean {
+  return (
+    lower.includes("application-specific password") ||
+    lower.includes("app password") ||
+    lower.includes("app-password") ||
+    lower.includes("web login required") ||
+    lower.includes("via your web browser") ||
+    lower.includes("please log in via")
+  );
+}
+
 export function mapImapError(err: unknown): EmailFieldError {
   const raw = err instanceof Error ? err.message : String(err);
   const lower = raw.toLowerCase();
   if (lower.includes("timeout") || raw.endsWith("_TIMEOUT")) {
     return { ok: false, field: "imap_host", message: "Tempo esgotado ao conectar no IMAP. Verifique servidor e porta." };
   }
+  if (looksLikeAppPasswordRequired(lower)) {
+    return {
+      ok: false,
+      field: "password",
+      message:
+        "O provedor recusou a senha. Gmail e Outlook exigem senha de app — não use a senha da conta.",
+    };
+  }
   if (lower.includes("auth") || lower.includes("login") || lower.includes("invalid credentials") || lower.includes("authentication")) {
-    return { ok: false, field: "password", message: "Falha na autenticação IMAP. Confira e-mail e senha." };
+    return {
+      ok: false,
+      field: "password",
+      message:
+        "Falha na autenticação IMAP. Confira e-mail e senha. No Gmail/Outlook, use uma senha de app.",
+    };
   }
   if (lower.includes("enotfound") || lower.includes("econnrefused") || lower.includes("eai_again")) {
     return { ok: false, field: "imap_host", message: "Servidor IMAP inacessível. Confira o host e a porta." };
