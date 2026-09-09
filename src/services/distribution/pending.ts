@@ -46,6 +46,7 @@ import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
   shouldClearOwnershipOnIneligible,
+  shouldKeepAssigneeInAttendance,
 } from "@/services/distribution/assignee-eligibility";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
@@ -843,8 +844,35 @@ export async function maybeDistributeNewInboundTicket(input: {
     }
     // Kill-switch soltou a IA: assignee=null → 1º atendimento (no-op) + fila humana.
     if (assignee) {
+    const conv = !check.isAi
+      ? await prisma.conversation.findUnique({
+          where: { id: input.conversationId },
+          select: { hasHumanReply: true },
+        })
+      : null;
+    // Almoço / offline / pausa não roubam conversa já respondida
+    // (09/set/26 #359447 — "Ótimo" redistribuía no inbound).
+    if (
+      shouldKeepAssigneeInAttendance({
+        departmentScoped: false,
+        eligibleInDepartment: check.eligible,
+        eligibleOutsideDepartment: check.eligible,
+        hasHumanReply: Boolean(conv?.hasHumanReply),
+        isAi: check.isAi,
+      })
+    ) {
+      debugWarn(
+        "[DBG-e46688 maybeDist] keep_human_in_attendance",
+        () => JSON.stringify({
+          convId: input.conversationId,
+          assignee,
+          reason: check.reason ?? null,
+        }),
+      );
+      return;
+    }
     // Fila cheia não solta o responsável: o teto barra lead NOVO, e este
-    // contato já é dele. Offline / fora do expediente seguem liberando.
+    // contato já é dele. Sem reply, offline / fora do expediente liberam.
     const keepHumanAssignee =
       check.eligible ||
       !shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons);
@@ -852,10 +880,6 @@ export async function maybeDistributeNewInboundTicket(input: {
       // IA herdada: mantém. Humano elegível sem reply nesta conversa:
       // libera p/ 1º atendimento IA (substitui INICIO-PIPE).
       if (!check.isAi) {
-        const conv = await prisma.conversation.findUnique({
-          where: { id: input.conversationId },
-          select: { hasHumanReply: true },
-        });
         // Herança de ticket antigo pode ir para a IA; quem foi atribuído
         // NESTA conversa fica (a saudação da distribuição sai como bot e
         // não marca `hasHumanReply` — não é sinal de "humano não atendeu").

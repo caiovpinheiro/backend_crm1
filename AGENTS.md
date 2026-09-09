@@ -23,6 +23,7 @@ UI: `frontend_crm1` (`:3000`). Este repo é API + Prisma + workers (`:3001`). Mu
 - Inventar model `Lead` (é Deal) ou `Group` (stub; filial = `OrgUnit`).
 - Recriar deal no inbound se o contato já tem WON/LOST (`src/services/auto-deals.ts`).
 - Encerrar conversa ao mover etapa (`moveDeal`).
+- Redistribuir conversa com `hasHumanReply` no inbound (almoço/offline/pausa). Use redistribuição manual.
 - Processar webhook Meta / send Graph / parse XLSX no `route.ts`.
 - Renomear permission (deprecar + chave nova).
 - `ENABLE RLS` não está em prod — não remova a extension Prisma “porque tem RLS”.
