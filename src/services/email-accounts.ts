@@ -90,14 +90,18 @@ export function parseConnectInput(body: Record<string, unknown>): ConnectEmailIn
     return { ok: false, field: "smtp_port", message: "Porta SMTP inválida." };
   }
 
-  const imapEncryption = readRaw(body, "imapEncryption", "imap_encryption") as EmailEncryption;
+  let imapEncryption = readRaw(body, "imapEncryption", "imap_encryption") as EmailEncryption;
   if (!ENCRYPTIONS.has(imapEncryption)) {
     return { ok: false, field: "imap_encryption", message: "Criptografia IMAP inválida." };
   }
-  const smtpEncryption = readRaw(body, "smtpEncryption", "smtp_encryption") as EmailEncryption;
+  let smtpEncryption = readRaw(body, "smtpEncryption", "smtp_encryption") as EmailEncryption;
   if (!ENCRYPTIONS.has(smtpEncryption)) {
     return { ok: false, field: "smtp_encryption", message: "Criptografia SMTP inválida." };
   }
+  // 993/465 = TLS implícito (UOL Host, Gmail IMAP). 587 = STARTTLS.
+  if (imapPort === 993) imapEncryption = "SSL_TLS";
+  if (smtpPort === 465) smtpEncryption = "SSL_TLS";
+  if (smtpPort === 587 && smtpEncryption === "SSL_TLS") smtpEncryption = "STARTTLS";
   const visibility = (readRaw(body, "visibility") as EmailVisibility) ?? "SHARED";
   if (!VISIBILITIES.has(visibility)) {
     return { ok: false, field: "visibility", message: "Visibilidade inválida." };
@@ -226,7 +230,7 @@ export async function connectEmailAccount(
 ): Promise<{ ok: true; account: SerializedEmailAccount } | EmailFieldError> {
   const tested = await testEmailAccountConnection(input);
   if (!tested.ok) {
-    log.warn({ field: tested.field, email: input.email }, "falha ao testar conexão de e-mail");
+    log.warn({ field: tested.field, email: input.email, message: tested.message }, "falha ao testar conexão de e-mail");
     return tested;
   }
 
