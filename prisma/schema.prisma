@@ -5938,6 +5938,8 @@ model TeamChatRoom {
   kind           String
   name           String?
   topic          String?
+  /// Foto do grupo/canal. Null = glifo/iniciais.
+  avatarUrl      String?
   /// Par ordenado "userA:userB" — único por org. Null em grupos.
   dmKey          String?
   createdById    String

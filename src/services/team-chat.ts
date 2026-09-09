@@ -220,12 +220,24 @@ export async function requireMember(viewer: TeamChatViewer, roomId: string) {
   return member;
 }
 
+function isGroupKind(kind: string) {
+  return kind === "GROUP" || kind === "CHANNEL";
+}
+
+function isAllowedRoomAvatarUrl(url: string, organizationId: string) {
+  return (
+    isOwnedStorageUrl(url, organizationId) ||
+    url.startsWith(`/api/storage/${organizationId}/avatars/`)
+  );
+}
+
 function shapeRoom(
   room: {
     id: string;
     kind: string;
     name: string | null;
     topic: string | null;
+    avatarUrl?: string | null;
     lastMessageAt: Date;
     lastPreview: string | null;
     createdAt: Date;
@@ -247,6 +259,7 @@ function shapeRoom(
     kind: room.kind as "DM" | "GROUP" | "CHANNEL",
     name: room.kind === "DM" ? (peer?.name ?? "Conversa") : (room.name ?? "Canal"),
     topic: room.topic,
+    avatarUrl: room.kind === "DM" ? null : (room.avatarUrl ?? null),
     lastMessageAt: room.lastMessageAt.toISOString(),
     lastPreview: room.lastPreview,
     createdAt: room.createdAt.toISOString(),
@@ -471,7 +484,7 @@ export async function addMembers(
 ) {
   const access = await getRoom(viewer, roomId);
   if ("error" in access) return access;
-  if (access.room.kind !== "GROUP" && access.room.kind !== "CHANNEL") {
+  if (!isGroupKind(access.room.kind)) {
     return { error: "Só canais e grupos aceitam novos membros.", status: 400 as const };
   }
 
@@ -517,6 +530,43 @@ export async function addMembers(
   publish("team_chat_room_updated", viewer.organizationId, {
     roomId,
     memberIds: [...already, ...toAdd],
+  });
+  return getRoom(viewer, roomId);
+}
+
+export async function updateRoom(
+  viewer: TeamChatViewer,
+  roomId: string,
+  input: { avatarUrl?: string | null },
+) {
+  const access = await getRoom(viewer, roomId);
+  if ("error" in access) return access;
+  if (!isGroupKind(access.room.kind)) {
+    return { error: "Só canais e grupos aceitam foto de perfil.", status: 400 as const };
+  }
+
+  const data: { avatarUrl?: string | null } = {};
+  if (input.avatarUrl !== undefined) {
+    if (input.avatarUrl === null || input.avatarUrl.trim() === "") {
+      data.avatarUrl = null;
+    } else {
+      const url = input.avatarUrl.trim();
+      if (url.length > 2000 || !isAllowedRoomAvatarUrl(url, viewer.organizationId)) {
+        return { error: "URL da foto inválida.", status: 400 as const };
+      }
+      data.avatarUrl = url;
+    }
+  }
+  if (Object.keys(data).length === 0) return { room: access.room };
+
+  await prisma.teamChatRoom.update({
+    where: { id: roomId },
+    data,
+  });
+
+  publish("team_chat_room_updated", viewer.organizationId, {
+    roomId,
+    memberIds: access.room.members.map((m) => m.id),
   });
   return getRoom(viewer, roomId);
 }
