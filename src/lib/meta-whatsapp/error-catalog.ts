@@ -75,9 +75,9 @@ const SUBCODE_CATALOG: Record<number, MetaErrorInfo> = {
   // Listar templates na WABA pode funcionar; criar/alterar pela Graph não.
   2388339: {
     reason:
-      "Esta conta WhatsApp não pode criar ou alterar templates pela Cloud API.",
+      "A Meta recusou criar/alterar template nesta WABA (Invalid WhatsApp account usage).",
     action:
-      "A WABA do canal não é elegível para a API de modelos (app WhatsApp Business / coexistência / número não migrado para a plataforma). Reconecte o canal como Cloud API no Embedded Signup ou crie o template no Gerenciador do WhatsApp da Meta.",
+      "O token do canal lista templates, mas o POST na Graph é bloqueado para esta WABA. No App Meta que gerou o token: WABA adicionada no produto WhatsApp, system user com whatsapp_business_management e controle da conta. Confira também se o mesmo phone_number_id não está em outra WABA. Se o WhatsApp Manager também recusar, é restrição da conta — use o fbtrace_id no suporte Meta.",
   },
 };
 
