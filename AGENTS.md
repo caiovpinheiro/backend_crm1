@@ -1,13 +1,24 @@
 # AGENTS — backend CRM EduIT
 
-Playbook curto deste repo. **Fonte do time (vault):** `knowledge_crm1` — clone ao lado deste repo, abra no Obsidian ou leia no GitHub.
+Playbook deste repo. **Este repositório é a fonte de verdade.** UI: `frontend_crm1` (`:3000`). Este repo é API + Prisma + workers (`:3001`). Mudou uma regra → atualize este arquivo.
 
-```
-../knowledge_crm1/AGENTS.md
-https://github.com/caiovpinheiro/knowledge_crm1
-```
+Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivado — consulte manualmente só quando precisar de contexto histórico; não é contexto cotidiano).
 
-UI: `frontend_crm1` (`:3000`). Este repo é API + Prisma + workers (`:3001`). Mudou uma regra → atualize o vault **e** este arquivo.
+## Comportamento do Agent
+
+- Faça a menor alteração necessária para cumprir cada tarefa.
+- Comece pelos arquivos diretamente relacionados ao pedido.
+- Não faça auditoria ampla do repositório sem necessidade.
+- Não leia históricos apenas para obter contexto adicional.
+- Não investigue subsistemas não relacionados à tarefa.
+- Não expanda o escopo por conta própria.
+- Não faça refatorações amplas sem solicitação.
+- Não crie documentação adicional sem solicitação.
+- Não abra navegador para validar alterações salvo quando solicitado explicitamente.
+- Não use Browser, Computer Use ou screenshots salvo quando solicitado explicitamente.
+- Para tarefas de backend, priorize leitura direcionada do código e validações diretamente relacionadas ao que foi alterado.
+- Não tente validar visualmente mudanças de backend.
+- Não registre automaticamente cada alteração realizada em arquivos de documentação histórica.
 
 ## Antes de código
 
@@ -16,14 +27,13 @@ UI: `frontend_crm1` (`:3000`). Este repo é API + Prisma + workers (`:3001`). Mu
 3. Banco: `prisma` de `@/lib/prisma` (injeta `organizationId`). Sem contexto → throw. `prismaBase` só webhook sem org, seed, admin, script — com comentário.
 4. Permission nova: entrar em `src/lib/authz/permissions.ts` **antes** de `can()`.
 5. Trabalho pesado (Meta, mídia, campanha, CSV, automação) → BullMQ. HTTP valida, persiste, enfileira.
-6. Sem testes/docs/refatoração se ninguém pediu. Plano curto se >3 arquivos.
+6. Não expanda o escopo com refatorações, documentação adicional ou criação de novos testes sem solicitação. Faça a menor alteração necessária. Quando código for alterado, execute apenas validações técnicas diretamente relacionadas à mudança. Plano curto se >3 arquivos.
 
 ## Nunca
 
 - Inventar model `Lead` (é Deal) ou `Group` (stub; filial = `OrgUnit`).
 - Recriar deal no inbound se o contato já tem WON/LOST (`src/services/auto-deals.ts`).
 - Encerrar conversa ao mover etapa (`moveDeal`).
-- Redistribuir conversa com `hasHumanReply` no inbound (almoço/offline/pausa). Use redistribuição manual.
 - Processar webhook Meta / send Graph / parse XLSX no `route.ts`.
 - Renomear permission (deprecar + chave nova).
 - `ENABLE RLS` não está em prod — não remova a extension Prisma “porque tem RLS”.
@@ -34,11 +44,11 @@ UI: `frontend_crm1` (`:3000`). Este repo é API + Prisma + workers (`:3001`). Mu
 
 ```ts
 export async function GET() {
-  const r = await requireAuth();
-  if (!r.ok) return r.response;
-  const denied = await requirePermission(r.session.user, "deal:view");
-  if (denied) return denied;
-  // RequestContext ativo. Use prisma (scoped).
+ const r = await requireAuth();
+ if (!r.ok) return r.response;
+ const denied = await requirePermission(r.session.user, "deal:view");
+ if (denied) return denied;
+ // RequestContext ativo. Use prisma (scoped).
 }
 ```
 
