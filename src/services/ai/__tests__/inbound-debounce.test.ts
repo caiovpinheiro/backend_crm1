@@ -72,9 +72,9 @@ describe("inbound-debounce claim + cancel", () => {
     expect(cache.del).toHaveBeenCalledWith("ai:gen:conv-1");
   });
 
-  it("DEFAULT_AI_DEBOUNCE_MS está na faixa pedida (2–3s)", () => {
-    expect(DEFAULT_AI_DEBOUNCE_MS).toBeGreaterThanOrEqual(2000);
-    expect(DEFAULT_AI_DEBOUNCE_MS).toBeLessThanOrEqual(3000);
+  it("DEFAULT_AI_DEBOUNCE_MS está na faixa pedida (5–8s)", () => {
+    expect(DEFAULT_AI_DEBOUNCE_MS).toBeGreaterThanOrEqual(5000);
+    expect(DEFAULT_AI_DEBOUNCE_MS).toBeLessThanOrEqual(8000);
   });
 });
 

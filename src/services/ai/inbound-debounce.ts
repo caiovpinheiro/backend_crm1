@@ -35,7 +35,9 @@ import {
 } from "@/lib/ai-agents/steering";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
-export const DEFAULT_AI_DEBOUNCE_MS = 2500;
+/** 2500ms cortava quem digita no celular: uma pausa de 3s no meio da */
+/** frase e o agente respondia a pergunta pela metade. */
+export const DEFAULT_AI_DEBOUNCE_MS = 5000;
 const MSG_CLAIM_TTL_SEC = 600;
 const GEN_TTL_SEC = 120;
 
