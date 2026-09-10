@@ -623,13 +623,6 @@ export type InboxPolicy = {
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
   humanRequestKeywords: string[];
-
-  /// O texto do pacote de vertical entra SOMADO ao que o operador escreve
-  /// (regras + os hints de runtime: polos, prova, portal, senha, primeiro
-  /// acesso, certificado). Como a tela não mostra esse texto, o operador
-  /// reescrevia a regra e via o agente obedecer a versão de fábrica.
-  /// `true` = só o que está escrito no agente vale.
-  useOnlyOwnRules: boolean;
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -679,7 +672,6 @@ export function defaultInboxPolicy(): InboxPolicy {
     assignedConsultantMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
-    useOnlyOwnRules: false,
   };
 }
 
@@ -795,7 +787,6 @@ export function normalizeInboxPolicy(
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
     humanRequestKeywords: strList(r.humanRequestKeywords),
-    useOnlyOwnRules: boolOr(r.useOnlyOwnRules, base.useOnlyOwnRules),
   };
 }
 

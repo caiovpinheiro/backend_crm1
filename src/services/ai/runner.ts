@@ -321,11 +321,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       inboxPolicyForRun.knowledgeExpiredInstruction,
     );
     const useMessageModelsRag = inboxPolicyForRun.useMessageModels;
-    // "Usar apenas as minhas regras": o texto canônico do pack e os hints
-    // de runtime (polos, prova, portal, senha, primeiro acesso, certificado)
-    // deixam de ser somados. As tools, o roteamento de departamento e os
-    // interceptos continuam — só o texto sai do prompt.
-    const packText = hasPack && !inboxPolicyForRun.useOnlyOwnRules;
+    // O que o operador escreve é absoluto. Com "Regras de atendimento"
+    // preenchido, nem o texto canônico do pack nem os hints de runtime
+    // (polos, prova, portal, senha, primeiro acesso, certificado) entram
+    // somados: vale só o que está no agente. Campo vazio cai no pacote
+    // inteiro. Tools, roteamento de departamento e interceptos seguem
+    // valendo nos dois casos.
+    const hasOwnRules = Boolean(agent.steeringRules?.trim());
+    const packText = hasPack && !hasOwnRules;
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
@@ -432,9 +435,6 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     ]
       .filter(Boolean)
       .join("\n");
-    // Com `useOnlyOwnRules`, o fallback do pack não entra: sem isso o agente
-    // que nunca salvou `steeringRules` recebia o texto de fábrica inteiro
-    // mesmo tendo o operador reescrito tudo no override.
     const steeringRules =
       agent.steeringRules?.trim() ||
       (packText
