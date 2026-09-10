@@ -421,7 +421,27 @@ export type WhatsAppAudioPayload = {
   fileName: string;
   voice: boolean;
   delivery: AudioDelivery;
+  /** Motivo técnico quando `delivery === "document"` (não exibir cru ao agente). */
+  failReason?: string;
 };
+
+export const WHATSAPP_AUDIO_CONVERT_FAILED =
+  "Não foi possível converter este áudio para o formato do WhatsApp. Grave novamente.";
+
+/** POST `/media` da Cloud API recusa estes MIME (erro 100 / octet-stream). */
+export function metaCloudAudioUploadBlocked(
+  prepared: WhatsAppAudioPayload,
+): string | null {
+  const mime = prepared.mime.split(";")[0].trim().toLowerCase();
+  if (
+    prepared.delivery === "document" ||
+    mime === "application/octet-stream" ||
+    mime === "audio/webm"
+  ) {
+    return WHATSAPP_AUDIO_CONVERT_FAILED;
+  }
+  return null;
+}
 
 function withAudioExt(name: string, ext: string): string {
   const base = name.replace(/\.[^.]+$/, "").trim() || "audio";
@@ -467,15 +487,22 @@ function asPlainAudio(
   return { ok: true, payload: payload(buffer, uploadMime, fileName, "audio") };
 }
 
-function asDocument(buffer: Buffer, _mime: string, fileName: string): PrepareAudioResult {
+function asDocument(
+  buffer: Buffer,
+  _mime: string,
+  fileName: string,
+  reason: string,
+): PrepareAudioResult {
   return {
     ok: true,
-    payload: payload(
+    payload: {
       buffer,
-      "application/octet-stream",
-      fileName || "audio.bin",
-      "document",
-    ),
+      mime: "application/octet-stream",
+      fileName: fileName || "audio.bin",
+      voice: false,
+      delivery: "document",
+      failReason: reason,
+    },
   };
 }
 
@@ -636,7 +663,12 @@ export async function prepareWhatsAppAudio(
   console.warn(
     `[audio-convert] PTT e áudio comum falharam (${pttReason}) — enviando como documento`,
   );
-  return asDocument(inputBuffer, originalMime.startsWith("audio/") ? originalMime : "application/octet-stream", originalNameWithExt);
+  return asDocument(
+    inputBuffer,
+    originalMime.startsWith("audio/") ? originalMime : "application/octet-stream",
+    originalNameWithExt,
+    pttReason,
+  );
 }
 
 /**

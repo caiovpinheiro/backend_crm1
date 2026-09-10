@@ -10,6 +10,7 @@
  */
 import {
   guessInputExt,
+  metaCloudAudioUploadBlocked,
   prepareWhatsAppAudio,
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
@@ -246,6 +247,16 @@ export async function processMetaAttach(
     if (!prepared.ok) {
       return markFailed(payload, prepared.reason);
     }
+    const blocked = metaCloudAudioUploadBlocked(prepared.payload);
+    if (blocked) {
+      console.warn(
+        `[meta-attach] Áudio não enviável à Meta (${prepared.payload.failReason ?? prepared.payload.mime})`,
+      );
+      return markFailed(payload, blocked, {
+        messageType: "audio",
+        audioDelivery: "document",
+      });
+    }
     mediaType = prepared.payload.delivery === "document" ? "document" : "audio";
     sendAsVoice = prepared.payload.voice;
     audioDelivery = prepared.payload.delivery;
@@ -312,41 +323,7 @@ export async function processMetaAttach(
   } catch (err) {
     const errMsg = formatMetaSendError(err);
     console.error("[meta-attach] Falha ao enviar para Meta:", errMsg);
-    if (mediaType === "audio") {
-      try {
-        const retryName = uploadName.includes(".") ? uploadName : `${uploadName}.bin`;
-        const mediaId = await metaClient.uploadMedia(
-          storeBuffer,
-          "application/octet-stream",
-          retryName,
-        );
-        const result = await metaClient.sendMediaById(
-          to,
-          mediaId,
-          "document",
-          payload.caption || undefined,
-          retryName,
-          false,
-          recipient,
-        );
-        externalId = result.messages?.[0]?.id ?? null;
-        mediaType = "document";
-        sendAsVoice = false;
-        audioDelivery = "document";
-        metaSendError = null;
-        console.warn(
-          `[meta-attach] Retry como documento OK após falha de áudio | wamid=${externalId}`,
-        );
-      } catch (retryErr) {
-        metaSendError = errMsg;
-        console.error(
-          "[meta-attach] Retry como documento também falhou:",
-          formatMetaSendError(retryErr),
-        );
-      }
-    } else {
-      metaSendError = errMsg;
-    }
+    metaSendError = errMsg;
   }
 
   const storedType = sendAsVoice ? "ptt" : mediaType;
