@@ -1224,6 +1224,9 @@ function startRoundRobinSender(opts: {
   const attemptsByRecipient = new Map<string, number>();
   let rotation = 0;
   let orgCache: { orgs: string[]; at: number } = { orgs: [], at: 0 };
+  const IDLE_BACKOFF_MIN_MS = 300;
+  const IDLE_BACKOFF_MAX_MS = 3_000;
+  let idleBackoffMs = IDLE_BACKOFF_MIN_MS;
   const stats = { claimed: 0, sent: 0, failed: 0, retried: 0 };
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1301,6 +1304,8 @@ function startRoundRobinSender(opts: {
          WHERE r."organizationId" = ${organizationId}
            AND r.status = 'PENDING'
            AND c.status IN ('SENDING', 'PROCESSING')
+           AND (c."sendCap" IS NULL
+                OR c."sentCount" + c."failedCount" < c."sendCap")
          ORDER BY r.id
          LIMIT ${limit}::int
          FOR UPDATE OF r SKIP LOCKED
@@ -1357,9 +1362,15 @@ function startRoundRobinSender(opts: {
         }
         stats.claimed += claimed;
         if (claimed === 0) {
-          // Lista de orgs estava velha (pendências acabaram) — relê já.
+          // Lista de orgs estava velha (pendências acabaram) — relê já. Mas o
+          // zero também acontece quando as pendências são de campanha inativa
+          // ou parada na trava (`sendCap`), estado que pode durar dias: sem
+          // backoff isso viraria polling permanente no banco.
           orgCache.at = 0;
-          await sleep(300);
+          idleBackoffMs = Math.min(IDLE_BACKOFF_MAX_MS, idleBackoffMs * 2);
+          await sleep(idleBackoffMs);
+        } else {
+          idleBackoffMs = IDLE_BACKOFF_MIN_MS;
         }
       } catch (err) {
         console.warn(
@@ -1570,10 +1581,18 @@ export function startCampaignLoops() {
             sentCount: true,
             failedCount: true,
             totalRecipients: true,
+            sendCap: true,
           },
         });
         for (const c of sending) {
-          if (c.sentCount + c.failedCount >= c.totalRecipients) {
+          const processed = c.sentCount + c.failedCount;
+          // A trava também entra aqui: se o cap foi batido enquanto a campanha
+          // ainda estava em PROCESSING, nenhum flush de contador vai acontecer
+          // depois (o claim já parou) e o PAUSED só sai por este sweep.
+          if (
+            processed >= c.totalRecipients ||
+            (c.sendCap !== null && processed >= c.sendCap)
+          ) {
             await maybeCompleteCampaign(c.id);
           }
         }

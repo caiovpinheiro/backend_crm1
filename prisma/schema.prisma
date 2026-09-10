@@ -4348,6 +4348,20 @@ model Campaign {
   /// Msgs por segundo. Cap server-side: CAMPAIGN_SEND_RATE_MAX (default 30).
   /// Default de criação: CAMPAIGN_SEND_RATE_DEFAULT (default 20).
   sendRate    Int       @default(20)
+
+  /// Trava de disparo por lote (opt-in). `sendLimit` é o tamanho do lote
+  /// escolhido na criação; `sendCap` é o teto acumulado de processados
+  /// (sentCount + failedCount) da rodada atual. Ao bater o teto com
+  /// destinatários ainda PENDING a campanha vai para PAUSED em vez de
+  /// COMPLETED, e cada `resume` libera outro lote (`sendCap += sendLimit`).
+  /// Ambos null = sem trava.
+  ///
+  /// Parada aproximada: os contadores flusham em lote (campaign-counters) e
+  /// vários envios correm em paralelo, então o corte pode passar alguns
+  /// envios do limite.
+  sendLimit Int?
+  sendCap   Int?
+
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?

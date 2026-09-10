@@ -68,6 +68,7 @@ export async function POST(request: Request) {
         textContent: typeof body.textContent === "string" ? body.textContent : undefined,
         automationId: typeof body.automationId === "string" ? body.automationId : undefined,
         sendRate: typeof body.sendRate === "number" ? body.sendRate : undefined,
+        sendLimit: typeof body.sendLimit === "number" ? body.sendLimit : null,
         scheduledAt: typeof body.scheduledAt === "string" ? new Date(body.scheduledAt) : undefined,
       };
 

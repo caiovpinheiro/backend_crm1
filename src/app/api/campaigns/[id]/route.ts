@@ -54,6 +54,9 @@ export async function PUT(
       if (typeof body.textContent === "string") data.textContent = body.textContent;
       if (typeof body.automationId === "string") data.automationId = body.automationId;
       if (typeof body.sendRate === "number") data.sendRate = body.sendRate;
+      if (body.sendLimit !== undefined) {
+        data.sendLimit = typeof body.sendLimit === "number" ? body.sendLimit : null;
+      }
       if (typeof body.scheduledAt === "string") data.scheduledAt = new Date(body.scheduledAt);
 
       const campaign = await updateCampaign(id, data as never);

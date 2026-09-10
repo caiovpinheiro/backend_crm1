@@ -7,6 +7,7 @@ import type {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { resolveCampaignSendRate } from "@/lib/campaign-send-rate";
+import { resolveCampaignSendLimit } from "@/lib/campaign-send-limit";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
 import {
   describeMetaError,
@@ -168,6 +169,8 @@ export type CreateCampaignInput = {
   textContent?: string;
   automationId?: string;
   sendRate?: number;
+  /** Trava por lote: quantos destinatários por rodada. null/0 = sem trava. */
+  sendLimit?: number | null;
   scheduledAt?: Date;
   createdById: string;
 };
@@ -192,6 +195,7 @@ export async function createCampaign(input: CreateCampaignInput) {
       textContent: input.textContent,
       automationId: input.automationId ?? null,
       sendRate: resolveCampaignSendRate(input.sendRate),
+      sendLimit: resolveCampaignSendLimit(input.sendLimit),
       scheduledAt: input.scheduledAt ?? null,
       createdById: input.createdById,
     }),
@@ -232,6 +236,7 @@ export async function updateCampaign(
       ? { connect: { id: data.automationId } }
       : { disconnect: true };
   if (data.sendRate !== undefined) patch.sendRate = resolveCampaignSendRate(data.sendRate);
+  if (data.sendLimit !== undefined) patch.sendLimit = resolveCampaignSendLimit(data.sendLimit);
   if (data.scheduledAt !== undefined) patch.scheduledAt = data.scheduledAt;
 
   return prisma.campaign.update({ where: { id }, data: patch });

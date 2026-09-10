@@ -73,7 +73,10 @@ async function flush(campaignId: string): Promise<void> {
 }
 
 /**
- * Marca COMPLETED quando sent+failed já cobriu o total. Idempotente.
+ * Marca COMPLETED quando sent+failed já cobriu o total — ou PAUSED quando a
+ * trava por lote (`sendCap`) foi atingida e ainda há destinatários pendentes.
+ * Idempotente.
+ *
  * Tem de viver neste módulo (não no worker) para o flush do timer também
  * concluir — o worker só chama o check em 1/N envios.
  */
@@ -84,12 +87,27 @@ export async function maybeCompleteCampaign(campaignId: string): Promise<void> {
       totalRecipients: true,
       sentCount: true,
       failedCount: true,
+      sendCap: true,
       status: true,
     },
   });
   if (!campaign || campaign.status !== "SENDING") return;
   const processed = campaign.sentCount + campaign.failedCount;
-  if (processed < campaign.totalRecipients) return;
+
+  if (processed < campaign.totalRecipients) {
+    if (campaign.sendCap === null || processed < campaign.sendCap) return;
+    // Trava batida com pendentes: pausa e espera o `resume` liberar o próximo
+    // lote. O claim do rodízio já parou de reivindicar desta campanha.
+    await prismaBase.campaign.update({
+      where: { id: campaignId },
+      data: { status: "PAUSED" },
+    });
+    console.info(
+      `[campaign-send] Campaign ${campaignId} pausada na trava: ${processed}/${campaign.totalRecipients} processados (cap ${campaign.sendCap})`,
+    );
+    return;
+  }
+
   await prismaBase.campaign.update({
     where: { id: campaignId },
     data: { status: "COMPLETED", completedAt: new Date() },

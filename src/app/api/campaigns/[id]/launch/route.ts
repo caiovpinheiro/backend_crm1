@@ -82,14 +82,15 @@ export async function POST(
 
       await prisma.campaign.update({
         where: { id },
-        data: { status: newStatus },
+        // Trava por lote: a primeira rodada libera `sendLimit` processados.
+        data: { status: newStatus, sendCap: campaign.sendLimit },
       });
 
       const job = await enqueueCampaignDispatch({ campaignId: campaign.id }, delay);
       if (!job) {
         await prisma.campaign.update({
           where: { id },
-          data: { status: "DRAFT" },
+          data: { status: "DRAFT", sendCap: null },
         });
         return NextResponse.json(
           {

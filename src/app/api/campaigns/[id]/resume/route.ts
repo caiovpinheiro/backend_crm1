@@ -5,6 +5,7 @@ import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { enqueueCampaignSend } from "@/lib/queue";
 import { isCampaignSendRoundRobinEnabled } from "@/lib/campaign-send-rate";
+import { nextCampaignSendCap } from "@/lib/campaign-send-limit";
 
 export async function POST(
   _request: Request,
@@ -18,7 +19,12 @@ export async function POST(
 
       const campaign = await prisma.campaign.findUnique({
         where: { id },
-        select: { status: true },
+        select: {
+          status: true,
+          sendLimit: true,
+          sentCount: true,
+          failedCount: true,
+        },
       });
 
       if (!campaign) {
@@ -32,17 +38,30 @@ export async function POST(
         );
       }
 
+      // Trava por lote: cada retomada libera outro lote de `sendLimit`.
+      const sendCap = campaign.sendLimit
+        ? nextCampaignSendCap(
+            campaign.sentCount + campaign.failedCount,
+            campaign.sendLimit,
+          )
+        : null;
+
       await prisma.campaign.update({
         where: { id },
-        data: { status: "SENDING" },
+        data: { status: "SENDING", sendCap },
       });
 
       if (isCampaignSendRoundRobinEnabled()) {
         const pending = await prisma.campaignRecipient.count({
           where: { campaignId: id, status: "PENDING" },
         });
+        const batch = campaign.sendLimit
+          ? Math.min(campaign.sendLimit, pending)
+          : pending;
         return NextResponse.json({
-          message: `Campanha retomada. ${pending} envios pendentes serão retomados automaticamente.`,
+          message: campaign.sendLimit
+            ? `Campanha retomada. Próximo lote de ${batch} envios (${pending} pendentes no total).`
+            : `Campanha retomada. ${pending} envios pendentes serão retomados automaticamente.`,
           status: "SENDING",
         });
       }
@@ -52,6 +71,10 @@ export async function POST(
         include: {
           contact: { select: { id: true, phone: true, whatsappBsuid: true } },
         },
+        // Caminho FIFO (rollback do rodízio): enfileirar só o lote. A trava
+        // ainda pausa via contadores, mas sem isto a fila levaria a audiência
+        // inteira e o resto só seria descartado no consumo.
+        ...(campaign.sendLimit ? { take: campaign.sendLimit } : {}),
       });
 
       for (const r of pendingRecipients) {
