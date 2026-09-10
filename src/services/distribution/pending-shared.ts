@@ -243,6 +243,9 @@ export async function getPendingDistributions(opts: {
               id: { in: manualConvIds },
               ...activeInboxQueueGuardWhere(),
               assignedToId: null,
+              // Modo leads também fica fora da fila smart no ramo MANUAL.
+              OR: [{ routeMode: null }, { routeMode: { not: "leads" } }],
+              NOT: { department: { distributionMode: "leads" } },
             },
           ]
         : []),
