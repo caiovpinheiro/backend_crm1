@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ffmpegCapabilities,
+  metaCloudAudioUploadBlocked,
   prepareWhatsAppAudio,
 } from "@/lib/audio-convert";
 import { isOggOpus, muxOggOpus } from "@/lib/ogg-opus-ptt";
@@ -114,6 +115,8 @@ describe("prepareWhatsAppAudio", () => {
     if (!result.ok) return;
     expect(result.payload.delivery).toBe("document");
     expect(result.payload.voice).toBe(false);
+    expect(result.payload.mime).toBe("application/octet-stream");
+    expect(metaCloudAudioUploadBlocked(result.payload)).toBeTruthy();
   });
 
   it("envia m4a original como áudio comum se o PTT falhar", async () => {

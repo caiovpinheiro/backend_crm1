@@ -3204,7 +3204,8 @@ async function executeStep(
           let sendAsVoice = false;
 
           if (mType === "audio") {
-            const { prepareWhatsAppAudio, guessInputExt } = await import("@/lib/audio-convert");
+            const { prepareWhatsAppAudio, guessInputExt, metaCloudAudioUploadBlocked } =
+              await import("@/lib/audio-convert");
             const prepared = await prepareWhatsAppAudio(
               buffer,
               guessInputExt(mimeType),
@@ -3214,6 +3215,10 @@ async function executeStep(
               throw new MetaSendFailureError(
                 `send_whatsapp_media: falha ao preparar áudio — ${prepared.reason}`,
               );
+            }
+            const blocked = metaCloudAudioUploadBlocked(prepared.payload);
+            if (blocked) {
+              throw new MetaSendFailureError(`send_whatsapp_media: ${blocked}`);
             }
             uploadBuffer = prepared.payload.buffer;
             uploadMime = prepared.payload.mime;
