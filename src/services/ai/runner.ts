@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Runner principal do agente de IA.
  *
  * Um "run" é uma invocação completa do agente respondendo a um ponto
@@ -321,6 +321,11 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       inboxPolicyForRun.knowledgeExpiredInstruction,
     );
     const useMessageModelsRag = inboxPolicyForRun.useMessageModels;
+    // "Usar apenas as minhas regras": o texto canônico do pack e os hints
+    // de runtime (polos, prova, portal, senha, primeiro acesso, certificado)
+    // deixam de ser somados. As tools, o roteamento de departamento e os
+    // interceptos continuam — só o texto sai do prompt.
+    const packText = hasPack && !inboxPolicyForRun.useOnlyOwnRules;
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
@@ -340,7 +345,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .slice(-4)
       .map((m) => m.content)
       .join("\n");
-    const portalAccessHint = hasPack
+    const portalAccessHint = packText
       ? (packOps.formatCanonicalPortalAccessHint?.(
           args.userMessage,
           recentContextForHint,
@@ -361,7 +366,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examsOnlineOnly = hasPack
       ? await getOrgSettingBool("ai.exams.onlineOnly", true).catch(() => true)
       : true;
-    const examAccessHint = hasPack
+    const examAccessHint = packText
       ? (packOps.formatExamAccessHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
@@ -370,13 +375,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           examsOnlineOnly,
         ) ?? "")
       : "";
-    const poloAddressesHint = hasPack
+    const poloAddressesHint = packText
       ? (packOps.formatPoloAddressesHint?.(
           args.userMessage,
           recentContextForHint,
         ) ?? "")
       : "";
-    const certificateHint = hasPack
+    const certificateHint = packText
       ? (packOps.formatParticipationCertificateHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
@@ -384,13 +389,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             .join("\n"),
         ) ?? "")
       : "";
-    const firstAccessHint = hasPack
+    const firstAccessHint = packText
       ? (packOps.formatFirstAccessHint?.(
           args.userMessage,
           recentContextForHint,
         ) ?? "")
       : "";
-    const passwordResetHint = hasPack
+    const passwordResetHint = packText
       ? (packOps.formatPasswordResetHint?.(
           args.userMessage,
           recentContextForHint,
@@ -427,13 +432,18 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     ]
       .filter(Boolean)
       .join("\n");
+    // Com `useOnlyOwnRules`, o fallback do pack não entra: sem isso o agente
+    // que nunca salvou `steeringRules` recebia o texto de fábrica inteiro
+    // mesmo tendo o operador reescrito tudo no override.
     const steeringRules =
       agent.steeringRules?.trim() ||
-      fallbackSteeringRules(agent.archetype, agent.verticalPack);
-    const curriculumRules = hasPack
+      (packText
+        ? fallbackSteeringRules(agent.archetype, agent.verticalPack)
+        : "");
+    const curriculumRules = packText
       ? (pack?.constants.curriculumTceRules ?? "")
       : "";
-    const examModalityRules = hasPack
+    const examModalityRules = packText
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
     // Alcance da tool de matrícula. Preso ao turno em que a tool existe:
@@ -441,7 +451,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // pelo texto canônico do pack porque o `steeringRules` salvo do agente
     // pode estar defasado — e aí o texto canônico não chega ao prompt.
     const enrollmentScopeRules =
-      hasPack && runtimeTools.includes("consultar_matricula")
+      packText && runtimeTools.includes("consultar_matricula")
         ? (pack?.constants.enrollmentScopeRules ?? "")
         : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as
