@@ -8,7 +8,11 @@
  *         ignorando departamento — nada fica preso na fila por falta de roteamento.
  *       - true: quando a conversa tem um departamento com distribuição automática
  *         ligada, restringe aos membros desse departamento; sem departamento cai
- *         no org-wide.
+ *         no org-wide (ou em `fallbackDepartmentId`, se definido).
+ *   - `fallbackDepartmentId` (só vale com `respectDepartment` ligado):
+ *       - null (default): lead sem departamento vai para todos os elegíveis.
+ *       - id: lead sem departamento vai SÓ para os membros desse departamento;
+ *         se nenhum estiver elegível, espera na fila (fronteira estrita).
  *   - `enabled`:
  *       - true (default): motor atribui e drena a fila.
  *       - false: kill switch — inbound, automação, IA e drenagem não atribuem.
@@ -26,7 +30,14 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
-import { getOrgSettingBool, setOrgSettingBool } from "@/lib/org-settings";
+import {
+  deleteOrgSetting,
+  getOrgSetting,
+  getOrgSettingBool,
+  setOrgSetting,
+  setOrgSettingBool,
+} from "@/lib/org-settings";
+import { prisma } from "@/lib/prisma";
 import { DISTRIBUTION_ENABLED_KEY } from "@/services/distribution/enabled";
 import {
   assertSmartDistributionEnabled,
@@ -35,6 +46,7 @@ import {
 
 const RESPECT_DEPT_KEY = "distribution.respectDepartment";
 const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
+const FALLBACK_DEPT_KEY = "distribution.fallbackDepartmentId";
 const ENABLED_KEY = DISTRIBUTION_ENABLED_KEY;
 
 async function guard(session: {
@@ -69,12 +81,19 @@ async function guard(session: {
 }
 
 async function readSettings() {
-  const [respectDepartment, autoOnInbound, enabled] = await Promise.all([
-    getOrgSettingBool(RESPECT_DEPT_KEY, false),
-    getOrgSettingBool(AUTO_ON_INBOUND_KEY, true),
-    getOrgSettingBool(ENABLED_KEY, true),
-  ]);
-  return { respectDepartment, autoOnInbound, enabled };
+  const [respectDepartment, autoOnInbound, enabled, fallbackDepartmentId] =
+    await Promise.all([
+      getOrgSettingBool(RESPECT_DEPT_KEY, false),
+      getOrgSettingBool(AUTO_ON_INBOUND_KEY, true),
+      getOrgSettingBool(ENABLED_KEY, true),
+      getOrgSetting(FALLBACK_DEPT_KEY),
+    ]);
+  return {
+    respectDepartment,
+    autoOnInbound,
+    enabled,
+    fallbackDepartmentId: fallbackDepartmentId || null,
+  };
 }
 
 export async function GET() {
@@ -93,6 +112,7 @@ export async function PUT(req: Request) {
       respectDepartment?: unknown;
       autoOnInbound?: unknown;
       enabled?: unknown;
+      fallbackDepartmentId?: unknown;
     };
 
     // Atualização PARCIAL: só toca as chaves presentes no corpo.
@@ -104,6 +124,35 @@ export async function PUT(req: Request) {
     }
     if ("enabled" in body) {
       await setOrgSettingBool(ENABLED_KEY, Boolean(body.enabled));
+    }
+    if ("fallbackDepartmentId" in body) {
+      const raw = body.fallbackDepartmentId;
+      const id = typeof raw === "string" ? raw.trim() : "";
+      if (!id) {
+        await deleteOrgSetting(FALLBACK_DEPT_KEY);
+      } else {
+        // prisma é org-scoped: departamento de outra org não é encontrado.
+        const dept = await prisma.department.findUnique({
+          where: { id },
+          select: { distributionEnabled: true },
+        });
+        if (!dept) {
+          return NextResponse.json(
+            { message: "Departamento não encontrado." },
+            { status: 400 },
+          );
+        }
+        if (!dept.distributionEnabled) {
+          return NextResponse.json(
+            {
+              message:
+                "Ligue a distribuição automática deste departamento antes de usá-lo como destino dos leads sem departamento.",
+            },
+            { status: 400 },
+          );
+        }
+        await setOrgSetting(FALLBACK_DEPT_KEY, id);
+      }
     }
 
     return NextResponse.json(await readSettings());

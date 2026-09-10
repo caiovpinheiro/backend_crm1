@@ -14,7 +14,7 @@
 import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
-import { getOrgSettingBool } from "@/lib/org-settings";
+import { getOrgSetting, getOrgSettingBool } from "@/lib/org-settings";
 import { isDistributionEnabled } from "./enabled";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -154,9 +154,24 @@ async function resolveDepartmentScope(
     });
     departmentId = conv?.departmentId ?? null;
   }
-  // Conversa SEM departamento identificado → distribui para todos os elegíveis
-  // (comportamento clássico), em vez de bloquear na fila.
-  if (!departmentId) return { mode: "org-wide", departmentId: null };
+  if (!departmentId) {
+    // Departamento de destino para quem chega SEM roteamento (config da org).
+    // Vazio = comportamento clássico: distribui para todos os elegíveis.
+    // Definido = fronteira estrita, só os membros dele; se nenhum estiver
+    // elegível o lead espera na fila do departamento.
+    const fallbackId = await getOrgSetting("distribution.fallbackDepartmentId");
+    if (!fallbackId) return { mode: "org-wide", departmentId: null };
+    const fallback = await prisma.department.findUnique({
+      where: { id: fallbackId },
+      select: { id: true, distributionEnabled: true },
+    });
+    // Departamento apagado ou com distribuição desligada: volta ao clássico em
+    // vez de congelar na fila todo lead sem departamento.
+    if (!fallback?.distributionEnabled) {
+      return { mode: "org-wide", departmentId: null };
+    }
+    return { mode: "department", departmentId: fallback.id };
+  }
 
   const dept = await prisma.department.findUnique({
     where: { id: departmentId },
