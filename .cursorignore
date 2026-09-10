@@ -1,0 +1,11 @@
+# Histórico técnico — consultar manualmente quando necessário
+docs/history/
+
+# Código gerado automaticamente — não usar para descoberta normal
+src/lib/automation-templates-imported.ts
+
+# Artefatos locais/de build
+.next/
+dist/
+coverage/
+*.log
