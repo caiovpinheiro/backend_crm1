@@ -39,6 +39,9 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 - `ENABLE RLS` não está em prod — não remova a extension Prisma “porque tem RLS”.
 - `Channel.pipelineId` / `search_text` — ADRs, **não implementados**.
 - Migrate no worker. Só `APP_MODE=api` migra no boot.
+- Criar fila de espera para o modo `leads` (ele é síncrono; NO_ELIGIBLE_PARTICIPANT vai p/ saída "Não" do bloco).
+- Reavaliar dono com `assignedVia="leads"` por offline/expediente (atribuição leads é protegida; só `reassign` explícito troca).
+- Bloco `execute_distribution` sem `mode` = smart. Nunca converter bloco antigo para leads.
 
 ## Handler
 
@@ -75,6 +78,8 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 | Auto-deal | `src/services/auto-deals.ts` |
 | Move de card | `src/services/deals.ts` → `moveDeal` |
 | Tenant | `docs/tenant-subdomain.md` |
+| Distribuição por Leads | `src/services/distribution/leads/` (engine síncrono, rodízio por slots) |
+| Claim anti-dupla-atribuição | `src/services/distribution/claim.ts` (CAS usado pelos dois motores) |
 
 ## Filas (`APP_MODE`)
 
