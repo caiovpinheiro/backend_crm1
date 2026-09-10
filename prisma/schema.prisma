@@ -90,6 +90,10 @@ model Organization {
   distributionResponsibles DistributionResponsible[]
   distributionLogs         DistributionLog[]
   distributionPending      DistributionPending[]
+  distributionLeadsParticipants DistributionLeadsParticipant[]
+  distributionLeadsSlots        DistributionLeadsSlot[]
+  distributionLeadsAssignments  DistributionLeadsAssignment[]
+  distributionLeadsExecutions   DistributionLeadsExecution[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -559,6 +563,7 @@ model User {
   assignedLeads                  Contact[]                 @relation("AssignedTo")
   distributionMembers            DistributionMember[]
   distributionResponsibles       DistributionResponsible[]
+  distributionLeadsParticipants  DistributionLeadsParticipant[]
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
@@ -1565,6 +1570,8 @@ model Deal {
   stage     Stage    @relation(fields: [stageId], references: [id])
   ownerId   String?
   owner     User?    @relation(fields: [ownerId], references: [id])
+  /// Origem da atribuição vigente do owner ("smart" | "leads"; null = manual/IA/legado).
+  assignedVia String?
 
   activities     Activity[]
   notes          Note[]
@@ -2895,6 +2902,13 @@ model Conversation {
   /// Agente responsável pela conversa na inbox (null = ainda na fila / visível conforme regra de contato).
   assignedToId String?
   assignedTo   User?   @relation("ConversationAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  /// Origem da atribuição vigente ("smart" | "leads"; null = manual/IA/legado).
+  /// `leads` protege o responsável de reavaliações automáticas (offline/expediente).
+  assignedVia  String?
+  /// Rota de distribuição destinada a esta conversa ("leads"; null = rota normal).
+  /// Conversas com routeMode="leads" ficam fora da fila de espera e da
+  /// distribuição automática smart até uma atribuição explícita.
+  routeMode    String?
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
@@ -3478,6 +3492,10 @@ model Department {
   /// (o lead fica na fila). Quando NENHUM depto da org tem isso true, o motor
   /// mantém o comportamento org-wide (retrocompatível).
   distributionEnabled      Boolean      @default(false)
+  /// Modo de entrada da distribuição deste departamento: "smart" (default,
+  /// comportamento atual) ou "leads" (fora da distribuição/fila smart; a
+  /// distribuição acontece via bloco `execute_distribution` com mode="leads").
+  distributionMode         String       @default("smart")
   /// Janela operacional do departamento (cobertura). Null = Seg–Sex 09:00–18:00.
   /// Formato: { start: "09:00", end: "18:00", weekdays: [1,2,3,4,5] }.
   operatingHours           Json?
@@ -3995,6 +4013,103 @@ model DistributionPending {
 
   @@index([organizationId, status])
   @@map("distribution_pending")
+}
+
+// ── Distribuição por Leads (modo `leads`) ─────────────────
+// Modo síncrono, SEM fila de espera: o bloco `execute_distribution` com
+// mode="leads" seleciona o próximo slot do rodízio e atribui na hora.
+// Configuração independente do smart (DistributionResponsible): status
+// administrativo próprio + peso 0..5. Não herda presença, pausa, expediente,
+// queueLimit, departamento ou tipo do modo smart.
+
+model DistributionLeadsParticipant {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// ACTIVE | INACTIVE — status administrativo próprio do modo leads.
+  status         String       @default("ACTIVE")
+  /// Peso 0..5: quantos dos 5 slots do participante entram no rodízio.
+  /// 0 = não recebe (CHECK na migration).
+  weight         Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  slots       DistributionLeadsSlot[]
+  assignments DistributionLeadsAssignment[]
+
+  @@unique([organizationId, userId])
+  @@index([organizationId, status])
+  @@map("distribution_leads_participants")
+}
+
+/// Slot de frequência do rodízio (nunca capacidade). Cada participante tem 5;
+/// entram no rodízio os com slotIndex < weight do participante ACTIVE.
+/// `lastAssignedAt` (NULL primeiro) define a ordem — estado 100% em banco.
+model DistributionLeadsSlot {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  participantId  String
+  participant    DistributionLeadsParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  slotIndex      Int
+  lastAssignedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([participantId, slotIndex])
+  @@index([organizationId, lastAssignedAt])
+  @@map("distribution_leads_slots")
+}
+
+/// Histórico oficial do modo leads (indicadores/ranking). Gravado SOMENTE na
+/// transaction vencedora do claim — contabilização sem duplicidade em retries.
+model DistributionLeadsAssignment {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  participantId  String
+  participant    DistributionLeadsParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  /// Desnormalizado para ranking/filtros sem join.
+  userId         String
+  slotIndex      Int
+  /// Identidade canônica do alvo: "contact:{id}" | "deal:{id}".
+  targetKey      String
+  contactId      String?
+  dealId         String?
+  conversationId String?
+  triggerSource  String   @default("AUTOMATION")
+  /// "{automationContextId}:{stepId}:{occurrence}" — idempotência de retry.
+  executionKey   String?
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, executionKey])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, userId, createdAt])
+  @@index([organizationId, targetKey])
+  @@map("distribution_leads_assignments")
+}
+
+/// Registro de execução do step leads: torna QUALQUER outcome (ASSIGNED,
+/// NO_ELIGIBLE_PARTICIPANT, DONO_PRESERVADO, módulo off) idempotente entre
+/// retries. A occurrence só avança junto ao avanço durável do runner
+/// (AutomationContext.variables no advanceContext).
+model DistributionLeadsExecution {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  automationContextId String
+  stepId              String
+  occurrence          Int
+  /// { success, reason, selectedUserId, selectedUserName } — replay idempotente.
+  result              Json
+  assignmentId        String?
+  createdAt           DateTime  @default(now())
+
+  @@unique([automationContextId, stepId, occurrence])
+  @@index([organizationId, createdAt])
+  @@map("distribution_leads_executions")
 }
 
 // ── Automation Context (Salesbot) ─────────────────

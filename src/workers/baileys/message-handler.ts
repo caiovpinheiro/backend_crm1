@@ -14,7 +14,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
-import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
+import { inheritContactAssigneeWithViaForNewTicket } from "@/services/ai/attendance-gate";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
@@ -292,7 +292,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     return existing;
   }
 
-  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
+  const inheritAssignee = await inheritContactAssigneeWithViaForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -304,7 +304,14 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
           channelId,
           waJid: rawJid,
           status: "OPEN" as const,
-          ...(inheritAssignee ? { assignedToId: inheritAssignee } : {}),
+          ...(inheritAssignee
+            ? {
+                assignedToId: inheritAssignee.userId,
+                ...(inheritAssignee.via
+                  ? { assignedVia: inheritAssignee.via }
+                  : {}),
+              }
+            : {}),
         }),
         select: CONV_SELECT,
       }),
@@ -312,7 +319,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     await maybeDistributeNewInboundTicket({
       conversationId: created.id,
       contactId,
-      assignedToId: inheritAssignee,
+      assignedToId: inheritAssignee?.userId ?? null,
     });
     return created;
   } catch (err) {

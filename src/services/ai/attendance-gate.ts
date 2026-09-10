@@ -22,6 +22,18 @@ export async function isAiAttendanceEnabled(): Promise<boolean> {
 export async function inheritContactAssigneeForNewTicket(
   contactId: string,
 ): Promise<string | null> {
+  const inherit = await inheritContactAssigneeWithViaForNewTicket(contactId);
+  return inherit?.userId ?? null;
+}
+
+/**
+ * Herança com a origem da atribuição (`assignedVia`): a conversa nova que
+ * herda o dono do contato recebe a mesma marca (ex.: lead atribuído pelo modo
+ * leads antes de ter conversa) — é a MESMA atribuição, não uma nova.
+ */
+export async function inheritContactAssigneeWithViaForNewTicket(
+  contactId: string,
+): Promise<{ userId: string; via: string | null } | null> {
   const contact = await prisma.contact.findUnique({
     where: { id: contactId },
     select: {
@@ -33,7 +45,27 @@ export async function inheritContactAssigneeForNewTicket(
   if (contact.assignedTo?.type === "AI" && !(await isAiAttendanceEnabled())) {
     return null;
   }
-  return contact.assignedToId;
+  const userId = contact.assignedToId;
+  // A marca mora na entidade atribuída (deal/conversa), não no contato.
+  // Origem da herança: deal OPEN com esse owner, senão a conversa ativa.
+  const [dealVia, convVia] = await Promise.all([
+    prisma.deal.findFirst({
+      where: { contactId, status: "OPEN", ownerId: userId, assignedVia: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      select: { assignedVia: true },
+    }),
+    prisma.conversation.findFirst({
+      where: {
+        contactId,
+        status: { not: "RESOLVED" },
+        assignedToId: userId,
+        assignedVia: { not: null },
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { assignedVia: true },
+    }),
+  ]);
+  return { userId, via: dealVia?.assignedVia ?? convVia?.assignedVia ?? null };
 }
 
 /** Se o gate estiver off e o responsável for IA, zera assignee (vai pra Entrada). */

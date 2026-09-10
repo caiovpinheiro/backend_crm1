@@ -109,6 +109,12 @@ export const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
   ...activeInboxQueueGuardWhere(),
   assignedToId: null,
   lastInboundAt: { not: null },
+  // Modo leads: conversa marcada (routeMode) ou roteada a departamento leads
+  // fica FORA da fila de espera smart — a distribuição é do bloco mode="leads".
+  // `OR` explícito: `routeMode: { not: "leads" }` sozinho excluiria NULL
+  // (semântica de 3 valores do SQL).
+  OR: [{ routeMode: null }, { routeMode: { not: "leads" } }],
+  NOT: { department: { distributionMode: "leads" } },
 };
 
 /** Default true: inbound sem dono entra na fila (legado acadêmico). */
@@ -136,6 +142,20 @@ export async function ensureConversationInWaitingQueue(args: {
   if (!args.contactId) return;
   const orgId = getOrgIdOrNull();
   if (!orgId) return;
+  // Alvo do modo leads nunca entra na fila de espera smart.
+  const convRoute = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: {
+      routeMode: true,
+      department: { select: { distributionMode: true } },
+    },
+  });
+  if (
+    convRoute?.routeMode === "leads" ||
+    convRoute?.department?.distributionMode === "leads"
+  ) {
+    return;
+  }
   const existing = await prisma.distributionPending.findFirst({
     where: {
       status: "PENDING",

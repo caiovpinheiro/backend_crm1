@@ -75,3 +75,21 @@ export {
   type RedistributeQueueScope,
   type RedistributeResult,
 } from "./redistribute";
+
+export {
+  executeLeadsDistribution,
+  type ExecuteLeadsDistributionInput,
+  type LeadsDistributionResult,
+  type LeadsDistributionReason,
+} from "./leads/engine";
+
+export {
+  getLeadsParticipants,
+  upsertLeadsParticipant,
+  getLeadsStats,
+  getLeadsHistory,
+  LEADS_SLOT_COUNT,
+  type LeadsParticipantView,
+  type LeadsStatsResult,
+  type LeadsHistoryItem,
+} from "./leads/participants";

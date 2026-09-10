@@ -27,7 +27,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
-import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
+import { inheritContactAssigneeWithViaForNewTicket } from "@/services/ai/attendance-gate";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -550,7 +550,7 @@ async function findOrCreateConversation(
     return { id: existing.id, assignedToId: existing.assignedToId ?? null };
   }
 
-  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
+  const inheritAssignee = await inheritContactAssigneeWithViaForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -561,7 +561,14 @@ async function findOrCreateConversation(
           channel: channelSlug,
           channelId,
           status: "OPEN" as const,
-          ...(inheritAssignee ? { assignedToId: inheritAssignee } : {}),
+          ...(inheritAssignee
+            ? {
+                assignedToId: inheritAssignee.userId,
+                ...(inheritAssignee.via
+                  ? { assignedVia: inheritAssignee.via }
+                  : {}),
+              }
+            : {}),
         }),
         select: { id: true, assignedToId: true },
       }),
@@ -569,11 +576,11 @@ async function findOrCreateConversation(
     await maybeDistributeNewInboundTicket({
       conversationId: created.id,
       contactId,
-      assignedToId: inheritAssignee,
+      assignedToId: inheritAssignee?.userId ?? null,
     });
     return {
       id: created.id,
-      assignedToId: created.assignedToId ?? inheritAssignee,
+      assignedToId: created.assignedToId ?? inheritAssignee?.userId ?? null,
     };
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {

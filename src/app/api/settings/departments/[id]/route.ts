@@ -25,6 +25,9 @@ const UpdateSchema = z.object({
   autoCloseTabulationId: z.string().min(1).nullable().optional(),
   isSupport: z.boolean().optional(),
   distributionEnabled: z.boolean().optional(),
+  /** Modo de entrada da distribuição: "smart" (atual) | "leads" (o depto fica
+   * fora da distribuição/fila smart; distribuição via bloco mode="leads"). */
+  distributionMode: z.enum(["smart", "leads"]).optional(),
   operatingHours: OperatingHoursSchema.nullable().optional(),
 });
 
@@ -85,6 +88,24 @@ export async function PUT(
           id: { not: id },
         },
         data: { isSupport: false },
+      });
+    }
+
+    // Ação explícita do gestor: ao voltar um departamento de leads → smart,
+    // as conversas marcadas (routeMode) e sem responsável voltam a ser
+    // elegíveis para a distribuição/fila smart. Leads → outros modos não
+    // toca em quem já foi atribuído.
+    if (
+      parsed.data.distributionMode === "smart" &&
+      dept.distributionMode === "leads"
+    ) {
+      await prisma.conversation.updateMany({
+        where: {
+          departmentId: id,
+          routeMode: "leads",
+          assignedToId: null,
+        },
+        data: { routeMode: null },
       });
     }
 

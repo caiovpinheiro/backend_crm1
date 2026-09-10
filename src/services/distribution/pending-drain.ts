@@ -321,6 +321,12 @@ export async function processPendingDistributionQueue(opts: {
                 ]
               : []),
           ],
+          // Modo leads nunca é drenado pelo smart: nem os marcados pelo step
+          // (routeMode) nem os roteados a departamento leads.
+          AND: [
+            { OR: [{ routeMode: null }, { routeMode: { not: "leads" } }] },
+            { NOT: { department: { distributionMode: "leads" } } },
+          ],
         },
         orderBy: { createdAt: "asc" },
         select: { id: true, contactId: true, departmentId: true },

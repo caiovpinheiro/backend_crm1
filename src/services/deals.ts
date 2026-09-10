@@ -680,7 +680,7 @@ export async function findOpenDealForContactInPipeline(
  * corria com o purge, reintroduzindo o card antigo por cima do update
  * otimista.
  */
-async function invalidateBoardsForPipelines(
+export async function invalidateBoardsForPipelines(
   pipelineIds: (string | null | undefined)[],
 ): Promise<void> {
   try {
@@ -762,7 +762,11 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.deal.update({
       where: { id },
-      data: payload,
+      data:
+        data.ownerId !== undefined
+          ? // Troca manual de responsável zera a origem de motor.
+            { ...payload, assignedVia: null }
+          : payload,
       include: listInclude,
     });
 
@@ -854,7 +858,7 @@ export async function propagateOwnerToContactAndChat(
   tx: ScopedTx,
   contactId: string | null | undefined,
   ownerId: string | null,
-  opts?: { conversations?: boolean },
+  opts?: { conversations?: boolean; via?: string | null },
 ): Promise<ConversationAssigneeChange[]> {
   if (!contactId) return [];
   await tx.contact.update({
@@ -922,6 +926,13 @@ export async function propagateOwnerToContactAndChat(
     where: { id: { in: toChange.map((c) => c.id) } },
     data: {
       assignedToId: ownerId,
+      // Origem da atribuição vigente: motores passam `via` ("smart"/"leads");
+      // qualquer outra escrita de owner (manual/IA/remoção) zera a marca —
+      // a proteção contra reavaliação automática pertence à atribuição atual.
+      assignedVia: opts?.via ?? null,
+      // Atribuição concreta consome a rota pendente; remoção de dono a
+      // preserva (a conversa pode estar sendo preparada para outro motor).
+      ...(ownerId !== null ? { routeMode: null } : {}),
       ...(newOwnerIsAi ? { aiGreetedAt: null } : {}),
     },
   });
@@ -942,28 +953,44 @@ export async function propagateOwnerToContactAndChat(
  * contato e as conversas (regra de herança). Use esta função sempre
  * que for mudar `Deal.ownerId` de forma isolada (sem outros campos).
  */
+/**
+ * Variante transacional de `assignDealOwner`: o caller fornece a `tx` (ex.: o
+ * motor de distribuição, que precisa do claim CAS na mesma transaction).
+ * `via` marca a origem da atribuição ("smart" | "leads"); omitido = zera.
+ * NÃO dispara invalidação de boards nem `agent_changed` — o caller faz isso
+ * pós-commit.
+ */
+export async function assignDealOwnerTx(
+  tx: ScopedTx,
+  dealId: string,
+  ownerId: string | null,
+  via?: string | null,
+) {
+  const current = await tx.deal.findUnique({
+    where: { id: dealId },
+    select: { ownerId: true },
+  });
+  const row = await tx.deal.update({
+    where: { id: dealId },
+    data: { ownerId, assignedVia: via ?? null },
+    select: {
+      id: true,
+      contactId: true,
+      ownerId: true,
+      stage: { select: { pipelineId: true } },
+    },
+  });
+  await propagateOwnerToContactAndChat(tx, row.contactId, ownerId, { via: via ?? null });
+  return { ...row, fromOwnerId: current?.ownerId ?? null };
+}
+
 export async function assignDealOwner(
   dealId: string,
   ownerId: string | null,
 ) {
-  const deal = await prisma.$transaction(async (tx) => {
-    const current = await tx.deal.findUnique({
-      where: { id: dealId },
-      select: { ownerId: true },
-    });
-    const row = await tx.deal.update({
-      where: { id: dealId },
-      data: { ownerId },
-      select: {
-        id: true,
-        contactId: true,
-        ownerId: true,
-        stage: { select: { pipelineId: true } },
-      },
-    });
-    await propagateOwnerToContactAndChat(tx, row.contactId, ownerId);
-    return { ...row, fromOwnerId: current?.ownerId ?? null };
-  });
+  const deal = await prisma.$transaction((tx) =>
+    assignDealOwnerTx(tx, dealId, ownerId),
+  );
 
   await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
 
@@ -1100,21 +1127,26 @@ export async function syncOwnershipForContact(
     }),
     prisma.deal.findMany({
       where: { contactId, status: "OPEN" },
-      select: { id: true, ownerId: true },
+      select: { id: true, ownerId: true, assignedVia: true },
     }),
     prisma.conversation.findMany({
       where: { contactId, status: { not: "RESOLVED" } },
-      select: { id: true, assignedToId: true },
+      select: { id: true, assignedToId: true, assignedVia: true },
       orderBy: { updatedAt: "desc" },
     }),
   ]);
 
-  const fromConv =
-    openConvs.find((c) => c.assignedToId)?.assignedToId ?? null;
+  const fromConvRow = openConvs.find((c) => c.assignedToId) ?? null;
+  const fromConv = fromConvRow?.assignedToId ?? null;
   const fromContact = contact?.assignedToId ?? null;
-  const fromDeal = openDeals.find((d) => d.ownerId)?.ownerId ?? null;
+  const fromDealRow = openDeals.find((d) => d.ownerId) ?? null;
+  const fromDeal = fromDealRow?.ownerId ?? null;
   const ownerId = fromConv ?? fromContact ?? fromDeal;
   if (!ownerId) return null;
+
+  // A cura propaga a MESMA atribuição vigente — a marca de origem
+  // (assignedVia) acompanha o owner para as projeções curadas.
+  const via = fromConvRow?.assignedVia ?? fromDealRow?.assignedVia ?? null;
 
   const nullDealIds = openDeals.filter((d) => !d.ownerId).map((d) => d.id);
   const nullConvIds = openConvs.filter((c) => !c.assignedToId).map((c) => c.id);
@@ -1134,13 +1166,13 @@ export async function syncOwnershipForContact(
     if (nullDealIds.length > 0) {
       await tx.deal.updateMany({
         where: { id: { in: nullDealIds } },
-        data: { ownerId },
+        data: { ownerId, assignedVia: via },
       });
     }
     if (nullConvIds.length > 0) {
       await tx.conversation.updateMany({
         where: { id: { in: nullConvIds } },
-        data: { assignedToId: ownerId },
+        data: { assignedToId: ownerId, assignedVia: via },
       });
     }
   });

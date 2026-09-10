@@ -2346,6 +2346,10 @@ export async function assignConversationAssignedTo(
       where: { id: conversationId },
       data: {
         assignedToId: newAssigneeId,
+        // Atribuição/remoção pelo inbox é manual: zera a origem de motor
+        // (assignedVia) e consome qualquer rota pendente (routeMode).
+        assignedVia: null,
+        routeMode: null,
         ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
       },
       select: ASSIGN_CONVERSATION_SELECT,
@@ -2360,7 +2364,7 @@ export async function assignConversationAssignedTo(
       });
       await tx.deal.updateMany({
         where: { contactId: conv.contactId, status: "OPEN" },
-        data: { ownerId: newAssigneeId },
+        data: { ownerId: newAssigneeId, assignedVia: null },
       });
     }
     return conv;

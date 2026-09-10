@@ -135,6 +135,39 @@ export async function maybeDistributeNewInboundTicket(input: {
     return;
   }
 
+  // ── Guardas do modo leads (antes de qualquer reavaliação) ──
+  // 1) Atribuição feita pelo modo leads é protegida de reavaliação
+  //    automática: dono humano com assignedVia="leads" permanece, mesmo
+  //    offline / fora do expediente / com fila cheia.
+  // 2) Conversa em departamento com distributionMode="leads" fica fora da
+  //    distribuição automática smart — a distribuição é do bloco mode="leads".
+  const convRoute = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      assignedVia: true,
+      routeMode: true,
+      departmentId: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (
+    convRoute?.assignedVia === "leads" &&
+    input.assignedToId &&
+    convRoute.assignedTo?.type === "HUMAN"
+  ) {
+    return;
+  }
+  if (convRoute?.routeMode === "leads" && !input.assignedToId) {
+    return;
+  }
+  if (convRoute?.departmentId && !input.assignedToId) {
+    const dept = await prisma.department.findUnique({
+      where: { id: convRoute.departmentId },
+      select: { distributionMode: true },
+    });
+    if (dept?.distributionMode === "leads") return;
+  }
+
   debugWarn(
     "[DBG-e46688 maybeDist] entry",
     () => JSON.stringify({

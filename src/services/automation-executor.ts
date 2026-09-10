@@ -65,6 +65,7 @@ import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
+import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
 import { logEvent } from "@/services/activity-log";
 import { tabulationLogMeta } from "@/services/tabulations";
 import {
@@ -2204,6 +2205,85 @@ async function executeStep(
         rt.conversation && typeof rt.conversation === "object"
           ? ((rt.conversation as { id?: string }).id ?? null)
           : null;
+
+      // ── Modo "leads" (escolha EXPLÍCITA no bloco; ausência = smart) ──
+      // Rodízio próprio: participantes com status administrativo + peso 0–5.
+      // Sem fila de espera, sem olhar presença/expediente/departamento.
+      // Idempotência: outcome gravado em DistributionLeadsExecution por
+      // (contexto, step, occurrence) — retry antes do avanço durável do
+      // fluxo reencontra o resultado; a occurrence avança após a execução.
+      const distributionMode = readString(cfg, "mode") ?? "smart";
+      if (distributionMode === "leads") {
+        const stepId = (cfg as Record<string, unknown>).__stepId as
+          | string
+          | undefined;
+        let automationContextId: string | null = null;
+        let occurrence = 1;
+        if (rt.contactId && stepId) {
+          const activeCtx = await getActiveContext(rt.automationId, rt.contactId);
+          if (activeCtx) {
+            automationContextId = activeCtx.id;
+            const vars =
+              (activeCtx.variables as Record<string, unknown> | null) ?? {};
+            const occMap =
+              (vars.__distOcc as Record<string, number> | undefined) ?? {};
+            occurrence = occMap[stepId] ?? 1;
+          }
+        }
+
+        const leadsResult = await executeLeadsDistribution({
+          dealId: rt.dealId ?? null,
+          contactId: rt.contactId ?? null,
+          conversationId,
+          triggerSource: "AUTOMATION",
+          reassign: readBoolean(cfg, "reassign") === true,
+          automationContextId,
+          stepId: stepId ?? null,
+          occurrence,
+        });
+
+        // Avanço da occurrence: persistido DEPOIS do engine. Morte entre o
+        // commit do engine e este update → o retry lê a occurrence antiga e
+        // reencontra a execution gravada (idempotente, sem consumir slot).
+        if (automationContextId && stepId) {
+          try {
+            const fresh = await prisma.automationContext.findUnique({
+              where: { id: automationContextId },
+              select: { variables: true },
+            });
+            const vars =
+              (fresh?.variables as Record<string, unknown> | null) ?? {};
+            const occMap = {
+              ...((vars.__distOcc as Record<string, number> | undefined) ?? {}),
+            };
+            occMap[stepId] = occurrence + 1;
+            await prisma.automationContext.update({
+              where: { id: automationContextId },
+              data: {
+                variables: {
+                  ...vars,
+                  __distOcc: occMap,
+                } as Prisma.InputJsonValue,
+              },
+            });
+          } catch (e) {
+            console.warn("[leads] falha ao avançar occurrence do contexto", e);
+          }
+        }
+
+        if (leadsResult.success) {
+          // ASSIGNED ou DONO_PRESERVADO → saída SIM (fluxo linear).
+          return {};
+        }
+        // NO_ELIGIBLE_PARTICIPANT / módulo off → saída NÃO. Sem fila de
+        // espera e sem fallback para o smart: o alvo fica marcado
+        // (routeMode="leads") fora da distribuição automática atual.
+        const elseStepId = readString(cfg, "elseStepId");
+        if (elseStepId) {
+          return { skipRemaining: true, gotoStepId: elseStepId };
+        }
+        return { skipRemaining: true };
+      }
 
       // Campo de departamento vazio no nó = herda o departamento da conversa
       // (marcado por transferências / `set_department`). Só cai em org-wide

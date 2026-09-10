@@ -116,7 +116,10 @@ export async function clearOwnershipForRedistribution(args: {
   await prisma.$transaction(async (tx) => {
     await tx.conversation.update({
       where: { id: args.conversationId },
-      data: { assignedToId: null },
+      // A remoção zera a origem da atribuição (assignedVia) mas preserva
+      // routeMode: a rota leads destinada continua valendo até uma nova
+      // atribuição explícita.
+      data: { assignedToId: null, assignedVia: null },
     });
     await tx.contact.update({
       where: { id: args.contactId },
@@ -124,7 +127,7 @@ export async function clearOwnershipForRedistribution(args: {
     });
     await tx.deal.updateMany({
       where: { contactId: args.contactId, status: "OPEN" },
-      data: { ownerId: null },
+      data: { ownerId: null, assignedVia: null },
     });
   });
 }

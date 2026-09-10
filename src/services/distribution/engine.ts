@@ -21,9 +21,12 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
+  assignDealOwnerTx,
+  invalidateBoardsForPipelines,
   propagateOwnerToContactAndChat,
   syncOwnershipForContact,
 } from "@/services/deals";
+import { claimConversationAssignmentTx } from "./claim";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
@@ -55,6 +58,9 @@ export type DistributionReason =
   | "DISTRIBUTION_DISABLED"
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
+  /** Escopo resolveu para departamento no modo leads — o smart se abstém
+   * (não atribui, não enfileira). A distribuição é do bloco com mode="leads". */
+  | "DEPARTMENT_ROUTED_TO_LEADS"
   | "RETIRED_WHATSAPP_CHANNEL";
 
 /**
@@ -116,7 +122,12 @@ export interface ExecuteDistributionInput {
  */
 type DepartmentScope =
   | { mode: "org-wide"; departmentId: null }
-  | { mode: "department"; departmentId: string }
+  | {
+      mode: "department";
+      departmentId: string;
+      /** distributionMode do departamento ("smart" default | "leads"). */
+      departmentMode: string;
+    }
   | { mode: "blocked"; departmentId: string | null };
 
 /**
@@ -163,21 +174,31 @@ async function resolveDepartmentScope(
     if (!fallbackId) return { mode: "org-wide", departmentId: null };
     const fallback = await prisma.department.findUnique({
       where: { id: fallbackId },
-      select: { id: true, distributionEnabled: true },
+      select: { id: true, distributionEnabled: true, distributionMode: true },
     });
     // Departamento apagado ou com distribuição desligada: volta ao clássico em
     // vez de congelar na fila todo lead sem departamento.
     if (!fallback?.distributionEnabled) {
       return { mode: "org-wide", departmentId: null };
     }
-    return { mode: "department", departmentId: fallback.id };
+    return {
+      mode: "department",
+      departmentId: fallback.id,
+      departmentMode: fallback.distributionMode,
+    };
   }
 
   const dept = await prisma.department.findUnique({
     where: { id: departmentId },
-    select: { distributionEnabled: true },
+    select: { distributionEnabled: true, distributionMode: true },
   });
-  if (dept?.distributionEnabled) return { mode: "department", departmentId };
+  if (dept?.distributionEnabled) {
+    return {
+      mode: "department",
+      departmentId,
+      departmentMode: dept.distributionMode,
+    };
+  }
   // Departamento identificado mas que optou por NÃO distribuir automaticamente
   // → respeita o opt-out: fica na fila (manual).
   return { mode: "blocked", departmentId };
@@ -624,18 +645,32 @@ export async function executeDistribution(
   );
   // Nunca aceita departmentId de outra organização (cross-tenant).
   const orgIdForDept = getOrgIdOrThrow();
-  const explicitDeptIds =
+  const requestedDeptRows =
     requestedDeptIds.length > 0
-      ? (
-          await prisma.department.findMany({
-            where: {
-              organizationId: orgIdForDept,
-              id: { in: requestedDeptIds },
-            },
-            select: { id: true },
-          })
-        ).map((d) => d.id)
+      ? await prisma.department.findMany({
+          where: {
+            organizationId: orgIdForDept,
+            id: { in: requestedDeptIds },
+          },
+          select: { id: true, distributionMode: true },
+        })
       : [];
+  // Departamentos no modo leads ficam FORA do smart: o pool explícito os
+  // perde; se só sobraram deptos leads, o smart se abstém (sem atribuir e
+  // sem enfileirar) — a distribuição é do bloco com mode="leads".
+  const explicitDeptIds = requestedDeptRows
+    .filter((d) => d.distributionMode !== "leads")
+    .map((d) => d.id);
+  if (requestedDeptRows.length > 0 && explicitDeptIds.length === 0) {
+    await writeLog(input, false, "DEPARTMENT_ROUTED_TO_LEADS", null, []);
+    return {
+      success: false,
+      reason: "DEPARTMENT_ROUTED_TO_LEADS",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated: [],
+    };
+  }
 
   // Snapshot ANTES do reassign limpar o assignee — usado para disparar
   // `lead_distributed` quando um HUMAN assume vindo de IA/sem dono
@@ -673,9 +708,23 @@ export async function executeDistribution(
   if (input.conversationId && !input.reassign) {
     const already = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
-      select: { assignedToId: true, contactId: true },
+      select: { assignedToId: true, contactId: true, assignedVia: true },
     });
     if (already?.assignedToId) {
+      // Atribuição feita pelo modo leads é protegida de reavaliação
+      // automática (offline / expediente / fila): sem `reassign` explícito,
+      // o dono permanece — independente de elegibilidade.
+      if (already.assignedVia === "leads") {
+        const contactId = input.contactId ?? already.contactId ?? null;
+        await resolvePendingFor(input.dealId, contactId, already.assignedToId);
+        return {
+          success: true,
+          reason: "ASSIGNED",
+          selectedUserId: already.assignedToId,
+          selectedUserName: null,
+          evaluated: [],
+        };
+      }
       const contactId = input.contactId ?? already.contactId ?? null;
       const check = await isAssigneeCurrentlyEligible(
         already.assignedToId,
@@ -930,6 +979,21 @@ export async function executeDistribution(
     }
 
     departmentScoped = deptScope.mode === "department";
+    // Departamento no modo leads: o smart se abstém (não atribui, não
+    // enfileira na fila smart). A distribuição é do bloco mode="leads".
+    if (
+      deptScope.mode === "department" &&
+      deptScope.departmentMode === "leads"
+    ) {
+      await writeLog(input, false, "DEPARTMENT_ROUTED_TO_LEADS", null, []);
+      return {
+        success: false,
+        reason: "DEPARTMENT_ROUTED_TO_LEADS",
+        selectedUserId: null,
+        selectedUserName: null,
+        evaluated: [],
+      };
+    }
     responsibles = await getDistributionResponsibles({
       distributionType: input.distributionType ?? null,
       now: input.now,
@@ -984,66 +1048,160 @@ export async function executeDistribution(
   // Atribui o owner. Quando veio um dealId explícito, usa-o. Quando veio só
   // contactId (ex.: automação manual disparada pela conversa), resolvemos o
   // negócio ABERTO do contato e atribuímos TAMBÉM o deal — senão o lead
-  // aparece "Sem responsável" no pipeline. assignDealOwner já propaga para
+  // aparece "Sem responsável" no pipeline. assignDealOwnerTx já propaga para
   // contato e conversas; sem deal aberto, propagamos direto.
+  //
+  // A atribuição roda em UMA transaction aberta pelo claim CAS da conversa
+  // (quando há): se outro fluxo (modo leads, inbox manual, IA) atribuiu entre
+  // a seleção e o commit, o CAS falha e o resultado é o "já tem responsável"
+  // idempotente — nunca sobrescreve. assignedVia="smart" marca a origem.
   let assignedDealId: string | null = input.dealId ?? null;
-  if (input.dealId) {
-    await assignDealOwner(input.dealId, selected.userId);
-  } else if (input.contactId) {
-    const contactId = input.contactId;
-    const openDeal = await prisma.deal.findFirst({
-      where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    });
-    if (openDeal) {
-      assignedDealId = openDeal.id;
-      await assignDealOwner(openDeal.id, selected.userId);
-    } else {
-      await prisma.$transaction((tx) =>
-        propagateOwnerToContactAndChat(tx, contactId, selected.userId),
-      );
+  const orgId = getOrgIdOrThrow();
+  const postCommit: {
+    pipelineIds: (string | null)[];
+    agentChangedDeals: { dealId: string; contactId: string | null; fromOwnerId: string | null }[];
+  } = { pipelineIds: [], agentChangedDeals: [] };
+
+  const claimed = await prisma.$transaction(async (tx) => {
+    if (input.conversationId) {
+      const ok = await claimConversationAssignmentTx(tx, {
+        conversationId: input.conversationId,
+        userId: selected.userId,
+        via: "smart",
+      });
+      if (!ok) return null;
     }
-  } else if (input.conversationId) {
-    // Fallback: só conversationId — atribui o chat direto (e o deal aberto
-    // do contato, se houver) para não "sucesso" sem dono após reassign.
-    await prisma.conversation.update({
-      where: { id: input.conversationId },
-      data: { assignedToId: selected.userId },
-    });
-    const conv = await prisma.conversation.findUnique({
-      where: { id: input.conversationId },
-      select: { contactId: true },
-    });
-    if (conv?.contactId) {
-      const openDeal = await prisma.deal.findFirst({
-        where: { contactId: conv.contactId, status: "OPEN" },
+
+    const trackDealSideEffects = (r: {
+      id: string;
+      contactId: string | null;
+      fromOwnerId: string | null;
+      stage: { pipelineId: string } | null;
+    }) => {
+      postCommit.pipelineIds.push(r.stage?.pipelineId ?? null);
+      if (r.fromOwnerId !== selected.userId) {
+        postCommit.agentChangedDeals.push({
+          dealId: r.id,
+          contactId: r.contactId,
+          fromOwnerId: r.fromOwnerId,
+        });
+      }
+    };
+
+    if (input.dealId) {
+      trackDealSideEffects(
+        await assignDealOwnerTx(tx, input.dealId, selected.userId, "smart"),
+      );
+    } else if (input.contactId) {
+      const contactId = input.contactId;
+      const openDeal = await tx.deal.findFirst({
+        where: { contactId, status: "OPEN" },
         orderBy: { updatedAt: "desc" },
         select: { id: true },
       });
       if (openDeal) {
         assignedDealId = openDeal.id;
-        await assignDealOwner(openDeal.id, selected.userId);
-      } else {
-        await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, conv.contactId!, selected.userId),
+        trackDealSideEffects(
+          await assignDealOwnerTx(tx, openDeal.id, selected.userId, "smart"),
         );
+      } else {
+        await propagateOwnerToContactAndChat(tx, contactId, selected.userId, {
+          via: "smart",
+        });
+      }
+    } else if (input.conversationId) {
+      // Fallback: só conversationId — o CAS já atribuiu o chat; falta o deal
+      // aberto do contato (se houver) para não "sucesso" sem dono no funil.
+      const conv = await tx.conversation.findUnique({
+        where: { id: input.conversationId },
+        select: { contactId: true },
+      });
+      if (conv?.contactId) {
+        const openDeal = await tx.deal.findFirst({
+          where: { contactId: conv.contactId, status: "OPEN" },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+        if (openDeal) {
+          assignedDealId = openDeal.id;
+          trackDealSideEffects(
+            await assignDealOwnerTx(tx, openDeal.id, selected.userId, "smart"),
+          );
+        } else {
+          await propagateOwnerToContactAndChat(
+            tx,
+            conv.contactId,
+            selected.userId,
+            { via: "smart" },
+          );
+        }
       }
     }
+
+    await tx.distributionResponsible.upsert({
+      where: {
+        organizationId_userId: { organizationId: orgId, userId: selected.userId },
+      },
+      update: { lastExecutionAt: new Date() },
+      create: {
+        organizationId: orgId,
+        userId: selected.userId,
+        lastExecutionAt: new Date(),
+      },
+    });
+    return true;
+  });
+
+  if (claimed === null) {
+    // Corrida perdida: a conversa ganhou dono entre a seleção e o commit.
+    // Idempotente — equivale ao atalho "já tem responsável".
+    const winner = await prisma.conversation.findUnique({
+      where: { id: input.conversationId! },
+      select: { assignedToId: true, contactId: true },
+    });
+    if (winner?.assignedToId) {
+      await resolvePendingFor(
+        input.dealId,
+        input.contactId ?? winner.contactId,
+        winner.assignedToId,
+      );
+      await writeLog(input, true, "ASSIGNED", winner.assignedToId, evaluated);
+      return {
+        success: true,
+        reason: "ASSIGNED",
+        selectedUserId: winner.assignedToId,
+        selectedUserName: null,
+        evaluated,
+      };
+    }
+    // CAS falhou sem dono (conversa apagada no meio) — não perde o lead.
+    await writeLog(input, false, "NO_ELIGIBLE_RESPONSIBLE", null, evaluated);
+    await enqueuePending(input);
+    return {
+      success: false,
+      reason: "NO_ELIGIBLE_RESPONSIBLE",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated,
+    };
   }
 
-  const orgId = getOrgIdOrThrow();
-  await prisma.distributionResponsible.upsert({
-    where: {
-      organizationId_userId: { organizationId: orgId, userId: selected.userId },
-    },
-    update: { lastExecutionAt: new Date() },
-    create: {
-      organizationId: orgId,
-      userId: selected.userId,
-      lastExecutionAt: new Date(),
-    },
-  });
+  // Efeitos que o wrapper `assignDealOwner` disparava inline — agora
+  // pós-commit (a tx já incluiu o claim). Falha aqui nunca refaz a atribuição.
+  if (postCommit.pipelineIds.length > 0) {
+    await invalidateBoardsForPipelines(postCommit.pipelineIds);
+  }
+  for (const ac of postCommit.agentChangedDeals) {
+    void import("@/services/automation-triggers")
+      .then(({ fireTrigger }) =>
+        fireTrigger("agent_changed", {
+          dealId: ac.dealId,
+          contactId: ac.contactId ?? undefined,
+          data: { fromOwnerId: ac.fromOwnerId, toOwnerId: selected.userId },
+        }),
+      )
+      .catch(() => {});
+  }
 
   await resolvePendingFor(input.dealId, input.contactId, selected.userId);
   await writeLog(input, true, "ASSIGNED", selected.userId, evaluated);
