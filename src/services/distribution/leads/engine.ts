@@ -39,7 +39,7 @@ import {
   claimConversationAssignmentTx,
   claimDealAssignmentTx,
 } from "../claim";
-import { isDistributionEnabled } from "../enabled";
+import { isLeadsDistributionEnabled } from "./enabled";
 
 export type LeadsDistributionReason =
   | "ASSIGNED"
@@ -328,7 +328,7 @@ export async function executeLeadsDistribution(
       selectedUserName: null,
     });
   }
-  if (!(await isDistributionEnabled())) {
+  if (!(await isLeadsDistributionEnabled())) {
     return finish({
       success: false,
       reason: "DISTRIBUTION_DISABLED",

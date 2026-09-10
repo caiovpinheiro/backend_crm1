@@ -26,8 +26,8 @@ const invalidateBoardsForPipelines = vi.fn(async () => {});
 vi.mock("@/services/organization-widgets", () => ({
   hasOrganizationWidget: (...a: unknown[]) => hasOrganizationWidget(...a),
 }));
-vi.mock("@/services/distribution/enabled", () => ({
-  isDistributionEnabled: () => isDistributionEnabled(),
+vi.mock("@/services/distribution/leads/enabled", () => ({
+  isLeadsDistributionEnabled: () => isDistributionEnabled(),
 }));
 vi.mock("@/lib/channel-session", () => ({
   getConversationSession: (...a: unknown[]) => getConversationSession(...a),
@@ -549,5 +549,23 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     expect(r.success).toBe(false);
     expect(r.reason).toBe("SMART_DISTRIBUTION_NOT_ENABLED");
     expect(conversations.get("c1")?.routeMode).toBeNull();
+  });
+
+  it("kill switch próprio (distribution.leads.enabled=false) → DISTRIBUTION_DISABLED, sem tocar no alvo nem no smart", async () => {
+    addParticipant("A", 3);
+    addConversation("c1", "ct1", null);
+    isDistributionEnabled.mockResolvedValue(false);
+
+    const r = await executeLeadsDistribution({
+      conversationId: "c1",
+      contactId: "ct1",
+      triggerSource: "AUTOMATION",
+    });
+
+    expect(r.success).toBe(false);
+    expect(r.reason).toBe("DISTRIBUTION_DISABLED");
+    expect(conversations.get("c1")?.assignedToId).toBeNull();
+    expect(conversations.get("c1")?.routeMode).toBeNull();
+    expect(assignments).toHaveLength(0);
   });
 });
