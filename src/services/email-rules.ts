@@ -1,7 +1,7 @@
 import type { Email, EmailRule } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrg } from "@/lib/prisma-helpers";
 
 export type EmailRuleDto = {
   id: string;
@@ -48,18 +48,22 @@ export async function createEmailRule(input: {
   action: EmailRuleDto["action"];
   targetFolderId?: string | null;
   priority?: number;
+  organizationId: string;
 }): Promise<EmailRuleDto> {
   const created = await prisma.emailRule.create({
-    data: withOrgFromCtx({
-      accountId: input.accountId,
-      name: input.name.trim(),
-      isActive: input.isActive !== false,
-      conditionField: input.conditionField,
-      conditionValue: input.conditionValue.trim(),
-      action: input.action,
-      targetFolderId: input.action === "MOVE" ? input.targetFolderId ?? null : null,
-      priority: input.priority ?? 0,
-    }),
+    data: withOrg(
+      {
+        accountId: input.accountId,
+        name: input.name.trim(),
+        isActive: input.isActive !== false,
+        conditionField: input.conditionField,
+        conditionValue: input.conditionValue.trim(),
+        action: input.action,
+        targetFolderId: input.action === "MOVE" ? input.targetFolderId ?? null : null,
+        priority: input.priority ?? 0,
+      },
+      input.organizationId,
+    ),
   });
   return serializeRule(created);
 }

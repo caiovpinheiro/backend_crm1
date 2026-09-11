@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrg } from "@/lib/prisma-helpers";
 
 export type EmailCustomFolderDto = {
   id: string;
@@ -41,13 +41,17 @@ export async function createEmailCustomFolder(input: {
   accountId: string;
   name: string;
   color?: string | null;
+  organizationId: string;
 }): Promise<EmailCustomFolderDto> {
   const created = await prisma.emailCustomFolder.create({
-    data: withOrgFromCtx({
-      accountId: input.accountId,
-      name: input.name.trim(),
-      color: input.color ?? null,
-    }),
+    data: withOrg(
+      {
+        accountId: input.accountId,
+        name: input.name.trim(),
+        color: input.color ?? null,
+      },
+      input.organizationId,
+    ),
   });
   return {
     id: created.id,
