@@ -4,8 +4,8 @@ import { can, loadAuthzContext } from "@/lib/authz";
 import { encryptSecret, decryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { withOrg } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow, getRequestContext, runWithContext } from "@/lib/request-context";
 import { testImapConnection, type EmailFieldError } from "@/services/email-imap";
 import { testSmtpConnection } from "@/services/email-smtp";
 
@@ -227,6 +227,7 @@ export async function listEmailAccounts(opts: {
 export async function connectEmailAccount(
   input: ConnectEmailInput,
   actorUserId: string,
+  organizationId: string,
 ): Promise<{ ok: true; account: SerializedEmailAccount } | EmailFieldError> {
   const tested = await testEmailAccountConnection(input);
   if (!tested.ok) {
@@ -234,40 +235,57 @@ export async function connectEmailAccount(
     return tested;
   }
 
-  const existing = await prisma.emailAccount.findFirst({
-    where: { email: input.email },
-  });
-  if (existing) {
-    return { ok: false, field: "email", message: "Esta conta já está conectada nesta organização." };
-  }
-
-  const created = await prisma.emailAccount.create({
-    data: withOrgFromCtx({
-      email: input.email,
-      passwordEncrypted: encryptSecret(input.password),
-      imapHost: input.imapHost,
-      imapPort: input.imapPort,
-      imapEncryption: input.imapEncryption,
-      smtpHost: input.smtpHost,
-      smtpPort: input.smtpPort,
-      smtpEncryption: input.smtpEncryption,
-      visibility: input.visibility,
-      groupInThreads: input.groupInThreads,
-      createContactsForReplies: input.createContactsForReplies,
-      ownerUserId: input.visibility === "PERSONAL" ? actorUserId : null,
-    }),
-  });
-
-  log.info({ accountId: created.id, email: created.email }, "conta de e-mail conectada");
-
-  return {
-    ok: true,
-    account: {
-      ...serializeBase(created),
-      unreadCount: 0,
-      folderUnread: { inbox: 0, sent: 0, trash: 0 },
+  // IMAP/SMTP (imapflow/nodemailer) usam callbacks que derrubam o ALS.
+  // Recoloca o tenant e grava organizationId no payload — withOrgFromCtx
+  // depois do teste voltava a falhar no redeploy.
+  const current = getRequestContext();
+  return runWithContext(
+    {
+      organizationId,
+      userId: current?.userId ?? actorUserId,
+      isSuperAdmin: current?.isSuperAdmin ?? false,
+      actor: current?.actor ?? { type: "HUMAN", label: actorUserId },
     },
-  };
+    async () => {
+      const existing = await prisma.emailAccount.findFirst({
+        where: { email: input.email },
+      });
+      if (existing) {
+        return { ok: false, field: "email", message: "Esta conta já está conectada nesta organização." };
+      }
+
+      const created = await prisma.emailAccount.create({
+        data: withOrg(
+          {
+            email: input.email,
+            passwordEncrypted: encryptSecret(input.password),
+            imapHost: input.imapHost,
+            imapPort: input.imapPort,
+            imapEncryption: input.imapEncryption,
+            smtpHost: input.smtpHost,
+            smtpPort: input.smtpPort,
+            smtpEncryption: input.smtpEncryption,
+            visibility: input.visibility,
+            groupInThreads: input.groupInThreads,
+            createContactsForReplies: input.createContactsForReplies,
+            ownerUserId: input.visibility === "PERSONAL" ? actorUserId : null,
+          },
+          organizationId,
+        ),
+      });
+
+      log.info({ accountId: created.id, email: created.email }, "conta de e-mail conectada");
+
+      return {
+        ok: true,
+        account: {
+          ...serializeBase(created),
+          unreadCount: 0,
+          folderUnread: { inbox: 0, sent: 0, trash: 0 },
+        },
+      };
+    },
+  );
 }
 
 export async function listAccessibleAccountIds(opts: {
