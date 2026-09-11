@@ -152,6 +152,9 @@ export async function PUT(request: Request, context: RouteContext) {
   });
 }
 
+/** Alias REST: o editor v2 renomeia via PATCH; o handler PUT já aceita update parcial. */
+export const PATCH = PUT;
+
 export async function DELETE(_request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     const denied = await requirePermission(session.user, "automation:delete");
