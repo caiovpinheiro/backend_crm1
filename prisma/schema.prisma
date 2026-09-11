@@ -4033,6 +4033,8 @@ model DistributionLeadsParticipant {
   /// Peso 0..5: quantos dos 5 slots do participante entram no rodízio.
   /// 0 = não recebe (CHECK na migration).
   weight         Int          @default(0)
+  /// Observação administrativa (só UI; não entra no rodízio).
+  note           String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

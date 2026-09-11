@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
 export const LEADS_SLOT_COUNT = 5;
+export const LEADS_NOTE_MAX = 500;
 
 export interface LeadsParticipantView {
   userId: string;
@@ -22,6 +23,7 @@ export interface LeadsParticipantView {
   avatarUrl: string | null;
   status: string;
   weight: number;
+  note: string;
   slots: { slotIndex: number; active: boolean; lastAssignedAt: string | null }[];
   /** Total histórico recebido (assignments). */
   totalReceived: number;
@@ -59,6 +61,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         userId: true,
         status: true,
         weight: true,
+        note: true,
         createdAt: true,
         updatedAt: true,
         slots: {
@@ -85,6 +88,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         avatarUrl: u.avatarUrl,
         status: "INACTIVE",
         weight: 0,
+        note: "",
         slots: emptySlots(),
         totalReceived: receivedByUser.get(u.id) ?? 0,
         createdAt: "",
@@ -98,6 +102,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
       avatarUrl: u.avatarUrl,
       status: p.status,
       weight: p.weight,
+      note: p.note ?? "",
       slots: p.slots.map((s) => ({
         slotIndex: s.slotIndex,
         active: p.status === "ACTIVE" && s.slotIndex < p.weight,
@@ -119,6 +124,7 @@ export async function upsertLeadsParticipant(args: {
   userId: string;
   status?: "ACTIVE" | "INACTIVE";
   weight?: number;
+  note?: string | null;
 }): Promise<LeadsParticipantView | null> {
   const orgId = getOrgIdOrThrow();
 
@@ -136,6 +142,11 @@ export async function upsertLeadsParticipant(args: {
   });
   if (!user) return null;
 
+  const note =
+    args.note === undefined
+      ? undefined
+      : (args.note ?? "").trim().slice(0, LEADS_NOTE_MAX) || null;
+
   await prisma.$transaction(async (tx) => {
     const existing = await tx.distributionLeadsParticipant.findUnique({
       where: { organizationId_userId: { organizationId: orgId, userId: args.userId } },
@@ -148,10 +159,12 @@ export async function upsertLeadsParticipant(args: {
         userId: args.userId,
         status: args.status ?? "ACTIVE",
         weight: args.weight ?? 0,
+        ...(note !== undefined ? { note } : {}),
       },
       update: {
         ...(args.status !== undefined ? { status: args.status } : {}),
         ...(args.weight !== undefined ? { weight: args.weight } : {}),
+        ...(note !== undefined ? { note } : {}),
       },
       select: { id: true },
     });

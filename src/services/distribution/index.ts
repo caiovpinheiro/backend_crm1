@@ -90,6 +90,7 @@ export {
   getLeadsStats,
   getLeadsHistory,
   LEADS_SLOT_COUNT,
+  LEADS_NOTE_MAX,
   type LeadsParticipantView,
   type LeadsStatsResult,
   type LeadsHistoryItem,

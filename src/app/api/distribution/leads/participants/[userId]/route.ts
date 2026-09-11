@@ -1,7 +1,8 @@
 /**
  * PUT /api/distribution/leads/participants/[userId]
  * Upsert da configuração do participante no modo leads: `status`
- * (ACTIVE|INACTIVE) e/ou `weight` (0–5). Na primeira configuração cria os 5
+ * (ACTIVE|INACTIVE), `weight` (0–5) e/ou `note` (observação, até 500
+ * caracteres; string vazia limpa). Na primeira configuração cria os 5
  * slots persistentes. Status/peso controlam SOMENTE recebimentos futuros —
  * leads já atribuídos permanecem com o responsável.
  *
@@ -25,6 +26,7 @@ const bodySchema = z
   .object({
     status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
     weight: z.number().int().min(0).max(5).optional(),
+    note: z.string().max(500).nullable().optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {
     message: "Nenhum campo para atualizar.",
@@ -80,6 +82,7 @@ export async function PUT(request: Request, context: RouteContext) {
         userId,
         status: parsed.data.status,
         weight: parsed.data.weight,
+        note: parsed.data.note,
       });
       if (!participant) {
         return NextResponse.json(
