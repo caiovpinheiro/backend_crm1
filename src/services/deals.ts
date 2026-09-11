@@ -576,18 +576,12 @@ export type CreateDealInput = {
 };
 
 /**
- * Calcula o proximo `Deal.number` da org corrente. O schema declara
- * `@@unique([organizationId, number])` e o campo nao tem default — antes
- * era autoincrement global, mas multi-tenancy partiu por org e Postgres
- * sequences nao suportam particionamento. A extension Prisma escopa o
- * aggregate por org via getOrgIdOrThrow(), entao isso ja vem isolado.
- *
- * Em caso de corrida (dois creates simultaneos resolvendo o mesmo
- * `max+1`), o caller deve fazer retry em P2002 — ver `createDeal` abaixo.
+ * Próximo `Deal.number` da org corrente. Delega no contador atômico —
+ * `aggregate(_max)` pela extension vira `MAX` com OFFSET e lia dezenas
+ * de milhares de linhas (~344ms) além de colidir sob concorrência.
  */
 export async function nextDealNumber(): Promise<number> {
-  const r = await prisma.deal.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
+  return allocateOrgNumber("Deal", getOrgIdOrThrow());
 }
 
 export async function createDeal(data: CreateDealInput) {

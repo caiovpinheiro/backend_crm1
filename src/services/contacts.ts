@@ -3,7 +3,7 @@ import type { LifecycleStage, Prisma } from "@prisma/client";
 import { defaultDealTitleForContact, sanitizeContactName } from "@/lib/display-name";
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
-import { prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
@@ -1061,37 +1061,28 @@ export async function getContactById(
 }
 
 /**
- * Aloca o próximo `Contact.number` da org sob advisory lock **na mesma
- * transaction** do INSERT. `MAX+1` sem lock colidia sob webhook/import
- * concorrente (P2002 em `contacts_organization_id_number_key` — DNAWork
- * ago/26). O lock é `xact` → liberado no commit/rollback da tx.
+ * Aloca o próximo `Contact.number` da org. Usa o contador atômico
+ * (`allocateOrgNumber`) — o MAX+advisory lock antigo varria a tabela
+ * em todo inbound e competia com a extension de scope.
  */
 export async function allocateNextContactNumber(
-  tx: {
+  _tx: {
     $executeRaw: typeof prisma.$executeRaw;
     $queryRaw: typeof prisma.$queryRaw;
   },
   orgId: string,
 ): Promise<number> {
-  await tx.$executeRaw`
-    SELECT pg_advisory_xact_lock(hashtextextended(${orgId + ":contact_number"}, 0))
-  `;
-  const rows = await tx.$queryRaw<Array<{ next: bigint | number | string }>>`
-    SELECT COALESCE(MAX(number), 0) + 1 AS next
-    FROM contacts
-    WHERE "organizationId" = ${orgId}
-  `;
-  return Number(rows[0]?.next ?? 1);
+  // Contador atômico (1 statement). O MAX+advisory lock antigo lia a tabela
+  // inteira da org em todo inbound e ainda competia com a extension.
+  return allocateOrgNumber("Contact", orgId);
 }
 
 /**
- * Compat: retorna o próximo número (com lock numa tx curta). Preferir
- * `insertContactWithNextNumber` / `createContact` para allocate+INSERT
- * na mesma transaction — senão ainda há janela entre return e create.
+ * Compat: próximo número da org. Preferir `insertContactWithNextNumber` /
+ * `createContact` — a extensão também aloca se `number` vier omitido.
  */
 export async function nextContactNumber(): Promise<number> {
-  const orgId = getOrgIdOrThrow();
-  return prisma.$transaction(async (tx) => allocateNextContactNumber(tx, orgId));
+  return allocateOrgNumber("Contact", getOrgIdOrThrow());
 }
 
 const CONTACT_NUMBER_MAX_RETRIES = 8;
