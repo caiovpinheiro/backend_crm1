@@ -20,25 +20,31 @@ export function shouldSkipCapacityReleasedCooldown(
   return trigger === "capacity_released" && now < cooldownUntil;
 }
 
-/** Agente ficou elegível, fila cresceu ou manual — não cron nem outbound. */
+/** Agente ficou elegível, fila cresceu, expediente abriu ou manual. */
 export function triggerClearsFruitlessCooldown(trigger: string): boolean {
   return (
     trigger === "agent_online" ||
     trigger === "agent_eligible" ||
     trigger === "new_item" ||
-    trigger === "manual"
+    trigger === "manual" ||
+    trigger === "hours_open"
   );
 }
 
 /**
- * Cron (`scheduled`) não fura passagem vazia. Fica no-op até um gatilho
- * real (`agent_online` / `agent_eligible` / `new_item` / `manual`).
+ * Cron legado (`scheduled`) nunca drena. A espera acorda por evento ou
+ * `hours_open` (job atrasado no próximo expediente).
  */
+export function shouldSkipLegacyScheduledDrain(trigger: string): boolean {
+  return trigger === "scheduled";
+}
+
+/** Cron legado: sempre skip. `fruitlessArmed` ignorado (assinatura estável). */
 export function shouldSkipScheduledFruitlessCooldown(
   trigger: string,
-  fruitlessArmed: boolean,
+  _fruitlessArmed: boolean,
 ): boolean {
-  return trigger === "scheduled" && fruitlessArmed;
+  return shouldSkipLegacyScheduledDrain(trigger);
 }
 
 /**
@@ -70,7 +76,8 @@ export function fruitlessCooldownIsArmed(
 /**
  * Passagem vazia não agenda `setTimeout` para o fim da janela.
  * O `retryInMs` do log é só o restante do cooldown — a próxima varredura
- * vem de `agent_online` / `agent_eligible` / `new_item` / `manual`.
+ * vem de `agent_online` / `agent_eligible` / `new_item` / `manual` /
+ * `hours_open`.
  */
 export function shouldScheduleRetryOnCooldownSkip(): boolean {
   return false;

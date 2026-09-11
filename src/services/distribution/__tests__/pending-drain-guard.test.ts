@@ -9,6 +9,7 @@ import {
   shouldSkipCapacityReleasedCooldown,
   shouldSkipCapacityReleasedFruitlessCooldown,
   shouldSkipScheduledFruitlessCooldown,
+  shouldSkipLegacyScheduledDrain,
   triggerClearsFruitlessCooldown,
 } from "../pending-drain-guard";
 
@@ -40,22 +41,23 @@ describe("pending drain guard", () => {
     );
   });
 
-  it("lets real eligibility / queue growth / manual clear the cooldown — not cron", () => {
+  it("lets real eligibility / queue growth / manual / hours_open clear the cooldown — not cron", () => {
     expect(triggerClearsFruitlessCooldown("agent_online")).toBe(true);
     expect(triggerClearsFruitlessCooldown("agent_eligible")).toBe(true);
     expect(triggerClearsFruitlessCooldown("new_item")).toBe(true);
     expect(triggerClearsFruitlessCooldown("manual")).toBe(true);
+    expect(triggerClearsFruitlessCooldown("hours_open")).toBe(true);
     expect(triggerClearsFruitlessCooldown("scheduled")).toBe(false);
     expect(triggerClearsFruitlessCooldown("capacity_released")).toBe(false);
   });
 
-  it("keeps cron a no-op while the last pass was fruitless", () => {
+  it("treats the legacy cron trigger as a permanent no-op", () => {
     expect(fruitlessCooldownIsArmed(null)).toBe(false);
     expect(fruitlessCooldownIsArmed("NO_ELIGIBLE_RESPONSIBLE")).toBe(true);
+    expect(shouldSkipLegacyScheduledDrain("scheduled")).toBe(true);
+    expect(shouldSkipLegacyScheduledDrain("hours_open")).toBe(false);
     expect(shouldSkipScheduledFruitlessCooldown("scheduled", true)).toBe(true);
-    expect(shouldSkipScheduledFruitlessCooldown("scheduled", false)).toBe(
-      false,
-    );
+    expect(shouldSkipScheduledFruitlessCooldown("scheduled", false)).toBe(true);
     expect(shouldSkipScheduledFruitlessCooldown("manual", true)).toBe(false);
     expect(shouldSkipScheduledFruitlessCooldown("new_item", true)).toBe(false);
   });

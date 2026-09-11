@@ -19,6 +19,12 @@ describe("distribution drain queue", () => {
     expect(id).not.toMatch(/:/);
   });
 
+  it("scopes hours_open jobIds per org", () => {
+    expect(distributionDrainJobId("clorg123", "hours_open")).toBe(
+      "dd-clorg123-hours_open",
+    );
+  });
+
   it("scopes the fruitless Redis flag per org", () => {
     expect(fruitlessCooldownRedisKey("org_a")).toBe("dist:fruitless:org_a");
   });

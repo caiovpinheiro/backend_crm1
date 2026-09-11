@@ -22,11 +22,17 @@ import { executeDistribution } from "./engine";
 import { isDistributionEnabled } from "./enabled";
 import { evaluateCapacityReleasedDrain } from "./capacity-released-gate";
 import {
+  cancelHoursOpenDrainForOrg,
+  consultantsForHoursOpen,
+  syncHoursOpenDrain,
+} from "./hours-open-drain";
+import {
   fruitlessCooldownIsArmed,
   fruitlessPassNeedsCooldown,
   shouldScheduleRetryOnCooldownSkip,
   shouldSkipCapacityReleasedCooldown,
   shouldSkipCapacityReleasedFruitlessCooldown,
+  shouldSkipLegacyScheduledDrain,
   shouldSkipScheduledFruitlessCooldown,
   triggerClearsFruitlessCooldown,
 } from "./pending-drain-guard";
@@ -59,6 +65,17 @@ export async function processPendingDistributionQueue(opts: {
   }
 
   const state = getDrainState(orgId);
+  if (shouldSkipLegacyScheduledDrain(opts.trigger)) {
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending: 0,
+      trigger: opts.trigger,
+      skipReason: "EVENT_DRIVEN",
+      skipMessage:
+        "Cron legado desligado — a fila drena por evento ou no próximo expediente.",
+    };
+  }
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
     clearFruitlessCooldown(state, orgId);
   } else if (
@@ -168,6 +185,7 @@ export async function processPendingDistributionQueue(opts: {
       }),
     );
     if (!widgetActive || !(await isDistributionEnabled())) {
+      void cancelHoursOpenDrainForOrg();
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
@@ -213,6 +231,10 @@ export async function processPendingDistributionQueue(opts: {
         }),
       );
       armFruitlessCooldown(state, "NO_ELIGIBLE_RESPONSIBLE", orgId);
+      void syncHoursOpenDrain({
+        pending,
+        consultants: consultantsForHoursOpen(views),
+      });
       return {
         resolved: 0,
         cancelled: cancelledOrphans,
@@ -241,6 +263,10 @@ export async function processPendingDistributionQueue(opts: {
             pending,
           }),
         );
+        void syncHoursOpenDrain({
+          pending,
+          consultants: consultantsForHoursOpen(views),
+        });
         return {
           resolved: 0,
           cancelled: cancelledOrphans,
@@ -444,11 +470,16 @@ export async function processPendingDistributionQueue(opts: {
       clearFruitlessCooldown(state, orgId);
     }
 
+    void syncHoursOpenDrain({
+      pending,
+      consultants: consultantsForHoursOpen(views),
+    });
+
     if (
       resolved > 0 ||
       cancelledOrphans > 0 ||
       opts.trigger === "manual" ||
-      opts.trigger === "scheduled"
+      opts.trigger === "hours_open"
     ) {
       debugInfo(
         "[distribution] processPendingDistributionQueue",
@@ -492,7 +523,8 @@ export async function processPendingDistributionQueue(opts: {
       (queued === "agent_online" ||
         queued === "agent_eligible" ||
         queued === "capacity_released" ||
-        queued === "manual")
+        queued === "manual" ||
+        queued === "hours_open")
     ) {
       scheduleProcessPendingDistributionQueue({
         trigger: queued,
@@ -517,6 +549,17 @@ export async function enqueueProcessPendingOrRun(opts: {
   }
 
   const state = getDrainState(orgId);
+  if (shouldSkipLegacyScheduledDrain(opts.trigger)) {
+    return {
+      resolved: 0,
+      cancelled: 0,
+      pending: 0,
+      trigger: opts.trigger,
+      skipReason: "EVENT_DRIVEN",
+      skipMessage:
+        "Cron legado desligado — a fila drena por evento ou no próximo expediente.",
+    };
+  }
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
     clearFruitlessCooldown(state, orgId);
   } else if (shouldSkipCapacityReleasedCooldown(opts.trigger, state.cooldownUntil)) {
@@ -526,22 +569,6 @@ export async function enqueueProcessPendingOrRun(opts: {
       opts.userId,
     );
     if (!bypassed) {
-      logCooldownSkip(orgId, state, opts.trigger, "schedule");
-      return {
-        resolved: 0,
-        cancelled: 0,
-        pending: 0,
-        trigger: opts.trigger,
-        skipReason: "COOLDOWN",
-        skipMessage:
-          "Reprocesso adiado — última passagem não encontrou consultor com vaga.",
-      };
-    }
-  } else if (opts.trigger === "scheduled") {
-    const fruitless =
-      fruitlessCooldownIsArmed(state.cooldownReason) ||
-      (await peekPublishedFruitlessCooldown(orgId)).armed;
-    if (shouldSkipScheduledFruitlessCooldown(opts.trigger, fruitless)) {
       logCooldownSkip(orgId, state, opts.trigger, "schedule");
       return {
         resolved: 0,

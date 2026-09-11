@@ -13,6 +13,8 @@ const peekFruitless = vi.fn();
 
 vi.mock("@/lib/distribution-drain-queue", () => ({
   enqueueDistributionDrain: (...a: unknown[]) => enqueueDistributionDrain(...a),
+  enqueueHoursOpenDrain: vi.fn(async () => "added"),
+  cancelHoursOpenDrain: vi.fn(async () => {}),
   isFreshDrainEnqueue: (r: string | null) => r === "added",
   allowInlineDistributionFallback: () => false,
 }));
@@ -302,5 +304,48 @@ describe("capacity_released producer vs worker", () => {
     expect(slotted.skipReason).not.toBe("COOLDOWN");
     expect(slotted.skipReason).not.toBe("AT_CAPACITY");
     expect(hasOrganizationWidget).toHaveBeenCalled();
+  });
+
+  it("does not enqueue the legacy scheduled cron trigger", async () => {
+    getOrgIdOrNull.mockReturnValue("org-scheduled-dead");
+    enqueueDistributionDrain.mockResolvedValue("added");
+
+    const { enqueueProcessPendingOrRun } = await import("../pending");
+    const result = await enqueueProcessPendingOrRun({ trigger: "scheduled" });
+
+    expect(enqueueDistributionDrain).not.toHaveBeenCalled();
+    expect(result.skipReason).toBe("EVENT_DRIVEN");
+  });
+
+  it("worker no-ops leftover scheduled jobs without scanning the waiting queue", async () => {
+    getOrgIdOrNull.mockReturnValue("org-scheduled-process");
+
+    const { processPendingDistributionQueue } = await import("../pending");
+    const result = await processPendingDistributionQueue({
+      trigger: "scheduled",
+    });
+
+    expect(result.skipReason).toBe("EVENT_DRIVEN");
+    expect(hasOrganizationWidget).not.toHaveBeenCalled();
+    expect(getDistributionResponsibles).not.toHaveBeenCalled();
+    expect(conversationCount).not.toHaveBeenCalled();
+  });
+
+  it("enqueues hours_open even when the fruitless flag is armed", async () => {
+    getOrgIdOrNull.mockReturnValue("org-hours-open");
+    enqueueDistributionDrain.mockResolvedValue("added");
+    peekFruitless.mockResolvedValue({ armed: true, ttlMs: 18_000 });
+
+    const { enqueueProcessPendingOrRun } = await import("../pending");
+    const result = await enqueueProcessPendingOrRun({
+      trigger: "hours_open",
+    });
+
+    expect(enqueueDistributionDrain).toHaveBeenCalledWith({
+      organizationId: "org-hours-open",
+      trigger: "hours_open",
+      userId: null,
+    });
+    expect(result.skipReason).toBe("QUEUED");
   });
 });

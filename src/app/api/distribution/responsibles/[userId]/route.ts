@@ -15,7 +15,7 @@ import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
-import { scheduleProcessPendingDistributionQueue } from "@/services/distribution";
+import { scheduleProcessPendingDistributionQueue, syncHoursOpenDrainFromDb } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -331,6 +331,7 @@ export async function PATCH(request: Request, context: RouteContext) {
           userId,
         });
       }
+      void syncHoursOpenDrainFromDb();
 
       return NextResponse.json({
         responsible: responsible

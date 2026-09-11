@@ -42,6 +42,7 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 - Criar fila de espera para o modo `leads` (ele é síncrono; NO_ELIGIBLE_PARTICIPANT vai p/ saída "Não" do bloco).
 - Reavaliar dono com `assignedVia="leads"` por offline/expediente no motor smart (atribuição leads é protegida lá). O motor leads redistribui quando o bloco `execute_distribution` mode=leads roda, mesmo com dono humano.
 - Bloco `execute_distribution` sem `mode` = smart. Nunca converter bloco antigo para leads.
+- Não reativar varredura periódica da espera Inteligente (`/api/cron/distribution-pending`). Drain é evento + `hours_open`.
 
 ## Handler
 
@@ -112,6 +113,7 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 
 ## Decisões técnicas
 
+- 2026-09-11 — Cursor Grok 4.6 — **Espera da Inteligente não é mais varrida por cron**: `GET /api/cron/distribution-pending` autentica e devolve `{skipped:true,reason:event_driven}`. A fila drena por evento (`agent_online` / `agent_eligible` / `capacity_released` / `new_item` / `manual`) e por um job BullMQ atrasado `hours_open` no próximo `AgentSchedule` (início, volta do almoço, sábado). Sem horário da operação da org — o expediente continua por consultor.
 - 2026-09-11 — Cursor Grok 4.6 — **Distribuição atribui o cluster inteiro**: smart e leads usam `assignOwnerToContactClusterTx` — deals OPEN (+ deal explícito), contato e todas as conversas vão para o mesmo usuário (inbox + pipeline).
 - 2026-09-11 — Cursor Grok 4.6 — **Modo leads redistribui mesmo com dono**: `executeLeadsDistribution` não devolve mais `DONO_PRESERVADO` só porque o deal/conversa já tem humano. O bloco `execute_distribution` mode=leads sobrescreve o dono (claim `overwrite`). `DONO_PRESERVADO` fica só se a linha sumiu na corrida. Motor smart continua sem reavaliar `assignedVia="leads"` por offline/expediente.
 - 2026-09-10 — Cursor Opus 5 — **Departamento de destino dos leads sem departamento**: org setting `distribution.fallbackDepartmentId` (string). Lido em `resolveDepartmentScope` (`engine.ts`) quando `respectDepartment` está ligado e a conversa não tem departamento — antes disso ia direto para org-wide. Fronteira estrita: os caminhos de inbound/drenagem passam `allowOrgWideFallback: false`, então sem ninguém elegível no departamento o lead **espera na fila**. Departamento apagado ou com `distributionEnabled` falso → volta ao org-wide (não congela a fila). UI: seletor aninhado no card "Respeitar departamento da conversa".

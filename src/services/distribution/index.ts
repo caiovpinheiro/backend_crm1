@@ -54,6 +54,7 @@ export {
   enqueueProcessPendingOrRun,
   scheduleProcessPendingDistributionQueue,
   maybeDistributeNewInboundTicket,
+  syncHoursOpenDrainFromDb,
   type PendingDistributionView,
   type PendingDistributionsPage,
   type RetryResult,

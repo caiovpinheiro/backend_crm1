@@ -5,8 +5,8 @@
  * responsável (conversa aberta, sem `assignedToId`). Deriva do mesmo
  * critério da aba Entrada do inbox. A drenagem automática passa por
  * `processPendingDistributionQueue` (gatilhos: novo item, agente online,
- * elegibilidade, capacidade liberada, botão manual; cron só se a última
- * passagem não foi vazia).
+ * elegibilidade, capacidade liberada, botão manual, próximo expediente;
+ * cron legado não varre).
  */
 export {
   ABERTA_SEM_RESPONSAVEL,
@@ -30,3 +30,4 @@ export {
   retryPendingDistributions,
   scheduleProcessPendingDistributionQueue,
 } from "./pending-drain";
+export { syncHoursOpenDrainFromDb } from "./hours-open-drain";
