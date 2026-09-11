@@ -76,11 +76,23 @@ export async function resolveDealSearchCandidates(
   const orgId = ctx?.organizationId;
   if (!orgId) return { contactIds: [], dealIds: [] };
   const pattern = `%${search}%`;
-  const [byFields, byCcfv, byDcfv] = await Promise.all([
+  // Uma coluna por query: OR name/email/phone na mesma cláusula faz o
+  // planner desistir do GIN trgm e varrer contacts (mesmo padrão do
+  // diretório — `resolveContactSearchCandidates`).
+  const [byName, byEmail, byPhone, byCcfv, byDcfv] = await Promise.all([
     prisma.$queryRaw<{ id: string }[]>`
       SELECT id FROM contacts
-      WHERE "organizationId" = ${orgId}
-        AND (name ILIKE ${pattern} OR email ILIKE ${pattern} OR phone ILIKE ${pattern})
+      WHERE "organizationId" = ${orgId} AND name ILIKE ${pattern}
+      LIMIT ${SEARCH_CANDIDATE_CAP}
+    `,
+    prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM contacts
+      WHERE "organizationId" = ${orgId} AND email ILIKE ${pattern}
+      LIMIT ${SEARCH_CANDIDATE_CAP}
+    `,
+    prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM contacts
+      WHERE "organizationId" = ${orgId} AND phone ILIKE ${pattern}
       LIMIT ${SEARCH_CANDIDATE_CAP}
     `,
     prisma.$queryRaw<{ contactId: string }[]>`
@@ -95,7 +107,12 @@ export async function resolveDealSearchCandidates(
     `,
   ]);
   const contactIds = [
-    ...new Set([...byFields.map((r) => r.id), ...byCcfv.map((r) => r.contactId)]),
+    ...new Set([
+      ...byName.map((r) => r.id),
+      ...byEmail.map((r) => r.id),
+      ...byPhone.map((r) => r.id),
+      ...byCcfv.map((r) => r.contactId),
+    ]),
   ];
   return { contactIds, dealIds: byDcfv.map((r) => r.dealId) };
 }
@@ -205,8 +222,9 @@ export async function resolveContactSearchCandidates(
  * linha em ccfv/deals e custava ~4s por busca no inbox (HAR de 26/ago/26),
  * contra ~0,4s da busca de negócios com o mesmo termo.
  *
- * São seis pré-queries em paralelo, mas cada uma é indexada e curta: o
- * padrão anterior segurava UMA conexão por ~4s.
+ * Pré-queries em paralelo, cada uma indexada e curta: o padrão anterior
+ * segurava UMA conexão por ~4s. name/email/phone vão separados para o
+ * planner usar GIN trgm (OR na mesma cláusula desiste do índice).
  */
 export async function resolveConversationSearchCandidates(
   search: string,
@@ -215,12 +233,21 @@ export async function resolveConversationSearchCandidates(
   if (!orgId) return { contactIds: [], assignedToIds: [] };
   const pattern = `%${search}%`;
 
-  const [byFields, byProfile, byCcfv, byDealTitle, byCompany, byUser] =
+  const [byName, byEmail, byPhone, byProfile, byCcfv, byDealTitle, byCompany, byUser] =
     await Promise.all([
       prisma.$queryRaw<{ id: string }[]>`
         SELECT id FROM contacts
-        WHERE "organizationId" = ${orgId}
-          AND (name ILIKE ${pattern} OR email ILIKE ${pattern} OR phone ILIKE ${pattern})
+        WHERE "organizationId" = ${orgId} AND name ILIKE ${pattern}
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId} AND email ILIKE ${pattern}
+        LIMIT ${SEARCH_CANDIDATE_CAP}
+      `,
+      prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE "organizationId" = ${orgId} AND phone ILIKE ${pattern}
         LIMIT ${SEARCH_CANDIDATE_CAP}
       `,
       // Separada da anterior de propósito: `whatsapp_username` e `source` têm
@@ -264,7 +291,9 @@ export async function resolveConversationSearchCandidates(
 
   const contactIds = [
     ...new Set([
-      ...byFields.map((r) => r.id),
+      ...byName.map((r) => r.id),
+      ...byEmail.map((r) => r.id),
+      ...byPhone.map((r) => r.id),
       ...byProfile.map((r) => r.id),
       ...byCcfv.map((r) => r.contactId),
       ...byDealTitle.map((r) => r.contactId),

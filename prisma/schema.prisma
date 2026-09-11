@@ -1196,16 +1196,13 @@ model Contact {
   @@unique([organizationId, whatsappBsuid])
   @@unique([organizationId, messengerPsid])
   @@unique([organizationId, instagramIgsid])
-  // Índices removidos em 2026-09-06 (0 scans/12d em prod, virada de mês
-  // inclusa — ver migration drop_dead_indexes_contacts_deals_automation):
-  //   (org,whatsappJid)  — inbound casa por whatsapp_bsuid, não jid
-  //   (org,leadScore), (org,companyId), (org,updatedAt)
-  //   (org,assignedToId) — prefixo de (org,assignedToId,lifecycleStage)
-  @@index([organizationId])
-  @@index([organizationId, number])
+  // Índices removidos (write tax no webhook, prefixo de composto / unique):
+  //   2026-09-06: (org,whatsappJid), (org,leadScore), (org,companyId),
+  //     (org,updatedAt), (org,assignedToId) — 0 scans/12d em prod
+  //   2026-09-11: (org) prefixo dos compostos; (org,number) duplica o unique;
+  //     (org,lifecycleStage) prefixo de (org,lifecycleStage,createdAt)
   @@index([organizationId, email])
   @@index([organizationId, phone])
-  @@index([organizationId, lifecycleStage])
   @@index([organizationId, createdAt])
   @@index([organizationId, assignedToId, lifecycleStage])
   @@index([organizationId, lifecycleStage, createdAt])
@@ -1591,19 +1588,19 @@ model Deal {
 
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
-  // Índices removidos em 2026-09-06 (prod, virada de mês inclusa):
-  //   (org,stageId)   — prefixo de (org,stageId,status) 2,6M scans
-  //   (org,dealRole)  — 0 scans/12d
-  //   (org,orgUnitId) — 0 scans/12d
-  @@index([organizationId])
+  // Índices removidos (prefixo / 0 scans):
+  //   2026-09-06: (org,stageId), (org,dealRole)
+  //   2026-09-11: (org) prefixo dos compostos; (org,contactId) prefixo de
+  //     (org,contactId,status). (orgUnitId) volta só como FK leading-column
+  //     — DELETE de filial seq-scanava deals (ver create-fk-indexes.sql).
   @@index([organizationId, status])
-  @@index([organizationId, contactId])
   @@index([organizationId, ownerId])
   @@index([organizationId, createdAt])
   @@index([organizationId, updatedAt])
   @@index([organizationId, stageId, status])
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
+  @@index([orgUnitId], map: "deals_orgUnitId_idx")
   @@map("deals")
 }
 
@@ -2608,6 +2605,13 @@ model ActivityEvent {
   @@index([organizationId, occurredAt(sort: Desc)])
   @@index([organizationId, conversationId, occurredAt(sort: Desc)])
   @@index([organizationId, type, occurredAt(sort: Desc)])
+  // FKs: DELETE de contact/conversation/deal/user sem 1ª coluna = FK
+  // seq-scanava activity_events (~minutos em prod). Não são os compostos
+  // dropados em 2026-09-06 — são btree simples, ~140 MB / milhões de scans.
+  @@index([contactId], map: "activity_events_contactId_idx")
+  @@index([conversationId], map: "activity_events_conversationId_idx")
+  @@index([dealId], map: "activity_events_dealId_idx")
+  @@index([actorUserId], map: "activity_events_actorUserId_idx")
   @@map("activity_events")
 }
 
@@ -2932,8 +2936,8 @@ model Conversation {
 
   @@unique([organizationId, externalId])
   @@unique([organizationId, number])
-  @@index([organizationId])
-  @@index([organizationId, status])
+  // (org) e (org,status) eram prefixo de (org,status,updatedAt) e
+  // (org,status,assignedToId,hasHumanReply) — write tax no inbound.
   @@index([organizationId, status, updatedAt])
   /// 3ª coluna cobre o MAX(updatedAt) por contato do board "Última interação"
   /// (index-only). Serve também qualquer lookup por (organizationId, contactId).
@@ -2947,6 +2951,8 @@ model Conversation {
   @@index([organizationId, status, assignedToId, hasHumanReply])
   @@index([whatsappCallConsentStatus])
   @@index([organizationId, tabulationId])
+  @@index([departmentId], map: "conversations_departmentId_idx")
+  @@index([tabulationId], map: "conversations_tabulationId_idx")
   @@map("conversations")
 }
 
@@ -3040,12 +3046,12 @@ model Message {
   favoritedBy FavoriteMessage[]
   pinnedIn    PinnedMessage[]
 
-  @@index([organizationId])
+  // (org) prefixo de (org,createdAt). (externalId) sozinho: a extension
+  // sempre injeta organizationId; o unique (org,externalId) cobre o lookup.
   @@index([organizationId, createdAt])
   @@index([conversationId, createdAt])
   @@index([conversationId, authorType, createdAt])
   @@index([channelId])
-  @@index([externalId])
   @@index([aiAgentUserId, createdAt])
   // Dedup de inbound garantida pelo BANCO. Antes disso a dedup era só o
   // `findFirst({ externalId })` + create dentro da transação nos 3 ingests
@@ -3211,6 +3217,7 @@ model AutomationSessionExpiryClaim {
   @@unique([automationId, contactId, channel, windowStartedAt], map: "automation_session_expiry_claim_window_uq")
   @@index([organizationId, createdAt], map: "automation_session_expiry_org_created_idx")
   @@index([contactId, channel, windowStartedAt], map: "automation_session_expiry_contact_channel_window_idx")
+  @@index([conversationId], map: "automation_session_expiry_claims_conversationId_idx")
   @@map("automation_session_expiry_claims")
 }
 
@@ -3271,14 +3278,14 @@ model AutomationLog {
   metaWebhookEventId String?
   metaWebhookEvent   MetaWebhookEvent? @relation(fields: [metaWebhookEventId], references: [id], onDelete: SetNull)
 
+  // 2026-09-06/11: (automationId) prefixo de (automationId,executedAt) e
+  // (automationId,stepId); (dealId) e (metaWebhookEventId) 0 scans / ~27 MB
+  // em prod (~850 MB de tabela). Não recriar no schema.
   @@index([organizationId])
-  @@index([automationId])
   @@index([contactId])
-  @@index([dealId])
   @@index([executedAt])
   @@index([automationId, executedAt])
   @@index([automationId, stepId])
-  @@index([metaWebhookEventId])
   @@map("automation_logs")
 }
 
@@ -3314,6 +3321,7 @@ model MetaWebhookEvent {
   /// Recovery de backlog do worker-meta-webhook: eventos não processados
   /// (processed=false) em ordem de chegada.
   @@index([processed, receivedAt])
+  @@index([channelId], map: "meta_webhook_events_channelId_idx")
   @@map("meta_webhook_events")
 }
 
@@ -3960,6 +3968,7 @@ model DistributionLog {
 
   @@index([organizationId, createdAt])
   @@index([organizationId, departmentId])
+  @@index([departmentId], map: "distribution_logs_departmentId_idx")
   @@map("distribution_logs")
 }
 
@@ -4182,6 +4191,7 @@ model ScheduledWhatsappCall {
   @@index([conversationId, scheduledAt])
   @@index([assigneeUserId, scheduledAt, status])
   @@index([status, scheduledAt])
+  @@index([contactId], map: "scheduled_whatsapp_calls_contactId_idx")
   @@map("scheduled_whatsapp_calls")
 }
 
@@ -4402,11 +4412,12 @@ model CampaignRecipient {
   updatedAt DateTime? @updatedAt
 
   @@unique([campaignId, contactId])
-  @@index([organizationId])
   @@index([campaignId, status])
-  @@index([contactId])
   @@index([contactId, sentAt])
   @@index([metaMessageId])
+  // Claim do rodízio: equality (org,status) + ORDER BY id sem sort.
+  // (org) sozinho era prefixo; (contactId) sozinho era prefixo de sentAt.
+  @@index([organizationId, status, id], map: "campaign_recipients_org_status_id_idx")
   @@map("campaign_recipients")
 }
 
@@ -5628,6 +5639,7 @@ model Call {
   @@index([organizationId, dealId])
   @@index([organizationId, direction, status])
   @@index([organizationId, extensionId])
+  @@index([contactId], map: "calls_contact_id_idx")
   @@map("calls")
 }
 
