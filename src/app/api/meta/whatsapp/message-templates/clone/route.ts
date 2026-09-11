@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { cloneMessageTemplatesBetweenClients } from "@/lib/meta-whatsapp/clone-message-templates";
+import {
+  httpStatusForMetaGraphError,
+  isMetaGraphError,
+} from "@/lib/meta-whatsapp/client";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
@@ -99,6 +103,12 @@ export async function POST(request: Request) {
       });
     } catch (e: unknown) {
       console.error("[meta-templates] clone", e);
+      if (isMetaGraphError(e)) {
+        return NextResponse.json(
+          { message: e.toPersistedString(), code: e.code, subcode: e.subcode, fbtraceId: e.fbtraceId },
+          { status: httpStatusForMetaGraphError(e) },
+        );
+      }
       const msg = e instanceof Error ? e.message : "Erro ao clonar templates na Meta.";
       return NextResponse.json({ message: msg }, { status: 502 });
     }
