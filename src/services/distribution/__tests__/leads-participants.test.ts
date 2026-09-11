@@ -34,6 +34,9 @@ vi.mock("@/lib/prisma", () => ({
       ),
       findMany: vi.fn(async () => []),
     },
+    departmentMember: {
+      findMany: vi.fn(async () => []),
+    },
     distributionLeadsAssignment: {
       groupBy: vi.fn(async () => []),
     },

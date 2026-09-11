@@ -10,17 +10,11 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
-import { getLeadsStats } from "@/services/distribution";
+import { getLeadsStats, parseLeadsDateParam } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
-
-function parseDateParam(raw: string | null): Date | undefined {
-  if (!raw) return undefined;
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? undefined : d;
-}
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -54,8 +48,8 @@ export async function GET(request: Request) {
     try {
       const url = new URL(request.url);
       const stats = await getLeadsStats({
-        from: parseDateParam(url.searchParams.get("from")),
-        to: parseDateParam(url.searchParams.get("to")),
+        from: parseLeadsDateParam(url.searchParams.get("from"), "start"),
+        to: parseLeadsDateParam(url.searchParams.get("to"), "end"),
         userId: url.searchParams.get("userId") ?? undefined,
       });
       return NextResponse.json(stats);

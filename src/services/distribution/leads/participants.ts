@@ -12,6 +12,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { parseDay } from "@/services/painel-period";
 
 export const LEADS_SLOT_COUNT = 5;
 export const LEADS_NOTE_MAX = 500;
@@ -25,10 +26,27 @@ export interface LeadsParticipantView {
   weight: number;
   note: string;
   slots: { slotIndex: number; active: boolean; lastAssignedAt: string | null }[];
-  /** Total histórico recebido (assignments). */
+  /** Total histórico recebido (assignments) — a tela usa o stats do período. */
   totalReceived: number;
+  /** Departamentos dos quais é membro (`DepartmentMember`). */
+  departments: { id: string; name: string }[];
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * `YYYY-MM-DD` = dia civil em America/Sao_Paulo (início ou fim inclusivo).
+ * ISO completo cai no `Date` nativo.
+ */
+export function parseLeadsDateParam(
+  raw: string | null,
+  bound: "start" | "end",
+): Date | undefined {
+  if (!raw) return undefined;
+  const day = parseDay(raw, bound === "end");
+  if (day) return day;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
 function emptySlots(): LeadsParticipantView["slots"] {
@@ -43,7 +61,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
   const orgId = getOrgIdOrThrow();
 
   // User NÃO é org-scoped na Prisma Extension — filtro manual, igual ao smart.
-  const [users, participants, received] = await Promise.all([
+  const [users, participants, received, memberships] = await Promise.all([
     prisma.user.findMany({
       where: {
         type: "HUMAN",
@@ -74,9 +92,27 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
       by: ["userId"],
       _count: { _all: true },
     }),
+    prisma.departmentMember.findMany({
+      where: { organizationId: orgId },
+      select: {
+        userId: true,
+        department: { select: { id: true, name: true } },
+      },
+    }),
   ]);
   const receivedByUser = new Map(received.map((r) => [r.userId, r._count._all]));
   const configByUser = new Map(participants.map((p) => [p.userId, p]));
+  const deptsByUser = new Map<string, { id: string; name: string }[]>();
+  for (const m of memberships) {
+    if (!m.department) continue;
+    const arr = deptsByUser.get(m.userId) ?? [];
+    arr.push(m.department);
+    deptsByUser.set(m.userId, arr);
+  }
+  for (const [userId, depts] of deptsByUser) {
+    depts.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+    deptsByUser.set(userId, depts);
+  }
 
   return users.map((u) => {
     const p = configByUser.get(u.id);
@@ -91,6 +127,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         note: "",
         slots: emptySlots(),
         totalReceived: receivedByUser.get(u.id) ?? 0,
+        departments: deptsByUser.get(u.id) ?? [],
         createdAt: "",
         updatedAt: "",
       };
@@ -109,6 +146,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         lastAssignedAt: s.lastAssignedAt ? s.lastAssignedAt.toISOString() : null,
       })),
       totalReceived: receivedByUser.get(u.id) ?? 0,
+      departments: deptsByUser.get(u.id) ?? [],
       createdAt: p.createdAt.toISOString(),
       updatedAt: p.updatedAt.toISOString(),
     };
