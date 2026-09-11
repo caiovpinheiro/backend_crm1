@@ -170,6 +170,27 @@ export async function upsertLeadsParticipant(args: {
   return all.find((p) => p.userId === args.userId) ?? null;
 }
 
+/** Inclui vários operadores no rodízio numa tacada (mesmo upsert unitário). */
+export async function upsertLeadsParticipantsBulk(args: {
+  userIds: string[];
+  status?: "ACTIVE" | "INACTIVE";
+  weight?: number;
+}): Promise<{ added: number; skipped: number }> {
+  const unique = [...new Set(args.userIds.filter(Boolean))];
+  let added = 0;
+  let skipped = 0;
+  for (const userId of unique) {
+    const row = await upsertLeadsParticipant({
+      userId,
+      status: args.status ?? "ACTIVE",
+      weight: args.weight ?? 1,
+    });
+    if (row) added += 1;
+    else skipped += 1;
+  }
+  return { added, skipped };
+}
+
 export interface LeadsStatsResult {
   total: number;
   byUser: { userId: string; name: string | null; count: number }[];

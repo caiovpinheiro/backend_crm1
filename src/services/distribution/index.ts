@@ -86,6 +86,7 @@ export {
 export {
   getLeadsParticipants,
   upsertLeadsParticipant,
+  upsertLeadsParticipantsBulk,
   getLeadsStats,
   getLeadsHistory,
   LEADS_SLOT_COUNT,
