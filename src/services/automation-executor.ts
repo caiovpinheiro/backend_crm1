@@ -2272,7 +2272,7 @@ async function executeStep(
         }
 
         if (leadsResult.success) {
-          // ASSIGNED ou DONO_PRESERVADO → saída SIM (fluxo linear).
+          // ASSIGNED (ou corrida rara DONO_PRESERVADO) → saída SIM.
           return {};
         }
         // NO_ELIGIBLE_PARTICIPANT / módulo off → saída NÃO. Sem fila de

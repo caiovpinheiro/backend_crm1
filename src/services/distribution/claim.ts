@@ -19,6 +19,7 @@ export type AssignmentVia = "smart" | "leads";
  *   (`assignedToId IS NULL` ou dono IA — handoff IA→humano legítimo).
  * - Com `expectedOwnerId`: reassign/transferência — só vence se o dono atual
  *   ainda é o lido na seleção (alguém mudou no meio → perde).
+ * - Com `overwrite`: atualiza pelo id (modo leads redistribui de propósito).
  */
 export async function claimConversationAssignmentTx(
   tx: ScopedTx,
@@ -27,15 +28,18 @@ export async function claimConversationAssignmentTx(
     userId: string;
     via: AssignmentVia;
     expectedOwnerId?: string | null;
+    overwrite?: boolean;
   },
 ): Promise<boolean> {
   const res = await tx.conversation.updateMany({
-    where: args.expectedOwnerId
-      ? { id: args.conversationId, assignedToId: args.expectedOwnerId }
-      : {
-          id: args.conversationId,
-          OR: [{ assignedToId: null }, { assignedTo: { type: "AI" } }],
-        },
+    where: args.overwrite
+      ? { id: args.conversationId }
+      : args.expectedOwnerId
+        ? { id: args.conversationId, assignedToId: args.expectedOwnerId }
+        : {
+            id: args.conversationId,
+            OR: [{ assignedToId: null }, { assignedTo: { type: "AI" } }],
+          },
     data: {
       assignedToId: args.userId,
       assignedVia: args.via,
@@ -48,6 +52,7 @@ export async function claimConversationAssignmentTx(
 /**
  * CAS no deal (alvo sem conversa). Mesma semântica do de conversa:
  * sem `expectedOwnerId` só vence com `ownerId IS NULL`.
+ * `overwrite` atualiza pelo id (redistribuição do modo leads).
  */
 export async function claimDealAssignmentTx(
   tx: ScopedTx,
@@ -56,12 +61,15 @@ export async function claimDealAssignmentTx(
     userId: string;
     via: AssignmentVia;
     expectedOwnerId?: string | null;
+    overwrite?: boolean;
   },
 ): Promise<boolean> {
   const res = await tx.deal.updateMany({
-    where: args.expectedOwnerId
-      ? { id: args.dealId, ownerId: args.expectedOwnerId }
-      : { id: args.dealId, ownerId: null },
+    where: args.overwrite
+      ? { id: args.dealId }
+      : args.expectedOwnerId
+        ? { id: args.dealId, ownerId: args.expectedOwnerId }
+        : { id: args.dealId, ownerId: null },
     data: { ownerId: args.userId, assignedVia: args.via },
   });
   return res.count === 1;

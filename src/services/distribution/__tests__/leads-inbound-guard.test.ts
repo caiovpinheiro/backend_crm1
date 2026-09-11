@@ -9,9 +9,10 @@
  * - LIMITAÇÃO REGISTRADA (decisão de produto): primeira mensagem de conversa
  *   NOVA, ainda sem departamento, com as configurações globais atuais
  *   (autoOnInbound=true) → o smart distribui antes da automação rotear. O
- *   modo leads NÃO troca esse dono depois (DONO_PRESERVADO). Quem precisa da
- *   captura desde o primeiro inbound usa `distribution.autoOnInbound=false`
- *   e distribui tudo via blocos. Nada aqui desliga configs globais.
+ *   modo leads redistribui esse dono quando o bloco mode="leads" rodar.
+ *   Quem precisa da captura desde o primeiro inbound usa
+ *   `distribution.autoOnInbound=false` e distribui tudo via blocos. Nada
+ *   aqui desliga configs globais.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -149,7 +150,7 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
 
     // Comportamento atual preservado: o smart distribui no inbound. Se a
     // automação rotear depois para um depto leads e o bloco leads executar,
-    // o dono é preservado (DONO_PRESERVADO) — nunca trocado.
+    // o dono é redistribuído pelo rodízio do modo leads.
     expect(executeDistribution).toHaveBeenCalledTimes(1);
   });
 

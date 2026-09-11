@@ -16,10 +16,10 @@
  * durável reencontra o resultado gravado — sem consumir slot nem duplicar
  * histórico.
  *
- * Nunca remove dono humano existente (DONO_PRESERVADO), salvo `reassign`
- * explícito (CAS com o dono esperado). Sem elegível: NO_ELIGIBLE_PARTICIPANT
- * — o alvo fica marcado (routeMode="leads") fora do smart, sem fila e sem
- * fallback.
+ * Se o deal/conversa passa no bloco, redistribui — inclusive quando já tem
+ * dono humano. `DONO_PRESERVADO` fica só para corrida (CAS perdeu). Sem
+ * elegível: NO_ELIGIBLE_PARTICIPANT — o alvo fica marcado (routeMode="leads")
+ * fora do smart, sem fila e sem fallback.
  */
 
 import { Prisma } from "@prisma/client";
@@ -29,9 +29,8 @@ import { prisma, type ScopedTx } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
-  assignDealOwnerTx,
+  assignOwnerToContactClusterTx,
   invalidateBoardsForPipelines,
-  propagateOwnerToContactAndChat,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
@@ -61,7 +60,7 @@ export interface ExecuteLeadsDistributionInput {
   contactId?: string | null;
   conversationId?: string | null;
   triggerSource: "AUTOMATION" | "MANUAL" | "SYSTEM";
-  /** Única forma de o modo leads trocar um dono humano existente. */
+  /** Aceito por compatibilidade; o modo leads sempre redistribui. */
   reassign?: boolean;
   /** Identidade da ocorrência do passo (idempotência). */
   automationContextId?: string | null;
@@ -293,6 +292,8 @@ async function selectNextSlotTx(
       AND p.weight > 0
       AND s."slotIndex" < p.weight
       AND u.type = 'HUMAN'
+      AND u.role = 'MEMBER'
+      AND u."isErased" = false
     ORDER BY s."lastAssignedAt" ASC NULLS FIRST, s.id ASC
     LIMIT 1
   `;
@@ -353,25 +354,6 @@ export async function executeLeadsDistribution(
     });
   }
 
-  // Dono humano vigente é preservado — o modo leads nunca troca dono, salvo
-  // `reassign` explícito (CAS com o dono esperado, na tx).
-  if (target.currentHumanOwnerId && !input.reassign) {
-    if (target.conversationId) {
-      await prisma.conversation
-        .update({
-          where: { id: target.conversationId },
-          data: { routeMode: null },
-        })
-        .catch(() => {});
-    }
-    return finish({
-      success: true,
-      reason: "DONO_PRESERVADO",
-      selectedUserId: target.currentHumanOwnerId,
-      selectedUserName: target.currentHumanOwnerName,
-    });
-  }
-
   // Marca a rota ANTES da seleção: enquanto o step executa, o alvo fica fora
   // do alcance do smart (fila derivada e inbound). Persistente — sem TTL.
   if (target.conversationId) {
@@ -414,34 +396,27 @@ export async function executeLeadsDistribution(
         return { kind: "NO_ELIGIBLE_PARTICIPANT" };
       }
 
-      // Claim CAS do alvo (proteção de corrida entre modos/fluxos).
+      // Claim do alvo: o modo leads sempre redistribui (inclusive dono
+      // humano vigente). `overwrite` evita o CAS "só sem dono / só o
+      // esperado" — DONO_PRESERVADO fica só se a linha sumiu na corrida.
       let claimed = false;
       if (target.conversationId) {
         claimed = await claimConversationAssignmentTx(tx, {
           conversationId: target.conversationId,
           userId: slot.userId,
           via: "leads",
-          expectedOwnerId: input.reassign
-            ? target.currentHumanOwnerId
-            : null,
+          overwrite: true,
         });
       } else if (target.dealId) {
         claimed = await claimDealAssignmentTx(tx, {
           dealId: target.dealId,
           userId: slot.userId,
           via: "leads",
-          expectedOwnerId: input.reassign
-            ? target.currentHumanOwnerId
-            : null,
+          overwrite: true,
         });
       } else if (target.contactId) {
         const res = await tx.contact.updateMany({
-          where: input.reassign && target.currentHumanOwnerId
-            ? { id: target.contactId, assignedToId: target.currentHumanOwnerId }
-            : {
-                id: target.contactId,
-                OR: [{ assignedToId: null }, { assignedTo: { type: "AI" } }],
-              },
+          where: { id: target.contactId },
           data: { assignedToId: slot.userId },
         });
         claimed = res.count === 1;
@@ -482,24 +457,16 @@ export async function executeLeadsDistribution(
         return { kind: "DONO_PRESERVADO", ownerId, ownerName };
       }
 
-      // Propagação do ownership (contato/conversas/deal) com a marca de origem.
-      let fromOwnerId: string | null = null;
-      let pipelineId: string | null = null;
-      if (target.dealId) {
-        const assigned = await assignDealOwnerTx(
-          tx,
-          target.dealId,
-          slot.userId,
-          "leads",
-        );
-        fromOwnerId = assigned.fromOwnerId;
-        pipelineId = assigned.stage?.pipelineId ?? null;
-      } else if (target.contactId) {
-        fromOwnerId = target.currentHumanOwnerId;
-        await propagateOwnerToContactAndChat(tx, target.contactId, slot.userId, {
-          via: "leads",
-        });
-      }
+      // Cluster inteiro: deals OPEN (+ deal explícito), contato e conversas.
+      const cluster = await assignOwnerToContactClusterTx(tx, {
+        userId: slot.userId,
+        via: "leads",
+        contactId: target.contactId,
+        dealId: target.dealId,
+        conversationId: target.conversationId,
+      });
+      const fromOwnerId = cluster.fromOwnerId;
+      const pipelineId = cluster.pipelineIds.find((id) => id) ?? null;
 
       // Só o slot escolhido avança. O carimbo é monotônico POR ORG:
       // TIMESTAMP(3) tem resolução de ms e o advisory lock serializa a tx,

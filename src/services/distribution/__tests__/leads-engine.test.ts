@@ -4,7 +4,7 @@
  * Cobre: rodízio de slots (NULLS FIRST, desempate estável, peso 0/1/3/5,
  * INACTIVE fora, mudança de peso), proporção 3:1 entre participantes,
  * idempotência por DistributionLeadsExecution (retry não consome slot nem
- * duplica histórico), DONO_PRESERVADO (dono humano nunca é trocado) e
+ * duplica histórico), redistribuição com dono humano vigente e
  * NO_ELIGIBLE_PARTICIPANT (sem fila, sem fallback; routeMode permanece).
  *
  * A serialização física do rodízio é do advisory lock por org
@@ -19,8 +19,13 @@ const isDistributionEnabled = vi.fn(async () => true);
 const getConversationSession = vi.fn(async () => ({ active: false }));
 const logEvent = vi.fn(async () => {});
 const fireTrigger = vi.fn(async () => {});
-const assignDealOwnerTx = vi.fn();
-const propagateOwnerToContactAndChat = vi.fn(async () => []);
+const assignOwnerToContactClusterTx = vi.fn(async () => ({
+  contactId: null,
+  dealIds: [],
+  fromOwnerId: null,
+  pipelineIds: [],
+  agentChangedDeals: [],
+}));
 const invalidateBoardsForPipelines = vi.fn(async () => {});
 
 vi.mock("@/services/organization-widgets", () => ({
@@ -39,9 +44,8 @@ vi.mock("@/services/automation-triggers", () => ({
   fireTrigger: (...a: unknown[]) => fireTrigger(...a),
 }));
 vi.mock("@/services/deals", () => ({
-  assignDealOwnerTx: (...a: unknown[]) => assignDealOwnerTx(...a),
-  propagateOwnerToContactAndChat: (...a: unknown[]) =>
-    propagateOwnerToContactAndChat(...a),
+  assignOwnerToContactClusterTx: (...a: unknown[]) =>
+    assignOwnerToContactClusterTx(...a),
   invalidateBoardsForPipelines: (...a: unknown[]) =>
     invalidateBoardsForPipelines(...a),
 }));
@@ -149,15 +153,24 @@ function selectSlotFake() {
 function applyConversationCas(
   conv: Conv,
   data: { assignedToId: string; assignedVia: string; routeMode: null },
-  where: { expectedOwnerId?: string | null },
+  where: {
+    expectedOwnerId?: string | null;
+    assignedToId?: string | null;
+    OR?: unknown;
+  },
 ): number {
-  if (where.expectedOwnerId) {
-    if (conv.assignedToId !== where.expectedOwnerId) return 0;
-  } else if (
-    conv.assignedToId !== null &&
-    conv.assigneeType !== "AI"
-  ) {
-    return 0;
+  const hasOwnerPrecondition =
+    where.expectedOwnerId != null ||
+    where.assignedToId !== undefined ||
+    where.OR != null;
+  if (hasOwnerPrecondition) {
+    if (where.assignedToId !== undefined) {
+      if (conv.assignedToId !== where.assignedToId) return 0;
+    } else if (where.expectedOwnerId) {
+      if (conv.assignedToId !== where.expectedOwnerId) return 0;
+    } else if (conv.assignedToId !== null && conv.assigneeType !== "AI") {
+      return 0;
+    }
   }
   conv.assignedToId = data.assignedToId;
   conv.assignedVia = data.assignedVia;
@@ -405,7 +418,7 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     expect(seq.slice(0, 4)).toEqual(["A", "A", "A", "A"]);
   });
 
-  it("dono humano existente NUNCA é trocado (DONO_PRESERVADO) — nem offline, nem por rodízio", async () => {
+  it("dono humano existente é redistribuído pelo rodízio", async () => {
     addParticipant("A", 5);
     addConversation("c1", "ct1", "donoHumano");
 
@@ -416,12 +429,12 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     });
 
     expect(r.success).toBe(true);
-    expect(r.reason).toBe("DONO_PRESERVADO");
-    expect(r.selectedUserId).toBe("donoHumano");
-    expect(conversations.get("c1")?.assignedToId).toBe("donoHumano");
-    expect(conversations.get("c1")?.routeMode).toBeNull(); // rota consumida
-    expect(assignments).toHaveLength(0); // não suja ranking
-    expect(slotUpdates).toHaveLength(0); // não consome slot
+    expect(r.reason).toBe("ASSIGNED");
+    expect(r.selectedUserId).toBe("A");
+    expect(conversations.get("c1")?.assignedToId).toBe("A");
+    expect(conversations.get("c1")?.assignedVia).toBe("leads");
+    expect(assignments).toHaveLength(1);
+    expect(slotUpdates).toEqual(["s_A_0"]);
   });
 
   it("dono IA é substituído (handoff IA→humano) via CAS", async () => {
@@ -440,7 +453,7 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     expect(conversations.get("c1")?.assignedVia).toBe("leads");
   });
 
-  it("CAS perdido (outro fluxo atribuiu na corrida) → DONO_PRESERVADO sem gravar", async () => {
+  it("segunda execução no mesmo alvo redistribui e consome o próximo slot", async () => {
     addParticipant("A", 3);
     addConversation("c1", "ct1", null);
     // Simula: entre a leitura e o CAS, outro fluxo atribuiu.
@@ -457,16 +470,17 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     expect(r1.reason).toBe("ASSIGNED");
     expect(assignments).toHaveLength(1);
 
-    // Segunda execução para o MESMO alvo (outra automação): dono humano
-    // presente → preservado, sem novo assignment nem consumo de slot.
+    // Segunda execução para o MESMO alvo (outra automação): redistribui
+    // de novo e consome o próximo slot.
     const r2 = await executeLeadsDistribution({
       conversationId: "c1",
       contactId: "ct1",
       triggerSource: "AUTOMATION",
     });
-    expect(r2.reason).toBe("DONO_PRESERVADO");
+    expect(r2.reason).toBe("ASSIGNED");
     expect(r2.selectedUserId).toBe("A");
-    expect(assignments).toHaveLength(1);
+    expect(assignments).toHaveLength(2);
+    expect(slotUpdates).toEqual(["s_A_0", "s_A_1"]);
   });
 
   it("idempotência: retry do step retorna o outcome gravado sem consumir slot nem duplicar histórico", async () => {
@@ -495,8 +509,8 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
     expect(assignments).toHaveLength(1);
     expect(slotUpdates).toEqual(["s_A_0"]);
 
-    // Nova ocorrência (loop legítimo) com dono humano → DONO_PRESERVADO,
-    // sem redistribuir o lead que já tem dono.
+    // Nova ocorrência (loop legítimo): redistribui de novo e consome o
+    // próximo slot — o dono vigente não bloqueia o passo.
     const r3 = await executeLeadsDistribution({
       conversationId: "c1",
       contactId: "ct1",
@@ -504,9 +518,10 @@ describe("executeLeadsDistribution — rodízio de slots", () => {
       ...execId,
       occurrence: 2,
     });
-    expect(r3.reason).toBe("DONO_PRESERVADO");
-    expect(assignments).toHaveLength(1);
-    expect(slotUpdates).toEqual(["s_A_0"]);
+    expect(r3.reason).toBe("ASSIGNED");
+    expect(r3.selectedUserId).toBe("A");
+    expect(assignments).toHaveLength(2);
+    expect(slotUpdates).toEqual(["s_A_0", "s_A_1"]);
   });
 
   it("NO_ELIGIBLE também é idempotente por occurrence", async () => {

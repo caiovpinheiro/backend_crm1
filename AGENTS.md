@@ -40,7 +40,7 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 - `Channel.pipelineId` / `search_text` — ADRs, **não implementados**.
 - Migrate no worker. Só `APP_MODE=api` migra no boot.
 - Criar fila de espera para o modo `leads` (ele é síncrono; NO_ELIGIBLE_PARTICIPANT vai p/ saída "Não" do bloco).
-- Reavaliar dono com `assignedVia="leads"` por offline/expediente (atribuição leads é protegida; só `reassign` explícito troca).
+- Reavaliar dono com `assignedVia="leads"` por offline/expediente no motor smart (atribuição leads é protegida lá). O motor leads redistribui quando o bloco `execute_distribution` mode=leads roda, mesmo com dono humano.
 - Bloco `execute_distribution` sem `mode` = smart. Nunca converter bloco antigo para leads.
 
 ## Handler
@@ -112,6 +112,8 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 
 ## Decisões técnicas
 
+- 2026-09-11 — Cursor Grok 4.6 — **Distribuição atribui o cluster inteiro**: smart e leads usam `assignOwnerToContactClusterTx` — deals OPEN (+ deal explícito), contato e todas as conversas vão para o mesmo usuário (inbox + pipeline).
+- 2026-09-11 — Cursor Grok 4.6 — **Modo leads redistribui mesmo com dono**: `executeLeadsDistribution` não devolve mais `DONO_PRESERVADO` só porque o deal/conversa já tem humano. O bloco `execute_distribution` mode=leads sobrescreve o dono (claim `overwrite`). `DONO_PRESERVADO` fica só se a linha sumiu na corrida. Motor smart continua sem reavaliar `assignedVia="leads"` por offline/expediente.
 - 2026-09-10 — Cursor Opus 5 — **Departamento de destino dos leads sem departamento**: org setting `distribution.fallbackDepartmentId` (string). Lido em `resolveDepartmentScope` (`engine.ts`) quando `respectDepartment` está ligado e a conversa não tem departamento — antes disso ia direto para org-wide. Fronteira estrita: os caminhos de inbound/drenagem passam `allowOrgWideFallback: false`, então sem ninguém elegível no departamento o lead **espera na fila**. Departamento apagado ou com `distributionEnabled` falso → volta ao org-wide (não congela a fila). UI: seletor aninhado no card "Respeitar departamento da conversa".
 - 2026-09-10 — Cursor Opus 5 — **Trava de disparo por lote** em campanha: `Campaign.sendLimit` (tamanho do lote, escolhido na criação) + `Campaign.sendCap` (teto acumulado de `sentCount + failedCount` da rodada). A audiência inteira continua materializada em `campaign_recipients`; quem trava é o claim do rodízio (`campaigns-worker`) e o `maybeCompleteCampaign` (`campaign-counters`), que marca `PAUSED` em vez de `COMPLETED` quando o cap fecha com pendentes. `resume` faz `sendCap = processados + sendLimit`. Parada aproximada (contadores flusham em lote) — não prometer corte exato.
 - 2026-09-09 — Cursor Grok 4.6 — **Bwipo Keeps** usa models `KeepNote` / `KeepAttachment` / `KeepImport` (`keep_notes`), não o `Note` de contato/negócio. Conteúdo é JSON TipTap. Arquivos no bucket de storage `keeps`. Permissões `keep:*` + `nav:bwipo-keeps`. Notas são por `organizationId` + `userId` (sem compartilhamento nesta versão). Ordem do mural: `KeepNote.position` (float); `PATCH /api/keeps/reorder`.

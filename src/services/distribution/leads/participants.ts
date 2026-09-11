@@ -29,8 +29,30 @@ export interface LeadsParticipantView {
   updatedAt: string;
 }
 
+function emptySlots(): LeadsParticipantView["slots"] {
+  return Array.from({ length: LEADS_SLOT_COUNT }, (_, slotIndex) => ({
+    slotIndex,
+    active: false,
+    lastAssignedAt: null,
+  }));
+}
+
 export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
-  const [participants, received] = await Promise.all([
+  const orgId = getOrgIdOrThrow();
+
+  // User NÃO é org-scoped na Prisma Extension — filtro manual, igual ao smart.
+  const [users, participants, received] = await Promise.all([
+    prisma.user.findMany({
+      where: {
+        type: "HUMAN",
+        organizationId: orgId,
+        role: "MEMBER",
+        isSuperAdmin: false,
+        isErased: false,
+      },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, email: true, avatarUrl: true },
+    }),
     prisma.distributionLeadsParticipant.findMany({
       orderBy: { createdAt: "asc" },
       select: {
@@ -39,9 +61,6 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         weight: true,
         createdAt: true,
         updatedAt: true,
-        user: {
-          select: { name: true, email: true, avatarUrl: true, type: true },
-        },
         slots: {
           orderBy: { slotIndex: "asc" },
           select: { slotIndex: true, lastAssignedAt: true },
@@ -54,23 +73,41 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
     }),
   ]);
   const receivedByUser = new Map(received.map((r) => [r.userId, r._count._all]));
+  const configByUser = new Map(participants.map((p) => [p.userId, p]));
 
-  return participants.map((p) => ({
-    userId: p.userId,
-    name: p.user.name,
-    email: p.user.email,
-    avatarUrl: p.user.avatarUrl,
-    status: p.status,
-    weight: p.weight,
-    slots: p.slots.map((s) => ({
-      slotIndex: s.slotIndex,
-      active: p.status === "ACTIVE" && s.slotIndex < p.weight,
-      lastAssignedAt: s.lastAssignedAt ? s.lastAssignedAt.toISOString() : null,
-    })),
-    totalReceived: receivedByUser.get(p.userId) ?? 0,
-    createdAt: p.createdAt.toISOString(),
-    updatedAt: p.updatedAt.toISOString(),
-  }));
+  return users.map((u) => {
+    const p = configByUser.get(u.id);
+    if (!p) {
+      return {
+        userId: u.id,
+        name: u.name,
+        email: u.email,
+        avatarUrl: u.avatarUrl,
+        status: "INACTIVE",
+        weight: 0,
+        slots: emptySlots(),
+        totalReceived: receivedByUser.get(u.id) ?? 0,
+        createdAt: "",
+        updatedAt: "",
+      };
+    }
+    return {
+      userId: u.id,
+      name: u.name,
+      email: u.email,
+      avatarUrl: u.avatarUrl,
+      status: p.status,
+      weight: p.weight,
+      slots: p.slots.map((s) => ({
+        slotIndex: s.slotIndex,
+        active: p.status === "ACTIVE" && s.slotIndex < p.weight,
+        lastAssignedAt: s.lastAssignedAt ? s.lastAssignedAt.toISOString() : null,
+      })),
+      totalReceived: receivedByUser.get(u.id) ?? 0,
+      createdAt: p.createdAt.toISOString(),
+      updatedAt: p.updatedAt.toISOString(),
+    };
+  });
 }
 
 /**
@@ -85,9 +122,16 @@ export async function upsertLeadsParticipant(args: {
 }): Promise<LeadsParticipantView | null> {
   const orgId = getOrgIdOrThrow();
 
-  // Alvo precisa ser operador humano desta organização.
+  // Só operador (MEMBER). Admin/gestor não entram no rodízio de leads.
   const user = await prisma.user.findFirst({
-    where: { id: args.userId, organizationId: orgId, type: "HUMAN" },
+    where: {
+      id: args.userId,
+      organizationId: orgId,
+      type: "HUMAN",
+      role: "MEMBER",
+      isSuperAdmin: false,
+      isErased: false,
+    },
     select: { id: true },
   });
   if (!user) return null;

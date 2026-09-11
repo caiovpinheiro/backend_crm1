@@ -1,8 +1,9 @@
 /**
  * GET /api/distribution/leads/participants
- * Lista os participantes da Distribuição por Leads (configuração própria:
- * status administrativo ACTIVE/INACTIVE + peso 0–5 + slots do rodízio +
- * total recebido). Gateado pelo widget `smart_distribution` e
+ * Lista os operadores (HUMAN + MEMBER) da org + config do modo leads
+ * (ACTIVE/INACTIVE + peso 0–5 + slots + total recebido). Admin/gestor
+ * não entram. Quem ainda não foi configurado aparece INACTIVE/peso 0
+ * e não recebe. Gateado pelo widget `smart_distribution` e
  * `distribution:view`.
  *
  * A config aqui NUNCA toca a elegibilidade do modo smart

@@ -949,14 +949,107 @@ export async function propagateOwnerToContactAndChat(
 }
 
 /**
- * Atribui um responsável a um deal e propaga a atribuição para o
- * contato e as conversas (regra de herança). Use esta função sempre
- * que for mudar `Deal.ownerId` de forma isolada (sem outros campos).
+ * Distribuição: atribui o usuário a TODO o cluster do contato —
+ * deals OPEN (+ deal explícito), contato e todas as conversas (inbox + pipeline).
  */
+export async function assignOwnerToContactClusterTx(
+  tx: ScopedTx,
+  args: {
+    userId: string;
+    via?: string | null;
+    contactId?: string | null;
+    dealId?: string | null;
+    conversationId?: string | null;
+  },
+): Promise<{
+  contactId: string | null;
+  dealIds: string[];
+  fromOwnerId: string | null;
+  pipelineIds: (string | null)[];
+  agentChangedDeals: {
+    dealId: string;
+    contactId: string | null;
+    fromOwnerId: string | null;
+  }[];
+}> {
+  let contactId = args.contactId ?? null;
+  if (!contactId && args.conversationId) {
+    const conv = await tx.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { contactId: true },
+    });
+    contactId = conv?.contactId ?? null;
+  }
+  if (!contactId && args.dealId) {
+    const deal = await tx.deal.findUnique({
+      where: { id: args.dealId },
+      select: { contactId: true },
+    });
+    contactId = deal?.contactId ?? null;
+  }
+
+  const deals =
+    contactId || args.dealId
+      ? await tx.deal.findMany({
+          where: contactId
+            ? {
+                OR: [
+                  { contactId, status: "OPEN" },
+                  ...(args.dealId ? [{ id: args.dealId }] : []),
+                ],
+              }
+            : { id: args.dealId! },
+          select: {
+            id: true,
+            ownerId: true,
+            contactId: true,
+            stage: { select: { pipelineId: true } },
+          },
+        })
+      : [];
+
+  const agentChangedDeals: {
+    dealId: string;
+    contactId: string | null;
+    fromOwnerId: string | null;
+  }[] = [];
+  const pipelineIds: (string | null)[] = [];
+  let fromOwnerId: string | null = null;
+
+  for (const d of deals) {
+    if (fromOwnerId === null) fromOwnerId = d.ownerId;
+    await tx.deal.update({
+      where: { id: d.id },
+      data: { ownerId: args.userId, assignedVia: args.via ?? null },
+    });
+    pipelineIds.push(d.stage?.pipelineId ?? null);
+    if (d.ownerId !== args.userId) {
+      agentChangedDeals.push({
+        dealId: d.id,
+        contactId: d.contactId,
+        fromOwnerId: d.ownerId,
+      });
+    }
+  }
+
+  if (contactId) {
+    await propagateOwnerToContactAndChat(tx, contactId, args.userId, {
+      via: args.via ?? null,
+    });
+  }
+
+  return {
+    contactId,
+    dealIds: deals.map((d) => d.id),
+    fromOwnerId,
+    pipelineIds,
+    agentChangedDeals,
+  };
+}
+
 /**
- * Variante transacional de `assignDealOwner`: o caller fornece a `tx` (ex.: o
- * motor de distribuição, que precisa do claim CAS na mesma transaction).
- * `via` marca a origem da atribuição ("smart" | "leads"); omitido = zera.
+ * Variante transacional de `assignDealOwner`: o caller fornece a `tx`.
+ * `via` marca a origem ("smart" | "leads"); omitido = zera.
  * NÃO dispara invalidação de boards nem `agent_changed` — o caller faz isso
  * pós-commit.
  */

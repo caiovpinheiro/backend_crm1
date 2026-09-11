@@ -21,9 +21,8 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
-  assignDealOwnerTx,
+  assignOwnerToContactClusterTx,
   invalidateBoardsForPipelines,
-  propagateOwnerToContactAndChat,
   syncOwnershipForContact,
 } from "@/services/deals";
 import { claimConversationAssignmentTx } from "./claim";
@@ -1045,11 +1044,8 @@ export async function executeDistribution(
 
   const selected = selectResponsible(eligible);
 
-  // Atribui o owner. Quando veio um dealId explícito, usa-o. Quando veio só
-  // contactId (ex.: automação manual disparada pela conversa), resolvemos o
-  // negócio ABERTO do contato e atribuímos TAMBÉM o deal — senão o lead
-  // aparece "Sem responsável" no pipeline. assignDealOwnerTx já propaga para
-  // contato e conversas; sem deal aberto, propagamos direto.
+  // Atribui o cluster inteiro: deals OPEN (+ deal explícito), contato e
+  // todas as conversas — inbox e pipeline ficam com o mesmo responsável.
   //
   // A atribuição roda em UMA transaction aberta pelo claim CAS da conversa
   // (quando há): se outro fluxo (modo leads, inbox manual, IA) atribuiu entre
@@ -1072,71 +1068,16 @@ export async function executeDistribution(
       if (!ok) return null;
     }
 
-    const trackDealSideEffects = (r: {
-      id: string;
-      contactId: string | null;
-      fromOwnerId: string | null;
-      stage: { pipelineId: string } | null;
-    }) => {
-      postCommit.pipelineIds.push(r.stage?.pipelineId ?? null);
-      if (r.fromOwnerId !== selected.userId) {
-        postCommit.agentChangedDeals.push({
-          dealId: r.id,
-          contactId: r.contactId,
-          fromOwnerId: r.fromOwnerId,
-        });
-      }
-    };
-
-    if (input.dealId) {
-      trackDealSideEffects(
-        await assignDealOwnerTx(tx, input.dealId, selected.userId, "smart"),
-      );
-    } else if (input.contactId) {
-      const contactId = input.contactId;
-      const openDeal = await tx.deal.findFirst({
-        where: { contactId, status: "OPEN" },
-        orderBy: { updatedAt: "desc" },
-        select: { id: true },
-      });
-      if (openDeal) {
-        assignedDealId = openDeal.id;
-        trackDealSideEffects(
-          await assignDealOwnerTx(tx, openDeal.id, selected.userId, "smart"),
-        );
-      } else {
-        await propagateOwnerToContactAndChat(tx, contactId, selected.userId, {
-          via: "smart",
-        });
-      }
-    } else if (input.conversationId) {
-      // Fallback: só conversationId — o CAS já atribuiu o chat; falta o deal
-      // aberto do contato (se houver) para não "sucesso" sem dono no funil.
-      const conv = await tx.conversation.findUnique({
-        where: { id: input.conversationId },
-        select: { contactId: true },
-      });
-      if (conv?.contactId) {
-        const openDeal = await tx.deal.findFirst({
-          where: { contactId: conv.contactId, status: "OPEN" },
-          orderBy: { updatedAt: "desc" },
-          select: { id: true },
-        });
-        if (openDeal) {
-          assignedDealId = openDeal.id;
-          trackDealSideEffects(
-            await assignDealOwnerTx(tx, openDeal.id, selected.userId, "smart"),
-          );
-        } else {
-          await propagateOwnerToContactAndChat(
-            tx,
-            conv.contactId,
-            selected.userId,
-            { via: "smart" },
-          );
-        }
-      }
-    }
+    const cluster = await assignOwnerToContactClusterTx(tx, {
+      userId: selected.userId,
+      via: "smart",
+      contactId: input.contactId,
+      dealId: input.dealId,
+      conversationId: input.conversationId,
+    });
+    assignedDealId = input.dealId ?? cluster.dealIds[0] ?? assignedDealId;
+    postCommit.pipelineIds.push(...cluster.pipelineIds);
+    postCommit.agentChangedDeals.push(...cluster.agentChangedDeals);
 
     await tx.distributionResponsible.upsert({
       where: {
