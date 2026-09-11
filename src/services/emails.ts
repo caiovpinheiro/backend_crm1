@@ -1,7 +1,8 @@
 import type { EmailFolder } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withOrg } from "@/lib/prisma-helpers";
+import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { decryptAccountPassword, type SerializedEmailAccount } from "@/services/email-accounts";
 import { sendSmtpMail } from "@/services/email-smtp";
 import { applyRulesToEmail } from "@/services/email-rules";
@@ -198,22 +199,36 @@ export async function sendEmail(params: {
   if (!sent.ok) throw new Error(sent.message);
 
   const messageId = sent.messageId.replace(/^<|>$/g, "");
-  const created = await prisma.email.create({
-    data: withOrgFromCtx({
-      accountId: account.id,
-      folder: "SENT",
-      threadId: params.subject.trim().toLowerCase() || messageId,
-      messageId,
-      fromAddress: account.email,
-      fromName: null,
-      toAddress: params.to.trim(),
-      subject: params.subject,
-      bodyText: params.bodyText ?? null,
-      bodyHtml: params.bodyHtml ?? null,
-      isRead: true,
-      receivedAt: new Date(),
-    }),
-  });
-  await applyRulesToEmail(created);
-  return { id: created.id };
+  const current = getRequestContext();
+  return runWithContext(
+    {
+      organizationId: account.organizationId,
+      userId: current?.userId ?? account.ownerUserId ?? "SYSTEM",
+      isSuperAdmin: current?.isSuperAdmin ?? false,
+      actor: current?.actor ?? { type: "SYSTEM", label: "email-send" },
+    },
+    async () => {
+      const created = await prisma.email.create({
+        data: withOrg(
+          {
+            accountId: account.id,
+            folder: "SENT" as const,
+            threadId: params.subject.trim().toLowerCase() || messageId,
+            messageId,
+            fromAddress: account.email,
+            fromName: null,
+            toAddress: params.to.trim(),
+            subject: params.subject,
+            bodyText: params.bodyText ?? null,
+            bodyHtml: params.bodyHtml ?? null,
+            isRead: true,
+            receivedAt: new Date(),
+          },
+          account.organizationId,
+        ),
+      });
+      await applyRulesToEmail(created);
+      return { id: created.id };
+    },
+  );
 }

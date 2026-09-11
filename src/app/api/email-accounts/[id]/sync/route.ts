@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth } from "@/lib/auth-helpers";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getAccessibleAccount, resolveEmailAccess } from "@/services/email-accounts";
 import { syncEmailAccount } from "@/services/email-sync";
@@ -11,18 +11,26 @@ export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const r = await requireAuth();
-  if (!r.ok) return r.response;
-  const denied = await requirePermission(r.session.user, "email_account:connect");
-  if (denied) return denied;
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "email_account:connect");
+    if (denied) return denied;
 
-  const { id } = await params;
-  const access = await resolveEmailAccess(r.session.user);
-  const account = await getAccessibleAccount(id, access);
-  if (!account) {
-    return NextResponse.json({ message: "Conta não encontrada." }, { status: 404 });
-  }
+    const organizationId = session.user.organizationId;
+    if (!organizationId) {
+      return NextResponse.json(
+        { message: "Sessão sem organização — contate o suporte." },
+        { status: 401 },
+      );
+    }
 
-  const result = await syncEmailAccount(id);
-  return NextResponse.json(result);
+    const { id } = await params;
+    const access = await resolveEmailAccess(session.user);
+    const account = await getAccessibleAccount(id, access);
+    if (!account) {
+      return NextResponse.json({ message: "Conta não encontrada." }, { status: 404 });
+    }
+
+    const result = await syncEmailAccount(id, organizationId);
+    return NextResponse.json(result);
+  });
 }
