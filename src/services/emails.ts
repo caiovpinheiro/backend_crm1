@@ -27,6 +27,7 @@ export type EmailListItemDto = {
 
 export type EmailDetailDto = EmailListItemDto & {
   bodyHtml: string | null;
+  messageId: string | null;
   account: { id: string; email: string; visibility: SerializedEmailAccount["visibility"] };
 };
 
@@ -134,6 +135,7 @@ export async function getEmail(id: string, accountIds: string[]): Promise<EmailD
   return {
     ...serializeListItem(row),
     bodyHtml: row.bodyHtml,
+    messageId: row.messageId ?? null,
     account: row.account,
   };
 }
@@ -179,6 +181,7 @@ export async function sendEmail(params: {
   subject: string;
   bodyText?: string;
   bodyHtml?: string;
+  inReplyTo?: string;
 }) {
   const account = await prisma.emailAccount.findFirst({ where: { id: params.accountId } });
   if (!account) throw new Error("Conta de e-mail não encontrada.");
@@ -196,6 +199,7 @@ export async function sendEmail(params: {
       subject: params.subject,
       text: params.bodyText,
       html: params.bodyHtml,
+      inReplyTo: params.inReplyTo,
     },
   );
   if (!sent.ok) throw new Error(sent.message);

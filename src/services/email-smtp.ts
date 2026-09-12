@@ -216,19 +216,44 @@ export async function testSmtpConnection(input: SmtpConnectInput): Promise<Email
   }
 }
 
+function isBlankHtml(html?: string): boolean {
+  if (!html?.trim()) return true;
+  return html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim() === "";
+}
+
+function textFromHtml(html?: string): string {
+  if (!html) return "";
+  return html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+\n/g, "\n").replace(/[ \t]+/g, " ").trim();
+}
+
 export async function sendSmtpMail(
   input: SmtpConnectInput,
-  mail: { to: string; subject: string; text?: string; html?: string },
+  mail: {
+    to: string;
+    subject: string;
+    text?: string;
+    html?: string;
+    inReplyTo?: string;
+  },
 ): Promise<{ ok: true; messageId: string } | EmailFieldError> {
+  const text = mail.text?.trim() || textFromHtml(mail.html) || undefined;
+  const html = isBlankHtml(mail.html) ? undefined : mail.html;
+  const payload = {
+    from: input.email,
+    to: mail.to,
+    subject: mail.subject,
+    text: text ?? " ",
+    html,
+    ...(mail.inReplyTo
+      ? {
+          inReplyTo: mail.inReplyTo.includes("<") ? mail.inReplyTo : `<${mail.inReplyTo}>`,
+          references: mail.inReplyTo.includes("<") ? mail.inReplyTo : `<${mail.inReplyTo}>`,
+        }
+      : {}),
+  };
   const transport = createTransport(input);
   try {
-    const info = await transport.sendMail({
-      from: input.email,
-      to: mail.to,
-      subject: mail.subject,
-      text: mail.text,
-      html: mail.html,
-    });
+    const info = await transport.sendMail(payload);
     return { ok: true, messageId: info.messageId || `smtp-${Date.now()}@${input.smtpHost}` };
   } catch (err) {
     const relay = await getSmtpRelayConfig();
@@ -242,15 +267,7 @@ export async function sendSmtpMail(
     // From continua o e-mail da conta: o relay precisa aceitar esse remetente
     // (sender verificado / domínio autorizado no provedor do relay).
     try {
-      const info = await withRelay(relay, input.smtpHost, (t) =>
-        t.sendMail({
-          from: input.email,
-          to: mail.to,
-          subject: mail.subject,
-          text: mail.text,
-          html: mail.html,
-        }),
-      );
+      const info = await withRelay(relay, input.smtpHost, (t) => t.sendMail(payload));
       return { ok: true, messageId: info.messageId || `relay-${Date.now()}@${relay.host}` };
     } catch (relayErr) {
       return mapSmtpError(relayErr, relay.host);

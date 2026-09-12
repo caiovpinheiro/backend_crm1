@@ -40,6 +40,7 @@ export async function POST(request: Request) {
       subject,
       bodyText: typeof body.bodyText === "string" ? body.bodyText : undefined,
       bodyHtml: typeof body.bodyHtml === "string" ? body.bodyHtml : undefined,
+      inReplyTo: typeof body.inReplyTo === "string" ? body.inReplyTo : undefined,
     });
     return NextResponse.json(sent, { status: 201 });
   } catch (e) {
