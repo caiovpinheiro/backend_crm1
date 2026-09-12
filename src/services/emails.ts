@@ -68,6 +68,7 @@ export async function listEmails(params: {
   folder?: EmailFolder;
   customFolderId?: string;
   search?: string;
+  unreadOnly?: boolean;
   page?: number;
   perPage?: number;
 }) {
@@ -101,6 +102,7 @@ export async function listEmails(params: {
           ],
         }
       : {}),
+    ...(params.unreadOnly ? { isRead: false } : {}),
   };
 
   const [total, rows] = await Promise.all([

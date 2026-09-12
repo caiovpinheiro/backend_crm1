@@ -24,6 +24,7 @@ export async function GET(request: Request) {
     folder: folder ?? undefined,
     customFolderId: url.searchParams.get("customFolderId") ?? undefined,
     search: url.searchParams.get("q") ?? undefined,
+    unreadOnly: url.searchParams.get("unreadOnly") === "1",
     page: Number(url.searchParams.get("page") ?? 1) || 1,
     perPage: Number(url.searchParams.get("perPage") ?? 25) || 25,
   });
