@@ -5467,6 +5467,12 @@ model EmailAccount {
   /// Cria contato/lead para remetentes desconhecidos ao responder.
   createContactsForReplies Boolean         @default(false) @map("create_contacts_for_replies")
 
+  /// Resposta automática de ausência (estilo Outlook).
+  oooEnabled  Boolean   @default(false) @map("ooo_enabled")
+  oooMessage  String?   @map("ooo_message") @db.Text
+  oooStartsAt DateTime? @map("ooo_starts_at")
+  oooEndsAt   DateTime? @map("ooo_ends_at")
+
   /// Proprietário da caixa (relevante quando visibility=PERSONAL).
   ownerUserId String? @map("owner_user_id")
   owner       User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
@@ -5553,6 +5559,8 @@ model Email {
   customFolder   EmailCustomFolder? @relation(fields: [customFolderId], references: [id], onDelete: SetNull)
 
   isRead Boolean @default(false) @map("is_read")
+  /// Já gerou encaminhamento/resposta automática — evita loop no reprocessar.
+  autoHandled Boolean @default(false) @map("auto_handled")
 
   receivedAt DateTime? @map("received_at")
   createdAt  DateTime  @default(now()) @map("created_at")
@@ -5607,15 +5615,19 @@ model EmailRule {
   name     String
   isActive Boolean @default(true) @map("is_active")
 
-  /// "FROM" | "TO" | "SUBJECT"
+  /// "FROM" | "TO" | "SUBJECT" | "BODY" | "ALWAYS"
   conditionField String @map("condition_field")
-  /// Substring buscada (case-insensitive) no campo escolhido.
+  /// Substring buscada (case-insensitive) no campo escolhido. Ignorada em ALWAYS.
   conditionValue String @map("condition_value")
 
-  /// "MOVE" | "TRASH"
+  /// "MOVE" | "TRASH" | "SPAM" | "FORWARD" | "REPLY" | "MARK_READ"
   action         String             @map("action")
   targetFolderId String?            @map("target_folder_id")
   targetFolder   EmailCustomFolder? @relation(fields: [targetFolderId], references: [id], onDelete: SetNull)
+  /// Destinatário do encaminhamento (FORWARD).
+  actionTarget   String?            @map("action_target")
+  /// Corpo da resposta automática (REPLY).
+  actionBody     String?            @map("action_body") @db.Text
 
   priority  Int      @default(0)
   createdAt DateTime @default(now()) @map("created_at")

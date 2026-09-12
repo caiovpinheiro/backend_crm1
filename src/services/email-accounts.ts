@@ -44,6 +44,10 @@ export type SerializedEmailAccount = {
   ownerUserId: string | null;
   unreadCount: number;
   folderUnread: { inbox: number; sent: number; trash: number };
+  oooEnabled: boolean;
+  oooMessage: string | null;
+  oooStartsAt: string | null;
+  oooEndsAt: string | null;
   createdAt: string;
   lastSyncedAt: string | null;
 };
@@ -179,6 +183,10 @@ function serializeBase(acc: EmailAccount): Omit<SerializedEmailAccount, "unreadC
     groupInThreads: acc.groupInThreads,
     createContactsForReplies: acc.createContactsForReplies,
     ownerUserId: acc.ownerUserId,
+    oooEnabled: acc.oooEnabled,
+    oooMessage: acc.oooMessage,
+    oooStartsAt: acc.oooStartsAt?.toISOString() ?? null,
+    oooEndsAt: acc.oooEndsAt?.toISOString() ?? null,
     createdAt: acc.createdAt.toISOString(),
     lastSyncedAt: acc.lastSyncedAt?.toISOString() ?? null,
   };
