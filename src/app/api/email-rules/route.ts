@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getAccessibleAccount, resolveEmailAccess } from "@/services/email-accounts";
-import { createEmailRule, listEmailRules } from "@/services/email-rules";
+import { createEmailRule, isRuleAction, isRuleField, listEmailRules } from "@/services/email-rules";
 
 export const dynamic = "force-dynamic";
 
@@ -41,14 +41,26 @@ export async function POST(request: Request) {
     const conditionField = body.conditionField;
     const conditionValue = typeof body.conditionValue === "string" ? body.conditionValue : "";
     const action = body.action;
-    if (!accountId || !name || !conditionValue) {
-      return NextResponse.json({ message: "accountId, name e conditionValue são obrigatórios." }, { status: 400 });
+    if (!accountId || !name) {
+      return NextResponse.json({ message: "accountId e name são obrigatórios." }, { status: 400 });
     }
-    if (conditionField !== "FROM" && conditionField !== "TO" && conditionField !== "SUBJECT") {
+    if (!isRuleField(conditionField)) {
       return NextResponse.json({ message: "conditionField inválido." }, { status: 400 });
     }
-    if (action !== "MOVE" && action !== "TRASH") {
+    if (!isRuleAction(action)) {
       return NextResponse.json({ message: "action inválida." }, { status: 400 });
+    }
+    if (conditionField !== "ALWAYS" && !conditionValue.trim()) {
+      return NextResponse.json({ message: "conditionValue é obrigatório." }, { status: 400 });
+    }
+    if (action === "MOVE" && typeof body.targetFolderId !== "string") {
+      return NextResponse.json({ message: "Selecione a pasta de destino." }, { status: 400 });
+    }
+    if (action === "FORWARD" && (typeof body.actionTarget !== "string" || !body.actionTarget.includes("@"))) {
+      return NextResponse.json({ message: "Informe o e-mail para encaminhar." }, { status: 400 });
+    }
+    if (action === "REPLY" && (typeof body.actionBody !== "string" || !body.actionBody.trim())) {
+      return NextResponse.json({ message: "Escreva o texto da resposta automática." }, { status: 400 });
     }
 
     const account = await getAccessibleAccount(accountId, access);
@@ -63,6 +75,8 @@ export async function POST(request: Request) {
       conditionValue,
       action,
       targetFolderId: typeof body.targetFolderId === "string" ? body.targetFolderId : null,
+      actionTarget: typeof body.actionTarget === "string" ? body.actionTarget : null,
+      actionBody: typeof body.actionBody === "string" ? body.actionBody : null,
       priority: typeof body.priority === "number" ? body.priority : 0,
       organizationId,
     });

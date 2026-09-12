@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
-import { deleteEmailRule, updateEmailRule } from "@/services/email-rules";
+import { deleteEmailRule, isRuleAction, isRuleField, updateEmailRule } from "@/services/email-rules";
 
 export const dynamic = "force-dynamic";
 
@@ -26,14 +26,17 @@ export async function PATCH(
   const rule = await updateEmailRule(id, {
     name: typeof body.name === "string" ? body.name : undefined,
     isActive: typeof body.isActive === "boolean" ? body.isActive : undefined,
-    conditionField:
-      body.conditionField === "FROM" || body.conditionField === "TO" || body.conditionField === "SUBJECT"
-        ? body.conditionField
-        : undefined,
+    conditionField: isRuleField(body.conditionField) ? body.conditionField : undefined,
     conditionValue: typeof body.conditionValue === "string" ? body.conditionValue : undefined,
-    action: body.action === "MOVE" || body.action === "TRASH" ? body.action : undefined,
+    action: isRuleAction(body.action) ? body.action : undefined,
     targetFolderId: body.targetFolderId === null || typeof body.targetFolderId === "string"
       ? (body.targetFolderId as string | null)
+      : undefined,
+    actionTarget: body.actionTarget === null || typeof body.actionTarget === "string"
+      ? (body.actionTarget as string | null)
+      : undefined,
+    actionBody: body.actionBody === null || typeof body.actionBody === "string"
+      ? (body.actionBody as string | null)
       : undefined,
     priority: typeof body.priority === "number" ? body.priority : undefined,
   });
