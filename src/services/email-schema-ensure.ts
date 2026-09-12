@@ -3,15 +3,17 @@ import { Prisma } from "@prisma/client";
 import { prismaBase } from "@/lib/prisma-base";
 
 /**
- * Auto-cura da migration `20260912133000_email_outlook_rules`.
+ * Auto-cura das migrations de e-mail (`outlook_rules`, `spam_folder`).
  *
  * Produção sobe com `SKIP_PRISMA_MIGRATE=1`. O Prisma Client passa a
  * selecionar `auto_handled` / `ooo_*` / `action_*` sem as colunas
  * existirem → P2022 no GET `/api/emails` (a caixa mostra
  * "Erro ao listar e-mails") e no GET `/api/email-accounts`.
- * `ADD COLUMN IF NOT EXISTS` é idempotente; uma tentativa por processo.
+ * Sem o valor `SPAM` no enum, listar/mover para Spam falha.
+ * DDL é idempotente; uma tentativa por processo.
  */
 let outlookColumnsEnsured = false;
+let spamFolderEnsured = false;
 
 export function isMissingEmailOutlookColumn(error: unknown): boolean {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022") {
@@ -27,8 +29,26 @@ export function isMissingEmailOutlookColumn(error: unknown): boolean {
   );
 }
 
+export async function ensureEmailSpamFolder(): Promise<boolean> {
+  if (spamFolderEnsured) return true;
+  try {
+    await prismaBase.$executeRawUnsafe(
+      `ALTER TYPE "EmailFolder" ADD VALUE IF NOT EXISTS 'SPAM'`,
+    );
+    spamFolderEnsured = true;
+    return true;
+  } catch (e) {
+    console.warn(
+      "[email] falha ao aplicar pasta Spam (enum):",
+      e instanceof Error ? e.message : e,
+    );
+    return false;
+  }
+}
+
 export async function ensureEmailOutlookColumns(): Promise<boolean> {
-  if (outlookColumnsEnsured) return true;
+  const spamOk = await ensureEmailSpamFolder();
+  if (outlookColumnsEnsured) return spamOk;
   try {
     await prismaBase.$executeRawUnsafe(`
       ALTER TABLE "email_rules"
@@ -47,7 +67,7 @@ export async function ensureEmailOutlookColumns(): Promise<boolean> {
         ADD COLUMN IF NOT EXISTS "auto_handled" BOOLEAN NOT NULL DEFAULT false
     `);
     outlookColumnsEnsured = true;
-    return true;
+    return spamOk;
   } catch (e) {
     console.warn(
       "[email] falha ao aplicar colunas Outlook (DDL):",

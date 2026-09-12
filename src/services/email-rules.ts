@@ -269,11 +269,75 @@ async function recordOutgoing(
   return true;
 }
 
+export function normalizeSenderAddress(raw: string): string {
+  const trimmed = raw.trim();
+  const angle = trimmed.match(/<([^>]+)>/);
+  return (angle?.[1] ?? trimmed).trim().toLowerCase();
+}
+
+export async function setSenderSpamRule(
+  accountId: string,
+  fromAddress: string,
+  active: boolean,
+): Promise<boolean> {
+  const addr = normalizeSenderAddress(fromAddress);
+  if (!addr.includes("@")) return false;
+  await ensureEmailOutlookColumns();
+
+  const account = await prisma.emailAccount.findFirst({
+    where: { id: accountId },
+    select: { id: true, organizationId: true },
+  });
+  if (!account) return false;
+
+  const existing = await prisma.emailRule.findFirst({
+    where: {
+      accountId,
+      action: "SPAM",
+      conditionField: "FROM",
+      conditionValue: { equals: addr, mode: "insensitive" },
+    },
+    select: { id: true, isActive: true },
+  });
+  if (existing) {
+    if (existing.isActive !== active) {
+      await prisma.emailRule.update({
+        where: { id: existing.id },
+        data: { isActive: active },
+      });
+    }
+    return true;
+  }
+  if (!active) return false;
+
+  await prisma.emailRule.create({
+    data: withOrg(
+      {
+        accountId,
+        name: `Spam: ${addr}`,
+        isActive: true,
+        conditionField: "FROM",
+        conditionValue: addr,
+        action: "SPAM",
+        priority: 0,
+      },
+      account.organizationId,
+    ),
+  });
+  return true;
+}
+
 async function applyAction(email: Email, account: EmailAccount, rule: EmailRule): Promise<Email> {
-  if (rule.action === "TRASH" || rule.action === "SPAM") {
+  if (rule.action === "TRASH") {
     return prisma.email.update({
       where: { id: email.id },
-      data: { folder: "TRASH", customFolderId: null, isRead: rule.action === "SPAM" ? true : email.isRead },
+      data: { folder: "TRASH", customFolderId: null },
+    });
+  }
+  if (rule.action === "SPAM") {
+    return prisma.email.update({
+      where: { id: email.id },
+      data: { folder: "SPAM", customFolderId: null, isRead: true },
     });
   }
   if (rule.action === "MOVE" && rule.targetFolderId) {

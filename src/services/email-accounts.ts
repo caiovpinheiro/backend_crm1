@@ -64,7 +64,7 @@ export type SerializedEmailAccount = {
   createContactsForReplies: boolean;
   ownerUserId: string | null;
   unreadCount: number;
-  folderUnread: { inbox: number; sent: number; trash: number };
+  folderUnread: { inbox: number; sent: number; spam: number; trash: number };
   oooEnabled: boolean;
   oooMessage: string | null;
   oooStartsAt: string | null;
@@ -281,17 +281,19 @@ export async function listEmailAccounts(opts: {
     _count: { _all: true },
   });
 
-  const byAccount = new Map<string, { inbox: number; sent: number; trash: number }>();
+  const emptyUnread = () => ({ inbox: 0, sent: 0, spam: 0, trash: 0 });
+  const byAccount = new Map<string, ReturnType<typeof emptyUnread>>();
   for (const row of unread) {
-    const cur = byAccount.get(row.accountId) ?? { inbox: 0, sent: 0, trash: 0 };
+    const cur = byAccount.get(row.accountId) ?? emptyUnread();
     if (row.folder === "INBOX") cur.inbox = row._count._all;
     if (row.folder === "SENT") cur.sent = row._count._all;
+    if (row.folder === "SPAM") cur.spam = row._count._all;
     if (row.folder === "TRASH") cur.trash = row._count._all;
     byAccount.set(row.accountId, cur);
   }
 
   return accounts.map((acc) => {
-    const folderUnread = byAccount.get(acc.id) ?? { inbox: 0, sent: 0, trash: 0 };
+    const folderUnread = byAccount.get(acc.id) ?? emptyUnread();
     return {
       ...serializeBase(acc),
       unreadCount: folderUnread.inbox,
@@ -357,7 +359,7 @@ export async function connectEmailAccount(
         account: {
           ...serializeBase(created),
           unreadCount: 0,
-          folderUnread: { inbox: 0, sent: 0, trash: 0 },
+          folderUnread: { inbox: 0, sent: 0, spam: 0, trash: 0 },
         },
       };
     },
