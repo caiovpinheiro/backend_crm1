@@ -5301,6 +5301,7 @@ enum EmailVisibility {
 enum EmailFolder {
   INBOX
   SENT
+  SPAM
   TRASH
 }
 

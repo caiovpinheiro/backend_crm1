@@ -6,7 +6,7 @@ import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { decryptAccountPassword, type SerializedEmailAccount } from "@/services/email-accounts";
 import { ensureEmailOutlookColumns } from "@/services/email-schema-ensure";
 import { sendSmtpMail } from "@/services/email-smtp";
-import { applyRulesToEmail } from "@/services/email-rules";
+import { applyRulesToEmail, normalizeSenderAddress, setSenderSpamRule } from "@/services/email-rules";
 
 const EMAIL_LIST_SELECT = {
   id: true,
@@ -24,7 +24,7 @@ const EMAIL_LIST_SELECT = {
   contact: { select: { id: true, name: true, avatarUrl: true } },
 } as const;
 
-const FOLDERS = new Set<EmailFolder>(["INBOX", "SENT", "TRASH"]);
+const FOLDERS = new Set<EmailFolder>(["INBOX", "SENT", "SPAM", "TRASH"]);
 
 export type EmailListItemDto = {
   id: string;
@@ -223,6 +223,75 @@ export async function deleteEmail(id: string, accountIds: string[]) {
     data: { folder: "TRASH", customFolderId: null },
   });
   return result.count > 0;
+}
+
+export async function markEmailsAsSpam(
+  ids: string[],
+  accountIds: string[],
+  undo = false,
+): Promise<{ updated: number; rules: number }> {
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 100);
+  if (unique.length === 0 || accountIds.length === 0) return { updated: 0, rules: 0 };
+
+  await ensureEmailOutlookColumns();
+
+  const rows = await prisma.email.findMany({
+    where: { id: { in: unique }, accountId: { in: accountIds }, folder: { not: "SENT" } },
+    select: { id: true, accountId: true, fromAddress: true },
+  });
+  if (rows.length === 0) return { updated: 0, rules: 0 };
+
+  const senders = new Map<string, { accountId: string; addr: string; ids: string[] }>();
+  const leftoverIds: string[] = [];
+  for (const row of rows) {
+    const addr = normalizeSenderAddress(row.fromAddress);
+    if (!addr.includes("@")) {
+      leftoverIds.push(row.id);
+      continue;
+    }
+    const key = `${row.accountId}:${addr}`;
+    const cur = senders.get(key) ?? { accountId: row.accountId, addr, ids: [] };
+    cur.ids.push(row.id);
+    senders.set(key, cur);
+  }
+
+  let rules = 0;
+  let updated = 0;
+
+  for (const { accountId, addr, ids } of senders.values()) {
+    const ok = await setSenderSpamRule(accountId, addr, !undo);
+    if (ok) rules += 1;
+    const result = await prisma.email.updateMany({
+      where: {
+        accountId,
+        folder: undo ? "SPAM" : { not: "SENT" },
+        OR: [
+          { id: { in: ids } },
+          { fromAddress: { equals: addr, mode: "insensitive" } },
+          { fromAddress: { contains: `<${addr}>`, mode: "insensitive" } },
+        ],
+      },
+      data: undo
+        ? { folder: "INBOX", customFolderId: null }
+        : { folder: "SPAM", customFolderId: null, isRead: true },
+    });
+    updated += result.count;
+  }
+
+  if (leftoverIds.length > 0) {
+    const result = await prisma.email.updateMany({
+      where: {
+        id: { in: leftoverIds },
+        folder: undo ? "SPAM" : { not: "SENT" },
+      },
+      data: undo
+        ? { folder: "INBOX", customFolderId: null }
+        : { folder: "SPAM", customFolderId: null, isRead: true },
+    });
+    updated += result.count;
+  }
+
+  return { updated, rules };
 }
 
 export async function sendEmail(params: {
