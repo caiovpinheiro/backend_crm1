@@ -1,6 +1,10 @@
 import type { Email, EmailAccount, EmailRule } from "@prisma/client";
 
 import { decryptAccountPassword } from "@/services/email-accounts";
+import {
+  ensureEmailOutlookColumns,
+  isMissingEmailOutlookColumn,
+} from "@/services/email-schema-ensure";
 import { sendSmtpMail } from "@/services/email-smtp";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
@@ -39,7 +43,20 @@ export function isRuleAction(v: unknown): v is EmailRuleAction {
   return typeof v === "string" && (RULE_ACTIONS as readonly string[]).includes(v);
 }
 
-function serializeRule(rule: EmailRule): EmailRuleDto {
+const RULE_BASE_SELECT = {
+  id: true,
+  accountId: true,
+  name: true,
+  isActive: true,
+  conditionField: true,
+  conditionValue: true,
+  action: true,
+  targetFolderId: true,
+  priority: true,
+  createdAt: true,
+} as const;
+
+function serializeRule(rule: Pick<EmailRule, keyof EmailRuleDto> & Partial<Pick<EmailRule, "actionTarget" | "actionBody">>): EmailRuleDto {
   return {
     id: rule.id,
     accountId: rule.accountId,
@@ -49,19 +66,33 @@ function serializeRule(rule: EmailRule): EmailRuleDto {
     conditionValue: rule.conditionValue,
     action: rule.action as EmailRuleAction,
     targetFolderId: rule.targetFolderId,
-    actionTarget: rule.actionTarget,
-    actionBody: rule.actionBody,
+    actionTarget: rule.actionTarget ?? null,
+    actionBody: rule.actionBody ?? null,
     priority: rule.priority,
     createdAt: rule.createdAt.toISOString(),
   };
 }
 
 export async function listEmailRules(accountId?: string): Promise<EmailRuleDto[]> {
-  const rules = await prisma.emailRule.findMany({
-    where: accountId ? { accountId } : undefined,
-    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-  });
-  return rules.map(serializeRule);
+  await ensureEmailOutlookColumns();
+  const where = accountId ? { accountId } : undefined;
+  const orderBy = [{ priority: "asc" as const }, { createdAt: "asc" as const }];
+  try {
+    const rules = await prisma.emailRule.findMany({
+      where,
+      orderBy,
+      select: { ...RULE_BASE_SELECT, actionTarget: true, actionBody: true },
+    });
+    return rules.map(serializeRule);
+  } catch (e) {
+    if (!isMissingEmailOutlookColumn(e)) throw e;
+    const rules = await prisma.emailRule.findMany({
+      where,
+      orderBy,
+      select: RULE_BASE_SELECT,
+    });
+    return rules.map((rule) => serializeRule({ ...rule, actionTarget: null, actionBody: null }));
+  }
 }
 
 export async function createEmailRule(input: {
@@ -323,6 +354,7 @@ async function applyOoo(email: Email, account: EmailAccount): Promise<Email> {
 }
 
 export async function applyRulesToEmail(email: Email): Promise<Email> {
+  await ensureEmailOutlookColumns();
   if (email.folder === "SENT") return email;
 
   const account = await prisma.emailAccount.findFirst({ where: { id: email.accountId } });

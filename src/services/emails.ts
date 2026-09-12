@@ -4,8 +4,25 @@ import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { decryptAccountPassword, type SerializedEmailAccount } from "@/services/email-accounts";
+import { ensureEmailOutlookColumns } from "@/services/email-schema-ensure";
 import { sendSmtpMail } from "@/services/email-smtp";
 import { applyRulesToEmail } from "@/services/email-rules";
+
+const EMAIL_LIST_SELECT = {
+  id: true,
+  accountId: true,
+  folder: true,
+  customFolderId: true,
+  threadId: true,
+  fromAddress: true,
+  fromName: true,
+  toAddress: true,
+  subject: true,
+  bodyText: true,
+  isRead: true,
+  receivedAt: true,
+  contact: { select: { id: true, name: true, avatarUrl: true } },
+} as const;
 
 const FOLDERS = new Set<EmailFolder>(["INBOX", "SENT", "TRASH"]);
 
@@ -83,6 +100,8 @@ export async function listEmails(params: {
     return { emails: [] as EmailListItemDto[], pagination: { page, perPage, total: 0, pages: 1 } };
   }
 
+  await ensureEmailOutlookColumns();
+
   const folder = params.folder && FOLDERS.has(params.folder) ? params.folder : undefined;
   const q = params.search?.trim();
 
@@ -113,7 +132,7 @@ export async function listEmails(params: {
       orderBy: { receivedAt: "desc" },
       skip: (page - 1) * perPage,
       take: perPage,
-      include: { contact: { select: { id: true, name: true, avatarUrl: true } } },
+      select: EMAIL_LIST_SELECT,
     }),
   ]);
 
@@ -124,10 +143,13 @@ export async function listEmails(params: {
 }
 
 export async function getEmail(id: string, accountIds: string[]): Promise<EmailDetailDto | null> {
+  await ensureEmailOutlookColumns();
   const row = await prisma.email.findFirst({
     where: { id, accountId: { in: accountIds } },
-    include: {
-      contact: { select: { id: true, name: true, avatarUrl: true } },
+    select: {
+      ...EMAIL_LIST_SELECT,
+      bodyHtml: true,
+      messageId: true,
       account: { select: { id: true, email: true, visibility: true } },
     },
   });
@@ -183,6 +205,7 @@ export async function sendEmail(params: {
   bodyHtml?: string;
   inReplyTo?: string;
 }) {
+  await ensureEmailOutlookColumns();
   const account = await prisma.emailAccount.findFirst({ where: { id: params.accountId } });
   if (!account) throw new Error("Conta de e-mail não encontrada.");
   const password = decryptAccountPassword(account);
