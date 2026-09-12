@@ -170,6 +170,34 @@ export async function markEmailRead(id: string, accountIds: string[], isRead: bo
   return result.count > 0;
 }
 
+export async function bulkMoveEmails(
+  ids: string[],
+  accountIds: string[],
+  input: { systemFolder?: EmailFolder; customFolderId?: string | null },
+) {
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 100);
+  if (unique.length === 0 || accountIds.length === 0) return 0;
+
+  let scopedAccountIds = accountIds;
+  if (input.customFolderId) {
+    const folder = await prisma.emailCustomFolder.findFirst({
+      where: { id: input.customFolderId, accountId: { in: accountIds } },
+      select: { accountId: true },
+    });
+    if (!folder) return 0;
+    scopedAccountIds = [folder.accountId];
+  }
+
+  const result = await prisma.email.updateMany({
+    where: { id: { in: unique }, accountId: { in: scopedAccountIds } },
+    data: {
+      ...(input.systemFolder && FOLDERS.has(input.systemFolder) ? { folder: input.systemFolder } : {}),
+      ...(input.customFolderId !== undefined ? { customFolderId: input.customFolderId } : {}),
+    },
+  });
+  return result.count;
+}
+
 export async function moveEmail(
   id: string,
   accountIds: string[],
