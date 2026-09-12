@@ -856,6 +856,7 @@ export async function executeDistribution(
         await tx.conversation.update({
           where: { id: input.conversationId! },
           data: { assignedToId: null },
+          select: { id: true },
         });
         if (contactId) {
           await tx.contact.update({
@@ -903,6 +904,7 @@ export async function executeDistribution(
       await prisma.conversation.update({
         where: { id: input.conversationId },
         data: { departmentId: explicitDeptIds[0]! },
+        select: { id: true },
       });
     }
     responsibles = await getDistributionResponsibles({

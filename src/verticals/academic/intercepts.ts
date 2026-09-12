@@ -209,6 +209,7 @@ export async function runAcademicInterceptPipeline(
                     await tx.conversation.update({
                       where: { id: args.conversationId },
                       data: { assignedToId: aiId },
+                      select: { id: true },
                     });
                     await tx.contact.update({
                       where: { id: args.contactId },
@@ -305,6 +306,7 @@ export async function runAcademicInterceptPipeline(
                   await tx.conversation.update({
                     where: { id: args.conversationId },
                     data: { assignedToId: avaAi },
+                    select: { id: true },
                   });
                   await tx.contact.update({
                     where: { id: args.contactId },
@@ -391,6 +393,7 @@ export async function runAcademicInterceptPipeline(
                   await tx.conversation.update({
                     where: { id: args.conversationId },
                     data: { assignedToId: greetAi },
+                    select: { id: true },
                   });
                   await tx.contact.update({
                     where: { id: args.contactId },
@@ -688,6 +691,7 @@ export async function runAcademicInterceptPipeline(
                 await tx.conversation.update({
                   where: { id: args.conversationId },
                   data: { assignedToId: assignee.id },
+                  select: { id: true },
                 });
                 await tx.contact.update({
                   where: { id: args.contactId },
@@ -778,6 +782,7 @@ export async function runAcademicInterceptPipeline(
                       await tx.conversation.update({
                         where: { id: args.conversationId },
                         data: { assignedToId: null },
+                        select: { id: true },
                       });
                       await tx.contact.update({
                         where: { id: args.contactId },

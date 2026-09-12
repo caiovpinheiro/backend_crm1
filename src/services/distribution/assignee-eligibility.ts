@@ -117,6 +117,7 @@ export async function clearOwnershipForRedistribution(args: {
     await tx.conversation.update({
       where: { id: args.conversationId },
       data: { assignedToId: null },
+      select: { id: true },
     });
     await tx.contact.update({
       where: { id: args.contactId },

@@ -657,6 +657,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           await tx.conversation.update({
             where: { id: args.conversationId },
             data: { assignedToId: aiAgent.id },
+            select: { id: true },
           });
           await tx.contact.update({
             where: { id: args.contactId },
@@ -741,6 +742,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       await prisma.conversation.update({
         where: { id: args.conversationId },
         data: { assignedToId: null },
+        select: { id: true },
       });
       await prisma.contact.update({
         where: { id: args.contactId },
@@ -1247,6 +1249,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           await tx.conversation.update({
             where: { id: args.conversationId },
             data: { assignedToId: assignee.id },
+            select: { id: true },
           });
           await tx.contact.update({
             where: { id: args.contactId },
