@@ -246,6 +246,7 @@ async function assignConversationToHuman(args: {
     await tx.conversation.update({
       where: { id: args.conversationId },
       data: { assignedToId: args.humanUserId },
+      select: { id: true },
     });
     await tx.contact.update({
       where: { id: args.contactId },
@@ -507,6 +508,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       await tx.conversation.update({
         where: { id: args.conversationId },
         data: { assignedToId: null },
+        select: { id: true },
       });
       await tx.contact.update({
         where: { id: contactId },
@@ -605,6 +607,7 @@ export async function tryAssignFirstAttendanceAi(args: {
         // sido limpo por propagate, mas o bot já falou — reabrir com
         // aiGreetedAt=null reenvia openingMessage no "Ok".
       },
+      select: { id: true },
     });
     await tx.contact.update({
       where: { id: contactId },

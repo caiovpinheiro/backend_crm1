@@ -120,6 +120,7 @@ export async function clearOwnershipForRedistribution(args: {
       // routeMode: a rota leads destinada continua valendo até uma nova
       // atribuição explícita.
       data: { assignedToId: null, assignedVia: null },
+      select: { id: true },
     });
     await tx.contact.update({
       where: { id: args.contactId },

@@ -144,6 +144,7 @@ export async function keepHumanAfterAutomationClose(args: {
     await tx.conversation.update({
       where: { id: args.conversationId },
       data: { assignedToId: humanId },
+      select: { id: true },
     });
     await tx.contact.update({
       where: { id: args.contactId },

@@ -90,6 +90,7 @@ export async function releaseAiAssigneeIfDisabled(args: {
     await tx.conversation.update({
       where: { id: args.conversationId },
       data: { assignedToId: null },
+      select: { id: true },
     });
     if (!contactId) return;
     const contact = await tx.contact.findUnique({

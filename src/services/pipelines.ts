@@ -253,7 +253,7 @@ export async function allocateStageSlug(
   });
 }
 
-const stageWithCountSelect = {
+const stageSelect = {
   id: true,
   name: true,
   slug: true,
@@ -266,6 +266,10 @@ const stageWithCountSelect = {
   isWon: true,
   isLost: true,
   pipelineId: true,
+} satisfies Prisma.StageSelect;
+
+const stageWithCountSelect = {
+  ...stageSelect,
   _count: { select: { deals: true } },
 } satisfies Prisma.StageSelect;
 
@@ -317,17 +321,30 @@ export async function getPipelines(options?: { allowedPipelineIds?: string[] | n
       organizationId: true,
       stages: {
         orderBy: { position: "asc" },
-        select: stageWithCountSelect,
+        select: stageSelect,
       },
     },
   });
 
+  // Um groupBy no lugar de `_count.deals` por etapa (COUNT por stage
+  // no GET /api/pipelines que o board dispara ao abrir o funil).
+  const stageIds = pipelines.flatMap((p) => p.stages.map((s) => s.id));
+  const totals =
+    stageIds.length === 0
+      ? []
+      : await prisma.deal.groupBy({
+          by: ["stageId"],
+          where: { stageId: { in: stageIds } },
+          _count: { _all: true },
+        });
+  const countByStage = new Map(totals.map((g) => [g.stageId, g._count._all]));
+
   return pipelines.map((p) => ({
     ...p,
-    stages: p.stages.map((s) => {
-      const { _count, ...rest } = s;
-      return { ...rest, dealCount: _count.deals };
-    }),
+    stages: p.stages.map((s) => ({
+      ...s,
+      dealCount: countByStage.get(s.id) ?? 0,
+    })),
   }));
 }
 

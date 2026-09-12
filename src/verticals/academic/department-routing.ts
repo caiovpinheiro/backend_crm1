@@ -839,6 +839,7 @@ export async function executeAcademicDepartmentHandoff(args: {
         // pela IA reenvia a openingMessage (bug Thabata).
         updatedAt: new Date(),
       },
+      select: { id: true },
     });
   } else {
     await prisma.conversation.update({
@@ -847,6 +848,7 @@ export async function executeAcademicDepartmentHandoff(args: {
         assignedToId: null,
         updatedAt: new Date(),
       },
+      select: { id: true },
     });
   }
 

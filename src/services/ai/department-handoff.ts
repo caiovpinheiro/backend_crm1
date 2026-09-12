@@ -190,6 +190,7 @@ export async function executeGenericDepartmentHandoff(
       assignedToId: null,
       updatedAt: new Date(),
     },
+    select: { id: true },
   });
 
   const distribution = await executeDistribution({

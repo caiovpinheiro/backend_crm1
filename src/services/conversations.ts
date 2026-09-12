@@ -44,8 +44,8 @@ import {
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 /**
  * Badges aceitam stale até o TTL. Não invalidar em cada `new_message`
- * (preview) — isso matava o Redis e o `?counts=1` seguinte rodava o
- * COUNT FILTER (200ms–1s). Invalidar só quando o ticket muda de aba
+ * (preview) — isso matava o Redis e o `?counts=1` seguinte recomputava
+ * as duas queries de badge. Invalidar só quando o ticket muda de aba
  * (assign / resolve / reopen / transfer / departamento / status).
  * 90s é rede de segurança se a invalidação falhar.
  */
@@ -1780,7 +1780,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 9,
+          k: 10,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1947,56 +1947,74 @@ async function tryComputeTabCountsOneSql(args: {
   }
 
   const collapse = args.collapseByContact;
+  const openSql = sqlConversationWhere(
+    { AND: [...shared, { closedAt: null, followUpAt: null }] },
+    orgId,
+  );
+  if (!openSql) return null;
+
   // Encerradas / Resolvendo: DISTINCT contato+canal.
-  // Todas: NÃO DISTINCT em OPEN+RESOLVED (5s+ na org). Admin = abertas
-  // (1:1) + fechadas únicas. MEMBER = COUNT(*) das filas permitidas.
+  // Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
+  // MEMBER = COUNT das filas permitidas. Abas OPEN usam o índice
+  // parcial conversations_inbox_open_idx (closedAt/followUpAt nulos).
   try {
-    const rows = await prisma.$queryRaw<
-      [{
-        entrada: number;
-        esperando: number;
-        respondidas: number;
-        agente_ia: number;
-        automacao: number;
-        resolvidos: number;
-        finalizados: number;
-        erro: number;
-        todos: number;
-        abertas: number;
-        ligar: number;
-      }]
-    >`
-      SELECT
-        ${tabCountExpr(entrada, false)} AS entrada,
-        ${tabCountExpr(esperando, false)} AS esperando,
-        ${tabCountExpr(respondidas, false)} AS respondidas,
-        ${tabCountExpr(agenteIa, false)} AS agente_ia,
-        ${tabCountExpr(automacao, false)} AS automacao,
-        ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
-        ${tabCountExpr(finalizados, collapse)} AS finalizados,
-        ${tabCountExpr(erro, false)} AS erro,
-        ${tabCountExpr(todos, false)} AS todos,
-        ${tabCountExpr(abertas, false)} AS abertas,
-        ${tabCountExpr(ligar, false)} AS ligar
-      FROM conversations c
-      WHERE ${sharedSql}
-    `;
-    const row = rows[0];
-    if (!row) return null;
+    const [allRows, openRows] = await Promise.all([
+      prisma.$queryRaw<
+        [{ todos: number; resolvidos: number; finalizados: number }]
+      >`
+        SELECT
+          ${
+            args.todosMemberCategoryTabs?.length
+              ? Prisma.sql`${tabCountExpr(todos, false)} AS todos`
+              : Prisma.sql`COUNT(*)::int AS todos`
+          },
+          ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
+          ${tabCountExpr(finalizados, collapse)} AS finalizados
+        FROM conversations c
+        WHERE ${sharedSql}
+      `,
+      prisma.$queryRaw<
+        [{
+          entrada: number;
+          esperando: number;
+          respondidas: number;
+          agente_ia: number;
+          automacao: number;
+          erro: number;
+          abertas: number;
+          ligar: number;
+        }]
+      >`
+        SELECT
+          ${tabCountExpr(entrada, false)} AS entrada,
+          ${tabCountExpr(esperando, false)} AS esperando,
+          ${tabCountExpr(respondidas, false)} AS respondidas,
+          ${tabCountExpr(agenteIa, false)} AS agente_ia,
+          ${tabCountExpr(automacao, false)} AS automacao,
+          ${tabCountExpr(erro, false)} AS erro,
+          ${tabCountExpr(abertas, false)} AS abertas,
+          ${tabCountExpr(ligar, false)} AS ligar
+        FROM conversations c
+        WHERE ${openSql}
+      `,
+    ]);
+    const all = allRows[0];
+    const open = openRows[0];
+    if (!all || !open) return null;
     return {
-      entrada: row.entrada ?? 0,
-      esperando: row.esperando ?? 0,
-      respondidas: row.respondidas ?? 0,
-      agente_ia: row.agente_ia ?? 0,
-      automacao: row.automacao ?? 0,
-      resolvidos: row.resolvidos ?? 0,
-      finalizados: row.finalizados ?? 0,
-      erro: row.erro ?? 0,
+      entrada: open.entrada ?? 0,
+      esperando: open.esperando ?? 0,
+      respondidas: open.respondidas ?? 0,
+      agente_ia: open.agente_ia ?? 0,
+      automacao: open.automacao ?? 0,
+      resolvidos: all.resolvidos ?? 0,
+      finalizados: all.finalizados ?? 0,
+      erro: open.erro ?? 0,
       todos: args.todosMemberCategoryTabs?.length
-        ? (row.todos ?? 0)
-        : (row.abertas ?? 0) + (row.resolvidos ?? 0) + (row.finalizados ?? 0),
-      abertas: row.abertas ?? 0,
-      ligar: row.ligar ?? 0,
+        ? (all.todos ?? 0)
+        : (open.abertas ?? 0) + (all.resolvidos ?? 0) + (all.finalizados ?? 0),
+      abertas: open.abertas ?? 0,
+      ligar: open.ligar ?? 0,
     };
   } catch (err) {
     getLogger("conversations").warn(

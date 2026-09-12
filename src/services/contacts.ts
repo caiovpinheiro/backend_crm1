@@ -64,6 +64,28 @@ export function isValidLifecycleStage(v: string): v is LifecycleStage {
  * pelo nome) ou gravado num duplicata com o mesmo telefone/e-mail
  * sumia do painel — o operador via o deal no CRM e o aside vazio.
  */
+function orphanDealTitleWhere(
+  name: string | null | undefined,
+): Prisma.DealWhereInput | null {
+  const titles = new Set<string>();
+  const person = (name ?? "").trim();
+  if (person) {
+    titles.add(person);
+    titles.add(`Negócio ${person}`);
+    titles.add(`Negócio - ${person}`);
+    const auto = defaultDealTitleForContact(person);
+    if (auto) titles.add(auto);
+  }
+  if (titles.size === 0) return null;
+  return {
+    contactId: null,
+    status: "OPEN",
+    OR: [...titles].map((title) => ({
+      title: { equals: title, mode: "insensitive" as const },
+    })),
+  };
+}
+
 export function dealsWhereForContact(
   contactId: string,
   phone: string | null | undefined,
@@ -84,24 +106,8 @@ export function dealsWhereForContact(
     });
   }
 
-  const titles = new Set<string>();
-  const person = (name ?? "").trim();
-  if (person) {
-    titles.add(person);
-    titles.add(`Negócio ${person}`);
-    titles.add(`Negócio - ${person}`);
-    const auto = defaultDealTitleForContact(person);
-    if (auto) titles.add(auto);
-  }
-  if (titles.size > 0) {
-    or.push({
-      contactId: null,
-      status: "OPEN",
-      OR: [...titles].map((title) => ({
-        title: { equals: title, mode: "insensitive" as const },
-      })),
-    });
-  }
+  const titleWhere = orphanDealTitleWhere(name);
+  if (titleWhere) or.push(titleWhere);
 
   return { OR: or };
 }
@@ -171,6 +177,93 @@ const assignedToSelect = {
   avatarUrl: true,
   role: true,
 } satisfies Prisma.UserSelect;
+
+const CONTACT_PANEL_DEAL_INCLUDE = {
+  stage: {
+    select: {
+      id: true,
+      name: true,
+      color: true,
+      pipelineId: true,
+      pipeline: { select: { name: true } },
+    },
+  },
+  owner: { select: assignedToSelect },
+} satisfies Prisma.DealInclude;
+
+const CONTACT_PANEL_DEAL_LIMIT = 20;
+
+type ContactPanelDeal = Awaited<
+  ReturnType<
+    typeof prisma.deal.findMany<{ include: typeof CONTACT_PANEL_DEAL_INCLUDE }>
+  >
+>[number];
+
+function sortDealsUpdatedAtDesc(a: { updatedAt: Date }, b: { updatedAt: Date }) {
+  return b.updatedAt.getTime() - a.updatedAt.getTime();
+}
+
+/**
+ * Mesmos predicados de `dealsWhereForContact`, mas 4 findMany em paralelo
+ * (UNION no JS) — o OR cross-table fazia hash de deals+contacts.
+ */
+async function findDealsForContactPanel(args: {
+  contactId: string;
+  phone: string | null | undefined;
+  email: string | null | undefined;
+  name: string | null | undefined;
+}): Promise<ContactPanelDeal[]> {
+  const variants = phoneMatchVariants(args.phone);
+  const emailNorm = args.email?.trim();
+  const titleBranch = orphanDealTitleWhere(args.name);
+
+  const [byContactId, byPhone, byEmail, byTitle] = await Promise.all([
+    prisma.deal.findMany({
+      where: { contactId: args.contactId },
+      take: CONTACT_PANEL_DEAL_LIMIT * 2,
+      orderBy: { updatedAt: "desc" },
+      include: CONTACT_PANEL_DEAL_INCLUDE,
+    }),
+    variants.length > 0
+      ? prisma.deal.findMany({
+          where: { contact: { phone: { in: variants } } },
+          take: CONTACT_PANEL_DEAL_LIMIT,
+          orderBy: { updatedAt: "desc" },
+          include: CONTACT_PANEL_DEAL_INCLUDE,
+        })
+      : Promise.resolve([] as ContactPanelDeal[]),
+    emailNorm
+      ? prisma.deal.findMany({
+          where: {
+            contact: { email: { equals: emailNorm, mode: "insensitive" } },
+          },
+          take: CONTACT_PANEL_DEAL_LIMIT,
+          orderBy: { updatedAt: "desc" },
+          include: CONTACT_PANEL_DEAL_INCLUDE,
+        })
+      : Promise.resolve([] as ContactPanelDeal[]),
+    titleBranch
+      ? prisma.deal.findMany({
+          where: titleBranch,
+          take: CONTACT_PANEL_DEAL_LIMIT,
+          orderBy: { updatedAt: "desc" },
+          include: CONTACT_PANEL_DEAL_INCLUDE,
+        })
+      : Promise.resolve([] as ContactPanelDeal[]),
+  ]);
+
+  const primary = byContactId.slice(0, CONTACT_PANEL_DEAL_LIMIT);
+  const seen = new Set(primary.map((d) => d.id));
+  const extra = [...byContactId.slice(CONTACT_PANEL_DEAL_LIMIT), ...byPhone, ...byEmail, ...byTitle]
+    .filter((d) => {
+      if (seen.has(d.id)) return false;
+      seen.add(d.id);
+      return true;
+    })
+    .sort(sortDealsUpdatedAtDesc)
+    .slice(0, CONTACT_PANEL_DEAL_LIMIT);
+  return [...primary, ...extra];
+}
 
 export async function getContacts(params: GetContactsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
@@ -920,29 +1013,13 @@ export async function getContactById(
     safe(
       "deals",
       () =>
-        prisma.deal.findMany({
-          where: { contactId: id },
-          take: 20,
-          orderBy: { updatedAt: "desc" },
-          include: {
-            // pipelineId é incluído via stage.pipelineId — Deal não tem
-            // pipelineId direto no schema. O frontend (contact-aside +
-            // inbox v2) usa `stageName`/`pipelineId` flat, então o map
-            // de retorno achata para esse formato.
-            stage: { select: { id: true, name: true, color: true, pipelineId: true, pipeline: { select: { name: true } } } },
-            owner: { select: assignedToSelect },
-          },
+        findDealsForContactPanel({
+          contactId: id,
+          phone: core.phone,
+          email: core.email,
+          name: core.name,
         }),
-      [] as Awaited<
-        ReturnType<
-          typeof prisma.deal.findMany<{
-            include: {
-              stage: { select: { id: true; name: true; color: true; pipelineId: true; pipeline: { select: { name: true } } } };
-              owner: { select: typeof assignedToSelect };
-            };
-          }>
-        >
-      >,
+      [] as ContactPanelDeal[],
     ),
     view === "inbox"
       ? Promise.resolve(emptyNotes)
@@ -989,29 +1066,6 @@ export async function getContactById(
   // `dealInboxPanelFields[dealAberto]` — se preenchêssemos só um negócio, abrir
   // qualquer outro do mesmo contato (ex.: reimport que gerou 2 cards) mostraria
   // a lateral vazia. Batched: 1 query pros defs + 1 pros valores de todos.
-  const extraDeals = await safe(
-    "deals-match",
-    () =>
-      prisma.deal.findMany({
-        where: {
-          AND: [
-            dealsWhereForContact(id, core.phone, core.email, core.name),
-            { id: { notIn: deals.map((d) => d.id) } },
-          ],
-        },
-        take: 20,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          stage: { select: { id: true, name: true, color: true, pipelineId: true, pipeline: { select: { name: true } } } },
-          owner: { select: assignedToSelect },
-        },
-      }),
-    [] as typeof deals,
-  );
-  if (extraDeals.length > 0) {
-    deals.push(...extraDeals);
-  }
-
   const orphanOpenIds = deals
     .filter((d) => d.contactId == null && d.status === "OPEN")
     .map((d) => d.id);

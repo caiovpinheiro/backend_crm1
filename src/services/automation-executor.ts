@@ -2185,6 +2185,7 @@ async function executeStep(
       await prisma.conversation.update({
         where: { id: convId },
         data: { departmentId },
+        select: { id: true },
       });
       return {};
     }

@@ -120,10 +120,11 @@ export async function invalidateWhatsappTemplateCatalog(
 
 // ── Inbox tab counts ────────────────────────────────────────────
 //
-// GET /api/conversations?counts=1 — COUNT por aba é caro em orgs
-// grandes (11 COUNT FILTER, 200ms–1s). TTL 90s cobre stampede; badges
-// aceitam stale. NÃO purgar em cada `new_message` (preview) — isso
-// era o storm de CPU. Purgar só quando o ticket muda de aba.
+// GET /api/conversations?counts=1 — 2 queries (count(*) do escopo +
+// COUNT FILTER das abas OPEN no índice parcial). TTL 90s cobre
+// stampede; badges aceitam stale. NÃO purgar em cada `new_message`
+// (preview) — isso era o storm de CPU. Purgar só quando o ticket
+// muda de aba.
 
 export function inboxTabCountsKey(orgId: string, scopeFp: string): string {
   return `inbox_tab_counts:${orgId}:${scopeFp}`;

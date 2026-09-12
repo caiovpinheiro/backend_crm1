@@ -777,6 +777,7 @@ export async function executeAgentHandoff(
       aiGreetedAt: null,
       updatedAt: new Date(),
     },
+    select: { id: true },
   });
 
   if (args.contactId) {
