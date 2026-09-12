@@ -7,7 +7,28 @@ import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext, runWithContext } from "@/lib/request-context";
 import { testImapConnection, type EmailFieldError } from "@/services/email-imap";
+import {
+  ensureEmailOutlookColumns,
+  isMissingEmailOutlookColumn,
+} from "@/services/email-schema-ensure";
 import { testSmtpConnection } from "@/services/email-smtp";
+
+const ACCOUNT_PUBLIC_SELECT = {
+  id: true,
+  email: true,
+  imapHost: true,
+  imapPort: true,
+  imapEncryption: true,
+  smtpHost: true,
+  smtpPort: true,
+  smtpEncryption: true,
+  visibility: true,
+  groupInThreads: true,
+  createContactsForReplies: true,
+  ownerUserId: true,
+  createdAt: true,
+  lastSyncedAt: true,
+} as const;
 
 const log = getLogger("email-accounts");
 
@@ -169,7 +190,28 @@ export function accountAccessWhere(opts: {
   return { OR: or };
 }
 
-function serializeBase(acc: EmailAccount): Omit<SerializedEmailAccount, "unreadCount" | "folderUnread"> {
+type AccountPublicRow = {
+  id: string;
+  email: string;
+  imapHost: string;
+  imapPort: number;
+  imapEncryption: EmailEncryption;
+  smtpHost: string;
+  smtpPort: number;
+  smtpEncryption: EmailEncryption;
+  visibility: EmailVisibility;
+  groupInThreads: boolean;
+  createContactsForReplies: boolean;
+  ownerUserId: string | null;
+  oooEnabled?: boolean;
+  oooMessage?: string | null;
+  oooStartsAt?: Date | null;
+  oooEndsAt?: Date | null;
+  createdAt: Date;
+  lastSyncedAt: Date | null;
+};
+
+function serializeBase(acc: AccountPublicRow): Omit<SerializedEmailAccount, "unreadCount" | "folderUnread"> {
   return {
     id: acc.id,
     email: acc.email,
@@ -183,8 +225,8 @@ function serializeBase(acc: EmailAccount): Omit<SerializedEmailAccount, "unreadC
     groupInThreads: acc.groupInThreads,
     createContactsForReplies: acc.createContactsForReplies,
     ownerUserId: acc.ownerUserId,
-    oooEnabled: acc.oooEnabled,
-    oooMessage: acc.oooMessage,
+    oooEnabled: acc.oooEnabled ?? false,
+    oooMessage: acc.oooMessage ?? null,
     oooStartsAt: acc.oooStartsAt?.toISOString() ?? null,
     oooEndsAt: acc.oooEndsAt?.toISOString() ?? null,
     createdAt: acc.createdAt.toISOString(),
@@ -197,10 +239,36 @@ export async function listEmailAccounts(opts: {
   canViewShared: boolean;
   canViewOwn: boolean;
 }): Promise<SerializedEmailAccount[]> {
-  const accounts = await prisma.emailAccount.findMany({
-    where: accountAccessWhere(opts),
-    orderBy: { createdAt: "desc" },
-  });
+  await ensureEmailOutlookColumns();
+  const where = accountAccessWhere(opts);
+  let accounts: AccountPublicRow[];
+  try {
+    accounts = await prisma.emailAccount.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      select: {
+        ...ACCOUNT_PUBLIC_SELECT,
+        oooEnabled: true,
+        oooMessage: true,
+        oooStartsAt: true,
+        oooEndsAt: true,
+      },
+    });
+  } catch (e) {
+    if (!isMissingEmailOutlookColumn(e)) throw e;
+    const rows = await prisma.emailAccount.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      select: ACCOUNT_PUBLIC_SELECT,
+    });
+    accounts = rows.map((row) => ({
+      ...row,
+      oooEnabled: false,
+      oooMessage: null,
+      oooStartsAt: null,
+      oooEndsAt: null,
+    }));
+  }
   if (accounts.length === 0) return [];
 
   const unread = await prisma.email.groupBy({
