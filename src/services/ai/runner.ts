@@ -74,6 +74,8 @@ import {
   DEFAULT_CHAT_MODEL,
   generateWithTools,
 } from "@/services/ai/provider";
+import { ARCHETYPE_MAP } from "@/lib/ai-agents/archetypes";
+import { isTabulationClassifier } from "@/lib/ai-agents/tabulation-classifier";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 import {
   evaluateTransferGate,
@@ -208,6 +210,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     }
   }
 
+  const classifierRun = isTabulationClassifier({
+    archetype: agent.archetype,
+    enabledTools: args.enabledTools ?? agent.enabledTools,
+    name: agent.user?.name,
+  });
+
   const configHash = hashAgentBehaviorConfig(behaviorSliceFromAgent(agent));
 
   const run = await prisma.aIAgentRun.create({
@@ -245,20 +253,21 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         })
       : null;
 
-    const deal = args.dealId
-      ? await prisma.deal.findUnique({
-          where: { id: args.dealId },
-          include: {
-            stage: {
-              select: {
-                name: true,
-                pipelineId: true,
-                pipeline: { select: { name: true } },
+    const deal =
+      !classifierRun && args.dealId
+        ? await prisma.deal.findUnique({
+            where: { id: args.dealId },
+            include: {
+              stage: {
+                select: {
+                  name: true,
+                  pipelineId: true,
+                  pipeline: { select: { name: true } },
+                },
               },
             },
-          },
-        })
-      : null;
+          })
+        : null;
 
     const timedHistory =
       args.history ??
@@ -284,15 +293,20 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // RAG em TODO turno. A query sai da mensagem atual + últimas mensagens
     // do cliente: com só a mensagem atual, continuações curtas ("ok", "Não
     // fez ainda?") não recuperavam nada e o turno respondia sem base.
-    const knowledge = await retrieveAgentKnowledge(
-      agent.id,
-      buildRetrievalQuery({ userMessage: args.userMessage, priorUserMessages }),
-      agentApiKey,
-      4,
-    ).catch((err) => {
-      console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
-      return { chunks: [], expired: [] };
-    });
+    const knowledge = classifierRun
+      ? { chunks: [], expired: [] }
+      : await retrieveAgentKnowledge(
+          agent.id,
+          buildRetrievalQuery({
+            userMessage: args.userMessage,
+            priorUserMessages,
+          }),
+          agentApiKey,
+          4,
+        ).catch((err) => {
+          console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
+          return { chunks: [], expired: [] };
+        });
     const retrievedChunks = knowledge.chunks;
     const noRetrievalContext = retrievedChunks.length === 0;
     const retrievalBlock = formatRetrievalBlock(retrievedChunks);
@@ -305,7 +319,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const pack = getVerticalPack(agent.verticalPack);
     const packOps = pack?.ops ?? {};
     // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
-    const hasPack = Boolean(pack);
+    // Classificador não recebe pack/deal/campanha — classifica só pelas mensagens.
+    const hasPack = Boolean(pack) && !classifierRun;
     // Modelos internos (tela Internos) como fonte de RAG. Era ligado por
     // `pack?.id === "academic"`, o que escondia a base do time de qualquer
     // agente genérico. Agora é configuração (default true no pack academic).
@@ -320,7 +335,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       knowledge.expired,
       inboxPolicyForRun.knowledgeExpiredInstruction,
     );
-    const useMessageModelsRag = inboxPolicyForRun.useMessageModels;
+    const useMessageModelsRag =
+      !classifierRun && inboxPolicyForRun.useMessageModels;
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
@@ -346,13 +362,15 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           recentContextForHint,
         ) ?? "")
       : "";
-    const campaignCtx = await loadLastCampaignDispatchContext(
-      args.conversationId ?? null,
-      args.contactId ?? null,
-    ).catch((err) => {
-      console.warn(`[ai] contexto de campanha falhou: ${err}`);
-      return null;
-    });
+    const campaignCtx = classifierRun
+      ? null
+      : await loadLastCampaignDispatchContext(
+          args.conversationId ?? null,
+          args.contactId ?? null,
+        ).catch((err) => {
+          console.warn(`[ai] contexto de campanha falhou: ${err}`);
+          return null;
+        });
     const campaignDispatchBlock = formatCampaignDispatchBlock(campaignCtx);
     // Fato da operação: toda prova é online. Se um dia voltar a existir
     // prova presencial, a org grava `ai.exams.onlineOnly=false` em
@@ -456,29 +474,46 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // O override salvo é descartado quando é a cópia velha das mesmas
     // regras que já entram por `steeringRules` — senão o mesmo documento
     // ia duas vezes para o prompt, em versões divergentes.
-    const runtimeOverride = composeRuntimeOverride({
-      savedOverride: agent.systemPromptOverride,
-      steeringRules,
-      blocks: [
-        buildUnknownAnswerBlock(inboxPolicyForRun, {
-          transferBlocked: transferBlockedByGate(transferGate),
-        }),
-        // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
-        // ele ainda tentava `close_conversation` e levava erro da tool.
-        buildAutoClosePromptBlock(normalizeAutoClosePolicy(agent.autoClosePolicy)),
-        examModalityRules,
-        curriculumRules,
-        enrollmentScopeRules,
-      ],
-    });
+    const runtimeOverride = classifierRun
+      ? null
+      : composeRuntimeOverride({
+          savedOverride: agent.systemPromptOverride,
+          steeringRules,
+          blocks: [
+            buildUnknownAnswerBlock(inboxPolicyForRun, {
+              transferBlocked: transferBlockedByGate(transferGate),
+            }),
+            // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
+            // ele ainda tentava `close_conversation` e levava erro da tool.
+            buildAutoClosePromptBlock(
+              normalizeAutoClosePolicy(agent.autoClosePolicy),
+            ),
+            examModalityRules,
+            curriculumRules,
+            enrollmentScopeRules,
+          ],
+        });
 
     const org = await prisma.organization.findUnique({
       where: { id: agent.organizationId },
       select: { name: true },
     });
 
+    const classifierContact = classifierRun
+      ? contact
+        ? {
+            ...contact,
+            email: null,
+            phone: null,
+            tags: [] as typeof contact.tags,
+          }
+        : null
+      : contact;
+
     const systemPrompt = renderSystemPrompt({
-      template: agent.systemPromptTemplate,
+      template: classifierRun
+        ? ARCHETYPE_MAP.TABULACAO.systemPromptTemplate
+        : agent.systemPromptTemplate,
       override: runtimeOverride,
       productPolicy: agent.productPolicy,
       hasProductSearch: runtimeTools.includes("search_products"),
@@ -487,7 +522,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       tone: agent.tone,
       language: agent.language,
       autonomyMode: agent.autonomyMode,
-      contact,
+      contact: classifierContact,
       deal,
       retrievalBlock: retrievalWithModels,
       qualificationQuestions,

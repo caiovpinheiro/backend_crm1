@@ -12,6 +12,8 @@ export type AttendanceMessage = {
   messageType?: string | null;
   mediaUrl?: string | null;
   authorType?: string | null;
+  senderName?: string | null;
+  aiAgentUserId?: string | null;
 };
 
 export type TabulationCatalogLeaf = {
@@ -51,6 +53,48 @@ const ACK_WORDS = new Set([
   "falou",
 ]);
 
+/** Cumprimento solto: não é dúvida nem pedido. */
+const GREETING_WORDS = new Set([
+  ...ACK_WORDS,
+  "oi",
+  "ola",
+  "oie",
+  "oii",
+  "oiii",
+  "oiee",
+  "hey",
+  "hi",
+  "hello",
+  "opa",
+  "eai",
+  "eae",
+  "iae",
+  "bom",
+  "boa",
+  "dia",
+  "tarde",
+  "noite",
+  "tudo",
+  "bem",
+  "td",
+  "bomdia",
+  "boatarde",
+  "boanoite",
+  "tudobem",
+]);
+
+function tokenizePromptText(text: string): string[] {
+  return text
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/\p{Extended_Pictographic}/gu, " ")
+    .replace(/\p{Emoji_Component}/gu, " ")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 const MEDIA_MESSAGE_TYPES = new Set([
   "image",
   "photo",
@@ -81,17 +125,20 @@ export function isSystemEventMessage(msg: AttendanceMessage): boolean {
 export function isShortAckText(text: string | null | undefined): boolean {
   const raw = (text ?? "").trim();
   if (!raw) return false;
-  const words = raw
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .replace(/\p{Extended_Pictographic}/gu, " ")
-    .replace(/\p{Emoji_Component}/gu, " ")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter(Boolean);
+  const words = tokenizePromptText(raw);
   if (words.length === 0) return true;
   return words.every((w) => ACK_WORDS.has(w));
+}
+
+/** "Bom dia", "Oi Bia tarde", "Tudo bem?" — sem dúvida/pedido. */
+export function isGreetingOnlyText(text: string | null | undefined): boolean {
+  const raw = (text ?? "").trim();
+  if (!raw) return false;
+  const words = tokenizePromptText(raw);
+  if (words.length === 0) return true;
+  if (words.length > 6) return false;
+  const greetCount = words.filter((w) => GREETING_WORDS.has(w)).length;
+  return greetCount >= Math.ceil(words.length * 0.6);
 }
 
 export function messageHasMedia(msg: AttendanceMessage): boolean {
@@ -111,13 +158,14 @@ export function isEligibleInbound(msg: AttendanceMessage): boolean {
   return true;
 }
 
-/** Inbound público no recorte: dúvida/pedido/mídia. Ack, vazio e evento não. */
+/** Inbound público no recorte: dúvida/pedido/mídia. Ack, cumprimento, vazio e evento não. */
 export function inboundMessageShowsDemand(msg: AttendanceMessage): boolean {
   if (!isEligibleInbound(msg)) return false;
   if (messageHasMedia(msg)) return true;
   const text = (msg.content ?? "").trim();
   if (!text) return false;
   if (isShortAckText(text)) return false;
+  if (isGreetingOnlyText(text)) return false;
   return true;
 }
 
@@ -125,6 +173,33 @@ export function conversationHasAttendanceDemand(
   messages: AttendanceMessage[],
 ): boolean {
   return messages.some(inboundMessageShowsDemand);
+}
+
+/** Resposta de humano ou IA de atendimento. Automação e o próprio tabulador não. */
+export function isStaffAttendanceReply(
+  msg: AttendanceMessage,
+  classifierUserId?: string | null,
+): boolean {
+  if (msg.direction !== "out") return false;
+  if (msg.isPrivate) return false;
+  if (isSystemEventMessage(msg)) return false;
+  if (msg.authorType === "human") return true;
+  if (msg.authorType === "bot" && msg.aiAgentUserId) {
+    if (classifierUserId && msg.aiAgentUserId === classifierUserId) return false;
+    return true;
+  }
+  return false;
+}
+
+/** Dúvida/pedido inbound + resposta de atendente (humano ou IA de atendimento). */
+export function conversationHasRealAttendance(
+  messages: AttendanceMessage[],
+  classifierUserId?: string | null,
+): boolean {
+  return (
+    conversationHasAttendanceDemand(messages) &&
+    messages.some((m) => isStaffAttendanceReply(m, classifierUserId))
+  );
 }
 
 /** Automação `conversation_tabulated` só quando o ticket realmente fecha. */

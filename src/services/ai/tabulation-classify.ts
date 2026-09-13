@@ -7,7 +7,7 @@
  */
 
 import {
-  conversationHasAttendanceDemand,
+  conversationHasRealAttendance,
   shouldFireConversationTabulatedTrigger,
   type AttendanceMessage,
 } from "@/lib/ai-agents/tabulation-classify-policy";
@@ -30,7 +30,7 @@ import {
 } from "@/services/tabulations";
 
 const CLASSIFY_USER_MESSAGE =
-  "Leia só o histórico deste atendimento recente (hoje; se for fim de semana, desde sexta). Só tabule se o contato mandou dúvida, reclamação ou pedido — ok, obrigado, silêncio ou só mensagem da empresa não são atendimento: nesse caso NÃO chame tabulate_conversation. Classifique pelas mensagens, não por polo/curso de cadastro. Prefira folhas do departamento da conversa; outro departamento só se as mensagens deixarem claro. Se nenhuma folha casar, não chame a tool. Não encerre a conversa. Não escreva mensagem para o cliente.";
+  "Leia só o histórico deste atendimento recente (hoje; se for fim de semana, desde sexta). Só tabule se houve troca real: o contato mandou dúvida, reclamação ou pedido E um humano ou IA de atendimento respondeu. Cumprimento (oi, bom dia, tudo bem), ok, obrigado, silêncio, campanha ou só mensagem da empresa NÃO são atendimento — NÃO chame tabulate_conversation. Classifique pelas mensagens, não por dados de cadastro. Se a conversa já tem folha, não chame a tool. Prefira folhas do departamento da conversa. Se nenhuma folha casar, não chame a tool. Não encerre. Não escreva ao cliente.";
 
 export type ApplyTabulationResult =
   | {
@@ -78,6 +78,20 @@ export async function applyConversationTabulation(args: {
 
   const contactId = args.contactId ?? conv.contactId;
   const closeIfOpen = args.closeIfOpen === true;
+  if (
+    conv.status === "RESOLVED" &&
+    !closeIfOpen &&
+    (args.source ?? "AI_AGENT") === "AI_AGENT"
+  ) {
+    return { ok: false, error: "Conversa já encerrada." };
+  }
+  if (
+    conv.tabulationId &&
+    conv.tabulationId !== chosen.tabulationId &&
+    (args.source ?? "AI_AGENT") === "AI_AGENT"
+  ) {
+    return { ok: false, error: "Conversa já tabulada. Não sobrescreva a folha." };
+  }
   const alreadySame = conv.tabulationId === chosen.tabulationId;
   const shouldClose = closeIfOpen && conv.status !== "RESOLVED";
 
@@ -206,6 +220,7 @@ export type ClassifyTriggerResult =
         | "agent_inactive"
         | "not_ai_agent"
         | "no_attendance"
+        | "already_tabulated"
         | "no_leaf_chosen";
     }
   | { status: "failed"; reason: string };
@@ -247,19 +262,22 @@ export async function triggerTabulationClassifyForContact(args: {
       organizationId: true,
       departmentId: true,
       contactId: true,
+      tabulationId: true,
     },
   });
   if (!conversation) return { status: "skipped", reason: "no_conversation" };
+  if (conversation.tabulationId) {
+    return { status: "skipped", reason: "already_tabulated" };
+  }
 
   const historySince = tabulationHistoryWindowStart(
     new Date(),
     "America/Sao_Paulo",
   );
-  const inbound = (await prisma.message.findMany({
+  const windowMessages = (await prisma.message.findMany({
     where: {
       conversationId: conversation.id,
       createdAt: { gte: historySince },
-      direction: "in",
       isPrivate: false,
     },
     select: {
@@ -269,9 +287,11 @@ export async function triggerTabulationClassifyForContact(args: {
       messageType: true,
       mediaUrl: true,
       authorType: true,
+      senderName: true,
+      aiAgentUserId: true,
     },
   })) as AttendanceMessage[];
-  if (!conversationHasAttendanceDemand(inbound)) {
+  if (!conversationHasRealAttendance(windowMessages, args.agentUserId)) {
     return { status: "skipped", reason: "no_attendance" };
   }
 

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { ARCHETYPE_MAP } from "@/lib/ai-agents/archetypes";
 import {
   conversationHasAttendanceDemand,
+  conversationHasRealAttendance,
   formatTabulationCatalogText,
   inboundMessageShowsDemand,
+  isGreetingOnlyText,
   isShortAckText,
   shouldFireConversationTabulatedTrigger,
   type AttendanceMessage,
@@ -34,6 +36,29 @@ describe("isShortAckText", () => {
   });
 });
 
+describe("isGreetingOnlyText", () => {
+  it("reconhece cumprimento solto", () => {
+    for (const text of [
+      "Bom dia",
+      "boa tarde",
+      "Oi",
+      "Oi Bia tarde",
+      "Tudo bem?",
+      "olá tudo bem",
+    ]) {
+      expect(isGreetingOnlyText(text), text).toBe(true);
+    }
+  });
+
+  it("não trata dúvida ou pedido como cumprimento", () => {
+    expect(isGreetingOnlyText("como recupero a senha?")).toBe(false);
+    expect(isGreetingOnlyText("quero trocar de curso")).toBe(false);
+    expect(
+      isGreetingOnlyText("Gostaria de saber se meu filho deve algum valor"),
+    ).toBe(false);
+  });
+});
+
 describe("inboundMessageShowsDemand", () => {
   it("ack / vazio / evento → sem demanda", () => {
     expect(inboundMessageShowsDemand(inbound({ content: "ok" }))).toBe(false);
@@ -58,6 +83,12 @@ describe("inboundMessageShowsDemand", () => {
         messageType: "event",
       }),
     ).toBe(false);
+    expect(inboundMessageShowsDemand(inbound({ content: "Bom dia" }))).toBe(
+      false,
+    );
+    expect(inboundMessageShowsDemand(inbound({ content: "Tudo bem?" }))).toBe(
+      false,
+    );
   });
 
   it("dúvida ou imagem → demanda", () => {
@@ -115,6 +146,67 @@ describe("conversationHasAttendanceDemand", () => {
   });
 });
 
+describe("conversationHasRealAttendance", () => {
+  it("dúvida sem resposta de atendente não é atendimento", () => {
+    expect(
+      conversationHasRealAttendance([
+        inbound({ content: "como acesso o portal?" }),
+        {
+          direction: "out",
+          authorType: "bot",
+          content: "Olá! Bem vindo",
+          senderName: "inicio - pipe",
+        },
+      ]),
+    ).toBe(false);
+  });
+
+  it("dúvida + humano ou IA de atendimento", () => {
+    expect(
+      conversationHasRealAttendance([
+        inbound({ content: "como acesso o portal?" }),
+        {
+          direction: "out",
+          authorType: "human",
+          content: "Vou te ajudar",
+          senderName: "Joyce",
+        },
+      ]),
+    ).toBe(true);
+    expect(
+      conversationHasRealAttendance(
+        [
+          inbound({ content: "como acesso o portal?" }),
+          {
+            direction: "out",
+            authorType: "bot",
+            aiAgentUserId: "atendimento-ai",
+            content: "Segue o passo a passo",
+          },
+        ],
+        "tabulador-1",
+      ),
+    ).toBe(true);
+  });
+
+  it("resposta do próprio tabulador não conta", () => {
+    expect(
+      conversationHasRealAttendance(
+        [
+          inbound({ content: "como acesso o portal?" }),
+          {
+            direction: "out",
+            authorType: "bot",
+            aiAgentUserId: "tabulador-1",
+            content: "classificando",
+          },
+        ],
+        "tabulador-1",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("shouldFireConversationTabulatedTrigger", () => {
   it("dispara automação só quando closed === true", () => {
     expect(shouldFireConversationTabulatedTrigger(true)).toBe(true);
@@ -152,12 +244,12 @@ describe("formatTabulationCatalogText", () => {
 });
 
 describe("arquétipo TABULACAO", () => {
-  it("só tabula com atendimento real, não encerra e ignora polo/curso de cadastro", () => {
+  it("só tabula com atendimento real, não encerra e ignora cadastro", () => {
     const prompt = ARCHETYPE_MAP.TABULACAO.systemPromptTemplate;
     expect(prompt).toMatch(/atendimento real/i);
     expect(prompt).toMatch(/NÃO encerra/i);
-    expect(prompt).toMatch(/polo/i);
-    expect(prompt).toMatch(/curso/i);
+    expect(prompt).toMatch(/dados de cadastro/i);
+    expect(prompt).not.toMatch(/polo/i);
     expect(ARCHETYPE_MAP.TABULACAO.defaultTools).not.toContain(
       "close_conversation",
     );

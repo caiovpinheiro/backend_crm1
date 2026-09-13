@@ -115,6 +115,8 @@ export type RunContext = {
   organizationId?: string | null;
   archetype?: string | null;
   agentName?: string | null;
+  /// Classificador: no máximo uma `tabulate_conversation` por run.
+  tabulationAppliedThisRun?: boolean;
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -1647,16 +1649,12 @@ function listTabulationsTool(ctx: RunContext) {
       try {
         const orgId = ctx.organizationId ?? getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
-        const {
-          listActiveTabulationLeaves,
-          resolveClassifierFallbackTabulation,
-        } = await import("@/services/tabulations");
+        const { listActiveTabulationLeaves } = await import(
+          "@/services/tabulations"
+        );
         const leaves = await listActiveTabulationLeaves({
           organizationId: orgId,
         });
-        const fallback = await resolveClassifierFallbackTabulation({
-          organizationId: orgId,
-        }).catch(() => null);
         return ok({
           leaves: leaves.map((l) => ({
             id: l.id,
@@ -1664,8 +1662,6 @@ function listTabulationsTool(ctx: RunContext) {
             path: l.path,
             departmentName: l.departmentName,
           })),
-          fallbackId: fallback?.tabulationId ?? null,
-          fallbackName: fallback?.name ?? null,
         });
       } catch (err) {
         return fail(
@@ -1693,6 +1689,11 @@ function tabulateConversationTool(ctx: RunContext) {
     execute: async ({ tabulationId }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (ctx.tabulationAppliedThisRun) {
+          return fail(
+            "Já tabulou nesta execução. Não chame tabulate_conversation de novo.",
+          );
+        }
         const orgId = ctx.organizationId ?? getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
         const { applyConversationTabulation } = await import(
@@ -1707,6 +1708,7 @@ function tabulateConversationTool(ctx: RunContext) {
           closeIfOpen: false,
         });
         if (!result.ok) return fail(result.error);
+        ctx.tabulationAppliedThisRun = true;
         return ok({
           tabulated: true,
           alreadyApplied: result.alreadyApplied,

@@ -143,6 +143,25 @@ describe("applyConversationTabulation — trigger", () => {
       }),
     );
   });
+
+  it("recusa sobrescrever folha já gravada", async () => {
+    vi.mocked(prisma.conversation.findFirst).mockResolvedValue({
+      ...openConversation(),
+      tabulationId: "human-leaf",
+    } as never);
+    const result = await applyConversationTabulation({
+      conversationId: "conv-1",
+      organizationId: "org-1",
+      tabulationId: "only-leaf",
+      source: "AI_AGENT",
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: "Conversa já tabulada. Não sobrescreva a folha.",
+    });
+    expect(prisma.conversation.update).not.toHaveBeenCalled();
+    expect(fireTrigger).not.toHaveBeenCalled();
+  });
 });
 
 describe("triggerTabulationClassifyForContact", () => {
@@ -187,6 +206,67 @@ describe("triggerTabulationClassifyForContact", () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  it("pula cumprimento sem demanda", async () => {
+    vi.mocked(prisma.conversation.findFirst).mockResolvedValue(
+      openConversation() as never,
+    );
+    vi.mocked(prisma.message.findMany).mockResolvedValue([
+      {
+        direction: "in",
+        isPrivate: false,
+        content: "Bom dia",
+        messageType: "text",
+        mediaUrl: null,
+        authorType: "human",
+        senderName: null,
+        aiAgentUserId: null,
+      },
+    ] as never);
+    const result = await triggerTabulationClassifyForContact({
+      contactId: "contact-1",
+      agentUserId: "agent-1",
+    });
+    expect(result).toEqual({ status: "skipped", reason: "no_attendance" });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("pula se já tem folha", async () => {
+    vi.mocked(prisma.conversation.findFirst).mockResolvedValue({
+      ...openConversation(),
+      tabulationId: "human-leaf",
+    } as never);
+    const result = await triggerTabulationClassifyForContact({
+      contactId: "contact-1",
+      agentUserId: "agent-1",
+    });
+    expect(result).toEqual({ status: "skipped", reason: "already_tabulated" });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("pula dúvida sem resposta de atendente", async () => {
+    vi.mocked(prisma.conversation.findFirst).mockResolvedValue(
+      openConversation() as never,
+    );
+    vi.mocked(prisma.message.findMany).mockResolvedValue([
+      {
+        direction: "in",
+        isPrivate: false,
+        content: "como acesso o blackboard?",
+        messageType: "text",
+        mediaUrl: null,
+        authorType: "human",
+        senderName: null,
+        aiAgentUserId: null,
+      },
+    ] as never);
+    const result = await triggerTabulationClassifyForContact({
+      contactId: "contact-1",
+      agentUserId: "agent-1",
+    });
+    expect(result).toEqual({ status: "skipped", reason: "no_attendance" });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
   it("pula se o inbound do recorte é só ack", async () => {
     vi.mocked(prisma.conversation.findFirst).mockResolvedValue(
       openConversation() as never,
@@ -222,6 +302,18 @@ describe("triggerTabulationClassifyForContact", () => {
         messageType: "text",
         mediaUrl: null,
         authorType: "human",
+        senderName: null,
+        aiAgentUserId: null,
+      },
+      {
+        direction: "out",
+        isPrivate: false,
+        content: "Vou te ajudar com o acesso",
+        messageType: "text",
+        mediaUrl: null,
+        authorType: "human",
+        senderName: "Joyce",
+        aiAgentUserId: null,
       },
     ] as never);
     runAgent.mockResolvedValue({ toolCalls: [] });
