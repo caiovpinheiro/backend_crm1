@@ -429,14 +429,38 @@ export async function maybeDistributeNewInboundTicket(input: {
 
     // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
     // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.
+    //
+    // Já na fila (domingo / fora do expediente): não reexecuta. O webhook
+    // + IA off chamam isto 2× por mensagem e o /logs virava rajada de
+    // "Distribuição pendente". Drena quando alguém ficar elegível.
 
-    const remapped = await prisma.distributionPending.updateMany({
-      where: { status: "PENDING", contactId: input.contactId },
-      data: {
-        conversationId: input.conversationId,
-        lastAttemptAt: new Date(),
+    const alreadyQueued = await prisma.distributionPending.findFirst({
+      where: {
+        status: "PENDING",
+        OR: [
+          { conversationId: input.conversationId },
+          { contactId: input.contactId },
+        ],
       },
+      select: { id: true },
     });
+    if (alreadyQueued) {
+      await prisma.distributionPending.update({
+        where: { id: alreadyQueued.id },
+        data: {
+          conversationId: input.conversationId,
+          lastAttemptAt: new Date(),
+        },
+      });
+      debugWarn(
+        "[DBG-e46688 maybeDist] skip_already_queued",
+        () => JSON.stringify({
+          convId: input.conversationId,
+          pendingId: alreadyQueued.id,
+        }),
+      );
+      return;
+    }
 
     const convDept = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
@@ -462,16 +486,12 @@ export async function maybeDistributeNewInboundTicket(input: {
       "[DBG-e46688 maybeDist] result",
       () => JSON.stringify({
         convId: input.conversationId,
-        remappedPending: remapped.count,
         success: result.success,
         reason: result.reason,
         selectedUserId: result.selectedUserId,
       }),
     );
     // #endregion
-
-    // Sem elegíveis: deixa na fila e NÃO dispara retry em loop.
-    // Drena só quando consultor ficar disponível / cron / manual.
   } catch (e) {
     console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
     // #region agent log

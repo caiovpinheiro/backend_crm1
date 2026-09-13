@@ -397,6 +397,20 @@ async function emitDistributionEvent(
     departmentName = dept?.name ?? null;
   }
   try {
+    // Mesmo ticket + mesmo motivo em janela curta: o inbound Meta chama
+    // maybeDistribute 2× (findOrCreate + IA off) e o /logs duplicava
+    // "Distribuição pendente" a cada mensagem.
+    if (!success && conversationId) {
+      const recentFail = await prisma.activityEvent.findFirst({
+        where: {
+          type: "LEAD_DISTRIBUTION_FAILED",
+          conversationId,
+          createdAt: { gte: new Date(Date.now() - LOG_COALESCE_WINDOW_MS) },
+        },
+        select: { id: true },
+      });
+      if (recentFail) return;
+    }
     await logEvent({
       type: success ? "LEAD_DISTRIBUTED" : "LEAD_DISTRIBUTION_FAILED",
       entityType: assignedDealId ? "DEAL" : conversationId ? "CONVERSATION" : "CONTACT",
