@@ -215,6 +215,43 @@ describe("fireTrigger fast-path", () => {
     );
   });
 
+  it("conversation_created anexa deal OPEN — move_stage do inicio-pipe", async () => {
+    prismaMock.deal.findFirst.mockResolvedValue({
+      id: "d1",
+      status: "OPEN",
+      stageId: "s1",
+      stage: { pipelineId: "p1" },
+    });
+    prismaMock.automation.findFirst.mockResolvedValue({ id: "pipe" });
+    prismaMock.automation.findMany.mockResolvedValue([
+      {
+        id: "pipe",
+        name: "inicio - pipe",
+        triggerType: "conversation_created",
+        triggerConfig: { channelScope: "all" },
+      },
+    ]);
+
+    await fireTrigger("conversation_created", {
+      contactId: "c1",
+      data: { channel: "whatsapp", conversationId: "conv-1" },
+    });
+
+    expect(enqueueAutomation).toHaveBeenCalledWith(
+      "pipe",
+      expect.objectContaining({
+        contactId: "c1",
+        dealId: "d1",
+        event: "conversation_created",
+        data: expect.objectContaining({
+          stageId: "s1",
+          pipelineId: "p1",
+          dealStatus: "OPEN",
+        }),
+      }),
+    );
+  });
+
   it("message_received não dispara quando suppressAutomation está ligado", async () => {
     vi.mocked(getHumanAttendanceForContact).mockResolvedValue({
       conversationId: "conv-1",

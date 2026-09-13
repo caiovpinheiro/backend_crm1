@@ -412,6 +412,35 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
     return { ...context, data: withChannel };
   }
 
+  // Inbound Meta/Baileys dispara conversation_created sem dealId.
+  // O inicio-pipe então falha no move_stage ("dealId ausente").
+  if (event === "conversation_created" && context.contactId && !context.dealId) {
+    const deal = await prisma.deal.findFirst({
+      where: { contactId: context.contactId, status: "OPEN" },
+      select: {
+        id: true,
+        status: true,
+        stageId: true,
+        stage: { select: { pipelineId: true } },
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (deal) {
+      return {
+        ...context,
+        dealId: deal.id,
+        data: {
+          ...data,
+          stageId: deal.stageId,
+          pipelineId: deal.stage.pipelineId,
+          dealStageId: deal.stageId,
+          dealPipelineId: deal.stage.pipelineId,
+          dealStatus: deal.status,
+        },
+      };
+    }
+  }
+
   if (event === "contact_created" && context.contactId) {
     // 27/mai/26 — Enriquecimento best-effort para suportar filtro por
     // pipeline/estágio em "contato criado". O auto-deal é criado em
