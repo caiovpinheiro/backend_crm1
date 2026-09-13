@@ -26,6 +26,8 @@ import { prisma } from "@/lib/prisma";
  *   - contactId       id
  *   - conversationId  id
  *   - q               busca textual (entityLabel ILIKE / actorLabel ILIKE)
+ *   - tabulated       "1" — só CONVERSATION_TABULATED
+ *   - tabulationId    csv de meta.tabulationId (força tabulated)
  *
  * Resposta:
  *   { items: ActivityFeedRow[], nextCursor: string | null }
@@ -87,6 +89,9 @@ export async function GET(req: Request) {
     const hasStageTransition = Boolean(
       stagePipelineId || stageFrom || stageTo,
     );
+    const tabulationIds = parseCsv(sp.get("tabulationId"));
+    const tabulatedOnly =
+      sp.get("tabulated") === "1" || Boolean(tabulationIds);
 
     const where: Prisma.ActivityEventWhereInput = {};
 
@@ -105,6 +110,8 @@ export async function GET(req: Request) {
     // (STAGE_CHANGED é o único que carrega fromStageId/toStageId no meta).
     if (hasStageTransition) {
       where.type = "STAGE_CHANGED";
+    } else if (tabulatedOnly) {
+      where.type = "CONVERSATION_TABULATED";
     }
     if (actorUserId) where.actorUserId = actorUserId;
     if (entityId) where.entityId = entityId;
@@ -159,6 +166,19 @@ export async function GET(req: Request) {
           ? [...where.AND, ...stageAnd]
           : [where.AND, ...stageAnd]
         : stageAnd;
+    }
+
+    if (tabulationIds && !hasStageTransition) {
+      const tabAnd: Prisma.ActivityEventWhereInput = {
+        OR: tabulationIds.map((id) => ({
+          meta: { path: ["tabulationId"], equals: id },
+        })),
+      };
+      where.AND = where.AND
+        ? Array.isArray(where.AND)
+          ? [...where.AND, tabAnd]
+          : [where.AND, tabAnd]
+        : [tabAnd];
     }
 
     // Cursor composto: occurredAt desc, id desc (desempate estavel).
