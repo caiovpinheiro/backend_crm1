@@ -6,27 +6,31 @@
  * classificador (`TABULACAO` ou tool `tabulate_conversation`).
  */
 
-import { prisma } from "@/lib/prisma";
-import { getOrgSettingBool } from "@/lib/org-settings";
-import { sseBus } from "@/lib/sse-bus";
-import { logEvent } from "@/services/activity-log";
-import { fireTrigger } from "@/services/automation-triggers";
-import { updateConversationStatusInDb } from "@/services/conversations";
-import { tabulationHistoryWindowStart } from "@/lib/zoned-date";
 import {
-  formatTabulationCatalogBlock,
-  listActiveTabulationLeaves,
-  resolveClassifierFallbackTabulation,
-  resolveTabulationForStep,
-  tabulationLogMeta,
-} from "@/services/tabulations";
+  conversationHasAttendanceDemand,
+  shouldFireConversationTabulatedTrigger,
+  type AttendanceMessage,
+} from "@/lib/ai-agents/tabulation-classify-policy";
 import {
   isTabulationClassifier,
   TABULATION_CLASSIFIER_TOOLS,
 } from "@/lib/ai-agents/tabulation-classifier";
+import { getOrgSettingBool } from "@/lib/org-settings";
+import { prisma } from "@/lib/prisma";
+import { sseBus } from "@/lib/sse-bus";
+import { tabulationHistoryWindowStart } from "@/lib/zoned-date";
+import { logEvent } from "@/services/activity-log";
+import { fireTrigger } from "@/services/automation-triggers";
+import { updateConversationStatusInDb } from "@/services/conversations";
+import {
+  formatTabulationCatalogBlock,
+  listActiveTabulationLeaves,
+  resolveTabulationForStep,
+  tabulationLogMeta,
+} from "@/services/tabulations";
 
 const CLASSIFY_USER_MESSAGE =
-  "Leia só o histórico deste atendimento recente (hoje; se for fim de semana, desde sexta). Identifique a dúvida ou o problema desta troca — ignore assuntos antigos que não estejam nesse recorte. No catálogo de TODA a organização, escolha a folha cujo caminho mais se aproxima desse assunto — não se limite ao departamento da conversa. Prefira a folha mais específica. Chame `tabulate_conversation` com esse id. Fallback só se nenhuma folha tiver relação. Não escreva mensagem para o cliente.";
+  "Leia só o histórico deste atendimento recente (hoje; se for fim de semana, desde sexta). Só tabule se o contato mandou dúvida, reclamação ou pedido — ok, obrigado, silêncio ou só mensagem da empresa não são atendimento: nesse caso NÃO chame tabulate_conversation. Classifique pelas mensagens, não por polo/curso de cadastro. Prefira folhas do departamento da conversa; outro departamento só se as mensagens deixarem claro. Se nenhuma folha casar, não chame a tool. Não encerre a conversa. Não escreva mensagem para o cliente.";
 
 export type ApplyTabulationResult =
   | {
@@ -142,27 +146,29 @@ export async function applyConversationTabulation(args: {
     /* best-effort */
   }
 
-  let dealId: string | undefined;
-  if (contactId) {
-    const deal = await prisma.deal.findFirst({
-      where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    });
-    dealId = deal?.id;
-  }
+  if (shouldFireConversationTabulatedTrigger(shouldClose)) {
+    let dealId: string | undefined;
+    if (contactId) {
+      const deal = await prisma.deal.findFirst({
+        where: { contactId, status: "OPEN" },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      });
+      dealId = deal?.id;
+    }
 
-  await fireTrigger("conversation_tabulated", {
-    contactId: contactId ?? undefined,
-    dealId,
-    data: {
-      tabulationId: chosen.tabulationId,
-      ancestorIds: chosen.ancestorIds,
-      departmentId: chosen.departmentId,
-      conversationId: conv.id,
-      source: args.source ?? "AI_AGENT",
-    },
-  }).catch(() => null);
+    await fireTrigger("conversation_tabulated", {
+      contactId: contactId ?? undefined,
+      dealId,
+      data: {
+        tabulationId: chosen.tabulationId,
+        ancestorIds: chosen.ancestorIds,
+        departmentId: chosen.departmentId,
+        conversationId: conv.id,
+        source: args.source ?? "AI_AGENT",
+      },
+    }).catch(() => null);
+  }
 
   return {
     ok: true,
@@ -176,33 +182,31 @@ export async function loadTabulationCatalogForConversation(args: {
   organizationId: string;
   conversationId?: string | null;
 }): Promise<string> {
+  let preferredDepartmentId: string | null = null;
+  if (args.conversationId) {
+    const conv = await prisma.conversation.findFirst({
+      where: { id: args.conversationId, organizationId: args.organizationId },
+      select: { departmentId: true },
+    });
+    preferredDepartmentId = conv?.departmentId ?? null;
+  }
   const leaves = await listActiveTabulationLeaves({
     organizationId: args.organizationId,
   });
-  const fallback = await resolveClassifierFallbackTabulation({
-    organizationId: args.organizationId,
-  }).catch(() => null);
-  const fallbackOpt = fallback
-    ? {
-        id: fallback.tabulationId,
-        path:
-          leaves.find((l) => l.id === fallback.tabulationId)?.path ??
-          fallback.name,
-      }
-    : null;
-  return formatTabulationCatalogBlock(leaves, fallbackOpt);
+  return formatTabulationCatalogBlock(leaves, preferredDepartmentId);
 }
 
 export type ClassifyTriggerResult =
   | { status: "classified"; tabulationId: string; tabulationName?: string }
-  | { status: "fallback"; tabulationId: string; tabulationName?: string }
   | {
       status: "skipped";
       reason:
         | "no_conversation"
         | "not_classifier"
         | "agent_inactive"
-        | "not_ai_agent";
+        | "not_ai_agent"
+        | "no_attendance"
+        | "no_leaf_chosen";
     }
   | { status: "failed"; reason: string };
 
@@ -236,7 +240,7 @@ export async function triggerTabulationClassifyForContact(args: {
   }
 
   const conversation = await prisma.conversation.findFirst({
-    where: { contactId: args.contactId },
+    where: { contactId: args.contactId, status: { not: "RESOLVED" } },
     orderBy: { updatedAt: "desc" },
     select: {
       id: true,
@@ -246,6 +250,30 @@ export async function triggerTabulationClassifyForContact(args: {
     },
   });
   if (!conversation) return { status: "skipped", reason: "no_conversation" };
+
+  const historySince = tabulationHistoryWindowStart(
+    new Date(),
+    "America/Sao_Paulo",
+  );
+  const inbound = (await prisma.message.findMany({
+    where: {
+      conversationId: conversation.id,
+      createdAt: { gte: historySince },
+      direction: "in",
+      isPrivate: false,
+    },
+    select: {
+      direction: true,
+      isPrivate: true,
+      content: true,
+      messageType: true,
+      mediaUrl: true,
+      authorType: true,
+    },
+  })) as AttendanceMessage[];
+  if (!conversationHasAttendanceDemand(inbound)) {
+    return { status: "skipped", reason: "no_attendance" };
+  }
 
   const leaves = await listActiveTabulationLeaves({
     organizationId: conversation.organizationId,
@@ -276,11 +304,7 @@ export async function triggerTabulationClassifyForContact(args: {
     contactId: args.contactId,
     dealId: openDeal?.id ?? null,
     enabledTools: classifyTools,
-    forceTabulateTool: true,
-    historySince: tabulationHistoryWindowStart(
-      new Date(),
-      "America/Sao_Paulo",
-    ),
+    historySince,
     historyLimit: 80,
   });
 
@@ -301,8 +325,8 @@ export async function triggerTabulationClassifyForContact(args: {
       status: "classified",
       tabulationId,
       tabulationName:
-        typeof (tabulated.result as { tabulationName?: unknown }).tabulationName ===
-        "string"
+        typeof (tabulated.result as { tabulationName?: unknown })
+          .tabulationName === "string"
           ? (tabulated.result as { tabulationName: string }).tabulationName
           : undefined,
     };
@@ -317,43 +341,9 @@ export async function triggerTabulationClassifyForContact(args: {
     })
     .find((e): e is string => Boolean(e));
 
-  const fallback = await resolveClassifierFallbackTabulation({
-    organizationId: conversation.organizationId,
-    departmentId: conversation.departmentId,
-  }).catch(() => null);
-  const singleLeaf = !fallback && leaves.length === 1 ? leaves[0] : null;
-  const chosenFallback = fallback
-    ? {
-        tabulationId: fallback.tabulationId,
-        name: fallback.name,
-      }
-    : singleLeaf
-      ? { tabulationId: singleLeaf.id, name: singleLeaf.path }
-      : null;
-  if (!chosenFallback) {
-    return {
-      status: "failed",
-      reason:
-        toolFail ??
-        result.error ??
-        "Agente não escolheu uma folha. Defina a tabulação padrão de encerramento no departamento (Settings → Departamentos).",
-    };
+  if (toolFail) {
+    return { status: "failed", reason: toolFail };
   }
 
-  const applied = await applyConversationTabulation({
-    conversationId: conversation.id,
-    organizationId: conversation.organizationId,
-    tabulationId: chosenFallback.tabulationId,
-    contactId: args.contactId,
-    source: "AI_AGENT",
-    closeIfOpen: false,
-  });
-  if (!applied.ok) {
-    return { status: "failed", reason: applied.error };
-  }
-  return {
-    status: "fallback",
-    tabulationId: chosenFallback.tabulationId,
-    tabulationName: chosenFallback.name,
-  };
+  return { status: "skipped", reason: "no_leaf_chosen" };
 }

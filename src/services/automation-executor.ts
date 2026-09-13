@@ -2357,10 +2357,7 @@ async function executeStep(
             `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
           );
           return {
-            note:
-              classified.status === "fallback"
-                ? `tabulou fallback: ${label}`
-                : `tabulou: ${label}`,
+            note: `tabulou: ${label}`,
           };
         } else {
           try {

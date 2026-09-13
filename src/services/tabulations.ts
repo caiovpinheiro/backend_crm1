@@ -1,3 +1,4 @@
+import { formatTabulationCatalogText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -856,24 +857,7 @@ async function listActiveTabulationLeavesStrict(args: {
 
 export function formatTabulationCatalogBlock(
   leaves: TabulationLeafOption[],
-  fallback: { id: string; path: string } | null,
+  preferredDepartmentId?: string | null,
 ): string {
-  const lines = [
-    "",
-    "## Catálogo de tabulações (organização inteira, somente folhas)",
-    "Escolha a folha cujo caminho mais se aproxima da dúvida ou problema do contato. Use SOMENTE estes IDs. Não invente. O departamento da conversa NÃO limita a escolha.",
-  ];
-  if (leaves.length === 0) {
-    lines.push("Nenhuma folha ativa na organização.");
-    return lines.join("\n");
-  }
-  for (const l of leaves) {
-    lines.push(`- ${l.departmentName} / ${l.path} [${l.number}] id=${l.id}`);
-  }
-  if (fallback) {
-    lines.push(
-      `Fallback (baixa confiança / sem casamento): ${fallback.path} id=${fallback.id}`,
-    );
-  }
-  return lines.join("\n");
+  return formatTabulationCatalogText(leaves, preferredDepartmentId);
 }
