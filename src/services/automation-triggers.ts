@@ -56,6 +56,36 @@ export function buildMessageTriggerData(args: {
   };
 }
 
+/**
+ * Ticket novo. `conversation_created` NÃO é silenciado por assignee IA/humano
+ * — senão o inbound do WhatsApp nunca aciona fluxos tipo "inicio - pipe"
+ * (o webhook só disparava `message_received`, e esse sim é suprimido).
+ */
+export function emitConversationCreated(args: {
+  contactId: string;
+  channel: string;
+  channelId?: string | null;
+  conversationId?: string | null;
+  source: string;
+  extra?: Record<string, unknown>;
+}): void {
+  fireTrigger("conversation_created", {
+    contactId: args.contactId,
+    data: {
+      channel: args.channel,
+      source: args.source,
+      ...(args.channelId ? { channelId: args.channelId } : {}),
+      ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+      ...args.extra,
+    },
+  }).catch((err) => {
+    console.warn(
+      "Falha no gatilho conversation_created:",
+      err instanceof Error ? err.message : err,
+    );
+  });
+}
+
 /** Comparação frouxa (trim + case-insensitive) usada nas condições de campo. */
 function looseEquals(a: unknown, b: unknown): boolean {
   const sa = String(a ?? "").trim().toLowerCase();

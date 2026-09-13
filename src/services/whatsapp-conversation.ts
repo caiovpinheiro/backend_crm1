@@ -24,7 +24,7 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
-import { fireTrigger } from "@/services/automation-triggers";
+import { emitConversationCreated } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("whatsapp-conversation");
@@ -268,18 +268,14 @@ export async function ensureWhatsAppConversationForContact(
     });
   }
 
-  // Gatilho de automacao (fire-and-forget). O tipo `conversation_created`
-  // ja existe registrado; ate hoje o fireTrigger nao era chamado — so o
-  // logEvent. Ver AGENT.md "ID de conversa + logs + gatilho".
-  fireTrigger("conversation_created", {
+  emitConversationCreated({
     contactId: contact.id,
-    data: {
-      channel: "whatsapp",
-      channelId: defaultChannel.id,
-      inboxName: defaultChannel.name,
-      source: "auto_ensure",
-    },
-  }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
+    channel: "whatsapp",
+    channelId: defaultChannel.id,
+    conversationId: created.id,
+    source: "auto_ensure",
+    extra: { inboxName: defaultChannel.name },
+  });
 
   return {
     status: "created",

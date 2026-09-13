@@ -33,7 +33,7 @@ import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
-import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import {
   asMetaId,
@@ -570,6 +570,13 @@ async function findOrCreateConversation(
       conversationId: created.id,
       contactId,
       assignedToId: inheritAssignee,
+    });
+    emitConversationCreated({
+      contactId,
+      channel: platform,
+      channelId,
+      conversationId: created.id,
+      source: "inbound_messaging",
     });
     return {
       id: created.id,

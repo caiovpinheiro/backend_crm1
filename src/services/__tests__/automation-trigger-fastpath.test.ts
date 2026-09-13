@@ -76,6 +76,7 @@ vi.mock("@/services/integration-webhooks", async (importOriginal) => {
 import {
   cancelActiveContextsForContactIfAny,
 } from "@/services/automation-context";
+import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 import {
   fireTrigger,
   resetTriggerExistenceCachesForTests,
@@ -135,6 +136,7 @@ describe("fireTrigger fast-path", () => {
     prismaMock.automation.findMany.mockResolvedValue([]);
     prismaMock.automationContext.findFirst.mockResolvedValue(null);
     prismaMock.deal.findFirst.mockResolvedValue(null);
+    vi.mocked(getHumanAttendanceForContact).mockResolvedValue(null);
   });
 
   it("retorna cedo e cacheia quando a org não tem webhook nem automação", async () => {
@@ -181,5 +183,62 @@ describe("fireTrigger fast-path", () => {
       "auto-1",
       expect.objectContaining({ contactId: "c1", event: "stage_changed" }),
     );
+  });
+
+  it("conversation_created dispara mesmo com assignee — inicio-pipe no inbound", async () => {
+    vi.mocked(getHumanAttendanceForContact).mockResolvedValue({
+      conversationId: "conv-1",
+      hasHumanReply: false,
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      suppressAutomation: true,
+    });
+    prismaMock.automation.findFirst.mockResolvedValue({ id: "pipe" });
+    prismaMock.automation.findMany.mockResolvedValue([
+      {
+        id: "pipe",
+        name: "inicio - pipe",
+        triggerType: "conversation_created",
+        triggerConfig: { channelScope: "all" },
+      },
+    ]);
+
+    await fireTrigger("conversation_created", {
+      contactId: "c1",
+      data: { channel: "whatsapp", conversationId: "conv-1" },
+    });
+
+    expect(enqueueAutomation).toHaveBeenCalledWith(
+      "pipe",
+      expect.objectContaining({ contactId: "c1", event: "conversation_created" }),
+    );
+  });
+
+  it("message_received não dispara quando suppressAutomation está ligado", async () => {
+    vi.mocked(getHumanAttendanceForContact).mockResolvedValue({
+      conversationId: "conv-1",
+      hasHumanReply: false,
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      suppressAutomation: true,
+    });
+    prismaMock.automation.findFirst.mockResolvedValue({ id: "pipe" });
+    prismaMock.automation.findMany.mockResolvedValue([
+      {
+        id: "pipe",
+        name: "inicio - pipe",
+        triggerType: "message_received",
+        triggerConfig: {},
+      },
+    ]);
+
+    await fireTrigger("message_received", {
+      contactId: "c1",
+      data: { channel: "WhatsApp", conversationId: "conv-1" },
+    });
+
+    expect(enqueueAutomation).not.toHaveBeenCalled();
   });
 });

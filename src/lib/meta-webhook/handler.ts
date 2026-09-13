@@ -48,7 +48,7 @@ import {
   maybeDenyWhatsappCallConsent,
   maybeGrantWhatsappCallConsent,
 } from "@/services/whatsapp-call-consent-webhook";
-import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
@@ -866,6 +866,13 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
       conversationId: created.id,
       contactId,
       assignedToId: inheritAssignee,
+    });
+    emitConversationCreated({
+      contactId,
+      channel: "whatsapp",
+      channelId: targetChannel?.id,
+      conversationId: created.id,
+      source: "inbound_meta",
     });
     return created;
   } catch (err) {

@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
 import { generateFileName, saveFile } from "@/lib/storage/local";
-import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import {
@@ -313,6 +313,13 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
       conversationId: created.id,
       contactId,
       assignedToId: inheritAssignee,
+    });
+    emitConversationCreated({
+      contactId,
+      channel: "whatsapp",
+      channelId,
+      conversationId: created.id,
+      source: "inbound_baileys",
     });
     return created;
   } catch (err) {
