@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -92,6 +92,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sslUrlParam(url: string | undefined, key: string): string | undefined {
+  if (!url) return undefined;
+  const match = url.match(new RegExp(`[?&]${key}=([^&]*)`));
+  if (!match?.[1]) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function stripSslFileParams(url: string): string {
+  return url
+    .replace(/([?&])sslmode=[^&]*/g, "$1")
+    .replace(/([?&])sslcert=[^&]*/g, "$1")
+    .replace(/([?&])sslrootcert=[^&]*/g, "$1")
+    .replace(/[?&]$/, "")
+    .replace(/\?&/, "?")
+    .replace(/\?$/, "");
+}
+
+function stripMissingSslFiles(url: string): string {
+  return url
+    .replace(/([?&])sslcert=[^&]*/g, "$1")
+    .replace(/([?&])sslrootcert=[^&]*/g, "$1")
+    .replace(/[?&]$/, "")
+    .replace(/\?&/, "?")
+    .replace(/\?$/, "");
+}
+
 /**
  * Retry 1x em pool timeout. Seguro para read e write: o timeout ocorre
  * ANTES de checkout — a query ainda não começou.
@@ -166,15 +196,20 @@ function createPrismaClient() {
   //
   // TLS para Postgres gerenciado (DigitalOcean): a CA da DO não está no
   // truststore do Node, então `sslmode=require` na URL falha com
-  // "self-signed certificate in certificate chain". O driver `pg` NÃO lê
-  // `sslcert` da connection string — ele precisa do objeto `ssl` com a CA.
-  // Lemos o arquivo do CA (montado via bind mount) e passamos ao pool.
-  // PGSSLROOTCERT ou PG_CA_PATH apontam para o arquivo; se ausentes, cai no
-  // comportamento padrão do pg (sslmode da URL).
+  // "self-signed certificate in certificate chain". O driver `pg` lê
+  // `sslcert`/`sslrootcert` da connection string e dá ENOENT se o arquivo
+  // não estiver montado (serviço novo no EasyPanel sem /app/certs).
+  // PGSSLROOTCERT, PG_CA_PATH ou o path da URL apontam para o CA; se o
+  // arquivo não existe, tiramos sslcert/sslrootcert e deixamos sslmode.
+  const urlCa =
+    sslUrlParam(process.env.DATABASE_URL, "sslrootcert") ||
+    sslUrlParam(process.env.DATABASE_URL, "sslcert");
   const caPath =
-    process.env.PGSSLROOTCERT?.trim() || process.env.PG_CA_PATH?.trim();
+    process.env.PGSSLROOTCERT?.trim() ||
+    process.env.PG_CA_PATH?.trim() ||
+    urlCa;
   let ssl: { ca: string; rejectUnauthorized: boolean } | undefined;
-  if (caPath) {
+  if (caPath && existsSync(caPath)) {
     try {
       ssl = { ca: readFileSync(caPath, "utf8"), rejectUnauthorized: true };
     } catch (err) {
@@ -183,6 +218,10 @@ function createPrismaClient() {
         err instanceof Error ? err.message : err,
       );
     }
+  } else if (caPath) {
+    console.warn(
+      `[prisma-base] CA ausente em ${caPath} — montar /app/certs como nos outros workers, ou o pool segue só com sslmode`,
+    );
   }
 
   // Quando passamos o objeto `ssl`, o `sslmode` da connection string CONFLITA
@@ -191,13 +230,15 @@ function createPrismaClient() {
   // `sslmode=require` presente. Por isso removemos o `sslmode`/`sslcert` da URL
   // quando o objeto ssl está presente, deixando o objeto mandar no TLS.
   let connectionString = process.env.DATABASE_URL;
-  if (ssl && connectionString) {
-    connectionString = connectionString
-      .replace(/([?&])sslmode=[^&]*/g, "$1")
-      .replace(/([?&])sslcert=[^&]*/g, "$1")
-      .replace(/[?&]$/, "")
-      .replace(/\?&/, "?")
-      .replace(/\?$/, "");
+  if (connectionString) {
+    if (ssl) {
+      connectionString = stripSslFileParams(connectionString);
+    } else if (
+      sslUrlParam(connectionString, "sslcert") ||
+      sslUrlParam(connectionString, "sslrootcert")
+    ) {
+      connectionString = stripMissingSslFiles(connectionString);
+    }
   }
 
   const pool = new Pool({
