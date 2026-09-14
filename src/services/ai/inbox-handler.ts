@@ -56,6 +56,7 @@ import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import {
   buildMediaAskTextMessage,
   buildMediaHandoffMessage,
+  buildMediaOffHoursMessage,
   evaluateInboundMedia,
   queueMediaHandoff,
 } from "@/services/ai/media-inbound";
@@ -78,6 +79,7 @@ import {
   computeTypingDelayMs,
   normalizeAutoClosePolicy,
   normalizeBusinessHours,
+  renderTemplate,
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import {
@@ -160,7 +162,21 @@ function isAcademicSelfServeTurn(
   return false;
 }
 
-function buildAcademicStayWithYouMessage(): string {
+/**
+ * Resposta ao "oi" que devolve o aluno para a IA.
+ *
+ * Usa a *Saudação inicial* da aba Pilotagem quando o operador escreveu uma:
+ * é a mesma frase de boas-vindas do agente, e é lá que ele controla o tom e
+ * o `{{contact.firstName}}`. Enquanto isso era texto fixo aqui, o agente
+ * abria com um menu frio ("portal, senha, Blackboard…") que nenhuma regra
+ * da tela conseguia mudar.
+ */
+function buildAcademicStayWithYouMessage(
+  openingMessage?: string | null,
+  contactName?: string | null,
+): string {
+  const custom = openingMessage?.trim();
+  if (custom) return renderTemplate(custom, { contactName });
   return (
     "Oi! Tô aqui. Pode me dizer o que você precisa — " +
     "portal, senha, Blackboard, prova, documento…"
@@ -433,6 +449,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         hasHumanReply: true,
         aiTestModeUntil: true,
         aiTestModeById: true,
+        // Nome só para preencher `{{contact.firstName}}` da saudação.
+        contact: { select: { name: true } },
         channelRef: {
           select: {
             id: true,
@@ -447,6 +465,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // Modo de teste sai da mesma linha que já buscamos — sem query extra e
     // sem chance de divergir do estado da conversa. Expira por comparação de
     // timestamp: worker que acordou depois da janela lê o modo desligado.
+    const contactName = conversation?.contact?.name ?? null;
     const testMode = readTestMode(conversation);
     if (isRetiredWhatsAppChannel(conversation?.channelRef)) {
       logAi("blocked", {
@@ -497,7 +516,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             isBareGreetingMessage,
             isAcademicSelfServeTurn: (raw: string) =>
               isAcademicSelfServeTurn(raw, earlyPack.ops),
-            buildAcademicStayWithYouMessage,
+            buildAcademicStayWithYouMessage: () =>
+              buildAcademicStayWithYouMessage(early.openingMessage, contactName),
             buildRetentionHandoffMessage,
             buildGenericQueueHandoffMessage,
             studentNoticeAfterHandoff,
@@ -972,7 +992,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             isBareGreetingMessage,
             isAcademicSelfServeTurn: (raw: string) =>
               isAcademicSelfServeTurn(raw, packOps),
-            buildAcademicStayWithYouMessage,
+            buildAcademicStayWithYouMessage: () =>
+              buildAcademicStayWithYouMessage(cfg.openingMessage, contactName),
             buildRetentionHandoffMessage,
             buildGenericQueueHandoffMessage,
             studentNoticeAfterHandoff,
@@ -1006,8 +1027,32 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         policy,
       });
+      // Fora do horário de atendimento não há quem assuma: em vez de jogar
+      // na fila calado, admite que não lê o arquivo e oferece texto agora
+      // ou a fila (o pedido dele cai no caminho normal de "falar com
+      // alguém"). Mesma noção de expediente da fila humana usada acima.
+      const mediaHumanWindowOpen =
+        mediaVerdict.action === "handoff"
+          ? isHumanAttendanceWindowOpen(new Date(), queueCtxOf(policy, hours))
+          : false;
       if (mediaVerdict.action) {
-        if (mediaVerdict.action === "handoff") {
+        if (mediaVerdict.action === "handoff" && !mediaHumanWindowOpen) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: buildMediaOffHoursMessage({
+              kinds: mediaVerdict.kinds,
+              policy,
+            }),
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        } else if (mediaVerdict.action === "handoff") {
           await queueMediaHandoff({
             conversationId: args.conversationId,
             contactId: args.contactId,
@@ -1382,7 +1427,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       text =
         (packOps.isAvaOrDisciplinesIntent?.(args.userMessage)
           ? (packOps.buildAvaDisciplinesMessage?.() as string | undefined)
-          : undefined) ?? buildAcademicStayWithYouMessage();
+          : undefined) ??
+        buildAcademicStayWithYouMessage(cfg.openingMessage, contactName);
     }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
@@ -1796,13 +1842,19 @@ async function resolveInboxAgentSteering(
 ): Promise<{
   pack: ReturnType<typeof getVerticalPack>;
   policy: InboxPolicy | null;
+  openingMessage: string | null;
 }> {
   if (conversation?.assignedToId) {
     const u = await prisma.user.findFirst({
       where: { id: conversation.assignedToId, type: "AI" },
       select: {
         aiAgentConfig: {
-          select: { verticalPack: true, active: true, inboxPolicy: true },
+          select: {
+            verticalPack: true,
+            active: true,
+            inboxPolicy: true,
+            openingMessage: true,
+          },
         },
       },
     });
@@ -1813,11 +1865,12 @@ async function resolveInboxAgentSteering(
           u.aiAgentConfig.inboxPolicy,
           u.aiAgentConfig.verticalPack,
         ),
+        openingMessage: u.aiAgentConfig.openingMessage,
       };
     }
   }
   const orgId = getOrgIdOrNull();
-  if (!orgId) return { pack: null, policy: null };
+  if (!orgId) return { pack: null, policy: null, openingMessage: null };
   const fallback = await prisma.user.findFirst({
     where: {
       organizationId: orgId,
@@ -1825,7 +1878,13 @@ async function resolveInboxAgentSteering(
       aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
     },
     select: {
-      aiAgentConfig: { select: { verticalPack: true, inboxPolicy: true } },
+      aiAgentConfig: {
+        select: {
+          verticalPack: true,
+          inboxPolicy: true,
+          openingMessage: true,
+        },
+      },
     },
     orderBy: { createdAt: "asc" },
   });
@@ -1835,6 +1894,7 @@ async function resolveInboxAgentSteering(
     policy: cfg
       ? normalizeInboxPolicy(cfg.inboxPolicy, cfg.verticalPack)
       : null,
+    openingMessage: cfg?.openingMessage ?? null,
   };
 }
 

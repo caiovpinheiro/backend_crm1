@@ -4,8 +4,9 @@
  * 1) Follow-up só-IA:
  *    30 min sem retorno → check-in empático (se janela 24h aberta).
  *    +30 min sem resposta ao check-in (ou 30 min e janela já fechada)
- *    → `closeAiOnlyConversation`. Overrides: `AI_AGENT_IDLE_NUDGE_MS`,
- *    `AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS`. 0 no nudge desliga o par.
+ *    → avisa que está encerrando e `closeAiOnlyConversation`. Overrides:
+ *    `AI_AGENT_IDLE_NUDGE_MS`, `AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS`.
+ *    0 no nudge desliga o par.
  *
  * 2) Handoff por inatividade (`inactivityTimerMs > 0`), só se já houve
  *    reply humano. IA-only não vai pra fila de consultor.
@@ -24,6 +25,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import {
+  normalizeAutoClosePolicy,
   normalizeBusinessHours,
   renderTemplate,
   type HandoffMode,
@@ -125,6 +127,7 @@ type IdleRow = {
   last_out_at: Date;
   last_in_content: string | null;
   last_inbound_at: Date | null;
+  auto_close_policy: unknown;
 };
 
 async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
@@ -136,6 +139,7 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       c."organizationId" AS organization_id,
       c."assignedToId" AS assigned_to_id,
       a."autonomyMode" AS autonomy_mode,
+      a."autoClosePolicy" AS auto_close_policy,
       last_out.content AS last_out_content,
       last_out."createdAt" AS last_out_at,
       last_in.content AS last_in_content,
@@ -222,6 +226,40 @@ async function processIdleAiOnly(
 
     try {
       if (shouldClose) {
+        // Avisa antes de fechar, com o texto que o operador escreveu em
+        // "Mensagem ao encerrar por falta de resposta". Vazio = encerra
+        // calado (o código não tem frase própria pra isso). Campo separado
+        // do `message`: lá o cliente fechou o assunto, aqui ele sumiu.
+        // Só no caminho do check-in: quem terminou em despedida já se
+        // despediu, e com a janela de 24h fechada a Meta não entrega.
+        const idleMessage = normalizeAutoClosePolicy(
+          row.auto_close_policy,
+        ).idleMessage;
+        const contactId = row.contact_id;
+        if (idleMessage && isNudge && canText && contactId && row.assigned_to_id) {
+          const agentUserId = row.assigned_to_id;
+          await withSystemContext(row.organization_id, async () => {
+            const contact = await prisma.contact.findUnique({
+              where: { id: contactId },
+              select: { name: true },
+            });
+            await sendAgentMessage({
+              conversationId: row.conversation_id,
+              contactId,
+              agentUserId,
+              autonomyMode: row.autonomy_mode,
+              text: renderTemplate(idleMessage, {
+                contactName: contact?.name ?? null,
+              }),
+              kind: "farewell",
+            });
+          }).catch((e) => {
+            console.warn(
+              `[ai-inactivity] aviso de encerramento falhou conv=${row.conversation_id}:`,
+              e instanceof Error ? e.message : e,
+            );
+          });
+        }
         // Encerrar ticket é genérico; o pack só refina (funil de origem).
         const closeConversation =
           ops.closeAiOnlyConversation ?? closeAiOnlyConversation;

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Runner principal do agente de IA.
  *
  * Um "run" é uma invocação completa do agente respondendo a um ponto
@@ -337,6 +337,14 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     const useMessageModelsRag =
       !classifierRun && inboxPolicyForRun.useMessageModels;
+    // O que o operador escreve é absoluto. Com "Regras de atendimento"
+    // preenchido, nem o texto canônico do pack nem os hints de runtime
+    // (polos, prova, portal, senha, primeiro acesso, certificado) entram
+    // somados: vale só o que está no agente. Campo vazio cai no pacote
+    // inteiro. Tools, roteamento de departamento e interceptos seguem
+    // valendo nos dois casos.
+    const hasOwnRules = Boolean(agent.steeringRules?.trim());
+    const packText = hasPack && !hasOwnRules;
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
@@ -356,7 +364,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .slice(-4)
       .map((m) => m.content)
       .join("\n");
-    const portalAccessHint = hasPack
+    const portalAccessHint = packText
       ? (packOps.formatCanonicalPortalAccessHint?.(
           args.userMessage,
           recentContextForHint,
@@ -379,7 +387,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examsOnlineOnly = hasPack
       ? await getOrgSettingBool("ai.exams.onlineOnly", true).catch(() => true)
       : true;
-    const examAccessHint = hasPack
+    const examAccessHint = packText
       ? (packOps.formatExamAccessHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
@@ -388,13 +396,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           examsOnlineOnly,
         ) ?? "")
       : "";
-    const poloAddressesHint = hasPack
+    const poloAddressesHint = packText
       ? (packOps.formatPoloAddressesHint?.(
           args.userMessage,
           recentContextForHint,
         ) ?? "")
       : "";
-    const certificateHint = hasPack
+    const certificateHint = packText
       ? (packOps.formatParticipationCertificateHint?.(
           args.userMessage,
           [recentContextForHint, campaignCtx?.body ?? ""]
@@ -402,13 +410,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             .join("\n"),
         ) ?? "")
       : "";
-    const firstAccessHint = hasPack
+    const firstAccessHint = packText
       ? (packOps.formatFirstAccessHint?.(
           args.userMessage,
           recentContextForHint,
         ) ?? "")
       : "";
-    const passwordResetHint = hasPack
+    const passwordResetHint = packText
       ? (packOps.formatPasswordResetHint?.(
           args.userMessage,
           recentContextForHint,
@@ -447,11 +455,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .join("\n");
     const steeringRules =
       agent.steeringRules?.trim() ||
-      fallbackSteeringRules(agent.archetype, agent.verticalPack);
-    const curriculumRules = hasPack
+      (packText
+        ? fallbackSteeringRules(agent.archetype, agent.verticalPack)
+        : "");
+    const curriculumRules = packText
       ? (pack?.constants.curriculumTceRules ?? "")
       : "";
-    const examModalityRules = hasPack
+    const examModalityRules = packText
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
     // Alcance da tool de matrícula. Preso ao turno em que a tool existe:
@@ -459,7 +469,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // pelo texto canônico do pack porque o `steeringRules` salvo do agente
     // pode estar defasado — e aí o texto canônico não chega ao prompt.
     const enrollmentScopeRules =
-      hasPack && runtimeTools.includes("consultar_matricula")
+      packText && runtimeTools.includes("consultar_matricula")
         ? (pack?.constants.enrollmentScopeRules ?? "")
         : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as

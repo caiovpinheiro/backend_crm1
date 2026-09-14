@@ -97,7 +97,25 @@ describe("evaluateInboundMedia", () => {
     expect(verdict.action).toBe("handoff");
   });
 
-  it("imagem com legenda segue o fluxo normal", async () => {
+  it("legenda NÃO salva mídia marcada como handoff (o agente não lê arquivo)", async () => {
+    mockInbound([
+      { content: "[Imagem]", messageType: "image" },
+      { content: "onde eu clico aqui?", messageType: "text" },
+    ]);
+    const verdict = await evaluateInboundMedia({
+      conversationId: "conv-1",
+      userMessage: "[Imagem]\nonde eu clico aqui?",
+      policy: genericPolicy,
+    });
+    expect(verdict.hasUsableText).toBe(true);
+    expect(verdict.action).toBe("handoff");
+  });
+
+  it("legenda vence quando a ação do tipo é ask_text", async () => {
+    const policy = normalizeInboxPolicy(
+      { media: { actions: { image: "ask_text" } } },
+      null,
+    );
     mockInbound([
       { content: "[Imagem]", messageType: "image" },
       { content: "quero cancelar minha matrícula", messageType: "text" },
@@ -105,7 +123,7 @@ describe("evaluateInboundMedia", () => {
     const verdict = await evaluateInboundMedia({
       conversationId: "conv-1",
       userMessage: "[Imagem]\nquero cancelar minha matrícula",
-      policy: genericPolicy,
+      policy,
     });
     expect(verdict.hasUsableText).toBe(true);
     expect(verdict.action).toBeNull();

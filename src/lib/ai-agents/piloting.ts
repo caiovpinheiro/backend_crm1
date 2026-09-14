@@ -253,12 +253,17 @@ export type AutoClosePolicy = {
   mode: AutoCloseMode;
   /// Termos extras (além do detector do código) que forçam encerrar.
   keywords: string[];
-  /// Texto enviado ao encerrar. Null = frase padrão do código.
+  /// Texto enviado ao encerrar depois de o cliente fechar o assunto.
+  /// Null = frase padrão do código.
   message: string | null;
+  /// Texto enviado ao encerrar por silêncio (sem resposta ao check-in).
+  /// Campo próprio porque o contexto é outro: ninguém combinou nada, o
+  /// cliente sumiu. Null = encerra sem avisar.
+  idleMessage: string | null;
 };
 
 export function defaultAutoClosePolicy(): AutoClosePolicy {
-  return { mode: "understood", keywords: [], message: null };
+  return { mode: "understood", keywords: [], message: null, idleMessage: null };
 }
 
 export function normalizeAutoClosePolicy(v: unknown): AutoClosePolicy {
@@ -279,6 +284,10 @@ export function normalizeAutoClosePolicy(v: unknown): AutoClosePolicy {
     message:
       typeof r.message === "string" && r.message.trim()
         ? r.message.trim()
+        : null,
+    idleMessage:
+      typeof r.idleMessage === "string" && r.idleMessage.trim()
+        ? r.idleMessage.trim()
         : null,
   };
 }

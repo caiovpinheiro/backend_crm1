@@ -442,6 +442,31 @@ export function buildAssignedConsultantNotice(
   );
 }
 
+const HUMAN_TOKENS =
+  "atendente|atendentes|humano|humana|consultor|consultora|fila|" +
+  "transferencia|atendimento humano";
+
+/**
+ * Recusa explícita de fila humana.
+ *
+ * Roda ANTES de qualquer palavra-chave (inclusive as extras do operador):
+ * "não quero atendente" contém "atendente", e sem esta checagem quem dizia
+ * exatamente que NÃO queria ser transferido era distribuído por isso.
+ */
+function userRefusesHumanDistribution(n: string): boolean {
+  const verb =
+    "quero|queria|desejo|preciso|precisa|precisava|gostaria|pedi|quis|" +
+    "falar|conversar";
+  return (
+    new RegExp(
+      `\\b(?:nao|n)\\s+(?:${verb})\\b[^.!?]{0,30}?\\b(?:${HUMAN_TOKENS})\\b`,
+    ).test(n) ||
+    new RegExp(`\\b(?:sem|nem|nada de)\\s+(?:${HUMAN_TOKENS})\\b`).test(n) ||
+    /\bnao\s+(?:me\s+)?(?:transfer\w*|encaminh\w*)/.test(n) ||
+    /\bnao\s+quero\s+(?:ser|falar)\b/.test(n)
+  );
+}
+
 /** Pedido explícito de fila / humano / consultor / distribuição. */
 export function userWantsHumanDistribution(
   userMessage: string,
@@ -449,6 +474,7 @@ export function userWantsHumanDistribution(
 ): boolean {
   const n = normalizeMsg(userMessage);
   if (!n) return false;
+  if (userRefusesHumanDistribution(n)) return false;
   for (const extra of ctx?.humanRequestKeywords ?? []) {
     const needle = normalizeMsg(extra);
     if (needle && n.includes(needle)) return true;

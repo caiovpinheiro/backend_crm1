@@ -26,8 +26,12 @@ export type RetrievedMessageModel = {
   media: AgentFaqMedia[];
 };
 
-/** Score mínimo para anexar tutorial (evita vídeo do tema errado). */
-export const FAQ_MEDIA_MIN_SCORE = 4;
+/**
+ * Score mínimo para anexar tutorial (evita vídeo do tema errado). 4 exigia
+ * casar título + duas palavras do corpo: o anexo quase nunca saía, mesmo
+ * com o modelo certo escolhido. 3 ainda exige título + corpo.
+ */
+export const FAQ_MEDIA_MIN_SCORE = 3;
 
 /** Títulos/conteúdos sensíveis — nunca entram no contexto do agente. */
 export const MESSAGE_MODEL_EXCLUDE_RE =
@@ -78,7 +82,12 @@ const STOP = new Set([
   "pra",
 ]);
 
-const MAX_CONTENT_CHARS = 700;
+/**
+ * 700 cortava o procedimento no meio — e o que fica no fim do modelo é
+ * justamente o link e os últimos passos. Modelo é fonte da verdade: entra
+ * inteiro até este teto.
+ */
+const MAX_CONTENT_CHARS = 1400;
 /** Score mínimo para injetar (evita falso positivo fraco). */
 const MIN_SCORE = 2.5;
 
