@@ -2624,6 +2624,33 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
+/**
+ * Devolve o deal do funil Atendimento à origem acadêmica. Sem vertical
+ * no agente/org, é no-op. Encerrar conversa (humano, lote, automação, IA)
+ * tem que limpar a fila — não só o close da IA.
+ */
+async function restoreDealAfterConversationResolved(args: {
+  conversationId: string;
+  contactId: string | null;
+  organizationId: string | null;
+}): Promise<void> {
+  if (!args.contactId || !args.organizationId) return;
+  try {
+    const { resolveAgentVerticalForConversation } = await import(
+      "@/services/ai/agent-vertical"
+    );
+    const agent = await resolveAgentVerticalForConversation(
+      args.conversationId,
+      args.organizationId,
+    );
+    await agent.ops.restoreDealToAcademicOrigin?.({
+      contactId: args.contactId,
+    });
+  } catch (e) {
+    console.warn("[conversations] restoreDeal after close failed", e);
+  }
+}
+
 export async function updateConversationStatusInDb(
   id: string,
   status: ConversationStatus,
@@ -2824,6 +2851,14 @@ export async function updateConversationStatusInDb(
     }
   }
 
+  if (status === "RESOLVED" && !followUp) {
+    await restoreDealAfterConversationResolved({
+      conversationId: id,
+      contactId: updated.contactId ?? updated.contact?.id ?? closeContactId,
+      organizationId: updated.organizationId,
+    });
+  }
+
   return updated;
 }
 
@@ -3015,6 +3050,14 @@ export async function resolveConversationsInline(params: {
       data: closePatch,
     });
     updated += toResolve.length;
+
+    for (const conv of toResolve) {
+      await restoreDealAfterConversationResolved({
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        organizationId: conv.organizationId,
+      });
+    }
 
     if (!params.keepAgent) {
       const pairs = new Map<string, { contactId: string; userId: string }>();

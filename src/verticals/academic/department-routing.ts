@@ -408,12 +408,103 @@ function isAtendimentoPipelineName(name?: string | null): boolean {
   return !!n && (n.includes("atendimento") || n === "sac");
 }
 
+type StageRef = { id?: string; name?: string; pipelineName?: string | null };
+
+function readStageRef(v: unknown): StageRef | null {
+  return typeof v === "object" && v !== null ? (v as StageRef) : null;
+}
+
+function isTerminalStageName(name?: string | null): boolean {
+  const n = normalize(name ?? "");
+  return n === "ganho" || n === "perdido";
+}
+
+const ACADEMIC_STAGE_SELECT = {
+  id: true,
+  name: true,
+  pipelineId: true,
+  pipeline: { select: { name: true } },
+} as const;
+
+function isUsableAcademicStage(stage: {
+  isWon?: boolean;
+  isLost?: boolean;
+  name: string;
+  pipeline?: { name?: string | null } | null;
+}): boolean {
+  if (stage.isWon || stage.isLost) return false;
+  if (isTerminalStageName(stage.name)) return false;
+  if (isAtendimentoPipelineName(stage.pipeline?.name)) return false;
+  if (isAtendimentoPipelineName(stage.name)) return false;
+  return true;
+}
+
+async function resolveAcademicStageFromRef(from: StageRef | null) {
+  if (!from) return null;
+  if (isAtendimentoPipelineName(from.pipelineName) || isAtendimentoPipelineName(from.name)) {
+    return null;
+  }
+  if (isTerminalStageName(from.name)) return null;
+
+  if (from.id) {
+    const byId = await prisma.stage.findUnique({
+      where: { id: from.id },
+      select: { ...ACADEMIC_STAGE_SELECT, isWon: true, isLost: true },
+    });
+    if (byId && isUsableAcademicStage(byId)) return byId;
+  }
+
+  if (from.name?.trim()) {
+    const byName = await prisma.stage.findFirst({
+      where: {
+        name: { equals: from.name.trim(), mode: "insensitive" },
+        isWon: false,
+        isLost: false,
+        pipeline: {
+          archivedAt: null,
+          name: { equals: "ACADÊMICO", mode: "insensitive" },
+        },
+      },
+      select: ACADEMIC_STAGE_SELECT,
+    });
+    if (byName && isUsableAcademicStage(byName)) return byName;
+  }
+
+  return null;
+}
+
+/** Sem origem gravada: Graduação do funil acadêmico, senão a entrada do default. */
+async function fallbackAcademicStage() {
+  const graduacao = await prisma.stage.findFirst({
+    where: {
+      name: { equals: "Graduação", mode: "insensitive" },
+      isWon: false,
+      isLost: false,
+      pipeline: {
+        archivedAt: null,
+        name: { equals: "ACADÊMICO", mode: "insensitive" },
+      },
+    },
+    select: ACADEMIC_STAGE_SELECT,
+  });
+  if (graduacao) return graduacao;
+  return prisma.stage.findFirst({
+    where: {
+      isIncoming: true,
+      isWon: false,
+      isLost: false,
+      pipeline: { archivedAt: null, isDefault: true },
+    },
+    select: ACADEMIC_STAGE_SELECT,
+  });
+}
+
 /**
  * Encerrou o atendimento: devolve o card ao estágio do funil acadêmico em que
  * ele estava ANTES de ir para o funil de Atendimento.
  *
- * Se o deal não está no funil de Atendimento, não mexe — o aluno fica no
- * funil em que já está (regra pedida pela operação).
+ * Vale para qualquer encerramento (humano, lote, automação, IA). Se o deal
+ * não está no funil de Atendimento, não mexe.
  */
 export async function restoreDealToAcademicOrigin(args: {
   dealId?: string | null;
@@ -446,7 +537,6 @@ export async function restoreDealToAcademicOrigin(args: {
     },
   });
   if (!deal) return { moved: false, reason: "NO_DEAL" };
-  // Fora do funil de Atendimento: mantém onde está.
   if (!isAtendimentoPipelineName(deal.stage?.pipeline?.name)) {
     return { moved: false, reason: "NOT_IN_ATENDIMENTO", dealId };
   }
@@ -458,41 +548,35 @@ export async function restoreDealToAcademicOrigin(args: {
     select: { meta: true },
   });
 
-  type StageRef = { id?: string; pipelineName?: string | null };
-  const readRef = (v: unknown): StageRef | null =>
-    typeof v === "object" && v !== null ? (v as StageRef) : null;
-
-  let originStageId: string | null = null;
+  let originStage: Awaited<ReturnType<typeof resolveAcademicStageFromRef>> = null;
   for (const ev of events) {
     const meta = (ev.meta as Record<string, unknown> | null) ?? {};
-    const from = readRef(meta.from);
-    const to = readRef(meta.to);
-    if (!from?.id) continue;
+    const from = readStageRef(meta.from);
+    const to = readStageRef(meta.to);
     const enteredAtendimento =
       meta.aiAttendanceHandoff === true ||
       to?.id === deal.stageId ||
-      isAtendimentoPipelineName(to?.pipelineName);
+      isAtendimentoPipelineName(to?.pipelineName) ||
+      isAtendimentoPipelineName(to?.name);
     if (!enteredAtendimento) continue;
-    if (isAtendimentoPipelineName(from.pipelineName)) continue;
-    originStageId = from.id;
-    break;
+    originStage = await resolveAcademicStageFromRef(from);
+    if (originStage) break;
   }
 
-  if (!originStageId) return { moved: false, reason: "NO_ORIGIN", dealId };
-
-  const originStage = await prisma.stage.findUnique({
-    where: { id: originStageId },
-    select: {
-      id: true,
-      name: true,
-      pipelineId: true,
-      pipeline: { select: { name: true } },
-    },
-  });
-  // Estágio apagado ou que virou parte do próprio Atendimento: não arrisca.
-  if (!originStage || isAtendimentoPipelineName(originStage.pipeline?.name)) {
-    return { moved: false, reason: "ORIGIN_GONE", dealId };
+  if (!originStage) {
+    for (const ev of events) {
+      const meta = (ev.meta as Record<string, unknown> | null) ?? {};
+      originStage =
+        (await resolveAcademicStageFromRef(readStageRef(meta.from))) ??
+        (await resolveAcademicStageFromRef(readStageRef(meta.to)));
+      if (originStage) break;
+    }
   }
+
+  if (!originStage) {
+    originStage = await fallbackAcademicStage();
+  }
+  if (!originStage) return { moved: false, reason: "NO_ORIGIN", dealId };
   if (originStage.id === deal.stageId) {
     return { moved: false, reason: "ALREADY_THERE", dealId };
   }
@@ -519,7 +603,7 @@ export async function restoreDealToAcademicOrigin(args: {
         },
         aiAttendanceReturn: true,
       },
-      { type: "AI", label: "Agente IA" },
+      { type: "SYSTEM", label: "Encerramento" },
     ).catch(() => {});
     return { moved: true, reason: "MOVED", dealId, stageId: originStage.id };
   } catch (e) {

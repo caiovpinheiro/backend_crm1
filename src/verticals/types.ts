@@ -54,6 +54,7 @@ export type VerticalPackOps = {
   // ações
   executeAcademicDepartmentHandoff?: PackOp;
   moveOpenDealToEmAtendimento?: PackOp;
+  restoreDealToAcademicOrigin?: PackOp;
   closeAiOnlyConversation?: PackOp;
   closeIfAgentFarewellEndsAttendance?: PackOp;
   ensureAcademicDepartmentRoster?: PackOp;
