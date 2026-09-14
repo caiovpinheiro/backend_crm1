@@ -73,6 +73,7 @@ import {
   advanceContext,
   closeStrandedContext,
   getActiveContext,
+  releaseOtherAutomationContexts,
   interpolateVariables,
   markPausedTtl,
   pausedStepTimeoutMs,
@@ -671,6 +672,13 @@ async function finishConversationsForContact(
     } catch {
       /* best-effort */
     }
+  }
+
+  if (convs.length > 0) {
+    await releaseOtherAutomationContexts({
+      contactId: rt.contactId,
+      exceptAutomationId: rt.automationId,
+    }).catch(() => {});
   }
 }
 
@@ -4191,6 +4199,21 @@ async function executeStep(
       return { skipRemaining: true };
     }
 
+    case "closing_protocol": {
+      if (!rt.contactId) throw new Error("closing_protocol: contactId ausente");
+      const {
+        CLOSING_PHASE_VAR,
+        closingProtocolWaitMs,
+      } = await import("@/services/automation-closing-protocol");
+      const cpStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      if (cpStepId) {
+        await persistPausedContext(rt, cpStepId, closingProtocolWaitMs(cfg), {
+          [CLOSING_PHASE_VAR]: "waiting",
+        });
+      }
+      return { skipRemaining: true };
+    }
+
     case "set_variable": {
       const varName = readString(cfg, "name") ?? readString(cfg, "variableName");
       if (!varName) throw new Error("set_variable: name obrigatório");
@@ -5141,6 +5164,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   update_lead_score: "Lead score",
   question: "Pergunta ao lead",
   wait_for_reply: "Aguardar resposta",
+  closing_protocol: "Encerramento (aguardar + agente)",
   set_variable: "Definir variável",
   goto: "Ir para",
   finish: "Finalizar fluxo",

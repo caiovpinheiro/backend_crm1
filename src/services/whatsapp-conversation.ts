@@ -26,6 +26,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { emitConversationCreated } from "@/services/automation-triggers";
+import { releaseOtherAutomationContexts } from "@/services/automation-context";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("whatsapp-conversation");
@@ -276,7 +277,7 @@ export async function ensureWhatsAppConversationForContact(
     channelId: defaultChannel.id,
     conversationId: created.id,
     source: "auto_ensure",
-    extra: { inboxName: defaultChannel.name },
+    extra: { inboxName: defaultChannel.name, openedWithoutMessage: true },
   });
 
   return {
@@ -308,7 +309,7 @@ export async function maybeResolveUnansweredOutboundTicket(
   if (!conv || conv.status !== "OPEN") return false;
   if (conv.lastInboundAt != null || conv.hasHumanReply) return false;
 
-  await prisma.conversation.update({
+  const closed = await prisma.conversation.update({
     where: { id: conversationId },
     data: {
       status: "RESOLVED",
@@ -316,6 +317,13 @@ export async function maybeResolveUnansweredOutboundTicket(
       assignedToId: null,
       updatedAt: new Date(),
     },
+    select: { contactId: true },
   });
+  if (closed.contactId) {
+    await releaseOtherAutomationContexts({
+      contactId: closed.contactId,
+      conversationId,
+    }).catch(() => {});
+  }
   return true;
 }

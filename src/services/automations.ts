@@ -32,6 +32,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "call_made",
   "call_permission_granted",
   "conversation_tabulated",
+  "attendance_closing",
   "whatsapp_session_expiring",
   "lead_distributed",
 ] as const;
@@ -166,6 +167,16 @@ function prepareStepsForReplace(
   }));
 }
 
+/** Ticket aberto sem inbound do contato (ensure/template/reopen outbound). */
+function conversationCreatedHasInboundOpening(data: Record<string, unknown>): boolean {
+  if (data.openedWithoutMessage === true) return false;
+  const source = (readString(data, "source") ?? "").trim();
+  if (source === "auto_ensure" || source === "outbound_reopen") return false;
+  const content = (readString(data, "content") ?? readString(data, "text") ?? "").trim();
+  const messageType = (readString(data, "messageType") ?? "").trim();
+  return Boolean(content || messageType);
+}
+
 export function evaluateTrigger(
   triggerType: string,
   triggerConfig: unknown,
@@ -266,6 +277,11 @@ export function evaluateTrigger(
         const opening = readString(data, "content") ?? readString(data, "text") ?? "";
         if (isAckOrGreetingText(opening)) return false;
       }
+      // Opt-in: ticket aberto só para disparo (template/API/ensure) não
+      // aciona o mesmo fluxo de "aluno chamou". Default off.
+      if (cfg.skipIfNoInbound === true && !conversationCreatedHasInboundOpening(data)) {
+        return false;
+      }
       return true;
     }
     case "lifecycle_changed": {
@@ -364,6 +380,8 @@ export function evaluateTrigger(
       // ativas com triggerType="manual".
       return true;
     }
+    case "attendance_closing":
+      return true;
     case "conversation_tabulated": {
       // Filtro por departamento (opcional): so casa se o encerramento
       // aconteceu no dept configurado. Sem departmentId => any dept.

@@ -26,6 +26,7 @@ export type AutomationTriggerType =
   | "call_made"
   | "call_permission_granted"
   | "conversation_tabulated"
+  | "attendance_closing"
   | "whatsapp_session_expiring"
   /** Distribuição Inteligente atribuiu um consultor HUMAN (1ª vez). */
   | "lead_distributed"
@@ -54,6 +55,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "call_made",
   "call_permission_granted",
   "conversation_tabulated",
+  "attendance_closing",
   "whatsapp_session_expiring",
   "lead_distributed",
   "manual",
@@ -83,6 +85,7 @@ export const ACTION_STEP_TYPES = [
   "update_lead_score",
   "question",
   "wait_for_reply",
+  "closing_protocol",
   "set_variable",
   "goto",
   "transfer_automation",
@@ -278,6 +281,7 @@ export function triggerTypeLabel(t: string): string {
     call_made: "Ligação realizada",
     call_permission_granted: "Permissão de ligação concedida",
     conversation_tabulated: "Conversa encerrada",
+    attendance_closing: "Atendimento sendo encerrado",
     whatsapp_session_expiring: "Sessão do WhatsApp prestes a encerrar",
     lead_distributed: "Lead distribuído (consultor humano)",
     manual: "Manual (executar pela conversa)",
@@ -310,6 +314,7 @@ export function stepTypeLabel(t: string): string {
     update_lead_score: "Atualizar lead score",
     question: "Pergunta ao lead",
     wait_for_reply: "Aguardar resposta",
+    closing_protocol: "Encerramento (aguardar + agente)",
     set_variable: "Definir variável",
     goto: "Ir para (Goto)",
     transfer_automation: "Transferir automação",
@@ -370,12 +375,13 @@ export function summarizeTriggerConfig(
     case "conversation_created": {
       const ids = readTriggerChannelIds(c);
       const skipAck = c.skipIfAckOrGreeting === true ? " · sem ack/cumprimento" : "";
+      const skipOut = c.skipIfNoInbound === true ? " · só inbound" : "";
       if (ids.length === 1) {
         const id = ids[0]!;
-        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}${skipAck}`;
+        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}${skipAck}${skipOut}`;
       }
-      if (ids.length > 1) return `${ids.length} conexões${skipAck}`;
-      return `${c.channel ? `Canal: ${String(c.channel)}` : "Qualquer canal"}${skipAck}`;
+      if (ids.length > 1) return `${ids.length} conexões${skipAck}${skipOut}`;
+      return `${c.channel ? `Canal: ${String(c.channel)}` : "Qualquer canal"}${skipAck}${skipOut}`;
     }
     case "lifecycle_changed": {
       const to = c.toLifecycle ?? c.lifecycleStage;
@@ -432,6 +438,8 @@ export function summarizeTriggerConfig(
       if (c.departmentId) return `Departamento: ${String(c.departmentId).slice(0, 8)}…`;
       return "Qualquer encerramento";
     }
+    case "attendance_closing":
+      return "Sem resposta no aguardo — protocolo de encerramento";
     case "whatsapp_session_expiring":
       return `${String(c.hoursBeforeExpiry ?? 1)}h antes do encerramento`;
     default:
@@ -551,6 +559,15 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
         else if (timeoutMs >= 60_000) parts.push(`⏱ ${timeoutMs / 60_000}min`);
         else parts.push(`⏱ ${timeoutMs / 1000}s`);
       }
+      return parts.join(" · ");
+    }
+    case "closing_protocol": {
+      const waitMs = Number(c.waitMs ?? c.timeoutMs ?? 0);
+      const closeMs = Number(c.closingWaitMs ?? 0);
+      const parts = ["Aguardar → encerrar/devolver"];
+      if (waitMs >= 3_600_000) parts.push(`${waitMs / 3_600_000}h`);
+      else if (waitMs >= 60_000) parts.push(`${waitMs / 60_000}min`);
+      if (closeMs >= 60_000) parts.push(`fecha ${closeMs / 60_000}min`);
       return parts.join(" · ");
     }
     case "finish":
@@ -827,6 +844,14 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return {
         timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "",
       };
+    case "closing_protocol":
+      return {
+        waitMs: 3_600_000,
+        closingWaitMs: 900_000,
+        receivedGotoStepId: "",
+        encerrarStepId: "",
+        devolverStepId: "",
+      };
     case "finish":
       return { action: "stop" };
     case "set_variable":
@@ -1026,7 +1051,13 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "contact_created":
       return {};
     case "conversation_created":
-      return { channel: "", channelIds: [], channelScope: "all", skipIfAckOrGreeting: false };
+      return {
+        channel: "",
+        channelIds: [],
+        channelScope: "all",
+        skipIfAckOrGreeting: false,
+        skipIfNoInbound: false,
+      };
     case "lifecycle_changed":
       return { fromLifecycle: "", toLifecycle: "" };
     case "agent_changed":
