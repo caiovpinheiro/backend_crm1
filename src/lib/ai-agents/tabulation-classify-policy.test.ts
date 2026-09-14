@@ -6,6 +6,7 @@ import {
   conversationHasRealAttendance,
   formatTabulationCatalogText,
   inboundMessageShowsDemand,
+  isAckOrGreetingText,
   isGreetingOnlyText,
   isShortAckText,
   shouldFireConversationTabulatedTrigger,
@@ -56,6 +57,16 @@ describe("isGreetingOnlyText", () => {
     expect(
       isGreetingOnlyText("Gostaria de saber se meu filho deve algum valor"),
     ).toBe(false);
+  });
+});
+
+describe("isAckOrGreetingText", () => {
+  it("une ack curto e cumprimento", () => {
+    expect(isAckOrGreetingText("ok")).toBe(true);
+    expect(isAckOrGreetingText("obrigado")).toBe(true);
+    expect(isAckOrGreetingText("Está tudo certo")).toBe(true);
+    expect(isAckOrGreetingText("Bom dia")).toBe(true);
+    expect(isAckOrGreetingText("como recupero a senha?")).toBe(false);
   });
 });
 

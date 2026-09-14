@@ -117,3 +117,44 @@ describe("evaluateTrigger — message_received channelId", () => {
     ).toBe(false);
   });
 });
+
+describe("evaluateTrigger — conversation_created skipIfAckOrGreeting", () => {
+  function created(data: Record<string, unknown>) {
+    return { event: "conversation_created" as const, data };
+  }
+
+  it("default (off) dispara mesmo com ack", () => {
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        { channelScope: "all" },
+        created({ channel: "whatsapp", content: "ok" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("opt-in pula ack/cumprimento", () => {
+    const cfg = { channelScope: "all", skipIfAckOrGreeting: true };
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", content: "Está tudo certo" }),
+      ),
+    ).toBe(false);
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", isAckOrGreeting: true }),
+      ),
+    ).toBe(false);
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", content: "como recupero a senha?" }),
+      ),
+    ).toBe(true);
+  });
+});

@@ -77,6 +77,7 @@ const GREETING_WORDS = new Set([
   "tudo",
   "bem",
   "td",
+  "esta",
   "bomdia",
   "boatarde",
   "boanoite",
@@ -139,6 +140,11 @@ export function isGreetingOnlyText(text: string | null | undefined): boolean {
   if (words.length > 6) return false;
   const greetCount = words.filter((w) => GREETING_WORDS.has(w)).length;
   return greetCount >= Math.ceil(words.length * 0.6);
+}
+
+/** Ack curto ou cumprimento solto — política de produto, não tenant. */
+export function isAckOrGreetingText(text: string | null | undefined): boolean {
+  return isShortAckText(text) || isGreetingOnlyText(text);
 }
 
 export function messageHasMedia(msg: AttendanceMessage): boolean {

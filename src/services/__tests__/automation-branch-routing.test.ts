@@ -671,6 +671,41 @@ describe("decideInteractiveMenuInbound — botão retoma goto", () => {
     expect(d.action).toBe("no_match");
   });
 
+  it("mídia / unsupported permanece no passo (não else)", () => {
+    const image = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "[Imagem]",
+      messageType: "image",
+    });
+    expect(image).toEqual({ action: "stay", reason: "non_text" });
+
+    const unsupported = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "Álbum de imagens (não suportado pela API da Meta)",
+      messageType: "unsupported",
+    });
+    expect(unsupported).toEqual({ action: "stay", reason: "non_text" });
+  });
+
+  it("texto livre sem match continua no_match (else do canvas)", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "quero trocar de curso",
+      messageType: "text",
+    });
+    expect(d.action).toBe("no_match");
+  });
+
+  it("onNonText=else trata mídia como no_match", () => {
+    const d = decideInteractiveMenuInbound({
+      buttons,
+      messageContent: "[Imagem]",
+      messageType: "image",
+      onNonText: "else",
+    });
+    expect(d.action).toBe("no_match");
+  });
+
   it("readAwaitingFlow", () => {
     expect(
       readAwaitingFlow({

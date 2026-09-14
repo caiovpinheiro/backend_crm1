@@ -8,6 +8,7 @@ import {
   type LifecycleStage,
 } from "@prisma/client";
 
+import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
 import { normalizeConditionConfig } from "@/lib/automation-condition";
 import {
   runWithAutomationOrigin,
@@ -84,6 +85,7 @@ import {
   ensureWhatsAppConversationForContact,
   maybeResolveUnansweredOutboundTicket,
 } from "@/services/whatsapp-conversation";
+import { activeConversationOnAccountWhere } from "@/services/conversations";
 
 const log = getLogger("automation");
 
@@ -372,8 +374,16 @@ async function resolveAutomationSendConv(
   // Preferir o ticket ATIVO evita gravar o outbound num ticket encerrado
   // enquanto a resposta do cliente entra no aberto (outbound e inbound em
   // tickets diferentes: o envio some da timeline do ticket que o cliente usa).
+  const preferredChannelId =
+    typeof opts?.channelId === "string" ? opts.channelId.trim() : "";
   const active = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+    where: preferredChannelId
+      ? activeConversationOnAccountWhere({
+          contactId,
+          channel: "whatsapp",
+          channelId: preferredChannelId,
+        })
+      : { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     select: { id: true },
   });
@@ -381,7 +391,11 @@ async function resolveAutomationSendConv(
   // Sem ticket ativo, usa o encerrado mais recente em vez de abortar: deixar
   // de enviar a mensagem é pior que o split de ticket que estamos corrigindo.
   const resolved = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
+    where: {
+      contactId,
+      channel: "whatsapp",
+      ...(preferredChannelId ? { channelId: preferredChannelId } : {}),
+    },
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     select: { id: true },
   });
@@ -516,6 +530,27 @@ function logTabulated(
   });
 }
 
+async function conversationHasRealAttendanceById(
+  conversationId: string,
+): Promise<boolean> {
+  const messages = await prisma.message.findMany({
+    where: { conversationId },
+    select: {
+      direction: true,
+      isPrivate: true,
+      content: true,
+      messageType: true,
+      mediaUrl: true,
+      authorType: true,
+      senderName: true,
+      aiAgentUserId: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 80,
+  });
+  return conversationHasRealAttendance(messages);
+}
+
 /**
  * Encerra as conversas abertas do contato. Compartilhado por
  * `finish_conversation` e por `tabulate_conversation` com encerramento junto —
@@ -524,7 +559,9 @@ function logTabulated(
  * (salvo `conversation.keepDepartmentOnEnd`).
  *
  * Sem `chosen`, mantém o comportamento antigo: cai na tabulação de
- * encerramento automático do departamento, se houver.
+ * encerramento automático do departamento, se houver. Folha autoClose do
+ * depto só entra quando houve atendimento real (demanda inbound + resposta
+ * de humano/IA) — ack sozinho não vira Sem Resposta.
  */
 async function finishConversationsForContact(
   rt: RuntimeContext,
@@ -569,10 +606,12 @@ async function finishConversationsForContact(
             tabulationId: c.tabulationId,
           }).catch(() => null)
         : null;
+    const canAutoCloseTab =
+      Boolean(rowOrg) && (await conversationHasRealAttendanceById(c.id));
     const autoTab =
       chosen ??
       alreadyApplied ??
-      (rowOrg
+      (rowOrg && canAutoCloseTab
         ? await resolveAutoCloseTabulation({
             organizationId: rowOrg,
             departmentId: c.departmentId,
