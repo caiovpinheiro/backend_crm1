@@ -6,7 +6,7 @@ import {
   createTemplate,
   getTemplates,
   normalizeTemplateAttachments,
-  MAX_TEMPLATE_ATTACHMENTS,
+  templateSequenceLimitError,
 } from "@/services/templates";
 
 // Bug 29/mai/26: usavamos `auth()` direto. createTemplate chama
@@ -59,11 +59,9 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
-        if (body.attachments.length > MAX_TEMPLATE_ATTACHMENTS) {
-          return NextResponse.json(
-            { message: `Máximo de ${MAX_TEMPLATE_ATTACHMENTS} anexos por modelo.` },
-            { status: 400 },
-          );
+        const limitError = templateSequenceLimitError(body.attachments);
+        if (limitError) {
+          return NextResponse.json({ message: limitError }, { status: 400 });
         }
         attachments = normalizeTemplateAttachments(body.attachments);
       }

@@ -4,37 +4,67 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export type TemplateAttachment = {
+  /** Vazio = passo só de texto (`messageBefore`). */
   url: string;
   mimeType?: string | null;
   name?: string | null;
-  /** Texto enviado ANTES deste arquivo. Só faz sentido para índice >= 1. */
+  /** Texto enviado neste passo (antes do arquivo, se houver). */
   messageBefore?: string | null;
 };
 
 export const MAX_TEMPLATE_ATTACHMENTS = 5;
+/** Arquivos + textos extras na sequência (além do `content` principal). */
+export const MAX_TEMPLATE_SEQUENCE_ITEMS = 10;
+
+export function firstFileAttachment(
+  items: TemplateAttachment[],
+): TemplateAttachment | null {
+  return items.find((a) => a.url.trim()) ?? null;
+}
+
+/** 400-message se a lista crua estourar tetos; `null` se ok. */
+export function templateSequenceLimitError(raw: unknown[]): string | null {
+  if (raw.length > MAX_TEMPLATE_SEQUENCE_ITEMS) {
+    return `Máximo de ${MAX_TEMPLATE_SEQUENCE_ITEMS} passos na sequência do modelo.`;
+  }
+  let files = 0;
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const url = (item as Record<string, unknown>).url;
+    if (typeof url === "string" && url.trim()) files += 1;
+  }
+  if (files > MAX_TEMPLATE_ATTACHMENTS) {
+    return `Máximo de ${MAX_TEMPLATE_ATTACHMENTS} arquivos por modelo.`;
+  }
+  return null;
+}
 
 /**
- * Valida e normaliza o array de anexos recebido do client. Itens inválidos
- * (sem `url` string não vazia) são descartados silenciosamente — o limite de
- * quantidade (`MAX_TEMPLATE_ATTACHMENTS`) é responsabilidade do caller (rota),
- * que deve rejeitar com 400 antes de chamar o service.
+ * Valida e normaliza o array de anexos recebido do client.
+ * Passo só de texto: `url` vazio + `messageBefore`. Arquivo: `url` obrigatório.
+ * Limites de quantidade são da rota (`templateSequenceLimitError`).
  */
 export function normalizeTemplateAttachments(raw: unknown): TemplateAttachment[] {
   if (!Array.isArray(raw)) return [];
   const out: TemplateAttachment[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
-    const url = (item as Record<string, unknown>).url;
-    if (typeof url !== "string" || !url.trim()) continue;
-    const mimeType = (item as Record<string, unknown>).mimeType;
-    const name = (item as Record<string, unknown>).name;
-    const messageBefore = (item as Record<string, unknown>).messageBefore;
+    const rec = item as Record<string, unknown>;
+    const urlRaw = rec.url;
+    const url = typeof urlRaw === "string" ? urlRaw.trim() : "";
+    const mimeType = rec.mimeType;
+    const name = rec.name;
+    const messageBeforeRaw = rec.messageBefore;
+    const messageBefore =
+      typeof messageBeforeRaw === "string" && messageBeforeRaw.trim()
+        ? messageBeforeRaw.trim()
+        : null;
+    if (!url && !messageBefore) continue;
     out.push({
-      url: url.trim(),
+      url,
       mimeType: typeof mimeType === "string" && mimeType ? mimeType : null,
       name: typeof name === "string" && name ? name : null,
-      messageBefore:
-        typeof messageBefore === "string" && messageBefore.trim() ? messageBefore.trim() : null,
+      messageBefore,
     });
   }
   return out;
@@ -77,10 +107,10 @@ export async function createTemplate(data: {
 
   if (data.attachments !== undefined) {
     attachments = data.attachments.length > 0 ? data.attachments : null;
-    const first = data.attachments[0] ?? null;
-    mediaUrl = first?.url ?? null;
-    mediaType = first?.mimeType ?? null;
-    mediaName = first?.name ?? null;
+    const firstFile = firstFileAttachment(data.attachments);
+    mediaUrl = firstFile?.url || null;
+    mediaType = firstFile?.mimeType ?? null;
+    mediaName = firstFile?.name ?? null;
   } else if (mediaUrl) {
     attachments = [{ url: mediaUrl, mimeType: mediaType, name: mediaName }];
   }
@@ -125,10 +155,10 @@ export async function updateTemplate(
 
   if (data.attachments !== undefined) {
     attachments = data.attachments.length > 0 ? data.attachments : null;
-    const first = data.attachments[0] ?? null;
-    mediaUrl = first?.url ?? null;
-    mediaType = first?.mimeType ?? null;
-    mediaName = first?.name ?? null;
+    const firstFile = firstFileAttachment(data.attachments);
+    mediaUrl = firstFile?.url || null;
+    mediaType = firstFile?.mimeType ?? null;
+    mediaName = firstFile?.name ?? null;
   } else if (mediaUrl !== undefined) {
     attachments = mediaUrl
       ? [{ url: mediaUrl, mimeType: mediaType ?? null, name: mediaName ?? null }]

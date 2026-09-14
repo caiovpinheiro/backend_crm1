@@ -6,7 +6,7 @@ import {
   getTemplateById,
   updateTemplate,
   normalizeTemplateAttachments,
-  MAX_TEMPLATE_ATTACHMENTS,
+  templateSequenceLimitError,
 } from "@/services/templates";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -47,11 +47,9 @@ export async function PUT(request: Request, ctx: Ctx) {
             { status: 400 },
           );
         }
-        if (body.attachments.length > MAX_TEMPLATE_ATTACHMENTS) {
-          return NextResponse.json(
-            { message: `Máximo de ${MAX_TEMPLATE_ATTACHMENTS} anexos por modelo.` },
-            { status: 400 },
-          );
+        const limitError = templateSequenceLimitError(body.attachments);
+        if (limitError) {
+          return NextResponse.json({ message: limitError }, { status: 400 });
         }
         attachments = normalizeTemplateAttachments(body.attachments);
       }
