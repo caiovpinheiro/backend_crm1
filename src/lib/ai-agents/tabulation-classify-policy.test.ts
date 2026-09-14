@@ -6,8 +6,10 @@ import {
   conversationHasRealAttendance,
   formatTabulationCatalogText,
   inboundMessageShowsDemand,
+  classifyInboundIdleIntent,
   isAckOrGreetingText,
   isGreetingOnlyText,
+  isIdleClosingText,
   isShortAckText,
   shouldFireConversationTabulatedTrigger,
   type AttendanceMessage,
@@ -57,6 +59,24 @@ describe("isGreetingOnlyText", () => {
     expect(
       isGreetingOnlyText("Gostaria de saber se meu filho deve algum valor"),
     ).toBe(false);
+  });
+});
+
+describe("isIdleClosingText / classifyInboundIdleIntent", () => {
+  it("ack e confirmação são idle; oi continua greeting", () => {
+    expect(isIdleClosingText("ok")).toBe(true);
+    expect(isIdleClosingText("obrigado")).toBe(true);
+    expect(isIdleClosingText("Está tudo certo")).toBe(true);
+    expect(isIdleClosingText("era só isso")).toBe(true);
+    expect(isIdleClosingText("qualquer dúvida eu falo")).toBe(true);
+    expect(isIdleClosingText("oi")).toBe(false);
+    expect(isIdleClosingText("Bom dia")).toBe(false);
+    expect(isIdleClosingText("como recupero a senha?")).toBe(false);
+    expect(classifyInboundIdleIntent("ok")).toBe("idle");
+    expect(classifyInboundIdleIntent("oi")).toBe("greeting");
+    expect(classifyInboundIdleIntent("preciso de ajuda no boleto")).toBe(
+      "demand",
+    );
   });
 });
 

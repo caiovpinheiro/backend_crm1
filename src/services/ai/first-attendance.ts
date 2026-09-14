@@ -305,6 +305,27 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
+  if (args.userMessage != null && args.userMessage.trim() !== "") {
+    try {
+      const { shouldSkipIdleInboundAutomation } = await import(
+        "@/services/ai/idle-inbound"
+      );
+      if (
+        await shouldSkipIdleInboundAutomation({
+          content: args.userMessage,
+        })
+      ) {
+        logAi("first_attendance_skip_idle_inbound", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        return null;
+      }
+    } catch (e) {
+      console.error("[ai] idle inbound check failed", e);
+    }
+  }
+
   try {
     const allowed = await isContactAllowedForAi(args.contactId);
     if (!allowed) {
