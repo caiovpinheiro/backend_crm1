@@ -6,10 +6,11 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
 import { generateFileName, saveFile } from "@/lib/storage/local";
-import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import {
+  activeConversationOnAccountWhere,
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -262,27 +263,33 @@ const CONV_SELECT = {
   assignedToId: true,
 } as const;
 
-async function findActiveConversation(contactId: string) {
+async function findActiveConversation(contactId: string, channelId: string | null) {
   return prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+    where: activeConversationOnAccountWhere({
+      contactId,
+      channel: "whatsapp",
+      channelId,
+    }),
     select: CONV_SELECT,
   });
 }
 
-async function findOrCreateConversation(contactId: string, channelId: string, rawJid: string) {
-  // Modelo de ticket: nova mensagem em contato com ultima RESOLVED cria
-  // conversa nova (com #N+1). Ver AGENT.md "ID de conversa + ticket".
-  const existing = await findActiveConversation(contactId);
+async function findOrCreateConversation(
+  contactId: string,
+  channelId: string,
+  rawJid: string,
+  opening?: { content?: string | null; messageType?: string | null },
+) {
+  // Ticket = contato + WhatsApp + conta Baileys. Nao reusa OPEN de outra
+  // conexao e nao sobrescreve o channelId dela.
+  const existing = await findActiveConversation(contactId, channelId);
 
   if (existing) {
-    // Reusa conversa ativa (nao-RESOLVED por construcao); so reconcilia
-    // metadados de canal/jid. Nao promove pra OPEN aqui — o modelo de
-    // ticket ja garante que existing esta em OPEN/PENDING/SNOOZED.
-    const updates: Record<string, unknown> = {};
-    if (existing.channelId !== channelId) updates.channelId = channelId;
-    if (existing.waJid !== rawJid) updates.waJid = rawJid;
-    if (Object.keys(updates).length > 0) {
-      await prisma.conversation.update({ where: { id: existing.id }, data: updates });
+    if (existing.waJid !== rawJid) {
+      await prisma.conversation.update({
+        where: { id: existing.id },
+        data: { waJid: rawJid },
+      });
     }
     await maybeDistributeNewInboundTicket({
       conversationId: existing.id,
@@ -290,6 +297,19 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
       assignedToId: existing.assignedToId ?? null,
     });
     return existing;
+  }
+
+  const orphan = await findActiveConversation(contactId, null);
+  if (orphan) {
+    const updates: Record<string, unknown> = { channelId };
+    if (orphan.waJid !== rawJid) updates.waJid = rawJid;
+    await prisma.conversation.update({ where: { id: orphan.id }, data: updates });
+    await maybeDistributeNewInboundTicket({
+      conversationId: orphan.id,
+      contactId,
+      assignedToId: orphan.assignedToId ?? null,
+    });
+    return { ...orphan, channelId, waJid: rawJid };
   }
 
   const inheritAssignee = await inheritContactAssigneeWithViaForNewTicket(contactId);
@@ -321,15 +341,23 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
       contactId,
       assignedToId: inheritAssignee?.userId ?? null,
     });
+    emitConversationCreated({
+      contactId,
+      channel: "whatsapp",
+      channelId,
+      conversationId: created.id,
+      source: "inbound_baileys",
+      extra: openingMessageTriggerExtra({
+        content: opening?.content,
+        messageType: opening?.messageType,
+      }),
+    });
     return created;
   } catch (err) {
-    // Corrida: mensagens simultaneas do mesmo numero disparam dois
-    // findOrCreate; o indice unico parcial (1 conversa ativa por
-    // contato+canal) rejeita o 2o create com P2002. Reusa o vencedor em
-    // vez de duplicar o ticket. Ver migration
-    // `conversations_active_contact_channel`.
+    // Corrida no mesmo número: o indice unico parcial rejeita o 2o
+    // create com P2002. Reusa o vencedor desta conta.
     if (isActiveConversationUniqueViolation(err)) {
-      const won = await findActiveConversation(contactId);
+      const won = await findActiveConversation(contactId, channelId);
       if (won) return won;
     }
     throw err;
@@ -573,7 +601,10 @@ export async function handleBaileysMessage(
     if (existingMsg) return;
 
     const contact = await resolveContact(jid, msg.pushName, channelId);
-    const conversation = await findOrCreateConversation(contact.id, channelId, rawJid);
+    const conversation = await findOrCreateConversation(contact.id, channelId, rawJid, {
+      content: parsed.text,
+      messageType: parsed.messageType,
+    });
 
     // Sincronizar foto de perfil em background — nao bloqueia o
     // processamento da mensagem (essencial pra throughput).
@@ -663,6 +694,7 @@ export async function handleBaileysMessage(
       await processSalesbotMessage(contact.id, parsed.text, {
         channelId,
         conversationId: conversation.id,
+        messageType: parsed.messageType,
       });
     } catch (err) {
       log.error("Falha no salesbot:", err);

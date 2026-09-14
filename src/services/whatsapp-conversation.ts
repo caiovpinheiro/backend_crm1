@@ -8,9 +8,9 @@
  * escrito.
  *
  * Idempotente:
- *  - Se já existe Conversation WA ativa pro contato e ela tem `channelId`, no-op.
- *  - Se existe mas está sem `channelId`, faz UPDATE com o default.
- *  - Se não existe, cria com `channelId` do default.
+ *  - Se já existe Conversation WA ativa nesta conta (`channelId`), no-op.
+ *  - Se existe órfã (`channelId` NULL), faz UPDATE com a conta alvo.
+ *  - Se não existe (ou só há OPEN em outra conta), cria nesta conta.
  *  - Se a org não tem canal Meta CONNECTED, retorna skipped (nada quebra).
  */
 
@@ -21,6 +21,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
+  activeConversationOnAccountWhere,
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -163,17 +164,15 @@ export async function ensureWhatsAppConversationForContact(
   if (!defaultChannel) defaultChannel = await resolveDefaultWhatsAppChannel();
   if (!defaultChannel) return { status: "skipped_no_channel" };
 
-  // Modelo de ticket: reusa apenas conversa nao-RESOLVED. Quando a ultima
-  // esta encerrada, o proximo envio gera nova conversa com #N+1 — mantendo
-  // as mensagens antigas encapsuladas no ticket anterior. Decisao aprovada
-  // pelo operador (ver AGENT.md "ID de conversa + logs + gatilho" e
-  // pergunta "estrategia = ticket puro").
+  // Ticket = contato + WhatsApp + conta. OPEN em outra WABA não é
+  // reutilizado (senão o próximo inbound nessa conta não dispara
+  // conversation_created). Órfã (channelId NULL) pode ser adotada.
   const existing = await prisma.conversation.findFirst({
-    where: {
+    where: activeConversationOnAccountWhere({
       contactId: contact.id,
       channel: "whatsapp",
-      status: { not: "RESOLVED" },
-    },
+      channelId: defaultChannel.id,
+    }),
     select: { id: true, channelId: true, inboxName: true, assignedToId: true },
   });
 
@@ -183,35 +182,34 @@ export async function ensureWhatsAppConversationForContact(
     // lead_distributed (saudação em texto livre) logo após HSM — falha Meta
     // 131047 fora da janela 24h e lotava a aba Erro (calouros_pt*, ago/2026).
     // inheritAssignee=false vale só na CRIAÇÃO do ticket (abaixo).
-    if (existing.channelId === defaultChannel.id) {
-      return {
-        status: "already_ok",
-        conversationId: existing.id,
-        channelId: existing.channelId,
-      };
-    }
-    if (!existing.channelId) {
-      // Backfill: conversa existe mas ficou órfã (criada via `skipSend` legado
-      // ou por seed). Só atualiza quando o campo está NULL — se aponta pra
-      // outro canal, respeita a escolha explícita anterior.
-      const updateData: Prisma.ConversationUpdateInput = {
-        channelId: defaultChannel.id,
-        inboxName: existing.inboxName ?? defaultChannel.name,
-      };
-      await prisma.conversation.update({
-        where: { id: existing.id },
-        data: updateData,
-      });
-      return {
-        status: "backfilled_channel",
-        conversationId: existing.id,
-        channelId: defaultChannel.id,
-      };
-    }
     return {
       status: "already_ok",
       conversationId: existing.id,
       channelId: existing.channelId,
+    };
+  }
+
+  const orphan = await prisma.conversation.findFirst({
+    where: activeConversationOnAccountWhere({
+      contactId: contact.id,
+      channel: "whatsapp",
+      channelId: null,
+    }),
+    select: { id: true, channelId: true, inboxName: true, assignedToId: true },
+  });
+  if (orphan) {
+    const updateData: Prisma.ConversationUpdateInput = {
+      channelId: defaultChannel.id,
+      inboxName: orphan.inboxName ?? defaultChannel.name,
+    };
+    await prisma.conversation.update({
+      where: { id: orphan.id },
+      data: updateData,
+    });
+    return {
+      status: "backfilled_channel",
+      conversationId: orphan.id,
+      channelId: defaultChannel.id,
     };
   }
 
@@ -238,7 +236,11 @@ export async function ensureWhatsAppConversationForContact(
     // (indice unico parcial). Ver `isActiveConversationUniqueViolation`.
     if (isActiveConversationUniqueViolation(err)) {
       const won = await prisma.conversation.findFirst({
-        where: { contactId: contact.id, channel: "whatsapp", status: { not: "RESOLVED" } },
+        where: activeConversationOnAccountWhere({
+          contactId: contact.id,
+          channel: "whatsapp",
+          channelId: defaultChannel.id,
+        }),
         select: { id: true, channelId: true },
       });
       if (won) {

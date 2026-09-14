@@ -182,6 +182,7 @@ const listSelect = {
   id: true,
   number: true,
   channel: true,
+  channelId: true,
   status: true,
   unreadCount: true,
   hasError: true,
@@ -1018,7 +1019,7 @@ async function findCollapsedConversationPage(args: {
                       ${sortCol} AS sort_val,
                       CASE
                         WHEN c."contactId" IS NULL THEN 'id:' || c.id
-                        ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+                        ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
                       END AS grp
                     FROM conversations c
                     WHERE ${sql}
@@ -1042,7 +1043,7 @@ async function findCollapsedConversationPage(args: {
                     ${sortCol} AS sort_val,
                     CASE
                       WHEN c."contactId" IS NULL THEN 'id:' || c.id
-                      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+                      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
                     END AS grp
                   FROM conversations c
                   WHERE ${sql}
@@ -1109,6 +1110,7 @@ async function scanCollapsedRepIdsJs(args: {
         id: true,
         contactId: true,
         channel: true,
+        channelId: true,
         updatedAt: true,
         createdAt: true,
         unreadCount: true,
@@ -1231,17 +1233,17 @@ async function hydrateConversationsByIds(
 }
 
 /**
- * DISTINCT ON (contato+canal) materializa TODOS os grupos antes do
+ * DISTINCT ON (contato+canal+conta) materializa TODOS os grupos antes do
  * LIMIT — 5s+ na 1ª página de `todos` (OPEN+RESOLVED da org). Filas
- * OPEN já são 1:1 (`conversations_active_contact_channel`). `todos` e
+ * OPEN já são 1:1 por conta (`conversations_active_contact_channel_account`). `todos` e
  * o picker sem aba usam ORDER BY + LIMIT; o FE colapsa o card e o
- * badge conta DISTINCT contato+canal. Encerradas/Resolvidos colapsam
+ * badge conta DISTINCT contato+canal+conta. Encerradas/Resolvidos colapsam
  * no SQL (N tickets RESOLVED por número).
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
   const tabs = listTabsOf(params);
-  // Encerradas/Resolvendo: DISTINCT contato+canal. Filas quentes (Entrada,
+  // Encerradas/Resolvendo: DISTINCT contato+canal+conta. Filas quentes (Entrada,
   // Aguardando, …) não — DISTINCT na org inteira é caro. União mista com
   // fila quente também fica sem DISTINCT; o FE colapsa o card.
   return (
@@ -1335,7 +1337,7 @@ const TAB_LIST = INBOX_TAB_LIST;
  * (...)`) — um único COUNT escalar, sem trazer os grupos para memória
  * (o org maior tem 28k grupos; `groupBy` custaria MBs por aba).
  *
- * Contato x contato+canal: a lista agrupa por `contactId::channel`. Em
+ * Contato x contato+canal+conta: a lista agrupa por `contactId::channel::channelId`. Em
  * `dnawork` os dois COUNTs divergem (3 cards a mais no par) — o badge
  * usa a mesma chave da lista, não só `contactId`.
  *
@@ -1731,7 +1733,7 @@ async function countConversationsLikeList(
   const rows = await prisma.$queryRaw<[{ n: number }]>`
     SELECT COUNT(DISTINCT CASE
       WHEN c."contactId" IS NULL THEN 'id:' || c.id
-      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
     END)::int AS n
     FROM conversations c
     WHERE ${sql}
@@ -1876,7 +1878,7 @@ function tabCountExpr(tabCond: Prisma.Sql, collapse: boolean): Prisma.Sql {
   if (collapse) {
     return Prisma.sql`COUNT(DISTINCT CASE
       WHEN c."contactId" IS NULL THEN 'id:' || c.id
-      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
     END) FILTER (WHERE ${tabCond})::int`;
   }
   return Prisma.sql`COUNT(*) FILTER (WHERE ${tabCond})::int`;
@@ -2557,7 +2559,11 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
 
   const findActive = () =>
     prisma.conversation.findFirst({
-      where: { contactId: src.contactId!, channel: src.channel, status: { not: "RESOLVED" } },
+      where: activeConversationOnAccountWhere({
+        contactId: src.contactId!,
+        channel: src.channel,
+        channelId: src.channelId ?? null,
+      }),
       select: { id: true },
     });
 
@@ -2843,12 +2849,29 @@ export async function nextConversationNumber(): Promise<number> {
 }
 
 /**
- * Detecta P2002 do indice unico PARCIAL que garante no maximo UMA conversa
- * ativa (status != RESOLVED) por (organizationId, contactId, channel).
- * Criado na migration `conversations_active_contact_channel`. Usado pelos
- * pontos de criacao (baileys/meta/whatsapp-conversation) para tratar a
- * corrida de mensagens simultaneas do mesmo numero: em vez de criar um 2o
- * ticket, o caller relê e reusa o ticket vencedor.
+ * Ticket ativo nesta conta do canal (WABA / página), não em outro número
+ * da mesma plataforma. `channelId: null` = órfã sem conta.
+ */
+export function activeConversationOnAccountWhere(args: {
+  contactId: string;
+  channel: string;
+  channelId: string | null;
+}): Prisma.ConversationWhereInput {
+  return {
+    contactId: args.contactId,
+    channel: args.channel,
+    status: { not: "RESOLVED" },
+    channelId: args.channelId,
+  };
+}
+
+/**
+ * Detecta P2002 do indice unico PARCIAL de conversa ativa:
+ * (organizationId, contactId, channel, channelId) — ou o legado
+ * (organizationId, contactId, channel) com channelId NULL.
+ * Usado pelos pontos de criacao (baileys/meta/whatsapp-conversation)
+ * para tratar corrida no MESMO número: em vez de criar um 2o ticket,
+ * o caller relê e reusa o vencedor.
  */
 export function isActiveConversationUniqueViolation(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;

@@ -23,6 +23,7 @@ import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { sseBus } from "@/lib/sse-bus";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import {
+  activeConversationOnAccountWhere,
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -33,7 +34,7 @@ import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
-import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import {
   asMetaId,
@@ -352,8 +353,6 @@ async function processEvent(
     channelId: hit.channelId,
   }).catch((err) => log.warn("Falha ao garantir deal aberto:", err));
 
-  const conversation = await findOrCreateConversation(contact.id, platform, hit.channelId);
-
   // Anexos: guardamos o primeiro URL como preview no `content` quando nao ha texto.
   let content = text;
   const firstAttachment = ev.message?.attachments?.[0];
@@ -362,6 +361,16 @@ async function processEvent(
     const type = firstAttachment.type || "attachment";
     content = url ? `[${type}] ${url}` : `[${type}]`;
   }
+
+  const conversation = await findOrCreateConversation(
+    contact.id,
+    platform,
+    hit.channelId,
+    {
+      content,
+      messageType: firstAttachment?.type || (content ? "text" : undefined),
+    },
+  );
 
   // O `findFirst` acima resolve a reentrega tardia; a corrida (dois eventos
   // da mesma mid processados em paralelo) é fechada pelo unique
@@ -524,30 +533,43 @@ async function findOrCreateConversation(
   contactId: string,
   platform: Platform,
   channelId: string,
+  opening?: { content?: string | null; messageType?: string | null },
 ): Promise<{ id: string; assignedToId: string | null }> {
   const channelSlug = platform;
 
-  const findActive = () =>
+  const findOnAccount = (accountId: string | null) =>
     prisma.conversation.findFirst({
-      where: { contactId, channel: channelSlug, status: { not: "RESOLVED" } },
+      where: activeConversationOnAccountWhere({
+        contactId,
+        channel: channelSlug,
+        channelId: accountId,
+      }),
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
       select: { id: true, channelId: true, assignedToId: true },
     });
 
-  const existing = await findActive();
+  const existing = await findOnAccount(channelId);
   if (existing) {
-    if (existing.channelId !== channelId) {
-      await prisma.conversation.update({
-        where: { id: existing.id },
-        data: { channelId },
-      });
-    }
     await maybeDistributeNewInboundTicket({
       conversationId: existing.id,
       contactId,
       assignedToId: existing.assignedToId ?? null,
     });
     return { id: existing.id, assignedToId: existing.assignedToId ?? null };
+  }
+
+  const orphan = await findOnAccount(null);
+  if (orphan) {
+    await prisma.conversation.update({
+      where: { id: orphan.id },
+      data: { channelId },
+    });
+    await maybeDistributeNewInboundTicket({
+      conversationId: orphan.id,
+      contactId,
+      assignedToId: orphan.assignedToId ?? null,
+    });
+    return { id: orphan.id, assignedToId: orphan.assignedToId ?? null };
   }
 
   const inheritAssignee = await inheritContactAssigneeWithViaForNewTicket(contactId);
@@ -578,13 +600,24 @@ async function findOrCreateConversation(
       contactId,
       assignedToId: inheritAssignee?.userId ?? null,
     });
+    emitConversationCreated({
+      contactId,
+      channel: platform,
+      channelId,
+      conversationId: created.id,
+      source: "inbound_messaging",
+      extra: openingMessageTriggerExtra({
+        content: opening?.content,
+        messageType: opening?.messageType,
+      }),
+    });
     return {
       id: created.id,
       assignedToId: created.assignedToId ?? inheritAssignee?.userId ?? null,
     };
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {
-      const won = await findActive();
+      const won = await findOnAccount(channelId);
       if (won) return { id: won.id, assignedToId: won.assignedToId ?? null };
     }
     throw err;

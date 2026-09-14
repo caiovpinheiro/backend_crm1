@@ -12,7 +12,10 @@ import {
 } from "@/services/channels";
 import { logEvent } from "@/services/activity-log";
 import { resolveDefaultWhatsAppChannel } from "@/services/whatsapp-conversation";
-import { withConversationNumberRetry } from "@/services/conversations";
+import {
+  activeConversationOnAccountWhere,
+  withConversationNumberRetry,
+} from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
 import { sseBus } from "@/lib/sse-bus";
@@ -83,22 +86,6 @@ export async function POST(request: Request) {
           if (viewDenied) return viewDenied;
         }
 
-        // Modelo de ticket: so reusa conversa nao-RESOLVED (a ultima em
-        // aberto). Se todas do contato ja foram encerradas, cria nova
-        // #N+1. Ver AGENT.md "ID de conversa + ticket".
-        const existing = await prisma.conversation.findFirst({
-          where: {
-            contactId: contact.id,
-            channel: "whatsapp",
-            status: { not: "RESOLVED" },
-          },
-          select: {
-            id: true, externalId: true, channel: true,
-            status: true, inboxName: true, channelId: true,
-            createdAt: true, updatedAt: true,
-          },
-        });
-
         // Resolve o canal alvo:
         //  1. Se o cliente passou `channelId`, ele manda.
         //  2. Senão, cai pro canal Meta CONNECTED default da org (mesma
@@ -119,24 +106,38 @@ export async function POST(request: Request) {
           }
         }
 
-        let conversation;
-        if (existing) {
-          // Backfill: conversa já existia mas sem canal (caso legado das
-          // conversas "soltas" criadas antes deste fix). Se resolvemos um
-          // channelId default agora, gruda ele.
-          if (!existing.channelId && effectiveChannelId) {
+        const convSelect = {
+          id: true, externalId: true, channel: true,
+          status: true, inboxName: true, channelId: true,
+          createdAt: true, updatedAt: true,
+        } as const;
+        const findOnAccount = (accountId: string | null) =>
+          prisma.conversation.findFirst({
+            where: activeConversationOnAccountWhere({
+              contactId: contact.id,
+              channel: "whatsapp",
+              channelId: accountId,
+            }),
+            select: convSelect,
+          });
+
+        let conversation = await findOnAccount(effectiveChannelId);
+        if (!conversation && effectiveChannelId) {
+          const orphan = await findOnAccount(null);
+          if (orphan) {
             await prisma.conversation.update({
-              where: { id: existing.id },
+              where: { id: orphan.id },
               data: {
                 channelId: effectiveChannelId,
-                inboxName: existing.inboxName ?? channelName,
+                inboxName: orphan.inboxName ?? channelName,
               },
             });
-            conversation = { ...existing, channelId: effectiveChannelId };
-          } else {
-            conversation = existing;
+            conversation = { ...orphan, channelId: effectiveChannelId };
           }
-        } else {
+        }
+        const reused = Boolean(conversation);
+
+        if (!conversation) {
           conversation = await withConversationNumberRetry((number) =>
             prisma.conversation.create({
               data: withOrgFromCtx({
@@ -206,7 +207,7 @@ export async function POST(request: Request) {
             createdAt: conversation.createdAt,
             updatedAt: conversation.updatedAt,
           },
-        }, { status: existing ? 200 : 201 });
+        }, { status: reused ? 200 : 201 });
       }
 
       if (!channelId) {
@@ -249,15 +250,14 @@ export async function POST(request: Request) {
         );
       }
 
-      // Modelo de ticket: so reusa se houver conversa ativa (nao-RESOLVED).
-      // O update abaixo nao promove status pra OPEN (nao ha volta pos-RESOLVED)
-      // — apenas reconcilia canal/inbox quando o operador troca de conta.
+      // Reusa só o OPEN desta conta. Outra WABA não é roubada; órfã
+      // (channelId NULL) pode ser adotada. Não promove RESOLVED.
       const existing = await prisma.conversation.findFirst({
-        where: {
+        where: activeConversationOnAccountWhere({
           contactId: contact.id,
           channel: "whatsapp",
-          status: { not: "RESOLVED" },
-        },
+          channelId: channel.id,
+        }),
         select: { id: true, externalId: true, waJid: true },
       });
 
@@ -265,9 +265,29 @@ export async function POST(request: Request) {
       if (existing) {
         conversation = await prisma.conversation.update({
           where: { id: existing.id },
-          data: { inboxName: channel.name, channelId: channel.id, updatedAt: new Date() },
+          data: { inboxName: channel.name, updatedAt: new Date() },
         });
       } else {
+        const orphan = await prisma.conversation.findFirst({
+          where: activeConversationOnAccountWhere({
+            contactId: contact.id,
+            channel: "whatsapp",
+            channelId: null,
+          }),
+          select: { id: true },
+        });
+        if (orphan) {
+          conversation = await prisma.conversation.update({
+            where: { id: orphan.id },
+            data: {
+              inboxName: channel.name,
+              channelId: channel.id,
+              updatedAt: new Date(),
+            },
+          });
+        }
+      }
+      if (!conversation) {
         conversation = await withConversationNumberRetry((number) =>
           prisma.conversation.create({
             data: withOrgFromCtx({

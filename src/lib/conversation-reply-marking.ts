@@ -65,13 +65,14 @@ export function noCountableReplyWhere(
     : { hasHumanReply: false };
 }
 
-/** Chave do card da inbox: 1 por contato+canal (ticket sem contato conta sozinho). */
+/** Chave do card da inbox: 1 por contato+plataforma+conta (WABA/página). */
 export function inboxCardGroupKey(row: {
   id: string;
   contactId: string | null;
   channel?: string | null;
+  channelId?: string | null;
 }): string {
   return row.contactId
-    ? `c:${row.contactId}::${row.channel ?? ""}`
+    ? `c:${row.contactId}::${row.channel ?? ""}::${row.channelId ?? ""}`
     : `id:${row.id}`;
 }
