@@ -537,15 +537,15 @@ export async function addMembers(
 export async function updateRoom(
   viewer: TeamChatViewer,
   roomId: string,
-  input: { avatarUrl?: string | null },
+  input: { avatarUrl?: string | null; name?: string; topic?: string | null },
 ) {
   const access = await getRoom(viewer, roomId);
   if ("error" in access) return access;
   if (!isGroupKind(access.room.kind)) {
-    return { error: "Só canais e grupos aceitam foto de perfil.", status: 400 as const };
+    return { error: "Só canais e grupos aceitam estes dados.", status: 400 as const };
   }
 
-  const data: { avatarUrl?: string | null } = {};
+  const data: { avatarUrl?: string | null; name?: string; topic?: string | null } = {};
   if (input.avatarUrl !== undefined) {
     if (input.avatarUrl === null || input.avatarUrl.trim() === "") {
       data.avatarUrl = null;
@@ -556,6 +556,14 @@ export async function updateRoom(
       }
       data.avatarUrl = url;
     }
+  }
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (!name) return { error: "Dê um nome ao grupo.", status: 400 as const };
+    data.name = name;
+  }
+  if (input.topic !== undefined) {
+    data.topic = input.topic?.trim() || null;
   }
   if (Object.keys(data).length === 0) return { room: access.room };
 

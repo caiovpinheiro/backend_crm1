@@ -7,9 +7,12 @@ import { denyUnless, jsonError, viewerOf } from "../../_guard";
 
 const PatchRoom = z
   .object({
-    avatarUrl: z.union([z.string().trim().max(2000), z.null()]),
+    avatarUrl: z.union([z.string().trim().max(2000), z.null()]).optional(),
+    name: z.string().trim().min(1).max(80).optional(),
+    topic: z.string().trim().max(200).nullable().optional(),
   })
-  .strict();
+  .strict()
+  .refine((v) => v.avatarUrl !== undefined || v.name !== undefined || v.topic !== undefined);
 
 export async function GET(
   _request: Request,
