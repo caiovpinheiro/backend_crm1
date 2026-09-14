@@ -23,16 +23,24 @@ function publishAutomationState(row: {
   contactId?: string | null;
   automationId?: string | null;
   status?: string | null;
+  createdAt?: Date | string | null;
 }) {
   if (!row?.contactId || !row.organizationId) return;
   try {
     const status = row.status ?? null;
+    const createdAt =
+      row.createdAt instanceof Date
+        ? row.createdAt.toISOString()
+        : typeof row.createdAt === "string"
+          ? row.createdAt
+          : null;
     sseBus.publish("automation_state", {
       organizationId: row.organizationId,
       contactId: row.contactId,
       automationId: row.automationId ?? null,
       status,
       active: status === "RUNNING" || status === "PAUSED",
+      createdAt,
     });
   } catch {
     /* best-effort */
@@ -526,6 +534,28 @@ export async function closeStrandedContext(automationId: string, contactId: stri
   });
   publishAutomationState(row);
   return row;
+}
+
+/**
+ * Garante contexto RUNNING no início da execução — o relógio de 15s da
+ * fila Automação parte de `createdAt`. Não recria se já houver um vivo
+ * desta automação (retry / mesma corrida).
+ */
+export async function ensureExecutionContext(
+  automationId: string,
+  contactId: string,
+  firstStepId: string,
+  initialVariables?: Record<string, unknown>,
+) {
+  const existing = await getActiveContext(automationId, contactId);
+  if (existing) return existing;
+  return createContext(
+    automationId,
+    contactId,
+    firstStepId,
+    undefined,
+    initialVariables,
+  );
 }
 
 export async function createContext(
