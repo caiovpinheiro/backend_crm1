@@ -336,7 +336,7 @@ export function withInboxQueueVisibility(
       status: "OPEN",
       assignedToId: null,
       contact: {
-        // PAUSED = aguardando reply/botão (campanha) — mesma fila Automação.
+        // RUNNING/PAUSED no contato — mesma fila Automação (com ou sem inbound).
         automationContexts: {
           some: { status: { in: ["RUNNING", "PAUSED"] } },
         },

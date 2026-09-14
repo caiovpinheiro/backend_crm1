@@ -243,6 +243,8 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   lastMessagePreview: ConversationLastMessagePreview | null;
   lastMessageAt: Date | null;
   tags: ConversationTag[];
+  /** Contexto RUNNING/PAUSED no contato — fila Automação. */
+  hasActiveAutomation: boolean;
 };
 
 /**
@@ -384,10 +386,22 @@ const ACTIVE_AUTOMATION_CTX: Prisma.EnumAutomationCtxStatusFilter = {
   in: ["RUNNING", "PAUSED"],
 };
 
-/** Cliente ainda não falou — template/campanha depois do inbound não conta. */
-const NEVER_REPLIED: Prisma.ConversationWhereInput = {
-  lastInboundAt: null,
-};
+function activeAutomationContactWhere(): Prisma.ConversationWhereInput {
+  return {
+    contact: {
+      automationContexts: {
+        some: { status: ACTIVE_AUTOMATION_CTX },
+      },
+    },
+  };
+}
+
+/** Tira o card das filas humanas enquanto o robô ainda está vivo. */
+function withoutActiveAutomation(
+  where: Prisma.ConversationWhereInput,
+): Prisma.ConversationWhereInput {
+  return { AND: [where, { NOT: activeAutomationContactWhere() }] };
+}
 
 function tabToWhere(
   tab: InboxCategoryTab,
@@ -406,49 +420,55 @@ function tabToWhere(
       // Assignee IA NÃO entra aqui: tem aba própria (`agente_ia`). O card
       // volta para Entrada quando o handoff libera o responsável (fila de
       // espera) ou atribui um consultor.
-      return withActiveInboxQueueGuard({
-        hasError: false,
-        OR: [
-          {
-            ...noCountableReplyWhere(countAgentReply),
-            OR: [
-              {
-                // Sem inbound = só disparo/órfão — não é Entrada (aparece
-                // quando o aluno responder e lastInboundAt for setado).
-                assignedToId: null,
-                lastInboundAt: { not: null },
-              },
-              { assignedTo: { is: { type: "HUMAN" } } },
-            ],
-          },
-          {
-            ...countableReplyWhere(countAgentReply),
-            assignedToId: null,
-          },
-        ],
-      });
+      return withoutActiveAutomation(
+        withActiveInboxQueueGuard({
+          hasError: false,
+          OR: [
+            {
+              ...noCountableReplyWhere(countAgentReply),
+              OR: [
+                {
+                  // Sem inbound = só disparo/órfão — não é Entrada (aparece
+                  // quando o aluno responder e lastInboundAt for setado).
+                  assignedToId: null,
+                  lastInboundAt: { not: null },
+                },
+                { assignedTo: { is: { type: "HUMAN" } } },
+              ],
+            },
+            {
+              ...countableReplyWhere(countAgentReply),
+              assignedToId: null,
+            },
+          ],
+        }),
+      );
     case "esperando":
       // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
       // cliente falou por último (`lastMessageDirection = "in"`).
       // Só assignee HUMANO: com a IA como responsável o card fica em
       // `agente_ia` até o handoff.
-      return withActiveInboxQueueGuard({
-        assignedTo: { is: { type: "HUMAN" } },
-        AND: [countableReplyWhere(countAgentReply)],
-        lastMessageDirection: "in",
-        hasError: false,
-      });
+      return withoutActiveAutomation(
+        withActiveInboxQueueGuard({
+          assignedTo: { is: { type: "HUMAN" } },
+          AND: [countableReplyWhere(countAgentReply)],
+          lastMessageDirection: "in",
+          hasError: false,
+        }),
+      );
     case "respondidas":
       // "Respondidas" = já teve atendimento e nós falamos por último
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
       // Assignee IA fica em `agente_ia`.
-      return withActiveInboxQueueGuard({
-        assignedTo: { is: { type: "HUMAN" } },
-        AND: [countableReplyWhere(countAgentReply)],
-        lastMessageDirection: "out",
-        hasError: false,
-      });
+      return withoutActiveAutomation(
+        withActiveInboxQueueGuard({
+          assignedTo: { is: { type: "HUMAN" } },
+          AND: [countableReplyWhere(countAgentReply)],
+          lastMessageDirection: "out",
+          hasError: false,
+        }),
+      );
     case "agente_ia":
       // Fila do Agente IA: TODA conversa em aberto cujo responsável é um
       // usuário `type: AI`, tenha o aluno falado ou não. Sai daqui quando o
@@ -459,19 +479,14 @@ function tabToWhere(
         assignedTo: { is: { type: "AI" } },
       });
     case "automacao":
-      // Robô ativo (RUNNING ou PAUSED) sem dono e sem nenhuma resposta do
-      // cliente. Quem já falou (lastInboundAt) vai para Entrada —
-      // campanha/template posterior não devolve o card pra cá. Assignee IA
-      // tem aba própria (`agente_ia`); consultor humano vai para
-      // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
+      // Qualquer ticket OPEN com contexto RUNNING/PAUSED. Dono humano e
+      // outbound do robô não mandam mais para Em Atendimento — a fila do
+      // consultor só volta quando o contexto encerra. Assignee IA fica em
+      // `agente_ia`. Erro continua na aba Erro.
       return withActiveInboxQueueGuard({
-        assignedToId: null,
-        AND: [NEVER_REPLIED],
-        contact: {
-          automationContexts: {
-            some: { status: ACTIVE_AUTOMATION_CTX },
-          },
-        },
+        hasError: false,
+        NOT: { assignedTo: { is: { type: "AI" } } },
+        ...activeAutomationContactWhere(),
       });
     case "resolvidos":
       return resolvidosTabWhere();
@@ -1191,6 +1206,29 @@ async function paintListRows(
     rows.map((r) => r.contact).filter((c): c is NonNullable<typeof c> => c !== null),
   );
 
+  const contactIds = [
+    ...new Set(
+      rows
+        .map((r) => r.contact?.id)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const activeAutomationContacts =
+    contactIds.length === 0
+      ? new Set<string>()
+      : new Set(
+          (
+            await prisma.automationContext.findMany({
+              where: {
+                contactId: { in: contactIds },
+                status: { in: ["RUNNING", "PAUSED"] },
+              },
+              select: { contactId: true },
+              distinct: ["contactId"],
+            })
+          ).map((r) => r.contactId),
+        );
+
   return rows.map((row) => {
     const tagMap = new Map<string, ConversationTag>();
     for (const t of row.contact?.tags ?? []) {
@@ -1202,6 +1240,9 @@ async function paintListRows(
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
+      hasActiveAutomation: Boolean(
+        row.contact?.id && activeAutomationContacts.has(row.contact.id),
+      ),
     };
   });
 }

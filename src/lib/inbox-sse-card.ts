@@ -48,6 +48,11 @@ const INBOX_SSE_CARD_SELECT = {
       email: true,
       phone: true,
       avatarUrl: true,
+      automationContexts: {
+        where: { status: { in: ["RUNNING", "PAUSED"] } },
+        select: { id: true },
+        take: 1,
+      },
     },
   },
 } as const;
@@ -63,6 +68,7 @@ export type InboxSseCard = {
   hasAgentReply: boolean;
   lastInboundAt: string | null;
   lastMessageDirection: string | null;
+  hasActiveAutomation: boolean;
   closedAt: string | null;
   followUpAt: string | null;
   updatedAt: string | null;
@@ -180,6 +186,7 @@ function rowToCard(
     hasAgentReply,
     lastInboundAt,
     lastMessageDirection,
+    hasActiveAutomation: (row.contact.automationContexts?.length ?? 0) > 0,
     closedAt: iso(row.closedAt),
     followUpAt: iso(row.followUpAt),
     updatedAt,
