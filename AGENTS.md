@@ -106,3 +106,8 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 - “Lead” no jargão = Deal.
 - Inbound cai no pipeline `isDefault` (canal → funil ainda não existe).
 - Encerrar ticket (humano ou IA) tira o card de Em Atendimento e devolve ao funil acadêmico.
+
+## Decisões técnicas
+
+- 2026-09-14 — Cursor Grok 4.6 — **Modelo interno: passo só de texto**: `MessageTemplate.attachments[]` aceita item sem `url` com `messageBefore` (texto extra na sequência, sem arquivo). Arquivo novo entra depois do último texto. Teto: 5 arquivos (`MAX_TEMPLATE_ATTACHMENTS`) e 10 passos no array (`MAX_TEMPLATE_SEQUENCE_ITEMS`). `mediaUrl` espelha o primeiro item **com** url. Envio: `content` → para cada passo, texto (se houver) e depois o arquivo (se houver).
+
