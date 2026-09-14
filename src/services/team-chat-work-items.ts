@@ -5,6 +5,7 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { createActivity, deleteActivity, updateActivity } from "@/services/activities";
 import {
   previewLabelForRef,
   resolveAnchorInput,
@@ -183,6 +184,158 @@ function canSeeWorkItem(
   return true;
 }
 
+type CalendarHost = {
+  id: string;
+  type: string;
+  title: string;
+  createdById: string;
+  startsAt: Date | null;
+  calendarActivityId: string | null;
+  anchorType: string | null;
+  anchorId: string | null;
+};
+
+type CalendarEntry = {
+  id: string;
+  text: string;
+  assigneeId: string | null;
+  dueAt: Date | null;
+  status: string;
+  completedAt: Date | null;
+  calendarActivityId: string | null;
+};
+
+function crmLinks(host: Pick<CalendarHost, "anchorType" | "anchorId">) {
+  if (host.anchorType === "deal" && host.anchorId) {
+    return { dealId: host.anchorId, contactId: null as string | null };
+  }
+  if (host.anchorType === "contact" && host.anchorId) {
+    return { contactId: host.anchorId, dealId: null as string | null };
+  }
+  return { dealId: null as string | null, contactId: null as string | null };
+}
+
+async function removeCalendarActivity(id: string | null | undefined) {
+  if (!id) return;
+  try {
+    await deleteActivity(id);
+  } catch {
+    /* já apagada ou invisível no escopo */
+  }
+}
+
+async function syncWorkItemCalendar(viewer: TeamChatViewer, item: CalendarHost) {
+  const links = crmLinks(item);
+  if (item.type !== "meeting" || !item.startsAt) {
+    if (item.calendarActivityId) {
+      await removeCalendarActivity(item.calendarActivityId);
+      await prisma.teamChatWorkItem.update({
+        where: { id: item.id },
+        data: { calendarActivityId: null },
+      });
+    }
+    return;
+  }
+
+  const payload = {
+    type: "MEETING" as const,
+    title: item.title.trim().slice(0, 200) || "Reunião",
+    description: "WiPO Chat",
+    scheduledAt: item.startsAt,
+    userId: item.createdById,
+    createdById: viewer.userId,
+    ...links,
+  };
+
+  if (item.calendarActivityId) {
+    try {
+      await updateActivity(item.calendarActivityId, {
+        type: payload.type,
+        title: payload.title,
+        description: payload.description,
+        scheduledAt: payload.scheduledAt,
+        userId: payload.userId,
+        dealId: payload.dealId,
+        contactId: payload.contactId,
+      });
+      return;
+    } catch {
+      /* recria se o espelho sumiu */
+    }
+  }
+
+  const created = await createActivity(payload);
+  await prisma.teamChatWorkItem.update({
+    where: { id: item.id },
+    data: { calendarActivityId: created.id },
+  });
+}
+
+async function syncEntryCalendar(viewer: TeamChatViewer, host: CalendarHost, entry: CalendarEntry) {
+  if (!entry.dueAt) {
+    if (entry.calendarActivityId) {
+      await removeCalendarActivity(entry.calendarActivityId);
+      await prisma.teamChatWorkItemEntry.update({
+        where: { id: entry.id },
+        data: { calendarActivityId: null },
+      });
+    }
+    return;
+  }
+
+  const links = crmLinks(host);
+  const done = entry.status === "done";
+  const payload = {
+    type: "TASK" as const,
+    title: entry.text.trim().slice(0, 200) || host.title,
+    description: `WiPO Chat · ${host.title}`,
+    scheduledAt: entry.dueAt,
+    completed: done,
+    completedAt: done ? entry.completedAt ?? new Date() : null,
+    userId: entry.assigneeId ?? host.createdById,
+    createdById: viewer.userId,
+    ...links,
+  };
+
+  if (entry.calendarActivityId) {
+    try {
+      await updateActivity(entry.calendarActivityId, {
+        title: payload.title,
+        description: payload.description,
+        scheduledAt: payload.scheduledAt,
+        completed: payload.completed,
+        completedAt: payload.completedAt,
+        userId: payload.userId,
+        dealId: payload.dealId,
+        contactId: payload.contactId,
+      });
+      return;
+    } catch {
+      /* recria se o espelho sumiu */
+    }
+  }
+
+  const created = await createActivity(payload);
+  await prisma.teamChatWorkItemEntry.update({
+    where: { id: entry.id },
+    data: { calendarActivityId: created.id },
+  });
+}
+
+async function syncWorkItemCalendars(
+  viewer: TeamChatViewer,
+  item: CalendarHost & { entries: CalendarEntry[] },
+) {
+  try {
+    await syncWorkItemCalendar(viewer, item);
+    for (const entry of item.entries) {
+      await syncEntryCalendar(viewer, item, entry);
+    }
+  } catch (err) {
+    console.error("[team-chat] calendar sync failed", err);
+  }
+}
+
 function publishWorkItem(organizationId: string, roomId: string | null, workItem: ShapedWorkItem) {
   // Sem crmCard: o preview é resolvido por leitor no GET.
   const { crmCard: _card, ...safe } = workItem;
@@ -292,6 +445,7 @@ export async function createWorkItem(
     include: ITEM_INCLUDE,
   });
 
+  await syncWorkItemCalendars(viewer, created);
   const shaped = await shapeWorkItem(created, viewer);
   if (input.roomId && input.postMessage !== false) {
     const { postWorkItemMessage } = await import("@/services/team-chat");
@@ -362,6 +516,7 @@ export async function updateWorkItem(
     data,
     include: ITEM_INCLUDE,
   });
+  await syncWorkItemCalendars(viewer, updated);
   const shaped = await shapeWorkItem(updated, viewer);
   publishWorkItem(viewer.organizationId, updated.roomId, shaped);
   return { workItem: shaped };
@@ -370,12 +525,24 @@ export async function updateWorkItem(
 export async function deleteWorkItem(viewer: TeamChatViewer, id: string) {
   const item = await prisma.teamChatWorkItem.findFirst({
     where: { id },
-    select: { id: true, roomId: true },
+    select: {
+      id: true,
+      roomId: true,
+      calendarActivityId: true,
+      entries: { select: { calendarActivityId: true } },
+    },
   });
   if (!item) return { error: "Item não encontrado.", status: 404 as const };
   if (item.roomId) {
     const member = await requireMember(viewer, item.roomId);
     if (!member) return { error: "Item não encontrado.", status: 404 as const };
+  }
+  const activityIds = [
+    item.calendarActivityId,
+    ...item.entries.map((entry) => entry.calendarActivityId),
+  ].filter((value): value is string => Boolean(value));
+  for (const activityId of activityIds) {
+    await removeCalendarActivity(activityId);
   }
   await prisma.teamChatWorkItem.delete({ where: { id } });
   sseBus.publish("team_chat_work_item_updated", {
@@ -409,7 +576,7 @@ export async function addWorkItemEntry(
     where: { workItemId },
     _max: { sortOrder: true },
   });
-  await prisma.teamChatWorkItemEntry.create({
+  const created = await prisma.teamChatWorkItemEntry.create({
     data: withOrgFromCtx({
       workItemId,
       text,
@@ -418,6 +585,22 @@ export async function addWorkItemEntry(
       sortOrder: (max._max.sortOrder ?? -1) + 1,
     }),
   });
+  const host = await prisma.teamChatWorkItem.findFirst({
+    where: { id: workItemId },
+    select: {
+      id: true,
+      type: true,
+      title: true,
+      createdById: true,
+      startsAt: true,
+      calendarActivityId: true,
+      anchorType: true,
+      anchorId: true,
+    },
+  });
+  if (host) {
+    await syncWorkItemCalendars(viewer, { ...host, entries: [created] });
+  }
   return getWorkItem(viewer, workItemId);
 }
 
@@ -473,7 +656,23 @@ export async function updateWorkItemEntry(
     data.completedById = null;
   }
 
-  await prisma.teamChatWorkItemEntry.update({ where: { id: entryId }, data });
+  const updated = await prisma.teamChatWorkItemEntry.update({ where: { id: entryId }, data });
+  const host = await prisma.teamChatWorkItem.findFirst({
+    where: { id: workItemId },
+    select: {
+      id: true,
+      type: true,
+      title: true,
+      createdById: true,
+      startsAt: true,
+      calendarActivityId: true,
+      anchorType: true,
+      anchorId: true,
+    },
+  });
+  if (host) {
+    await syncWorkItemCalendars(viewer, { ...host, entries: [updated] });
+  }
 
   if (input.status === "done" && entry.workItem.roomId) {
     const me = await prisma.user.findFirst({
@@ -506,6 +705,7 @@ export async function deleteWorkItemEntry(
     const member = await requireMember(viewer, entry.workItem.roomId);
     if (!member) return { error: "Item não encontrado.", status: 404 as const };
   }
+  await removeCalendarActivity(entry.calendarActivityId);
   await prisma.teamChatWorkItemEntry.delete({ where: { id: entryId } });
   return getWorkItem(viewer, workItemId);
 }

@@ -19,6 +19,7 @@ import {
   inboxClosedCardGroupKey,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
+import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import {
   activeInboxQueueGuardWhere,
   encerradasTabWhere,
@@ -243,7 +244,7 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   lastMessagePreview: ConversationLastMessagePreview | null;
   lastMessageAt: Date | null;
   tags: ConversationTag[];
-  /** Contexto RUNNING/PAUSED no contato — fila Automação. */
+  /** Fila Automação: contexto vivo ou atendimento só do robô. */
   hasActiveAutomation: boolean;
 };
 
@@ -390,17 +391,114 @@ function activeAutomationContactWhere(): Prisma.ConversationWhereInput {
   return {
     contact: {
       automationContexts: {
-        some: { status: ACTIVE_AUTOMATION_CTX },
+        some: {
+          status: ACTIVE_AUTOMATION_CTX,
+          createdAt: { lte: automationQueueDelayAgo() },
+        },
       },
     },
   };
 }
 
-/** Tira o card das filas humanas enquanto o robô ainda está vivo. */
-function withoutActiveAutomation(
+/** Execução começou há menos de 15s — card ainda não vai para Automação. */
+function recentAutomationStartWhere(): Prisma.ConversationWhereInput {
+  return {
+    contact: {
+      automationContexts: {
+        some: { createdAt: { gt: automationQueueDelayAgo() } },
+      },
+    },
+  };
+}
+
+/** Robô falou por último e o consultor ainda não assumiu o fio. */
+function botOwnedOutboundWhere(): Prisma.ConversationWhereInput {
+  return {
+    hasAgentReply: true,
+    hasHumanReply: false,
+    lastMessageDirection: "out",
+  };
+}
+
+/**
+ * Fila Automação: contexto vivo OU atendimento só do robô, só depois
+ * de 15s do início da execução. Assignee IA continua em `agente_ia`.
+ */
+function inAutomationQueueWhere(): Prisma.ConversationWhereInput {
+  return {
+    hasError: false,
+    OR: [{ assignedToId: null }, { assignedTo: { is: { type: "HUMAN" } } }],
+    AND: [
+      { OR: [activeAutomationContactWhere(), botOwnedOutboundWhere()] },
+      { NOT: recentAutomationStartWhere() },
+    ],
+  };
+}
+
+/** Tira o card das filas humanas enquanto o robô ainda é o dono do fio. */
+function withoutAutomationQueue(
   where: Prisma.ConversationWhereInput,
 ): Prisma.ConversationWhereInput {
-  return { AND: [where, { NOT: activeAutomationContactWhere() }] };
+  return { AND: [where, { NOT: inAutomationQueueWhere() }] };
+}
+
+function isAiAssignee(
+  assignedTo: { type?: string | null } | null | undefined,
+): boolean {
+  return (assignedTo?.type ?? "").toUpperCase() === "AI";
+}
+
+function rowInAutomationQueue(
+  row: {
+    hasAgentReply: boolean;
+    hasHumanReply: boolean;
+    lastMessageDirection: string | null;
+    assignedTo?: { type?: string | null } | null;
+    contact?: { id?: string | null } | null;
+  },
+  flags: { eligible: Set<string>; recentStart: Set<string> },
+): boolean {
+  if (isAiAssignee(row.assignedTo)) return false;
+  const cid = row.contact?.id;
+  if (cid && flags.recentStart.has(cid)) return false;
+  if (cid && flags.eligible.has(cid)) return true;
+  return (
+    row.hasAgentReply === true &&
+    row.hasHumanReply === false &&
+    row.lastMessageDirection === "out"
+  );
+}
+
+async function loadAutomationQueueContactFlags(
+  contactIds: string[],
+): Promise<{ eligible: Set<string>; recentStart: Set<string> }> {
+  if (contactIds.length === 0) {
+    return { eligible: new Set(), recentStart: new Set() };
+  }
+  const ago = automationQueueDelayAgo();
+  const [agedLive, recent] = await Promise.all([
+    prisma.automationContext.findMany({
+      where: {
+        contactId: { in: contactIds },
+        status: { in: ["RUNNING", "PAUSED"] },
+        createdAt: { lte: ago },
+      },
+      select: { contactId: true },
+      distinct: ["contactId"],
+    }),
+    prisma.automationContext.findMany({
+      where: {
+        contactId: { in: contactIds },
+        createdAt: { gt: ago },
+      },
+      select: { contactId: true },
+      distinct: ["contactId"],
+    }),
+  ]);
+  return {
+    eligible: new Set(agedLive.map((r) => r.contactId)),
+    recentStart: new Set(recent.map((r) => r.contactId)),
+  };
 }
 
 function tabToWhere(
@@ -420,7 +518,7 @@ function tabToWhere(
       // Assignee IA NÃO entra aqui: tem aba própria (`agente_ia`). O card
       // volta para Entrada quando o handoff libera o responsável (fila de
       // espera) ou atribui um consultor.
-      return withoutActiveAutomation(
+      return withoutAutomationQueue(
         withActiveInboxQueueGuard({
           hasError: false,
           OR: [
@@ -448,7 +546,7 @@ function tabToWhere(
       // cliente falou por último (`lastMessageDirection = "in"`).
       // Só assignee HUMANO: com a IA como responsável o card fica em
       // `agente_ia` até o handoff.
-      return withoutActiveAutomation(
+      return withoutAutomationQueue(
         withActiveInboxQueueGuard({
           assignedTo: { is: { type: "HUMAN" } },
           AND: [countableReplyWhere(countAgentReply)],
@@ -461,7 +559,7 @@ function tabToWhere(
       // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
       // (aviso automático da distribuição sem reply humano fica em Entrada).
       // Assignee IA fica em `agente_ia`.
-      return withoutActiveAutomation(
+      return withoutAutomationQueue(
         withActiveInboxQueueGuard({
           assignedTo: { is: { type: "HUMAN" } },
           AND: [countableReplyWhere(countAgentReply)],
@@ -479,15 +577,10 @@ function tabToWhere(
         assignedTo: { is: { type: "AI" } },
       });
     case "automacao":
-      // Qualquer ticket OPEN com contexto RUNNING/PAUSED. Dono humano e
-      // outbound do robô não mandam mais para Em Atendimento — a fila do
-      // consultor só volta quando o contexto encerra. Assignee IA fica em
-      // `agente_ia`. Erro continua na aba Erro.
-      return withActiveInboxQueueGuard({
-        hasError: false,
-        NOT: { assignedTo: { is: { type: "AI" } } },
-        ...activeAutomationContactWhere(),
-      });
+      // Contexto RUNNING/PAUSED ou robô falou por último sem reply
+      // humano. Dono humano + outbound do bot não caem em Em Atendimento.
+      // Assignee IA fica em `agente_ia`. Erro continua na aba Erro.
+      return withActiveInboxQueueGuard(inAutomationQueueWhere());
     case "resolvidos":
       return resolvidosTabWhere();
     case "finalizados":
@@ -1213,21 +1306,7 @@ async function paintListRows(
         .filter((id): id is string => Boolean(id)),
     ),
   ];
-  const activeAutomationContacts =
-    contactIds.length === 0
-      ? new Set<string>()
-      : new Set(
-          (
-            await prisma.automationContext.findMany({
-              where: {
-                contactId: { in: contactIds },
-                status: { in: ["RUNNING", "PAUSED"] },
-              },
-              select: { contactId: true },
-              distinct: ["contactId"],
-            })
-          ).map((r) => r.contactId),
-        );
+  const automationQueueFlags = await loadAutomationQueueContactFlags(contactIds);
 
   return rows.map((row) => {
     const tagMap = new Map<string, ConversationTag>();
@@ -1240,9 +1319,7 @@ async function paintListRows(
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
-      hasActiveAutomation: Boolean(
-        row.contact?.id && activeAutomationContacts.has(row.contact.id),
-      ),
+      hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
     };
   });
 }
@@ -1577,18 +1654,34 @@ function sqlContactFilter(
   }
 
   const ctxs = contact.automationContexts as {
-    some?: { status?: unknown };
+    some?: { status?: unknown; createdAt?: unknown };
   } | undefined;
   if (ctxs?.some) {
-    const status = ctxs.some.status;
-    const s = sqlScalar(Prisma.sql`ac.status`, status, "AutomationCtxStatus");
-    if (!s) return null;
+    const inner: Prisma.Sql[] = [
+      Prisma.sql`ac."contactId" = c."contactId"`,
+      Prisma.sql`ac."organizationId" = ${orgId}`,
+    ];
+    if (ctxs.some.status !== undefined) {
+      const s = sqlScalar(
+        Prisma.sql`ac.status`,
+        ctxs.some.status,
+        "AutomationCtxStatus",
+      );
+      if (!s) return null;
+      inner.push(s);
+    }
+    if (ctxs.some.createdAt !== undefined) {
+      const created = sqlScalar(Prisma.sql`ac."createdAt"`, ctxs.some.createdAt);
+      if (!created) return null;
+      inner.push(created);
+    }
+    if (ctxs.some.status === undefined && ctxs.some.createdAt === undefined) {
+      return null;
+    }
     parts.push(
       Prisma.sql`EXISTS (
         SELECT 1 FROM automation_contexts ac
-        WHERE ac."contactId" = c."contactId"
-          AND ac."organizationId" = ${orgId}
-          AND ${s}
+        WHERE ${Prisma.join(inner, " AND ")}
       )`,
     );
   }
@@ -2273,12 +2366,16 @@ export async function getConversationById(idOrNumber: string) {
   for (const t of row.contact?.tags ?? []) {
     if (t.tag) tagMap.set(t.tag.id, t.tag);
   }
+  const automationQueueFlags = await loadAutomationQueueContactFlags(
+    row.contact?.id ? [row.contact.id] : [],
+  );
   return {
     ...row,
     lastInboundAt: lastInboundMap.get(convId) ?? null,
     lastMessagePreview: previewMap.get(convId)?.preview ?? null,
     lastMessageAt: previewMap.get(convId)?.createdAt ?? null,
     tags: Array.from(tagMap.values()),
+    hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
   };
 }
 
