@@ -87,7 +87,11 @@ export class BaileysSession {
 
     this.socket = sock;
 
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", () => {
+      const orgId = this.organizationId;
+      if (!orgId) return;
+      void withSystemContext(orgId, saveCreds);
+    });
 
     sock.ev.on("connection.update", (update) => {
       void this.handleConnectionUpdate(update);
@@ -205,6 +209,32 @@ export class BaileysSession {
     }
   }
 
+  private async patchChannel(
+    data: Prisma.ChannelUpdateInput,
+    status?: string,
+  ): Promise<void> {
+    const orgId = this.organizationId;
+    if (!orgId) {
+      console.warn(`[baileys:${this.channelId}] patchChannel sem organizationId`);
+      return;
+    }
+    await withSystemContext(orgId, async () => {
+      await prisma.channel.update({
+        where: { id: this.channelId },
+        data,
+      });
+    });
+    try {
+      sseBus.publish("channel_updated", {
+        organizationId: orgId,
+        channelId: this.channelId,
+        status: status ?? (typeof data.status === "string" ? data.status : undefined),
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
   private async handleConnectionUpdate(
     update: Partial<BaileysEventMap["connection.update"]>,
   ): Promise<void> {
@@ -214,18 +244,15 @@ export class BaileysSession {
       this.clearQrTimer();
       try {
         const qrDataUri = await QRCode.toDataURL(qr, { margin: 1 });
-        await prisma.channel.update({
-          where: { id: this.channelId },
-          data: { status: "QR_READY", qrCode: qrDataUri },
-        });
+        await this.patchChannel({ status: "QR_READY", qrCode: qrDataUri }, "QR_READY");
         console.info(`[baileys:${this.channelId}] QR code gerado`);
 
-        this.qrTimer = setTimeout(async () => {
+        this.qrTimer = setTimeout(() => {
           console.info(`[baileys:${this.channelId}] QR expirado — timeout`);
-          await prisma.channel.update({
-            where: { id: this.channelId },
-            data: { status: "DISCONNECTED", qrCode: null },
-          }).catch(() => {});
+          void this.patchChannel(
+            { status: "DISCONNECTED", qrCode: null },
+            "DISCONNECTED",
+          );
         }, QR_TIMEOUT_MS);
       } catch (e) {
         console.error(`[baileys:${this.channelId}] erro ao gerar QR:`, e);
@@ -238,15 +265,15 @@ export class BaileysSession {
       const me = this.socket?.user;
       const phone = me?.id?.split(":")[0] ?? me?.id?.split("@")[0] ?? null;
 
-      await prisma.channel.update({
-        where: { id: this.channelId },
-        data: {
+      await this.patchChannel(
+        {
           status: "CONNECTED",
           qrCode: null,
           lastConnectedAt: new Date(),
           phoneNumber: phone,
         },
-      });
+        "CONNECTED",
+      );
       console.info(`[baileys:${this.channelId}] conectado — ${phone ?? "sem número"}`);
     }
 
@@ -261,21 +288,23 @@ export class BaileysSession {
 
       if (loggedOut) {
         console.info(`[baileys:${this.channelId}] deslogado — limpando sessão`);
-        await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
-        await prisma.channel.update({
-          where: { id: this.channelId },
-          data: { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
-        });
+        const orgId = this.organizationId;
+        if (orgId) {
+          await withSystemContext(orgId, async () => {
+            await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
+          });
+        }
+        await this.patchChannel(
+          { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
+          "DISCONNECTED",
+        );
         this.socket = null;
         return;
       }
 
       if (this.retryCount >= RECONNECT_MAX_RETRIES) {
         console.error(`[baileys:${this.channelId}] máximo de tentativas atingido — FAILED`);
-        await prisma.channel.update({
-          where: { id: this.channelId },
-          data: { status: "FAILED", qrCode: null },
-        });
+        await this.patchChannel({ status: "FAILED", qrCode: null }, "FAILED");
         this.socket = null;
         return;
       }
@@ -286,10 +315,7 @@ export class BaileysSession {
         `[baileys:${this.channelId}] desconectado (status=${statusCode}) — reconectando em ${delay}ms (tentativa ${this.retryCount})`,
       );
 
-      await prisma.channel.update({
-        where: { id: this.channelId },
-        data: { status: "CONNECTING" },
-      });
+      await this.patchChannel({ status: "CONNECTING" }, "CONNECTING");
 
       setTimeout(() => {
         if (!this.destroyed) void this.connect();
@@ -312,10 +338,7 @@ export class BaileysSession {
       /* best-effort */
     }
     this.socket = null;
-    await prisma.channel.update({
-      where: { id: this.channelId },
-      data: { status: "DISCONNECTED", qrCode: null },
-    });
+    await this.patchChannel({ status: "DISCONNECTED", qrCode: null }, "DISCONNECTED");
   }
 
   async logout(): Promise<void> {
@@ -328,11 +351,16 @@ export class BaileysSession {
       /* best-effort */
     }
     this.socket = null;
-    await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
-    await prisma.channel.update({
-      where: { id: this.channelId },
-      data: { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
-    });
+    const orgId = this.organizationId;
+    if (orgId) {
+      await withSystemContext(orgId, async () => {
+        await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
+      });
+    }
+    await this.patchChannel(
+      { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
+      "DISCONNECTED",
+    );
   }
 
   private clearQrTimer() {

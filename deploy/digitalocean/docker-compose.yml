@@ -181,6 +181,18 @@ services:
       api:
         condition: service_healthy
 
+  worker-baileys:
+    <<: *backend
+    # WhatsApp QR (conta normal). Sessão WebSocket em memória — não misturar
+    # com worker-whatsapp (inbox Meta). Pool de DB próprio no EasyPanel.
+    cpus: 1.0
+    mem_limit: 1g
+    environment:
+      APP_MODE: worker-baileys
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   storage:
   caddy_data:

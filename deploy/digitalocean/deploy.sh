@@ -12,7 +12,8 @@ fi
 
 echo "==> pull"
 docker compose pull --quiet frontend api worker-whatsapp worker-campaigns \
-  worker-meta-webhook worker-automation worker-leads worker-distribution worker-etl
+  worker-meta-webhook worker-automation worker-leads worker-distribution worker-etl \
+  worker-baileys
 
 echo "==> up"
 docker compose up -d --remove-orphans

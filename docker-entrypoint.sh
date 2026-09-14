@@ -197,6 +197,7 @@ fi
 #                         (processPending da fila de espera da Distribuição)
 # - worker-etl          → worker BullMQ que consome import-etl
 # - worker-automation   → worker BullMQ que consome automation-jobs (Salesbot/automações)
+# - worker-baileys      → WhatsApp QR (não-Meta): baileys-control + baileys-outbound
 #
 # Workers são compilados via esbuild (npm run build:workers) e copiados para
 # /app/dist/workers no Dockerfile runner stage. Executar com `node` direto.
@@ -242,9 +243,13 @@ case "$APP_MODE" in
     echo "[entrypoint] starting Meta Webhook worker (meta-webhook-events)..."
     exec node dist/workers/meta-webhook-worker.js
     ;;
+  worker-baileys)
+    echo "[entrypoint] starting Baileys worker (WhatsApp QR — baileys-control + baileys-outbound)..."
+    exec node dist/workers/baileys/index.js
+    ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-distribution | worker-etl | worker-automation | worker-meta-webhook"
+    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-distribution | worker-etl | worker-automation | worker-meta-webhook | worker-baileys"
     exit 1
     ;;
 esac
