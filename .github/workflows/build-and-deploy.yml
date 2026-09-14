@@ -33,6 +33,7 @@ name: Build & Deploy
 #     EASYPANEL_WEBHOOK_DO_WORKER_ETL           worker-etl (produção DO)
 #     EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS   worker-automations (produção DO)
 #     EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK  worker-meta-webhook (produção DO)
+#     EASYPANEL_WEBHOOK_PROD_BAILEYS            worker-baileys (produção DO)
 #     EASYPANEL_WEBHOOK_PROD*                   servidor antigo — NÃO disparado
 #     EASYPANEL_WEBHOOK_DEV                     serviço API (dev)
 #     EASYPANEL_WEBHOOK_DEV_API_PUBLIC          api-public Bearer/n8n (opcional)
@@ -43,6 +44,7 @@ name: Build & Deploy
 #     EASYPANEL_WEBHOOK_DEV_WORKER_ETL          worker-etl (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS  worker-automations (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK worker-meta-webhook (dev)
+#     EASYPANEL_WEBHOOK_DEV_BAILEYS             worker-baileys (WhatsApp QR, dev)
 #
 #   Só a API é obrigatória. Webhooks de workers ausentes são ignorados —
 #   assim dá pra adotar o rollout por partes (cadastra o secret quando o
@@ -157,6 +159,7 @@ jobs:
           S_WEBHOOK_PROD_ETL: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_ETL }}
           S_WEBHOOK_PROD_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS }}
           S_WEBHOOK_PROD_META: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_META_WEBHOOK }}
+          S_WEBHOOK_PROD_BAILEYS: ${{ secrets.EASYPANEL_WEBHOOK_PROD_BAILEYS }}
           S_WEBHOOK_DEV: ${{ secrets.EASYPANEL_WEBHOOK_DEV }}
           S_WEBHOOK_DEV_PUBLIC: ${{ secrets.EASYPANEL_WEBHOOK_DEV_API_PUBLIC }}
           S_WEBHOOK_DEV_WA: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP }}
@@ -166,6 +169,7 @@ jobs:
           S_WEBHOOK_DEV_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_ETL }}
           S_WEBHOOK_DEV_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS }}
           S_WEBHOOK_DEV_META: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK }}
+          S_WEBHOOK_DEV_BAILEYS: ${{ secrets.EASYPANEL_WEBHOOK_DEV_BAILEYS }}
           S_WEBHOOK_DO: ${{ secrets.EASYPANEL_WEBHOOK_DO_API }}
           S_WEBHOOK_DO_PUBLIC: ${{ secrets.EASYPANEL_WEBHOOK_DO_API_PUBLIC }}
           S_WEBHOOK_DO_WA: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_WHATSAPP }}
@@ -191,15 +195,15 @@ jobs:
             # rollback manual — só deixaram de ser chamadas automaticamente.
             TAG=latest
             EXTRA_TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META"
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
           elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
             # Branch de migração DO: publica com a tag da branch e dispara o
             # redeploy dos serviços do EasyPanel da DO (API + workers).
             TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META"
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
           else
             TAG=dev
-            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_PUBLIC $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_CAMPAIGN $S_WEBHOOK_DEV_DIST $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META"
+            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_PUBLIC $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_CAMPAIGN $S_WEBHOOK_DEV_DIST $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META $S_WEBHOOK_DEV_BAILEYS"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
           EXTRA_TAG=$(printf '%s' "${EXTRA_TAG:-}" | tr -d '\r\n')
