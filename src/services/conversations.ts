@@ -16,7 +16,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
   countAgentReplyAsAnswered,
-  inboxCardGroupKey,
+  inboxClosedCardGroupKey,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
 import {
@@ -973,6 +973,14 @@ type CollapsedConversationPage = {
   knownTotal: number | null;
 };
 
+/** DISTINCT Encerradas/Resolvendo: contato+plataforma (sem channelId). */
+function inboxClosedCardGroupSql() {
+  return Prisma.sql`CASE
+    WHEN c."contactId" IS NULL THEN 'id:' || c.id
+    ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '')
+  END`;
+}
+
 /**
  * Uma página colapsada por contato+canal em SQL (`DISTINCT ON`).
  * Fallback: scan em lotes Prisma se o `where` não traduzir.
@@ -1017,10 +1025,7 @@ async function findCollapsedConversationPage(args: {
                     SELECT
                       c.id,
                       ${sortCol} AS sort_val,
-                      CASE
-                        WHEN c."contactId" IS NULL THEN 'id:' || c.id
-                        ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
-                      END AS grp
+                      ${inboxClosedCardGroupSql()} AS grp
                     FROM conversations c
                     WHERE ${sql}
                     ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
@@ -1041,10 +1046,7 @@ async function findCollapsedConversationPage(args: {
                   SELECT
                     c.id,
                     ${sortCol} AS sort_val,
-                    CASE
-                      WHEN c."contactId" IS NULL THEN 'id:' || c.id
-                      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
-                    END AS grp
+                    ${inboxClosedCardGroupSql()} AS grp
                   FROM conversations c
                   WHERE ${sql}
                 ) inner_c
@@ -1126,8 +1128,7 @@ async function scanCollapsedRepIdsJs(args: {
     if (batch.length < BATCH) exhausted = true;
 
     for (const r of batch) {
-      const groupKey =
-        args.collapse && r.contactId ? inboxCardGroupKey(r) : `id:${r.id}`;
+      const groupKey = args.collapse ? inboxClosedCardGroupKey(r) : `id:${r.id}`;
       if (seenGroups.has(groupKey)) continue;
       seenGroups.add(groupKey);
       if (
@@ -1233,17 +1234,17 @@ async function hydrateConversationsByIds(
 }
 
 /**
- * DISTINCT ON (contato+canal+conta) materializa TODOS os grupos antes do
+ * DISTINCT ON (contato+canal) materializa TODOS os grupos antes do
  * LIMIT — 5s+ na 1ª página de `todos` (OPEN+RESOLVED da org). Filas
  * OPEN já são 1:1 por conta (`conversations_active_contact_channel_account`). `todos` e
  * o picker sem aba usam ORDER BY + LIMIT; o FE colapsa o card e o
- * badge conta DISTINCT contato+canal+conta. Encerradas/Resolvidos colapsam
+ * badge de Encerradas conta DISTINCT contato+canal. Encerradas/Resolvidos colapsam
  * no SQL (N tickets RESOLVED por número).
  */
 function listNeedsContactChannelCollapse(params: GetConversationsParams): boolean {
   if (params.contactId) return false;
   const tabs = listTabsOf(params);
-  // Encerradas/Resolvendo: DISTINCT contato+canal+conta. Filas quentes (Entrada,
+  // Encerradas/Resolvendo: DISTINCT contato+canal. Filas quentes (Entrada,
   // Aguardando, …) não — DISTINCT na org inteira é caro. União mista com
   // fila quente também fica sem DISTINCT; o FE colapsa o card.
   return (
@@ -1337,9 +1338,9 @@ const TAB_LIST = INBOX_TAB_LIST;
  * (...)`) — um único COUNT escalar, sem trazer os grupos para memória
  * (o org maior tem 28k grupos; `groupBy` custaria MBs por aba).
  *
- * Contato x contato+canal+conta: a lista agrupa por `contactId::channel::channelId`. Em
- * `dnawork` os dois COUNTs divergem (3 cards a mais no par) — o badge
- * usa a mesma chave da lista, não só `contactId`.
+ * Contato x contato+canal: Encerradas agrupa por `contactId::channel` (sem
+ * `channelId` — órfã NULL e conta preenchida no mesmo WhatsApp são 1 card).
+ * Em `dnawork` contato vs par divergem (3 cards) — o badge segue a lista.
  *
  * `collapseByContact = false` (filtro por `contactId`) espelha a lista quando
  * ela NÃO colapsa: aí cada ticket é um card e contamos linhas.
@@ -1731,10 +1732,7 @@ async function countConversationsLikeList(
     });
   }
   const rows = await prisma.$queryRaw<[{ n: number }]>`
-    SELECT COUNT(DISTINCT CASE
-      WHEN c."contactId" IS NULL THEN 'id:' || c.id
-      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
-    END)::int AS n
+    SELECT COUNT(DISTINCT ${inboxClosedCardGroupSql()})::int AS n
     FROM conversations c
     WHERE ${sql}
   `;
@@ -1782,7 +1780,7 @@ function inboxTabCountsScopeFp(args: {
     return createHash("sha1")
       .update(
         JSON.stringify({
-          k: 10,
+          k: 11,
           v: args.visibilityWhere ?? null,
           m: args.todosMemberCategoryTabs ?? null,
           c: args.allowedChannelIds ?? null,
@@ -1876,10 +1874,7 @@ export async function getTabCounts(
 
 function tabCountExpr(tabCond: Prisma.Sql, collapse: boolean): Prisma.Sql {
   if (collapse) {
-    return Prisma.sql`COUNT(DISTINCT CASE
-      WHEN c."contactId" IS NULL THEN 'id:' || c.id
-      ELSE 'c:' || c."contactId" || '::' || COALESCE(c.channel, '') || '::' || COALESCE(c."channelId", '')
-    END) FILTER (WHERE ${tabCond})::int`;
+    return Prisma.sql`COUNT(DISTINCT ${inboxClosedCardGroupSql()}) FILTER (WHERE ${tabCond})::int`;
   }
   return Prisma.sql`COUNT(*) FILTER (WHERE ${tabCond})::int`;
 }
@@ -1955,7 +1950,7 @@ async function tryComputeTabCountsOneSql(args: {
   );
   if (!openSql) return null;
 
-  // Encerradas / Resolvendo: DISTINCT contato+canal.
+  // Encerradas / Resolvendo: DISTINCT contato+canal (sem channelId).
   // Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
   // MEMBER = COUNT das filas permitidas. Abas OPEN usam o índice
   // parcial conversations_inbox_open_idx (closedAt/followUpAt nulos).

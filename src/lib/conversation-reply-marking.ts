@@ -76,3 +76,19 @@ export function inboxCardGroupKey(row: {
     ? `c:${row.contactId}::${row.channel ?? ""}::${row.channelId ?? ""}`
     : `id:${row.id}`;
 }
+
+/**
+ * Encerradas/Resolvendo: 1 card por contato+plataforma.
+ * `channelId` no grupo cindia o histórico (órfã NULL vs conta preenchida
+ * no mesmo WhatsApp) e inflava o badge — ticket ativo por conta continua
+ * em `inboxCardGroupKey` / índice OPEN.
+ */
+export function inboxClosedCardGroupKey(row: {
+  id: string;
+  contactId: string | null;
+  channel?: string | null;
+}): string {
+  return row.contactId
+    ? `c:${row.contactId}::${row.channel ?? ""}`
+    : `id:${row.id}`;
+}
