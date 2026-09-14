@@ -255,11 +255,11 @@ describe("formatTabulationCatalogText", () => {
 });
 
 describe("arquétipo TABULACAO", () => {
-  it("só tabula com atendimento real, não encerra e ignora cadastro", () => {
+  it("não atende o cliente, não fecha conversa e classifica pela demanda", () => {
     const prompt = ARCHETYPE_MAP.TABULACAO.systemPromptTemplate;
-    expect(prompt).toMatch(/atendimento real/i);
-    expect(prompt).toMatch(/NÃO encerra/i);
-    expect(prompt).toMatch(/dados de cadastro/i);
+    expect(prompt).toMatch(/NÃO atende/i);
+    expect(prompt).toMatch(/NÃO envia WhatsApp/i);
+    expect(prompt).toMatch(/atendimento real|demanda real/i);
     expect(prompt).not.toMatch(/polo/i);
     expect(ARCHETYPE_MAP.TABULACAO.defaultTools).not.toContain(
       "close_conversation",
