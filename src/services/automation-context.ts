@@ -1159,6 +1159,43 @@ async function dispatchToNextStep(
   }
 }
 
+/**
+ * Timeout de menu/espera depois que o aluno já falou ou já tem consultor
+ * não pode seguir a aresta de inatividade até `finish_conversation` —
+ * isso tira o ticket da fila no meio do atendimento.
+ */
+async function abortTimeoutIfAttendanceStarted(
+  contactId: string | null,
+  pausedAt: Date,
+  nextStep: { type: string; config: unknown } | undefined,
+): Promise<"stale_inbound" | "already_assigned" | null> {
+  if (!contactId) return null;
+  const convs = await prisma.conversation.findMany({
+    where: { contactId, status: { not: "RESOLVED" } },
+    select: {
+      lastInboundAt: true,
+      assignedToId: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (convs.some((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)) {
+    return "stale_inbound";
+  }
+  const cfg = nextStep?.config && typeof nextStep.config === "object"
+    ? (nextStep.config as Record<string, unknown>)
+    : {};
+  const targetCloses =
+    nextStep?.type === "finish_conversation" ||
+    (nextStep?.type === "tabulate_conversation" && cfg.closeConversation !== false);
+  if (
+    targetCloses &&
+    convs.some((c) => c.assignedToId && c.assignedTo?.type === "HUMAN")
+  ) {
+    return "already_assigned";
+  }
+  return null;
+}
+
 export async function processTimeout(contextId: string) {
   const ctx = await prisma.automationContext.findUnique({
     where: { id: contextId },
@@ -1243,6 +1280,18 @@ export async function processTimeout(contextId: string) {
       await advanceContext(ctx.id, null, variables);
       return;
     }
+    const waitAbort = await abortTimeoutIfAttendanceStarted(
+      ctx.contactId,
+      ctx.updatedAt,
+      ctx.automation.steps.find((s) => s.id === timeoutGoto),
+    );
+    if (waitAbort) {
+      log.warn(
+        `wait_for_reply timeout abortado (${waitAbort}) — auto=${ctx.automation.name} contato=${ctx.contactId} — não segue finish`,
+      );
+      await advanceContext(ctx.id, null, variables);
+      return;
+    }
     log.info(
       `wait_for_reply timeout — auto=${ctx.automation.name} contato=${ctx.contactId} → step=${timeoutGoto}`,
     );
@@ -1285,6 +1334,21 @@ export async function processTimeout(contextId: string) {
         ? `question/interactive timeout SEM timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → fallback linear step=${nextStepId} (conecte a aresta de timeout no canvas p/ evitar surpresa em ramos paralelos)`
         : `question/interactive timeout SEM timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → encerrando fluxo (conecte a aresta de timeout no canvas)`,
     );
+  }
+
+  const abort = await abortTimeoutIfAttendanceStarted(
+    ctx.contactId,
+    ctx.updatedAt,
+    nextStepId
+      ? ctx.automation.steps.find((s) => s.id === nextStepId)
+      : undefined,
+  );
+  if (abort) {
+    log.warn(
+      `question/interactive timeout abortado (${abort}) — auto=${ctx.automation.name} contato=${ctx.contactId} — não segue finish`,
+    );
+    await advanceContext(ctx.id, null, variables);
+    return;
   }
 
   log.info(
