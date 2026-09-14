@@ -302,6 +302,11 @@ export class BaileysSession {
         return;
       }
 
+      if (this.destroyed) {
+        this.socket = null;
+        return;
+      }
+
       if (this.retryCount >= RECONNECT_MAX_RETRIES) {
         console.error(`[baileys:${this.channelId}] máximo de tentativas atingido — FAILED`);
         await this.patchChannel({ status: "FAILED", qrCode: null }, "FAILED");
@@ -342,13 +347,27 @@ export class BaileysSession {
   }
 
   async logout(): Promise<void> {
-    this.destroyed = true;
     this.clearQrTimer();
     clearChannelMap(this.channelId);
+    if (!this.socket) {
+      await this.connect();
+      await this.waitForOpen(8_000);
+    } else if (!this.socket.user) {
+      await this.waitForOpen(4_000);
+    }
+    this.destroyed = true;
     try {
-      await this.socket?.logout();
-    } catch {
-      /* best-effort */
+      if (this.socket) {
+        await this.socket.logout();
+        console.info(`[baileys:${this.channelId}] logout enviado ao WhatsApp`);
+      }
+    } catch (err) {
+      console.warn(`[baileys:${this.channelId}] logout falhou:`, err);
+      try {
+        this.socket?.end(undefined);
+      } catch {
+        /* best-effort */
+      }
     }
     this.socket = null;
     const orgId = this.organizationId;
@@ -361,6 +380,26 @@ export class BaileysSession {
       { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
       "DISCONNECTED",
     );
+  }
+
+  private waitForOpen(ms: number): Promise<void> {
+    if (this.socket?.user) return Promise.resolve();
+    const sock = this.socket;
+    if (!sock) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        sock.ev.off("connection.update", onUp);
+        resolve();
+      }, ms);
+      const onUp = (update: Partial<BaileysEventMap["connection.update"]>) => {
+        if (update.connection === "open") {
+          clearTimeout(timer);
+          sock.ev.off("connection.update", onUp);
+          resolve();
+        }
+      };
+      sock.ev.on("connection.update", onUp);
+    });
   }
 
   private clearQrTimer() {

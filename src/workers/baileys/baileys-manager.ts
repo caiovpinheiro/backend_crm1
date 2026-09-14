@@ -70,11 +70,22 @@ export class BaileysManager {
   }
 
   async logout(channelId: string): Promise<void> {
-    const session = this.sessions.get(channelId);
-    if (session) {
-      await session.logout();
-      this.sessions.delete(channelId);
+    let session = this.sessions.get(channelId);
+    if (!session) {
+      const ch = await prismaBase.channel.findUnique({
+        where: { id: channelId },
+        select: { organizationId: true, provider: true },
+      });
+      if (!ch || ch.provider !== "BAILEYS_MD") return;
+      console.info(
+        `[baileys-manager] Sem sessão em memória — reabrindo ${channelId} só para desvincular o aparelho`,
+      );
+      session = new BaileysSession(channelId);
+      this.sessions.set(channelId, session);
+      await withSystemContext(ch.organizationId, () => session.connect());
     }
+    await session.logout();
+    this.sessions.delete(channelId);
   }
 
   getSession(channelId: string): BaileysSession | undefined {
