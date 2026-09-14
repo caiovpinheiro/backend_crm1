@@ -369,12 +369,13 @@ export function summarizeTriggerConfig(
       return "Novo contato";
     case "conversation_created": {
       const ids = readTriggerChannelIds(c);
+      const skipAck = c.skipIfAckOrGreeting === true ? " · sem ack/cumprimento" : "";
       if (ids.length === 1) {
         const id = ids[0]!;
-        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}`;
+        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}${skipAck}`;
       }
-      if (ids.length > 1) return `${ids.length} conexões`;
-      return c.channel ? `Canal: ${String(c.channel)}` : "Qualquer canal";
+      if (ids.length > 1) return `${ids.length} conexões${skipAck}`;
+      return `${c.channel ? `Canal: ${String(c.channel)}` : "Qualquer canal"}${skipAck}`;
     }
     case "lifecycle_changed": {
       const to = c.toLifecycle ?? c.lifecycleStage;
@@ -755,6 +756,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         header: "",
         footer: "",
         elseGotoStepId: "",
+        onNonText: "stay",
         saveToVariable: "",
         failureAction: "stop",
         failureGotoStepId: "",
@@ -768,6 +770,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         header: "",
         footer: "",
         elseGotoStepId: "",
+        onNonText: "stay",
         saveToVariable: "",
         timeoutMs: 86_400_000,
         timeoutAction: "continue",
@@ -817,7 +820,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return {
         message: "", buttons: [], saveToVariable: "",
         timeoutMs: 86_400_000, timeoutAction: "continue",
-        timeoutGotoStepId: "", elseGotoStepId: "",
+        timeoutGotoStepId: "", elseGotoStepId: "", onNonText: "stay",
         failureAction: "stop", failureGotoStepId: "",
       };
     case "wait_for_reply":
@@ -1023,7 +1026,7 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "contact_created":
       return {};
     case "conversation_created":
-      return { channel: "", channelIds: [], channelScope: "all" };
+      return { channel: "", channelIds: [], channelScope: "all", skipIfAckOrGreeting: false };
     case "lifecycle_changed":
       return { fromLifecycle: "", toLifecycle: "" };
     case "agent_changed":

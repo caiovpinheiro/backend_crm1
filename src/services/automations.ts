@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { isAckOrGreetingText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { enqueueAutomationJob, type AutomationJobContext } from "@/lib/queue";
 
 export type { AutomationJobContext } from "@/lib/queue";
@@ -258,6 +259,13 @@ export function evaluateTrigger(
     }
     case "conversation_created": {
       if (!matchTriggerChannelFilter(cfg, data)) return false;
+      // Opt-in: não dispara se o inbound de abertura for só ack/cumprimento.
+      // Default off — outras orgs não mudam.
+      if (cfg.skipIfAckOrGreeting === true) {
+        if (data.isAckOrGreeting === true) return false;
+        const opening = readString(data, "content") ?? readString(data, "text") ?? "";
+        if (isAckOrGreetingText(opening)) return false;
+      }
       return true;
     }
     case "lifecycle_changed": {

@@ -1,3 +1,4 @@
+import { isAckOrGreetingText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -54,6 +55,54 @@ export function buildMessageTriggerData(args: {
     ...(args.content !== undefined ? { content: args.content } : {}),
     ...args.extra,
   };
+}
+
+/**
+ * Primeiro inbound do ticket novo. O canvas lê `data.content` /
+ * `data.isAckOrGreeting` no passo Condição; o gatilho pode optar por
+ * `skipIfAckOrGreeting` (default off).
+ */
+export function openingMessageTriggerExtra(args: {
+  content?: string | null;
+  messageType?: string | null;
+}): Record<string, unknown> {
+  const content = (args.content ?? "").trim();
+  const messageType = (args.messageType ?? "").trim();
+  return {
+    ...(content ? { content } : {}),
+    ...(messageType ? { messageType } : {}),
+    isAckOrGreeting: isAckOrGreetingText(content),
+  };
+}
+
+/**
+ * Ticket novo. `conversation_created` NÃO é silenciado por assignee IA/humano
+ * — senão o inbound do WhatsApp nunca aciona fluxos tipo "inicio - pipe"
+ * (o webhook só disparava `message_received`, e esse sim é suprimido).
+ */
+export function emitConversationCreated(args: {
+  contactId: string;
+  channel: string;
+  channelId?: string | null;
+  conversationId?: string | null;
+  source: string;
+  extra?: Record<string, unknown>;
+}): void {
+  fireTrigger("conversation_created", {
+    contactId: args.contactId,
+    data: {
+      channel: args.channel,
+      source: args.source,
+      ...(args.channelId ? { channelId: args.channelId } : {}),
+      ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+      ...args.extra,
+    },
+  }).catch((err) => {
+    console.warn(
+      "Falha no gatilho conversation_created:",
+      err instanceof Error ? err.message : err,
+    );
+  });
 }
 
 /** Comparação frouxa (trim + case-insensitive) usada nas condições de campo. */
@@ -380,6 +429,46 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
       };
     }
     return { ...context, data: withChannel };
+  }
+
+  // Inbound Meta/Baileys dispara conversation_created sem dealId.
+  // O inicio-pipe então falha no move_stage ("dealId ausente").
+  if (event === "conversation_created") {
+    const openingContent = readString(data, "content") ?? readString(data, "text");
+    const withAck =
+      openingContent && data.isAckOrGreeting === undefined
+        ? { ...data, isAckOrGreeting: isAckOrGreetingText(openingContent) }
+        : data;
+
+    if (context.contactId && !context.dealId) {
+      const deal = await prisma.deal.findFirst({
+        where: { contactId: context.contactId, status: "OPEN" },
+        select: {
+          id: true,
+          status: true,
+          stageId: true,
+          stage: { select: { pipelineId: true } },
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+      if (deal) {
+        return {
+          ...context,
+          dealId: deal.id,
+          data: {
+            ...withAck,
+            stageId: deal.stageId,
+            pipelineId: deal.stage.pipelineId,
+            dealStageId: deal.stageId,
+            dealPipelineId: deal.stage.pipelineId,
+            dealStatus: deal.status,
+          },
+        };
+      }
+    }
+    if (withAck !== data) {
+      return { ...context, data: withAck };
+    }
   }
 
   if (event === "contact_created" && context.contactId) {

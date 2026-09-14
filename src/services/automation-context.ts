@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { messageHasMedia } from "@/lib/ai-agents/tabulation-classify-policy";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -231,12 +232,31 @@ export function interactiveButtonId(b: InteractiveOption, idx: number): string {
 export type InteractiveMenuDecision =
   | { action: "complete_flow"; buttonId: string }
   | { action: "goto_button"; button: InteractiveOption }
-  | { action: "stay" }
+  | { action: "stay"; reason?: "flow_token" | "non_text" }
   | { action: "no_match" };
+
+export type InteractiveOnNonText = "stay" | "else";
+
+/** Imagem, áudio, documento, sticker, álbum Meta `unsupported` — não é clique do menu. */
+export function isNonTextMenuInbound(input: {
+  messageContent: string;
+  messageType?: string | null;
+  interactiveId?: string | null;
+}): boolean {
+  if ((input.interactiveId ?? "").trim()) return false;
+  const type = (input.messageType ?? "").trim().toLowerCase();
+  if (type === "unsupported") return true;
+  return messageHasMedia({
+    direction: "in",
+    content: input.messageContent,
+    messageType: input.messageType,
+  });
+}
 
 /**
  * Decide o que fazer com um inbound enquanto o passo espera botões/lista.
  * nfm_reply não pode cair em "Outra resposta" se já houver um Flow aberto.
+ * Mídia/unsupported ficam no passo (`stay`) por padrão — não reenviam o menu.
  */
 export function decideInteractiveMenuInbound(input: {
   buttons: InteractiveOption[];
@@ -245,6 +265,8 @@ export function decideInteractiveMenuInbound(input: {
   flowReply?: boolean;
   flowToken?: string | null;
   awaitingFlow?: AwaitingFlowState | null;
+  messageType?: string | null;
+  onNonText?: InteractiveOnNonText;
 }): InteractiveMenuDecision {
   const awaiting = input.awaitingFlow;
   const inboundToken = (input.flowToken ?? "").trim();
@@ -252,7 +274,7 @@ export function decideInteractiveMenuInbound(input: {
     if (!inboundToken || inboundToken === awaiting.flowToken) {
       return { action: "complete_flow", buttonId: awaiting.buttonId };
     }
-    return { action: "stay" };
+    return { action: "stay", reason: "flow_token" };
   }
 
   const matched = matchInteractiveOption(
@@ -262,6 +284,18 @@ export function decideInteractiveMenuInbound(input: {
   );
   if (matched) {
     return { action: "goto_button", button: matched };
+  }
+
+  const onNonText = input.onNonText === "else" ? "else" : "stay";
+  if (
+    onNonText === "stay" &&
+    isNonTextMenuInbound({
+      messageContent: input.messageContent,
+      messageType: input.messageType,
+      interactiveId: input.interactiveId,
+    })
+  ) {
+    return { action: "stay", reason: "non_text" };
   }
 
   return { action: "no_match" };
@@ -640,6 +674,7 @@ export async function processIncomingMessage(
     flowReply?: boolean;
     flowToken?: string | null;
     flowPayload?: Record<string, unknown> | null;
+    messageType?: string | null;
   },
 ): Promise<SalesbotProcessResult> {
   // Guard: texto livre com humano atendendo não deixa o robô falar em cima
@@ -814,6 +849,7 @@ export async function processIncomingMessage(
         const elseGoto = readStepRef(config, "elseGotoStepId");
         const defaultOut = readStepRef(config, "nextStepId");
         const awaitingFlow = readAwaitingFlow(variables);
+        const onNonTextRaw = String(config.onNonText ?? "stay").trim().toLowerCase();
         const decision = decideInteractiveMenuInbound({
           buttons,
           messageContent,
@@ -821,6 +857,8 @@ export async function processIncomingMessage(
           flowReply: Boolean(opts?.flowReply),
           flowToken: opts?.flowToken,
           awaitingFlow,
+          messageType: opts?.messageType,
+          onNonText: onNonTextRaw === "else" ? "else" : "stay",
         });
 
         const gotoFromButton = (matchedBtn: InteractiveOption, label: string) => {
@@ -871,10 +909,18 @@ export async function processIncomingMessage(
           const matchedBtn = decision.button;
           gotoFromButton(matchedBtn, matchedBtn.title || matchedBtn.text || matchedBtn.id || "");
         } else if (decision.action === "stay") {
+          const stayForMedia = decision.reason === "non_text";
           log.info(
-            `nfm_reply ignorado (token não casa com Flow em aberto) — auto=${ctx.automation.name} step=${currentStep.id}`,
+            stayForMedia
+              ? `menu interativo stay (mídia/unsupported) — auto=${ctx.automation.name} step=${currentStep.id}`
+              : `nfm_reply ignorado (token não casa com Flow em aberto) — auto=${ctx.automation.name} step=${currentStep.id}`,
           );
-          return { handled: true, replied: false, automationId: ctx.automationId, contextId: ctx.id };
+          return {
+            handled: true,
+            replied: stayForMedia,
+            automationId: ctx.automationId,
+            contextId: ctx.id,
+          };
         } else {
           const staleBtn = matchStaleInteractiveOption(
             ctx.automation.steps,
