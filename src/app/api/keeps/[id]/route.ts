@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { parseKeepNoteColor } from "@/services/keeps/colors";
 import {
   deleteKeepNote,
   getKeepNote,
@@ -58,6 +59,13 @@ export async function PATCH(
     return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
   }
   try {
+    const colorPatch =
+      "color" in body
+        ? parseKeepNoteColor(body.color)
+        : undefined;
+    if ("color" in body && colorPatch === undefined) {
+      return NextResponse.json({ message: "Cor inválida." }, { status: 400 });
+    }
     const note = await updateKeepNote({
       orgId: r.session.user.organizationId,
       userId: r.session.user.id,
@@ -67,6 +75,7 @@ export async function PATCH(
       pinned: typeof body.pinned === "boolean" ? body.pinned : undefined,
       archived: typeof body.archived === "boolean" ? body.archived : undefined,
       trashed: typeof body.trashed === "boolean" ? body.trashed : undefined,
+      color: colorPatch,
     });
     return NextResponse.json({ note: serializeKeepNote(note, r.session.user.organizationId) });
   } catch (err) {

@@ -110,6 +110,7 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 
 ## Decisões técnicas
 
+- 2026-09-14 — Cursor Grok 4.6 — **KeepNote.color**: paleta nomeada (`coral`…`blossom`), `null` = padrão. `PATCH` aceita `color`; `GET /api/keeps?color=` filtra (repetir o param; `none` = sem cor). Resposta inclui `usedColors` + `hasUncolored` para o Filtrar só mostrar cores em uso.
 - 2026-09-14 — Cursor Grok 4.6 — **Modelo interno: passo só de texto**: `MessageTemplate.attachments[]` aceita item sem `url` com `messageBefore` (texto extra na sequência, sem arquivo). Arquivo novo entra depois do último texto. Teto: 5 arquivos (`MAX_TEMPLATE_ATTACHMENTS`) e 10 passos no array (`MAX_TEMPLATE_SEQUENCE_ITEMS`). `mediaUrl` espelha o primeiro item **com** url. Envio: `content` → para cada passo, texto (se houver) e depois o arquivo (se houver).
 - 2026-09-09 — Cursor Grok 4.6 — **Bwipo Keeps** usa models `KeepNote` / `KeepAttachment` / `KeepImport` (`keep_notes`), não o `Note` de contato/negócio. Conteúdo é JSON TipTap. Arquivos no bucket de storage `keeps`. Permissões `keep:*` + `nav:bwipo-keeps`. Notas são por `organizationId` + `userId` (sem compartilhamento nesta versão). Ordem do mural: `KeepNote.position` (float); `PATCH /api/keeps/reorder`.
 

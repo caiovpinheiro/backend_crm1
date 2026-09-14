@@ -9,6 +9,7 @@ import {
   serializeKeepNote,
   type KeepFolder,
 } from "@/services/keeps/keeps";
+import { parseKeepColorFilter } from "@/services/keeps/colors";
 
 export const dynamic = "force-dynamic";
 
@@ -48,16 +49,20 @@ export async function GET(request: Request) {
   const folder: KeepFolder =
     folderRaw === "archive" || folderRaw === "trash" ? folderRaw : "notes";
   const q = url.searchParams.get("q") ?? undefined;
+  const colors = parseKeepColorFilter(url.searchParams.getAll("color"));
 
   try {
-    const items = await listKeepNotes({
+    const { rows, usedColors, hasUncolored } = await listKeepNotes({
       userId: r.session.user.id,
       folder,
       q,
+      colors,
     });
     const orgId = r.session.user.organizationId!;
     return NextResponse.json({
-      items: items.map((n) => serializeKeepNote(n, orgId)),
+      items: rows.map((n) => serializeKeepNote(n, orgId)),
+      usedColors,
+      hasUncolored,
     });
   } catch (err) {
     return keepFail(err);

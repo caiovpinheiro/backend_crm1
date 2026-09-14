@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { buildPublicUrl, generateFileName, saveFile } from "@/lib/storage/local";
 import { asJson, EMPTY_DOC, normalizeDoc, plainTextFromDoc, type KeepDoc } from "./doc";
+import { type KeepNoteColorId } from "./colors";
 
 export type KeepFolder = "notes" | "archive" | "trash";
 
@@ -29,7 +30,7 @@ function serializeNote<
     archived: boolean;
     trashed: boolean;
     trashedAt: Date | null;
-    source: string;
+    color: string | null;
     importBatchId: string | null;
     position: number;
     createdAt: Date;
@@ -54,6 +55,7 @@ function serializeNote<
     trashed: note.trashed,
     trashedAt: note.trashedAt?.toISOString() ?? null,
     source: note.source,
+    color: note.color ?? null,
     importBatchId: note.importBatchId,
     position: note.position,
     createdAt: note.createdAt.toISOString(),
@@ -75,26 +77,43 @@ export async function listKeepNotes(opts: {
   userId: string;
   folder: KeepFolder;
   q?: string;
+  colors?: Array<KeepNoteColorId | "none">;
 }) {
   const q = opts.q?.trim();
+  const colorClause =
+    opts.colors && opts.colors.length > 0
+      ? { OR: opts.colors.map((c) => (c === "none" ? { color: null } : { color: c })) }
+      : null;
+  const searchClause = q
+    ? {
+        OR: [
+          { title: { contains: q, mode: "insensitive" } },
+          { plainText: { contains: q, mode: "insensitive" } },
+        ],
+      }
+    : null;
+  const folder = folderWhere(opts.folder);
+  const and = [colorClause, searchClause].filter(Boolean) as object[];
   const rows = await prisma.keepNote.findMany({
     where: {
       userId: opts.userId,
-      ...folderWhere(opts.folder),
-      ...(q
-        ? {
-            OR: [
-              { title: { contains: q, mode: "insensitive" } },
-              { plainText: { contains: q, mode: "insensitive" } },
-            ],
-          }
-        : {}),
+      ...folder,
+      ...(and.length ? { AND: and } : {}),
     },
     include: includeAtt,
     orderBy: [{ pinned: "desc" }, { position: "asc" }, { updatedAt: "desc" }],
     take: 500,
   });
-  return rows;
+  const usedRows = await prisma.keepNote.findMany({
+    where: { userId: opts.userId, ...folder },
+    select: { color: true },
+    distinct: ["color"],
+  });
+  const usedColors = usedRows
+    .map((r) => r.color)
+    .filter((c): c is string => Boolean(c));
+  const hasUncolored = usedRows.some((r) => r.color == null);
+  return { rows, usedColors, hasUncolored };
 }
 
 export async function getKeepNote(opts: { userId: string; id: string }) {
@@ -144,6 +163,7 @@ export async function updateKeepNote(opts: {
   pinned?: boolean;
   archived?: boolean;
   trashed?: boolean;
+  color?: KeepNoteColorId | null;
 }) {
   const existing = await prisma.keepNote.findFirst({
     where: { id: opts.id, userId: opts.userId },
@@ -167,6 +187,7 @@ export async function updateKeepNote(opts: {
       ...(opts.archived !== undefined ? { archived: opts.archived, trashed: false, trashedAt: null } : {}),
       ...(trashed === true ? { trashed: true, archived: false, pinned: false, trashedAt: new Date() } : {}),
       ...(trashed === false ? { trashed: false, trashedAt: null } : {}),
+      ...(opts.color !== undefined ? { color: opts.color } : {}),
     },
     include: includeAtt,
   });

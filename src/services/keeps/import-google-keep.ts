@@ -44,14 +44,24 @@ export async function importGoogleKeepZip(opts: {
   if (opts.buffer.length > MAX_ZIP_BYTES) {
     throw new KeepError("ZIP acima de 25 MB.", 413);
   }
-  const fileHash = createHash("sha256").update(opts.buffer).update("\nkeep-html-split-v2").digest("hex");
+  const fileHash = createHash("sha256").update(opts.buffer).update("\nkeep-html-split-v4").digest("hex");
 
   const dup = await prisma.keepImport.findFirst({
     where: { userId: opts.userId, fileHash },
-    select: { id: true, noteCount: true, createdAt: true },
+    select: { id: true },
   });
   if (dup) {
-    throw new KeepError("Este arquivo já foi importado. As notas já estão no Bwipo Keeps.", 409);
+    const live = await prisma.keepNote.count({
+      where: { importBatchId: dup.id, userId: opts.userId, trashed: false },
+    });
+    if (live > 0) {
+      throw new KeepError("Este arquivo já foi importado. As notas já estão no Bwipo Keeps.", 409);
+    }
+    await prisma.keepNote.updateMany({
+      where: { importBatchId: dup.id, userId: opts.userId },
+      data: { importBatchId: null },
+    });
+    await prisma.keepImport.delete({ where: { id: dup.id } });
   }
 
   let entries: Record<string, Uint8Array>;
