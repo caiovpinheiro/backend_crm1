@@ -72,6 +72,7 @@ import {
   createContext,
   advanceContext,
   closeStrandedContext,
+  ensureExecutionContext,
   getActiveContext,
   releaseOtherAutomationContexts,
   interpolateVariables,
@@ -4909,6 +4910,11 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   const MAX_ITER = automation.steps.length * 2 + 10;
 
   let current: typeof automation.steps[0] | undefined = automation.steps[0];
+  if (rt.contactId && current) {
+    await ensureExecutionContext(automationId, rt.contactId, current.id, {
+      conversationId: rt.conversation?.id ?? contextData.conversationId ?? null,
+    });
+  }
   let iterations = 0;
   let flowVariables: Record<string, unknown> = {};
   // Quando o último step executado pausou o fluxo (skipRemaining), o
