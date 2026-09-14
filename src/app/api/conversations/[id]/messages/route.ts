@@ -18,6 +18,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
 import { enqueueMetaOutbound } from "@/lib/queue";
+import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
 import {
   platformFromConversationChannel,
@@ -739,6 +740,7 @@ export async function POST(request: Request, context: RouteContext) {
     if (!content) {
       return NextResponse.json({ message: "Mensagem vazia." }, { status: 400 });
     }
+    const waitUntilSent = b.waitUntilSent === true;
 
     const messageType =
       typeof b.messageType === "string" && b.messageType.length > 0
@@ -1193,6 +1195,10 @@ export async function POST(request: Request, context: RouteContext) {
           .catch(() => {});
         sendStatus = "failed";
         sendErrorMsg = errMsg;
+      } else if (waitUntilSent) {
+        const waited = await waitForMessageSendStatus(saved.id);
+        if (waited === "sent") sendStatus = "sent";
+        if (waited === "failed") sendStatus = "failed";
       }
 
       return NextResponse.json({
