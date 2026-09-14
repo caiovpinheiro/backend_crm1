@@ -34,6 +34,7 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 - Inventar model `Lead` (é Deal) ou `Group` (stub; filial = `OrgUnit`).
 - Recriar deal no inbound se o contato já tem WON/LOST (`src/services/auto-deals.ts`).
 - Encerrar conversa ao mover etapa (`moveDeal`).
+- Encerrar conversa (`RESOLVED`) sem devolver deal do funil Atendimento à origem acadêmica — inbox, lote, automação e IA passam por `restoreDealToAcademicOrigin`.
 - Processar webhook Meta / send Graph / parse XLSX no `route.ts`.
 - Renomear permission (deprecar + chave nova).
 - `ENABLE RLS` não está em prod — não remova a extension Prisma “porque tem RLS”.
@@ -104,3 +105,4 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 - Deal não tem `pipelineId`; funil vem do `Stage`.
 - “Lead” no jargão = Deal.
 - Inbound cai no pipeline `isDefault` (canal → funil ainda não existe).
+- Encerrar ticket (humano ou IA) tira o card de Em Atendimento e devolve ao funil acadêmico.
