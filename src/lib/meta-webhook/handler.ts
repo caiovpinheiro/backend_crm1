@@ -11,6 +11,7 @@ import {
   isContactBsuidUniqueViolation,
 } from "@/services/contacts";
 import {
+  activeConversationOnAccountWhere,
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
@@ -48,7 +49,7 @@ import {
   maybeDenyWhatsappCallConsent,
   maybeGrantWhatsappCallConsent,
 } from "@/services/whatsapp-call-consent-webhook";
-import { fireTrigger, buildMessageTriggerData, emitConversationCreated } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
@@ -803,11 +804,16 @@ async function resolveWebhookContact(
 // contatos importados/manuais sem deal passam a ter um ao primeiro
 // inbound.
 
-async function findOrCreateConversation(contactId: string, phoneNumberId?: string) {
+async function findOrCreateConversation(
+  contactId: string,
+  phoneNumberId?: string,
+  opening?: { content?: string | null; messageType?: string | null },
+) {
   const targetChannel = await findChannelByPhoneNumberId(phoneNumberId);
+  const targetChannelId = targetChannel?.id ?? null;
 
-  // Modelo de ticket: contatos com conversa RESOLVED geram NOVA conversa
-  // na proxima mensagem inbound (nao reabre). Ver AGENT.md.
+  // Ticket = contato + plataforma + conta (WABA). Nao reusa OPEN de
+  // outro numero e nao sobrescreve o channelId dele.
   const convSelect = {
     id: true,
     status: true,
@@ -815,9 +821,13 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     organizationId: true,
     assignedToId: true,
   } as const;
-  const findActive = () =>
+  const findOnAccount = (channelId: string | null) =>
     prisma.conversation.findFirst({
-      where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+      where: activeConversationOnAccountWhere({
+        contactId,
+        channel: "whatsapp",
+        channelId,
+      }),
       // Sem orderBy o Postgres devolve o ticket mais antigo. Ligação
       // gravada lá faz o inbox (1 card / contato) saltar para esse id
       // e o chat do ticket atual some da timeline.
@@ -825,24 +835,30 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
       select: convSelect,
     });
 
-  const existing = await findActive();
-
+  const existing = await findOnAccount(targetChannelId);
   if (existing) {
-    // Reusa a conversa aberta. So reconcilia canal (para o inbox mostrar
-    // que a mensagem entrou pela conta X). Nao promove status pra OPEN
-    // porque agora a conversa ja e' non-RESOLVED por construcao.
-    if (targetChannel && existing.channelId !== targetChannel.id) {
-      await prisma.conversation.update({
-        where: { id: existing.id },
-        data: { channelId: targetChannel.id },
-      });
-    }
     await maybeDistributeNewInboundTicket({
       conversationId: existing.id,
       contactId,
       assignedToId: existing.assignedToId ?? null,
     });
-    return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
+    return existing;
+  }
+
+  if (targetChannelId) {
+    const orphan = await findOnAccount(null);
+    if (orphan) {
+      await prisma.conversation.update({
+        where: { id: orphan.id },
+        data: { channelId: targetChannelId },
+      });
+      await maybeDistributeNewInboundTicket({
+        conversationId: orphan.id,
+        contactId,
+        assignedToId: orphan.assignedToId ?? null,
+      });
+      return { ...orphan, channelId: targetChannelId };
+    }
   }
 
   const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
@@ -873,6 +889,10 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
       channelId: targetChannel?.id,
       conversationId: created.id,
       source: "inbound_meta",
+      extra: openingMessageTriggerExtra({
+        content: opening?.content,
+        messageType: opening?.messageType,
+      }),
     });
     return created;
   } catch (err) {
@@ -880,8 +900,8 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     // indice unico parcial rejeita o 2o create com P2002 — reusa o
     // ticket vencedor em vez de duplicar.
     if (isActiveConversationUniqueViolation(err)) {
-      const won = await findActive();
-      if (won) return { ...won, channelId: targetChannel?.id ?? won.channelId };
+      const won = await findOnAccount(targetChannelId);
+      if (won) return won;
     }
     throw err;
   }
@@ -2808,7 +2828,11 @@ export async function processMetaWebhookPayload(
           } catch (err) {
             log.warn("Falha ao salvar referral de anúncio (não-fatal):", err);
           }
-          const conversation = await findOrCreateConversation(contact.id, phoneNumberId || undefined);
+          const conversation = await findOrCreateConversation(
+            contact.id,
+            phoneNumberId || undefined,
+            { content: parsed.text, messageType: parsed.type },
+          );
 
           let mediaUrl = parsed.mediaUrl;
           if (!mediaUrl && parsed.mediaId) {
@@ -3155,6 +3179,7 @@ export async function processMetaWebhookPayload(
                 flowReply: isFlowReply,
                 flowToken: parsed.flowToken,
                 flowPayload: parsed.flowPayload,
+                messageType: inboundMsgType,
               });
               salesbotReplied = Boolean(salesbotResult?.replied);
             } catch (err) {

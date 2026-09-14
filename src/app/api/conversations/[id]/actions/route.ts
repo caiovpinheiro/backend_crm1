@@ -7,6 +7,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import {
+  activeConversationOnAccountWhere,
   assignConversationAssignedTo,
   getConversationById,
   resolveReopenDepartmentId,
@@ -594,15 +595,15 @@ export async function POST(request: Request, context: RouteContext) {
           preferred: src.departmentId,
         });
 
-        // Guard extra contra corrida: se ja existe um ticket ATIVO pro
-        // contato+canal (ex.: inbound reabriu enquanto o operador clicava),
+        // Guard extra contra corrida: se ja existe um ticket ATIVO nesta
+        // conta (ex.: inbound reabriu enquanto o operador clicava),
         // reusa em vez de tentar criar e violar o indice unico parcial.
         const alreadyActive = await prisma.conversation.findFirst({
-          where: {
+          where: activeConversationOnAccountWhere({
             contactId: src.contactId,
             channel: src.channel,
-            status: { not: "RESOLVED" },
-          },
+            channelId: src.channelId ?? null,
+          }),
           select: {
             id: true,
             number: true,

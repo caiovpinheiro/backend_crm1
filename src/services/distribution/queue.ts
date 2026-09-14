@@ -85,6 +85,7 @@ export async function getQueueCounts(
       assignedToId: true,
       contactId: true,
       channel: true,
+      channelId: true,
       hasHumanReply: true,
       hasAgentReply: true,
       lastMessageDirection: true,
