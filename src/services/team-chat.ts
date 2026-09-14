@@ -579,6 +579,25 @@ export async function updateRoom(
   return getRoom(viewer, roomId);
 }
 
+export async function deleteRoom(viewer: TeamChatViewer, roomId: string) {
+  const access = await getRoom(viewer, roomId);
+  if ("error" in access) return access;
+  if (!isGroupKind(access.room.kind)) {
+    return { error: "Só grupos e canais podem ser excluídos.", status: 400 as const };
+  }
+
+  const memberIds = access.room.members.map((m) => m.id);
+  await prisma.teamChatMessageForward.deleteMany({ where: { destRoomId: roomId } });
+  await prisma.teamChatRoom.delete({ where: { id: roomId } });
+
+  publish("team_chat_room_updated", viewer.organizationId, {
+    roomId,
+    memberIds,
+    deleted: true,
+  });
+  return { ok: true as const };
+}
+
 export async function listMessages(
   viewer: TeamChatViewer,
   roomId: string,
