@@ -55,8 +55,8 @@ function parseBulkFilterTab(
  *   1. aplica o filtro de visibilidade do usuário;
  *   2. valida `tabulationId` (folha da org). Com folha, aplica a tabulação
  *      e encerra TODAS as selecionadas (não rejeita depois por departamento).
- *      Sem folha, ADMIN / super-admin encerram sem tabular; não-admin
- *      deixam em `skipped` as que exigem tabulação;
+ *      Sem folha, só ADMIN / super-admin encerram sem tabular (400 para
+ *      os demais);
  *   3. lê as org settings keepAgent/keepDepartment;
  *   4. lote pequeno: responde 200 com `updated` depois do persist;
  *      lote grande: cria `BulkOperation` e enfileira o job (202 + operationId).
@@ -154,9 +154,17 @@ export async function POST(request: Request) {
               { status: 400 },
             );
           }
-          // Sem folha: ADMIN / super-admin ainda podem encerrar sem tabular
-          // (mesmo bypass do lote antigo). Com folha, a tabulação entra em
-          // TODAS as selecionadas — não filtrar por departamento da folha.
+          // Encerrar em massa sem folha: só ADMIN / super-admin.
+          // Demais papéis precisam escolher um motivo.
+          if (!chosenTab && !isAdmin(session) && !isSuperAdmin(session)) {
+            return NextResponse.json(
+              {
+                message: "Selecione uma tabulação para encerrar em massa.",
+                code: "TABULATION_REQUIRED",
+              },
+              { status: 400 },
+            );
+          }
           const allowCloseWithoutTabulation =
             !chosenTab && (isAdmin(session) || isSuperAdmin(session));
           const skipAutomations =
