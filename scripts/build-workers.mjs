@@ -133,6 +133,8 @@ const entries = [
   "src/workers/automation-worker.ts",
   // Webhooks Meta — consome `meta-webhook-events` (offload da API do inbox).
   "src/workers/meta-webhook-worker.ts",
+  // WhatsApp QR (Baileys) — baileys-control + baileys-outbound. Isolado da Meta.
+  "src/workers/baileys/index.ts",
 ];
 
 await build({

@@ -94,6 +94,7 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 | `leads-bulk` | `worker-leads` (deals/conversas, não model Lead) |
 | `import-etl` | `worker-etl` |
 | `distribution-drain` / `distribution-execute` | `worker-distribution` |
+| `baileys-control` / `baileys-outbound` | `worker-baileys` (WhatsApp QR; não é Meta Cloud API) |
 
 API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com cookie de sessão.
 

@@ -35,18 +35,29 @@ export class BaileysManager {
       return;
     }
 
+    const ch = await prismaBase.channel.findUnique({
+      where: { id: channelId },
+      select: { organizationId: true, provider: true },
+    });
+    if (!ch || ch.provider !== "BAILEYS_MD") {
+      console.warn(`[baileys-manager] canal ${channelId} ausente ou não é BAILEYS_MD`);
+      return;
+    }
+
     console.info(`[baileys-manager] Iniciando sessão ${channelId}`);
     const session = new BaileysSession(channelId);
     this.sessions.set(channelId, session);
 
     try {
-      await session.connect();
+      await withSystemContext(ch.organizationId, () => session.connect());
     } catch (err) {
       console.error(`[baileys-manager] Erro ao conectar ${channelId}:`, err);
-      await prisma.channel.update({
-        where: { id: channelId },
-        data: { status: "FAILED" },
-      }).catch(() => {});
+      await withSystemContext(ch.organizationId, () =>
+        prisma.channel.update({
+          where: { id: channelId },
+          data: { status: "FAILED" },
+        }),
+      ).catch(() => {});
     }
   }
 

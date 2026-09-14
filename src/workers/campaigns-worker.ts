@@ -1100,12 +1100,10 @@ async function sendViaBaileys(
   recipientId: string,
   campaignId: string,
 ) {
-  // Baileys não é usado neste ambiente: as filas baileys-outbound/control não
-  // têm consumidor em produção (não há APP_MODE=worker-baileys no entrypoint).
-  // Enfileirar aqui e marcar SENT reportaria 100% enviado sem enviar nada.
-  // Falhar explicitamente torna o canal mal configurado visível.
+  // Campanha não dispara por WhatsApp QR de propósito (risco de ban).
+  // Inbox 1:1 usa worker-baileys; blast continua só na Cloud API.
   throw new Error(
-    "Provider BAILEYS_MD não suportado neste ambiente (sem consumidor nas filas baileys-outbound/control).",
+    "Campanha não envia por WhatsApp QR (BAILEYS_MD). Use um canal Meta Cloud API.",
   );
 }
 
