@@ -65,6 +65,16 @@ function parseIds(raw: unknown): string[] {
   return raw.filter((x): x is string => typeof x === "string");
 }
 
+async function resolveOrgAssignee(assigneeId?: string | null) {
+  if (!assigneeId) return { value: null as string | null };
+  const user = await prisma.user.findFirst({
+    where: { id: assigneeId },
+    select: { id: true },
+  });
+  if (!user) return { error: "Responsável não encontrado.", status: 400 as const };
+  return { value: user.id };
+}
+
 function shapeEntry(e: {
   id: string;
   text: string;
@@ -357,6 +367,26 @@ export async function updateWorkItem(
   return { workItem: shaped };
 }
 
+export async function deleteWorkItem(viewer: TeamChatViewer, id: string) {
+  const item = await prisma.teamChatWorkItem.findFirst({
+    where: { id },
+    select: { id: true, roomId: true },
+  });
+  if (!item) return { error: "Item não encontrado.", status: 404 as const };
+  if (item.roomId) {
+    const member = await requireMember(viewer, item.roomId);
+    if (!member) return { error: "Item não encontrado.", status: 404 as const };
+  }
+  await prisma.teamChatWorkItem.delete({ where: { id } });
+  sseBus.publish("team_chat_work_item_updated", {
+    organizationId: viewer.organizationId,
+    roomId: item.roomId,
+    workItemId: id,
+    deleted: true,
+  });
+  return { ok: true as const, roomId: item.roomId };
+}
+
 export async function addWorkItemEntry(
   viewer: TeamChatViewer,
   workItemId: string,
@@ -373,6 +403,8 @@ export async function addWorkItemEntry(
   }
   const text = input.text.trim();
   if (!text) return { error: "Texto vazio.", status: 400 as const };
+  const assignee = await resolveOrgAssignee(input.assigneeId);
+  if ("error" in assignee) return assignee;
   const max = await prisma.teamChatWorkItemEntry.aggregate({
     where: { workItemId },
     _max: { sortOrder: true },
@@ -381,7 +413,7 @@ export async function addWorkItemEntry(
     data: withOrgFromCtx({
       workItemId,
       text,
-      assigneeId: input.assigneeId || null,
+      assigneeId: assignee.value,
       dueAt: input.dueAt ? new Date(input.dueAt) : null,
       sortOrder: (max._max.sortOrder ?? -1) + 1,
     }),
@@ -425,7 +457,11 @@ export async function updateWorkItemEntry(
 
   const data: Record<string, unknown> = {};
   if (input.text !== undefined) data.text = input.text.trim();
-  if (input.assigneeId !== undefined) data.assigneeId = input.assigneeId;
+  if (input.assigneeId !== undefined) {
+    const assignee = await resolveOrgAssignee(input.assigneeId);
+    if ("error" in assignee) return assignee;
+    data.assigneeId = assignee.value;
+  }
   if (input.dueAt !== undefined) data.dueAt = input.dueAt ? new Date(input.dueAt) : null;
   if (input.status === "done") {
     data.status = "done";
@@ -453,6 +489,24 @@ export async function updateWorkItemEntry(
     );
   }
 
+  return getWorkItem(viewer, workItemId);
+}
+
+export async function deleteWorkItemEntry(
+  viewer: TeamChatViewer,
+  workItemId: string,
+  entryId: string,
+) {
+  const entry = await prisma.teamChatWorkItemEntry.findFirst({
+    where: { id: entryId, workItemId },
+    include: { workItem: { select: { roomId: true } } },
+  });
+  if (!entry) return { error: "Item não encontrado.", status: 404 as const };
+  if (entry.workItem.roomId) {
+    const member = await requireMember(viewer, entry.workItem.roomId);
+    if (!member) return { error: "Item não encontrado.", status: 404 as const };
+  }
+  await prisma.teamChatWorkItemEntry.delete({ where: { id: entryId } });
   return getWorkItem(viewer, workItemId);
 }
 
