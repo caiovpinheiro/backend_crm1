@@ -121,7 +121,7 @@ export async function evaluateInboundMedia(args: {
   }
 
   const list = MEDIA_KINDS.filter((k) => kinds.has(k));
-  if (hasUsableText || list.length === 0) {
+  if (list.length === 0) {
     return { kinds: list, hasUsableText, action: null };
   }
 
@@ -129,6 +129,14 @@ export async function evaluateInboundMedia(args: {
   for (const kind of list) {
     const candidate = args.policy.media.actions[kind] ?? "handoff";
     if (ACTION_SEVERITY[candidate] > ACTION_SEVERITY[action]) action = candidate;
+  }
+  // Legenda não salva mídia marcada como `handoff`. O agente não abre o
+  // arquivo, e a legenda quase sempre aponta para ele ("onde eu clico
+  // aqui?", "em que opção clico na imagem?") — respondia às cegas e depois
+  // dizia que não tinha recebido a imagem. Em `ask_text` e `ignore` a
+  // legenda continua valendo: ali o arquivo é dispensável, não bloqueio.
+  if (hasUsableText && action !== "handoff") {
+    return { kinds: list, hasUsableText, action: null };
   }
   return { kinds: list, hasUsableText, action };
 }
@@ -164,9 +172,28 @@ export function buildMediaHandoffMessage(args: {
   if (args.policy.media.handoffMessage) return args.policy.media.handoffMessage;
   const noun = KIND_NOUN[args.kinds[0] ?? "other"];
   if (args.assignedToHuman) {
-    return `Recebi ${noun}! Já passei seu atendimento para uma pessoa da equipe, que continua com você por aqui.`;
+    return `Recebi ${noun}, mas por aqui eu não consigo abrir arquivos. Já passei seu atendimento para uma pessoa da equipe, que continua com você por aqui.`;
   }
-  return `Recebi ${noun}! Para te ajudar do jeito certo, já registrei seu atendimento com a equipe e alguém continua com você por aqui.`;
+  return `Recebi ${noun}, mas por aqui eu não consigo abrir arquivos. Já registrei seu atendimento com a equipe e alguém continua com você por aqui.`;
+}
+
+/**
+ * Mídia que exigiria humano, mas fora do horário de atendimento: não há
+ * ninguém para assumir agora, então admite que não lê o arquivo e oferece
+ * as duas saídas — texto agora, ou fila até abrir o expediente. O override
+ * é o mesmo `askTextMessage` (a intenção é a mesma: pedir texto).
+ */
+export function buildMediaOffHoursMessage(args: {
+  kinds: MediaKind[];
+  policy: InboxPolicy;
+}): string {
+  if (args.policy.media.askTextMessage) return args.policy.media.askTextMessage;
+  const noun = KIND_NOUN[args.kinds[0] ?? "other"];
+  return (
+    `Recebi ${noun}, mas por aqui eu não consigo abrir arquivos. ` +
+    `Se você me contar em texto o que precisa, eu tento te ajudar agora mesmo. ` +
+    `Se preferir falar com uma pessoa da equipe, me diz que eu já deixo seu atendimento na fila.`
+  );
 }
 
 /** Pedido de texto — nunca diz que "não conseguiu abrir/ver" a mídia. */

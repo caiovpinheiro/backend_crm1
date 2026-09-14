@@ -56,6 +56,7 @@ import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import {
   buildMediaAskTextMessage,
   buildMediaHandoffMessage,
+  buildMediaOffHoursMessage,
   evaluateInboundMedia,
   queueMediaHandoff,
 } from "@/services/ai/media-inbound";
@@ -1026,8 +1027,32 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         policy,
       });
+      // Fora do horário de atendimento não há quem assuma: em vez de jogar
+      // na fila calado, admite que não lê o arquivo e oferece texto agora
+      // ou a fila (o pedido dele cai no caminho normal de "falar com
+      // alguém"). Mesma noção de expediente da fila humana usada acima.
+      const mediaHumanWindowOpen =
+        mediaVerdict.action === "handoff"
+          ? isHumanAttendanceWindowOpen(new Date(), queueCtxOf(policy, hours))
+          : false;
       if (mediaVerdict.action) {
-        if (mediaVerdict.action === "handoff") {
+        if (mediaVerdict.action === "handoff" && !mediaHumanWindowOpen) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: buildMediaOffHoursMessage({
+              kinds: mediaVerdict.kinds,
+              policy,
+            }),
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        } else if (mediaVerdict.action === "handoff") {
           await queueMediaHandoff({
             conversationId: args.conversationId,
             contactId: args.contactId,
