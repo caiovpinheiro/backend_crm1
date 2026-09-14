@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
+import { enqueueBaileysControl } from "@/lib/queue";
 import { deleteChannel, getChannelById, updateChannel } from "@/services/channels";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -153,6 +154,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
     if (manageDenied) return manageDenied;
 
     try {
+      const existing = await getChannelById(id);
+      if (existing?.provider === "BAILEYS_MD") {
+        await enqueueBaileysControl({ channelId: id, action: "logout" });
+      }
       const channel = await deleteChannel(id);
       return NextResponse.json({ channel });
     } catch (err: unknown) {

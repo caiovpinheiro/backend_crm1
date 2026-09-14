@@ -25,7 +25,9 @@ export async function POST(_request: Request, context: RouteContext) {
     if (manageDenied) return manageDenied;
 
     if (channel.provider === "BAILEYS_MD") {
-      await enqueueBaileysControl({ channelId: id, action: "disconnect" });
+      // logout (não disconnect): avisa o WhatsApp e some do aparelho.
+      // disconnect só fecha o socket local — o celular continua vinculado.
+      await enqueueBaileysControl({ channelId: id, action: "logout" });
     }
 
     const updated = await markChannelDisconnected(id);
