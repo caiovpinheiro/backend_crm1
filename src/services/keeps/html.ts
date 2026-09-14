@@ -111,9 +111,24 @@ function flushTag(frame: Frame): KeepNode[] {
   if (tag === "h1" || tag === "h2" || tag === "h3") {
     return [{ type: "heading", attrs: { level: tag === "h1" ? 1 : tag === "h2" ? 2 : 3 }, content: inlineOnly(children) }];
   }
-  if (tag === "ul") return [{ type: "bulletList", content: listItems(children) }];
+  if (tag === "ul") {
+    const items = listItems(children).map((item) => ({
+      type: "taskItem",
+      attrs: { checked: Boolean(item.attrs?.checked) },
+      content: item.content?.length ? item.content : [{ type: "paragraph" }],
+    }));
+    return [{ type: "taskList", content: items }];
+  }
   if (tag === "ol") return [{ type: "orderedList", content: listItems(children) }];
-  if (tag === "li") return [{ type: "listItem", content: [{ type: "paragraph", content: inlineOnly(children) }] }];
+  if (tag === "li") {
+    return [
+      {
+        type: "listItem",
+        attrs: { checked: liChecked(attrs) },
+        content: [{ type: "paragraph", content: inlineOnly(children) }],
+      },
+    ];
+  }
   if (tag === "blockquote") {
     return [{ type: "blockquote", content: children.length ? children : [{ type: "paragraph" }] }];
   }
@@ -140,6 +155,13 @@ function inlineOnly(nodes: KeepNode[]): KeepNode[] {
     else if (n.content) out.push(...inlineOnly(n.content));
   }
   return out;
+}
+
+function liChecked(attrs: Record<string, string>): boolean {
+  const cls = attrs.class ?? "";
+  if (/\bunchecked\b/i.test(cls)) return false;
+  if (/\bchecked\b/i.test(cls)) return true;
+  return attrs.checked !== undefined && attrs.checked !== "false";
 }
 
 function listItems(children: KeepNode[]): KeepNode[] {
@@ -216,10 +238,10 @@ function splitAtH1(html: string): string[] {
   while ((m = re.exec(html))) starts.push(m.index);
   if (starts.length === 0) return html.trim() ? [html] : [];
   const out: string[] = [];
-  if (starts[0] > 0) out.push(html.slice(0, starts[0]));
   for (let i = 0; i < starts.length; i++) {
+    const start = i === 0 ? 0 : starts[i];
     const end = i + 1 < starts.length ? starts[i + 1] : html.length;
-    out.push(html.slice(starts[i], end));
+    out.push(html.slice(start, end));
   }
   return out;
 }

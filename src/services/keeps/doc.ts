@@ -35,6 +35,8 @@ export function normalizeDoc(value: unknown): KeepDoc {
 export function plainTextFromDoc(doc: KeepDoc): string {
   const parts: string[] = [];
   function walk(node: KeepNode) {
+    if (node.type === "taskItem") parts.push(node.attrs?.checked ? "☑ " : "☐ ");
+    else if (node.type === "listItem") parts.push("• ");
     if (node.type === "text" && node.text) parts.push(node.text);
     if (node.content) for (const child of node.content) walk(child);
     if (node.type === "paragraph" || node.type === "heading" || node.type === "listItem" || node.type === "taskItem") {
