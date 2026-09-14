@@ -158,3 +158,44 @@ describe("evaluateTrigger — conversation_created skipIfAckOrGreeting", () => {
     ).toBe(true);
   });
 });
+
+describe("evaluateTrigger — conversation_created skipIfNoInbound", () => {
+  function created(data: Record<string, unknown>) {
+    return { event: "conversation_created" as const, data };
+  }
+
+  it("default (off) dispara em ticket aberto só para template", () => {
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        { channelScope: "all" },
+        created({ channel: "whatsapp", source: "auto_ensure" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("opt-in ignora ensure/outbound e exige inbound", () => {
+    const cfg = { channelScope: "all", skipIfNoInbound: true };
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", source: "auto_ensure" }),
+      ),
+    ).toBe(false);
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", openedWithoutMessage: true, content: "oi" }),
+      ),
+    ).toBe(false);
+    expect(
+      evaluateTrigger(
+        "conversation_created",
+        cfg,
+        created({ channel: "whatsapp", content: "preciso de ajuda" }),
+      ),
+    ).toBe(true);
+  });
+});

@@ -63,6 +63,7 @@ export const PAUSING_STEP_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_message",
   "wait_for_reply",
+  "closing_protocol",
 ]);
 
 /** Marcador de "fim de ramo" gravado pelo canvas em saídas não conectadas. */
@@ -450,6 +451,40 @@ export async function getActiveContext(automationId: string, contactId: string) 
 }
 
 /**
+ * Outra automação encerrou o ticket: solta esperas (menu/timeout) das
+ * demais para não mandar "falta de interação" em conversa já RESOLVED
+ * nem travar o re-disparo no próximo inbound.
+ */
+export async function releaseOtherAutomationContexts(args: {
+  contactId: string;
+  exceptAutomationId?: string | null;
+  conversationId?: string | null;
+}): Promise<number> {
+  const rows = await prisma.automationContext.findMany({
+    where: {
+      contactId: args.contactId,
+      status: "RUNNING",
+      ...(args.exceptAutomationId
+        ? { automationId: { not: args.exceptAutomationId } }
+        : {}),
+    },
+    select: { id: true, variables: true },
+  });
+  const wantConv = args.conversationId?.trim() || "";
+  let n = 0;
+  for (const row of rows) {
+    const vars = (row.variables as Record<string, unknown>) ?? {};
+    if (wantConv) {
+      const cid = typeof vars.conversationId === "string" ? vars.conversationId.trim() : "";
+      if (cid && cid !== wantConv) continue;
+    }
+    await advanceContext(row.id, null, vars);
+    n += 1;
+  }
+  return n;
+}
+
+/**
  * Fecha contexto RUNNING órfão ao fim da execução do motor.
  * Não toca contextos parados em passo pausante (espera legítima de resposta).
  */
@@ -780,7 +815,60 @@ export async function processIncomingMessage(
     if (inboundChannelId) variables.channelId = inboundChannelId;
     if (inboundConversationId) variables.conversationId = inboundConversationId;
 
-    if (currentStep.type === "wait_for_reply") {
+    if (currentStep.type === "closing_protocol") {
+      const {
+        CLOSING_PHASE_VAR,
+        classifyClosingExit,
+        emitAttendanceClosing,
+      } = await import("@/services/automation-closing-protocol");
+      const phase = String(variables[CLOSING_PHASE_VAR] ?? "waiting");
+      const convId =
+        inboundConversationId ||
+        (typeof variables.conversationId === "string"
+          ? variables.conversationId
+          : null);
+      if (phase !== "closing") {
+        const { isIdleClosingText } = await import(
+          "@/lib/ai-agents/tabulation-classify-policy"
+        );
+        if (isIdleClosingText(messageContent)) {
+          await emitAttendanceClosing({
+            contactId,
+            conversationId: convId,
+          });
+          const exit = await classifyClosingExit({
+            lastInbound: messageContent,
+            contactId,
+            conversationId: convId,
+          });
+          nextStepId = readStepRef(
+            config,
+            exit === "encerrar" ? "encerrarStepId" : "devolverStepId",
+          );
+          log.info(
+            `closing_protocol T1 idle → ${exit} — auto=${ctx.automation.name} step=${nextStepId ?? "(fim)"}`,
+          );
+        } else {
+          nextStepId = readStepRef(config, "receivedGotoStepId");
+          log.info(
+            `closing_protocol T1 demanda → received — auto=${ctx.automation.name} step=${nextStepId ?? "(fim)"}`,
+          );
+        }
+      } else {
+        const exit = await classifyClosingExit({
+          lastInbound: messageContent,
+          contactId,
+          conversationId: convId,
+        });
+        nextStepId = readStepRef(
+          config,
+          exit === "encerrar" ? "encerrarStepId" : "devolverStepId",
+        );
+        log.info(
+          `closing_protocol T2 → ${exit} — auto=${ctx.automation.name} step=${nextStepId ?? "(fim)"}`,
+        );
+      }
+    } else if (currentStep.type === "wait_for_reply") {
       const varName = String(config.saveToVariable ?? "lastResponse").trim();
       if (varName) {
         variables = { ...variables, [varName]: messageContent };
@@ -936,6 +1024,27 @@ export async function processIncomingMessage(
               `botão stale "${btnLabel}" matched — auto=${ctx.automation.name} step=${currentStep.id} → step=${nextStepId} (clique em menu anterior)`,
             );
           } else if (elseGoto) {
+            const { isIdleClosingText } = await import(
+              "@/lib/ai-agents/tabulation-classify-policy"
+            );
+            const { isClosingProtocolEnabled } = await import(
+              "@/services/automation-closing-protocol"
+            );
+            if (
+              isIdleClosingText(messageContent) &&
+              (await isClosingProtocolEnabled())
+            ) {
+              log.info(
+                `inbound ocioso sem match de botão ("${messageContent.slice(0, 40)}") — auto=${ctx.automation.name} solta o menu sem elseGoto`,
+              );
+              await cancelContext(ctx.id);
+              return {
+                handled: true,
+                replied: true,
+                automationId: ctx.automationId,
+                contextId: ctx.id,
+              };
+            }
             nextStepId = elseGoto;
             log.info(
               `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
@@ -1168,8 +1277,40 @@ async function abortTimeoutIfAttendanceStarted(
   contactId: string | null,
   pausedAt: Date,
   nextStep: { type: string; config: unknown } | undefined,
-): Promise<"stale_inbound" | "already_assigned" | null> {
+  conversationId?: string | null,
+): Promise<"stale_inbound" | "already_assigned" | "already_resolved" | null> {
   if (!contactId) return null;
+  const convId = conversationId?.trim() || "";
+  if (convId) {
+    const target = await prisma.conversation.findFirst({
+      where: { id: convId },
+      select: {
+        status: true,
+        lastInboundAt: true,
+        assignedToId: true,
+        assignedTo: { select: { type: true } },
+      },
+    });
+    if (!target || target.status === "RESOLVED") return "already_resolved";
+    if (target.lastInboundAt && target.lastInboundAt > pausedAt) {
+      return "stale_inbound";
+    }
+    const cfg = nextStep?.config && typeof nextStep.config === "object"
+      ? (nextStep.config as Record<string, unknown>)
+      : {};
+    const targetCloses =
+      nextStep?.type === "finish_conversation" ||
+      (nextStep?.type === "tabulate_conversation" && cfg.closeConversation !== false);
+    if (
+      targetCloses &&
+      target.assignedToId &&
+      target.assignedTo?.type === "HUMAN"
+    ) {
+      return "already_assigned";
+    }
+    return null;
+  }
+
   const convs = await prisma.conversation.findMany({
     where: { contactId, status: { not: "RESOLVED" } },
     select: {
@@ -1178,6 +1319,7 @@ async function abortTimeoutIfAttendanceStarted(
       assignedTo: { select: { type: true } },
     },
   });
+  if (convs.length === 0) return "already_resolved";
   if (convs.some((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)) {
     return "stale_inbound";
   }
@@ -1271,6 +1413,61 @@ export async function processTimeout(contextId: string) {
     automation: ctx.automation,
   };
 
+  if (step.type === "closing_protocol") {
+    const {
+      CLOSING_PHASE_VAR,
+      closingProtocolClosingWaitMs,
+      emitAttendanceClosing,
+    } = await import("@/services/automation-closing-protocol");
+    const phase = String(variables[CLOSING_PHASE_VAR] ?? "waiting");
+    const convId =
+      typeof variables.conversationId === "string"
+        ? variables.conversationId
+        : null;
+    const closingAbort = await abortTimeoutIfAttendanceStarted(
+      ctx.contactId,
+      ctx.updatedAt,
+      null,
+      convId,
+    );
+    if (closingAbort === "already_resolved") {
+      log.info(
+        `closing_protocol timeout abortado (already_resolved) — auto=${ctx.automation.name} contato=${ctx.contactId}`,
+      );
+      await advanceContext(ctx.id, null, variables);
+      return;
+    }
+    if (phase !== "closing") {
+      if (ctx.contactId) {
+        await emitAttendanceClosing({
+          contactId: ctx.contactId,
+          conversationId: convId,
+        });
+      }
+      await advanceContext(
+        ctx.id,
+        ctx.currentStepId,
+        { ...variables, [CLOSING_PHASE_VAR]: "closing" },
+        closingProtocolClosingWaitMs(config),
+      );
+      log.info(
+        `closing_protocol T1 timeout → fase encerramento — auto=${ctx.automation.name}`,
+      );
+      return;
+    }
+    const encerrar = readStepRef(config, "encerrarStepId");
+    log.info(
+      `closing_protocol T2 timeout → encerrar — auto=${ctx.automation.name} step=${encerrar ?? "(fim)"}`,
+    );
+    await dispatchToNextStep(
+      ctxForDispatch,
+      encerrar,
+      variables,
+      "closing_protocol encerrar (sem resposta)",
+    );
+    return;
+  }
+
   if (step.type === "wait_for_reply") {
     const timeoutGoto = readStepRef(config, "timeoutGotoStepId");
     if (!timeoutGoto) {
@@ -1284,6 +1481,7 @@ export async function processTimeout(contextId: string) {
       ctx.contactId,
       ctx.updatedAt,
       ctx.automation.steps.find((s) => s.id === timeoutGoto),
+      typeof variables.conversationId === "string" ? variables.conversationId : null,
     );
     if (waitAbort) {
       log.warn(
@@ -1342,6 +1540,7 @@ export async function processTimeout(contextId: string) {
     nextStepId
       ? ctx.automation.steps.find((s) => s.id === nextStepId)
       : undefined,
+    typeof variables.conversationId === "string" ? variables.conversationId : null,
   );
   if (abort) {
     log.warn(

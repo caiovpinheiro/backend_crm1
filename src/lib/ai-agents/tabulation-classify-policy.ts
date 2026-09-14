@@ -147,6 +147,109 @@ export function isAckOrGreetingText(text: string | null | undefined): boolean {
   return isShortAckText(text) || isGreetingOnlyText(text);
 }
 
+/** Confirmação / encerramento sem pedido novo. Não inclui "oi" / "bom dia". */
+const IDLE_CLOSING_PHRASES = [
+  "esta tudo certo",
+  "ta tudo certo",
+  "tudo certo",
+  "tudo bem por aqui",
+  "era so isso",
+  "era isso",
+  "era so isso mesmo",
+  "so isso",
+  "so isso mesmo",
+  "pode deixar",
+  "pode deixar com voces",
+  "ta bom",
+  "ta otimo",
+  "muito obrigado",
+  "muito obrigada",
+  "nao preciso",
+  "nao precisa",
+  "nao preciso mais",
+  "depois eu falo",
+  "chamo depois",
+  "qualquer coisa eu chamo",
+  "qualquer duvida eu falo",
+  "resolvido",
+  "ja resolveu",
+  "pode encerrar",
+  "pode fechar",
+  "fechado",
+  "combinado entao",
+];
+
+const DEMAND_HINTS = [
+  "como",
+  "quando",
+  "onde",
+  "porque",
+  "preciso",
+  "queria",
+  "gostaria",
+  "consigo",
+  "consegui",
+  "erro",
+  "problema",
+  "boleto",
+  "senha",
+  "acesso",
+  "matricula",
+  "pagamento",
+  "ajuda",
+  "duvida",
+  "urgente",
+];
+
+export type IdleInboundIntent = "idle" | "greeting" | "demand" | "unknown";
+
+function joinedTokens(text: string): string {
+  return tokenizePromptText(text).join(" ");
+}
+
+function hasDemandHint(normalized: string): boolean {
+  if (normalized.includes("?")) return true;
+  return DEMAND_HINTS.some((h) => normalized.includes(h));
+}
+
+function matchesIdlePhrase(normalized: string): boolean {
+  return IDLE_CLOSING_PHRASES.some(
+    (p) =>
+      normalized === p ||
+      normalized.startsWith(`${p} `) ||
+      normalized.endsWith(` ${p}`) ||
+      normalized.includes(` ${p} `),
+  );
+}
+
+/** ok / obrigado / "está tudo certo" / despedida — sem dúvida nova. */
+export function isIdleClosingText(text: string | null | undefined): boolean {
+  if (isShortAckText(text)) return true;
+  const n = joinedTokens(text ?? "");
+  if (!n) return false;
+  if (matchesIdlePhrase(n)) return true;
+  return false;
+}
+
+/**
+ * Abertura de ticket: idle não reabre automação/agente;
+ * cumprimento ("oi") continua disparando o pipe.
+ */
+export function classifyInboundIdleIntent(
+  text: string | null | undefined,
+): IdleInboundIntent {
+  const raw = (text ?? "").trim();
+  if (!raw) return "unknown";
+  if (isIdleClosingText(raw)) return "idle";
+  if (isGreetingOnlyText(raw)) return "greeting";
+  const n = joinedTokens(raw);
+  if (hasDemandHint(n)) return "demand";
+  const words = tokenizePromptText(raw);
+  if (words.length > 16) return "demand";
+  if (words.length === 0) return "unknown";
+  return "unknown";
+}
+
 export function messageHasMedia(msg: AttendanceMessage): boolean {
   if (msg.mediaUrl?.trim()) return true;
   const type = (msg.messageType ?? "").toLowerCase();

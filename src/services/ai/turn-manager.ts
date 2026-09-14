@@ -336,6 +336,28 @@ export async function onInboundMessageForAi(
     if (consumed) return;
   }
 
+  if (input.userMessage?.trim()) {
+    try {
+      const { shouldSkipNewAiForIdleInbound } = await import(
+        "@/services/ai/idle-inbound"
+      );
+      if (
+        await shouldSkipNewAiForIdleInbound({
+          conversationId: input.conversationId,
+          userMessage: input.userMessage,
+        })
+      ) {
+        logTurn("skip_idle_inbound", {
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+        });
+        return;
+      }
+    } catch (e) {
+      console.error("[ai-turn] idle inbound check failed", e);
+    }
+  }
+
   if (!isTurnManagerEnabled()) {
     const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
     await scheduleAiReply(input);

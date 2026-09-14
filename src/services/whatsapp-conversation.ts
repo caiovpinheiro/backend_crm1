@@ -26,6 +26,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
+import { releaseOtherAutomationContexts } from "@/services/automation-context";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("whatsapp-conversation");
@@ -278,8 +279,10 @@ export async function ensureWhatsAppConversationForContact(
     data: {
       channel: "whatsapp",
       channelId: defaultChannel.id,
+      conversationId: created.id,
       inboxName: defaultChannel.name,
       source: "auto_ensure",
+      openedWithoutMessage: true,
     },
   }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
 
@@ -312,7 +315,7 @@ export async function maybeResolveUnansweredOutboundTicket(
   if (!conv || conv.status !== "OPEN") return false;
   if (conv.lastInboundAt != null || conv.hasHumanReply) return false;
 
-  await prisma.conversation.update({
+  const closed = await prisma.conversation.update({
     where: { id: conversationId },
     data: {
       status: "RESOLVED",
@@ -320,6 +323,13 @@ export async function maybeResolveUnansweredOutboundTicket(
       assignedToId: null,
       updatedAt: new Date(),
     },
+    select: { contactId: true },
   });
+  if (closed.contactId) {
+    await releaseOtherAutomationContexts({
+      contactId: closed.contactId,
+      conversationId,
+    }).catch(() => {});
+  }
   return true;
 }

@@ -88,16 +88,40 @@ export function emitConversationCreated(args: {
   source: string;
   extra?: Record<string, unknown>;
 }): void {
-  fireTrigger("conversation_created", {
-    contactId: args.contactId,
-    data: {
-      channel: args.channel,
-      source: args.source,
-      ...(args.channelId ? { channelId: args.channelId } : {}),
-      ...(args.conversationId ? { conversationId: args.conversationId } : {}),
-      ...args.extra,
-    },
-  }).catch((err) => {
+  const data = {
+    channel: args.channel,
+    source: args.source,
+    ...(args.channelId ? { channelId: args.channelId } : {}),
+    ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+    ...args.extra,
+  };
+  void (async () => {
+    try {
+      const { maybeResolveIdleReopenTicket } = await import(
+        "@/services/ai/idle-inbound"
+      );
+      const content =
+        typeof data.content === "string"
+          ? data.content
+          : typeof data.text === "string"
+            ? data.text
+            : null;
+      const messageType =
+        typeof data.messageType === "string" ? data.messageType : null;
+      await maybeResolveIdleReopenTicket({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        content,
+        messageType,
+      });
+    } catch {
+      /* best-effort */
+    }
+    await fireTrigger("conversation_created", {
+      contactId: args.contactId,
+      data,
+    });
+  })().catch((err) => {
     console.warn(
       "Falha no gatilho conversation_created:",
       err instanceof Error ? err.message : err,
@@ -643,6 +667,29 @@ export async function fireTrigger(  event: string,
   }
 
   if (!hasAutomations) return;
+
+  if (
+    (event === "conversation_created" || event === "message_received") &&
+    context.data &&
+    typeof context.data === "object"
+  ) {
+    try {
+      const { shouldSkipIdleInboundAutomation } = await import(
+        "@/services/ai/idle-inbound"
+      );
+      if (await shouldSkipIdleInboundAutomation(asRecord(context.data))) {
+        console.info(
+          `[fireTrigger] skip ${event} — inbound ocioso (ack/obrigado/confirmação) contact=${context.contactId ?? "-"}`,
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn(
+        "[fireTrigger] idle inbound check failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 
   // Guarda só no INBOUND: não responder por cima de atendimento humano.
   // message_sent é ação do agente e não pode ser suprimido por ela.
