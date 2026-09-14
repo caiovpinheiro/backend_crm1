@@ -13,6 +13,7 @@
  * be missing; org is taken from the envelope.
  */
 
+import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import { prismaBase } from "@/lib/prisma-base";
 
 const INBOX_SSE_CARD_SELECT = {
@@ -49,8 +50,8 @@ const INBOX_SSE_CARD_SELECT = {
       phone: true,
       avatarUrl: true,
       automationContexts: {
-        where: { status: { in: ["RUNNING", "PAUSED"] } },
-        select: { id: true },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, status: true, createdAt: true },
         take: 1,
       },
     },
@@ -169,12 +170,35 @@ function rowToCard(
     lastMessageDirection = "out";
     updatedAt = lastMessageAt;
   }
-  // Preview outbound no evento: promove reply contável mesmo se o SELECT
-  // correr num instante em que o UPDATE ainda não commitou (race rara).
+  // Outbound do robô NÃO é reply humano — senão o card cai em
+  // Em Atendimento. Humano: a coluna já vai `true` no UPDATE antes do SSE.
+  const authorType =
+    typeof event.authorType === "string" ? event.authorType.toUpperCase() : "";
   const hasHumanReply =
-    preview?.direction === "out" ? true : Boolean(row.hasHumanReply);
+    Boolean(row.hasHumanReply) ||
+    (preview?.direction === "out" && authorType === "HUMAN");
   const hasAgentReply =
-    preview?.direction === "out" ? true : Boolean(row.hasAgentReply);
+    Boolean(row.hasAgentReply) || preview?.direction === "out";
+  const latest = row.contact.automationContexts?.[0];
+  const ago = automationQueueDelayAgo().getTime();
+  const startedAt = latest?.createdAt
+    ? latest.createdAt instanceof Date
+      ? latest.createdAt.getTime()
+      : Date.parse(String(latest.createdAt))
+    : NaN;
+  const recentStart = Number.isFinite(startedAt) && startedAt > ago;
+  const liveAged =
+    !recentStart &&
+    (latest?.status === "RUNNING" || latest?.status === "PAUSED") &&
+    Number.isFinite(startedAt) &&
+    startedAt <= ago;
+  const assigneeType = (row.assignedTo?.type ?? "").toUpperCase();
+  const lastDir = lastMessageDirection ?? row.lastMessageDirection;
+  const hasActiveAutomation =
+    assigneeType !== "AI" &&
+    !recentStart &&
+    (liveAged ||
+      (hasAgentReply && !hasHumanReply && lastDir === "out"));
   return {
     id: row.id,
     number: row.number,
@@ -186,7 +210,7 @@ function rowToCard(
     hasAgentReply,
     lastInboundAt,
     lastMessageDirection,
-    hasActiveAutomation: (row.contact.automationContexts?.length ?? 0) > 0,
+    hasActiveAutomation,
     closedAt: iso(row.closedAt),
     followUpAt: iso(row.followUpAt),
     updatedAt,
