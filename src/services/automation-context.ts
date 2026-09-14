@@ -26,11 +26,13 @@ function publishAutomationState(row: {
 }) {
   if (!row?.contactId || !row.organizationId) return;
   try {
+    const status = row.status ?? null;
     sseBus.publish("automation_state", {
       organizationId: row.organizationId,
       contactId: row.contactId,
       automationId: row.automationId ?? null,
-      status: row.status ?? null,
+      status,
+      active: status === "RUNNING" || status === "PAUSED",
     });
   } catch {
     /* best-effort */
