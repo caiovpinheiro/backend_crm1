@@ -29,6 +29,7 @@ import { readUpstreamFallbackBytes } from "@/lib/storage/upstream-fallback";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -86,6 +87,7 @@ type AttachmentSource =
       file: Blob & { name?: string };
       caption: string;
       requestedChannelId: string | null;
+      waitUntilSent?: boolean;
     }
   | {
       mode: "reuse";
@@ -94,6 +96,7 @@ type AttachmentSource =
       mimeBase: string;
       caption: string;
       requestedChannelId: string | null;
+      waitUntilSent?: boolean;
     };
 
 function readChannelId(raw: unknown): string | null {
@@ -312,6 +315,7 @@ async function parseAttachmentRequest(
         mimeBase,
         caption: typeof rec.caption === "string" ? rec.caption : "",
         requestedChannelId: readChannelId(rec.channelId),
+        waitUntilSent: rec.waitUntilSent === true,
       },
     };
   }
@@ -679,6 +683,10 @@ export async function POST(request: Request, context: RouteContext) {
             .catch(() => {});
           sendStatus = "failed";
           queuedMetaError = errMsg;
+        } else if (source.waitUntilSent) {
+          const waited = await waitForMessageSendStatus(msgRow.id);
+          if (waited === "sent") sendStatus = "sent";
+          if (waited === "failed") sendStatus = "failed";
         }
 
         return NextResponse.json({
