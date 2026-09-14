@@ -244,8 +244,10 @@ function shapeRoom(
     members: {
       userId: string;
       lastReadAt: Date;
+      muted?: boolean;
       user: { id: string; name: string; avatarUrl: string | null };
     }[];
+    createdById?: string;
     _count?: { messages: number };
   },
   viewerId: string,
@@ -254,6 +256,7 @@ function shapeRoom(
 ) {
   const others = room.members.filter((m) => m.userId !== viewerId);
   const peer = room.kind === "DM" ? others[0]?.user ?? null : null;
+  const mine = room.members.find((m) => m.userId === viewerId);
   return {
     id: room.id,
     kind: room.kind as "DM" | "GROUP" | "CHANNEL",
@@ -264,6 +267,8 @@ function shapeRoom(
     lastPreview: room.lastPreview,
     createdAt: room.createdAt.toISOString(),
     unread,
+    muted: Boolean(mine?.muted),
+    createdById: room.createdById ?? null,
     peer: peer
       ? {
           ...peer,
@@ -274,6 +279,7 @@ function shapeRoom(
       id: m.user.id,
       name: m.user.name,
       avatarUrl: m.user.avatarUrl,
+      role: m.userId === room.createdById ? "admin" : undefined,
       systemOnline: presence?.get(m.user.id)?.systemOnline ?? false,
     })),
     memberCount: room.members.length,
@@ -285,7 +291,7 @@ export async function listRooms(viewer: TeamChatViewer) {
     where: { members: { some: { userId: viewer.userId } } },
     orderBy: { lastMessageAt: "desc" },
     include: {
-      members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+      members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
     },
   });
 
@@ -339,7 +345,7 @@ export async function getRoom(viewer: TeamChatViewer, roomId: string) {
   const room = await prisma.teamChatRoom.findFirst({
     where: { id: roomId },
     include: {
-      members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+      members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
     },
   });
   if (!room) return { error: "Conversa não encontrada.", status: 404 as const };
@@ -389,7 +395,7 @@ export async function createRoom(
     const existing = await prisma.teamChatRoom.findFirst({
       where: { dmKey },
       include: {
-        members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+        members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
       },
     });
     if (existing) {
@@ -410,7 +416,7 @@ export async function createRoom(
         },
       }),
       include: {
-        members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+        members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
       },
     });
     } catch (err) {
@@ -419,7 +425,7 @@ export async function createRoom(
         const again = await prisma.teamChatRoom.findFirst({
           where: { dmKey },
           include: {
-            members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+            members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
           },
         });
         if (again) return { room: shapeRoom(again, viewer.userId, 0), created: false };
@@ -449,7 +455,7 @@ export async function createRoom(
       },
     }),
     include: {
-      members: { select: { userId: true, lastReadAt: true, user: { select: USER_SELECT } } },
+      members: { select: { userId: true, lastReadAt: true, muted: true, user: { select: USER_SELECT } } },
     },
   });
 
@@ -577,6 +583,93 @@ export async function updateRoom(
     memberIds: access.room.members.map((m) => m.id),
   });
   return getRoom(viewer, roomId);
+}
+
+export async function updateMemberPrefs(
+  viewer: TeamChatViewer,
+  roomId: string,
+  input: { muted?: boolean },
+) {
+  const member = await requireMember(viewer, roomId);
+  if (!member) return { error: "Conversa não encontrada.", status: 404 as const };
+  if (input.muted === undefined) return getRoom(viewer, roomId);
+  await prisma.teamChatMember.update({
+    where: { roomId_userId: { roomId, userId: viewer.userId } },
+    data: { muted: input.muted },
+  });
+  return getRoom(viewer, roomId);
+}
+
+export async function leaveRoom(viewer: TeamChatViewer, roomId: string) {
+  const access = await getRoom(viewer, roomId);
+  if ("error" in access) return access;
+  if (!isGroupKind(access.room.kind)) {
+    return { error: "Só é possível sair de grupos e canais.", status: 400 as const };
+  }
+  if (access.room.memberCount <= 1) {
+    return deleteRoom(viewer, roomId);
+  }
+  const me = await prisma.user.findFirst({
+    where: { id: viewer.userId },
+    select: { name: true },
+  });
+  await prisma.teamChatMember.delete({
+    where: { roomId_userId: { roomId, userId: viewer.userId } },
+  });
+  await prisma.teamChatMessage.create({
+    data: withOrgFromCtx({
+      roomId,
+      authorId: viewer.userId,
+      kind: "SYSTEM",
+      content: `${me?.name ?? "Alguém"} saiu do grupo`,
+    }),
+  });
+  const remaining = access.room.members.filter((m) => m.id !== viewer.userId).map((m) => m.id);
+  publish("team_chat_room_updated", viewer.organizationId, {
+    roomId,
+    memberIds: remaining,
+    leftUserId: viewer.userId,
+  });
+  return { ok: true as const, left: true };
+}
+
+export async function deleteMessage(viewer: TeamChatViewer, roomId: string, messageId: string) {
+  const member = await requireMember(viewer, roomId);
+  if (!member) return { error: "Conversa não encontrada.", status: 404 as const };
+  const msg = await prisma.teamChatMessage.findFirst({
+    where: { id: messageId, roomId },
+    select: { id: true, authorId: true, kind: true },
+  });
+  if (!msg) return { error: "Mensagem não encontrada.", status: 404 as const };
+  if (msg.kind === "SYSTEM") return { error: "Mensagem de sistema não pode ser apagada.", status: 400 as const };
+  if (msg.authorId !== viewer.userId) {
+    return { error: "Só quem enviou pode apagar.", status: 403 as const };
+  }
+  await prisma.teamChatMessage.delete({ where: { id: messageId } });
+  const last = await prisma.teamChatMessage.findFirst({
+    where: { roomId },
+    orderBy: { createdAt: "desc" },
+    select: { content: true, createdAt: true, kind: true, attachments: true },
+  });
+  const room = await prisma.teamChatRoom.update({
+    where: { id: roomId },
+    data: {
+      lastMessageAt: last?.createdAt ?? new Date(),
+      lastPreview: last
+        ? last.kind === "SYSTEM"
+          ? last.content.replace(/\u200b[\s\S]*$/, "").trim()
+          : previewOfPayload(last.content, parseAttachments(last.attachments))
+        : null,
+    },
+    select: { members: { select: { userId: true } } },
+  });
+  publish("team_chat_message", viewer.organizationId, {
+    roomId,
+    memberIds: room.members.map((m) => m.userId),
+    deleted: true,
+    messageId,
+  });
+  return { ok: true as const };
 }
 
 export async function deleteRoom(viewer: TeamChatViewer, roomId: string) {

@@ -2680,6 +2680,8 @@ model Activity {
 
   comments    ActivityComment[]
   alertStates ActivityAlertState[]
+  teamChatWorkItems       TeamChatWorkItem[]      @relation("WorkItemCalendar")
+  teamChatWorkItemEntries TeamChatWorkItemEntry[] @relation("WorkItemEntryCalendar")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6072,11 +6074,15 @@ model TeamChatWorkItem {
   recurrenceKey  String?
   /// Participantes da reunião (userIds).
   participantIds Json         @default("[]")
+  /// Espelho no calendário de tarefas (Activity) quando há startsAt.
+  calendarActivityId String?
+  calendarActivity   Activity? @relation("WorkItemCalendar", fields: [calendarActivityId], references: [id], onDelete: SetNull)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   entries TeamChatWorkItemEntry[]
 
+  @@unique([calendarActivityId])
   @@index([organizationId, createdById])
   @@index([organizationId, type])
   @@index([roomId])
@@ -6101,9 +6107,13 @@ model TeamChatWorkItemEntry {
   completedAt    DateTime?
   completedById  String?
   completedBy    User?            @relation("TeamChatWorkItemEntryCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  /// Espelho no calendário de tarefas quando a linha tem dueAt.
+  calendarActivityId String?
+  calendarActivity   Activity? @relation("WorkItemEntryCalendar", fields: [calendarActivityId], references: [id], onDelete: SetNull)
 
   revisions TeamChatWorkItemEntryRevision[]
 
+  @@unique([calendarActivityId])
   @@index([workItemId, sortOrder])
   @@index([organizationId, assigneeId, status])
   @@index([dueAt])

@@ -5,6 +5,7 @@ import { loadAuthzContext } from "@/lib/authz";
 import { isFeatureEnabled } from "@/lib/feature-flags";
 import { getOrgSettingsByPrefix } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
 export type VisibilityMode = "all" | "own";
@@ -281,7 +282,7 @@ function permissionsAllowKey(
  * Amplia o `conversationWhere` para filas compartilhadas da Inbox quando o
  * operador tem as chaves correspondentes:
  *   - `inbox:tab:entrada` + `conversation:claim` → pool OPEN não atribuído
- *   - `inbox:tab:automacao` → fila de automação (contexto RUNNING/PAUSED)
+ *   - `inbox:tab:automacao` → fila de automação (contexto vivo ou só robô)
  *   - `inbox:tab:agente_ia` → fila do Agente IA (assignee `type: AI`)
  *
  * Substitui o legado `sharedInbox` para MEMBER nas filas compartilhadas.
@@ -335,12 +336,37 @@ export function withInboxQueueVisibility(
     extras.push({
       status: "OPEN",
       assignedToId: null,
-      contact: {
-        // RUNNING/PAUSED no contato — mesma fila Automação (com ou sem inbound).
-        automationContexts: {
-          some: { status: { in: ["RUNNING", "PAUSED"] } },
+      hasError: false,
+      AND: [
+        {
+          OR: [
+            {
+              contact: {
+                automationContexts: {
+                  some: {
+                    status: { in: ["RUNNING", "PAUSED"] },
+                    createdAt: { lte: automationQueueDelayAgo() },
+                  },
+                },
+              },
+            },
+            {
+              hasAgentReply: true,
+              hasHumanReply: false,
+              lastMessageDirection: "out",
+            },
+          ],
         },
-      },
+        {
+          NOT: {
+            contact: {
+              automationContexts: {
+                some: { createdAt: { gt: automationQueueDelayAgo() } },
+              },
+            },
+          },
+        },
+      ],
     });
   }
 
