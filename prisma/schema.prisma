@@ -184,6 +184,7 @@ model Organization {
   keepImports              KeepImport[]
   whatsAppGroups           WhatsAppGroup[]
   whatsAppGroupMembers     WhatsAppGroupMember[]
+  whatsAppGroupMessages    WhatsAppGroupMessage[]
 
   @@index([status])
   @@map("organizations")
@@ -3440,6 +3441,7 @@ model WhatsAppGroup {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   members           WhatsAppGroupMember[]
+  messages          WhatsAppGroupMessage[]
 
   @@unique([channelId, jid])
   @@index([organizationId])
@@ -3463,6 +3465,27 @@ model WhatsAppGroupMember {
   @@index([organizationId])
   @@index([groupId])
   @@map("whatsapp_group_members")
+}
+
+/// Histórico do grupo QR. Não cria Conversation/Deal no inbox.
+model WhatsAppGroupMessage {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  groupId        String
+  group          WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  waMessageId    String?
+  fromJid        String
+  fromName       String?
+  fromPhone      String?
+  fromMe         Boolean       @default(false)
+  text           String        @db.Text
+  createdAt      DateTime      @default(now())
+
+  @@index([organizationId])
+  @@index([groupId, createdAt])
+  @@index([groupId, waMessageId])
+  @@map("whatsapp_group_messages")
 }
 
 // ──────────────────────────────────────────────
