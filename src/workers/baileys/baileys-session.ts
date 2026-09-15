@@ -1,7 +1,9 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
+  isJidGroup,
   makeCacheableSignalKeyStore,
+  type GroupMetadata,
   type WASocket,
   type BaileysEventMap,
   type AnyMessageContent,
@@ -34,6 +36,10 @@ export class BaileysSession {
   // contexto, ensureOpenDealForContact falhava silenciosamente —
   // contato + conversa criavam, mas o deal "Lead de Entrada" não.
   private organizationId: string | null = null;
+  // Baileys 7 cifra grupo com sender-keys dos participantes. Sem este
+  // cache o sendMessage(@g.us) resolve metadados vazios e o WhatsApp
+  // nunca entrega — a API já tinha respondido 200 só por enfileirar.
+  private groupCache = new Map<string, GroupMetadata>();
 
   constructor(channelId: string) {
     this.channelId = channelId;
@@ -83,6 +89,7 @@ export class BaileysSession {
       browser: ["CRM Eduit", "Chrome", "4.0.0"],
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
+      cachedGroupMetadata: async (jid) => this.groupCache.get(jid),
     });
 
     this.socket = sock;
@@ -121,6 +128,26 @@ export class BaileysSession {
           registerLidMapping(this.channelId, c.lid, c.id);
         }
       }
+    });
+
+    sock.ev.on("groups.upsert", (groups) => {
+      for (const g of groups) this.rememberGroup(g);
+    });
+
+    sock.ev.on("groups.update", (updates) => {
+      for (const u of updates) {
+        if (!u.id) continue;
+        const prev = this.groupCache.get(u.id);
+        if (prev) {
+          this.rememberGroup({ ...prev, ...u } as GroupMetadata);
+          continue;
+        }
+        void sock.groupMetadata(u.id).then((m) => this.rememberGroup(m)).catch(() => {});
+      }
+    });
+
+    sock.ev.on("group-participants.update", (event) => {
+      void sock.groupMetadata(event.id).then((m) => this.rememberGroup(m)).catch(() => {});
     });
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
@@ -330,14 +357,38 @@ export class BaileysSession {
     }
   }
 
+  rememberGroup(meta: GroupMetadata): void {
+    if (!meta?.id) return;
+    this.groupCache.set(meta.id, meta);
+  }
+
   async sendMessage(jid: string, content: AnyMessageContent): Promise<WAMessage | undefined> {
     if (!this.socket) throw new Error("Socket não conectado");
-    return this.socket.sendMessage(jid, content);
+    if (!this.socket.user) {
+      await this.waitForOpen(12_000);
+      if (!this.socket?.user) {
+        throw new Error("Sessão Baileys ainda conectando. Tente de novo em alguns segundos.");
+      }
+    }
+    if (isJidGroup(jid) && !this.groupCache.has(jid)) {
+      try {
+        const meta = await this.socket.groupMetadata(jid);
+        this.rememberGroup(meta);
+      } catch (err) {
+        console.warn(
+          `[baileys:${this.channelId}] groupMetadata ${jid} falhou:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    const dest = this.groupCache.get(jid)?.id ?? jid;
+    return this.socket.sendMessage(dest, content);
   }
 
   async disconnect(): Promise<void> {
     this.destroyed = true;
     this.clearQrTimer();
+    this.groupCache.clear();
     clearChannelMap(this.channelId);
     try {
       this.socket?.end(undefined);
@@ -350,6 +401,7 @@ export class BaileysSession {
 
   async logout(): Promise<void> {
     this.clearQrTimer();
+    this.groupCache.clear();
     clearChannelMap(this.channelId);
     if (!this.socket) {
       await this.connect();

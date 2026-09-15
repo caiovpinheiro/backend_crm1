@@ -1,4 +1,4 @@
-import { Queue, type JobsOptions } from "bullmq";
+import { Queue, QueueEvents, type Job, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
 import { debugInfo } from "@/lib/debug-log";
@@ -366,6 +366,7 @@ const globalForQueue = globalThis as unknown as {
   automationQueueRedis?: IORedis;
   automationQueue?: Queue<AutomationJobPayload>;
   baileysOutboundQueue?: Queue<BaileysOutboundPayload>;
+  baileysOutboundEvents?: QueueEvents;
   baileysControlQueue?: Queue<BaileysControlPayload>;
   campaignDispatchQueue?: Queue<CampaignDispatchPayload>;
   campaignSendQueue?: Queue<CampaignSendPayload>;
@@ -541,9 +542,35 @@ export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
     return null;
   }
   return queue.add("send", payload, {
-    removeOnComplete: true,
+    // Mantém o job uns segundos para waitUntilFinished no POST de grupo.
+    removeOnComplete: { age: 60 },
     removeOnFail: { count: 1000 },
   });
+}
+
+function getBaileysOutboundEvents(): QueueEvents | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.baileysOutboundEvents) {
+    globalForQueue.baileysOutboundEvents = new QueueEvents(
+      BAILEYS_OUTBOUND_QUEUE_NAME,
+      { connection: redis.duplicate() },
+    );
+  }
+  return globalForQueue.baileysOutboundEvents;
+}
+
+/** Espera o worker Baileys entregar (ou falhar). Timeout → erro, não sucesso. */
+export async function waitForBaileysOutboundJob(
+  job: Job<BaileysOutboundPayload>,
+  timeoutMs = 25_000,
+): Promise<void> {
+  const events = getBaileysOutboundEvents();
+  if (!events || !job.id) {
+    throw new Error("Fila indisponível. Tente de novo.");
+  }
+  await events.waitUntilReady();
+  await job.waitUntilFinished(events, timeoutMs);
 }
 
 export async function enqueueBaileysControl(payload: BaileysControlPayload) {

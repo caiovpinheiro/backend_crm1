@@ -172,6 +172,10 @@ export function startOutboundConsumer(
       }
 
       const sent = await session.sendMessage(jid, waContent);
+      if (!sent?.key?.id) {
+        throw new Error("WhatsApp não confirmou o envio");
+      }
+      console.info(`[baileys-outbound] enviado ${sent.key.id} → ${jid}`);
 
       if (!messageId) return;
 
