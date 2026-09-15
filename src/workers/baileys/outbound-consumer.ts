@@ -171,11 +171,16 @@ export function startOutboundConsumer(
         };
       }
 
-      const sent = await session.sendMessage(jid, waContent);
-      if (!sent?.key?.id) {
-        throw new Error("WhatsApp não confirmou o envio");
+      const sent = await withTimeout(
+        session.sendMessage(jid, waContent),
+        15_000,
+        "WhatsApp não confirmou o envio",
+      );
+      if (sent?.key?.id) {
+        console.info(`[baileys-outbound] enviado ${sent.key.id} → ${jid}`);
+      } else {
+        console.warn(`[baileys-outbound] send sem id de mensagem → ${jid}`);
       }
-      console.info(`[baileys-outbound] enviado ${sent.key.id} → ${jid}`);
 
       if (!messageId) return;
 
@@ -258,4 +263,16 @@ async function markFailed(messageId: string, error: string) {
       });
     });
   })();
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label)), ms);
+    }),
+  ]);
 }

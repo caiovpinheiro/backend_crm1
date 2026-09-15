@@ -372,7 +372,12 @@ export class BaileysSession {
     }
     if (isJidGroup(jid) && !this.groupCache.has(jid)) {
       try {
-        const meta = await this.socket.groupMetadata(jid);
+        const meta = await Promise.race([
+          this.socket.groupMetadata(jid),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("groupMetadata timeout")), 8_000),
+          ),
+        ]);
         this.rememberGroup(meta);
       } catch (err) {
         console.warn(
