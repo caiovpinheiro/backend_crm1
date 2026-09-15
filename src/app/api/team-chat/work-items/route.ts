@@ -46,8 +46,13 @@ export async function POST(request: Request) {
     if (denied) return denied;
     const parsed = Create.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
-    const result = await createWorkItem(viewerOf(session), parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
-    return NextResponse.json(result.workItem, { status: 201 });
+    try {
+      const result = await createWorkItem(viewerOf(session), parsed.data);
+      if ("error" in result) return jsonError(result.error, result.status);
+      return NextResponse.json(result.workItem, { status: 201 });
+    } catch (err) {
+      console.error("[team-chat] create work item failed", err);
+      return jsonError("Não foi possível criar o item.", 500);
+    }
   });
 }

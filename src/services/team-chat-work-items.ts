@@ -5,6 +5,7 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { createActivity, deleteActivity, updateActivity } from "@/services/activities";
 import {
   previewLabelForRef,
   resolveAnchorInput,
@@ -97,11 +98,41 @@ function shapeEntry(e: {
   };
 }
 
-const ITEM_INCLUDE = {
+/** Sem `calendarActivityId`: o SELECT padrão do Prisma quebra o create/list
+ *  se a migration do calendário ainda não rodou (P2022 → HTML 500 no proxy). */
+const ENTRY_SELECT = {
+  id: true,
+  text: true,
+  assigneeId: true,
+  assignee: { select: { name: true } },
+  dueAt: true,
+  status: true,
+  sortOrder: true,
+  completedAt: true,
+} as const;
+
+const ITEM_SELECT = {
+  id: true,
+  type: true,
+  title: true,
+  originType: true,
+  originId: true,
+  roomId: true,
+  visibility: true,
+  createdById: true,
   createdBy: { select: { name: true } },
+  startsAt: true,
+  endsAt: true,
+  callUrl: true,
+  recurrenceKey: true,
+  participantIds: true,
+  createdAt: true,
+  updatedAt: true,
+  anchorType: true,
+  anchorId: true,
   entries: {
     orderBy: { sortOrder: "asc" as const },
-    include: { assignee: { select: { name: true } } },
+    select: ENTRY_SELECT,
   },
 } as const;
 
@@ -183,6 +214,214 @@ function canSeeWorkItem(
   return true;
 }
 
+type CalendarHost = {
+  id: string;
+  type: string;
+  title: string;
+  createdById: string;
+  startsAt: Date | null;
+  calendarActivityId: string | null;
+  anchorType: string | null;
+  anchorId: string | null;
+};
+
+type CalendarEntry = {
+  id: string;
+  text: string;
+  assigneeId: string | null;
+  dueAt: Date | null;
+  status: string;
+  completedAt: Date | null;
+  calendarActivityId: string | null;
+};
+
+function crmLinks(host: Pick<CalendarHost, "anchorType" | "anchorId">) {
+  if (host.anchorType === "deal" && host.anchorId) {
+    return { dealId: host.anchorId, contactId: null as string | null };
+  }
+  if (host.anchorType === "contact" && host.anchorId) {
+    return { contactId: host.anchorId, dealId: null as string | null };
+  }
+  return { dealId: null as string | null, contactId: null as string | null };
+}
+
+function isMissingCalendarColumn(err: unknown) {
+  const code =
+    typeof err === "object" && err && "code" in err ? String((err as { code: unknown }).code) : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  return code === "P2022" || /calendarActivityId/i.test(msg);
+}
+
+async function removeCalendarActivity(id: string | null | undefined) {
+  if (!id) return;
+  try {
+    await deleteActivity(id);
+  } catch {
+    /* já apagada ou invisível no escopo */
+  }
+}
+
+async function loadCalendarState(id: string) {
+  try {
+    return await prisma.teamChatWorkItem.findFirst({
+      where: { id },
+      select: {
+        id: true,
+        type: true,
+        title: true,
+        createdById: true,
+        startsAt: true,
+        calendarActivityId: true,
+        anchorType: true,
+        anchorId: true,
+        entries: {
+          select: {
+            id: true,
+            text: true,
+            assigneeId: true,
+            dueAt: true,
+            status: true,
+            completedAt: true,
+            calendarActivityId: true,
+          },
+        },
+      },
+    });
+  } catch (err) {
+    if (!isMissingCalendarColumn(err)) {
+      console.error("[team-chat] calendar load failed", err);
+    }
+    return null;
+  }
+}
+
+async function syncWorkItemCalendar(viewer: TeamChatViewer, item: CalendarHost) {
+  const links = crmLinks(item);
+  if (item.type !== "meeting" || !item.startsAt) {
+    if (item.calendarActivityId) {
+      await removeCalendarActivity(item.calendarActivityId);
+      await prisma.teamChatWorkItem.update({
+        where: { id: item.id },
+        data: { calendarActivityId: null },
+      });
+    }
+    return;
+  }
+
+  const payload = {
+    type: "MEETING" as const,
+    title: item.title.trim().slice(0, 200) || "Reunião",
+    description: "WiPO Chat",
+    scheduledAt: item.startsAt,
+    userId: item.createdById,
+    createdById: viewer.userId,
+    ...links,
+  };
+
+  if (item.calendarActivityId) {
+    try {
+      await updateActivity(item.calendarActivityId, {
+        type: payload.type,
+        title: payload.title,
+        description: payload.description,
+        scheduledAt: payload.scheduledAt,
+        userId: payload.userId,
+        dealId: payload.dealId,
+        contactId: payload.contactId,
+      });
+      return;
+    } catch {
+      /* recria se o espelho sumiu */
+    }
+  }
+
+  const created = await createActivity(payload);
+  await prisma.teamChatWorkItem.update({
+    where: { id: item.id },
+    data: { calendarActivityId: created.id },
+  });
+}
+
+async function syncEntryCalendar(viewer: TeamChatViewer, host: CalendarHost, entry: CalendarEntry) {
+  if (!entry.dueAt) {
+    if (entry.calendarActivityId) {
+      await removeCalendarActivity(entry.calendarActivityId);
+      await prisma.teamChatWorkItemEntry.update({
+        where: { id: entry.id },
+        data: { calendarActivityId: null },
+      });
+    }
+    return;
+  }
+
+  const links = crmLinks(host);
+  const done = entry.status === "done";
+  const payload = {
+    type: "TASK" as const,
+    title: entry.text.trim().slice(0, 200) || host.title,
+    description: `WiPO Chat · ${host.title}`,
+    scheduledAt: entry.dueAt,
+    completed: done,
+    completedAt: done ? entry.completedAt ?? new Date() : null,
+    userId: entry.assigneeId ?? host.createdById,
+    createdById: viewer.userId,
+    ...links,
+  };
+
+  if (entry.calendarActivityId) {
+    try {
+      await updateActivity(entry.calendarActivityId, {
+        title: payload.title,
+        description: payload.description,
+        scheduledAt: payload.scheduledAt,
+        completed: payload.completed,
+        completedAt: payload.completedAt,
+        userId: payload.userId,
+        dealId: payload.dealId,
+        contactId: payload.contactId,
+      });
+      return;
+    } catch {
+      /* recria se o espelho sumiu */
+    }
+  }
+
+  const created = await createActivity(payload);
+  await prisma.teamChatWorkItemEntry.update({
+    where: { id: entry.id },
+    data: { calendarActivityId: created.id },
+  });
+}
+
+async function syncWorkItemCalendars(
+  viewer: TeamChatViewer,
+  item: CalendarHost & { entries: CalendarEntry[] },
+) {
+  try {
+    await syncWorkItemCalendar(viewer, item);
+    for (const entry of item.entries) {
+      await syncEntryCalendar(viewer, item, entry);
+    }
+  } catch (err) {
+    if (!isMissingCalendarColumn(err)) {
+      console.error("[team-chat] calendar sync failed", err);
+    }
+  }
+}
+
+async function syncCalendarsIfReady(
+  viewer: TeamChatViewer,
+  workItemId: string,
+  entries?: CalendarEntry[],
+) {
+  const host = await loadCalendarState(workItemId);
+  if (!host) return;
+  await syncWorkItemCalendars(viewer, {
+    ...host,
+    entries: entries ?? host.entries,
+  });
+}
+
 function publishWorkItem(organizationId: string, roomId: string | null, workItem: ShapedWorkItem) {
   // Sem crmCard: o preview é resolvido por leitor no GET.
   const { crmCard: _card, ...safe } = workItem;
@@ -249,7 +488,13 @@ export async function createWorkItem(
     const prev = await prisma.teamChatWorkItem.findFirst({
       where: { recurrenceKey: input.recurrenceKey, type: "meeting" },
       orderBy: { createdAt: "desc" },
-      include: { entries: { where: { status: "open" }, orderBy: { sortOrder: "asc" } } },
+      select: {
+        entries: {
+          where: { status: "open" },
+          orderBy: { sortOrder: "asc" },
+          select: { text: true, assigneeId: true, dueAt: true },
+        },
+      },
     });
     if (prev) {
       carry = prev.entries.map((e) => ({
@@ -289,13 +534,18 @@ export async function createWorkItem(
         ),
       },
     }),
-    include: ITEM_INCLUDE,
+    select: ITEM_SELECT,
   });
 
+  await syncCalendarsIfReady(viewer, created.id);
   const shaped = await shapeWorkItem(created, viewer);
   if (input.roomId && input.postMessage !== false) {
-    const { postWorkItemMessage } = await import("@/services/team-chat");
-    await postWorkItemMessage(viewer, input.roomId, created.id, title);
+    try {
+      const { postWorkItemMessage } = await import("@/services/team-chat");
+      await postWorkItemMessage(viewer, input.roomId, created.id, title);
+    } catch (err) {
+      console.error("[team-chat] post work item message failed", err);
+    }
   }
   publishWorkItem(viewer.organizationId, created.roomId, shaped);
   return { workItem: shaped };
@@ -304,7 +554,7 @@ export async function createWorkItem(
 export async function getWorkItem(viewer: TeamChatViewer, id: string) {
   const item = await prisma.teamChatWorkItem.findFirst({
     where: { id },
-    include: ITEM_INCLUDE,
+    select: ITEM_SELECT,
   });
   if (!item) return { error: "Item não encontrado.", status: 404 as const };
   if (item.roomId) {
@@ -331,7 +581,10 @@ export async function updateWorkItem(
     participantIds?: string[];
   },
 ) {
-  const item = await prisma.teamChatWorkItem.findFirst({ where: { id } });
+  const item = await prisma.teamChatWorkItem.findFirst({
+    where: { id },
+    select: { id: true, roomId: true },
+  });
   if (!item) return { error: "Item não encontrado.", status: 404 as const };
   if (item.roomId) {
     const member = await requireMember(viewer, item.roomId);
@@ -360,8 +613,9 @@ export async function updateWorkItem(
   const updated = await prisma.teamChatWorkItem.update({
     where: { id },
     data,
-    include: ITEM_INCLUDE,
+    select: ITEM_SELECT,
   });
+  await syncCalendarsIfReady(viewer, updated.id);
   const shaped = await shapeWorkItem(updated, viewer);
   publishWorkItem(viewer.organizationId, updated.roomId, shaped);
   return { workItem: shaped };
@@ -377,7 +631,16 @@ export async function deleteWorkItem(viewer: TeamChatViewer, id: string) {
     const member = await requireMember(viewer, item.roomId);
     if (!member) return { error: "Item não encontrado.", status: 404 as const };
   }
-  await prisma.teamChatWorkItem.delete({ where: { id } });
+  const calendar = await loadCalendarState(id);
+  const activityIds = calendar
+    ? [calendar.calendarActivityId, ...calendar.entries.map((entry) => entry.calendarActivityId)].filter(
+        (value): value is string => Boolean(value),
+      )
+    : [];
+  for (const activityId of activityIds) {
+    await removeCalendarActivity(activityId);
+  }
+  await prisma.teamChatWorkItem.delete({ where: { id }, select: { id: true } });
   sseBus.publish("team_chat_work_item_updated", {
     organizationId: viewer.organizationId,
     roomId: item.roomId,
@@ -417,7 +680,9 @@ export async function addWorkItemEntry(
       dueAt: input.dueAt ? new Date(input.dueAt) : null,
       sortOrder: (max._max.sortOrder ?? -1) + 1,
     }),
+    select: { id: true },
   });
+  await syncCalendarsIfReady(viewer, workItemId);
   return getWorkItem(viewer, workItemId);
 }
 
@@ -434,7 +699,14 @@ export async function updateWorkItemEntry(
 ) {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
-    include: { workItem: { select: { roomId: true, title: true } } },
+    select: {
+      id: true,
+      text: true,
+      assigneeId: true,
+      dueAt: true,
+      status: true,
+      workItem: { select: { roomId: true, title: true } },
+    },
   });
   if (!entry) return { error: "Item não encontrado.", status: 404 as const };
   if (entry.workItem.roomId) {
@@ -473,7 +745,12 @@ export async function updateWorkItemEntry(
     data.completedById = null;
   }
 
-  await prisma.teamChatWorkItemEntry.update({ where: { id: entryId }, data });
+  await prisma.teamChatWorkItemEntry.update({
+    where: { id: entryId },
+    data,
+    select: { id: true },
+  });
+  await syncCalendarsIfReady(viewer, workItemId);
 
   if (input.status === "done" && entry.workItem.roomId) {
     const me = await prisma.user.findFirst({
@@ -499,14 +776,17 @@ export async function deleteWorkItemEntry(
 ) {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
-    include: { workItem: { select: { roomId: true } } },
+    select: { id: true, workItem: { select: { roomId: true } } },
   });
   if (!entry) return { error: "Item não encontrado.", status: 404 as const };
   if (entry.workItem.roomId) {
     const member = await requireMember(viewer, entry.workItem.roomId);
     if (!member) return { error: "Item não encontrado.", status: 404 as const };
   }
-  await prisma.teamChatWorkItemEntry.delete({ where: { id: entryId } });
+  const calendar = await loadCalendarState(workItemId);
+  const mirrored = calendar?.entries.find((row) => row.id === entryId);
+  await removeCalendarActivity(mirrored?.calendarActivityId);
+  await prisma.teamChatWorkItemEntry.delete({ where: { id: entryId }, select: { id: true } });
   return getWorkItem(viewer, workItemId);
 }
 
@@ -517,7 +797,7 @@ export async function listRoomWorkItems(viewer: TeamChatViewer, roomId: string) 
     where: { roomId },
     orderBy: { updatedAt: "desc" },
     take: 80,
-    include: ITEM_INCLUDE,
+    select: ITEM_SELECT,
   });
   const shaped = [];
   for (const item of items) {
@@ -537,7 +817,7 @@ export async function listMyWorkItems(viewer: TeamChatViewer) {
     },
     orderBy: { updatedAt: "desc" },
     take: 80,
-    include: ITEM_INCLUDE,
+    select: ITEM_SELECT,
   });
   const shaped = [];
   for (const item of items) {
@@ -550,7 +830,18 @@ export async function listMyWorkItems(viewer: TeamChatViewer) {
 export async function generateChecklistFromMeeting(viewer: TeamChatViewer, meetingId: string) {
   const meeting = await prisma.teamChatWorkItem.findFirst({
     where: { id: meetingId, type: "meeting" },
-    include: { entries: { orderBy: { sortOrder: "asc" } } },
+    select: {
+      id: true,
+      title: true,
+      roomId: true,
+      visibility: true,
+      anchorType: true,
+      anchorId: true,
+      entries: {
+        orderBy: { sortOrder: "asc" },
+        select: { text: true, assigneeId: true, dueAt: true },
+      },
+    },
   });
   if (!meeting) return { error: "Reunião não encontrada.", status: 404 as const };
   return createWorkItem(viewer, {
