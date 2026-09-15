@@ -541,6 +541,8 @@ export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
     return null;
   }
   return queue.add("send", payload, {
+    attempts: 4,
+    backoff: { type: "exponential", delay: 2000 },
     removeOnComplete: true,
     removeOnFail: { count: 1000 },
   });
