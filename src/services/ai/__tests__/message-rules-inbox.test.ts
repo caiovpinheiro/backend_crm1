@@ -201,6 +201,8 @@ const POLO_RULE: MessageRule = {
   department: null,
   message: null,
   tagName: null,
+  ownerUserId: null,
+  ownerLabel: null,
 };
 
 function mockRun() {

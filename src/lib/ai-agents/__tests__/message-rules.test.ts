@@ -32,6 +32,8 @@ function rule(over: Partial<MessageRule>): MessageRule {
     department: null,
     message: null,
     tagName: null,
+    ownerUserId: null,
+    ownerLabel: null,
     ...over,
   };
 }
