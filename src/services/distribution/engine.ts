@@ -6,9 +6,9 @@
  * ("Testar distribuição"). A elegibilidade vem de `eligibility.ts` e a fila
  * de `queue.ts`, garantindo que tela, simulação e execução decidam igual.
  *
- * Seleção (v1): elegíveis → menor fila → desempate por `lastExecutionAt` mais
- * antigo (nunca executado tem prioridade). `volume` é apenas peso exibido na
- * v2, não entra na seleção v1.
+ * Seleção: entre os elegíveis, sorteio ponderado pelo `volume` (peso = nº de
+ * bilhetes na urna). Fila não pesa na escolha — só tira quem estourou o teto
+ * (`QUEUE_LIMIT_REACHED` em `eligibility.ts`).
  */
 
 import { Prisma } from "@prisma/client";
@@ -212,20 +212,32 @@ function toSummary(
   }));
 }
 
+function ticketCount(volume: number): number {
+  const n = Math.floor(Number(volume));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /**
- * Seleciona o responsável: menor fila; empate → `lastExecutionAt` mais antigo
- * (nunca executado = prioridade máxima). Assume lista já filtrada por elegíveis
- * e não vazia.
+ * Sorteio ponderado: peso 5 = 5 bilhetes, peso 1 = 1. Cada execução sorteia
+ * de novo; `queueCount` e `lastExecutionAt` não entram. Peso 0 = sem bilhete.
+ * Se ninguém tiver peso, cai para sorteio uniforme. `random` é injetável
+ * (testes). Assume lista já filtrada por elegíveis e não vazia.
  */
 export function selectResponsible(
   eligible: DistributionResponsibleView[],
+  random: () => number = Math.random,
 ): DistributionResponsibleView {
-  return [...eligible].sort((a, b) => {
-    if (a.queueCount !== b.queueCount) return a.queueCount - b.queueCount;
-    const aTime = a.lastExecutionAt ? Date.parse(a.lastExecutionAt) : 0;
-    const bTime = b.lastExecutionAt ? Date.parse(b.lastExecutionAt) : 0;
-    return aTime - bTime;
-  })[0];
+  const weights = eligible.map((r) => ticketCount(r.volume));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  const tickets = total > 0 ? weights : eligible.map(() => 1);
+  const pot = total > 0 ? total : eligible.length;
+
+  let cursor = random() * pot;
+  for (let i = 0; i < eligible.length; i++) {
+    cursor -= tickets[i]!;
+    if (cursor < 0) return eligible[i]!;
+  }
+  return eligible[eligible.length - 1]!;
 }
 
 /**

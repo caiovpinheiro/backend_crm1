@@ -2,7 +2,7 @@
  * Fila (carga) de cada responsável = cards da inbox "Entrada" + "Aguardando"
  * daquele consultor. Mesmo critério das abas (`tabToWhere`) e o mesmo
  * colapso da lista (1 card por contato+canal). Alimenta o teto
- * (`queueLimit`) e a seleção ("menor carga" em `engine.selectResponsible`).
+ * (`queueLimit`). A escolha do consultor é sorteio por peso, não por carga.
  *
  * Um ticket não entra nas duas abas: Entrada = ainda sem reply contável;
  * Aguardando = já teve reply contável e o cliente falou por último.
@@ -44,8 +44,7 @@ function addCard(
  *
  * `departmentIds` (opcional): quando informado, conta APENAS as conversas cujo
  * `Conversation.departmentId` está no conjunto — ou seja, o "volume de fila"
- * fica POR DEPARTAMENTO. Usado na distribuição por departamento para a
- * SELEÇÃO (o consultor concorre pela menor fila DAQUELE departamento). O teto
+ * fica POR DEPARTAMENTO (exibição / diagnóstico). O teto
  * `queueLimit` NÃO usa este número: ele compara a carga total (ver
  * `totalQueueCount` em `responsibles.ts`), senão quem é membro de dois
  * departamentos ganharia um limite por departamento. Vazio/undefined = fila

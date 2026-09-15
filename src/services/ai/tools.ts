@@ -1354,7 +1354,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description:
       copy?.executeDistribution ??
-      "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor escolhe automaticamente quem recebe (menor fila, dentro do departamento roteado, respeitando horário e disponibilidade) — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
+      "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor sorteia quem recebe pelo peso (volume) de cada elegível, dentro do departamento roteado, respeitando horário e disponibilidade — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
     inputSchema: z.object({
       departmentName: z
         .string()
