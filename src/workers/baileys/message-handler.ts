@@ -26,6 +26,10 @@ import { getLogger } from "@/lib/logger";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
+import {
+  appendWhatsAppGroupMessage,
+  findWhatsAppGroupByJid,
+} from "@/services/whatsapp-groups";
 
 const log = getLogger("baileys-msg");
 
@@ -559,6 +563,50 @@ async function downloadAndSave(
   }
 }
 
+function groupMessagePreview(msg: WAMessage): string | null {
+  const raw = msg.message;
+  if (!raw) return null;
+  const type = getContentType(raw);
+  if (!type) return null;
+  const node = (raw as Record<string, { text?: string; caption?: string; conversation?: string; fileName?: string }>)[type];
+  if (type === "conversation") return raw.conversation?.trim() || null;
+  if (type === "extendedTextMessage") return raw.extendedTextMessage?.text?.trim() || null;
+  if (node?.caption?.trim()) return node.caption.trim();
+  if (type === "imageMessage") return "[imagem]";
+  if (type === "videoMessage") return "[vídeo]";
+  if (type === "audioMessage" || type === "ptt") return "[áudio]";
+  if (type === "documentMessage") return node?.fileName ? `📎 ${node.fileName}` : "[arquivo]";
+  if (type === "stickerMessage") return "[sticker]";
+  if (type === "contactMessage" || type === "contactsArrayMessage") return "[contato]";
+  if (type === "locationMessage" || type === "liveLocationMessage") return "[localização]";
+  return null;
+}
+
+async function persistIncomingGroupMessage(
+  channelId: string,
+  groupJid: string,
+  msg: WAMessage,
+): Promise<void> {
+  const text = groupMessagePreview(msg);
+  if (!text) return;
+  const group = await findWhatsAppGroupByJid(channelId, groupJid);
+  if (!group) return;
+  const fromJid = msg.key.participant || groupJid;
+  const phone = fromJid.endsWith("@s.whatsapp.net") || fromJid.endsWith("@c.us")
+    ? jidToPhone(fromJid)
+    : null;
+  await appendWhatsAppGroupMessage({
+    organizationId: group.organizationId,
+    groupId: group.id,
+    waMessageId: msg.key.id ?? null,
+    fromJid,
+    fromName: msg.pushName ?? null,
+    fromPhone: phone,
+    fromMe: Boolean(msg.key.fromMe),
+    text,
+  });
+}
+
 export async function handleBaileysMessage(
   channelId: string,
   msg: WAMessage,
@@ -566,7 +614,11 @@ export async function handleBaileysMessage(
 ): Promise<void> {
   try {
     const rawJid = msg.key.remoteJid;
-    if (!rawJid || rawJid === "status@broadcast" || rawJid.endsWith("@g.us")) return;
+    if (!rawJid || rawJid === "status@broadcast") return;
+    if (rawJid.endsWith("@g.us")) {
+      await persistIncomingGroupMessage(channelId, rawJid, msg);
+      return;
+    }
 
     let jid = rawJid;
     if (isLidJid(rawJid)) {
