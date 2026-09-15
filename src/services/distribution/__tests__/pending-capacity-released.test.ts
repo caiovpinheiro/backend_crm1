@@ -205,10 +205,11 @@ describe("capacity_released producer vs worker", () => {
     info.mockRestore();
   });
 
-  it("worker skips drain when load >= queueLimit (no waiting-queue scan)", async () => {
+  it("worker does not skip drain when load >= queueLimit (sem teto)", async () => {
     getOrgIdOrNull.mockReturnValue("org-worker-full");
     findFirst.mockResolvedValue({ queueLimit: 5 });
     getQueueCounts.mockResolvedValue(new Map([["u1", 5]]));
+    hasOrganizationWidget.mockResolvedValue(false);
 
     const { processPendingDistributionQueue } = await import("../pending");
     const result = await processPendingDistributionQueue({
@@ -216,12 +217,8 @@ describe("capacity_released producer vs worker", () => {
       userId: "u1",
     });
 
-    expect(result.skipReason).toBe("AT_CAPACITY");
-    expect(result.pending).toBe(0);
-    expect(getQueueCounts).toHaveBeenCalledWith(["u1"]);
-    expect(conversationCount).not.toHaveBeenCalled();
-    expect(conversationFindMany).not.toHaveBeenCalled();
-    expect(getDistributionResponsibles).not.toHaveBeenCalled();
+    expect(result.skipReason).not.toBe("AT_CAPACITY");
+    expect(hasOrganizationWidget).toHaveBeenCalled();
   });
 
   it("worker proceeds past the volume gate when load < queueLimit", async () => {

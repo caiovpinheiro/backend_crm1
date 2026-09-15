@@ -94,7 +94,7 @@ describe("pending drain guard", () => {
   it("uses a ~30s cooldown so outbound does not rescan every few seconds", () => {
     expect(CAPACITY_RELEASED_COOLDOWN_MS).toBe(30_000);
     expect(consultantHasFreeSlot(4, 5)).toBe(true);
-    expect(consultantHasFreeSlot(5, 5)).toBe(false);
+    expect(consultantHasFreeSlot(5, 5)).toBe(true);
   });
 
   it("does not schedule a retry timer when the fruitless cooldown is active", () => {
