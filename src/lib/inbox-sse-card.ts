@@ -20,6 +20,7 @@ const INBOX_SSE_CARD_SELECT = {
   id: true,
   number: true,
   channel: true,
+  channelId: true,
   status: true,
   unreadCount: true,
   hasError: true,
@@ -62,6 +63,8 @@ export type InboxSseCard = {
   id: string;
   number: number | null;
   channel: string;
+  /** Conta do canal (WABA/página). Sem isto o FE dedupe cria 2 cards. */
+  channelId: string | null;
   status: string;
   unreadCount: number;
   hasError: boolean;
@@ -203,6 +206,7 @@ function rowToCard(
     id: row.id,
     number: row.number,
     channel: row.channel,
+    channelId: row.channelId ?? null,
     status: row.status,
     unreadCount: row.unreadCount,
     hasError: row.hasError,
