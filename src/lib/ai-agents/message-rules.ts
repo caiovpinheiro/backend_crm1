@@ -21,6 +21,9 @@ export type MessageRuleAction =
   | "transfer_department"
   /// Transfere para a fila humana, sem fixar departamento.
   | "transfer_human"
+  /// Atribui um responsável (consultor ou agente IA ligado). Inbox e
+  /// pipeline passam a mostrar essa pessoa, sem precisar de automação.
+  | "assign_owner"
   /// Responde um texto fixo, sem chamar o modelo.
   | "fixed_reply"
   /// Marca uma tag no contato, o que dispara as automações de gatilho
@@ -33,6 +36,7 @@ export const MESSAGE_RULE_ACTIONS: MessageRuleAction[] = [
   "answer_with_knowledge",
   "transfer_department",
   "transfer_human",
+  "assign_owner",
   "fixed_reply",
   "add_tag",
 ];
@@ -55,11 +59,13 @@ export type MessageRule = {
   /// ao cliente (`null` = o agente usa o texto de fila já configurado).
   /// `add_tag`: texto opcional enviado junto (`null` = não responde nada).
   message: string | null;
-  /// Só em `add_tag`: nome da tag, exatamente como está no CRM. A tag
-  /// precisa existir — a regra não cria tag nova, pelo mesmo motivo que a
-  /// tool não cria quando há allowlist: tag inventada não dispara
-  /// automação nenhuma e ninguém descobre por quê.
+  /// Só em `add_tag`, ou junto de transferência/atribuição: nome da tag
+  /// exatamente como está no CRM. A regra não cria tag nova.
   tagName: string | null;
+  /// Só em `assign_owner`: User.id do consultor ou do agente IA.
+  ownerUserId: string | null;
+  /// Nome gravado na tela para o card da lista.
+  ownerLabel: string | null;
 };
 
 /** Rótulos pt-BR de operador. O FE não deve traduzir o nome técnico. */
@@ -88,6 +94,11 @@ export const MESSAGE_RULE_LABELS: {
       id: "transfer_human",
       label: "Transferir para a fila de atendimento humano",
       hint: "Sem escolher departamento — entra na fila geral.",
+    },
+    {
+      id: "assign_owner",
+      label: "Transferir para",
+      hint: "Consultor ou agente de IA ligado. Aparece no inbox e no pipeline.",
     },
     {
       id: "fixed_reply",
@@ -151,10 +162,13 @@ export function normalizeMessageRules(v: unknown): MessageRule[] {
     const department = text(r.department);
     const message = text(r.message);
     const tagName = text(r.tagName);
+    const ownerUserId = text(r.ownerUserId);
+    const ownerLabel = text(r.ownerLabel);
     if (action === "transfer_department" && !department) continue;
     if (action === "fixed_reply" && !message) continue;
     // Regra de tag sem tag não tem próximo passo executável.
     if (action === "add_tag" && !tagName) continue;
+    if (action === "assign_owner" && !ownerUserId) continue;
     const id = text(r.id) ?? `regra-${out.length + 1}`;
     if (out.some((existing) => existing.id === id)) continue;
     out.push({
@@ -167,7 +181,9 @@ export function normalizeMessageRules(v: unknown): MessageRule[] {
       action,
       department: action === "transfer_department" ? department : null,
       message: action === "answer_with_knowledge" ? null : message,
-      tagName: action === "add_tag" ? tagName : null,
+      tagName: action === "add_tag" || tagName ? tagName : null,
+      ownerUserId: action === "assign_owner" ? ownerUserId : null,
+      ownerLabel: action === "assign_owner" ? ownerLabel : null,
     });
   }
   return out;

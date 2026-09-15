@@ -12,6 +12,11 @@ import type { MessageRuleHit } from "@/lib/ai-agents/message-rules";
 import type { InboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
+import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
+import {
+  assignOwnerToContactClusterTx,
+  invalidateBoardsForPipelines,
+} from "@/services/deals";
 import { addTagToContact } from "@/services/tags";
 import type { VerticalPackOps } from "@/verticals/types";
 
@@ -81,6 +86,9 @@ export async function executeMessageRule(
   deps: MessageRuleDeps,
 ): Promise<MessageRuleOutcome> {
   const { rule } = hit;
+  // Tag é campo da regra, não o próximo passo: vale junto de atender,
+  // transferir ou atribuir responsável.
+  await applyRuleTag(rule.tagName, deps.contactId);
 
   if (rule.action === "answer_with_knowledge") {
     return { kind: "answer_with_knowledge" };
@@ -92,12 +100,38 @@ export async function executeMessageRule(
   }
 
   if (rule.action === "add_tag") {
-    await applyRuleTag(rule.tagName, deps.contactId);
-    // Sem texto o agente fica calado de propósito: quem responde é a
-    // automação de `tag_added`, e duas mensagens no mesmo turno é o
-    // sintoma clássico de regra e automação falando junto.
     if (rule.message) await deps.sendNotice(rule.message);
     return { kind: "handled", interceptName: "message_rule_add_tag" };
+  }
+
+  if (rule.action === "assign_owner") {
+    const ownerUserId = rule.ownerUserId;
+    if (!ownerUserId) {
+      return { kind: "handled", interceptName: "message_rule_assign_owner" };
+    }
+    const cluster = await prisma.$transaction((tx) =>
+      assignOwnerToContactClusterTx(tx, {
+        userId: ownerUserId,
+        contactId: deps.contactId,
+        conversationId: deps.conversationId,
+        dealId: deps.dealId ?? null,
+        via: "message_rule",
+      }),
+    );
+    await invalidateBoardsForPipelines(cluster.pipelineIds);
+    const owner = await prisma.user.findUnique({
+      where: { id: ownerUserId },
+      select: { type: true },
+    });
+    if (rule.message) {
+      await deps.sendNotice(rule.message);
+    } else if (owner?.type === "AI" && deps.contactId) {
+      await triggerAgentOpeningForContact({
+        contactId: deps.contactId,
+        agentUserId: ownerUserId,
+      }).catch(() => {});
+    }
+    return { kind: "handled", interceptName: "message_rule_assign_owner" };
   }
 
   const handoff = await executeDepartmentHandoff({
