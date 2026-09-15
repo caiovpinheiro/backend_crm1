@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
-import { enqueueBaileysOutbound, waitForBaileysOutboundJob } from "@/lib/queue";
+import { enqueueBaileysOutbound } from "@/lib/queue";
 import {
   findConnectedBaileysChannel,
   getWhatsAppGroup,
@@ -55,22 +55,7 @@ export async function POST(request: Request, context: RouteContext) {
   if (!job) {
     return NextResponse.json({ message: "Fila indisponível. Tente de novo." }, { status: 503 });
   }
-  try {
-    await waitForBaileysOutboundJob(job);
-  } catch (err) {
-    const raw = err instanceof Error ? err.message : String(err);
-    const disconnected = /não conectada|ainda conectando/i.test(raw);
-    const timeout = /timed out|timeout/i.test(raw);
-    return NextResponse.json(
-      {
-        message: disconnected
-          ? "WhatsApp QR desconectou. Escaneie de novo em Canais."
-          : timeout
-            ? "WhatsApp não confirmou o envio. Tente de novo."
-            : raw || "Falha ao enviar no grupo.",
-      },
-      { status: disconnected ? 409 : timeout ? 504 : 502 },
-    );
-  }
+  // Não espera o worker aqui: o rewrite do frontend/Traefik corta ~10–15s
+  // e devolve 502 HTML ("Servidor temporariamente indisponível").
   return NextResponse.json({ ok: true, groupId: group.id });
 }
