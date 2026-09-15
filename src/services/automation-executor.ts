@@ -194,17 +194,25 @@ function resolveNextStepId(cfg: Record<string, unknown>): string | null {
   return id;
 }
 
+/** Passos que já são a espera de resposta — o envio anterior não deve pausar. */
+const NEXT_STEP_OWNS_REPLY_WAIT = new Set(["wait_for_reply", "closing_protocol"]);
+
 /**
  * Pausa pós-envio só faz sentido se "Sem resposta" leva a um destino
- * diferente de "Enviado". Quando as duas arestas apontam pro mesmo
- * passo (ex.: Finalizar), esperar resposta só prende o contexto em
- * RODANDO sem mudar o resultado — segue imediatamente.
+ * diferente de "Enviado" E o próximo passo não é um wait dedicado.
+ * Template → wait_for_reply (30 min no canvas) pausava no envio com
+ * TTL de 24h e o wait nunca rodava — DNAWORK "ativar perdidos".
  */
-function shouldPauseAfterSendForTimeout(cfg: Record<string, unknown>): boolean {
+function shouldPauseAfterSendForTimeout(
+  cfg: Record<string, unknown>,
+  nextStepType?: string | null,
+): boolean {
   const timeoutGoto = resolveTimeoutGotoStepId(cfg);
   if (!timeoutGoto) return false;
   const nextGoto = resolveNextStepId(cfg);
-  return !nextGoto || nextGoto !== timeoutGoto;
+  if (nextGoto && nextGoto === timeoutGoto) return false;
+  if (nextGoto && NEXT_STEP_OWNS_REPLY_WAIT.has(nextStepType ?? "")) return false;
+  return true;
 }
 
 const DEFAULT_WAIT_TIMEOUT_MS = 86_400_000;
@@ -1413,6 +1421,11 @@ type RuntimeContext = {
    * (ou canal não identificado).
    */
   activeChannelId?: string | null;
+  /**
+   * Tipo do passo apontado por `nextStepId` do step atual. Usado para
+   * não pausar o envio quando o próximo já é `wait_for_reply`.
+   */
+  nextStepType?: string | null;
 };
 
 /**
@@ -2855,7 +2868,7 @@ async function executeStep(
 
       // "Sem resposta": pausa só se o destino for distinto de "Enviado"
       // (mesmo destino = Finalizar em ambos → segue e encerra).
-      if (shouldPauseAfterSendForTimeout(cfg)) {
+      if (shouldPauseAfterSendForTimeout(cfg, rt.nextStepType)) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const timeoutMs =
           rawTimeout && rawTimeout > 0 ? rawTimeout : DEFAULT_WAIT_TIMEOUT_MS;
@@ -3158,8 +3171,9 @@ async function executeStep(
       const tplHasRouting = tplButtons.some(
         (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
       );
-      const tplHasTimeout = shouldPauseAfterSendForTimeout(cfg);
-      if (tplHasRouting || tplHasTimeout) {
+      const tplHasTimeout = shouldPauseAfterSendForTimeout(cfg, rt.nextStepType);
+      const nextOwnsWait = NEXT_STEP_OWNS_REPLY_WAIT.has(rt.nextStepType ?? "");
+      if ((tplHasRouting || tplHasTimeout) && !nextOwnsWait) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const tplTimeoutMs =
           tplHasTimeout
@@ -4955,6 +4969,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       // evento de timeline escrito dentro do passo — inclusive os
       // gravados por services indiretos, como o motor da Distribuição
       // Inteligente — registre qual card causou a ação.
+      const nidPeek =
+        typeof stepConfig.nextStepId === "string" ? stepConfig.nextStepId.trim() : "";
+      rt.nextStepType =
+        nidPeek && nidPeek !== NONE_ID ? stepById.get(nidPeek)?.type ?? null : null;
       result = await runWithAutomationOrigin(
         buildStepOrigin(rt, automation.name, step, automation.steps),
         () => executeStep(step.type, enrichedConfig, rt),
@@ -5339,6 +5357,12 @@ export async function continueFromStep(
 
     let result: StepResult;
     try {
+      const nidPeek =
+        typeof (step.config as Record<string, unknown>).nextStepId === "string"
+          ? String((step.config as Record<string, unknown>).nextStepId).trim()
+          : "";
+      rt.nextStepType =
+        nidPeek && nidPeek !== NONE_ID ? stepById.get(nidPeek)?.type ?? null : null;
       result = await runWithAutomationOrigin(
         buildStepOrigin(rt, automation.name, step, automation.steps),
         () => executeStep(step.type, stepConfig, rt),

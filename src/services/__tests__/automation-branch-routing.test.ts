@@ -21,6 +21,7 @@ import {
   decideInteractiveMenuInbound,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  shouldCancelPausedAutomationForHumanAttendance,
   waitForReplyHijacksAiTurn,
   decideFlowStepInbound,
 } from "@/services/automation-context";
@@ -481,6 +482,36 @@ describe("matchStaleInteractiveOption — clique em menu anterior (WhatsApp)", (
       "Entrega de Documento",
     );
     expect(hit?.gotoStepId).toBe("docs");
+  });
+});
+
+describe("shouldCancelPausedAutomationForHumanAttendance", () => {
+  it("dono no card sem o consultor ter falado não cancela o wait", () => {
+    expect(
+      shouldCancelPausedAutomationForHumanAttendance({
+        humanAttending: true,
+        hasHumanReply: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("consultor já respondeu cancela o contexto pausado", () => {
+    expect(
+      shouldCancelPausedAutomationForHumanAttendance({
+        humanAttending: true,
+        hasHumanReply: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("clique/flow retoma mesmo com consultor já tendo falado", () => {
+    expect(
+      shouldCancelPausedAutomationForHumanAttendance({
+        humanAttending: true,
+        hasHumanReply: true,
+        interactiveId: "btn_0",
+      }),
+    ).toBe(false);
   });
 });
 
