@@ -40,7 +40,7 @@ export function startOutboundConsumer(
 
       const session = manager.getSession(channelId);
       if (!session?.socket) {
-        await markFailed(messageId, "Sessão Baileys não está conectada");
+        if (messageId) await markFailed(messageId, "Sessão Baileys não está conectada");
         throw new Error(`Sessão ${channelId} não conectada`);
       }
 
@@ -107,7 +107,7 @@ export function startOutboundConsumer(
                 originalName || mediaUrl.split("/").pop() || "audio.webm",
               );
               if (!prepared.ok) {
-                await markFailed(messageId, prepared.reason);
+                if (messageId) await markFailed(messageId, prepared.reason);
                 throw new Error(prepared.reason);
               }
               audioBuffer = prepared.payload.buffer;
@@ -120,7 +120,7 @@ export function startOutboundConsumer(
                 : isPtt
                   ? "ptt"
                   : "audio";
-              if (nextType !== messageType) {
+              if (nextType !== messageType && messageId) {
                 await prismaBase.message
                   .update({
                     where: { id: messageId },
@@ -172,6 +172,8 @@ export function startOutboundConsumer(
       }
 
       const sent = await session.sendMessage(jid, waContent);
+
+      if (!messageId) return;
 
       // Prisma scoped exige RequestContext. Sem withSystemContext o
       // externalId nunca era gravado (.catch engolia) → ACKs de

@@ -76,6 +76,7 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 | Auto-deal | `src/services/auto-deals.ts` |
 | Move de card | `src/services/deals.ts` → `moveDeal` |
 | Tenant | `docs/tenant-subdomain.md` |
+| Grupos WhatsApp QR | `src/services/whatsapp-groups.ts` (model `WhatsAppGroup`, não o stub `Group`) |
 
 ## Filas (`APP_MODE`)
 

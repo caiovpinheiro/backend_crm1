@@ -356,6 +356,16 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "team-chat",    label: "Chat interno" },
       { action: "email",        label: "E-mail (caixa IMAP)" },
       { action: "bwipo-keeps",  label: "Bwipo Keeps" },
+      { action: "whatsapp-groups", label: "Grupos WhatsApp" },
+    ],
+  },
+  {
+    resource: "whatsapp_group",
+    label: "Grupos WhatsApp",
+    description: "Grupos da conta WhatsApp QR (Baileys). Sem canal CONNECTED a lista vem vazia.",
+    actions: [
+      { action: "view", label: "Visualizar grupos e participantes" },
+      { action: "send", label: "Enviar mensagem no grupo" },
     ],
   },
   {

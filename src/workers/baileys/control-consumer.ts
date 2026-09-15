@@ -29,6 +29,9 @@ export function startControlConsumer(
         case "logout":
           await manager.logout(channelId);
           break;
+        case "sync-groups":
+          await manager.syncGroups(channelId);
+          break;
         default:
           console.warn(`[baileys-control] ação desconhecida: ${action}`);
       }
