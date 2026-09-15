@@ -387,7 +387,13 @@ export class BaileysSession {
       }
     }
     const dest = this.groupCache.get(jid)?.id ?? jid;
-    return this.socket.sendMessage(dest, content);
+    // Baileys 7 cifra grupo com sender-keys + addressing LID. Cache
+    // parcial (groups.update) fazia o relay pular o groupMetadata vivo.
+    return this.socket.sendMessage(
+      dest,
+      content,
+      dest.endsWith("@g.us") ? { useCachedGroupMetadata: false } : undefined,
+    );
   }
 
   async disconnect(): Promise<void> {

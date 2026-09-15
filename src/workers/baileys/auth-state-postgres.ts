@@ -6,7 +6,6 @@ import type {
   SignalKeyStore,
 } from "@whiskeysockets/baileys";
 import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
-import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 
 /**
@@ -26,7 +25,7 @@ export async function usePostgresAuthState(
   const organizationId = channelRow?.organizationId ?? "";
 
   const readCreds = async (): Promise<AuthenticationCreds> => {
-    const row = await prisma.baileysAuthKey.findUnique({
+    const row = await prismaBase.baileysAuthKey.findUnique({
       where: { channelId_keyType_keyId: { channelId, keyType: "creds", keyId: "creds" } },
     });
     return row ? readData(row.value) : initAuthCreds();
@@ -35,7 +34,7 @@ export async function usePostgresAuthState(
   const creds = await readCreds();
 
   const saveCreds = async () => {
-    await prisma.baileysAuthKey.upsert({
+    await prismaBase.baileysAuthKey.upsert({
       where: { channelId_keyType_keyId: { channelId, keyType: "creds", keyId: "creds" } },
       update: { value: JSON.parse(writeData(creds)) },
       create: { organizationId, channelId, keyType: "creds", keyId: "creds", value: JSON.parse(writeData(creds)) },
@@ -44,7 +43,7 @@ export async function usePostgresAuthState(
 
   const keys: SignalKeyStore = {
     async get<T extends keyof SignalDataTypeMap>(type: T, ids: string[]) {
-      const rows = await prisma.baileysAuthKey.findMany({
+      const rows = await prismaBase.baileysAuthKey.findMany({
         where: { channelId, keyType: type, keyId: { in: ids } },
       });
       const result: { [id: string]: SignalDataTypeMap[T] } = {};
@@ -66,14 +65,14 @@ export async function usePostgresAuthState(
         for (const [keyId, value] of Object.entries(entries)) {
           if (value === null || value === undefined) {
             ops.push(
-              prisma.baileysAuthKey.deleteMany({
+              prismaBase.baileysAuthKey.deleteMany({
                 where: { channelId, keyType: type, keyId },
               }),
             );
           } else {
             const serialized = JSON.parse(writeData(value));
             ops.push(
-              prisma.baileysAuthKey.upsert({
+              prismaBase.baileysAuthKey.upsert({
                 where: { channelId_keyType_keyId: { channelId, keyType: type, keyId } },
                 update: { value: serialized },
                 create: { organizationId, channelId, keyType: type, keyId, value: serialized },
@@ -86,7 +85,7 @@ export async function usePostgresAuthState(
     },
 
     async clear() {
-      await prisma.baileysAuthKey.deleteMany({ where: { channelId } });
+      await prismaBase.baileysAuthKey.deleteMany({ where: { channelId } });
     },
   };
 
