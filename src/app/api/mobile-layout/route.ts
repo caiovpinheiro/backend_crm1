@@ -6,6 +6,8 @@ import {
   BOTTOM_NAV_MAX,
   DEFAULT_BOTTOM_NAV,
   DEFAULT_ENABLED,
+  ensureEnabledModules,
+  ensurePinnedBottomNav,
   type MobileLayoutConfigDto,
   sanitizeModuleIds,
   serializeModuleIds,
@@ -48,13 +50,17 @@ export async function GET() {
 
     const dto: MobileLayoutConfigDto = row
       ? {
-          bottomNav: sanitizeModuleIds(row.bottomNavModuleIds, {
-            ensureRequired: true,
-            maxItems: BOTTOM_NAV_MAX,
-          }),
-          enabled: sanitizeModuleIds(row.enabledModuleIds, {
-            ensureRequired: true,
-          }),
+          bottomNav: ensurePinnedBottomNav(
+            sanitizeModuleIds(row.bottomNavModuleIds, {
+              ensureRequired: true,
+              maxItems: BOTTOM_NAV_MAX,
+            }),
+          ),
+          enabled: ensureEnabledModules(
+            sanitizeModuleIds(row.enabledModuleIds, {
+              ensureRequired: true,
+            }),
+          ),
           startRoute: row.startRoute,
           brandColor: row.brandColor,
           version: row.version,

@@ -21,6 +21,7 @@ export type MobileModuleId =
   | "campaigns"
   | "automations"
   | "distribution"
+  | "team-chat"
   | "reports"
   | "monitor"
   | "settings"
@@ -122,6 +123,14 @@ export const MOBILE_MODULES: MobileModuleDescriptor[] = [
     allowedRoles: ["ADMIN", "MANAGER"],
   },
   {
+    id: "team-chat",
+    label: "Chat",
+    href: "/bwipo-chat",
+    iconName: "MessagesSquare",
+    description: "Bwipo Chat — diretas e canais do time",
+    category: "core",
+  },
+  {
     id: "reports",
     label: "Relatórios",
     href: "/reports",
@@ -167,6 +176,7 @@ export const DEFAULT_BOTTOM_NAV: MobileModuleId[] = [
   "contacts",
   "inbox",
   "distribution",
+  "team-chat",
 ];
 
 export const DEFAULT_ENABLED: MobileModuleId[] = [
@@ -180,6 +190,7 @@ export const DEFAULT_ENABLED: MobileModuleId[] = [
   "settings",
   "profile",
   "distribution",
+  "team-chat",
 ];
 
 /**
@@ -187,6 +198,37 @@ export const DEFAULT_ENABLED: MobileModuleId[] = [
  * (onboard de feature — evita depender de re-salvar o Layout Builder).
  */
 export const MORE_SHEET_ENSURE: MobileModuleId[] = ["automations"];
+
+/**
+ * Módulos pinados na barra mesmo em layouts já salvos sem eles
+ * (onboard de feature — evita depender de re-salvar o Layout Builder).
+ * Entram à direita de Distribuição quando ela está na barra.
+ */
+export const BOTTOM_NAV_ENSURE: MobileModuleId[] = ["team-chat"];
+
+export function ensurePinnedBottomNav(ids: MobileModuleId[]): MobileModuleId[] {
+  const out = [...ids];
+  const seen = new Set(out);
+  for (const id of BOTTOM_NAV_ENSURE) {
+    if (seen.has(id)) continue;
+    const distIdx = out.indexOf("distribution");
+    if (distIdx >= 0) out.splice(distIdx + 1, 0, id);
+    else out.push(id);
+    seen.add(id);
+  }
+  return out;
+}
+
+export function ensureEnabledModules(ids: MobileModuleId[]): MobileModuleId[] {
+  const out = [...ids];
+  const seen = new Set(out);
+  for (const id of BOTTOM_NAV_ENSURE) {
+    if (seen.has(id)) continue;
+    out.push(id);
+    seen.add(id);
+  }
+  return out;
+}
 
 /**
  * Limite de itens no bottom nav. Nao ha mais corte visual em N —
