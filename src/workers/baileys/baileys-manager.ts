@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { BaileysSession } from "./baileys-session";
+import { syncChannelGroups } from "./sync-groups";
 
 /**
  * Manages multiple Baileys sessions (one per BAILEYS_MD channel).
@@ -90,6 +91,10 @@ export class BaileysManager {
 
   getSession(channelId: string): BaileysSession | undefined {
     return this.sessions.get(channelId);
+  }
+
+  async syncGroups(channelId: string): Promise<void> {
+    await syncChannelGroups(this, channelId);
   }
 
   async shutdownAll(): Promise<void> {

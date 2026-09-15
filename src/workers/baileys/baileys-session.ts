@@ -275,6 +275,8 @@ export class BaileysSession {
         "CONNECTED",
       );
       console.info(`[baileys:${this.channelId}] conectado — ${phone ?? "sem número"}`);
+      const { enqueueBaileysControl } = await import("@/lib/queue");
+      void enqueueBaileysControl({ channelId: this.channelId, action: "sync-groups" });
     }
 
     if (connection === "close") {

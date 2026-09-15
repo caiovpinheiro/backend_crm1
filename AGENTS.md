@@ -82,6 +82,7 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 | Tenant | `docs/tenant-subdomain.md` |
 | Distribuição por Leads | `src/services/distribution/leads/` (engine síncrono, rodízio por slots) |
 | Claim anti-dupla-atribuição | `src/services/distribution/claim.ts` (CAS usado pelos dois motores) |
+| Grupos WhatsApp QR | `src/services/whatsapp-groups.ts` (model `WhatsAppGroup`, não o stub `Group`) |
 
 ## Filas (`APP_MODE`)
 

@@ -103,8 +103,9 @@ export type BaileysOutboundPayload = {
   mediaUrl?: string;
   replyTo?: string;
   messageType: string;
-  conversationId: string;
-  messageId: string;
+  conversationId?: string;
+  /** Ausente no envio para grupo (não cria conversa de inbox). */
+  messageId?: string;
   /** MIME original (áudio: remux no outbound-consumer). */
   mime?: string;
   originalName?: string;
@@ -112,7 +113,7 @@ export type BaileysOutboundPayload = {
 
 export type BaileysControlPayload = {
   channelId: string;
-  action: "connect" | "disconnect" | "logout";
+  action: "connect" | "disconnect" | "logout" | "sync-groups";
 };
 
 export type CampaignDispatchPayload = {

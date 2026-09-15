@@ -186,6 +186,8 @@ model Organization {
   keepNotes                KeepNote[]
   keepAttachments          KeepAttachment[]
   keepImports              KeepImport[]
+  whatsAppGroups           WhatsAppGroup[]
+  whatsAppGroupMembers     WhatsAppGroupMember[]
 
   @@index([status])
   @@map("organizations")
@@ -3377,6 +3379,7 @@ model Channel {
   conversations     Conversation[]
   messages          Message[]
   baileysAuthKeys   BaileysAuthKey[]
+  whatsAppGroups    WhatsAppGroup[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
 
@@ -3433,6 +3436,47 @@ model BaileysAuthKey {
   @@index([organizationId])
   @@index([channelId])
   @@map("baileys_auth_keys")
+}
+
+/// Snapshot dos grupos da conta WhatsApp QR (Baileys). Não é o stub Group.
+model WhatsAppGroup {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channelId         String
+  channel           Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  jid               String
+  name              String       @default("")
+  description       String?      @db.Text
+  ownerJid          String?
+  participantCount  Int          @default(0)
+  syncedAt          DateTime     @default(now())
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  members           WhatsAppGroupMember[]
+
+  @@unique([channelId, jid])
+  @@index([organizationId])
+  @@index([channelId])
+  @@map("whatsapp_groups")
+}
+
+model WhatsAppGroupMember {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  groupId        String
+  group          WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  jid            String
+  phone          String?
+  name           String?
+  isAdmin        Boolean       @default(false)
+  isSuperAdmin   Boolean       @default(false)
+
+  @@unique([groupId, jid])
+  @@index([organizationId])
+  @@index([groupId])
+  @@map("whatsapp_group_members")
 }
 
 // ──────────────────────────────────────────────
