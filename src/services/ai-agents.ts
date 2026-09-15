@@ -17,7 +17,11 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { encryptSecret } from "@/lib/secret-crypto";
-import { apiKeyHint } from "@/services/ai/agent-key";
+import {
+  apiKeyHint,
+  looksLikeOpenAiApiKey,
+  sanitizeOpenAiApiKey,
+} from "@/services/ai/agent-key";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   assertAutonomousReadiness,
@@ -431,9 +435,9 @@ function openaiKeyFields(
   raw: string | null | undefined,
 ): { openaiApiKeyEnc: string | null; openaiApiKeyHint: string | null } | null {
   if (raw === undefined) return null;
-  const key = (raw ?? "").trim();
+  const key = sanitizeOpenAiApiKey(raw ?? "");
   if (!key) return { openaiApiKeyEnc: null, openaiApiKeyHint: null };
-  if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) {
+  if (!looksLikeOpenAiApiKey(key)) {
     throw new Error("Formato de chave OpenAI inválido. Esperado algo como sk-…");
   }
   return { openaiApiKeyEnc: encryptSecret(key), openaiApiKeyHint: apiKeyHint(key) };
