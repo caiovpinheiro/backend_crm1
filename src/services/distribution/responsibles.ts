@@ -137,8 +137,8 @@ export interface DistributionResponsibleView {
   /** Expediente (null se não configurado). */
   schedule: ResponsibleScheduleView | null;
   /**
-   * Fila usada para SELEÇÃO ("menor carga"). POR DEPARTAMENTO quando a chamada
-   * tem escopo de departamento (distribuição); global caso contrário.
+   * Fila (Entrada + Aguardando). POR DEPARTAMENTO quando a chamada tem escopo
+   * de departamento; global caso contrário. Não entra no sorteio.
    */
   queueCount: number;
   /**
@@ -246,8 +246,7 @@ export async function getDistributionResponsibles(
       select: { userId: true, status: true },
     }),
     loadSchedules(userIds),
-    // Fila POR DEPARTAMENTO quando há escopo: usada só para SELEÇÃO (o
-    // consultor concorre pela menor fila daquele depto). Sem escopo
+    // Fila POR DEPARTAMENTO quando há escopo (exibição). Sem escopo
     // (tela/cockpit) = fila global.
     getQueueCounts(userIds, scopeDeptIds),
     // Carga TOTAL, usada para o TETO (`queueLimit`). Contar só o depto fazia
