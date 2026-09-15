@@ -35,15 +35,21 @@ function snapshotFromMeta(meta: GroupMetadata): BaileysGroupSnapshot {
   };
 }
 
-export async function fetchParticipatingGroups(sock: WASocket): Promise<BaileysGroupSnapshot[]> {
+export async function fetchParticipatingGroups(
+  sock: WASocket,
+  onMeta?: (meta: GroupMetadata) => void,
+): Promise<BaileysGroupSnapshot[]> {
   const map = await sock.groupFetchAllParticipating();
-  return Object.values(map).map(snapshotFromMeta);
+  return Object.values(map).map((meta) => {
+    onMeta?.(meta);
+    return snapshotFromMeta(meta);
+  });
 }
 
 export async function syncChannelGroups(manager: BaileysManager, channelId: string): Promise<number> {
   const session = manager.getSession(channelId);
   const sock = session?.socket;
-  if (!sock) {
+  if (!session || !sock) {
     throw new Error("Sessão Baileys não está conectada");
   }
 
@@ -55,7 +61,7 @@ export async function syncChannelGroups(manager: BaileysManager, channelId: stri
     throw new Error("Canal ausente ou não é BAILEYS_MD");
   }
 
-  const snapshots = await fetchParticipatingGroups(sock);
+  const snapshots = await fetchParticipatingGroups(sock, (meta) => session.rememberGroup(meta));
   const count = await withSystemContext(ch.organizationId, () =>
     replaceChannelGroups(ch.organizationId, channelId, snapshots),
   );
