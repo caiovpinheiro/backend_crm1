@@ -40,6 +40,8 @@ export const ACADEMIC_RETENTION_MESSAGE_RULES: MessageRule[] = [
     department: null,
     message: null,
     tagName: null,
+    ownerUserId: null,
+    ownerLabel: null,
   },
   {
     id: "academic-retencao-troca-curso-polo",
@@ -67,6 +69,8 @@ export const ACADEMIC_RETENTION_MESSAGE_RULES: MessageRule[] = [
     department: "Retenção",
     message: null,
     tagName: null,
+    ownerUserId: null,
+    ownerLabel: null,
   },
 ];
 

@@ -320,7 +320,7 @@ const listInclude = {
       pipeline: { select: { id: true, name: true, slug: true, number: true } },
     },
   },
-  owner: { select: { id: true, name: true, email: true, avatarUrl: true } },
+  owner: { select: { id: true, name: true, email: true, avatarUrl: true, type: true } },
 } satisfies Prisma.DealInclude;
 
 export async function getDeals(params: GetDealsParams = {}) {
@@ -497,7 +497,7 @@ const detailInclude = {
       },
     },
   },
-  owner: { select: { id: true, name: true, email: true, avatarUrl: true, role: true } },
+  owner: { select: { id: true, name: true, email: true, avatarUrl: true, role: true, type: true } },
   activities: {
     take: 30,
     orderBy: [{ scheduledAt: "asc" }, { createdAt: "desc" }],
@@ -1736,7 +1736,7 @@ const BOARD_DEAL_INCLUDE = {
       avatarUrl: true,
     },
   },
-  owner: { select: { id: true, name: true, avatarUrl: true } },
+  owner: { select: { id: true, name: true, avatarUrl: true, type: true } },
   tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
   activities: {
     where: { completed: false },
