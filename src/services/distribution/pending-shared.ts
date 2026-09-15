@@ -509,12 +509,10 @@ type ResponsibleCapacity = {
 };
 
 export function liveFreeCapacityForUser(
-  r: Pick<ResponsibleCapacity, "userId" | "queueLimit" | "queueCount">,
-  assignedDeltaByUser: Map<string, number>,
+  _r: Pick<ResponsibleCapacity, "userId" | "queueLimit" | "queueCount">,
+  _assignedDeltaByUser: Map<string, number>,
 ): number {
-  const delta = assignedDeltaByUser.get(r.userId) ?? 0;
-  const loaded = r.queueCount + delta;
-  return Math.max(0, r.queueLimit - loaded);
+  return Number.MAX_SAFE_INTEGER;
 }
 
 export function eligibleInDeptScope(

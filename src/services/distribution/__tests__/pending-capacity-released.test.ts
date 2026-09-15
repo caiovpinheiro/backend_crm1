@@ -208,10 +208,11 @@ describe("capacity_released producer vs worker", () => {
     info.mockRestore();
   });
 
-  it("worker skips drain when load >= queueLimit (no waiting-queue scan)", async () => {
+  it("worker does not skip drain when load >= queueLimit (sem teto)", async () => {
     getOrgIdOrNull.mockReturnValue("org-worker-full");
     findFirst.mockResolvedValue({ queueLimit: 5 });
     getQueueCounts.mockResolvedValue(new Map([["u1", 5]]));
+    hasOrganizationWidget.mockResolvedValue(false);
 
     const { processPendingDistributionQueue } = await import("../pending");
     const result = await processPendingDistributionQueue({
@@ -219,12 +220,8 @@ describe("capacity_released producer vs worker", () => {
       userId: "u1",
     });
 
-    expect(result.skipReason).toBe("AT_CAPACITY");
-    expect(result.pending).toBe(0);
-    expect(getQueueCounts).toHaveBeenCalledWith(["u1"]);
-    expect(conversationCount).not.toHaveBeenCalled();
-    expect(conversationFindMany).not.toHaveBeenCalled();
-    expect(getDistributionResponsibles).not.toHaveBeenCalled();
+    expect(result.skipReason).not.toBe("AT_CAPACITY");
+    expect(hasOrganizationWidget).toHaveBeenCalled();
   });
 
   it("worker proceeds past the volume gate when load < queueLimit", async () => {
@@ -266,9 +263,10 @@ describe("capacity_released producer vs worker", () => {
     expect(getQueueCounts).toHaveBeenCalledWith(["u-retencao"]);
   });
 
-  it("keeps fruitless skip when the triggering consultant is still at queueLimit", async () => {
+  it("enqueues drain even when load equals queueLimit (sem teto)", async () => {
     getOrgIdOrNull.mockReturnValue("org-fruitless-full");
     peekFruitless.mockResolvedValue({ armed: true, ttlMs: null });
+    enqueueDistributionDrain.mockResolvedValue("added");
     findFirst.mockResolvedValue({ queueLimit: 15 });
     getQueueCounts.mockResolvedValue(new Map([["u-retencao", 15]]));
 
@@ -278,16 +276,14 @@ describe("capacity_released producer vs worker", () => {
       userId: "u-retencao",
     });
 
-    expect(enqueueDistributionDrain).not.toHaveBeenCalled();
-    expect(result.skipReason).toBe("COOLDOWN");
+    expect(enqueueDistributionDrain).toHaveBeenCalled();
+    expect(result.skipReason).toBe("QUEUED");
   });
 
-  it("worker drains after AT_CAPACITY when the same consultant later has a slot", async () => {
+  it("worker does not skip AT_CAPACITY when load equals queueLimit", async () => {
     getOrgIdOrNull.mockReturnValue("org-worker-slot-after-full");
     findFirst.mockResolvedValue({ queueLimit: 15 });
-    getQueueCounts
-      .mockResolvedValueOnce(new Map([["u-retencao", 15]]))
-      .mockResolvedValueOnce(new Map([["u-retencao", 10]]));
+    getQueueCounts.mockResolvedValue(new Map([["u-retencao", 15]]));
     hasOrganizationWidget.mockResolvedValue(false);
 
     const { processPendingDistributionQueue } = await import("../pending");
@@ -295,14 +291,8 @@ describe("capacity_released producer vs worker", () => {
       trigger: "capacity_released",
       userId: "u-retencao",
     });
-    const slotted = await processPendingDistributionQueue({
-      trigger: "capacity_released",
-      userId: "u-retencao",
-    });
 
-    expect(full.skipReason).toBe("AT_CAPACITY");
-    expect(slotted.skipReason).not.toBe("COOLDOWN");
-    expect(slotted.skipReason).not.toBe("AT_CAPACITY");
+    expect(full.skipReason).not.toBe("AT_CAPACITY");
     expect(hasOrganizationWidget).toHaveBeenCalled();
   });
 

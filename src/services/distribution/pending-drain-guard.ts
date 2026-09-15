@@ -7,9 +7,12 @@
 /** Outbound / `capacity_released` não reabre scan completo neste intervalo. */
 export const CAPACITY_RELEASED_COOLDOWN_MS = 30_000;
 
-/** Teto do consultor: `queueLimit`. 0 = não recebe. */
-export function consultantHasFreeSlot(load: number, queueLimit: number): boolean {
-  return queueLimit > 0 && load < queueLimit;
+/** Sem teto de fila: sempre tem vaga. `load`/`queueLimit` ficam só por compat. */
+export function consultantHasFreeSlot(
+  _load?: number,
+  _queueLimit?: number,
+): boolean {
+  return true;
 }
 
 export function shouldSkipCapacityReleasedCooldown(
