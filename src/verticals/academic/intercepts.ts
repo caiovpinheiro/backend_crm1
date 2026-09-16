@@ -50,6 +50,7 @@ import {
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
   humanAttendanceStartHint,
+  humanQueueContextFromAgent,
   isHumanAttendanceWindowOpen,
   isNearDuplicateBotText,
   messageLooksLikeHumanQueueNotice,
@@ -732,8 +733,15 @@ export async function runAcademicInterceptPipeline(
                 messageType: { not: "note" },
               },
               orderBy: { createdAt: "desc" },
-              select: { content: true },
+              select: { content: true, aiAgentUserId: true },
             });
+            // Aviso de entrega entre agentes de IA ("vou te encaminhar para o
+            // setor de X") é escrito pelo agente anterior, não pela fila
+            // humana: o ack do aluno pertence ao agente que recebeu a
+            // conversa e não pode virar distribuição.
+            const noticeFromOtherAiAgent =
+              !!lastBotOut?.aiAgentUserId &&
+              lastBotOut.aiAgentUserId !== assignee.id;
             const HANDOFF_PHRASES = [
               "vou te conectar",
               "fala com você em breve",
@@ -747,12 +755,13 @@ export async function runAcademicInterceptPipeline(
               "já pedi para a equipe",
               "já registrei seu pedido",
               "já te passei para um",
+              "já te encaminhei para o setor",
               "seu pedido já está com alguém",
-              "setor de",
-              "Retenção",
-              "Acolhimento",
             ];
-            if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
+            if (
+              !noticeFromOtherAiAgent &&
+              HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))
+            ) {
               if (isAcademicSelfServeTurn(args.userMessage)) {
                 // "oi" / "consegue me ajudar" depois do aviso de fila → a IA atende.
               } else {
@@ -806,6 +815,10 @@ export async function runAcademicInterceptPipeline(
                     args.conversationId,
                   );
                   if (!messageLooksLikeHumanQueueNotice(lastBotOut?.content)) {
+                    const queueCtx = humanQueueContextFromAgent({
+                      inboxPolicy: policy,
+                      businessHours: hours,
+                    });
                     await sendAgentMessage({
                       conversationId: args.conversationId,
                       contactId: args.contactId,
@@ -813,7 +826,8 @@ export async function runAcademicInterceptPipeline(
                       autonomyMode: cfg.autonomyMode,
                       text: studentNoticeAfterHandoff(
                         gotHumanAck,
-                        buildHumanQueueWithHoursMessage(),
+                        buildHumanQueueWithHoursMessage(new Date(), queueCtx),
+                        queueCtx,
                       ),
                       channel: args.channel,
                       kind: "text",
