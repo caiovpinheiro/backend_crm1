@@ -184,6 +184,7 @@ model Organization {
   activityAlertStates      ActivityAlertState[]
   dealStageDailySnapshots  DealStageDailySnapshot[]
   keepNotes                KeepNote[]
+  keepCategories           KeepCategory[]
   keepAttachments          KeepAttachment[]
   keepImports              KeepImport[]
   whatsAppGroups           WhatsAppGroup[]
@@ -626,6 +627,7 @@ model User {
   teamChatForwardsSent           TeamChatMessageForward[]  @relation("TeamChatForwardFrom")
   teamChatForwardsResponded      TeamChatMessageForward[]  @relation("TeamChatForwardResponder")
   keepNotes                    KeepNote[]
+  keepCategories               KeepCategory[]
   keepAttachments              KeepAttachment[]
   keepImports                  KeepImport[]
 
@@ -6366,6 +6368,23 @@ model TeamChatMessageForward {
 // Não confundir com `Note` (timeline de contato/negócio).
 // ──────────────────────────────────────────────
 
+model KeepCategory {
+  id             String     @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  /// Ordem das seções no modo Categorias. Menor = mais acima.
+  position       Float      @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  notes          KeepNote[]
+
+  @@index([organizationId, userId, position], map: "keep_categories_owner_pos_idx")
+  @@map("keep_categories")
+}
+
 model KeepNote {
   id             String   @id @default(cuid())
   organizationId String
@@ -6385,6 +6404,9 @@ model KeepNote {
   color          String?
   /// Ordem no mural (Keep). Menor = mais à frente / acima.
   position       Float     @default(0)
+  /// Categoria opcional (modo Categorias). Null = Sem categoria. Ignorado no modo Normal.
+  categoryId     String?
+  category       KeepCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   /// manual | google_keep_html
   source         String    @default("manual")
   importBatchId  String?
@@ -6394,6 +6416,7 @@ model KeepNote {
   attachments    KeepAttachment[]
 
   @@index([organizationId, userId, trashed, archived, pinned, position], map: "keep_notes_owner_folder_idx")
+  @@index([organizationId, userId, categoryId, position], map: "keep_notes_owner_category_idx")
   @@index([organizationId, importBatchId])
   @@map("keep_notes")
 }

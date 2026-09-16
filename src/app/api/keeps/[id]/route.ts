@@ -66,6 +66,9 @@ export async function PATCH(
     if ("color" in body && colorPatch === undefined) {
       return NextResponse.json({ message: "Cor inválida." }, { status: 400 });
     }
+    if ("categoryId" in body && body.categoryId !== null && typeof body.categoryId !== "string") {
+      return NextResponse.json({ message: "Categoria inválida." }, { status: 400 });
+    }
     const note = await updateKeepNote({
       orgId: r.session.user.organizationId,
       userId: r.session.user.id,
@@ -76,6 +79,14 @@ export async function PATCH(
       archived: typeof body.archived === "boolean" ? body.archived : undefined,
       trashed: typeof body.trashed === "boolean" ? body.trashed : undefined,
       color: colorPatch,
+      categoryId:
+        "categoryId" in body
+          ? body.categoryId === null
+            ? null
+            : typeof body.categoryId === "string"
+              ? body.categoryId
+              : undefined
+          : undefined,
     });
     return NextResponse.json({ note: serializeKeepNote(note, r.session.user.organizationId) });
   } catch (err) {

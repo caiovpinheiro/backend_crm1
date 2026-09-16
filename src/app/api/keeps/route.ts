@@ -90,6 +90,12 @@ export async function POST(request: Request) {
       userId: r.session.user.id,
       title: typeof body.title === "string" ? body.title : "",
       content: body.content,
+      categoryId:
+        body.categoryId === null
+          ? null
+          : typeof body.categoryId === "string"
+            ? body.categoryId
+            : undefined,
     });
     return NextResponse.json(
       { note: serializeKeepNote(note, r.session.user.organizationId!) },

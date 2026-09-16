@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
+import { KeepError, reorderKeepNotes } from "@/services/keeps/keeps";
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
-import { KeepError, reorderKeepNotes } from "@/services/keeps/keeps";
 
 export const dynamic = "force-dynamic";
 
@@ -23,14 +23,37 @@ export async function PATCH(request: Request) {
   }
 
   const raw = Array.isArray(body.items) ? body.items : [];
-  const items: Array<{ id: string; pinned: boolean; position: number }> = [];
+  const items: Array<{
+    id: string;
+    position: number;
+    pinned?: boolean;
+    categoryId?: string | null;
+  }> = [];
   for (const row of raw) {
     if (!row || typeof row !== "object") continue;
     const rec = row as Record<string, unknown>;
-    if (typeof rec.id !== "string" || typeof rec.pinned !== "boolean" || typeof rec.position !== "number") {
+    if (typeof rec.id !== "string" || typeof rec.position !== "number") {
       return NextResponse.json({ message: "Lista de ordem inválida." }, { status: 400 });
     }
-    items.push({ id: rec.id, pinned: rec.pinned, position: rec.position });
+    const item: {
+      id: string;
+      position: number;
+      pinned?: boolean;
+      categoryId?: string | null;
+    } = { id: rec.id, position: rec.position };
+    if ("pinned" in rec) {
+      if (typeof rec.pinned !== "boolean") {
+        return NextResponse.json({ message: "Lista de ordem inválida." }, { status: 400 });
+      }
+      item.pinned = rec.pinned;
+    }
+    if ("categoryId" in rec) {
+      if (rec.categoryId !== null && typeof rec.categoryId !== "string") {
+        return NextResponse.json({ message: "Lista de ordem inválida." }, { status: 400 });
+      }
+      item.categoryId = rec.categoryId as string | null;
+    }
+    items.push(item);
   }
 
   try {
