@@ -66,6 +66,7 @@ import { fireTrigger, notifyDealStageChanged } from "@/services/automation-trigg
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
+import { getOrgDistributionMode } from "@/services/distribution/mode";
 import { logEvent } from "@/services/activity-log";
 import { tabulationLogMeta } from "@/services/tabulations";
 import {
@@ -2264,7 +2265,11 @@ async function executeStep(
       // Idempotência: outcome gravado em DistributionLeadsExecution por
       // (contexto, step, occurrence) — retry antes do avanço durável do
       // fluxo reencontra o resultado; a occurrence avança após a execução.
-      const distributionMode = readString(cfg, "mode") ?? "smart";
+      const blockMode = readString(cfg, "mode");
+      const distributionMode =
+        blockMode === "leads" || blockMode === "smart"
+          ? blockMode
+          : await getOrgDistributionMode();
       if (distributionMode === "leads") {
         const stepId = (cfg as Record<string, unknown>).__stepId as
           | string

@@ -39,6 +39,12 @@ import {
 } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { DISTRIBUTION_ENABLED_KEY } from "@/services/distribution/enabled";
+import { LEADS_DISTRIBUTION_ENABLED_KEY } from "@/services/distribution/leads/enabled";
+import {
+  DISTRIBUTION_MODE_KEY,
+  parseDistributionMode,
+  type OrgDistributionMode,
+} from "@/services/distribution/mode";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -81,18 +87,21 @@ async function guard(session: {
 }
 
 async function readSettings() {
-  const [respectDepartment, autoOnInbound, enabled, fallbackDepartmentId] =
+  const [respectDepartment, autoOnInbound, enabled, fallbackDepartmentId, modeRaw] =
     await Promise.all([
       getOrgSettingBool(RESPECT_DEPT_KEY, false),
       getOrgSettingBool(AUTO_ON_INBOUND_KEY, true),
       getOrgSettingBool(ENABLED_KEY, true),
       getOrgSetting(FALLBACK_DEPT_KEY),
+      getOrgSetting(DISTRIBUTION_MODE_KEY),
     ]);
+  const mode: OrgDistributionMode = parseDistributionMode(modeRaw);
   return {
     respectDepartment,
     autoOnInbound,
     enabled,
     fallbackDepartmentId: fallbackDepartmentId || null,
+    mode,
   };
 }
 
@@ -113,6 +122,7 @@ export async function PUT(req: Request) {
       autoOnInbound?: unknown;
       enabled?: unknown;
       fallbackDepartmentId?: unknown;
+      mode?: unknown;
     };
 
     // Atualização PARCIAL: só toca as chaves presentes no corpo.
@@ -124,6 +134,17 @@ export async function PUT(req: Request) {
     }
     if ("enabled" in body) {
       await setOrgSettingBool(ENABLED_KEY, Boolean(body.enabled));
+    }
+    if ("mode" in body) {
+      if (body.mode !== "smart" && body.mode !== "leads") {
+        return NextResponse.json(
+          { message: "mode deve ser smart ou leads." },
+          { status: 400 },
+        );
+      }
+      await setOrgSetting(DISTRIBUTION_MODE_KEY, body.mode);
+      // Motor Por Leads só roda com o kill switch ligado.
+      await setOrgSettingBool(LEADS_DISTRIBUTION_ENABLED_KEY, body.mode === "leads");
     }
     if ("fallbackDepartmentId" in body) {
       const raw = body.fallbackDepartmentId;
