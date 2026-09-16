@@ -46,9 +46,15 @@ import { sseBus } from "@/lib/sse-bus";
 import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
-import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
+import {
+  assignOwnerToContactClusterTx,
+  createDeal,
+  createDealEvent,
+  invalidateBoardsForPipelines,
+  updateDeal,
+} from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
-import { addTagToContact } from "@/services/tags";
+import { addTagToContact, applyExistingTagToContact } from "@/services/tags";
 import { evaluateTransferGate } from "@/services/ai/transfer-gate";
 import {
   departmentNotFoundMessage,
@@ -1259,6 +1265,174 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
   });
 }
 
+// ── transfer_to_ai_agent ───────────────────────────────────────
+
+/**
+ * Entrega a conversa a OUTRO agente de IA (orquestrador → especialista).
+ *
+ * A Distribuição Inteligente só sorteia candidatos `HUMAN`, então handoff
+ * por departamento nunca alcança um agente IA. Aqui a atribuição é direta e
+ * vale para o cluster inteiro do contato (conversa, contato, deals OPEN),
+ * que é o que o inbox e o pipeline leem como responsável.
+ *
+ * O aviso ao aluno sai DAQUI, antes de trocar o dono: depois da
+ * reatribuição o texto final do turno morre no `assertAiStillAuthorized`
+ * (`assignee_changed`), e transferência silenciosa é exatamente o que não
+ * pode acontecer. Por isso `noticeMessage` é obrigatório.
+ *
+ * Não dispara a saudação do destino: o especialista assume e responde a
+ * próxima mensagem do aluno, sem correr com o aviso que acabou de sair.
+ */
+function transferToAiAgentTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Entrega a conversa a outro agente de IA especializado, que assume a continuidade do atendimento. " +
+      "Use quando já entendeu a necessidade do aluno e ela é do escopo de outro agente. " +
+      "`noticeMessage` é o que o aluno recebe ANTES da troca: curto, humanizado, avisando que vai encaminhar. " +
+      "Depois de chamar esta tool NÃO escreva mais nada — quem fala com o aluno agora é o outro agente.",
+    inputSchema: z.object({
+      agentName: z
+        .string()
+        .min(2)
+        .describe(
+          "Nome do agente de destino, exatamente como está cadastrado (ex.: 'Agente Retenção').",
+        ),
+      noticeMessage: z
+        .string()
+        .min(3)
+        .describe(
+          "Mensagem enviada ao aluno avisando da transferência, antes de trocar o responsável.",
+        ),
+      reason: z
+        .string()
+        .describe(
+          "Motivo curto da classificação, para auditoria interna. NÃO vai para o aluno.",
+        ),
+      tagName: z
+        .string()
+        .optional()
+        .describe(
+          "Tag marcada no contato antes da transferência (ex.: 'RET-IA'). Precisa já existir no CRM.",
+        ),
+    }),
+    execute: async ({ agentName, noticeMessage, reason, tagName }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (!ctx.contactId) return fail("Sem contato na conversa.");
+
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
+        const wanted = agentName.trim();
+        const target = await prisma.user.findFirst({
+          where: {
+            type: "AI",
+            ...(orgId ? { organizationId: orgId } : {}),
+            name: { equals: wanted, mode: "insensitive" },
+            aiAgentConfig: { active: true },
+          },
+          select: { id: true, name: true },
+        });
+        if (!target) {
+          const others = await prisma.user.findMany({
+            where: {
+              type: "AI",
+              ...(orgId ? { organizationId: orgId } : {}),
+              aiAgentConfig: { active: true },
+              id: { not: ctx.agentUserId },
+            },
+            select: { name: true },
+            orderBy: { name: "asc" },
+            take: 10,
+          });
+          return fail(
+            others.length > 0
+              ? `Agente "${wanted}" não encontrado ou inativo. Disponíveis: ${others
+                  .map((o) => o.name)
+                  .join(", ")}.`
+              : `Agente "${wanted}" não encontrado ou inativo.`,
+          );
+        }
+        if (target.id === ctx.agentUserId) {
+          return fail(
+            "Esse é você mesmo. Siga o atendimento ou escolha outro agente.",
+          );
+        }
+
+        // Aviso primeiro: a reatribuição derruba a entrega do texto do turno.
+        const { sendAgentMessage } = await import(
+          "@/services/ai/piloting-actions"
+        );
+        const me = await prisma.user.findUnique({
+          where: { id: ctx.agentUserId },
+          select: { aiAgentConfig: { select: { autonomyMode: true } } },
+        });
+        const notice = await sendAgentMessage({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          agentUserId: ctx.agentUserId,
+          autonomyMode: me?.aiAgentConfig?.autonomyMode ?? "AUTONOMOUS",
+          text: noticeMessage,
+        });
+        // `skipped` = o aviso não chegou ao aluno (allowlist, canal fora,
+        // near-duplicate). Transferir aqui seria a troca silenciosa.
+        if (notice.status === "skipped") {
+          return fail(
+            `Não consegui avisar o aluno (${notice.reason}) — não transferi. Siga o atendimento neste turno.`,
+          );
+        }
+
+        const tagApplied = await applyExistingTagToContact({
+          contactId: ctx.contactId,
+          tagName: tagName ?? null,
+          source: "[ai] handoff entre agentes",
+        });
+
+        const cluster = await prisma.$transaction((tx) =>
+          assignOwnerToContactClusterTx(tx, {
+            userId: target.id,
+            contactId: ctx.contactId,
+            conversationId: ctx.conversationId,
+            dealId: ctx.dealId ?? null,
+            via: "ai_handoff",
+          }),
+        );
+        await invalidateBoardsForPipelines(cluster.pipelineIds);
+
+        sseBus.publish("conversation_assigned", {
+          organizationId: getOrgIdOrNull(),
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          assignedToId: target.id,
+          reason,
+        });
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "transferred_to_ai_agent",
+            agentId: ctx.agentId ?? null,
+            reason,
+            targetAgentUserId: target.id,
+            targetAgentName: target.name,
+          }).catch(() => {});
+        }
+
+        return ok({
+          transferred: true,
+          // `assigned` é o que a auditoria de efeito olha para liberar a
+          // promessa feita ao aluno (`effect-claims`).
+          assigned: true,
+          agentName: target.name,
+          tagApplied,
+          noticeStatus: notice.status,
+          hint: "Transferência concluída. Não escreva mais nada neste turno.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao transferir para o agente.",
+        );
+      }
+    },
+  });
+}
+
 // ── transfer_to_department ─────────────────────────────────────
 
 function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
@@ -1747,6 +1921,7 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   execute_distribution: executeDistributionTool,
   consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
+  transfer_to_ai_agent: transferToAiAgentTool,
   close_conversation: closeConversationTool,
   list_tabulations: listTabulationsTool,
   tabulate_conversation: tabulateConversationTool,

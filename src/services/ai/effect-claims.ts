@@ -23,6 +23,7 @@ export const EFFECT_TOOLS: Record<string, EffectKind> = {
   execute_distribution: "transfer",
   transfer_to_human: "transfer",
   transfer_to_department: "transfer",
+  transfer_to_ai_agent: "transfer",
   create_deal: "deal_created",
   move_stage: "stage_moved",
   send_whatsapp_template: "template_sent",
@@ -137,6 +138,10 @@ export function effectToolSucceeded(
       return r.assigned === true || r.queuedWaiting === true;
     case "transfer_to_department":
       return false;
+    // Handoff entre agentes IA: a atribuição é direta, sem fila. Ou o
+    // cluster trocou de dono, ou a tool falhou e nada foi prometido.
+    case "transfer_to_ai_agent":
+      return r.assigned === true;
     case "create_deal":
       return typeof r.dealId === "string" && r.dealId.length > 0;
     case "move_stage":

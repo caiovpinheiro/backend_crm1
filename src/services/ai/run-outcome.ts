@@ -78,6 +78,17 @@ export function deriveRunOutcome(input: OutcomeInput): RunOutcome {
     input.toolCalls.some((c) => TRANSFER_TOOLS.has(c.toolName));
   if (transferLeftTheAi) return "HANDOFF_COMPLETED";
 
+  // Handoff entre agentes IA não passa pelo teste acima: o assignee final
+  // continua sendo IA, só que outra. Sem isto, todo roteamento do agente
+  // de primeiro contato era gravado como ANSWERED.
+  const handedToAnotherAgent = input.toolCalls.some(
+    (c) =>
+      c.toolName === "transfer_to_ai_agent" &&
+      !isSimulatedEffectResult(c.result) &&
+      effectToolSucceeded(c.toolName, c.result),
+  );
+  if (handedToAnotherAgent) return "HANDOFF_COMPLETED";
+
   const queued = input.toolCalls.some(
     (c) => TRANSFER_TOOLS.has(c.toolName) && transferQueuedWaiting(c.result),
   );
