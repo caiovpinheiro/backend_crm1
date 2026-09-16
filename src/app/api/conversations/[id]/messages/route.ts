@@ -263,6 +263,7 @@ export async function GET(request: Request, context: RouteContext) {
             where: {
               contactId: conv.contactId,
               id: { not: conv.id },
+              status: "RESOLVED",
               ...(conv.channel ? { channel: conv.channel } : {}),
             },
             select: { id: true },
@@ -362,7 +363,9 @@ export async function GET(request: Request, context: RouteContext) {
           // Só existe um não-RESOLVED por (org, contato, canal), então isso
           // acrescenta no máximo um ticket.
           //
-          // Ticket aberto: todos os outros do contato/canal.
+          // Ticket aberto: só encerrados (RESOLVED) como histórico. Com
+          // múltiplas WABAs ativas para o mesmo contato+canal, incluir
+          // tickets não-RESOLVED duplicaria a timeline atual no chat.
           ...(viewingResolved
             ? {
                 OR: [
@@ -373,7 +376,7 @@ export async function GET(request: Request, context: RouteContext) {
                   { status: { not: "RESOLVED" as const } },
                 ],
               }
-            : {}),
+            : { status: "RESOLVED" as const }),
         },
         orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true, createdAt: true },
