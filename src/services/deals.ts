@@ -848,7 +848,7 @@ export async function propagateOwnerToContactAndChat(
   tx: ScopedTx,
   contactId: string | null | undefined,
   ownerId: string | null,
-  opts?: { conversations?: boolean },
+  opts?: { conversations?: boolean; via?: string | null },
 ): Promise<ConversationAssigneeChange[]> {
   if (!contactId) return [];
   await tx.contact.update({
@@ -916,6 +916,10 @@ export async function propagateOwnerToContactAndChat(
     where: { id: { in: toChange.map((c) => c.id) } },
     data: {
       assignedToId: ownerId,
+      assignedVia: opts?.via ?? null,
+      // Atribuição concreta consome a rota pendente; remoção de dono a
+      // preserva (a conversa pode estar sendo preparada para outro motor).
+      ...(ownerId !== null ? { routeMode: null } : {}),
       ...(newOwnerIsAi ? { aiGreetedAt: null } : {}),
     },
   });
@@ -935,9 +939,8 @@ export async function propagateOwnerToContactAndChat(
  * Atribui o usuário a TODO o cluster do contato — deals OPEN (+ deal
  * explícito), contato e todas as conversas (inbox + pipeline).
  *
- * `via` é aceito mas ignorado: `Deal.assignedVia` só existe no schema a
- * partir da distribuição por leads. Mantido na assinatura para o call site
- * ser o mesmo dos dois lados.
+ * `via` marca a origem da atribuição ("smart" | "leads" | null).
+ * Persistido em Deal.assignedVia e Conversation.assignedVia.
  */
 export async function assignOwnerToContactClusterTx(
   tx: ScopedTx,
@@ -1007,7 +1010,7 @@ export async function assignOwnerToContactClusterTx(
     if (fromOwnerId === null) fromOwnerId = d.ownerId;
     await tx.deal.update({
       where: { id: d.id },
-      data: { ownerId: args.userId },
+      data: { ownerId: args.userId, assignedVia: args.via ?? null },
     });
     pipelineIds.push(d.stage?.pipelineId ?? null);
     if (d.ownerId !== args.userId) {
@@ -1020,7 +1023,7 @@ export async function assignOwnerToContactClusterTx(
   }
 
   if (contactId) {
-    await propagateOwnerToContactAndChat(tx, contactId, args.userId);
+    await propagateOwnerToContactAndChat(tx, contactId, args.userId, { via: args.via ?? null });
   }
 
   return {

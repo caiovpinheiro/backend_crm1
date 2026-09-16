@@ -162,20 +162,31 @@ async function resolveDepartmentScope(
     if (!fallbackId) return { mode: "org-wide", departmentId: null };
     const fallback = await prisma.department.findUnique({
       where: { id: fallbackId },
-      select: { id: true, distributionEnabled: true },
+      select: { id: true, distributionEnabled: true, distributionMode: true },
     });
     // Departamento apagado ou com distribuição desligada: volta ao clássico em
     // vez de congelar na fila todo lead sem departamento.
     if (!fallback?.distributionEnabled) {
       return { mode: "org-wide", departmentId: null };
     }
+    // Departamento no modo leads: o smart se abstém.
+    if ((fallback as { distributionMode?: string }).distributionMode === "leads") {
+      return { mode: "blocked", departmentId: fallback.id };
+    }
     return { mode: "department", departmentId: fallback.id };
   }
 
   const dept = await prisma.department.findUnique({
     where: { id: departmentId },
-    select: { distributionEnabled: true },
+    select: { distributionEnabled: true, distributionMode: true },
   });
+  // Departamento no modo leads: o smart se abstém (não atribui, não enfileira).
+  if (
+    dept?.distributionEnabled &&
+    (dept as { distributionMode?: string }).distributionMode === "leads"
+  ) {
+    return { mode: "blocked", departmentId };
+  }
   if (dept?.distributionEnabled) return { mode: "department", departmentId };
   // Departamento identificado mas que optou por NÃO distribuir automaticamente
   // → respeita o opt-out: fica na fila (manual).
@@ -649,18 +660,33 @@ export async function executeDistribution(
   );
   // Nunca aceita departmentId de outra organização (cross-tenant).
   const orgIdForDept = getOrgIdOrThrow();
-  const explicitDeptIds =
+  const requestedDeptRows =
     requestedDeptIds.length > 0
-      ? (
-          await prisma.department.findMany({
-            where: {
-              organizationId: orgIdForDept,
-              id: { in: requestedDeptIds },
-            },
-            select: { id: true },
-          })
-        ).map((d) => d.id)
+      ? await prisma.department.findMany({
+          where: {
+            organizationId: orgIdForDept,
+            id: { in: requestedDeptIds },
+          },
+          select: { id: true, distributionMode: true },
+        })
       : [];
+  // Departamentos no modo leads ficam FORA do smart: o pool explícito os
+  // perde; se só sobraram deptos leads, o smart se abstém (sem atribuir e
+  // sem enfileirar) — a distribuição é do bloco com mode="leads".
+  const explicitDeptIds = requestedDeptRows
+    .filter((d) => (d as { distributionMode?: string }).distributionMode !== "leads")
+    .map((d) => d.id);
+  // Se o pool explícito só tinha deptos leads, o smart se abstém.
+  if (requestedDeptRows.length > 0 && explicitDeptIds.length === 0) {
+    await writeLog(input, false, "NO_DEPARTMENT", null, []);
+    return {
+      success: false,
+      reason: "NO_DEPARTMENT",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated: [],
+    };
+  }
 
   // Snapshot ANTES do reassign limpar o assignee — usado para disparar
   // `lead_distributed` quando um HUMAN assume vindo de IA/sem dono
@@ -698,9 +724,23 @@ export async function executeDistribution(
   if (input.conversationId && !input.reassign) {
     const already = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
-      select: { assignedToId: true, contactId: true },
+      select: { assignedToId: true, contactId: true, assignedVia: true },
     });
     if (already?.assignedToId) {
+      // Atribuição feita pelo modo leads é protegida de reavaliação
+      // automática (offline / expediente / fila): sem `reassign` explícito,
+      // o dono permanece — independente de elegibilidade.
+      if ((already as { assignedVia?: string | null }).assignedVia === "leads") {
+        const contactId = input.contactId ?? already.contactId ?? null;
+        await resolvePendingFor(input.dealId, contactId, already.assignedToId);
+        return {
+          success: true,
+          reason: "ASSIGNED",
+          selectedUserId: already.assignedToId,
+          selectedUserName: null,
+          evaluated: [],
+        };
+      }
       const contactId = input.contactId ?? already.contactId ?? null;
       const check = await isAssigneeCurrentlyEligible(
         already.assignedToId,
