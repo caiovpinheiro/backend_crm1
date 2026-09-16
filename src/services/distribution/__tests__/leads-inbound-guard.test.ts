@@ -117,6 +117,7 @@ vi.mock("@/lib/prisma", () => ({
       })),
     },
     distributionPending: {
+      findFirst: vi.fn(async () => null),
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
   },
