@@ -46,6 +46,9 @@ export async function GET(request: Request) {
     // (Contact.adSourceId, gravado pelo webhook Meta em referral.source_id).
     // Uso principal: integrações (n8n) enumerando leads por anúncio.
     const adSourceId = searchParams.get("adSourceId") ?? undefined;
+    // Opt-in para integrações: inclui UTM/gclid/fbclid/referrer no payload
+    // (13 colunas a mais por contato — a UI não usa, por isso não é padrão).
+    const includeTracking = searchParams.get("includeTracking") === "1";
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
     const sortByRaw = searchParams.get("sortBy");
@@ -108,6 +111,7 @@ export async function GET(request: Request) {
       emailExact,
       phoneExact,
       adSourceId,
+      includeTracking,
       createdFrom,
       createdTo,
       updatedFrom,

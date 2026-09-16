@@ -150,6 +150,12 @@ export type GetContactsParams = {
    * direto. Case-sensitive porque a Meta grava o id como string opaca.
    */
   adSourceId?: string;
+  /**
+   * Inclui os campos de rastreamento (UTMs, gclid/fbclid, referrer…) no
+   * select da listagem. Opt-in porque a UI não usa e são 13 colunas a mais
+   * por linha — uso principal: integrações (n8n "Search Full Record").
+   */
+  includeTracking?: boolean;
   /** Intervalo de criação (createdAt). */
   createdFrom?: Date;
   createdTo?: Date;
@@ -445,6 +451,23 @@ export async function getContacts(params: GetContactsParams = {}) {
           select: { tag: { select: { id: true, name: true, color: true } } },
         },
         customFields: { select: { customFieldId: true, value: true } },
+        ...(params.includeTracking
+          ? {
+              adUtmSource: true,
+              adUtmMedium: true,
+              adUtmCampaign: true,
+              adUtmContent: true,
+              adUtmTerm: true,
+              utmId: true,
+              utmReferrer: true,
+              referrer: true,
+              gclid: true,
+              fbclid: true,
+              googleClientId: true,
+              ttadId: true,
+              ttadName: true,
+            }
+          : {}),
       },
     }),
     searchCapped
