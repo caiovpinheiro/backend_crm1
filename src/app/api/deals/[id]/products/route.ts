@@ -47,7 +47,7 @@ export async function GET(_request: Request, context: RouteContext) {
     const items = await prisma.dealProduct.findMany({
       where: { dealId },
       include: {
-        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true } },
+        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true, imageUrl: true, imageMime: true, imageName: true } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -65,6 +65,9 @@ export async function GET(_request: Request, context: RouteContext) {
         | "COURSE"
         | "JOB_OPENING"
         | null,
+      imageUrl: item.product.imageUrl ?? null,
+      imageMime: item.product.imageMime ?? null,
+      imageName: item.product.imageName ?? null,
       quantity: Number(item.quantity),
       unitPrice: Number(item.unitPrice),
       discount: Number(item.discount),
@@ -160,11 +163,35 @@ export async function POST(request: Request, context: RouteContext) {
     const item = (await prisma.dealProduct.create({
       data: withOrgFromCtx({ dealId, productId, quantity, unitPrice, discount }),
       include: {
-        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true } },
+        product: {
+          select: {
+            id: true,
+            name: true,
+            sku: true,
+            unit: true,
+            type: true,
+            kind: true,
+            imageUrl: true,
+            imageMime: true,
+            imageName: true,
+          },
+        },
       },
     })) as Prisma.DealProductGetPayload<{
       include: {
-        product: { select: { id: true; name: true; sku: true; unit: true; type: true; kind: true } };
+        product: {
+          select: {
+            id: true;
+            name: true;
+            sku: true;
+            unit: true;
+            type: true;
+            kind: true;
+            imageUrl: true;
+            imageMime: true;
+            imageName: true;
+          };
+        };
       };
     }>;
 
@@ -204,6 +231,9 @@ export async function POST(request: Request, context: RouteContext) {
           | "COURSE"
           | "JOB_OPENING"
           | null,
+        imageUrl: item.product.imageUrl ?? null,
+        imageMime: item.product.imageMime ?? null,
+        imageName: item.product.imageName ?? null,
         quantity: Number(item.quantity),
         unitPrice: Number(item.unitPrice),
         discount: Number(item.discount),

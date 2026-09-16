@@ -174,6 +174,23 @@ export async function PUT(request: Request, context: RouteContext) {
     }
     if (typeof body.unit === "string") data.unit = body.unit.trim() || "un";
     if (typeof body.isActive === "boolean") data.isActive = body.isActive;
+    if (body.imageUrl !== undefined) {
+      if (body.imageUrl === null || body.imageUrl === "") {
+        data.imageUrl = null;
+        data.imageMime = null;
+        data.imageName = null;
+      } else if (typeof body.imageUrl === "string") {
+        data.imageUrl = body.imageUrl.trim();
+        data.imageMime =
+          typeof body.imageMime === "string" && body.imageMime.trim()
+            ? body.imageMime.trim()
+            : null;
+        data.imageName =
+          typeof body.imageName === "string" && body.imageName.trim()
+            ? body.imageName.trim().slice(0, 180)
+            : null;
+      }
+    }
     if (typeof body.type === "string") {
       const t = body.type.toUpperCase();
       if (t === "PRODUCT" || t === "SERVICE") data.type = t;

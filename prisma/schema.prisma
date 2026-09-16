@@ -1678,6 +1678,11 @@ model Product {
   /// legado. Pools novos não usam este campo.
   stock          Decimal      @default(0) @db.Decimal(12, 2)
 
+  /// Capa do produto (1 imagem). Usada ao encaminhar o produto no chat.
+  imageUrl       String?
+  imageMime      String?
+  imageName      String?
+
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
   /// Nullable para zero regressão; backfill move produtos legados ao catálogo
   /// default da org.
