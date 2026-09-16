@@ -1039,6 +1039,7 @@ export async function POST(request: Request, context: RouteContext) {
           contactId: conv.contactId,
           direction: "out",
           content,
+          senderName,
           timestamp: savedMsg.createdAt,
         });
       } catch { /* best-effort */ }
@@ -1157,6 +1158,7 @@ export async function POST(request: Request, context: RouteContext) {
           contactId: conv.contactId,
           direction: "out",
           content,
+          senderName,
           timestamp: saved.createdAt,
         });
       } catch {
@@ -1304,6 +1306,7 @@ export async function POST(request: Request, context: RouteContext) {
         contactId: conv.contactId,
         direction: "out",
         content,
+        senderName,
         timestamp: saved.createdAt,
       });
     } catch {
