@@ -257,6 +257,32 @@ export async function GET(request: Request, context: RouteContext) {
     const after = url.searchParams.get("after");
     const includeHistory = url.searchParams.get("history") === "1";
 
+    // Unifica mensagens de todas as conversas ATIVAS do mesmo contato+canal
+    // em uma única timeline cronológica. Tickets RESOLVED continuam no
+    // histórico (history=1), com separadores.
+    const siblingActiveConversations =
+      conv.contactId && conv.channel
+        ? await prisma.conversation.findMany({
+            where: {
+              organizationId: conv.organizationId,
+              contactId: conv.contactId,
+              channel: conv.channel,
+              id: { not: conv.id },
+              status: { not: "RESOLVED" },
+            },
+            select: { id: true },
+            take: 20,
+          })
+        : [];
+    const activeMessageConversationFilter: Prisma.MessageWhereInput =
+      siblingActiveConversations.length > 0
+        ? {
+            conversationId: {
+              in: [conv.id, ...siblingActiveConversations.map((c) => c.id)],
+            },
+          }
+        : { conversationId: conv.id };
+
     const olderTicketsProbe =
       !includeHistory && !before && conv.contactId
         ? prisma.conversation.findFirst({
@@ -308,7 +334,7 @@ export async function GET(request: Request, context: RouteContext) {
         ? Promise.resolve([] as MsgRow[])
         : findMessagesSafe({
             where: {
-              conversationId: conv.id,
+              ...activeMessageConversationFilter,
               ...(before
                 ? { createdAt: { lt: new Date(before) } }
                 : after
@@ -347,41 +373,19 @@ export async function GET(request: Request, context: RouteContext) {
     };
     let historyTickets: HistoryTicket[] = [];
     if (includeHistory && conv.contactId && conv.channel) {
-      const viewingResolved = conv.status === "RESOLVED";
+      // Histórico = apenas tickets encerrados (RESOLVED) anteriores a este.
+      // Conversas ativas do mesmo contato+canal já são unificadas na página
+      // principal em ordem cronológica.
       const prevConvs = await prisma.conversation.findMany({
         where: {
           contactId: conv.contactId,
           channel: conv.channel,
           id: { not: conv.id },
-          // Ticket RESOLVED: os encerrados ANTERIORES (não poluir a timeline
-          // de um ticket antigo com tudo que veio depois) MAIS o ticket ativo
-          // do contato/canal, se houver. O ticket ativo é a exceção porque a
-          // mesma proteção do ramo aberto vale aqui: se o card saltou para um
-          // id antigo, o chat recente continua visível. Sem ele, uma resposta
-          // do cliente que entrou num ticket novo ficava invisível na
-          // timeline enquanto aparecia no preview do card (que é por contato).
-          // Só existe um não-RESOLVED por (org, contato, canal), então isso
-          // acrescenta no máximo um ticket.
-          //
-          // Ticket aberto: só encerrados (RESOLVED) como histórico. Com
-          // múltiplas WABAs ativas para o mesmo contato+canal, incluir
-          // tickets não-RESOLVED duplicaria a timeline atual no chat.
-          ...(viewingResolved
-            ? {
-                OR: [
-                  {
-                    status: "RESOLVED" as const,
-                    createdAt: { lt: conv.createdAt },
-                  },
-                  { status: { not: "RESOLVED" as const } },
-                ],
-              }
-            : { status: "RESOLVED" as const }),
+          status: "RESOLVED",
+          createdAt: { lt: conv.createdAt },
         },
         orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true, createdAt: true },
-        // +1 no ramo RESOLVED para o ticket ativo não roubar a vaga de um dos
-        // 5 encerrados anteriores que já apareciam antes desta mudança.
         take: 40,
       });
       let remaining = historyBudget ?? 25;
