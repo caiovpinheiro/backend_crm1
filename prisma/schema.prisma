@@ -2670,7 +2670,12 @@ model ActivityEvent {
   @@index([dealId], map: "activity_events_dealId_idx")
   @@index([actorUserId], map: "activity_events_actorUserId_idx")
   @@index([triggeredByUserId], map: "activity_events_triggeredByUserId_idx")
-  @@unique([organizationId, idempotencyKey], map: "activity_events_org_idempotency_idx")
+  // `idempotencyKey` fica SEM índice: @@unique é impossível numa tabela
+  // particionada por RANGE(occurredAt) (o Postgres exige a coluna de partição
+  // no índice UNIQUE), e um btree comum no pai se constrói nas 49 partições
+  // com lock exclusivo durante a migration do boot. Unicidade do evento vem
+  // da outbox (`activity_outbox_org_idempotency_idx`) + o findFirst antes de
+  // projetar. Ver 20260917190000_activity_outbox.
   @@map("activity_events")
 }
 
