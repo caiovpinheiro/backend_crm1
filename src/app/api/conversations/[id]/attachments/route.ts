@@ -25,6 +25,7 @@ import {
   statStoredFile,
   type OrgOwnedReuseUrl,
 } from "@/lib/storage/local";
+import { ingestProductCoverForReuse } from "@/lib/storage/ingest-product-cover";
 import { readUpstreamFallbackBytes } from "@/lib/storage/upstream-fallback";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -173,10 +174,11 @@ async function parseAttachmentRequest(
       };
     }
     const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-    const parsedReuse = resolveOrgOwnedReuseUrl(
-      typeof rec.reuseUrl === "string" ? rec.reuseUrl : "",
-      orgId,
-    );
+    const reuseRaw = typeof rec.reuseUrl === "string" ? rec.reuseUrl : "";
+    let parsedReuse = resolveOrgOwnedReuseUrl(reuseRaw, orgId);
+    if (!parsedReuse) {
+      parsedReuse = await ingestProductCoverForReuse(orgId, reuseRaw);
+    }
     if (!parsedReuse) {
       return {
         ok: false,
