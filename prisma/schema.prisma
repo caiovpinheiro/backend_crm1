@@ -573,6 +573,7 @@ model User {
   scheduledWhatsappCallsAssigned ScheduledWhatsappCall[]   @relation("ScheduledWhatsappCallAssignee")
   dealEvents                     DealEvent[]
   activityEvents                 ActivityEvent[]           @relation("ActivityEventActor")
+  triggeredActivityEvents        ActivityEvent[]           @relation("ActivityEventTriggeredBy")
   apiTokens                      ApiToken[]
   campaigns                      Campaign[]
   webPushSubscriptions           WebPushSubscription[]
@@ -2585,12 +2586,38 @@ model ActivityEvent {
   contactId      String?
   conversationId String?
 
+  // ── Dimensões normalizadas para rollups e agregações ─────────────
+  /// Funil vigente no momento do evento (snapshot).
+  pipelineId    String?
+  /// Etapa de origem em transições de funil.
+  fromStageId   String?
+  /// Etapa de destino em transições de funil / criação do deal.
+  toStageId     String?
+  /// Folha de tabulação aplicada no encerramento.
+  tabulationId  String?
+  /// Departamento vigente no momento do evento.
+  departmentId  String?
+  /// Canal da conversa/mensagem no momento do evento.
+  channel       String?
+  /// Origem do contato no momento do evento (para eventos de deal).
+  source        String?
+
+  /// Chave de idempotência para eventos projetados pela outbox.
+  /// NULL para eventos fire-and-forget (sem garantia de unicidade).
+  idempotencyKey String?
+
   // ── Ator (quem fez) ──────────────────────────────────────────────
-  actorType     ActorType
-  actorUserId   String?
-  actorLabel    String?
-  actorSublabel String?
-  actorRef      String?
+  actorType         ActorType
+  actorUserId       String?
+  actorLabel        String?
+  actorSublabel     String?
+  actorRef          String?
+  /// Usuário que disparou uma ação automatizada. Distinto de actorUserId:
+  /// actorUserId é quem executou a ação; triggeredByUserId é o humano que
+  /// deu origem à execução (ex.: botão "Executar automação" no painel).
+  /// Útil para rollups de produtividade que devem atribuir ganhos ao
+  /// consultor mesmo quando a automação moveu o card.
+  triggeredByUserId String?
 
   // ── Conteudo (old/new + meta livre) ──────────────────────────────
   /// Identificador do campo alterado (ex.: "stage", "status", "owner",
@@ -2602,9 +2629,16 @@ model ActivityEvent {
   /// auxiliares, payload do step de automacao, etc.).
   meta     Json    @default("{}")
 
-  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  actorUser    User?         @relation("ActivityEventActor", fields: [actorUserId], references: [id])
-  deal         Deal?         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  /// Indica que "source" foi reconstruído pelo backfill a partir do
+  /// contact.source ATUAL, não do valor vigente no momento do evento.
+  /// Eventos novos têm false (snapshot real). Constante de corte
+  /// documentada em src/scripts/backfill-activity-dimensions.ts.
+  sourceIsReconstructed Boolean @default(false)
+
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorUser         User?         @relation("ActivityEventActor", fields: [actorUserId], references: [id])
+  triggeredByUser   User?         @relation("ActivityEventTriggeredBy", fields: [triggeredByUserId], references: [id])
+  deal              Deal?         @relation(fields: [dealId], references: [id], onDelete: Cascade)
   contact      Contact?      @relation(fields: [contactId], references: [id], onDelete: Cascade)
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
@@ -2615,6 +2649,7 @@ model ActivityEvent {
   // ~1,8 GB de disco. As FKs por dealId/contactId/conversationId/actorUserId
   // (índices simples, criados por SQL, milhões de scans) cobrem os lookups de
   // timeline; a ordenação por occurredAt cai no sort.
+  @@index([organizationId, occurredAt], map: "activity_events_org_occurred_at_cursor_idx")
   @@index([organizationId, occurredAt(sort: Desc)])
   @@index([organizationId, conversationId, occurredAt(sort: Desc)])
   @@index([organizationId, type, occurredAt(sort: Desc)])
@@ -2625,7 +2660,51 @@ model ActivityEvent {
   @@index([conversationId], map: "activity_events_conversationId_idx")
   @@index([dealId], map: "activity_events_dealId_idx")
   @@index([actorUserId], map: "activity_events_actorUserId_idx")
+  @@index([triggeredByUserId], map: "activity_events_triggeredByUserId_idx")
+  @@unique([organizationId, idempotencyKey], map: "activity_events_org_idempotency_idx")
   @@map("activity_events")
+}
+
+/// Checkpoint de scripts operacionais de backfill (fora do ciclo de
+/// migrations). Permite retomada por organização sem transação longa.
+model BackfillCheckpoint {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  entityName     String
+  lastId         String?
+  lastOccurredAt DateTime?
+  updatedAt      DateTime @updatedAt
+
+  @@map("backfill_checkpoints")
+}
+
+/// Outbox transacional para o Activity Log. Garante que eventos que
+/// alimentam rollups sejam gravados na mesma transacao da mutacao de
+/// negocio; um worker poll consome e escreve em activity_events.
+model ActivityOutbox {
+  id String @id @default(cuid())
+  organizationId String
+  createdAt DateTime @default(now())
+  /// Quando o item pode ser pego pelo worker (respeita backoff de retry).
+  scheduledFor DateTime @default(now())
+  /// Preenchido quando o evento foi projetado com sucesso em activity_events.
+  processedAt DateTime?
+  /// Tentativas ja realizadas (0 = nunca processado).
+  attempts Int @default(0)
+  /// Limite de tentativas antes de dead letter (default 5).
+  maxAttempts Int @default(5)
+  /// Preenchido quando esgotou as tentativas.
+  deadLetterAt DateTime?
+  /// Ultima mensagem de erro; deadLetter tambem a guarda.
+  lastError String?
+  /// Chave de idempotencia por evento. Obrigatoria para evitar duplicados
+  /// quando a transacao e reprocessada ou o worker retoma apos crash.
+  idempotencyKey String
+  /// Payload serializado do evento (mesma forma de LogEventInput + dimensoes).
+  payload Json
+
+  @@unique([organizationId, idempotencyKey], map: "activity_outbox_org_idempotency_idx")
+  @@map("activity_outbox")
 }
 
 /// HUMAN       : operador humano logado (sessao web ou app)
@@ -6152,6 +6231,8 @@ model TeamChatMessage {
   kind           String       @default("TEXT")
   content        String
   pinned         Boolean      @default(false)
+  /// positive | negative | warning
+  feedbackType   String?
   /// [{ emoji, userIds: string[] }]
   reactions      Json         @default("[]")
   /// [{ url, name, mimeType, size, kind: image|audio|video|file|sticker, emoji? }]

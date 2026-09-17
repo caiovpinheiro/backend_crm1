@@ -11,6 +11,7 @@ const Body = z.object({
   roomIds: z.array(z.string().min(1)).max(20).optional().default([]),
   personIds: z.array(z.string().min(1)).max(20).optional().default([]),
   content: z.string().max(4000).optional().default(""),
+  feedbackType: z.enum(["positive", "negative", "warning"]).optional().nullable(),
 });
 
 export async function POST(request: Request) {
