@@ -212,7 +212,7 @@ export class MetaGraphError extends Error {
       this.message.replace(/\s*\(code [^)]+\)\s*$/i, "");
     // Prefixa o motivo PT-BR catalogado (quando o code e conhecido) para
     // que o operador entenda a causa sem consultar a doc da Meta.
-    const ptReason = metaErrorReason(this.code);
+    const ptReason = metaErrorReason(this.code, this.subcode);
     const human = ptReason ? `${ptReason} (Meta: ${rawHuman})` : rawHuman;
     const meta: string[] = [];
     if (this.code != null) {
@@ -225,6 +225,18 @@ export class MetaGraphError extends Error {
 
 export function isMetaGraphError(err: unknown): err is MetaGraphError {
   return err instanceof MetaGraphError;
+}
+
+/**
+ * Status HTTP que o CRM devolve ao browser para um erro da Graph.
+ *
+ * 4xx da Meta é rejeição de negócio (WABA inelegível, nome duplicado,
+ * validação). Devolver 502 faz o EasyPanel/Traefik trocar o JSON por
+ * HTML "Service is not reachable" sem CORS — o toast vira "Failed to fetch".
+ */
+export function httpStatusForMetaGraphError(err: MetaGraphError): number {
+  if (err.httpStatus >= 400 && err.httpStatus < 500) return 422;
+  return 502;
 }
 
 /** CTA do Flow: máx. 20 caracteres, sem emoji (exigência da Cloud API). */
