@@ -68,6 +68,7 @@ import {
   normalizeAutoClosePolicy,
   renderTemplate,
 } from "@/lib/ai-agents/piloting";
+import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 
@@ -163,6 +164,9 @@ export async function runAcademicInterceptPipeline(
               isFirstAccessIntent(args.userMessage) ||
               isFirstAccessStuckIntent(args.userMessage)
             ) {
+              if (await conversationAssignedToHuman(args.conversationId)) {
+                return null;
+              }
               const orgId = getOrgIdOrNull();
               let aiId: string | null = null;
               if (conversation?.assignedToId) {
@@ -188,11 +192,27 @@ export async function runAcademicInterceptPipeline(
                 const alreadyPack = messageLooksLikeFirstAccessPack(
                   lastBotFa?.content,
                 );
+                let packText = buildFirstAccessPackMessage();
+                if (!faChoice && !isFirstAccessStuckIntent(args.userMessage) && !alreadyPack) {
+                  const agentCfg = await prisma.aIAgentConfig.findUnique({
+                    where: { userId: aiId },
+                    select: { inboxPolicy: true, verticalPack: true },
+                  });
+                  const custom = normalizeInboxPolicy(
+                    agentCfg?.inboxPolicy,
+                    agentCfg?.verticalPack,
+                  ).firstAccessPackMessage;
+                  if (custom?.trim()) {
+                    packText = renderTemplate(custom, {
+                      contactName: conversation?.contact?.name ?? null,
+                    });
+                  }
+                }
                 const text = faChoice
                   ? buildFirstAccessChoiceMessage(faChoice)
                   : isFirstAccessStuckIntent(args.userMessage) || alreadyPack
                     ? buildFirstAccessStuckMessage()
-                    : buildFirstAccessPackMessage();
+                    : packText;
                 await prisma.distributionPending
                   .updateMany({
                     where: {
@@ -268,6 +288,9 @@ export async function runAcademicInterceptPipeline(
     const __hit = await (async (): Promise<VerticalInterceptHit | null> => {
           // Blackboard / ver disciplinas — caminho do Portal, sem fila.
           if (isAvaOrDisciplinesIntent(args.userMessage)) {
+            if (await conversationAssignedToHuman(args.conversationId)) {
+              return null;
+            }
             const orgIdAva = getOrgIdOrNull();
             let avaAi: string | null = null;
             if (conversation?.assignedToId) {
@@ -355,6 +378,9 @@ export async function runAcademicInterceptPipeline(
             isBareGreetingMessage(args.userMessage) ||
             /^\?+$/.test((args.userMessage ?? "").trim())
           ) {
+            if (await conversationAssignedToHuman(args.conversationId)) {
+              return null;
+            }
             const orgIdG = getOrgIdOrNull();
             let greetAi: string | null = null;
             if (conversation?.assignedToId) {
