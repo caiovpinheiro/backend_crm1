@@ -8,6 +8,7 @@ import {
   listKeepCategories,
   serializeKeepCategory,
 } from "@/services/keeps/keeps";
+import { parseKeepCategoryColor } from "@/services/keeps/colors";
 
 export const dynamic = "force-dynamic";
 
@@ -45,10 +46,15 @@ export async function POST(request: Request) {
   }
 
   try {
+    const color = parseKeepCategoryColor(body.color);
+    if (!color) {
+      return NextResponse.json({ message: "Cor da categoria obrigatória." }, { status: 400 });
+    }
     const cat = await createKeepCategory({
       orgId: r.session.user.organizationId,
       userId: r.session.user.id,
       name: typeof body.name === "string" ? body.name : "",
+      color,
     });
     return NextResponse.json({ category: serializeKeepCategory(cat) }, { status: 201 });
   } catch (err) {

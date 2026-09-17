@@ -6375,6 +6375,8 @@ model KeepCategory {
   userId         String
   user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   name           String
+  /// Paleta exclusiva de categorias (`ember`…`graphite`). Obrigatória.
+  color          String
   /// Ordem das seções no modo Categorias. Menor = mais acima.
   position       Float      @default(0)
   createdAt      DateTime   @default(now())

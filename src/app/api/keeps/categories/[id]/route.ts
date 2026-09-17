@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { parseKeepCategoryColor } from "@/services/keeps/colors";
 import { keepFail } from "@/services/keeps/keep-http";
 import {
   deleteKeepCategory,
@@ -31,11 +32,17 @@ export async function PATCH(
   }
 
   try {
+    const color =
+      "color" in body ? parseKeepCategoryColor(body.color) : undefined;
+    if ("color" in body && !color) {
+      return NextResponse.json({ message: "Cor da categoria inválida." }, { status: 400 });
+    }
     const cat = await updateKeepCategory({
       userId: r.session.user.id,
       id,
       name: typeof body.name === "string" ? body.name : undefined,
       position: typeof body.position === "number" ? body.position : undefined,
+      color,
     });
     return NextResponse.json({ category: serializeKeepCategory(cat) });
   } catch (err) {

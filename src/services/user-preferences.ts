@@ -50,7 +50,10 @@ export function computeAvailableKeys(
   return new Set(
     SIDEBAR_CATALOG.filter((i) => {
       const permOk =
-        !i.requiredPermission || (hasPermission?.(i.requiredPermission) ?? false);
+        !i.requiredPermission ||
+        (hasPermission?.(i.requiredPermission) ?? false) ||
+        (i.requiredPermission === "nav:team-chat" &&
+          (hasPermission?.("team_chat:view") ?? false));
       const widgetOk =
         !i.requiredWidgetSlug || (hasWidget?.(i.requiredWidgetSlug) ?? false);
       return permOk && widgetOk;
@@ -204,7 +207,8 @@ async function readUserSidebarOverlay(
  * Aplica o overlay pessoal por cima do teto do papel:
  *  - ordem do usuario primeiro, depois itens novos do papel;
  *  - usuario pode ocultar (exceto locked);
- *  - usuario NAO pode reexibir o que o papel escondeu.
+ *  - se o papel omitiu/desligou um item que a permissão ainda libera,
+ *    o overlay pessoal pode religar (ex.: Bwipo Chat em menu antigo).
  */
 export function applyUserSidebarOverlay(
   rolePrefs: SidebarPreferences,
@@ -214,7 +218,6 @@ export function applyUserSidebarOverlay(
   const overlayMap = new Map<string, SidebarItemPreference>();
   for (const it of overlay) {
     if (!it || typeof it.key !== "string") continue;
-    if (!roleMap.has(it.key)) continue;
     if (overlayMap.has(it.key)) continue;
     overlayMap.set(it.key, it);
   }
@@ -231,10 +234,12 @@ export function applyUserSidebarOverlay(
     items: orderedKeys.map((key, idx) => {
       const locked = SIDEBAR_LOCKED_KEYS.has(key);
       const roleEnabled = roleMap.get(key)?.enabled ?? true;
-      const userEnabled = overlayMap.get(key)?.enabled ?? true;
+      const userEnabled = overlayMap.has(key)
+        ? Boolean(overlayMap.get(key)?.enabled)
+        : roleEnabled;
       return {
         key,
-        enabled: locked ? true : roleEnabled && userEnabled,
+        enabled: locked ? true : userEnabled,
         order: idx + 1,
       };
     }),
