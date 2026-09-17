@@ -514,12 +514,16 @@ export async function agentHasEverRepliedInConversation(
  */
 export async function hasAgentGreetedInCurrentAssignment(
   conversationId: string,
+  opts?: { ignorePriorBotOutbound?: boolean },
 ): Promise<boolean> {
   const row = await prisma.conversation.findUnique({
     where: { id: conversationId },
     select: { aiGreetedAt: true },
   });
   if (row?.aiGreetedAt != null) return true;
+  // Handoff IA→IA: o aviso do orquestrador já é outbound bot. Se contar
+  // qualquer bot da thread, a abertura do destino nunca sai.
+  if (opts?.ignorePriorBotOutbound) return false;
 
   // Fallback: qualquer outbound do bot nesta conversa conta como
   // já saudou — evita reenviar openingMessage após handoff.
@@ -589,6 +593,9 @@ export async function triggerAgentOpeningForContact(args: {
   contactId: string;
   agentUserId: string;
   channel?: "meta" | "baileys" | null;
+  /// Após transferência entre IAs: não trate o aviso do orquestrador
+  /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
+  ignorePriorBotOutbound?: boolean;
 }): Promise<TriggerOpeningResult> {
   // Usa a conversa aberta mais recente do contato. Na prática, o CRM
   // mantém 1 conversa por contato para canais (Meta/Baileys), então
@@ -644,7 +651,9 @@ export async function triggerAgentOpeningForContact(args: {
   if (!cfg.openingMessage?.trim()) {
     return { status: "skipped", reason: "no_opening_message" };
   }
-  if (await hasAgentGreetedInCurrentAssignment(conversation.id)) {
+  if (await hasAgentGreetedInCurrentAssignment(conversation.id, {
+    ignorePriorBotOutbound: Boolean(args.ignorePriorBotOutbound),
+  })) {
     return { status: "skipped", reason: "already_greeted" };
   }
 

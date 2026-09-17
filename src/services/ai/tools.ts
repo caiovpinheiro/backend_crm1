@@ -32,6 +32,7 @@ import {
   emptyToolPolicy,
   listAllows,
   listBlocks,
+  normalizeInboxPolicy,
   toolPolicyFor,
   type InboxPolicy,
   type ToolConfigMap,
@@ -1280,8 +1281,9 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
  * (`assignee_changed`), e transferência silenciosa é exatamente o que não
  * pode acontecer. Por isso `noticeMessage` é obrigatório.
  *
- * Não dispara a saudação do destino: o especialista assume e responde a
- * próxima mensagem do aluno, sem correr com o aviso que acabou de sair.
+ * Se o destino tem `inboxPolicy.speakOnAiTransfer`, dispara a mensagem
+ * de abertura da Pilotagem dele na hora. Sem o interruptor, o especialista
+ * só responde no próximo inbound.
  */
 function transferToAiAgentTool(ctx: RunContext) {
   return tool({
@@ -1329,7 +1331,11 @@ function transferToAiAgentTool(ctx: RunContext) {
             name: { equals: wanted, mode: "insensitive" },
             aiAgentConfig: { active: true },
           },
-          select: { id: true, name: true },
+          select: {
+            id: true,
+            name: true,
+            aiAgentConfig: { select: { inboxPolicy: true } },
+          },
         });
         if (!target) {
           const others = await prisma.user.findMany({
@@ -1414,6 +1420,41 @@ function transferToAiAgentTool(ctx: RunContext) {
           }).catch(() => {});
         }
 
+        const destPolicy = normalizeInboxPolicy(target.aiAgentConfig?.inboxPolicy);
+        let openingStatus: string | null = null;
+        if (destPolicy.speakOnAiTransfer && ctx.contactId) {
+          try {
+            const { triggerAgentOpeningForContact } = await import(
+              "@/services/ai/piloting-actions"
+            );
+            const conv = ctx.conversationId
+              ? await prisma.conversation.findUnique({
+                  where: { id: ctx.conversationId },
+                  select: {
+                    channelRef: { select: { provider: true } },
+                  },
+                })
+              : null;
+            const opening = await triggerAgentOpeningForContact({
+              contactId: ctx.contactId,
+              agentUserId: target.id,
+              channel:
+                conv?.channelRef?.provider === "BAILEYS_MD" ? "baileys" : "meta",
+              ignorePriorBotOutbound: true,
+            });
+            openingStatus = opening.status;
+            if (opening.status === "skipped") {
+              openingStatus = `skipped:${opening.reason}`;
+            }
+          } catch (err) {
+            openingStatus = "failed";
+            console.warn(
+              "[ai] speakOnAiTransfer opening failed",
+              err instanceof Error ? err.message : err,
+            );
+          }
+        }
+
         return ok({
           transferred: true,
           // `assigned` é o que a auditoria de efeito olha para liberar a
@@ -1422,7 +1463,10 @@ function transferToAiAgentTool(ctx: RunContext) {
           agentName: target.name,
           tagApplied,
           noticeStatus: notice.status,
-          hint: "Transferência concluída. Não escreva mais nada neste turno.",
+          openingStatus,
+          hint: destPolicy.speakOnAiTransfer
+            ? "Transferência concluída. Não escreva mais nada neste turno — o destino fala agora."
+            : "Transferência concluída. Não escreva mais nada neste turno.",
         });
       } catch (err) {
         return fail(

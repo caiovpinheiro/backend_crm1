@@ -573,6 +573,11 @@ export type InboxPolicy = {
   /// `null` / vazio = texto de fábrica. O operador pilota a cópia no CRM.
   firstAccessPackMessage: string | null;
 
+  /// Depois de outro agente IA transferir (aviso + troca de dono), este
+  /// destino envia na hora a mensagem de abertura da Pilotagem. Desligado
+  /// (default) = só responde no próximo inbound do aluno.
+  speakOnAiTransfer: boolean;
+
   /// Em quais conversas o agente pode entrar (funil, etapa, tag).
   scope: AttendanceScope;
 
@@ -661,6 +666,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     inauguralUrl: null,
     inauguralDates: [],
     firstAccessPackMessage: null,
+    speakOnAiTransfer: false,
     scope: defaultAttendanceScope(),
     handoffMessage: null,
     retentionHandoffMessage: null,
@@ -765,6 +771,7 @@ export function normalizeInboxPolicy(
       /^\d{4}-\d{2}-\d{2}$/.test(d),
     ),
     firstAccessPackMessage: nullableText(r.firstAccessPackMessage),
+    speakOnAiTransfer: boolOr(r.speakOnAiTransfer, base.speakOnAiTransfer),
     scope: normalizeAttendanceScope(r.scope),
     handoffMessage: nullableText(r.handoffMessage),
     retentionHandoffMessage: nullableText(r.retentionHandoffMessage),
