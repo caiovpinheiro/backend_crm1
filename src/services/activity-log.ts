@@ -80,6 +80,12 @@ export type LogEventInput = {
   /// Org explícita — use quando o caller está fora de `withOrgContext`
   /// ou o ALS pode já ter sido encerrado (ex.: `void logEvent` após delete).
   organizationId?: string | null;
+
+  /// Chave de idempotência (outbox → activity_events). Ausente no fire-and-forget.
+  idempotencyKey?: string | null;
+
+  /// Override direto do enum quando o payload vem da outbox (sem `actor`).
+  actorType?: ActorType;
 };
 
 /**
@@ -132,6 +138,16 @@ function resolveActor(input: LogEventInput): {
     };
   }
 
+  if (input.actorType) {
+    return {
+      actorType: input.actorType,
+      actorUserId: safeUserId,
+      actorLabel: null,
+      actorSublabel: null,
+      actorRef: null,
+    };
+  }
+
   if (safeUserId) {
     return {
       actorType: "HUMAN" as ActorType,
@@ -172,60 +188,76 @@ export function withAutomationOriginMeta(
   return { ...base, automationOrigin: origin } as Prisma.InputJsonValue;
 }
 
+type ActivityEventWriter = {
+  activityEvent: { create: (typeof prisma)["activityEvent"]["create"] };
+};
+
+/// Grava o ActivityEvent (e o espelho no chat) no cliente/`tx` informado.
+/// A outbox chama isto ao projetar; `logEvent` envolve com try/catch.
+export async function runLogEvent(
+  tx: ActivityEventWriter,
+  input: LogEventInput,
+): Promise<void> {
+  if (shouldSkipActivityLog()) return;
+  const actor = resolveActor(input);
+  const metaJson = withAutomationOriginMeta(input.meta);
+  const orgId =
+    input.organizationId ?? getRequestContext()?.organizationId ?? null;
+  if (!orgId) {
+    throw new Error(
+      "[withOrgFromCtx] RequestContext sem organizationId. " +
+        "Envolva o handler em withOrgContext ou passe organizationId.",
+    );
+  }
+
+  await tx.activityEvent.create({
+    data: withOrg(
+      {
+        type: input.type,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        entityLabel: input.entityLabel ?? null,
+        dealId: input.dealId ?? null,
+        contactId: input.contactId ?? null,
+        conversationId: input.conversationId ?? null,
+        actorType: actor.actorType,
+        actorUserId: actor.actorUserId,
+        actorLabel: actor.actorLabel,
+        actorSublabel: actor.actorSublabel,
+        actorRef: actor.actorRef,
+        field: input.field ?? null,
+        oldValue: input.oldValue ?? null,
+        newValue: input.newValue ?? null,
+        meta: metaJson,
+        ...(input.idempotencyKey
+          ? { idempotencyKey: input.idempotencyKey }
+          : {}),
+      },
+      orgId,
+    ),
+  });
+  await mirrorConversationChatEvent({
+    type: input.type,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    conversationId: input.conversationId,
+    oldValue: input.oldValue,
+    newValue: input.newValue,
+    meta: input.meta,
+    actor: {
+      type: actor.actorType,
+      label: actor.actorLabel,
+    },
+    actorUserId: actor.actorUserId,
+  });
+}
+
 /// Helper principal. Fire-and-forget (retorna Promise mas catch interno
 /// evita propagar falhas para o caller). Use `await` se quiser garantir
 /// ordem com outras escritas — em geral, deixe sem await.
 export async function logEvent(input: LogEventInput): Promise<void> {
-  if (shouldSkipActivityLog()) return;
   try {
-    const actor = resolveActor(input);
-    const metaJson = withAutomationOriginMeta(input.meta);
-    const orgId =
-      input.organizationId ?? getRequestContext()?.organizationId ?? null;
-    if (!orgId) {
-      throw new Error(
-        "[withOrgFromCtx] RequestContext sem organizationId. " +
-          "Envolva o handler em withOrgContext ou passe organizationId.",
-      );
-    }
-
-    await prisma.activityEvent.create({
-      data: withOrg(
-        {
-          type: input.type,
-          entityType: input.entityType,
-          entityId: input.entityId,
-          entityLabel: input.entityLabel ?? null,
-          dealId: input.dealId ?? null,
-          contactId: input.contactId ?? null,
-          conversationId: input.conversationId ?? null,
-          actorType: actor.actorType,
-          actorUserId: actor.actorUserId,
-          actorLabel: actor.actorLabel,
-          actorSublabel: actor.actorSublabel,
-          actorRef: actor.actorRef,
-          field: input.field ?? null,
-          oldValue: input.oldValue ?? null,
-          newValue: input.newValue ?? null,
-          meta: metaJson,
-        },
-        orgId,
-      ),
-    });
-    await mirrorConversationChatEvent({
-      type: input.type,
-      entityType: input.entityType,
-      entityId: input.entityId,
-      conversationId: input.conversationId,
-      oldValue: input.oldValue,
-      newValue: input.newValue,
-      meta: input.meta,
-      actor: {
-        type: actor.actorType,
-        label: actor.actorLabel,
-      },
-      actorUserId: actor.actorUserId,
-    });
+    await runLogEvent(prisma, input);
   } catch (err) {
     // ATENCAO: logEvent jamais deve derrubar a request principal.
     // Falhas de FK / org context ausente / DB indisponivel sao
