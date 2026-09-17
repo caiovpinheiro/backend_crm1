@@ -377,6 +377,13 @@ export async function runAcademicInterceptPipeline(
               greetAi = fallbackAi?.id ?? null;
             }
             if (greetAi) {
+              // Saudação no meio da conversa não é primeiro contato: o
+              // texto de abertura seria barrado como duplicata e o aluno
+              // ficaria sem resposta. O resgate para a IA continua; quem
+              // responde é o modelo, pelas regras do agente.
+              const alreadyGreeted = await hasAgentGreetedInCurrentAssignment(
+                args.conversationId,
+              );
               await prisma.distributionPending
                 .updateMany({
                   where: {
@@ -402,6 +409,16 @@ export async function runAcademicInterceptPipeline(
                   });
                 })
                 .catch(() => null);
+              if (conversation) {
+                conversation = { ...conversation, assignedToId: greetAi };
+              }
+              if (alreadyGreeted) {
+                logAi("greeting_self_serve_to_llm", {
+                  conversationId: args.conversationId,
+                  contactId: args.contactId,
+                });
+                return null;
+              }
               await sendAgentMessage({
                 conversationId: args.conversationId,
                 contactId: args.contactId,
@@ -412,6 +429,7 @@ export async function runAcademicInterceptPipeline(
                 kind: "text",
                 bypassAssigneeCheck: true,
               }).catch(() => null);
+              await markAgentGreetedNow(args.conversationId);
               logAi("greeting_self_serve", {
                 conversationId: args.conversationId,
                 contactId: args.contactId,
