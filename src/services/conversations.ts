@@ -11,7 +11,7 @@ import {
 } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
-import { allocateOrgNumber, prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
@@ -2787,6 +2787,21 @@ async function restoreDealAfterConversationResolved(args: {
   } catch (e) {
     console.warn("[conversations] restoreDeal after close failed", e);
   }
+}
+
+export async function updateConversationStatusInTx(
+  _tx: ScopedTx,
+  id: string,
+  status: ConversationStatus,
+  extra?: {
+    tabulationId?: string | null;
+    clearAssignedTo?: boolean;
+    clearDepartment?: boolean;
+    followUp?: boolean;
+  },
+) {
+  const row = await updateConversationStatusInDb(id, status, extra);
+  return { row };
 }
 
 export async function updateConversationStatusInDb(

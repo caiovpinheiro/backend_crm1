@@ -13,6 +13,7 @@ import {
   resolveReopenDepartmentId,
   updateConversationStatusInDb,
   updateConversationStatusInTx,
+  withConversationNumberRetry,
 } from "@/services/conversations";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";

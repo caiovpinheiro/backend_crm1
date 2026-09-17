@@ -175,6 +175,31 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  const activityOutboxProcessed = new Counter({
+    name: "crm_activity_outbox_processed_total",
+    help: "Itens da activity_outbox projetados, em retry ou dead letter.",
+    labelNames: ["organization", "status"] as const,
+    registers: [registry],
+  });
+  const activityOutboxDepth = new Gauge({
+    name: "crm_activity_outbox_depth",
+    help: "Itens pendentes na activity_outbox por organização.",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+  const activityOutboxDead = new Gauge({
+    name: "crm_activity_outbox_dead",
+    help: "Itens em dead letter na activity_outbox por organização.",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+  const activityOutboxAge = new Gauge({
+    name: "crm_activity_outbox_oldest_seconds",
+    help: "Idade em segundos do item pendente mais antigo da outbox.",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+
   return {
     http: { requests: httpRequests, duration: httpDuration },
     sse: { subscribers: sseSubscribers, messages: sseMessages },
@@ -186,6 +211,12 @@ function buildMetrics(registry: Registry): AppMetrics {
     errors,
     cacheHits,
     cacheMisses,
+    activityOutbox: {
+      processed: activityOutboxProcessed,
+      depth: activityOutboxDepth,
+      dead: activityOutboxDead,
+      age: activityOutboxAge,
+    },
   };
 }
 
@@ -221,6 +252,12 @@ export type AppMetrics = {
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
+  activityOutbox: {
+    processed: Counter<"organization" | "status">;
+    depth: Gauge<"organization">;
+    dead: Gauge<"organization">;
+    age: Gauge<"organization">;
+  };
 };
 
 function ensureRegistry(): { registry: Registry; metrics: AppMetrics } {
