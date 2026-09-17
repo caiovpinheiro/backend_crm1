@@ -41,6 +41,38 @@ export async function findUserIdByEmailCI(email: string): Promise<string | null>
 }
 
 /**
+ * SheetJS `raw: false` devolve o texto de exibição (`w`). Relatórios com
+ * CPF/RGM numéricos vêm com `w` vazio e o valor só em `v` — a coluna inteira
+ * some no import. Usa `w` quando houver; senão stringify de `v`.
+ */
+function spreadsheetCellToString(cell: { w?: string; v?: unknown } | undefined): string {
+  if (!cell) return "";
+  const formatted = cell.w != null ? String(cell.w).trim() : "";
+  if (formatted) return formatted;
+  if (cell.v == null || cell.v === "") return "";
+  return String(cell.v).trim();
+}
+
+function sheetToRows(
+  XLSX: typeof import("xlsx"),
+  ws: import("xlsx").WorkSheet,
+): string[][] {
+  const ref = ws["!ref"];
+  if (!ref) return [];
+  const range = XLSX.utils.decode_range(ref);
+  const out: string[][] = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const arr: string[] = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      arr.push(spreadsheetCellToString(ws[addr]));
+    }
+    out.push(arr);
+  }
+  return out;
+}
+
+/**
  * Lê o conteúdo de um arquivo enviado via multipart e devolve headers + rows.
  * Suporta CSV (qualquer delimitador) e XLSX/XLS/ODS via SheetJS.
  *
@@ -78,25 +110,25 @@ export async function readTableFromBuffer(
     const ws = wb.Sheets[firstSheetName];
     if (!ws) return { headers: [], rows: [] };
 
-    const data = XLSX.utils.sheet_to_json<unknown[]>(ws, {
-      header: 1,
-      raw: false,
-      defval: "",
-    });
+    // `raw: false` usa o texto formatado (`w`). Relatórios acadêmicos gravam
+    // CPF/RGM como número com `w: ""` — o SheetJS devolve vazio e o CRM
+    // "zera" a coluna. Prefira `w` quando existir; senão use `v`.
+    const data = sheetToRows(XLSX, ws);
     if (data.length === 0) return { headers: [], rows: [] };
 
-    const headerRow = (data[0] ?? []) as unknown[];
+    const headerRow = data[0] ?? [];
     const headers = headerRow.map((h) =>
-      String(h ?? "").trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_"),
+      h.trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_"),
     );
 
     const rows: Record<string, string>[] = [];
     for (let r = 1; r < data.length; r++) {
-      const arr = (data[r] ?? []) as unknown[];
-      if (arr.every((v) => v === null || v === undefined || String(v).trim() === "")) continue;
+      const arr = data[r] ?? [];
+      if (arr.every((v) => v.trim() === "")) continue;
       const obj: Record<string, string> = {};
       for (let c = 0; c < headers.length; c++) {
-        obj[headers[c]] = String(arr[c] ?? "").trim();
+        if (!headers[c]) continue;
+        obj[headers[c]] = arr[c] ?? "";
       }
       rows.push(obj);
     }
