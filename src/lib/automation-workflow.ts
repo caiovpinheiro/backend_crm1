@@ -72,6 +72,7 @@ export const ACTION_STEP_TYPES = [
   "remove_tag",
   "update_field",
   "create_activity",
+  "create_conversation_note",
   "send_whatsapp_message",
   "send_whatsapp_template",
   "send_whatsapp_media",
@@ -301,6 +302,7 @@ export function stepTypeLabel(t: string): string {
     remove_tag: "Remover tag",
     update_field: "Atualizar campo",
     create_activity: "Criar atividade",
+    create_conversation_note: "Nota na conversa",
     send_whatsapp_message: "Mensagem WhatsApp",
     send_whatsapp_template: "Template WhatsApp",
     send_whatsapp_media: "Mídia WhatsApp",
@@ -497,6 +499,10 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       return c.field ? `${String(c.field)} = ${String(c.value ?? "")}` : "Campo / valor";
     case "create_activity":
       return c.title ? String(c.title) : "Nova atividade";
+    case "create_conversation_note":
+      return c.content
+        ? `${String(c.content).slice(0, 40)}${String(c.content).length > 40 ? "…" : ""}`
+        : "Nota interna";
     case "send_whatsapp_message":
       // sendAs: "bot" (padrão) | "assignee" (como o consultor responsável)
       return c.content
@@ -683,6 +689,8 @@ export function isStepIncomplete(
       return !str(c.to) || !str(c.subject) || !str(c.body);
     case "webhook":
       return !str(c.url);
+    case "create_conversation_note":
+      return !str(c.content);
     case "question":
       return !(str(c.message) || str(c.question));
     case "goto":
@@ -721,6 +729,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { field: "", value: "" };
     case "create_activity":
       return { type: "TASK", title: "", description: "" };
+    case "create_conversation_note":
+      return { content: "" };
     case "send_whatsapp_message":
       // sendAs: "bot" | "assignee"
       // - bot (padrão): authorType bot — conversa distribuída permanece em Entrada

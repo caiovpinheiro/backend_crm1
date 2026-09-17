@@ -48,7 +48,7 @@ import {
 } from "@/lib/meta-whatsapp/template-header-media";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
+import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
@@ -67,7 +67,8 @@ import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
 import { getOrgDistributionMode } from "@/services/distribution/mode";
-import { logEvent } from "@/services/activity-log";
+import { logEvent, userIdForFk } from "@/services/activity-log";
+import { createInternalNoteOnConversation } from "@/services/outbound-messaging";
 import { tabulationLogMeta } from "@/services/tabulations";
 import {
   createContext,
@@ -4443,6 +4444,66 @@ async function executeStep(
         pipelineId: stage.pipelineId,
         pipelineName: stage.pipeline?.name ?? "",
       };
+      return {};
+    }
+
+    case "create_conversation_note": {
+      const raw = readString(cfg, "content");
+      if (!raw?.trim()) throw new Error("create_conversation_note: content obrigatório");
+      const vars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const content = (await interpolateMessageVariables(raw, rt, vars)).trim();
+      if (!content) throw new Error("create_conversation_note: content obrigatório");
+
+      let conversationId =
+        rt.conversation?.id ?? readString(rt.data, "conversationId") ?? null;
+      if (!conversationId && rt.contactId) {
+        const active = await prisma.conversation.findFirst({
+          where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
+          orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          select: { id: true },
+        });
+        conversationId = active?.id ?? null;
+        if (!conversationId) {
+          const any = await prisma.conversation.findFirst({
+            where: { contactId: rt.contactId },
+            orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+            select: { id: true },
+          });
+          conversationId = any?.id ?? null;
+        }
+      }
+      if (!conversationId) {
+        log.warn("create_conversation_note: sem conversa — pulando");
+        return { note: "sem conversa" };
+      }
+
+      const orgId = getOrgIdOrNull();
+      const userId =
+        userIdForFk(getRequestContext()?.userId) ??
+        (
+          await prisma.user.findFirst({
+            where: orgId ? { organizationId: orgId } : {},
+            orderBy: { createdAt: "asc" },
+            select: { id: true },
+          })
+        )?.id;
+      if (!userId) throw new Error("create_conversation_note: nenhum usuário disponível");
+
+      const result = await createInternalNoteOnConversation({
+        conversationId,
+        dealId: rt.dealId ?? null,
+        content,
+        actor: {
+          id: userId,
+          name: rt.automationName ?? "Automação",
+          organizationId: orgId,
+        },
+      });
+      if (!result.ok) {
+        throw new Error(`create_conversation_note: ${result.message}`);
+      }
       return {};
     }
 
