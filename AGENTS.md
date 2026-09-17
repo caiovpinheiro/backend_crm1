@@ -111,7 +111,7 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 
 ## Decisões técnicas
 
-- 2026-09-17 — Cursor Grok 4.6 — **Bwipo Chat na sidebar**: o item `team-chat` entra em `availableKeys` com `team_chat:view` (não só `nav:team-chat`). Overlay pessoal pode ligar o ícone mesmo se o menu do papel for antigo e não listar o chat.
+- 2026-09-17 — Cursor Grok 4.6 — **Pacote de primeiro acesso no CRM**: `inboxPolicy.firstAccessPackMessage` (aba Inbox). O intercepto envia esse texto literal; vazio = pack de fábrica. Interceptos de primeiro acesso / disciplinas / oi não reassumem conversa já com humano.
 - 2026-09-17 — Cursor Grok 4.6 — **Capa de produto externa no encaminhar**: `POST .../attachments` JSON `reuseUrl` continua só storage da org. Se a URL não é storage mas é exatamente `Product.imageUrl` da mesma org (https público), a API baixa, grava em `automation-media` e atualiza o catálogo — depois segue send-by-reference. Não abre reuse para URL arbitrária.
 - 2026-09-17 — Cursor Grok 4.6 — **KeepCategory** (modo Categorias): model `keep_categories` + `KeepNote.categoryId`. CRUD em `/api/keeps/categories`. Cor obrigatória na paleta exclusiva de categoria; notas herdam a cor. Models Keep* entram em `SCOPED_MODELS`.
 - 2026-09-14 — Cursor Grok 4.6 — **KeepNote.color**: paleta nomeada (`coral`…`blossom`), `null` = padrão. `PATCH` aceita `color`; `GET /api/keeps?color=` filtra (repetir o param; `none` = sem cor). Resposta inclui `usedColors` + `hasUncolored` para o Filtrar só mostrar cores em uso.

@@ -569,6 +569,10 @@ export type InboxPolicy = {
   /// `INAUGURAL_LINK_DATES` / default do código.
   inauguralDates: string[];
 
+  /// Pacote de primeiro acesso enviado pelo intercepto (sem LLM).
+  /// `null` / vazio = texto de fábrica. O operador pilota a cópia no CRM.
+  firstAccessPackMessage: string | null;
+
   /// Em quais conversas o agente pode entrar (funil, etapa, tag).
   scope: AttendanceScope;
 
@@ -656,6 +660,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     inauguralEnabled: false,
     inauguralUrl: null,
     inauguralDates: [],
+    firstAccessPackMessage: null,
     scope: defaultAttendanceScope(),
     handoffMessage: null,
     retentionHandoffMessage: null,
@@ -759,6 +764,7 @@ export function normalizeInboxPolicy(
     inauguralDates: strList(r.inauguralDates).filter((d) =>
       /^\d{4}-\d{2}-\d{2}$/.test(d),
     ),
+    firstAccessPackMessage: nullableText(r.firstAccessPackMessage),
     scope: normalizeAttendanceScope(r.scope),
     handoffMessage: nullableText(r.handoffMessage),
     retentionHandoffMessage: nullableText(r.retentionHandoffMessage),
