@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { KeepError, reorderKeepNotes } from "@/services/keeps/keeps";
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { keepFail } from "@/services/keeps/keep-http";
+import { reorderKeepNotes } from "@/services/keeps/keeps";
 
 export const dynamic = "force-dynamic";
 
@@ -60,9 +61,6 @@ export async function PATCH(request: Request) {
     await reorderKeepNotes({ userId: r.session.user.id, items });
     return NextResponse.json({ ok: true });
   } catch (err) {
-    if (err instanceof KeepError) {
-      return NextResponse.json({ message: err.message }, { status: err.status });
-    }
-    throw err;
+    return keepFail(err);
   }
 }

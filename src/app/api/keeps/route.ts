@@ -2,14 +2,14 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { parseKeepColorFilter } from "@/services/keeps/colors";
+import { keepFail } from "@/services/keeps/keep-http";
 import {
   createKeepNote,
-  KeepError,
   listKeepNotes,
   serializeKeepNote,
   type KeepFolder,
 } from "@/services/keeps/keeps";
-import { parseKeepColorFilter } from "@/services/keeps/colors";
 
 export const dynamic = "force-dynamic";
 
@@ -18,22 +18,6 @@ function orgIdOrDeny(orgId: string | null) {
     return NextResponse.json({ message: "Organização obrigatória." }, { status: 403 });
   }
   return null;
-}
-
-function keepFail(err: unknown) {
-  if (err instanceof KeepError) {
-    return NextResponse.json({ message: err.message }, { status: err.status });
-  }
-  const prismaCode =
-    typeof err === "object" && err && "code" in err ? String((err as { code?: string }).code) : "";
-  if (prismaCode === "P2021") {
-    return NextResponse.json(
-      { message: "Tabelas do Bwipo Keeps ainda não existem neste banco. Rode a migration." },
-      { status: 503 },
-    );
-  }
-  const message = err instanceof Error ? err.message : "Erro ao salvar a nota.";
-  return NextResponse.json({ message }, { status: 500 });
 }
 
 export async function GET(request: Request) {

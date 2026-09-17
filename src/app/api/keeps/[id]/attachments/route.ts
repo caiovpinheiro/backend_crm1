@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { buildPublicUrl } from "@/lib/storage/local";
-import { addKeepAttachment, KeepError } from "@/services/keeps/keeps";
+import { keepFail } from "@/services/keeps/keep-http";
+import { addKeepAttachment } from "@/services/keeps/keeps";
 
 export const dynamic = "force-dynamic";
 
@@ -68,9 +69,6 @@ export async function POST(
       { status: 201 },
     );
   } catch (err) {
-    if (err instanceof KeepError) {
-      return NextResponse.json({ message: err.message }, { status: err.status });
-    }
-    throw err;
+    return keepFail(err);
   }
 }

@@ -2,30 +2,14 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { keepFail } from "@/services/keeps/keep-http";
 import {
   createKeepCategory,
-  KeepError,
   listKeepCategories,
   serializeKeepCategory,
 } from "@/services/keeps/keeps";
 
 export const dynamic = "force-dynamic";
-
-function keepFail(err: unknown) {
-  if (err instanceof KeepError) {
-    return NextResponse.json({ message: err.message }, { status: err.status });
-  }
-  const prismaCode =
-    typeof err === "object" && err && "code" in err ? String((err as { code?: string }).code) : "";
-  if (prismaCode === "P2021") {
-    return NextResponse.json(
-      { message: "Tabelas do Bwipo Keeps ainda não existem neste banco. Rode a migration." },
-      { status: 503 },
-    );
-  }
-  const message = err instanceof Error ? err.message : "Erro ao salvar a categoria.";
-  return NextResponse.json({ message }, { status: 500 });
-}
 
 export async function GET() {
   const r = await requireAuth();

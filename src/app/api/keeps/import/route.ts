@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { importGoogleKeepZip } from "@/services/keeps/import-google-keep";
-import { KeepError } from "@/services/keeps/keeps";
+import { keepFail } from "@/services/keeps/keep-http";
 
 export const dynamic = "force-dynamic";
 
@@ -56,9 +56,6 @@ export async function POST(request: Request) {
     });
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
-    if (err instanceof KeepError) {
-      return NextResponse.json({ message: err.message }, { status: err.status });
-    }
-    throw err;
+    return keepFail(err);
   }
 }
