@@ -12,12 +12,16 @@ import {
   getConversationById,
   resolveReopenDepartmentId,
   updateConversationStatusInDb,
-  withConversationNumberRetry,
+  updateConversationStatusInTx,
 } from "@/services/conversations";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { sseBus } from "@/lib/sse-bus";
 import { metrics } from "@/lib/metrics";
 import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
@@ -123,6 +127,7 @@ async function logConversationAssigneeChanged(args: {
   // refetch imediato do inbox perde atribuição/transferência/remoção.
   await logEvent({
     type: "ASSIGNEE_CHANGED",
+      actorType: "HUMAN",
     entityType: "CONVERSATION",
     entityId: args.conversationId,
     entityLabel: args.entityLabel,
@@ -449,6 +454,7 @@ export async function POST(request: Request, context: RouteContext) {
             // para o refetch imediato do chatter enxergar o evento.
             await logEvent({
               type: "CONVERSATION_DEPARTMENT_CHANGED",
+      actorType: "HUMAN",
               entityType: "CONVERSATION",
               entityId: id,
               entityLabel: prevConv.externalId ?? null,
@@ -651,6 +657,7 @@ export async function POST(request: Request, context: RouteContext) {
         // no refetch imediato se a linha ja existir (mesma corrida do close).
         await logEvent({
           type: "CONVERSATION_REOPENED",
+      actorType: "HUMAN",
           entityType: "CONVERSATION",
           entityId: id,
           entityLabel: conv.externalId ?? null,
@@ -673,6 +680,7 @@ export async function POST(request: Request, context: RouteContext) {
         if (!alreadyActive) {
           void logEvent({
             type: "CONVERSATION_CREATED",
+      actorType: "HUMAN",
             entityType: "CONVERSATION",
             entityId: created.id,
             entityLabel: null,
@@ -860,11 +868,78 @@ export async function POST(request: Request, context: RouteContext) {
 
       const followUp = wantsFollowUp;
 
-      const updated = await updateConversationStatusInDb(id, dbStatus, {
-        tabulationId,
-        clearAssignedTo,
-        clearDepartment,
-        followUp,
+      const closedNow = dbStatus === "RESOLVED" && conv.status !== "RESOLVED";
+      const retabulated =
+        Boolean(tabulationId) &&
+        conv.status === "RESOLVED" &&
+        tabulationId !== previousTabulationId;
+
+      const { row: updated } = await prisma.$transaction(async (tx) => {
+        const result = await updateConversationStatusInTx(tx, id, dbStatus, {
+          tabulationId,
+          clearAssignedTo,
+          clearDepartment,
+          followUp,
+        });
+
+        const closedAtIso = result.row.closedAt?.toISOString() ?? new Date().toISOString();
+
+        if (closedNow) {
+          await insertActivityOutbox(tx, {
+            type: "CONVERSATION_CLOSED",
+            actorType: "HUMAN",
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: result.row.externalId ?? null,
+            conversationId: id,
+            contactId: result.row.contact?.id ?? null,
+            field: "status",
+            oldValue: conv.status,
+            newValue: "RESOLVED",
+            organizationId: result.row.organizationId,
+            meta: {
+              action,
+              ...(tabulationId ? { tabulationId } : {}),
+              ...(skipAutomations ? { skipAutomations: true } : {}),
+            },
+            idempotencyKey: `conversation:${id}:closed:${closedAtIso}`,
+          });
+        }
+
+        if ((closedNow || retabulated) && tabulationId) {
+          await insertActivityOutbox(tx, {
+            type: "CONVERSATION_TABULATED",
+            actorType: "HUMAN",
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: result.row.externalId ?? null,
+            conversationId: id,
+            contactId: result.row.contact?.id ?? null,
+            departmentId: resolvedDepartmentId,
+            organizationId: result.row.organizationId,
+            meta:
+              tabulationName != null && tabulationNumber != null
+                ? tabulationLogMeta(
+                    {
+                      tabulationId,
+                      ancestorIds: tabulationAncestors,
+                      departmentId: resolvedDepartmentId,
+                      name: tabulationName,
+                      number: tabulationNumber,
+                    },
+                    retabulated ? { retabulated: true } : undefined,
+                  )
+                : {
+                    tabulationId,
+                    ancestorIds: tabulationAncestors,
+                    departmentId: resolvedDepartmentId,
+                    ...(retabulated ? { retabulated: true } : {}),
+                  },
+            idempotencyKey: `conversation:${id}:tabulated:${tabulationId}:${closedAtIso}`,
+          });
+        }
+
+        return result;
       });
 
       if (conv.status !== updated.status) {
@@ -890,28 +965,27 @@ export async function POST(request: Request, context: RouteContext) {
         // Grava no log de cada deal aberto do contato com o tipo correto.
         await logDealEventsForConversationContact(id, uid, convEventType, statusMeta);
 
-        // Evento da própria conversa (sem dealId) — registra no feed global.
-        // AWAIT (nao fire-and-forget): garante que a linha exista ANTES da
-        // resposta. O chatter (ConversationTimelineTab) e' atualizado via
-        // invalidacao de ["conversation-timeline", id] no onSuccess da
-        // mutation; com `void` havia corrida — a resposta voltava antes do
-        // insert e o refetch imediato nao encontrava o CONVERSATION_CLOSED.
-        await logEvent({
-          type: convEventType,
-          entityType: "CONVERSATION",
-          entityId: id,
-          entityLabel: updated.externalId ?? null,
-          conversationId: id,
-          contactId: conv.contact?.id ?? null,
-          field: "status",
-          oldValue: conv.status,
-          newValue: updated.status,
-          meta: {
-            action,
-            ...(tabulationId ? { tabulationId } : {}),
-            ...(skipAutomations ? { skipAutomations: true } : {}),
-          },
-        });
+        // Conversa: CONVERSATION_CLOSED agora passa pelo outbox transacional.
+        // REOPENED / STATUS_CHANGED continuam fire-and-forget no feed.
+        if (convEventType !== "CONVERSATION_CLOSED") {
+          await logEvent({
+            type: convEventType,
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: updated.externalId ?? null,
+            conversationId: id,
+            contactId: conv.contact?.id ?? null,
+            actorType: "HUMAN",
+            field: "status",
+            oldValue: conv.status,
+            newValue: updated.status,
+            meta: {
+              action,
+              ...(tabulationId ? { tabulationId } : {}),
+              ...(skipAutomations ? { skipAutomations: true } : {}),
+            },
+          });
+        }
 
         // Empurra o evento pro chatter em tempo real (mesma via do
         // new_message). Cobre tambem encerramentos por outro agente/automacao,
@@ -927,43 +1001,37 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      // Re-tabulação: `resolve` numa conversa JÁ encerrada passa pelo guard
-      // acima (só bloqueia sair de RESOLVED) e regrava `tabulationId`. Sem
-      // este segundo caso o dashboard continuaria contando o motivo antigo
-      // enquanto o banco já tem o novo.
-      const retabulated =
-        Boolean(tabulationId) &&
-        conv.status === "RESOLVED" &&
-        tabulationId !== previousTabulationId;
-
-      if ((dbStatus === "RESOLVED" && conv.status !== "RESOLVED") || retabulated) {
-        if (tabulationId) {
-          void logEvent({
-            type: "CONVERSATION_TABULATED",
-            entityType: "CONVERSATION",
-            entityId: id,
-            entityLabel: updated.externalId ?? null,
+      // Acompanhar (followUp): status permanece OPEN, então o bloco acima
+      // não dispara. Cria log + SSE para que a timeline/feed mostre quem
+      // colocou o ticket em resolvendo.
+      if (followUp && updated.followUpAt && !conv.followUpAt) {
+        await logEvent({
+          type: "CONVERSATION_FOLLOWUP_SET",
+          actorType: "HUMAN",
+          entityType: "CONVERSATION",
+          entityId: id,
+          entityLabel: updated.externalId ?? null,
+          conversationId: id,
+          contactId: conv.contact?.id ?? null,
+          field: "followUpAt",
+          oldValue: null,
+          newValue: updated.followUpAt.toISOString(),
+          meta: {
+            action,
+            status: updated.status,
+            ...(tabulationId ? { tabulationId } : {}),
+          },
+        });
+        try {
+          sseBus.publish("conversation_updated", {
+            organizationId: conv.organizationId,
             conversationId: id,
-            contactId: conv.contact?.id ?? null,
-            meta:
-              tabulationName != null && tabulationNumber != null
-                ? tabulationLogMeta(
-                    {
-                      tabulationId,
-                      ancestorIds: tabulationAncestors,
-                      departmentId: resolvedDepartmentId,
-                      name: tabulationName,
-                      number: tabulationNumber,
-                    },
-                    retabulated ? { retabulated: true } : undefined,
-                  )
-                : {
-                    tabulationId,
-                    ancestorIds: tabulationAncestors,
-                    departmentId: resolvedDepartmentId,
-                    ...(retabulated ? { retabulated: true } : {}),
-                  },
+            status: updated.status,
+            closedAt: updated.closedAt?.toISOString() ?? null,
+            followUpAt: updated.followUpAt.toISOString(),
           });
+        } catch {
+          /* best-effort */
         }
       }
 
