@@ -38,6 +38,7 @@ const MESSAGE_SELECT = {
   kind: true,
   content: true,
   pinned: true,
+  feedbackType: true,
   reactions: true,
   attachments: true,
   createdAt: true,
@@ -93,6 +94,7 @@ export type TeamChatMessagePayload = {
   content: string;
   displayContent: string;
   pinned: boolean;
+  feedbackType: "positive" | "negative" | "warning" | null;
   reactions: ReturnType<typeof parseReactions>;
   attachments: TeamChatAttachment[];
   createdAt: string;
@@ -120,6 +122,7 @@ function shapeMessage(
     kind: string;
     content: string;
     pinned?: boolean;
+    feedbackType?: string | null;
     reactions?: unknown;
     attachments?: unknown;
     createdAt: Date;
@@ -144,6 +147,7 @@ function shapeMessage(
     content: rawContent,
     displayContent: hasCard && extra?.card ? stripCrmUrls(rawContent) : rawContent,
     pinned: !!m.pinned,
+    feedbackType: (m.feedbackType as TeamChatMessagePayload["feedbackType"]) ?? null,
     reactions: parseReactions(m.reactions, viewerId),
     attachments: parseAttachments(m.attachments),
     createdAt: m.createdAt.toISOString(),
@@ -783,6 +787,7 @@ export async function sendMessage(
     content?: string;
     attachments?: TeamChatAttachment[];
     anchor?: { type: string; id: string } | null;
+    feedbackType?: "positive" | "negative" | "warning" | null;
   },
 ) {
   const member = await requireMember(viewer, roomId);
@@ -816,6 +821,7 @@ export async function sendMessage(
       authorId: viewer.userId,
       kind: "TEXT",
       content: text,
+      feedbackType: input.feedbackType ?? null,
       attachments: attachments as unknown as Prisma.InputJsonValue,
     }),
     select: MESSAGE_SELECT,
@@ -1139,6 +1145,7 @@ export async function shareRecordToChat(
     roomIds?: string[];
     personIds?: string[];
     content?: string;
+    feedbackType?: "positive" | "negative" | "warning" | null;
   },
 ) {
   const resolved = await resolveAnchorInput(viewer.organizationId, {
@@ -1162,6 +1169,7 @@ export async function shareRecordToChat(
     const sent = await sendMessage(viewer, roomId, {
       content: input.content ?? "",
       anchor: { type: resolved.type, id: resolved.id },
+      feedbackType: input.feedbackType ?? null,
     });
     if ("error" in sent) return sent;
     messages.push(sent.message);
