@@ -501,16 +501,16 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             examModalityRules,
             curriculumRules,
             enrollmentScopeRules,
-            agent.archetype === "COORDENADOR" ||
-            !inboxPolicyForRun.announceAiTransfer
-              ? `## Transferência entre agentes IA
-NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar", "setor" nem fila. A troca de dono é silenciosa.`
-              : inboxPolicyForRun.announceAiTransferMessage?.trim()
+            inboxPolicyForRun.announceAiTransfer
+              ? inboxPolicyForRun.announceAiTransferMessage?.trim()
                 ? `## Transferência entre agentes IA
 Avise o aluno com este texto (substitua {{target_agent}} pelo nome do destino):
-${inboxPolicyForRun.announceAiTransferMessage.trim()}`
+${inboxPolicyForRun.announceAiTransferMessage.trim()}
+O CRM também envia esse aviso; não invente outra frase.`
                 : `## Transferência entre agentes IA
-Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA — não diga "setor" nem fila humana.`,
+Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA — não diga "setor" nem fila humana.`
+              : `## Transferência entre agentes IA
+NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar". A troca de dono é silenciosa.`,
           ],
         });
 
@@ -677,25 +677,47 @@ Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA
     // seria esconder do operador exatamente o que ele foi ver: a resposta que
     // o cliente receberia. A auditoria de produção fica intacta.
     const claimBlocked = effectAudit.blocked && !testMode;
-    const silentCoordinatorHandoff =
-      agent.archetype === "COORDENADOR" &&
-      result.toolCalls.some((c) => {
-        const payload = c.result;
-        if (!payload || typeof payload !== "object") return false;
-        if ((payload as { ok?: unknown }).ok === false) return false;
-        if (c.toolName === "transfer_to_ai_agent") return true;
-        if (c.toolName !== "transfer_conversation") return false;
-        const target =
-          c.args && typeof c.args === "object" && !Array.isArray(c.args)
-            ? (c.args as { target?: unknown }).target
-            : null;
-        return target === "ai_agent";
-      });
-    const finalText = claimBlocked
-      ? NEUTRAL_EFFECT_FALLBACK
-      : silentCoordinatorHandoff
-        ? ""
-        : result.text;
+    const aiHandoffOk = result.toolCalls.some((c) => {
+      const payload = c.result;
+      if (!payload || typeof payload !== "object") return false;
+      if ((payload as { ok?: unknown }).ok === false) return false;
+      if (c.toolName === "transfer_to_ai_agent") return true;
+      if (c.toolName !== "transfer_conversation") return false;
+      const target =
+        c.args && typeof c.args === "object" && !Array.isArray(c.args)
+          ? (c.args as { target?: unknown }).target
+          : null;
+      return target === "ai_agent";
+    });
+    // O modelo escreve "vou te encaminhar" mesmo com o interruptor desligado.
+    // Aviso oficial: tool envia em produção. Aqui só devolvemos texto no
+    // replay/teste (tool simulada) quando o interruptor está ligado.
+    let finalText = claimBlocked ? NEUTRAL_EFFECT_FALLBACK : result.text;
+    if (!claimBlocked && aiHandoffOk) {
+      if (!inboxPolicyForRun.announceAiTransfer) {
+        finalText = "";
+      } else if (testMode) {
+        const call = result.toolCalls.find(
+          (c) =>
+            c.toolName === "transfer_to_ai_agent" ||
+            c.toolName === "transfer_conversation",
+        );
+        const args =
+          call?.args && typeof call.args === "object" && !Array.isArray(call.args)
+            ? (call.args as Record<string, unknown>)
+            : {};
+        const dest = String(
+          args.agentName ?? args.name ?? "o especialista",
+        ).trim();
+        const canned = inboxPolicyForRun.announceAiTransferMessage?.trim();
+        finalText = canned
+          ? canned.replaceAll("{{target_agent}}", dest)
+          : String(args.noticeMessage ?? "").trim() ||
+            `Vou te passar para ${dest}, que segue com você daqui.`;
+      } else {
+        finalText = "";
+      }
+    }
     if (claimBlocked) {
       console.warn("[ai] resposta descartada — efeito afirmado sem execução", {
         agentId: agent.id,

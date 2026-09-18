@@ -310,7 +310,7 @@ export function renderSystemPrompt(args: RenderArgs): string {
       "- Destino preferido: outro agente IA. Humano (fila, pessoa, transfer_to_human) só se o contato pediu atendente ou não houver especialista para o assunto.",
     );
     lines.push(
-      "- Transferência IA→IA é silenciosa: chame a tool e não escreva aviso de encaminhamento.",
+      "- O aviso de transferência IA→IA obedece o interruptor da Inbox. Se estiver desligado, chame a tool e não escreva encaminhamento.",
     );
     lines.push(
       "- Assunto ambíguo: UMA pergunta de esclarecimento. Não chute o destino.",

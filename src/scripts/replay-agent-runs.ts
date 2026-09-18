@@ -373,7 +373,15 @@ async function main() {
   console.log(
     JSON.stringify({
       org: { id: org.id, slug: org.slug },
-      start: { id: start.id, name: start.name, archetype: start.archetype },
+      start: {
+        id: start.id,
+        name: start.name,
+        archetype: start.archetype,
+        announceAiTransfer: normalizeInboxPolicy(
+          start.inboxPolicy,
+          start.verticalPack,
+        ).announceAiTransfer,
+      },
       agents: agents.map((a) => a.name),
       lote,
       cases: cases.map((c) => c.id),
