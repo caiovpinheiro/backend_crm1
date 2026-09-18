@@ -1,5 +1,13 @@
+import type { AppUserRole } from "@/lib/auth-types";
 import { auth } from "@/lib/auth";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors";
+import {
+  allowAllInboxSseCards,
+  buildInboxSseCardGate,
+  stripHiddenInboxSseCard,
+  type InboxSseCardGate,
+} from "@/lib/inbox-sse-card-visibility";
+import { runWithContext } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +36,7 @@ export async function GET(request: Request) {
 
   const sessionUser = session.user as {
     id?: string;
+    role?: AppUserRole;
     organizationId?: string | null;
     isSuperAdmin?: boolean;
   };
@@ -38,6 +47,29 @@ export async function GET(request: Request) {
   // Fail-closed: 403 explicito em vez de stream vazio silencioso.
   if (!organizationId && !isSuperAdmin) {
     return sseError(request, "Sem organização vinculada à sessão", 403);
+  }
+
+  // Snapshot da visibilidade do usuário, resolvido uma vez por conexão: o
+  // callback do bus é síncrono e não pode consultar o banco por evento.
+  // Mudança de permissão/visibilidade vale no próximo reconnect do stream.
+  let cardGate: InboxSseCardGate = allowAllInboxSseCards;
+  if (sessionUser.id && sessionUser.role && organizationId && !isSuperAdmin) {
+    try {
+      cardGate = await runWithContext(
+        { organizationId, userId: sessionUser.id, isSuperAdmin: false },
+        () =>
+          buildInboxSseCardGate({
+            id: sessionUser.id!,
+            role: sessionUser.role!,
+            organizationId,
+            isSuperAdmin: false,
+          }),
+      );
+    } catch (e) {
+      // Sem o gate, mantém o comportamento anterior (card para todos) em
+      // vez de derrubar o stream — a lista continua autoritativa no GET.
+      console.error("[sse] falha ao montar o gate de card do inbox:", e);
+    }
   }
 
   const encoder = new TextEncoder();
@@ -61,7 +93,9 @@ export async function GET(request: Request) {
           try {
             // Repassa apenas `data` pro cliente (mantem compat com o
             // formato anterior), mas o bus ja garantiu o filtro por org.
-            const payload = `event: ${event}\ndata: ${JSON.stringify(envelope.data)}\n\n`;
+            // O `card` ainda e por-usuario: sem acesso, sai do payload.
+            const data = stripHiddenInboxSseCard(envelope.data, cardGate);
+            const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
             controller.enqueue(encoder.encode(payload));
           } catch {
             /* client disconnected */
