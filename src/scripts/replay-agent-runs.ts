@@ -122,11 +122,19 @@ function findAgent(agents: AgentRow[], needle: string): AgentRow | null {
   );
 }
 
+function toolSucceeded(result: unknown): boolean {
+  const r = asRecord(result);
+  if (r.ok === false) return false;
+  if (typeof r.error === "string" && r.ok !== true) return false;
+  return true;
+}
+
 function inspectHandoff(calls: RunResult["toolCalls"]): {
   kind: "ai_agent" | "department" | "human" | null;
   name: string;
 } {
   for (const c of calls) {
+    if (!toolSucceeded(c.result)) continue;
     const args = asRecord(c.args);
     if (c.name === "transfer_conversation") {
       const target = String(args.target ?? "");
