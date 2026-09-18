@@ -229,6 +229,10 @@ export type RenderArgs = {
   timezone?: string | null;
   /** Instante de referência. Injeção pra teste; produção usa agora. */
   now?: Date;
+  /// Coordenador: lista de especialistas da org + destino sugerido neste turno.
+  coordinatorRoutingBlock?: string | null;
+  /// Especialista: outros agentes IA para passar o assunto, não a fila humana.
+  specialistPeerBlock?: string | null;
 };
 
 /** Render do system prompt — mesma função usada pelo runner em produção. */
@@ -315,6 +319,9 @@ export function renderSystemPrompt(args: RenderArgs): string {
     lines.push(
       "- Assunto ambíguo: UMA pergunta de esclarecimento. Não chute o destino.",
     );
+    if (args.coordinatorRoutingBlock?.trim()) {
+      lines.push(args.coordinatorRoutingBlock.trim());
+    }
   } else if (
     args.archetype &&
     args.archetype !== "TABULACAO" &&
@@ -328,6 +335,12 @@ export function renderSystemPrompt(args: RenderArgs): string {
     lines.push(
       "- Citar financeiro, acesso, matrícula ou horário NÃO é, sozinho, motivo para fila humana.",
     );
+    lines.push(
+      "- Pedido de humano neste turno: só então fila/pessoa. Assunto de outro especialista → transfer_to_ai_agent, não transfer_to_human.",
+    );
+    if (args.specialistPeerBlock?.trim()) {
+      lines.push(args.specialistPeerBlock.trim());
+    }
   }
 
   if (args.hasEnrollmentLookup) {

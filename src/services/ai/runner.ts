@@ -46,8 +46,15 @@ import {
 } from "@/services/ai/campaign-context";
 import { formatLocalClockHint } from "@/services/ai/idle-followup";
 import {
+  formatCoordinatorRoutingBlock,
+  formatSpecialistPeerBlock,
+  suggestCoordinatorAiAgent,
+  type PeerAiAgent,
+} from "@/lib/ai-agents/coordinator-route";
+import {
   humanQueueContextFromAgent,
   resolveAgentTimezone,
+  userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
 import {
   formatMessageModelsBlock,
@@ -423,7 +430,25 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         ) ?? "")
       : "";
     const clockHint = hasPack ? formatLocalClockHint() : "";
-    const runtimeTools = args.enabledTools ?? agent.enabledTools;
+    const askedHumanNow = userWantsHumanDistribution(
+      args.userMessage,
+      humanQueueContextFromAgent({ inboxPolicy: inboxPolicyForRun }),
+    );
+    let runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
+    if (
+      !classifierRun &&
+      agent.archetype !== "COORDENADOR" &&
+      agent.archetype !== "TABULACAO" &&
+      agent.archetype !== "ENCERRAMENTO" &&
+      !askedHumanNow
+    ) {
+      runtimeTools = runtimeTools.filter(
+        (id) =>
+          id !== "transfer_to_human" &&
+          id !== "execute_distribution" &&
+          id !== "transfer_to_department",
+      );
+    }
     const tabulationCatalog =
       runtimeTools.includes("tabulate_conversation") ||
       runtimeTools.includes("list_tabulations")
@@ -514,10 +539,50 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
           ],
         });
 
-    const org = await prisma.organization.findUnique({
-      where: { id: agent.organizationId },
-      select: { name: true },
-    });
+    const [org, peerRows] = await Promise.all([
+      prisma.organization.findUnique({
+        where: { id: agent.organizationId },
+        select: { name: true },
+      }),
+      classifierRun
+        ? Promise.resolve(
+            [] as Array<{
+              id: string;
+              archetype: string | null;
+              user: { name: string | null } | null;
+            }>,
+          )
+        : prisma.aIAgentConfig.findMany({
+            where: {
+              organizationId: agent.organizationId,
+              active: true,
+            },
+            select: {
+              id: true,
+              archetype: true,
+              user: { select: { name: true } },
+            },
+          }),
+    ]);
+    const peers: PeerAiAgent[] = peerRows.map((row) => ({
+      id: row.id,
+      name: row.user?.name?.trim() || "Agente",
+      archetype: row.archetype,
+    }));
+    const coordinatorRoutingBlock =
+      agent.archetype === "COORDENADOR"
+        ? formatCoordinatorRoutingBlock({
+            peers,
+            suggested: suggestCoordinatorAiAgent(args.userMessage, peers),
+          })
+        : null;
+    const specialistPeerBlock =
+      agent.archetype &&
+      agent.archetype !== "COORDENADOR" &&
+      agent.archetype !== "TABULACAO" &&
+      agent.archetype !== "ENCERRAMENTO"
+        ? formatSpecialistPeerBlock(agent.id, peers)
+        : null;
 
     const classifierContact = classifierRun
       ? contact
@@ -554,6 +619,8 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
           businessHours: agent.businessHours,
         }),
       ),
+      coordinatorRoutingBlock,
+      specialistPeerBlock,
       templateVars: {
         agent_name: agent.user?.name ?? null,
         company_name: org?.name ?? null,
