@@ -6,6 +6,7 @@
  * classificador (`TABULACAO` ou tool `tabulate_conversation`).
  */
 
+import type { InboxPolicy, TabulateOnExitMode } from "@/lib/ai-agents/steering";
 import {
   conversationHasRealAttendance,
   shouldFireConversationTabulatedTrigger,
@@ -366,4 +367,52 @@ export async function triggerTabulationClassifyForContact(args: {
   }
 
   return { status: "skipped", reason: "no_leaf_chosen" };
+}
+
+export function shouldTabulateOnExit(
+  mode: TabulateOnExitMode | undefined,
+  trigger: "human_handoff" | "close",
+): boolean {
+  if (!mode || mode === "off") return false;
+  if (mode === "both") return true;
+  return mode === trigger;
+}
+
+export async function maybeTabulateOnExit(args: {
+  organizationId: string;
+  contactId: string | null | undefined;
+  policy: InboxPolicy | null | undefined;
+  trigger: "human_handoff" | "close";
+}): Promise<ClassifyTriggerResult | { status: "skipped"; reason: "off" | "no_contact" | "no_classifier" }> {
+  if (!args.contactId) return { status: "skipped", reason: "no_contact" };
+  if (!shouldTabulateOnExit(args.policy?.tabulateOnExit, args.trigger)) {
+    return { status: "skipped", reason: "off" };
+  }
+  const agents = await prisma.user.findMany({
+    where: {
+      organizationId: args.organizationId,
+      type: "AI",
+      aiAgentConfig: { active: true },
+    },
+    select: {
+      id: true,
+      name: true,
+      aiAgentConfig: {
+        select: { archetype: true, enabledTools: true, active: true },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 40,
+  });
+  const classifier = agents.find((u) =>
+    isTabulationClassifier({
+      ...(u.aiAgentConfig ?? { archetype: "ATENDIMENTO", enabledTools: [] }),
+      name: u.name,
+    }),
+  );
+  if (!classifier) return { status: "skipped", reason: "no_classifier" };
+  return triggerTabulationClassifyForContact({
+    contactId: args.contactId,
+    agentUserId: classifier.id,
+  });
 }

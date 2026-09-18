@@ -2424,6 +2424,14 @@ async function executeStep(
         return {};
       }
 
+      const { isTabulationClassifier } = await import(
+        "@/lib/ai-agents/tabulation-classifier"
+      );
+      const classifier = isTabulationClassifier({
+        ...agentUser.aiAgentConfig,
+        name: agentUser.name,
+      });
+
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
       let contactForOpening: string | null = null;
       if (target === "deal") {
@@ -2431,9 +2439,9 @@ async function executeStep(
         if (!targetDealId) {
           throw new Error("transfer_to_ai_agent: dealId ausente");
         }
-        await assignDealOwner(targetDealId, agentUserId);
-        // Resolve o contact do deal pra poder disparar a saudação
-        // proativa (precisa do contactId, não do dealId).
+        if (!classifier) {
+          await assignDealOwner(targetDealId, agentUserId);
+        }
         const deal = await prisma.deal.findUnique({
           where: { id: targetDealId },
           select: { contactId: true },
@@ -2444,12 +2452,15 @@ async function executeStep(
         if (!targetContactId) {
           throw new Error("transfer_to_ai_agent: contactId ausente");
         }
-        await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
-        );
+        if (!classifier) {
+          await prisma.$transaction((tx) =>
+            propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
+          );
+        }
         contactForOpening = targetContactId;
       }
 
+      // Classificador só carimba a folha — nunca vira dono do WhatsApp.
       // Saudação proativa: dispara imediatamente após a atribuição,
       // sem esperar o cliente mandar mensagem. Isso resolve o caso de
       // automações cujo trigger é "Negócio criado" / etc. — antes, o
@@ -2462,15 +2473,7 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        const { isTabulationClassifier } = await import(
-          "@/lib/ai-agents/tabulation-classifier"
-        );
-        if (
-          isTabulationClassifier({
-            ...agentUser.aiAgentConfig,
-            name: agentUser.name,
-          })
-        ) {
+        if (classifier) {
           const { triggerTabulationClassifyForContact } = await import(
             "@/services/ai/tabulation-classify"
           );

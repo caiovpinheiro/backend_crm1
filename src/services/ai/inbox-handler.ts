@@ -342,7 +342,7 @@ function runHadTransferTools(
 ): boolean {
   if (!toolCalls?.length) return false;
   return toolCalls.some((c) =>
-    ["transfer_to_human", "transfer_to_department", "execute_distribution"].includes(
+    ["transfer_to_human", "transfer_to_department", "execute_distribution", "transfer_conversation", "transfer_to_ai_agent"].includes(
       c.name,
     ),
   );
@@ -1204,6 +1204,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsedEarly = parseAgentConfidence(result.text || "");
     const replyText = parsedEarly.text.trim();
+    const afterTools = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: {
+        assignedToId: true,
+        assignedTo: { select: { type: true } },
+      },
+    });
+    const stillThisAgent = afterTools?.assignedToId === assignee.id;
+    const handedToPeerAi =
+      afterTools?.assignedTo?.type === "AI" &&
+      afterTools.assignedToId !== assignee.id;
+    if (handedToPeerAi) {
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "peer_ai",
+        toUserId: afterTools.assignedToId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
     // Tool/HANDOFF OU promessa explícita no texto ("vou te conectar…") →
     // distribui de fato. Cumprimento / "me ajuda" / primeiro acesso NÃO
     // viram fila. Fora do expediente, o template de horário só sai se o
@@ -1226,8 +1246,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       lowConfHandoff;
     // Freio de handoff "não justificado" é regra do pack: sem pack não há
     // tema acadêmico para justificar, e cancelar aqui engoliria uma tool de
-    // transferência legítima do agente genérico.
-    if (agentPack && transferred && !justifiedHandoff) {
+    // transferência legítima do agente genérico. Se a tool já atribuiu um
+    // humano, o freio não desfaz o dono.
+    if (agentPack && transferred && !justifiedHandoff && stillThisAgent) {
       transferred = false;
     }
 

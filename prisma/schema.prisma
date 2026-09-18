@@ -5074,6 +5074,7 @@ enum AIAgentArchetype {
   SUPORTE
   TABULACAO
   ENCERRAMENTO
+  COORDENADOR
 }
 
 enum AIAgentAutonomy {

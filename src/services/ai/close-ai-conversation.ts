@@ -181,5 +181,25 @@ export async function closeAiOnlyConversation(
     },
   }).catch(() => null);
 
+  const closer = await prisma.user.findFirst({
+    where: { id: conv.assignedToId ?? "", type: "AI" },
+    select: { aiAgentConfig: { select: { inboxPolicy: true, verticalPack: true } } },
+  });
+  if (closer?.aiAgentConfig) {
+    const { normalizeInboxPolicy } = await import("@/lib/ai-agents/steering");
+    const { maybeTabulateOnExit } = await import(
+      "@/services/ai/tabulation-classify"
+    );
+    await maybeTabulateOnExit({
+      organizationId: conv.organizationId,
+      contactId,
+      policy: normalizeInboxPolicy(
+        closer.aiAgentConfig.inboxPolicy,
+        closer.aiAgentConfig.verticalPack,
+      ),
+      trigger: "close",
+    }).catch(() => null);
+  }
+
   return { closed: true, reason: "CLOSED" };
 }

@@ -20,6 +20,7 @@ const SYSTEM_IDS: Record<AIAgentArchetype, string> = {
   SUPORTE: "tmpl_sys_suporte",
   TABULACAO: "tmpl_sys_tabulacao",
   ENCERRAMENTO: "tmpl_sys_encerramento",
+  COORDENADOR: "tmpl_sys_coordenador",
 };
 
 type TemplateRow = {
@@ -60,9 +61,22 @@ export async function ensureSystemTemplates(): Promise<void> {
         ? ({
             interceptRetention: true,
             interceptCourseShopping: true,
+            interceptFirstAccess: true,
             inauguralEnabled: true,
+            tabulateOnExit: "on_human_handoff",
           } as Prisma.InputJsonValue)
-        : Prisma.JsonNull;
+        : a.id === "COORDENADOR"
+          ? ({
+              interceptRetention: false,
+              interceptCourseShopping: false,
+              interceptFirstAccess: false,
+              inauguralEnabled: false,
+              tabulateOnExit: "off",
+              transferPolicy: "always",
+              useMessageModels: false,
+              speakOnAiTransfer: false,
+            } as Prisma.InputJsonValue)
+          : Prisma.JsonNull;
 
     await db.upsert({
       where: { id },
