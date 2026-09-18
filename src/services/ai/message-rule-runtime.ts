@@ -34,6 +34,8 @@ export type MessageRuleDeps = {
   conversationId: string;
   contactId: string | null;
   dealId?: string | null;
+  /// Coordenador não consome o turno com assign_owner — o modelo roteia.
+  archetype?: string | null;
   policy: InboxPolicy;
   ops?: VerticalPackOps | null;
   /// Envia o aviso ao cliente (o handler sabe typing, delay, generationId).
@@ -108,6 +110,9 @@ export async function executeMessageRule(
   }
 
   if (rule.action === "assign_owner") {
+    if (deps.archetype === "COORDENADOR") {
+      return { kind: "continue" };
+    }
     const ownerUserId = rule.ownerUserId;
     const owner = ownerUserId
       ? await prisma.user.findFirst({

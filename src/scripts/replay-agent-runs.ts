@@ -399,7 +399,14 @@ async function main() {
           );
           const ruleHit = evaluateMessageRules(inbound, policy.messageRules);
 
-          if (ruleHit && ruleHit.rule.action !== "answer_with_knowledge") {
+          if (
+            ruleHit &&
+            ruleHit.rule.action !== "answer_with_knowledge" &&
+            !(
+              speaker.archetype === "COORDENADOR" &&
+              ruleHit.rule.action === "assign_owner"
+            )
+          ) {
             let switchedTo: string | null = null;
             if (ruleHit.rule.action === "transfer_department") {
               const dest = mapDepartmentToAgent(

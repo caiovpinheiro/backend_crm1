@@ -56,7 +56,7 @@ import {
 } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact, applyExistingTagToContact } from "@/services/tags";
-import { evaluateTransferGate } from "@/services/ai/transfer-gate";
+import { evaluateTransferGate, isIdleOrchestrationMessage } from "@/services/ai/transfer-gate";
 import { executeOrchestratedHandoff } from "@/services/ai/agent-handoff";
 import {
   departmentNotFoundMessage,
@@ -170,6 +170,12 @@ function transferAllowed(ctx: RunContext): boolean {
     priorUserMessages: ctx.priorUserMessages,
     inboxPolicy: ctx.inboxPolicy,
   }).allows;
+}
+
+function coordinatorIdleHandoffError(ctx: RunContext): string | null {
+  if (ctx.archetype !== "COORDENADOR") return null;
+  if (!isIdleOrchestrationMessage(ctx.userMessage)) return null;
+  return "Não há assunto para encaminhar. Responda uma frase curta e espere o pedido.";
 }
 
 // ── create_deal ────────────────────────────────────────────────
@@ -1177,9 +1183,8 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
     description:
       copy?.transferToHuman ??
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
-        "Use SOMENTE quando: o contato pedir humano/atendente, for retenção, ou você NÃO puder " +
-        "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
-        "Se você puder orientar o contato, NÃO chame esta tool — responda você. " +
+        "ÚLTIMO RECURSO: só quando o contato pedir humano/atendente, ou você já tentou as tools/base e ainda não puder seguir com segurança. " +
+        "Citar financeiro, acesso, matrícula ou horário NÃO basta. Se puder orientar, NÃO chame esta tool. " +
         "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
         "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
     inputSchema: z.object({
@@ -1305,7 +1310,8 @@ function transferToAiAgentTool(ctx: RunContext) {
   return tool({
     description:
       "Entrega a conversa a outro agente de IA especializado, que assume a continuidade do atendimento. " +
-      "Use quando já entendeu a necessidade do aluno e ela é do escopo de outro agente. " +
+      "Use quando já entendeu a necessidade e ela é do escopo de outro agente. " +
+      "NÃO use em saudação, recado sem assunto ou 'depois eu falo'. " +
       "Se a política pedir aviso, `noticeMessage` é o que o aluno recebe ANTES da troca. " +
       "Depois de chamar esta tool NÃO escreva mais nada — quem fala com o aluno agora é o outro agente.",
     inputSchema: z.object({
@@ -1337,6 +1343,8 @@ function transferToAiAgentTool(ctx: RunContext) {
     execute: async ({ agentName, noticeMessage, reason, tagName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const idle = coordinatorIdleHandoffError(ctx);
+        if (idle) return fail(idle);
         if (!ctx.contactId) return fail("Sem contato na conversa.");
 
         const orgId = ctx.organizationId ?? getOrgIdOrNull();
@@ -2000,7 +2008,10 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
     execute: async ({ target, name, reason }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa para transferir.");
-        if (target !== "ai_agent" && !transferAllowed(ctx)) {
+        if (target === "ai_agent") {
+          const idle = coordinatorIdleHandoffError(ctx);
+          if (idle) return fail(idle);
+        } else if (!transferAllowed(ctx)) {
           return fail(
             "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você, ou passe para outro agente IA se o assunto for de outro especialista.",
           );
@@ -2107,13 +2118,36 @@ function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
  * mudam atribuição nem estado de atendimento continuam executando: o valor do
  * teste é ver o agente real, e sem elas a resposta seria outra.
  */
-function withTestModeSimulation(id: string, t: AnyTool): AnyTool {
+function withTestModeSimulation(
+  id: string,
+  t: AnyTool,
+  ctx: RunContext,
+): AnyTool {
   const execute = t.execute;
   if (!execute || !isEffectTool(id)) return t;
   return {
     ...t,
-    execute: (async (args: Record<string, unknown>) =>
-      simulateEffectTool(id, args)) as typeof execute,
+    execute: (async (args: Record<string, unknown>) => {
+      if (
+        id === "transfer_to_human" ||
+        id === "execute_distribution" ||
+        (id === "transfer_conversation" && args.target !== "ai_agent")
+      ) {
+        if (!transferAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
+          );
+        }
+      }
+      if (
+        id === "transfer_to_ai_agent" ||
+        (id === "transfer_conversation" && args.target === "ai_agent")
+      ) {
+        const idle = coordinatorIdleHandoffError(ctx);
+        if (idle) return fail(idle);
+      }
+      return simulateEffectTool(id, args);
+    }) as typeof execute,
   } as AnyTool;
 }
 
@@ -2161,7 +2195,7 @@ export function buildToolSet(
     let built = withArgPolicy(factory(ctx, policy), policy);
     // Antes do governor: a chamada simulada continua contando para os tetos e
     // para o dedup, senão um loop do modelo em modo de teste rodaria solto.
-    if (ctx.testMode) built = withTestModeSimulation(id, built);
+    if (ctx.testMode) built = withTestModeSimulation(id, built, ctx);
     set[id] = governor ? withCallGovernor(id, built, governor) : built;
   }
   return set as ToolSet;

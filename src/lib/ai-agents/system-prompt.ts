@@ -194,6 +194,9 @@ export type RenderArgs = {
   template: string;
   override: string | null;
   productPolicy: string | null;
+  /// Arquétipo do agente. Sem isso o bloco de orquestração/humano-último
+  /// não entra — agentes com steering próprio continuariam ignorando.
+  archetype?: string | null;
   hasProductSearch: boolean;
   hasEnrollmentLookup: boolean;
   /// `search_crm_records` habilitada. A orientação de uso fica na
@@ -291,6 +294,36 @@ export function renderSystemPrompt(args: RenderArgs): string {
     if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
     lines.push(
       "- Funil/Estágio é só contexto. NÃO transfira só por causa do funil — atenda primeiro; use departamento certo só quando for distribuir de verdade.",
+    );
+  }
+
+  if (args.archetype === "COORDENADOR") {
+    lines.push("");
+    lines.push("ORQUESTRAÇÃO (runtime — regra dura):");
+    lines.push(
+      "- Você classifica e encaminha. Não resolva a dúvida do especialista.",
+    );
+    lines.push(
+      "- NÃO transfira: saudação sozinha, agradecimento, tchau, ou recado sem assunto (ex.: só posso responder mais tarde / depois eu falo). Responda uma frase curta e espere o pedido.",
+    );
+    lines.push(
+      "- Destino preferido: outro agente IA. Humano (fila, pessoa, transfer_to_human) só se o contato pediu atendente ou não houver especialista para o assunto.",
+    );
+    lines.push(
+      "- Assunto ambíguo: UMA pergunta de esclarecimento. Não chute o destino.",
+    );
+  } else if (
+    args.archetype &&
+    args.archetype !== "TABULACAO" &&
+    args.archetype !== "ENCERRAMENTO"
+  ) {
+    lines.push("");
+    lines.push("HUMANO É ÚLTIMO RECURSO (runtime — regra dura):");
+    lines.push(
+      "- Atenda neste turno com a base e as tools. transfer_to_human / fila / pessoa só depois de tentar, ou se o contato pediu humano, ou se a tool não devolveu o dado necessário.",
+    );
+    lines.push(
+      "- Citar financeiro, acesso, matrícula ou horário NÃO é, sozinho, motivo para fila humana.",
     );
   }
 

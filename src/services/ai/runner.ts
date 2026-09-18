@@ -535,6 +535,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. A troca de dono é s
         : agent.systemPromptTemplate,
       override: runtimeOverride,
       productPolicy: agent.productPolicy,
+      archetype: classifierRun ? "TABULACAO" : agent.archetype,
       hasProductSearch: runtimeTools.includes("search_products"),
       hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
       hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),

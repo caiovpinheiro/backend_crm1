@@ -107,6 +107,46 @@ export function transferBlockedByGate(state: TransferGateState): boolean {
   return state.active && !state.allows;
 }
 
+function foldIdle(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[!?.…,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Mensagem sem assunto para orquestrar: saudação, recado de “depois falo”,
+ * agradeço/tchau. O coordenador não deve chamar especialista nem humano.
+ */
+export function isIdleOrchestrationMessage(raw?: string | null): boolean {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return true;
+  const n = foldIdle(trimmed);
+  if (!n) return true;
+  if (
+    trimmed.length <= 48 &&
+    /^(oi+|ola+|oie+|hey|hello|bom dia|boa tarde|boa noite)( tudo bem)?$/.test(n)
+  ) {
+    return true;
+  }
+  if (n.length < 90) {
+    if (
+      /so posso responder( mais)? tarde|depois eu (falo|respondo)|te falo depois|agora nao posso|so depois/.test(
+        n,
+      )
+    ) {
+      return true;
+    }
+    if (/^(ok+|obrigad[oa]|valeu|tchau|ate mais|combinado)$/.test(n)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export type AgentConfigWarning = { field: string; message: string };
 
 /**

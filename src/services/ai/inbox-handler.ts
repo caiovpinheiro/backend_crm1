@@ -914,6 +914,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           contactId: args.contactId,
           policy,
           ops: packOps,
+          archetype: cfg.archetype,
           sendNotice: async (text: string) => {
             if (!text.trim()) return;
             await sendAgentMessage({

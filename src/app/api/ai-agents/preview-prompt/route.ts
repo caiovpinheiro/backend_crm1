@@ -78,6 +78,8 @@ export async function POST(request: Request) {
       override: runtimeOverride,
       productPolicy:
         typeof body.productPolicy === "string" ? body.productPolicy : null,
+      archetype:
+        typeof body.archetype === "string" ? body.archetype : null,
       hasProductSearch: enabledTools.includes("search_products"),
       hasEnrollmentLookup: enabledTools.includes("consultar_matricula"),
       hasCrmFieldSearch: enabledTools.includes("search_crm_records"),
