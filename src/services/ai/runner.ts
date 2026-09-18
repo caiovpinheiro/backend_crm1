@@ -677,7 +677,25 @@ Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA
     // seria esconder do operador exatamente o que ele foi ver: a resposta que
     // o cliente receberia. A auditoria de produção fica intacta.
     const claimBlocked = effectAudit.blocked && !testMode;
-    const finalText = claimBlocked ? NEUTRAL_EFFECT_FALLBACK : result.text;
+    const silentCoordinatorHandoff =
+      agent.archetype === "COORDENADOR" &&
+      result.toolCalls.some((c) => {
+        const payload = c.result;
+        if (!payload || typeof payload !== "object") return false;
+        if ((payload as { ok?: unknown }).ok === false) return false;
+        if (c.toolName === "transfer_to_ai_agent") return true;
+        if (c.toolName !== "transfer_conversation") return false;
+        const target =
+          c.args && typeof c.args === "object" && !Array.isArray(c.args)
+            ? (c.args as { target?: unknown }).target
+            : null;
+        return target === "ai_agent";
+      });
+    const finalText = claimBlocked
+      ? NEUTRAL_EFFECT_FALLBACK
+      : silentCoordinatorHandoff
+        ? ""
+        : result.text;
     if (claimBlocked) {
       console.warn("[ai] resposta descartada — efeito afirmado sem execução", {
         agentId: agent.id,
