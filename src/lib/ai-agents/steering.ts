@@ -594,6 +594,12 @@ export type InboxPolicy = {
   /// (default) = só responde no próximo inbound do aluno.
   speakOnAiTransfer: boolean;
 
+  /// Avisar o aluno ao passar a conversa para outro agente IA.
+  /// Desligado = troca silenciosa (só a tool). Ligado = envia o texto
+  /// abaixo (ou o noticeMessage da tool, se este campo estiver vazio).
+  announceAiTransfer: boolean;
+  announceAiTransferMessage: string | null;
+
   /// Em quais conversas o agente pode entrar (funil, etapa, tag).
   scope: AttendanceScope;
 
@@ -705,6 +711,8 @@ export function defaultInboxPolicy(): InboxPolicy {
     inauguralDates: [],
     firstAccessPackMessage: null,
     speakOnAiTransfer: false,
+    announceAiTransfer: true,
+    announceAiTransferMessage: null,
     scope: defaultAttendanceScope(),
     handoffMessage: null,
     retentionHandoffMessage: null,
@@ -819,6 +827,8 @@ export function normalizeInboxPolicy(
     ),
     firstAccessPackMessage: nullableText(r.firstAccessPackMessage),
     speakOnAiTransfer: boolOr(r.speakOnAiTransfer, base.speakOnAiTransfer),
+    announceAiTransfer: boolOr(r.announceAiTransfer, base.announceAiTransfer),
+    announceAiTransferMessage: nullableText(r.announceAiTransferMessage),
     scope: normalizeAttendanceScope(r.scope),
     handoffMessage: nullableText(r.handoffMessage),
     retentionHandoffMessage: nullableText(r.retentionHandoffMessage),

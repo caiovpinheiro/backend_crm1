@@ -1327,7 +1327,16 @@ export async function runAcademicInterceptPipeline(
             userMessage: args.userMessage,
             policy,
           });
-          if (policy.interceptRetention && retentionKey === "retencao") {
+          // Especialista de retenção já é o dono: o intercepto jogaria a
+          // conversa na fila humana e o LLM do agente nunca rodaria.
+          const assigneeLooksLikeRetention = /reten|evas/i.test(
+            assignee.name ?? "",
+          );
+          if (
+            policy.interceptRetention &&
+            retentionKey === "retencao" &&
+            !assigneeLooksLikeRetention
+          ) {
             await executeAcademicDepartmentHandoff({
               conversationId: args.conversationId,
               contactId: args.contactId,

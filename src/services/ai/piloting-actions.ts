@@ -28,6 +28,14 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
+
+async function aiSenderName(agentUserId: string): Promise<string> {
+  const u = await prisma.user.findUnique({
+    where: { id: agentUserId },
+    select: { name: true },
+  });
+  return u?.name?.trim() || "Agente IA";
+}
 import { createActivity } from "@/services/activities";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
@@ -323,7 +331,7 @@ export async function sendAgentMessage(args: {
         messageType: "text",
         authorType: "bot",
         aiAgentUserId: args.agentUserId,
-        senderName: "Agente IA",
+        senderName: await aiSenderName(args.agentUserId),
         externalId,
         sendStatus: "sent",
       }),
@@ -392,7 +400,7 @@ export async function sendAgentMessage(args: {
           messageType: "text",
           authorType: "bot",
           aiAgentUserId: args.agentUserId,
-          senderName: "Agente IA",
+          senderName: await aiSenderName(args.agentUserId),
           sendStatus: "pending",
         }),
       });

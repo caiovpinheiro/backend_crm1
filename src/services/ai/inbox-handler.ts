@@ -1629,7 +1629,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           messageType: "text",
           authorType: "bot",
           aiAgentUserId: assignee.id,
-          senderName: "Agente IA",
+          senderName: assignee.name?.trim() || "Agente IA",
           externalId,
           sendStatus: "sent",
         }),

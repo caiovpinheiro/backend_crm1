@@ -98,7 +98,12 @@ export async function sendAgentFollowUpMedia(args: {
         messageType: kind,
         authorType: "bot",
         aiAgentUserId: args.agentUserId,
-        senderName: "Agente IA",
+        senderName: (
+          await prisma.user.findUnique({
+            where: { id: args.agentUserId },
+            select: { name: true },
+          })
+        )?.name?.trim() || "Agente IA",
         mediaUrl: att.url,
         sendStatus: "pending",
       }),

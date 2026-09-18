@@ -766,7 +766,6 @@ export function textImpliesAcademicHandoff(text: string): boolean {
     t.includes("consultor(a) fala") ||
     t.includes("consultor fala com voce") ||
     t.includes("consultora fala com voce") ||
-    t.includes("setor de retenc") ||
     t.includes("ja esta na fila")
   );
 }

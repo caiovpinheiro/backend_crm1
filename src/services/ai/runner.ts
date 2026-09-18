@@ -501,6 +501,15 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             examModalityRules,
             curriculumRules,
             enrollmentScopeRules,
+            inboxPolicyForRun.announceAiTransfer
+              ? inboxPolicyForRun.announceAiTransferMessage?.trim()
+                ? `## Transferência entre agentes IA
+Avise o aluno com este texto (substitua {{target_agent}} pelo nome do destino):
+${inboxPolicyForRun.announceAiTransferMessage.trim()}`
+                : `## Transferência entre agentes IA
+Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA — não diga "setor" nem fila humana.`
+              : `## Transferência entre agentes IA
+NÃO avise o aluno que vai transferir. Chame a tool e pare. A troca de dono é silenciosa.`,
           ],
         });
 

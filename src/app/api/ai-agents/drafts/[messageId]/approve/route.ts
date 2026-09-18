@@ -105,6 +105,15 @@ export async function POST(
         );
       }
 
+      let senderName = "Agente IA";
+      if (draft.aiAgentUserId) {
+        const agentUser = await prisma.user.findUnique({
+          where: { id: draft.aiAgentUserId },
+          select: { name: true },
+        });
+        senderName = agentUser?.name?.trim() || senderName;
+      }
+
       const approved = await prisma.message.update({
         where: { id: messageId },
         data: {
@@ -113,7 +122,7 @@ export async function POST(
           isPrivate: false,
           externalId,
           sendStatus: "sent",
-          senderName: "Agente IA",
+          senderName,
         },
       });
       await prisma.conversation

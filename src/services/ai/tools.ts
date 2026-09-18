@@ -566,7 +566,7 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
             content: tplChatContent,
             direction: "out",
             messageType: "template",
-            senderName: "Agente IA",
+            senderName: ctx.agentName?.trim() || "Agente IA",
             externalId,
             aiAgentUserId: ctx.agentUserId,
             ...(typeof enrichSend.flowToken === "string" && enrichSend.flowToken.trim()
@@ -1293,10 +1293,9 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
  * vale para o cluster inteiro do contato (conversa, contato, deals OPEN),
  * que é o que o inbox e o pipeline leem como responsável.
  *
- * O aviso ao aluno sai DAQUI, antes de trocar o dono: depois da
- * reatribuição o texto final do turno morre no `assertAiStillAuthorized`
- * (`assignee_changed`), e transferência silenciosa é exatamente o que não
- * pode acontecer. Por isso `noticeMessage` é obrigatório.
+ * O aviso ao aluno (se a política `announceAiTransfer` estiver ligada)
+ * sai DAQUI, antes de trocar o dono: depois da reatribuição o texto
+ * final do turno morre no `assertAiStillAuthorized`.
  *
  * Se o destino tem `inboxPolicy.speakOnAiTransfer`, dispara a mensagem
  * de abertura da Pilotagem dele na hora. Sem o interruptor, o especialista
@@ -1307,7 +1306,7 @@ function transferToAiAgentTool(ctx: RunContext) {
     description:
       "Entrega a conversa a outro agente de IA especializado, que assume a continuidade do atendimento. " +
       "Use quando já entendeu a necessidade do aluno e ela é do escopo de outro agente. " +
-      "`noticeMessage` é o que o aluno recebe ANTES da troca: curto, humanizado, avisando que vai encaminhar. " +
+      "Se a política pedir aviso, `noticeMessage` é o que o aluno recebe ANTES da troca. " +
       "Depois de chamar esta tool NÃO escreva mais nada — quem fala com o aluno agora é o outro agente.",
     inputSchema: z.object({
       agentName: z
@@ -1319,8 +1318,9 @@ function transferToAiAgentTool(ctx: RunContext) {
       noticeMessage: z
         .string()
         .min(3)
+        .optional()
         .describe(
-          "Mensagem enviada ao aluno avisando da transferência, antes de trocar o responsável.",
+          "Aviso ao aluno antes da troca. Ignorado se o operador desligou o aviso na Inbox.",
         ),
       reason: z
         .string()
@@ -1380,27 +1380,37 @@ function transferToAiAgentTool(ctx: RunContext) {
           );
         }
 
-        // Aviso primeiro: a reatribuição derruba a entrega do texto do turno.
-        const { sendAgentMessage } = await import(
-          "@/services/ai/piloting-actions"
-        );
-        const me = await prisma.user.findUnique({
-          where: { id: ctx.agentUserId },
-          select: { aiAgentConfig: { select: { autonomyMode: true } } },
-        });
-        const notice = await sendAgentMessage({
-          conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
-          agentUserId: ctx.agentUserId,
-          autonomyMode: me?.aiAgentConfig?.autonomyMode ?? "AUTONOMOUS",
-          text: noticeMessage,
-        });
-        // `skipped` = o aviso não chegou ao aluno (allowlist, canal fora,
-        // near-duplicate). Transferir aqui seria a troca silenciosa.
-        if (notice.status === "skipped") {
-          return fail(
-            `Não consegui avisar o aluno (${notice.reason}) — não transferi. Siga o atendimento neste turno.`,
+        const srcPolicy = ctx.inboxPolicy ?? normalizeInboxPolicy(null);
+        const announce = srcPolicy.announceAiTransfer;
+        const canned = srcPolicy.announceAiTransferMessage?.trim();
+        const noticeText = announce
+          ? (canned
+              ? canned.replaceAll("{{target_agent}}", target.name)
+              : noticeMessage?.trim() ||
+                `Vou te passar para ${target.name}, que segue com você daqui.`)
+          : null;
+
+        if (noticeText) {
+          // Aviso primeiro: a reatribuição derruba a entrega do texto do turno.
+          const { sendAgentMessage } = await import(
+            "@/services/ai/piloting-actions"
           );
+          const me = await prisma.user.findUnique({
+            where: { id: ctx.agentUserId },
+            select: { aiAgentConfig: { select: { autonomyMode: true } } },
+          });
+          const notice = await sendAgentMessage({
+            conversationId: ctx.conversationId,
+            contactId: ctx.contactId,
+            agentUserId: ctx.agentUserId,
+            autonomyMode: me?.aiAgentConfig?.autonomyMode ?? "AUTONOMOUS",
+            text: noticeText,
+          });
+          if (notice.status === "skipped") {
+            return fail(
+              `Não consegui avisar o aluno (${notice.reason}) — não transferi. Siga o atendimento neste turno.`,
+            );
+          }
         }
 
         const tagApplied = await applyExistingTagToContact({
@@ -1479,7 +1489,7 @@ function transferToAiAgentTool(ctx: RunContext) {
           assigned: true,
           agentName: target.name,
           tagApplied,
-          noticeStatus: notice.status,
+          noticeStatus: noticeText ? "sent" : "off",
           openingStatus,
           hint: destPolicy.speakOnAiTransfer
             ? "Transferência concluída. Não escreva mais nada neste turno — o destino fala agora."
