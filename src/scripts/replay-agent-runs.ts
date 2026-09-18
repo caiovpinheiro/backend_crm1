@@ -7,8 +7,10 @@
  * Local:
  *   npx tsx src/scripts/replay-agent-runs.ts --org teste-dev --start Joseph
  *
- * EasyPanel (/app, depois do deploy — a imagem não tem src/ nem tsx):
+ * EasyPanel (/app, depois do deploy):
  *   node dist/workers/replay-agent-runs.js --org teste-dev --start Joseph
+ *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
+ *   node dist/workers/replay-agent-runs.js --lote 2 --limit 10
  *
  * Env: DATABASE_URL; opcional ORG_SLUG / REPLAY_START_AGENT.
  * prismaBase: script fora de RequestContext até achar a org; o loop usa
@@ -17,7 +19,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import bundledFixtures from "./fixtures/joseph-replay-cases.json";
+import bundledLote1 from "./fixtures/joseph-replay-cases.json";
+import bundledLote2 from "./fixtures/joseph-replay-lote2.json";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prismaBase } from "@/lib/prisma-base";
@@ -78,12 +81,21 @@ function clip(s: string, n = 240): string {
   return t.length <= n ? t : t.slice(0, n) + "…";
 }
 
-function loadFixtures(path: string | null): FixtureCase[] {
-  const raw = (
-    path
-      ? (JSON.parse(readFileSync(path, "utf8")) as FixtureFile)
-      : (bundledFixtures as FixtureFile)
-  );
+function loadFixtures(path: string | null, lote: string): FixtureCase[] {
+  const bundled =
+    lote === "2" || lote === "lote2"
+      ? (bundledLote2 as FixtureFile)
+      : lote === "all"
+        ? {
+            cases: [
+              ...(bundledLote1 as FixtureFile).cases,
+              ...(bundledLote2 as FixtureFile).cases,
+            ],
+          }
+        : (bundledLote1 as FixtureFile);
+  const raw = path
+    ? (JSON.parse(readFileSync(path, "utf8")) as FixtureFile)
+    : bundled;
   if (!Array.isArray(raw.cases)) throw new Error("fixture sem cases[]");
   return raw.cases.filter((c) => c.id && Array.isArray(c.turns) && c.turns.length);
 }
@@ -191,6 +203,7 @@ async function main() {
 
   const fixturesArg = arg("--fixtures");
   const fixturePath = fixturesArg ? resolve(fixturesArg) : null;
+  const lote = arg("--lote", "1");
   const orgSlug = arg("--org", process.env.ORG_SLUG ?? "teste-dev");
   const startNeedle = arg(
     "--start",
@@ -201,7 +214,7 @@ async function main() {
   const outPath = arg("--out", "replay-agent-runs.out.json");
   const delayMs = Number(arg("--delay", "0")) || 0;
 
-  let cases = loadFixtures(fixturePath);
+  let cases = loadFixtures(fixturePath, lote);
   if (onlyCase) cases = cases.filter((c) => c.id === onlyCase);
   const limit = Number(limitRaw);
   if (Number.isFinite(limit) && limit > 0) cases = cases.slice(0, limit);
@@ -253,6 +266,7 @@ async function main() {
       org: { id: org.id, slug: org.slug },
       start: { id: start.id, name: start.name, archetype: start.archetype },
       agents: agents.map((a) => a.name),
+      lote,
       cases: cases.map((c) => c.id),
     }),
   );
@@ -316,6 +330,21 @@ async function main() {
               }
             } else if (ruleHit.rule.action === "transfer_human") {
               skipReason = "rule_human";
+            } else if (ruleHit.rule.action === "assign_owner") {
+              const extra = ruleHit.rule as {
+                ownerUserId?: string | null;
+                ownerLabel?: string | null;
+              };
+              const dest = findAgent(
+                agents,
+                extra.ownerUserId ?? extra.ownerLabel ?? "",
+              );
+              if (dest && dest.id !== speaker.id) {
+                current = dest;
+                switchedTo = dest.name;
+              } else {
+                skipReason = `rule_owner:${extra.ownerLabel ?? extra.ownerUserId ?? "?"}`;
+              }
             }
 
             const text =
