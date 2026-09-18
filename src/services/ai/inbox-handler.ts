@@ -1219,10 +1219,42 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       afterTools?.assignedTo?.type === "AI" &&
       afterTools.assignedToId !== assignee.id;
     if (handedToPeerAi) {
+      const destUserId = afterTools.assignedToId;
+      const destText = (result.text || "").trim();
+      if (destUserId && destText) {
+        const dest = await prisma.user.findUnique({
+          where: { id: destUserId },
+          select: {
+            id: true,
+            aiAgentConfig: { select: { autonomyMode: true } },
+          },
+        });
+        if (dest) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: dest.id,
+            autonomyMode: dest.aiAgentConfig?.autonomyMode ?? "AUTONOMOUS",
+            text: destText,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+          }).catch(() => null);
+          if (result.followUpMedia?.length) {
+            await sendAgentFollowUpMedia({
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              agentUserId: dest.id,
+              attachments: result.followUpMedia,
+            }).catch(() => null);
+          }
+        }
+      }
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "peer_ai",
-        toUserId: afterTools.assignedToId,
+        toUserId: destUserId,
         durationMs: Date.now() - startedAt.getTime(),
       });
       return;

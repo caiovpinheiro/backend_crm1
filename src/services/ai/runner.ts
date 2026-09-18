@@ -45,6 +45,7 @@ import {
   loadLastCampaignDispatchContext,
 } from "@/services/ai/campaign-context";
 import { formatLocalClockHint } from "@/services/ai/idle-followup";
+import { maybeOrchestrateCoordinatorTurn } from "@/services/ai/coordinator-orchestrate";
 import {
   formatCoordinatorRoutingBlock,
   formatSpecialistPeerBlock,
@@ -161,6 +162,8 @@ export type RunArgs = {
   historyLimit?: number;
   /// Só mensagens a partir deste instante (Tabulador: janela do dia).
   historySince?: Date;
+  /// Recursão do orquestrador: o especialista não re-roteia.
+  skipCoordinatorOrchestration?: boolean;
 };
 
 export type RunResult = {
@@ -190,6 +193,15 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
   });
   if (!agent) throw new Error("Agente não encontrado.");
   if (!agent.active) throw new Error("Agente inativo.");
+
+  if (!args.skipCoordinatorOrchestration && agent.archetype === "COORDENADOR") {
+    const orchestrated = await maybeOrchestrateCoordinatorTurn({
+      runArgs: args,
+      agent,
+      runNested: (next) => runAgent(next),
+    });
+    if (orchestrated) return orchestrated;
+  }
 
   // Todo o restante roda como ator AI — qualquer logEvent disparado por
   // tool calls (move_stage, add_tag, transfer_to_human, etc.) sai

@@ -522,13 +522,14 @@ async function main() {
             current = applied.next;
           }
           if (applied.skip) skipReason = applied.skip;
+          const shown = current.id !== speaker.id ? current : speaker;
 
           records.push({
             caseId: c.id,
             turnIndex: i,
             inbound,
-            agentId: speaker.id,
-            agentName: speaker.name,
+            agentId: shown.id,
+            agentName: shown.name,
             llmInvoked: true,
             runId: result.runId,
             status: result.status,
