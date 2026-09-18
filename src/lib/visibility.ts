@@ -268,7 +268,7 @@ export async function getVisibilityFilter(
   };
 }
 
-function permissionsAllowKey(
+export function permissionsAllowKey(
   perms: ReadonlySet<string>,
   key: string,
 ): boolean {
