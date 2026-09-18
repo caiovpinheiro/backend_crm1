@@ -92,6 +92,24 @@ function clip(s: string, n = 240): string {
   return t.length <= n ? t : t.slice(0, n) + "…";
 }
 
+function logTurn(r: TurnRecord): void {
+  const tools = r.tools.map((t) => t.name).join(",") || "-";
+  console.log(
+    [
+      r.caseId,
+      `t${r.turnIndex}`,
+      r.agentName,
+      r.skipped ? `SKIP ${r.skipped}` : r.status,
+      r.switchedTo ? `→ ${r.switchedTo}` : "",
+      tools,
+      clip(r.inbound, 60),
+      clip(r.text, 80),
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
 function loadFixtures(path: string | null, lote: string): FixtureCase[] {
   const bundled =
     lote === "2" || lote === "lote2"
@@ -398,6 +416,7 @@ async function main() {
               switchedTo: null,
               skipped: skipReason,
             });
+            logTurn(records[records.length - 1]!);
             continue;
           }
 
@@ -472,6 +491,7 @@ async function main() {
               switchedTo,
               skipped: null,
             });
+            logTurn(records[records.length - 1]!);
             if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
@@ -516,6 +536,7 @@ async function main() {
             switchedTo: applied.switchedTo,
             skipped: null,
           });
+          logTurn(records[records.length - 1]!);
 
           if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
         }
@@ -530,26 +551,8 @@ async function main() {
     turns: records,
   };
 
-  for (const r of records) {
-    const tools = r.tools.map((t) => t.name).join(",") || "-";
-    console.log(
-      [
-        r.caseId,
-        `t${r.turnIndex}`,
-        r.agentName,
-        r.skipped ? `SKIP ${r.skipped}` : r.status,
-        r.switchedTo ? `→ ${r.switchedTo}` : "",
-        tools,
-        clip(r.inbound, 60),
-        clip(r.text, 80),
-      ]
-        .filter(Boolean)
-        .join(" | "),
-    );
-  }
-
   writeFileSync(resolve(outPath), JSON.stringify(report, null, 2), "utf8");
-  console.log(`wrote ${outPath}`);
+  console.log(`wrote ${outPath} (${records.length} turns)`);
 }
 
 main()
