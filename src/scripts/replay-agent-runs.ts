@@ -24,14 +24,12 @@ import bundledLote1 from "./fixtures/joseph-replay-cases.json";
 import bundledLote2 from "./fixtures/joseph-replay-lote2.json";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
-import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
 import {
   canonicalPhone,
   lookupStudent,
 } from "@/services/academic-records";
-import { createContact } from "@/services/contacts";
 import { runAgent, type RunResult } from "@/services/ai/runner";
 
 type FixtureCase = {
@@ -226,16 +224,29 @@ async function ensureReplayStudent(
   const externalId = `replay-${c.id}`;
   const digits = canonicalPhone(phone);
 
-  let contact = await prisma.contact.findFirst({
-    where: { externalId },
+  let contact = await prismaBase.contact.findFirst({
+    where: { organizationId, externalId },
     select: { id: true, phone: true, email: true },
   });
   if (!contact) {
-    contact = await createContact({
-      name,
-      phone,
-      externalId,
-      source: "replay-agent-runs",
+    // prismaBase: seed de replay. createContact dispara ActivityEvent e o
+    // banco DEV pode estar atrás do schema (sourceIsReconstructed).
+    const max = await prismaBase.contact.aggregate({
+      where: { organizationId },
+      _max: { number: true },
+    });
+    const e164 =
+      phone.startsWith("+") ? phone : digits ? `+55${digits}` : phone;
+    contact = await prismaBase.contact.create({
+      data: {
+        organizationId,
+        number: (max._max.number ?? 0) + 1,
+        name,
+        phone: e164,
+        externalId,
+        source: "replay-agent-runs",
+      },
+      select: { id: true, phone: true, email: true },
     });
   }
 
