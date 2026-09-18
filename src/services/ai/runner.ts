@@ -194,7 +194,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
   if (!agent) throw new Error("Agente não encontrado.");
   if (!agent.active) throw new Error("Agente inativo.");
 
-  if (!args.skipCoordinatorOrchestration && agent.archetype === "COORDENADOR") {
+  if (!args.skipCoordinatorOrchestration) {
     const orchestrated = await maybeOrchestrateCoordinatorTurn({
       runArgs: args,
       agent,
@@ -757,23 +757,35 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
     // seria esconder do operador exatamente o que ele foi ver: a resposta que
     // o cliente receberia. A auditoria de produção fica intacta.
     const claimBlocked = effectAudit.blocked && !testMode;
-    const aiHandoffOk = result.toolCalls.some((c) => {
+    const selfName = (agent.user?.name ?? "").trim();
+    const aiHandoffAway = result.toolCalls.some((c) => {
       const payload = c.result;
       if (!payload || typeof payload !== "object") return false;
       if ((payload as { ok?: unknown }).ok === false) return false;
-      if (c.toolName === "transfer_to_ai_agent") return true;
-      if (c.toolName !== "transfer_conversation") return false;
-      const target =
+      const isAiTool =
+        c.toolName === "transfer_to_ai_agent" ||
+        (c.toolName === "transfer_conversation" &&
+          c.args &&
+          typeof c.args === "object" &&
+          !Array.isArray(c.args) &&
+          (c.args as { target?: unknown }).target === "ai_agent");
+      if (!isAiTool) return false;
+      const dest = String(
         c.args && typeof c.args === "object" && !Array.isArray(c.args)
-          ? (c.args as { target?: unknown }).target
-          : null;
-      return target === "ai_agent";
+          ? ((c.args as { agentName?: unknown; name?: unknown }).agentName ??
+            (c.args as { name?: unknown }).name ??
+            "")
+          : "",
+      ).trim();
+      if (!dest) return (payload as { assigned?: unknown }).assigned === true;
+      return dest.localeCompare(selfName, undefined, { sensitivity: "accent" }) !== 0;
     });
     // O modelo escreve "vou te encaminhar" mesmo com o interruptor desligado.
     // Aviso oficial: tool envia em produção. Aqui só devolvemos texto no
     // replay/teste (tool simulada) quando o interruptor está ligado.
+    // Transferência para o PRÓPRIO agente não é troca de dono — não zera a fala.
     let finalText = claimBlocked ? NEUTRAL_EFFECT_FALLBACK : result.text;
-    if (!claimBlocked && aiHandoffOk) {
+    if (!claimBlocked && aiHandoffAway) {
       if (!inboxPolicyForRun.announceAiTransfer) {
         finalText = "";
       } else if (testMode) {

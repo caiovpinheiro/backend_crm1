@@ -95,6 +95,13 @@ export async function executeMessageRule(
   // transferir ou atribuir responsável.
   await applyRuleTag(rule.tagName, deps.contactId);
 
+  if (
+    deps.archetype === "COORDENADOR" &&
+    (rule.action === "transfer_human" || rule.action === "transfer_department")
+  ) {
+    return { kind: "continue" };
+  }
+
   if (rule.action === "answer_with_knowledge") {
     return { kind: "answer_with_knowledge" };
   }

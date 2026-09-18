@@ -1,7 +1,8 @@
 /**
- * Orquestrador de verdade: o COORDENADOR escolhe o especialista no código,
- * troca o dono e o destino atende no mesmo turno. O LLM do coordenador
- * só roda em saudação, recado sem assunto ou pedido explícito de humano.
+ * Orquestrador: escolhe o especialista no código, troca o dono e o
+ * destino atende no mesmo turno. Roda no coordenador e de novo no
+ * especialista se o assunto mudar (ex.: cancelar no meio do atendimento).
+ * O LLM só fica com saudação, recado sem assunto ou pedido de humano.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -39,7 +40,12 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
 }): Promise<RunResult | null> {
   const { runArgs, agent, runNested } = args;
   if (runArgs.skipCoordinatorOrchestration) return null;
-  if (agent.archetype !== "COORDENADOR") return null;
+  if (
+    agent.archetype === "TABULACAO" ||
+    agent.archetype === "ENCERRAMENTO"
+  ) {
+    return null;
+  }
   if (isIdleOrchestrationMessage(runArgs.userMessage)) return null;
 
   const policy = normalizeInboxPolicy(agent.inboxPolicy, agent.verticalPack);

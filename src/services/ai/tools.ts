@@ -2145,6 +2145,17 @@ function withTestModeSimulation(
       ) {
         const idle = coordinatorIdleHandoffError(ctx);
         if (idle) return fail(idle);
+        const wanted = String(args.agentName ?? args.name ?? "").trim();
+        const me = ctx.agentName?.trim() ?? "";
+        if (
+          wanted &&
+          me &&
+          wanted.localeCompare(me, undefined, { sensitivity: "accent" }) === 0
+        ) {
+          return fail(
+            "Esse é você mesmo. Siga o atendimento neste turno; não chame a tool de novo.",
+          );
+        }
       }
       return simulateEffectTool(id, args);
     }) as typeof execute,

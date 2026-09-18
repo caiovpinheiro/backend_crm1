@@ -439,7 +439,9 @@ async function main() {
             ruleHit.rule.action !== "answer_with_knowledge" &&
             !(
               speaker.archetype === "COORDENADOR" &&
-              ruleHit.rule.action === "assign_owner"
+              (ruleHit.rule.action === "assign_owner" ||
+                ruleHit.rule.action === "transfer_human" ||
+                ruleHit.rule.action === "transfer_department")
             )
           ) {
             let switchedTo: string | null = null;
