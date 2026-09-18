@@ -711,7 +711,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     inauguralDates: [],
     firstAccessPackMessage: null,
     speakOnAiTransfer: false,
-    announceAiTransfer: true,
+    announceAiTransfer: false,
     announceAiTransferMessage: null,
     scope: defaultAttendanceScope(),
     handoffMessage: null,
