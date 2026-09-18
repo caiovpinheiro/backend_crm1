@@ -16,7 +16,6 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
-import { getOrgIdOrNull } from "@/lib/request-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
@@ -403,8 +402,10 @@ async function processEvent(
   );
 
   try {
+    // Org do canal, não do contexto: o guard fail-closed do sse-bus
+    // descarta o evento sem org e este ingest roda no worker.
     sseBus.publish("new_message", {
-      organizationId: getOrgIdOrNull(),
+      organizationId: hit.organizationId,
       conversationId: conversation.id,
       contactId: contact.id,
       direction: "in",
@@ -413,7 +414,7 @@ async function processEvent(
       timestamp,
     });
   } catch (err) {
-    log.debug("SSE publish falhou (nao-fatal):", err);
+    log.warn("SSE publish falhou (nao-fatal):", err);
   }
 
   notifyInboundMessage({
