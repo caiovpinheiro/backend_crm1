@@ -6,14 +6,22 @@
       "label": "Kauane Andrade de Oliveira",
       "turns": [
         "Primeiro Acesso"
-      ]
+      ],
+      "contact": {
+        "name": "Kauane Andrade de Oliveira",
+        "phone": "+5511971678304"
+      }
     },
     {
       "id": "403970",
       "label": "Jessica Correa Gama De Melo",
       "turns": [
         "Qual é o horário das aulas?"
-      ]
+      ],
+      "contact": {
+        "name": "Jessica Correa Gama De Melo",
+        "phone": "+5511985717156"
+      }
     },
     {
       "id": "403971",
@@ -22,7 +30,11 @@
         "Falar com equipe",
         "Financeiro",
         "Quero falar com a equipe"
-      ]
+      ],
+      "contact": {
+        "name": "Bruno Lima de Oliveira",
+        "phone": "+5511986739217"
+      }
     },
     {
       "id": "403972",
@@ -30,14 +42,22 @@
       "turns": [
         "Ola",
         "Acesso a Plataforma"
-      ]
+      ],
+      "contact": {
+        "name": "Ana carolina de souza alvarez da costa",
+        "phone": "+5515998370224"
+      }
     },
     {
       "id": "403973",
       "label": "Elisete Aparecida Correia da Silva",
       "turns": [
         "Só posso responder mais tarde"
-      ]
+      ],
+      "contact": {
+        "name": "Elisete Aparecida Correia da Silva",
+        "phone": "+5511976428635"
+      }
     },
     {
       "id": "403974",
@@ -48,7 +68,11 @@
         "Que irei paga",
         "Financeiro",
         "Regras de pagamento"
-      ]
+      ],
+      "contact": {
+        "name": "Alexandre Lúcio dos santos oliveira",
+        "phone": "+5511962178594"
+      }
     },
     {
       "id": "403976",
@@ -64,7 +88,11 @@
         "Recebi apenas isso ☝️",
         "Deu certo",
         "Já sim"
-      ]
+      ],
+      "contact": {
+        "name": "Gabriel Bergamo",
+        "phone": "+5511985252851"
+      }
     },
     {
       "id": "403977",
@@ -79,7 +107,11 @@
         "Não entra com esse aceso",
         "Acesso",
         "Essa"
-      ]
+      ],
+      "contact": {
+        "name": "Maisa Alves de Almeida Rocha",
+        "phone": "+553899846151"
+      }
     },
     {
       "id": "403978",
@@ -88,7 +120,11 @@
         "Olá, fiz matrícula hj",
         "Acesso a Plataforma",
         "O app Duda só aceita Microsoft"
-      ]
+      ],
+      "contact": {
+        "name": "Cícera Quesia da Silva",
+        "phone": "+5511959878027"
+      }
     },
     {
       "id": "403979",
@@ -100,14 +136,22 @@
         "Ah perfeito, obrigada 🙏🏻",
         "Irei fazer hoje mesmo",
         "Só isso mesmo, obrigada Felipe"
-      ]
+      ],
+      "contact": {
+        "name": "JULIA SOARES DE SOUZA",
+        "phone": "+5511977432625"
+      }
     },
     {
       "id": "403980",
       "label": "DEBORA GOMES DOS ANJOS",
       "turns": [
         "Oie"
-      ]
+      ],
+      "contact": {
+        "name": "DEBORA GOMES DOS ANJOS",
+        "phone": "+5511932925501"
+      }
     },
     {
       "id": "403982",
@@ -119,7 +163,11 @@
         "Mas to tendo dificuldade p finalizar",
         "Pode verificar p favor",
         "Nao tenho acesso"
-      ]
+      ],
+      "contact": {
+        "name": "Marluci Portela",
+        "phone": "+5511975797416"
+      }
     },
     {
       "id": "403983",
@@ -135,7 +183,11 @@
         "A professora de artes não tem número de registro o que devo colocar",
         "Mas são as informações que a direção da escola me passou",
         "Ok"
-      ]
+      ],
+      "contact": {
+        "name": "NEUSA LÚCIA CAMPOS",
+        "phone": "+5511912193235"
+      }
     },
     {
       "id": "403984",
@@ -149,7 +201,11 @@
         "Minhas mensalidades foram lançadas com valor errado. Já foram atualizadas, porém a do mês de Agosto eu paguei o valor cheio sem o desconto, pq já estava no dia do vencimento, mas até o momento não foi feito nenhum estorno. Já mandei mensagem pelo aplicativo, mas ainda nada. Como devo proceder?",
         "OK",
         "Não. Obrigada ☺️"
-      ]
+      ],
+      "contact": {
+        "name": "ELAINE DE SÁ VIEIRA DE GOUVEIA",
+        "phone": "+5511993093323"
+      }
     },
     {
       "id": "403985",
@@ -165,7 +221,11 @@
         "Poderia me enviar o video de como eu cancelo pfv",
         "Valeu",
         "Preciso do login"
-      ]
+      ],
+      "contact": {
+        "name": "LIVIA AZEVEDO ARAÚJO DE BARROS",
+        "phone": "+5511993015816"
+      }
     },
     {
       "id": "403986",
@@ -176,7 +236,11 @@
         "Falar com equipe",
         "Como entro em contato direto com eles?",
         "Obrigado Beatriz"
-      ]
+      ],
+      "contact": {
+        "name": "JOEL VICTOR ARAUJO DOS SANTOS",
+        "phone": "+5511992286756"
+      }
     },
     {
       "id": "403987",
@@ -192,7 +256,11 @@
         "Esse é o conteúdo né?",
         "ta bom",
         "Muito obrigada."
-      ]
+      ],
+      "contact": {
+        "name": "CLEYSLA DA SILVA LIMA",
+        "phone": "+5511983516073"
+      }
     },
     {
       "id": "403988",
@@ -206,7 +274,11 @@
         "Está correto muito obrigada",
         "Não e só isso",
         "Obrigada"
-      ]
+      ],
+      "contact": {
+        "name": "Matheus Angelo Almeida Castro",
+        "phone": "+5511946027310"
+      }
     },
     {
       "id": "403989",
@@ -214,7 +286,11 @@
       "turns": [
         "Primeiro Acesso",
         "Sobre o Curso"
-      ]
+      ],
+      "contact": {
+        "name": "Vanessa evangelista Machado",
+        "phone": "+5511962468435"
+      }
     },
     {
       "id": "403990",
@@ -224,7 +300,11 @@
         "Oi",
         "MARIANA",
         "7 a 10 disse úteis"
-      ]
+      ],
+      "contact": {
+        "name": "Arlete",
+        "phone": "+5511957782554"
+      }
     },
     {
       "id": "403991",
@@ -240,7 +320,11 @@
         "Já tentei",
         "Estou tentando autenticar mas não vai",
         "Consegui"
-      ]
+      ],
+      "contact": {
+        "name": "Cícera Quesia da Silva",
+        "phone": "+5511959878027"
+      }
     },
     {
       "id": "403992",
@@ -256,7 +340,11 @@
         "Sim por favor",
         "Não recebi",
         "ok, muito obrigado"
-      ]
+      ],
+      "contact": {
+        "name": "ALEXSANDRO HARIM ALVES DA SILVA",
+        "phone": "+5511917948693"
+      }
     },
     {
       "id": "403993",
@@ -272,7 +360,11 @@
         "Por onde vou ser comunicada sobre dias e horários",
         "E as aulas por vídeo é uma vez por semana ?",
         "Obrigada"
-      ]
+      ],
+      "contact": {
+        "name": "Elisangela olivia dos Santos",
+        "phone": "+5511981332677"
+      }
     },
     {
       "id": "403994",
@@ -281,7 +373,11 @@
         "Olá",
         "Falar com equipe",
         "37126676808"
-      ]
+      ],
+      "contact": {
+        "name": "Ana Paula",
+        "phone": "+5511955713384"
+      }
     },
     {
       "id": "403995",
@@ -291,14 +387,22 @@
         "Falar com equipe",
         "Não.",
         "Ok obrigada"
-      ]
+      ],
+      "contact": {
+        "name": "Cristiane Aparecida de Souza",
+        "phone": "+5511994145939"
+      }
     },
     {
       "id": "403996",
       "label": "Nicolle Santos Lima",
       "turns": [
         "Oii, boa tarde"
-      ]
+      ],
+      "contact": {
+        "name": "Nicolle Santos Lima",
+        "phone": "+5511993869247"
+      }
     },
     {
       "id": "403997",
@@ -308,7 +412,11 @@
         "Quero trocar o curso",
         "Logística",
         "Ou comércio exterior"
-      ]
+      ],
+      "contact": {
+        "name": "DEBORA GOMES DOS ANJOS",
+        "phone": "+5511932925501"
+      }
     },
     {
       "id": "403998",
@@ -324,14 +432,22 @@
         "Não aparece",
         "Ops foi errado",
         "No histórico aparece pendente"
-      ]
+      ],
+      "contact": {
+        "name": "REGIANE BRITO DOS SANTOS",
+        "phone": "+5511963538726"
+      }
     },
     {
       "id": "403999",
       "label": "Daniele Ferreira Pinto",
       "turns": [
         "Obrigada , pra vc também"
-      ]
+      ],
+      "contact": {
+        "name": "Daniele Ferreira Pinto",
+        "phone": "+5511961468072"
+      }
     },
     {
       "id": "404000",
@@ -343,7 +459,11 @@
         "Pq não tenho mais interesse em trabalhar na área, quero somente concluir",
         "Entendi",
         "Obrigado"
-      ]
+      ],
+      "contact": {
+        "name": "NÚBIA NEVES DA COSTA",
+        "phone": "+5511914805345"
+      }
     },
     {
       "id": "404001",
@@ -355,7 +475,11 @@
         "Não consigo entrar na minha conta",
         "Tanto no aplicaria Duda quanto na área do aluno pelo google",
         "Oi Beatriz meu CPF é 45097926897"
-      ]
+      ],
+      "contact": {
+        "name": "Meira",
+        "phone": "+5511930404612"
+      }
     },
     {
       "id": "404002",
@@ -369,7 +493,11 @@
         "ta bom",
         "moça mas eu não recebi comprovante de pagamento",
         "onde eu vejo?"
-      ]
+      ],
+      "contact": {
+        "name": "RAFAELA DOMINGOS BIANCHI",
+        "phone": "+5511945268262"
+      }
     },
     {
       "id": "404003",
@@ -378,7 +506,11 @@
         "Eu faço curso ead não tenho instituição fisica",
         "Financeiro",
         "Como pagar"
-      ]
+      ],
+      "contact": {
+        "name": "Meira",
+        "phone": "+5511930404612"
+      }
     },
     {
       "id": "404004",
@@ -386,7 +518,11 @@
       "turns": [
         "Boa tarde tudo....vcs conseguem mandar outro link não estou conseguindo acessar a plataforma",
         "Acesso a Plataforma"
-      ]
+      ],
+      "contact": {
+        "name": "Silvano da silveira Silva",
+        "phone": "+5511972468129"
+      }
     },
     {
       "id": "404005",
@@ -398,7 +534,11 @@
         "Ou quando refaço?",
         "Ok e eu posso já fazer isso? Ou até quando devo fazer?",
         "Ok obrigada"
-      ]
+      ],
+      "contact": {
+        "name": "MARGARIDA PIRES DE SOUZA DIAS",
+        "phone": "+5511941709512"
+      }
     },
     {
       "id": "404007",
@@ -410,14 +550,22 @@
         "Estou no primeiro semestre",
         "E gostaria de fazer junto com nutrição o curso de análise e desenvolvimento de sistemas",
         "Gostaria de saber valores, já que seria minha terceira graduação com vcs"
-      ]
+      ],
+      "contact": {
+        "name": "Wandressa de Freitas Gomes",
+        "phone": "+5561991372176"
+      }
     },
     {
       "id": "404008",
       "label": "😉😘",
       "turns": [
         "Qual senha??"
-      ]
+      ],
+      "contact": {
+        "name": "😉😘",
+        "phone": "+5511993261233"
+      }
     },
     {
       "id": "404009",
@@ -433,7 +581,11 @@
         "gostaria de alguams infromações",
         "gostaria de algumas informações",
         "vc teria como verificar meus estudos"
-      ]
+      ],
+      "contact": {
+        "name": "Douglas da Silva Franco",
+        "phone": "+5511986501557"
+      }
     },
     {
       "id": "404010",
@@ -449,14 +601,22 @@
         "Oque pode ser feito?",
         "Mas só parcela no cartão?",
         "Se eu for pagar só dia 20/10 oque acontece.?"
-      ]
+      ],
+      "contact": {
+        "name": "VANESSA PERESSIM PIRON LIMA",
+        "phone": "+5519991965624"
+      }
     },
     {
       "id": "404011",
       "label": "Kauane Andrade de Oliveira",
       "turns": [
         "Pode deixa, muito obrigada ❤️"
-      ]
+      ],
+      "contact": {
+        "name": "Kauane Andrade de Oliveira",
+        "phone": "+5511971678304"
+      }
     },
     {
       "id": "404013",
@@ -469,7 +629,11 @@
         "Preciso começar logo",
         "Tá bomm",
         "Você também!"
-      ]
+      ],
+      "contact": {
+        "name": "Nicolle Santos Lima",
+        "phone": "+5511993869247"
+      }
     },
     {
       "id": "404014",
@@ -478,7 +642,11 @@
         "A quando inicia as atividades?",
         "Acesso a Plataforma",
         "Não!"
-      ]
+      ],
+      "contact": {
+        "name": "Lilian da Silva Pedrosa",
+        "phone": "+5511946807179"
+      }
     },
     {
       "id": "404015",
@@ -486,14 +654,22 @@
       "turns": [
         "Preciso de ajuda",
         "Acesso a Plataforma"
-      ]
+      ],
+      "contact": {
+        "name": "Nutricionista",
+        "phone": "+5511981240501"
+      }
     },
     {
       "id": "404017",
       "label": "emerson santos irineu",
       "turns": [
         "Marília, esse link me levou para o google. é isso mesmo?: https://www.google.com/search?sa=X&sca_esv=82c5e956d036c811&rlz=1C1HKFL_pt-PTBR1204BR1204&biw=1536&bih=695&sxsrf=APpeQnvb4YFP2OSKm23AaYLJ-th0Q518mQ:1788374010723&kgmid=/g/11q2t4ct80&q=EAD+-+Cruzeiro+do+Sul+Vila+Prudente&shem=dlvs1,epsd1,ltae,rimspwouoe&shndl=30&source=sh/x/loc/uni/m1/1&kgs=3681a39d0707c30e&utm_source=dlvs1,epsd1,ltae,rimspwouoe,sh/x/loc/uni/m1/1"
-      ]
+      ],
+      "contact": {
+        "name": "emerson santos irineu",
+        "phone": "+5531993288473"
+      }
     },
     {
       "id": "404018",
@@ -505,14 +681,22 @@
         "Obrigadaa",
         "Não!! Está tudo certinho!!  Estou ansiosa pra começar as matérias no mês que vem",
         "Obrigada!!"
-      ]
+      ],
+      "contact": {
+        "name": "Nicassia Silva Mendes",
+        "phone": "+5511944559427"
+      }
     },
     {
       "id": "404019",
       "label": "Fábio",
       "turns": [
         "Oi"
-      ]
+      ],
+      "contact": {
+        "name": "Fábio",
+        "phone": "+5511913314135"
+      }
     },
     {
       "id": "404020",
@@ -520,7 +704,11 @@
       "turns": [
         "Primeiro Acesso",
         "Ok"
-      ]
+      ],
+      "contact": {
+        "name": "Vitor Hugo Pires Machado",
+        "phone": "+5543988681389"
+      }
     },
     {
       "id": "404021",
@@ -532,7 +720,11 @@
         "Eu comecei a faculdade em abril de 2025",
         "Gostaria de saber qd eu me formo",
         "Pq vi q tem matérias pendentes do primeiro semestre"
-      ]
+      ],
+      "contact": {
+        "name": "DEBORA CAMARGO SCHWINSKY",
+        "phone": "+5511958279849"
+      }
     },
     {
       "id": "404022",
@@ -545,14 +737,22 @@
         "?",
         "Ok, obrigada",
         "Não"
-      ]
+      ],
+      "contact": {
+        "name": "REGIANE BRITO DOS SANTOS",
+        "phone": "+5511963538726"
+      }
     },
     {
       "id": "404023",
       "label": "Danielle Da Silva Rodrigues",
       "turns": [
         "Acesso a Plataforma"
-      ]
+      ],
+      "contact": {
+        "name": "Danielle Da Silva Rodrigues",
+        "phone": "+559282377280"
+      }
     },
     {
       "id": "404024",
@@ -566,7 +766,11 @@
         "Como faço as coisas ?",
         "App dida",
         "Duda"
-      ]
+      ],
+      "contact": {
+        "name": "Clayton Aparecido Adriano",
+        "phone": "+5511981026578"
+      }
     },
     {
       "id": "404025",
@@ -577,7 +781,11 @@
         "Já tentei diversas vezes entrar e da essa mesng que o email não existe…. Preciso acessar a plataforma…",
         "Mas estava entrando normalmente",
         "Pq parou ? E está dando que o e-mail não existe"
-      ]
+      ],
+      "contact": {
+        "name": "Ederaldo de Souza Junior",
+        "phone": "+5511943806546"
+      }
     },
     {
       "id": "404027",
@@ -591,7 +799,11 @@
         "Meu cpf 50693664835",
         "Ok",
         "Obrigada 🙏🏼"
-      ]
+      ],
+      "contact": {
+        "name": "FRANCIELE MOREIRA DA SILVA LEITE",
+        "phone": "+5511968398607"
+      }
     },
     {
       "id": "404028",
@@ -603,7 +815,11 @@
         "Ok",
         "Não",
         "Obrigado"
-      ]
+      ],
+      "contact": {
+        "name": "RENAN DOS SANTOS SOUZA",
+        "phone": "+5567996951083"
+      }
     },
     {
       "id": "404029",
@@ -618,7 +834,11 @@
         "Fiz a matrícula hoje no curso de nutrição semipresencial",
         "Já sim, só fiquei com essa dúvida mesmo",
         "E pra realizar os pagamentos como faço ?"
-      ]
+      ],
+      "contact": {
+        "name": "Kauane Andrade de Oliveira",
+        "phone": "+5511971678304"
+      }
     },
     {
       "id": "404030",
@@ -629,14 +849,22 @@
         "27713221883",
         "Eu fiz a rematrícula , mas preciso do termo de estágio",
         "Outra dúvida é , minha rematrícula está dizendo que o semestre é mais de 4 mil reais , mas só vou entregar o estágio e horas complementares"
-      ]
+      ],
+      "contact": {
+        "name": "Anderson Carlos",
+        "phone": "+5511948205907"
+      }
     },
     {
       "id": "404031",
       "label": "Paula Fialho de Amorim",
       "turns": [
         "Primeiro Acesso"
-      ]
+      ],
+      "contact": {
+        "name": "Paula Fialho de Amorim",
+        "phone": "+5511965602503"
+      }
     },
     {
       "id": "404035",
@@ -646,7 +874,11 @@
         "?",
         "Falar com equipe",
         "489.555.838-00"
-      ]
+      ],
+      "contact": {
+        "name": "Emily",
+        "phone": "+5511994538144"
+      }
     },
     {
       "id": "404039",
@@ -656,14 +888,22 @@
         "Falar com equipe",
         "Já fiz o pagamento da prova e a disciplina apareceu em outubro",
         "Mas não aparece nada. Devo aguardar aparecer o conteúdo?"
-      ]
+      ],
+      "contact": {
+        "name": "YAMILLE MIRANDA DE FARIAS",
+        "phone": "+5592993178477"
+      }
     },
     {
       "id": "404040",
       "label": "Anderson Carlos",
       "turns": [
         "Polo São Miguel"
-      ]
+      ],
+      "contact": {
+        "name": "Anderson Carlos",
+        "phone": "+5511948205907"
+      }
     },
     {
       "id": "404041",
@@ -673,7 +913,11 @@
         "Estou bem graças a Deus 🙏",
         "Falar com equipe",
         "CPF:174.307.588/00"
-      ]
+      ],
+      "contact": {
+        "name": "Luciane",
+        "phone": "+5511984589659"
+      }
     },
     {
       "id": "404042",
@@ -682,7 +926,11 @@
         "Boa tarde",
         "Falar com equipe",
         "Qual o nome da minha cordenadora ?"
-      ]
+      ],
+      "contact": {
+        "name": "eliana ianuantuoni",
+        "phone": "+5511987466576"
+      }
     },
     {
       "id": "404043",
@@ -690,7 +938,11 @@
       "turns": [
         "Ola",
         "Cancelamento/trancamento"
-      ]
+      ],
+      "contact": {
+        "name": "Andressa da Silva Cremonesi",
+        "phone": "+5511959661702"
+      }
     }
   ]
 }

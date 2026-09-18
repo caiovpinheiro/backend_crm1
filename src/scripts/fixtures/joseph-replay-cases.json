@@ -4,7 +4,14 @@
     {
       "id": "404046",
       "label": "texto fora do menu — Emily",
-      "turns": ["?", "Atendimento lixo"]
+      "turns": [
+        "?",
+        "Atendimento lixo"
+      ],
+      "contact": {
+        "name": "Emily",
+        "phone": "+5511994538144"
+      }
     },
     {
       "id": "404026",
@@ -14,7 +21,11 @@
         "Tudo bem",
         "Queria saber como faço para cancelar o plano",
         "Cancelamento/trancamento"
-      ]
+      ],
+      "contact": {
+        "name": "Matheus Teles Dalosto",
+        "phone": "+5511966109447"
+      }
     },
     {
       "id": "404038",
@@ -25,7 +36,11 @@
         "Como pagar",
         "Preciso de ajuda",
         "Parcelamento"
-      ]
+      ],
+      "contact": {
+        "name": "Stephany",
+        "phone": "+5511935367709"
+      }
     },
     {
       "id": "404034",
@@ -38,7 +53,11 @@
         "Preciso de ajuda",
         "Não estou conseguindo logar",
         "Está pedindo e-mail e não CPF"
-      ]
+      ],
+      "contact": {
+        "name": "Leticia Domingos de Lima",
+        "phone": "+5511983924204"
+      }
     },
     {
       "id": "404044",
@@ -47,7 +66,11 @@
         "Boa tarde !!",
         "Falar com equipe",
         "Solicitei para fazer as dp e as matérias correspondentes para encerrar o curso, mas só aparece 3 matérias na plataforma"
-      ]
+      ],
+      "contact": {
+        "name": "ESTER DE SOUZA MENDONÇA",
+        "phone": "+5511962796568"
+      }
     }
   ]
 }

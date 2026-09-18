@@ -12,7 +12,8 @@
  *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
  *   node dist/workers/replay-agent-runs.js --lote 2 --limit 10
  *
- * Env: DATABASE_URL; opcional ORG_SLUG / REPLAY_START_AGENT.
+ * O harness cria contato + linha de matriculado (se a org não tiver relatório
+ * casando o telefone). Sem isso consultar_matricula sempre falha.
  * prismaBase: script fora de RequestContext até achar a org; o loop usa
  * runWithContext + runAgent (prisma scoped).
  */
@@ -23,11 +24,22 @@ import bundledLote1 from "./fixtures/joseph-replay-cases.json";
 import bundledLote2 from "./fixtures/joseph-replay-lote2.json";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
+import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
+import {
+  canonicalPhone,
+  lookupStudent,
+} from "@/services/academic-records";
+import { createContact } from "@/services/contacts";
 import { runAgent, type RunResult } from "@/services/ai/runner";
 
-type FixtureCase = { id: string; label: string; turns: string[] };
+type FixtureCase = {
+  id: string;
+  label: string;
+  turns: string[];
+  contact?: { name?: string; phone?: string | null };
+};
 type FixtureFile = { cases: FixtureCase[] };
 
 type AgentRow = {
@@ -195,6 +207,65 @@ function applyHandoff(
   return { next: null, skip: null, switchedTo: null };
 }
 
+function replayPhone(c: FixtureCase): string {
+  const raw = c.contact?.phone?.trim();
+  if (raw && /\d/.test(raw)) return raw;
+  return `+55119${c.id.replace(/\D/g, "").padStart(8, "0").slice(-8)}`;
+}
+
+/**
+ * Contact + linha no relatório de matriculados. Sem isso consultar_matricula
+ * devolve "Sem contato" / found:false e o agente só pede cadastro.
+ */
+async function ensureReplayStudent(
+  organizationId: string,
+  c: FixtureCase,
+): Promise<{ contactId: string; seededRecord: boolean }> {
+  const name = (c.contact?.name || c.label || `Aluno ${c.id}`).trim();
+  const phone = replayPhone(c);
+  const externalId = `replay-${c.id}`;
+  const digits = canonicalPhone(phone);
+
+  let contact = await prisma.contact.findFirst({
+    where: { externalId },
+    select: { id: true, phone: true, email: true },
+  });
+  if (!contact) {
+    contact = await createContact({
+      name,
+      phone,
+      externalId,
+      source: "replay-agent-runs",
+    });
+  }
+
+  const existing = await lookupStudent(organizationId, {
+    phone: contact.phone ?? phone,
+    email: contact.email,
+    cpf: null,
+  });
+  if (existing.length) return { contactId: contact.id, seededRecord: false };
+
+  await prismaBase.studentAcademicRecord.create({
+    data: {
+      organizationId,
+      nome: name,
+      phone: digits,
+      rgm: `R${c.id}`,
+      curso: "Pedagogia",
+      polo: "EAD",
+      serie: "1",
+      instituicao: "Cruzeiro do Sul Virtual",
+      situacao: "EM CURSO",
+      tipoMatricula: "MATRICULA",
+      emailAcademico: `replay.${c.id}@aluno.replay.local`,
+      dataMatricula: new Date("2026-02-01T00:00:00.000Z"),
+      raw: { replay: true, caseId: c.id },
+    },
+  });
+  return { contactId: contact.id, seededRecord: true };
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL ausente");
@@ -285,6 +356,7 @@ async function main() {
         let current = start;
         const history: HistoryTurn[] = [];
         let skipReason: string | null = null;
+        const identity = await ensureReplayStudent(org.id, c);
 
         for (let i = 0; i < c.turns.length; i++) {
           const inbound = c.turns[i] ?? "";
@@ -382,6 +454,7 @@ async function main() {
             source: "playground",
             userMessage: inbound,
             history: history.slice(-10),
+            contactId: identity.contactId,
           });
 
           history.push({ role: "user", content: inbound });
