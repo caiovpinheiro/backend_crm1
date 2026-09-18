@@ -1,8 +1,9 @@
 /**
  * Replay em lote: falas do aluno → runAgent, troca de agente pela tool.
  *
- * Não cria conversa WhatsApp. transfer_* falha com "sem conversa"; o harness
- * lê os ARGS da tool e passa o próximo turno para o destino.
+ * Não cria conversa WhatsApp. `source: inbox_test` simula transfer_* (não
+ * muta CRM) e o guardrail não descarta o texto. O harness lê os ARGS da
+ * tool e passa o próximo turno para o destino.
  *
  * Local:
  *   npx tsx src/scripts/replay-agent-runs.ts --org teste-dev --start Joseph
@@ -462,7 +463,7 @@ async function main() {
 
           const result = await runAgent({
             agentId: speaker.id,
-            source: "playground",
+            source: "inbox_test",
             userMessage: inbound,
             history: history.slice(-10),
             contactId: identity.contactId,
