@@ -961,6 +961,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         });
         if (outcome.kind === "answer_with_knowledge") {
           ruleAnswersWithKnowledge = true;
+        } else if (outcome.kind === "continue") {
+          // Destino inválido: não engole o turno (sem reply e sem run).
         } else {
           await recordInboxInterceptRun({
             agentId: cfg.id,

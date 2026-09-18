@@ -24,6 +24,9 @@ export type MessageRuleOutcome =
   /// O turno segue para o modelo (base de conhecimento). Interceptos
   /// determinísticos NÃO rodam — a regra do operador já decidiu.
   | { kind: "answer_with_knowledge" }
+  /// Destino da regra é inválido (id sumido no clone, outro tenant). Não
+  /// engole o turno: o handler segue como se a regra não tivesse casado.
+  | { kind: "continue" }
   /// A regra resolveu o turno. `interceptName` vai para o run de auditoria.
   | { kind: "handled"; interceptName: string; departmentName?: string | null };
 
@@ -106,29 +109,46 @@ export async function executeMessageRule(
 
   if (rule.action === "assign_owner") {
     const ownerUserId = rule.ownerUserId;
-    if (!ownerUserId) {
-      return { kind: "handled", interceptName: "message_rule_assign_owner" };
-    }
-    const cluster = await prisma.$transaction((tx) =>
-      assignOwnerToContactClusterTx(tx, {
-        userId: ownerUserId,
-        contactId: deps.contactId,
+    const owner = ownerUserId
+      ? await prisma.user.findFirst({
+          where: { id: ownerUserId },
+          select: { id: true, type: true },
+        })
+      : null;
+    if (!owner) {
+      console.error("[ai] regra assign_owner: destino ausente nesta org", {
+        ruleId: rule.id,
+        ownerUserId,
         conversationId: deps.conversationId,
-        dealId: deps.dealId ?? null,
-        via: "message_rule",
-      }),
-    );
-    await invalidateBoardsForPipelines(cluster.pipelineIds);
-    const owner = await prisma.user.findUnique({
-      where: { id: ownerUserId },
-      select: { type: true },
-    });
+      });
+      return { kind: "continue" };
+    }
+    try {
+      const cluster = await prisma.$transaction((tx) =>
+        assignOwnerToContactClusterTx(tx, {
+          userId: owner.id,
+          contactId: deps.contactId,
+          conversationId: deps.conversationId,
+          dealId: deps.dealId ?? null,
+          via: "message_rule",
+        }),
+      );
+      await invalidateBoardsForPipelines(cluster.pipelineIds);
+    } catch (err) {
+      console.error("[ai] regra assign_owner: falha ao atribuir", {
+        ruleId: rule.id,
+        ownerUserId: owner.id,
+        conversationId: deps.conversationId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: "continue" };
+    }
     if (rule.message) {
       await deps.sendNotice(rule.message);
-    } else if (owner?.type === "AI" && deps.contactId) {
+    } else if (owner.type === "AI" && deps.contactId) {
       await triggerAgentOpeningForContact({
         contactId: deps.contactId,
-        agentUserId: ownerUserId,
+        agentUserId: owner.id,
       }).catch(() => {});
     }
     return { kind: "handled", interceptName: "message_rule_assign_owner" };
