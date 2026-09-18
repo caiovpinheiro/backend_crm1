@@ -1,0 +1,53 @@
+{
+  "comment": "Só falas inbound do aluno (dump prod 2026-09-18). Sem menu Meta, fila nem consultor.",
+  "cases": [
+    {
+      "id": "404046",
+      "label": "texto fora do menu — Emily",
+      "turns": ["?", "Atendimento lixo"]
+    },
+    {
+      "id": "404026",
+      "label": "pedido de cancelamento — Matheus",
+      "turns": [
+        "Oi",
+        "Tudo bem",
+        "Queria saber como faço para cancelar o plano",
+        "Cancelamento/trancamento"
+      ]
+    },
+    {
+      "id": "404038",
+      "label": "financeiro como pagar — Stephany",
+      "turns": [
+        "Dúvidas Financeiras",
+        "Financeiro",
+        "Como pagar",
+        "Preciso de ajuda",
+        "Parcelamento"
+      ]
+    },
+    {
+      "id": "404034",
+      "label": "acesso / login — Leticia",
+      "turns": [
+        "Sobre o Curso",
+        "Primeiro Acesso",
+        "Acesso a Plataforma",
+        "Não está indo",
+        "Preciso de ajuda",
+        "Não estou conseguindo logar",
+        "Está pedindo e-mail e não CPF"
+      ]
+    },
+    {
+      "id": "404044",
+      "label": "falar com equipe + dúvida longa — Ester",
+      "turns": [
+        "Boa tarde !!",
+        "Falar com equipe",
+        "Solicitei para fazer as dp e as matérias correspondentes para encerrar o curso, mas só aparece 3 matérias na plataforma"
+      ]
+    }
+  ]
+}
