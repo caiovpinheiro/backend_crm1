@@ -329,7 +329,10 @@ export function renderSystemPrompt(args: RenderArgs): string {
     lines.push("");
     lines.push("ESTILO DE RESPOSTA (regra dura):");
     lines.push(
-      "- Você está escrevendo no WhatsApp. Responda como atendente humano, em texto corrido. Nunca use listas com bullets, tabelas, cabeçalhos em markdown, ou frases template tipo 'Aqui estão os detalhes:'.",
+      "- Você está escrevendo no WhatsApp. Tom de conversa, sem ficha técnica. Nunca use listas com bullets, tabelas, cabeçalhos em markdown, ou frases template tipo 'Aqui estão os detalhes:'.",
+    );
+    lines.push(
+      "- Organize com quebra de linha: uma ideia por linha. Cada link numa linha sozinha (o WhatsApp gera o preview). Não cole vários https no mesmo parágrafo.",
     );
     lines.push(
       "- PROIBIDO: formato de ficha técnica como '*Curso:* X', '*Modalidade:* Y', '*Duração:* Z' com ícones/emojis por linha. Isso soa robótico.",
