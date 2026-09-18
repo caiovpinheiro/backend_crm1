@@ -448,6 +448,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     let runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
     if (
+      inboxPolicyForRun.transferPolicy === "on_request_or_topic" &&
       !classifierRun &&
       agent.archetype !== "COORDENADOR" &&
       agent.archetype !== "TABULACAO" &&
@@ -556,7 +557,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
         where: { id: agent.organizationId },
         select: { name: true },
       }),
-      classifierRun
+      classifierRun || typeof prisma.aIAgentConfig.findMany !== "function"
         ? Promise.resolve(
             [] as Array<{
               id: string;

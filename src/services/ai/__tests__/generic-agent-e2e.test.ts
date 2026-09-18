@@ -215,6 +215,7 @@ vi.mock("@/lib/prisma", () => {
       aIAgentConfig: {
         findUnique: vi.fn(async () => agentRow()),
         findFirst: vi.fn(async () => agentRow()),
+        findMany: vi.fn(async () => [agentRow()]),
       },
       aIAgentRun: {
         create: vi.fn(async () => ({ id: "run-1" })),
