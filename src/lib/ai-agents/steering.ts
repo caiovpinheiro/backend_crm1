@@ -56,7 +56,6 @@ export type ToolPolicy = {
   allowedTypes: string[];
   defaultType: string | null;
 
-  // consultar_matricula
   policyText: string | null;
   transferMessage: string | null;
 
@@ -957,8 +956,8 @@ export function buildUnknownAnswerBlock(
 /** Keywords padrão que acionam pedido de humano (quando nada é configurado). */
 export const DEFAULT_HUMAN_REQUEST_KEYWORDS: string[] = [
   "atendente",
+  "equipe",
   "humano",
-  "pessoa",
   "consultor",
   "humana",
   "operador",

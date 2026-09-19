@@ -56,8 +56,6 @@
       "retencao: string[];": 1,
       "* - `handoff` acolhe e passa para um atendente humano.": 1,
       "/// mensagem como retenção / dúvida comercial de curso.": 1,
-      "/// (default) = só responde no próximo inbound do aluno.": 1,
-      "/// Avisar o aluno ao passar a conversa para outro agente IA.": 1,
       "departmentAliases: { acolhimento: [], retencao: [], atendimento: [] },": 1,
       "acolhimento: strList(aliasesRaw.acolhimento),": 1,
       "retencao: strList(aliasesRaw.retencao),": 1
