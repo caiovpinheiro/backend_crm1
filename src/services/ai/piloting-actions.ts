@@ -589,6 +589,7 @@ export type TriggerOpeningResult =
         | "agent_inactive"
         | "no_opening_message"
         | "already_greeted"
+        | "attendance_in_progress"
         | "off_hours"
         | "no_contact"
         | "tabulation_classifier"
@@ -618,6 +619,11 @@ export async function triggerAgentOpeningForContact(args: {
   /// Após transferência entre IAs: não trate o aviso do orquestrador
   /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
   ignorePriorBotOutbound?: boolean;
+  /// Instante em que o handoff começou. Se o bot já tinha falado ANTES
+  /// disso, o atendimento estava em curso e quem recebe não se apresenta:
+  /// `ignorePriorBotOutbound` existe para não contar o aviso da própria
+  /// transferência, mas acabava liberando saudação no meio da conversa.
+  handoffStartedAt?: Date | null;
 }): Promise<TriggerOpeningResult> {
   // Replay com handoff real: a saudação do agente que recebeu o handoff
   // sairia pelo canal do contato.
@@ -683,6 +689,22 @@ export async function triggerAgentOpeningForContact(args: {
     ignorePriorBotOutbound: Boolean(args.ignorePriorBotOutbound),
   })) {
     return { status: "skipped", reason: "already_greeted" };
+  }
+  if (args.handoffStartedAt) {
+    const spokeBefore = await prisma.message.findFirst({
+      where: {
+        conversationId: conversation.id,
+        direction: "out",
+        authorType: "bot",
+        isPrivate: false,
+        messageType: { not: "note" },
+        createdAt: { lt: args.handoffStartedAt },
+      },
+      select: { id: true },
+    });
+    if (spokeBefore) {
+      return { status: "skipped", reason: "attendance_in_progress" };
+    }
   }
 
   // Business hours gate — se fora, não dispara a saudação proativa.

@@ -20,11 +20,19 @@ import {
   executeOrchestratedHandoff,
 } from "@/services/ai/agent-handoff";
 import {
+  loadConversationPeerHistory,
+  peerAlreadyAttended,
+} from "@/services/ai/conversation-peers";
+import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
+import {
   humanQueueContextFromAgent,
   userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
+import { recordInboxInterceptRun } from "@/services/ai/record-intercept-run";
 import { isIdleOrchestrationMessage } from "@/services/ai/transfer-gate";
+import type { InboxPolicy } from "@/lib/ai-agents/steering";
 import type { RunArgs, RunResult } from "@/services/ai/runner";
+import { getVerticalPack } from "@/verticals";
 
 type CoordinatorAgent = {
   id: string;
@@ -36,6 +44,63 @@ type CoordinatorAgent = {
   toolConfig: unknown;
   user: { id: string; name: string | null } | null;
 };
+
+/**
+ * Saída do contrato de atendimento quando o roteamento fica sem destino IA.
+ *
+ * Manda para a Distribuição Inteligente (mesmo caminho da tool
+ * `transfer_to_human`) e grava o run — sem o run, o `inbox-handler` não sabe
+ * que houve handoff e o contato fica sem a mensagem de fila. `llmInvoked`
+ * fica falso porque o modelo não chegou a rodar neste turno.
+ */
+async function escalateToHumanQueue(args: {
+  runArgs: RunArgs;
+  agent: CoordinatorAgent;
+  policy: InboxPolicy;
+  reason: string;
+}): Promise<RunResult | null> {
+  const { runArgs, agent, policy, reason } = args;
+  if (!runArgs.conversationId || !runArgs.contactId) return null;
+
+  const handed = await executeDepartmentHandoff({
+    ops: getVerticalPack(agent.verticalPack)?.ops ?? null,
+    conversationId: runArgs.conversationId,
+    contactId: runArgs.contactId,
+    dealId: runArgs.dealId ?? null,
+    // Sem nome: o motor infere o departamento pelo contexto da conversa.
+    departmentName: null,
+    userMessage: runArgs.userMessage,
+    reason,
+    policy,
+  }).catch(() => null);
+  if (!handed) return null;
+
+  const runId = await recordInboxInterceptRun({
+    agentId: agent.id,
+    conversationId: runArgs.conversationId,
+    contactId: runArgs.contactId,
+    interceptName: "no_ai_destination",
+  });
+  if (!runId) return null;
+
+  const cfg = await prisma.aIAgentConfig.findUnique({
+    where: { id: agent.id },
+    select: { autonomyMode: true },
+  });
+
+  // Texto vazio de propósito: quem escreve a mensagem de fila é o
+  // `inbox-handler`, com a cópia configurada pelo tenant.
+  return {
+    runId,
+    text: "",
+    status: "HANDOFF",
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    autonomyMode: cfg?.autonomyMode ?? "AUTONOMOUS",
+    toolCalls: [],
+  };
+}
 
 export async function maybeOrchestrateCoordinatorTurn(args: {
   runArgs: RunArgs;
@@ -96,15 +161,40 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
     routingScope: normalizeInboxPolicy(row.inboxPolicy, agent.verticalPack)
       .routingScope,
   }));
-  const dest = suggestCoordinatorAiAgent(
+  // Duas passadas: a primeira diz se este turno tem assunto para rotear, a
+  // segunda escolhe entre quem ainda não tentou. Sem separar as duas, "nada
+  // a rotear" e "não sobrou ninguém" ficam indistinguíveis — e o segundo
+  // caso é o que precisa acabar em humano.
+  const wanted = suggestCoordinatorAiAgent(
     runArgs.userMessage,
     peers,
     agent.verticalPack,
   );
-  if (!dest || dest.id === agent.id) return null;
+  if (!wanted || wanted.id === agent.id) return null;
+
+  const history = await loadConversationPeerHistory(runArgs.conversationId);
+  const available = peers.filter((p) => !peerAlreadyAttended(history, p));
+  const dest = suggestCoordinatorAiAgent(
+    runArgs.userMessage,
+    available,
+    agent.verticalPack,
+  );
   // Antes do anúncio: o handoff também recusa no teto, mas lá o contato já
   // teria lido "vou te passar para X" sem ninguém assumir.
-  if (await aiHandoffCapReached(runArgs.conversationId)) return null;
+  const capReached = await aiHandoffCapReached(runArgs.conversationId);
+  if (!dest || dest.id === agent.id || capReached) {
+    // O assunto é de outro agente, e não sobrou agente para ele. Devolver
+    // para quem já tentou é o pingue-pongue; ficar calado é pior. A saída
+    // do contrato de atendimento é a fila humana.
+    return escalateToHumanQueue({
+      runArgs,
+      agent,
+      policy,
+      reason: capReached
+        ? "Teto de transferências entre agentes atingido"
+        : `Assunto de ${wanted.name}, que já atendeu esta conversa`,
+    });
+  }
 
   if (runArgs.conversationId && runArgs.contactId) {
     const announce = policy.announceAiTransfer;
