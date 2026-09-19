@@ -77,6 +77,22 @@ const dealRow = (id: string, number: number, rgm: string, stage: string) => ({
 const ONE_DEAL = [dealRow("deal-1", 37514, RGM, "Graduação")];
 let dealRows: ReturnType<typeof dealRow>[] = ONE_DEAL;
 
+/// Identificação fixada na conversa. É o que um agente anterior gravou e o
+/// próximo herda — o mock guarda em memória para o teste ler de volta.
+type StoredIdentity = {
+  aiIdentifiedEntity: string | null;
+  aiIdentifiedRecordId: string | null;
+  aiIdentifiedRef: string | null;
+  aiIdentifiedBy: string | null;
+};
+const NO_IDENTITY: StoredIdentity = {
+  aiIdentifiedEntity: null,
+  aiIdentifiedRecordId: null,
+  aiIdentifiedRef: null,
+  aiIdentifiedBy: null,
+};
+let identity: StoredIdentity = { ...NO_IDENTITY };
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     customField: {
@@ -103,6 +119,13 @@ vi.mock("@/lib/prisma", () => ({
     },
     company: { findMany: vi.fn(async () => []) },
     product: { findMany: vi.fn(async () => []) },
+    conversation: {
+      findUnique: vi.fn(async () => identity),
+      update: vi.fn(async ({ data }: { data: Partial<StoredIdentity> }) => {
+        identity = { ...identity, ...data };
+        return identity;
+      }),
+    },
   },
 }));
 
@@ -216,6 +239,7 @@ describe("search_crm_records: registros já ligados ao contato", () => {
 
   afterEach(() => {
     dealRows = ONE_DEAL;
+    identity = { ...NO_IDENTITY };
   });
 
   it("um registro só: responde normalmente", async () => {
@@ -258,6 +282,95 @@ describe("search_crm_records: registros já ligados ao contato", () => {
 
     const out = await search({ query: "curso" }, ["deal.curso"]);
     expect(out.records?.filter((r) => r.entity === "deal")).toHaveLength(2);
+  });
+});
+
+/**
+ * Identificar custa uma pergunta ao cliente. Pagar de novo a cada
+ * transferência é o defeito que este bloco tranca: o resultado pertence à
+ * conversa, então o próximo agente herda em vez de interrogar.
+ */
+describe("search_crm_records: a identificação atravessa a transferência", () => {
+  const LINKED = { linkedIdentityKeys: ["deal.rgm"] };
+  const BOTH = { identityKeys: ["deal.rgm"], linkedIdentityKeys: ["deal.rgm"] };
+
+  afterEach(() => {
+    dealRows = ONE_DEAL;
+    identity = { ...NO_IDENTITY };
+  });
+
+  it("o número informado fica gravado na conversa", async () => {
+    await search(
+      { query: "matricula", identificador: { campo: "deal.rgm", valor: RGM } },
+      ["deal.curso"],
+      BOTH,
+    );
+
+    expect(identity.aiIdentifiedEntity).toBe("deal");
+    expect(identity.aiIdentifiedRecordId).toBe("deal-1");
+    expect(identity.aiIdentifiedBy).toBe("RGM");
+  });
+
+  it("o vínculo do telefone também identifica, sem perguntar nada", async () => {
+    await search({ query: "curso" }, ["deal.curso"], LINKED);
+
+    expect(identity.aiIdentifiedRecordId).toBe("deal-1");
+    // Ninguém digitou número: a origem precisa ficar distinguível.
+    expect(identity.aiIdentifiedBy).toBeNull();
+  });
+
+  it("com a conversa já identificada não pergunta de novo", async () => {
+    dealRows = [
+      dealRow("deal-1", 37514, RGM, "Graduação"),
+      dealRow("deal-2", 37515, "20239999", "Pós-graduação"),
+    ];
+    // Estado deixado pelo agente anterior.
+    identity = {
+      aiIdentifiedEntity: "deal",
+      aiIdentifiedRecordId: "deal-2",
+      aiIdentifiedRef: "negócio #37515",
+      aiIdentifiedBy: "RGM",
+    };
+
+    const out = await search({ query: "curso" }, ["deal.curso"], LINKED);
+
+    // Sem o herdado, este cenário devolvia needsIdentification.
+    expect(out.keyField).toBeUndefined();
+    const deals = out.records?.filter((r) => r.entity === "deal");
+    expect(deals).toHaveLength(1);
+    expect(deals?.[0].fields).toEqual([
+      { label: "Curso", value: "CST EM GESTÃO DE RECURSOS HUMANOS" },
+    ]);
+  });
+
+  it("um palpite do telefone não derruba o que a pessoa confirmou", async () => {
+    identity = {
+      aiIdentifiedEntity: "deal",
+      aiIdentifiedRecordId: "deal-9",
+      aiIdentifiedRef: "negócio #9",
+      aiIdentifiedBy: "RGM",
+    };
+
+    await search({ query: "curso" }, ["deal.curso"], LINKED);
+
+    expect(identity.aiIdentifiedRecordId).toBe("deal-9");
+  });
+
+  it("mas um número novo informado sobrescreve", async () => {
+    identity = {
+      aiIdentifiedEntity: "deal",
+      aiIdentifiedRecordId: "deal-9",
+      aiIdentifiedRef: "negócio #9",
+      aiIdentifiedBy: null,
+    };
+
+    await search(
+      { query: "matricula", identificador: { campo: "deal.rgm", valor: RGM } },
+      ["deal.curso"],
+      BOTH,
+    );
+
+    expect(identity.aiIdentifiedRecordId).toBe("deal-1");
   });
 });
 

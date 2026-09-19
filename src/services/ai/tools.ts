@@ -102,6 +102,10 @@ import {
   type CrmFieldValue,
   type CrmSearchEntity,
 } from "@/services/ai/crm-field-policy";
+import {
+  loadConversationIdentity,
+  rememberConversationIdentity,
+} from "@/services/ai/conversation-identity";
 import { isEffectTool, simulateEffectTool } from "@/services/ai/effect-claims";
 import {
   denialPayload,
@@ -925,6 +929,7 @@ async function findRecordByIdentity(args: {
   catalog: CrmFieldDescriptor[];
 }): Promise<{
   entity: CrmSearchEntity;
+  recordId: string;
   ref: string;
   values: CrmFieldValue[];
 } | null> {
@@ -969,7 +974,12 @@ async function findRecordByIdentity(args: {
         })),
       );
       if (identityValueMatches(storedValue(values), informed)) {
-        return { entity: "deal", ref: `negócio #${d.number}`, values };
+        return {
+          entity: "deal",
+          recordId: d.id,
+          ref: `negócio #${d.number}`,
+          values,
+        };
       }
     }
     return null;
@@ -994,7 +1004,12 @@ async function findRecordByIdentity(args: {
         })),
       );
       if (identityValueMatches(storedValue(values), informed)) {
-        return { entity: "contact", ref: `contato #${c.number}`, values };
+        return {
+          entity: "contact",
+          recordId: c.id,
+          ref: `contato #${c.number}`,
+          values,
+        };
       }
     }
     return null;
@@ -1147,6 +1162,17 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
               hint: "Nenhum registro com esse identificador. Confirme o número com a pessoa ou encaminhe para um consultor — não afirme que ela não tem cadastro.",
             });
           }
+          // A pessoa digitou o número: é a fonte mais forte que existe e
+          // sobrescreve palpite anterior. Fica na conversa para o próximo
+          // agente não perguntar de novo.
+          await rememberConversationIdentity({
+            conversationId: ctx.conversationId,
+            entity: found.entity,
+            recordId: found.recordId,
+            ref: found.ref,
+            by: field.label,
+            overwrite: true,
+          });
           push(found.entity, found.ref, found.values);
           return ok({ records, identifiedBy: field.label });
         }
@@ -1190,7 +1216,7 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
           }
 
           if (wanted.includes("deal")) {
-            const deals = await prisma.deal.findMany({
+            const all = await prisma.deal.findMany({
               where: { contactId: contact.id },
               orderBy: [{ updatedAt: "desc" }],
               take,
@@ -1201,6 +1227,15 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
                 },
               },
             });
+            // A conversa já sabe de quem é. Vale para qualquer agente que
+            // pegue a conversa depois — inclusive o que não participou da
+            // identificação. Sem isto, a transferência reabria a pergunta.
+            const pinned = await loadConversationIdentity(ctx.conversationId);
+            const deals =
+              pinned?.entity === "deal" &&
+              all.some((d) => d.id === pinned.recordId)
+                ? all.filter((d) => d.id === pinned.recordId)
+                : all;
             // Mais de um registro no mesmo telefone: juntar tudo faria o
             // agente misturar dois contratos da mesma pessoa (ou de duas)
             // numa resposta só. Com campo-chave declarado ele pergunta por
@@ -1223,6 +1258,19 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
                 needsIdentification: true,
                 keyField: ambiguity.label,
                 hint: `Há mais de um registro neste contato. Peça à pessoa que informe o ${ambiguity.label} e chame esta ferramenta de novo com \`identificador\`. NÃO escolha um registro por conta própria e não misture os dados dos dois.`,
+              });
+            }
+            // Um negócio só e nenhuma dúvida: o telefone já identificou a
+            // pessoa. Registrar isso poupa o próximo agente de refazer a
+            // consulta e, principalmente, de perguntar.
+            if (deals.length === 1) {
+              await rememberConversationIdentity({
+                conversationId: ctx.conversationId,
+                entity: "deal",
+                recordId: deals[0].id,
+                ref: `negócio #${deals[0].number}`,
+                by: null,
+                overwrite: false,
               });
             }
             for (const d of deals) {

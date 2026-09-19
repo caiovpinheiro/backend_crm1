@@ -40,6 +40,10 @@ import {
 } from "@/lib/ai-agents/piloting";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
+  describeConversationIdentity,
+  loadConversationIdentity,
+} from "@/services/ai/conversation-identity";
+import {
   formatCampaignDispatchBlock,
   hydrateOutboundTemplateContent,
   loadLastCampaignDispatchContext,
@@ -538,6 +542,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       inboxPolicy: inboxPolicyForRun,
     });
 
+    // Quem já foi identificado continua identificado, mesmo que tenha sido
+    // outro agente a confirmar: o run só recebe o histórico de mensagens, e
+    // sem este bloco cada transferência recomeçava a interrogar a pessoa.
+    const conversationIdentity = classifierRun
+      ? null
+      : await loadConversationIdentity(args.conversationId);
+
     // O override salvo é descartado quando é a cópia velha das mesmas
     // regras que já entram por `steeringRules` — senão o mesmo documento
     // ia duas vezes para o prompt, em versões divergentes.
@@ -550,6 +561,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             buildUnknownAnswerBlock(inboxPolicyForRun, {
               transferBlocked: transferBlockedByGate(transferGate),
             }),
+            describeConversationIdentity(conversationIdentity),
             // Sem este bloco o LLM não sabia o modo de encerramento: em "off"
             // ele ainda tentava `close_conversation` e levava erro da tool.
             buildAutoClosePromptBlock(

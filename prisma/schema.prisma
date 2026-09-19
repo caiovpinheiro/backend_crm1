@@ -3019,6 +3019,29 @@ model Conversation {
   /// segurar a exclusão do usuário por causa de um estado efêmero.
   aiTestModeById         String?
 
+  /// QUEM É a pessoa desta conversa, depois que algum agente confirmou.
+  ///
+  /// Identificar é caro e chato: custa uma chamada de ferramenta e, quando o
+  /// mesmo telefone tem mais de um cadastro, custa uma pergunta ao cliente.
+  /// O resultado disso pertence à CONVERSA, não ao turno — o run seguinte só
+  /// recebe o histórico de mensagens, então sem esta linha cada transferência
+  /// entre agentes recomeçava do zero e pedia o mesmo número de novo.
+  ///
+  /// Guardar a identidade NÃO concede leitura: o que cada agente pode ver do
+  /// registro continua governado pelo `readableFields` dele. Aqui fica só o
+  /// ponteiro — a fronteira de dado sensível não se move.
+  ///
+  /// Entidade do registro ("deal" | "contact" | "company").
+  aiIdentifiedEntity     String?
+  aiIdentifiedRecordId   String?
+  /// Referência amigável já pronta ("negócio #12"), para o prompt não
+  /// precisar de uma consulta só para citar o cadastro.
+  aiIdentifiedRef        String?
+  /// Rótulo do campo que a pessoa informou. Null = veio do vínculo com o
+  /// telefone, sem ninguém digitar nada.
+  aiIdentifiedBy         String?
+  aiIdentifiedAt         DateTime?
+
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id])
 
