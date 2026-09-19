@@ -1,9 +1,41 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
-import { stripUnofficialUrls } from "../outbound-url-guard";
+import { runWithContext } from "@/lib/request-context";
+import { primeAcademicTenantConfig } from "@/verticals/academic/tenant-config";
+import { stripUnofficialUrls as strip } from "../outbound-url-guard";
+
+// URLs e domínios liberados são config da org (R1): o guard precisa de um
+// contexto de organização para saber o que é oficial.
+const ORG = "org_guard_test";
+
+function stripUnofficialUrls(
+  ...args: Parameters<typeof strip>
+): ReturnType<typeof strip> {
+  return runWithContext(
+    { organizationId: ORG, userId: "u1", isSuperAdmin: false },
+    () => strip(...args),
+  ) as ReturnType<typeof strip>;
+}
 
 describe("stripUnofficialUrls", () => {
-  it("preserva os links oficiais do pack", () => {
+  beforeAll(() => {
+    primeAcademicTenantConfig(ORG, {
+      portalUrl: "https://novoportal.cruzeirodosul.edu.br/",
+      inauguralCertificateUrl: "https://app.cruzeiroead.com.br/",
+      firstAccessVideoUrl: "https://youtu.be/vFJP7a1EMsU",
+      appAndroidUrl:
+        "https://play.google.com/store/apps/details?id=br.com.cruzeirodosulvirtual",
+      appIosUrl:
+        "https://apps.apple.com/us/app/duda-aplicativo-do-estudante/id6451416655",
+      allowedUrlSuffixes: [
+        "cruzeirodosul.edu.br",
+        "cruzeirodosulvirtual.com.br",
+        "cruzeiroead.com.br",
+      ],
+    });
+  });
+
+  it("preserva os links oficiais da config da org", () => {
     const text = [
       "Tutorial: https://youtu.be/vFJP7a1EMsU",
       "Portal: https://novoportal.cruzeirodosul.edu.br/",
@@ -18,7 +50,7 @@ describe("stripUnofficialUrls", () => {
     expect(out.text).toBe(text);
   });
 
-  it("preserva subdomínio da instituição que não está nas constantes", () => {
+  it("preserva subdomínio da instituição que não está nas URLs configuradas", () => {
     const text = "Veja em https://www.cruzeirodosulvirtual.com.br/nossos-polos/";
     expect(stripUnofficialUrls(text).removed).toEqual([]);
   });
