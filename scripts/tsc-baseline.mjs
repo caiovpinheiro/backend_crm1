@@ -36,7 +36,10 @@ const LINE_RE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/;
  */
 function normalize(msg) {
   return msg
-    .replace(/(?:[A-Za-z]:)?[\\/][^"')\s]*?[\\/]node_modules[\\/]/g, "node_modules/")
+    // Greedy até o ÚLTIMO `node_modules/`: o pnpm aninha
+    // (`node_modules/.pnpm/next-auth@x/node_modules/next-auth`) e o npm do
+    // runner não. Sem isso o mesmo erro tem duas chaves.
+    .replace(/(?:[A-Za-z]:)?[\\/][^"')\s]*node_modules[\\/]/g, "node_modules/")
     .replace(/\\/g, "/")
     .replace(/\s+/g, " ")
     .trim();
