@@ -89,6 +89,7 @@ export type VerticalPack = {
     interceptRetention?: boolean;
     interceptCourseShopping?: boolean;
     inauguralEnabled?: boolean;
+    humanRequestKeywords?: string[];
   };
   /**
    * Ops do pack — nomes = exports dos módulos do vertical.

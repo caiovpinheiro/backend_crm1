@@ -26,6 +26,7 @@ import {
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import { academicDefaultMessageRules } from "@/verticals/academic/default-message-rules";
+import { getVerticalPack } from "@/verticals";
 
 // ── Tool config ───────────────────────────────────────────────
 
@@ -769,6 +770,11 @@ export function normalizeInboxPolicy(
     // HandoffJustified`). Agora é declarativo — e o default preserva a
     // regra que já vale em produção para esses agentes.
     base.transferPolicy = "on_request_or_topic";
+    const packKeywords =
+      getVerticalPack("academic")?.inboxPolicyDefaults?.humanRequestKeywords;
+    if (packKeywords?.length) {
+      base.humanRequestKeywords = [...packKeywords];
+    }
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
@@ -856,7 +862,9 @@ export function normalizeInboxPolicy(
     queueMessage: nullableText(r.queueMessage),
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
-    humanRequestKeywords: strList(r.humanRequestKeywords),
+    humanRequestKeywords: Array.isArray(r.humanRequestKeywords)
+      ? strList(r.humanRequestKeywords)
+      : base.humanRequestKeywords,
   };
 }
 

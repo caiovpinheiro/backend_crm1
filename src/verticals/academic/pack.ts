@@ -110,6 +110,11 @@ export const academicPack: VerticalPack = {
     interceptFirstAccess: true,
     inauguralEnabled: true,
     tabulateOnExit: "on_human_handoff",
+    humanRequestKeywords: [
+      "falar com equipe",
+      "falar com a equipe",
+      "falar com o time",
+    ],
   },
   ops: {
     ...closure,

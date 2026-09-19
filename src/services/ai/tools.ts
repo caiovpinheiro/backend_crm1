@@ -143,8 +143,17 @@ function queueCtx(ctx: RunContext) {
 function ok<T>(data: T) {
   return { ok: true as const, ...data } as { ok: true } & T;
 }
-function fail(error: string) {
-  return { ok: false as const, error };
+function fail(error: string, extra?: { reason?: string }) {
+  return extra?.reason
+    ? { ok: false as const, error, reason: extra.reason }
+    : { ok: false as const, error };
+}
+
+function policyDeniedHumanTransfer() {
+  return fail(
+    "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
+    { reason: "policy_requires_explicit_request" },
+  );
 }
 
 function fireTabulateOnHumanExit(ctx: RunContext) {
@@ -1204,9 +1213,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
         if (!transferAllowed(ctx)) {
-          return fail(
-            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
-          );
+          return policyDeniedHumanTransfer();
         }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
@@ -1625,9 +1632,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
         if (!transferAllowed(ctx)) {
-          return fail(
-            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda a dúvida.",
-          );
+          return policyDeniedHumanTransfer();
         }
         const gate = departmentGate(policy, departmentName);
         if (gate) return fail(gate);
@@ -2012,9 +2017,7 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
           const idle = coordinatorIdleHandoffError(ctx);
           if (idle) return fail(idle);
         } else if (!transferAllowed(ctx)) {
-          return fail(
-            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você, ou passe para outro agente IA se o assunto for de outro especialista.",
-          );
+          return policyDeniedHumanTransfer();
         }
         const result = await executeOrchestratedHandoff({
           conversationId: ctx.conversationId,
@@ -2134,9 +2137,7 @@ function withTestModeSimulation(
         (id === "transfer_conversation" && args.target !== "ai_agent")
       ) {
         if (!transferAllowed(ctx)) {
-          return fail(
-            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
-          );
+          return policyDeniedHumanTransfer();
         }
       }
       if (

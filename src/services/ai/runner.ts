@@ -55,7 +55,6 @@ import {
 import {
   humanQueueContextFromAgent,
   resolveAgentTimezone,
-  userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
 import {
   formatMessageModelsBlock,
@@ -469,26 +468,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         ) ?? "")
       : "";
     const clockHint = hasPack ? formatLocalClockHint() : "";
-    const askedHumanNow = userWantsHumanDistribution(
-      args.userMessage,
-      humanQueueContextFromAgent({ inboxPolicy: inboxPolicyForRun }),
-    );
-    let runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
-    if (
-      inboxPolicyForRun.transferPolicy === "on_request_or_topic" &&
-      !classifierRun &&
-      agent.archetype !== "COORDENADOR" &&
-      agent.archetype !== "TABULACAO" &&
-      agent.archetype !== "ENCERRAMENTO" &&
-      !askedHumanNow
-    ) {
-      runtimeTools = runtimeTools.filter(
-        (id) =>
-          id !== "transfer_to_human" &&
-          id !== "execute_distribution" &&
-          id !== "transfer_to_department",
-      );
-    }
+    const runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
     const tabulationCatalog =
       runtimeTools.includes("tabulate_conversation") ||
       runtimeTools.includes("list_tabulations")
