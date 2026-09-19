@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Política quando não há consultor humano elegível.
  *
  * Fonte de verdade: configuração do agente — `inboxPolicy`
@@ -501,7 +501,7 @@ export function userWantsHumanDistribution(
   return false;
 }
 
-/** Aluno pede para a IA continuar (após oferta de indisponibilidade). */
+/** contato pede para a IA continuar (após oferta de indisponibilidade). */
 export function userWantsAiContinue(
   userMessage: string,
   ctx?: HumanQueueContext,

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Auditoria determinística de efeito afirmado.
  *
  * O modelo dizia ao cliente "já te passei para um consultor" enquanto
@@ -7,7 +7,7 @@
  * próprio sucesso. Aqui comparamos o TEXTO com o RESULTADO real das tools
  * de efeito e barramos a mensagem quando ela afirma algo que não aconteceu.
  *
- * Só olha tools que mudam o mundo. Consulta (`consultar_matricula`,
+ * Só olha tools que mudam o mundo. Consulta (`record_lookup`,
  * `search_products`) não entra: afirmar que consultou não engana ninguém.
  */
 
@@ -134,7 +134,7 @@ export function effectToolSucceeded(
       // `assigned` = consultor na conversa. `queuedWaiting` = o handoff
       // rodou, a conversa saiu da IA e o cliente está na fila — aí "já
       // registrei seu pedido" é verdade. `assigned: false` sem fila é a
-      // promessa vazia que o aluno recebeu sete vezes.
+      // promessa vazia que o contato recebeu sete vezes.
       return r.assigned === true || r.queuedWaiting === true;
     case "transfer_to_department":
       return false;
@@ -161,7 +161,7 @@ const CLAIM_PATTERNS: Record<EffectKind, RegExp[]> = {
   transfer: [
     /\b(vou|irei|ja vou)\s+(te\s+)?(transferir|passar|conectar|encaminhar|direcionar)/,
     // Gerúndio: "Estou conectando você com um(a) consultor(a)" passou pela
-    // auditoria e chegou ao aluno com o gate de transferência fechado —
+    // auditoria e chegou ao contato com o gate de transferência fechado —
     // promessa idêntica às de cima, só que sem o verbo no futuro.
     /\b(estou|to|tou)\s+(te\s+)?(transferindo|passando|conectando|encaminhando|direcionando)/,
     /\bja\s+(te\s+)?(transferi|passei|conectei|encaminhei|direcionei)/,

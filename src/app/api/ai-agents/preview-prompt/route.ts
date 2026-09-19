@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import {
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
         steeringRules,
         pack ? pack.ops.academicExamModalityRules?.(examsOnlineOnly) ?? "" : "",
         pack?.constants.curriculumTceRules ?? "",
-        enabledTools.includes("consultar_matricula")
+        (pack?.extraTools ?? []).some((t) => enabledTools.includes(t.id))
           ? (pack?.constants.enrollmentScopeRules ?? "")
           : "",
       ]
@@ -81,7 +81,9 @@ export async function POST(request: Request) {
       archetype:
         typeof body.archetype === "string" ? body.archetype : null,
       hasProductSearch: enabledTools.includes("search_products"),
-      hasEnrollmentLookup: enabledTools.includes("consultar_matricula"),
+      hasEnrollmentLookup: (pack?.extraTools ?? []).some((t) =>
+        enabledTools.includes(t.id),
+      ),
       hasCrmFieldSearch: enabledTools.includes("search_crm_records"),
       tone: typeof body.tone === "string" ? body.tone : "profissional",
       language: typeof body.language === "string" ? body.language : "pt-BR",

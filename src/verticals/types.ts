@@ -85,6 +85,14 @@ export type VerticalPack = {
     consultarMatricula?: string;
   };
   /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
+  extraTools?: Array<{
+    id: string;
+    label: string;
+    description: string;
+    category: "crm" | "whatsapp" | "handoff";
+    defaultForArchetypes: string[];
+  }>;
+  /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
   inboxPolicyDefaults?: {
     interceptRetention?: boolean;
     interceptCourseShopping?: boolean;

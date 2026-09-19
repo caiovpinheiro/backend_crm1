@@ -154,7 +154,7 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
     }
     if (
       /^(bom dia|boa tarde|boa noite)\b/.test(n) &&
-      !/\b(acesso|matricul|financ|cancel|senha|portal|prova|contrato|boleto)\w*/.test(
+      !/\b(acesso|senha|portal|prova|contrato|boleto)\w*/.test(
         n,
       )
     ) {

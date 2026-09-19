@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Política de exposição de campos do CRM para o agente de IA.
  *
  * Duas regras governam este arquivo.
@@ -434,7 +434,7 @@ export function matchFieldValues(
  *
  * Vocabulário de produto, sem ramo: vale para o agente de uma faculdade, de
  * uma imobiliária ou de uma clínica. O que aquela organização chama de
- * "aluno", "locatário" ou "paciente" é assunto do prompt e da base de
+ * "contato", "locatário" ou "paciente" é assunto do prompt e da base de
  * conhecimento dela, não desta orientação.
  */
 export const CRM_SEARCH_GUIDANCE = [

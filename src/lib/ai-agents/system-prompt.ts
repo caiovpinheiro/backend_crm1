@@ -158,7 +158,7 @@ export const DEFAULT_PROMPT_TIMEZONE = "America/Sao_Paulo";
 
 const DATE_REFERENCE_RULE =
   'Calcule prazos, vencimentos e "hoje/amanhã/próxima" a partir dela. NUNCA infira nem invente outra data, ano, semestre ou período.\n' +
-  'Compare a data antes de escolher o tempo verbal: data POSTERIOR a hoje vai no futuro ("será liberada em DD/MM"), nunca no passado ("foi liberada em DD/MM"). O aluno age em cima disso.';
+  'Compare a data antes de escolher o tempo verbal: data POSTERIOR a hoje vai no futuro ("será liberada em DD/MM"), nunca no passado ("foi liberada em DD/MM"). O contato age em cima disso.';
 
 /**
  * Data/hora atuais como FATO do sistema (não instrução comportamental).
@@ -333,7 +333,7 @@ export function renderSystemPrompt(args: RenderArgs): string {
       "- Atenda neste turno com a base e as tools. transfer_to_human / fila / pessoa só depois de tentar, ou se o contato pediu humano, ou se a tool não devolveu o dado necessário.",
     );
     lines.push(
-      "- Citar financeiro, acesso, matrícula ou horário NÃO é, sozinho, motivo para fila humana.",
+      "- Citar tema operacional ou prazo NÃO é, sozinho, motivo para fila humana.",
     );
     lines.push(
       "- Pedido de humano neste turno: só então fila/pessoa. Assunto de outro especialista → transfer_to_ai_agent, não transfer_to_human.",
@@ -346,11 +346,11 @@ export function renderSystemPrompt(args: RenderArgs): string {
   if (args.hasEnrollmentLookup) {
     lines.push("");
     lines.push(
-      "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+      "Lembrete: chame a tool de consulta ao cadastro cedo no atendimento para personalizar a resposta.",
     );
   }
 
-  // Sem este empurrão a tool ficava inerte: com `consultar_matricula`
+  // Sem este empurrão a tool de cadastro ficava inerte: com a consulta
   // anunciada aqui e a busca de campos só na própria description, o modelo
   // usava a primeira para tudo. A orientação de uso NÃO se repete aqui —
   // ela vive em `CRM_SEARCH_GUIDANCE`, na description da tool.

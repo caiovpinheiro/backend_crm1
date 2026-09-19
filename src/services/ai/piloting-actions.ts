@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Ações operacionais do agente de IA ("piloting") — lado do servidor.
  *
  * Reúnem duas primitivas compartilhadas entre o `inbox-handler`
@@ -71,7 +71,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Despedida enviada → encerra o atendimento se o aluno já havia fechado o
+ * Despedida enviada → encerra o atendimento se o contato já havia fechado o
  * assunto. Fica aqui (e não só no inbox) porque a resposta pode sair pela
  * tool `send_message` ou pelo follow-up — todas passam por este envio.
  * Saudação e aviso de fora de horário nunca encerram.
@@ -144,7 +144,7 @@ export async function sendAgentMessage(args: {
   /**
    * Após handoff a tool já limpa o assignee. Sem este bypass a mensagem
    * de "vou te transferir" morre no assertAiStillAuthorized (unassigned)
-   * e o aluno fica sem resposta.
+   * e o contato fica sem resposta.
    */
   bypassAssigneeCheck?: boolean;
   /**

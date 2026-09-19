@@ -1200,7 +1200,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
       copy?.transferToHuman ??
       "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
         "ÚLTIMO RECURSO: só quando o contato pedir humano/atendente, ou você já tentou as tools/base e ainda não puder seguir com segurança. " +
-        "Citar financeiro, acesso, matrícula ou horário NÃO basta. Se puder orientar, NÃO chame esta tool. " +
+        "Citar um tema operacional NÃO basta. Se puder orientar, NÃO chame esta tool. " +
         "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
         "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
     inputSchema: z.object({

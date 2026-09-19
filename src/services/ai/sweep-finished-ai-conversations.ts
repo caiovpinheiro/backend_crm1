@@ -1,6 +1,6 @@
-/**
+﻿/**
  * Varredura da fila do Agente IA: encerra tickets cujo atendimento já
- * terminou mas ficaram OPEN (aluno agradeceu / pediu para encerrar, ou
+ * terminou mas ficaram OPEN (contato agradeceu / pediu para encerrar, ou
  * a última mensagem é a despedida do agente).
  *
  * Usado pelo cron `/api/cron/sweep-finished-ai` e pelo script
@@ -135,12 +135,12 @@ export async function sweepFinishedAiConversations(
       row.organizationId,
     );
 
-    // Última é do aluno encerrando (inclui resposta de despedida ao check-in).
+    // Última é do contato encerrando (inclui resposta de despedida ao check-in).
     const studentClosing =
       last.direction === "in" && ops.studentWrappedUp?.(last.content);
 
-    // Última é do agente: exige despedida dele + aluno já tendo fechado
-    // o assunto, senão fecharíamos conversa em que o aluno só sumiu.
+    // Última é do agente: exige despedida dele + contato já tendo fechado
+    // o assunto, senão fecharíamos conversa em que o contato só sumiu.
     const agentClosing =
       last.direction === "out" &&
       last.authorType === "bot" &&

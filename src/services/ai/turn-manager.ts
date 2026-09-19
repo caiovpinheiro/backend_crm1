@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Turn Manager — agrupamento persistente de inbound para o Agente IA.
  *
- * O cliente manda "Oi" / "preciso" / "de ajuda" / "com minha matrícula" em
+ * O cliente manda "Oi" / "preciso" / "de ajuda" / "com minha cadastro" em
  * quatro bolhas. Cada bolha continua sendo uma `Message` própria no banco
  * (nada é fundido, nada é sobrescrito); o `ConversationTurn` só REFERENCIA
  * os ids e materializa o texto concatenado quando o turno estabiliza. A IA

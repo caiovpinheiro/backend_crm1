@@ -1,5 +1,5 @@
-/**
- * Áudio/voz do aluno → transferência determinística.
+﻿/**
+ * Áudio/voz do contato → transferência determinística.
  *
  * O WhatsApp entrega áudio como mídia: o webhook Meta grava a Message com
  * `messageType="audio"` e conteúdo `"[Áudio]"`; o worker Baileys grava
@@ -7,7 +7,7 @@
  * que chega ao LLM é só um placeholder — sem transcrição automática.
  *
  * Antes o modelo improvisava ("não consegui ouvir o áudio, pode escrever?").
- * A regra da operação é outra: áudio → acolhe e distribui para um humano.
+ * A regra da operação é outra: áudio → recebe e distribui para um humano.
  * Por isso a decisão é feita aqui, no inbound, sem depender do prompt.
  */
 
@@ -55,7 +55,7 @@ function isNoiseText(content: string | null | undefined): boolean {
 }
 
 export type InboundAudioCheck = {
-  /** O aluno mandou pelo menos um áudio nesta rodada. */
+  /** O contato mandou pelo menos um áudio nesta rodada. */
   hasAudio: boolean;
   /** O próprio áudio veio com transcrição/legenda no conteúdo. */
   hasTranscript: boolean;
@@ -65,7 +65,7 @@ export type InboundAudioCheck = {
 
 /**
  * Inspeciona as mensagens inbound ainda não respondidas (mesma janela do
- * debounce: tudo depois da última outbound) para saber se o aluno mandou
+ * debounce: tudo depois da última outbound) para saber se o contato mandou
  * áudio e se esse áudio já veio com transcrição no conteúdo.
  */
 export async function detectInboundAudio(args: {
@@ -125,7 +125,7 @@ export async function detectInboundAudio(args: {
 }
 
 /**
- * Aviso ao aluno quando o áudio dispara a transferência.
+ * Aviso ao contato quando o áudio dispara a transferência.
  * Nunca diz que "não conseguiu ouvir" nem pede para escrever de novo.
  * Fora do expediente, não promete consultor imediato — informa o retorno.
  */

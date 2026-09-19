@@ -31,29 +31,28 @@ const DEPT_DEFS = [
 
 type DeptKey = (typeof DEPT_DEFS)[number]["key"];
 
-/** Email → departamentos canônicos. */
-const ROSTER: Array<{ email: string; depts: DeptKey[] }> = [
-  {
-    email: "wesley.guerreiro@cruzeiroead.com.br",
-    depts: ["acolhimento", "retencao"],
-  },
-  {
-    email: "danubia.sousa@cruzeiroead.com.br",
-    depts: ["acolhimento", "retencao"],
-  },
-  {
-    email: "marilia.nascimento@cruzeiroead.com.br",
-    depts: ["acolhimento"],
-  },
-  { email: "beatriz.andrade@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "breno.silva@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "erica.ferreira@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "emanuel.felipe@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "felipe.guimaraes@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "joyce.pereira@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "julia.rodrigues@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "mariana.vecoso@cruzeiroead.com.br", depts: ["atendimento"] },
-];
+/** Email → departamentos. Seed via ACADEMIC_DEPT_ROSTER_JSON (admin/config). */
+function loadRoster(): Array<{ email: string; depts: DeptKey[] }> {
+  const raw = process.env.ACADEMIC_DEPT_ROSTER_JSON?.trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Array<{ email?: string; depts?: string[] }>;
+    if (!Array.isArray(parsed)) return [];
+    const keys = new Set(DEPT_DEFS.map((d) => d.key));
+    return parsed
+      .filter((r) => r.email && Array.isArray(r.depts))
+      .map((r) => ({
+        email: String(r.email).toLowerCase(),
+        depts: (r.depts ?? []).filter((d): d is DeptKey => keys.has(d as DeptKey)),
+      }))
+      .filter((r) => r.depts.length > 0);
+  } catch {
+    console.warn("[academic] ACADEMIC_DEPT_ROSTER_JSON inválido");
+    return [];
+  }
+}
+
+const ROSTER: Array<{ email: string; depts: DeptKey[] }> = loadRoster();
 
 const lastSyncAt = new Map<string, number>();
 const SYNC_TTL_MS = 5 * 60 * 1000;

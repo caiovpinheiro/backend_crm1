@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Modo de teste do agente, por conversa, ligado por comando no WhatsApp.
  *
  * Problema que isto resolve: hoje não existe jeito de conversar com o agente
@@ -101,7 +101,7 @@ function fold(raw: string): string {
  * O texto é um comando de teste?
  *
  * Exige o `#` e a primeira palavra inteira — "#iniciar" liga o modo, "queria
- * iniciar uma matrícula" é conversa. Aceita pontuação final.
+ * iniciar uma cadastro" é conversa. Aceita pontuação final.
  */
 export function parseAiTestCommand(
   raw: string | null | undefined,
@@ -285,7 +285,7 @@ export function testRuleSavedMessage(text: string): string {
 }
 
 export function testRuleEmptyMessage(): string {
-  return `🧪 Escreva a orientação depois do comando. Ex.: ${AI_TEST_COMMANDS.rule} não prometa transferência quando o aluno não pediu.`;
+  return `🧪 Escreva a orientação depois do comando. Ex.: ${AI_TEST_COMMANDS.rule} não prometa transferência quando o contato não pediu.`;
 }
 
 export function testCommandNeedsTestModeMessage(): string {

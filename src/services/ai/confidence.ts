@@ -1,6 +1,6 @@
-/**
+﻿/**
  * Confiança auto-declarada pelo LLM (paridade DataCrazy).
- * Marcador oculto: [CONFIANCA:X.X] — removido antes do envio ao aluno.
+ * Marcador oculto: [CONFIANCA:X.X] — removido antes do envio ao contato.
  *
  * Handoff runtime no antigo: confidence < 0.40.
  * CONFIDENCE_THRESHOLD config (0.5) era só referência de prompt.
@@ -18,7 +18,7 @@ const CONFIDENCE_RE =
 /**
  * Índice de trecho da base (`[1]`, `[2][3]`) que o modelo às vezes copia do
  * bloco de referências para a resposta. É numeração interna do retrieval —
- * no WhatsApp do aluno não significa nada. Só casa colchete com dígitos, para
+ * no WhatsApp do contato não significa nada. Só casa colchete com dígitos, para
  * não comer `[1]` de uma citação legítima com texto dentro.
  */
 const SOURCE_MARKER_RE = /\s*\[\d{1,2}\](?=\s|$|[.,;:!?])/g;

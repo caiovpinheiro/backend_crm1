@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Transferência para departamento — capacidade GENÉRICA do CRM.
  *
  * Departamento, distribuição e fila existem para qualquer organização.
@@ -105,7 +105,7 @@ export async function listDepartmentNames(limit = 12): Promise<string[]> {
 
 /**
  * Erro de departamento não encontrado. Cita os departamentos DESTA
- * organização — o texto antigo mandava usar "Acolhimento, Retenção ou
+ * organização — o texto antigo mandava usar "Onboarding, Retention ou
  * Atendimento", que são de um tenant específico.
  */
 export async function departmentNotFoundMessage(name: string): Promise<string> {

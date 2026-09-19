@@ -658,6 +658,8 @@ export type InboxPolicy = {
   /// Cópia do guard de inbound ininteligível. `null` = fallback neutro.
   nonsenseAskOnceMessage: string | null;
   nonsenseStopMessage: string | null;
+  /// Escopo/tópicos deste agente, para o coordenador rotear sem usar o nome.
+  routingScope: string | null;
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -735,6 +737,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     humanRequestKeywords: [],
     nonsenseAskOnceMessage: null,
     nonsenseStopMessage: null,
+    routingScope: null,
   };
 }
 
@@ -872,6 +875,7 @@ export function normalizeInboxPolicy(
       : base.humanRequestKeywords,
     nonsenseAskOnceMessage: nullableText(r.nonsenseAskOnceMessage),
     nonsenseStopMessage: nullableText(r.nonsenseStopMessage),
+    routingScope: nullableText(r.routingScope),
   };
 }
 

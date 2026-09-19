@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Runner principal do agente de IA.
  *
  * Um "run" é uma invocação completa do agente respondendo a um ponto
@@ -511,12 +511,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examModalityRules = packText
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
-    // Alcance da tool de matrícula. Preso ao turno em que a tool existe:
+    // Alcance da tool de cadastro. Preso ao turno em que a tool existe:
     // regra sobre ferramenta desligada é ruído no prompt. Vem por aqui e não
     // pelo texto canônico do pack porque o `steeringRules` salvo do agente
     // pode estar defasado — e aí o texto canônico não chega ao prompt.
     const enrollmentScopeRules =
-      packText && runtimeTools.includes("consultar_matricula")
+      packText &&
+      (pack?.extraTools ?? []).some((t) => runtimeTools.includes(t.id))
         ? (pack?.constants.enrollmentScopeRules ?? "")
         : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as
@@ -551,13 +552,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             inboxPolicyForRun.announceAiTransfer
               ? inboxPolicyForRun.announceAiTransferMessage?.trim()
                 ? `## Transferência entre agentes IA
-Avise o aluno com este texto (substitua {{target_agent}} pelo nome do destino):
+Avise o contato com este texto (substitua {{target_agent}} pelo nome do destino):
 ${inboxPolicyForRun.announceAiTransferMessage.trim()}
 O CRM também envia esse aviso; não invente outra frase.`
                 : `## Transferência entre agentes IA
 Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA — não diga "setor" nem fila humana.`
               : `## Transferência entre agentes IA
-NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar". A troca de dono é silenciosa.`,
+NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar". A troca de dono é silenciosa.`,
           ],
         });
 
@@ -571,6 +572,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
             [] as Array<{
               id: string;
               archetype: string | null;
+              inboxPolicy: unknown;
               user: { name: string | null } | null;
             }>,
           )
@@ -582,6 +584,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
             select: {
               id: true,
               archetype: true,
+              inboxPolicy: true,
               user: { select: { name: true } },
             },
           }),
@@ -590,12 +593,18 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       id: row.id,
       name: row.user?.name?.trim() || "Agente",
       archetype: row.archetype,
+      routingScope: normalizeInboxPolicy(row.inboxPolicy, agent.verticalPack)
+        .routingScope,
     }));
     const coordinatorRoutingBlock =
       agent.archetype === "COORDENADOR"
         ? formatCoordinatorRoutingBlock({
             peers,
-            suggested: suggestCoordinatorAiAgent(args.userMessage, peers),
+      suggested: suggestCoordinatorAiAgent(
+            args.userMessage,
+            peers,
+            agent.verticalPack,
+          ),
           })
         : null;
     const specialistPeerBlock =
@@ -625,7 +634,9 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       productPolicy: agent.productPolicy,
       archetype: classifierRun ? "TABULACAO" : agent.archetype,
       hasProductSearch: runtimeTools.includes("search_products"),
-      hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
+      hasEnrollmentLookup: (getVerticalPack(agent.verticalPack)?.extraTools ?? []).some(
+        (t) => runtimeTools.includes(t.id),
+      ),
       hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),
       tone: agent.tone,
       language: agent.language,

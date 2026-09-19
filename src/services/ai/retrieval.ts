@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Recuperação semântica (RAG) nos documentos de conhecimento
  * indexados do agente.
  *
@@ -229,7 +229,7 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
   return [
     "",
     // O [N] numera os trechos só para o modelo se orientar. Mandar "cite [N]"
-    // fazia o índice do chunk chegar no WhatsApp do aluno.
+    // fazia o índice do chunk chegar no WhatsApp do contato.
     "BASE DE CONHECIMENTO (use para fundamentar respostas). O [N] é índice interno: PROIBIDO escrever [1], [2] ou qualquer marcador de fonte na resposta ao cliente.",
     sections,
     KNOWLEDGE_ANSWER_RULES,

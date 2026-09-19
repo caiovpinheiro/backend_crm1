@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Encerramento de conversa feito pelo agente IA — capacidade GENÉRICA.
  *
  * O corpo vivia em `src/verticals/academic/closure.ts`, então agente sem
@@ -58,7 +58,7 @@ export async function closeAiOnlyConversation(
     return { closed: false, reason: "ALREADY_CLOSED" };
   }
   // Somente atendimento da IA — se humano já respondeu, não encerra
-  // (salvo wrap-up natural: aluno agradeceu e a IA ainda é a responsável).
+  // (salvo wrap-up natural: contato agradeceu e a IA ainda é a responsável).
   if (conv.hasHumanReply && !args.allowAfterHumanReply) {
     return { closed: false, reason: "HAS_HUMAN_REPLY" };
   }

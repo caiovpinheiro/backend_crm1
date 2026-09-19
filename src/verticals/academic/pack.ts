@@ -26,6 +26,7 @@ import {
 } from "@/verticals/academic/atendimento-prompt";
 import * as closure from "@/verticals/academic/closure";
 import * as routing from "@/verticals/academic/department-routing";
+import { pickAcademicCoordinatorPeer } from "@/verticals/academic/coordinator-pick";
 import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept-roster";
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
 import type {
@@ -133,7 +134,18 @@ export const academicPack: VerticalPack = {
     formatCanonicalPortalAccessHint,
     academicExamModalityRules,
     buildAvaDisciplinesMessage,
+    pickCoordinatorPeer: pickAcademicCoordinatorPeer,
   },
+  extraTools: [
+    {
+      id: "consultar_matricula",
+      label: "Consultar registro acadêmico",
+      description:
+        "Consulta o registro da pessoa no relatório acadêmico da organização. Casa por telefone/e-mail do contato. Demais campos só chegam se o operador liberar na ferramenta.",
+      category: "crm",
+      defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
+    },
+  ],
   constants: {
     handoffKeywords: [...ACADEMIC_HANDOFF_KEYWORDS],
     atendimentoRules: ACADEMIC_ATENDIMENTO_RULES,

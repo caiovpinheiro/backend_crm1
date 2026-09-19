@@ -8,19 +8,25 @@
  * `transfer_to_department` + `execute_distribution` (substitui INICIO-PIPE).
  */
 
-/** Portal do Aluno — único link oficial autorizado para acesso via PC/navegador. */
+/** Portal — URL oficial vem de configuração (env), sem default de tenant. */
 export const OFFICIAL_STUDENT_PORTAL_URL =
-  "https://novoportal.cruzeirodosul.edu.br/";
+  process.env.ACADEMIC_PORTAL_URL?.trim() ?? "";
 
-/** Área do Aluno da Aula Inaugural — certificado de participação (não é o novoportal). */
+/** Certificado inaugural — URL de configuração. */
 export const OFFICIAL_INAUGURAL_CERTIFICATE_URL =
-  "https://app.cruzeiroead.com.br/";
+  process.env.ACADEMIC_INAUGURAL_URL?.trim() ?? "";
 
 /**
- * Instituição do aluno. O agente acadêmico atende alunos da Cruzeiro do Sul —
- * nunca deve falar de forma genérica ("sua instituição", "sua faculdade").
+ * Nome da instituição: env ou omitido (sem default de tenant).
  */
-export const OFFICIAL_INSTITUTION_NAME = "Cruzeiro do Sul";
+export const OFFICIAL_INSTITUTION_NAME =
+  process.env.ACADEMIC_INSTITUTION_NAME?.trim() ?? "";
+
+if (!OFFICIAL_INSTITUTION_NAME) {
+  console.warn(
+    "[academic] ACADEMIC_INSTITUTION_NAME ausente — trechos de instituição ficam vazios",
+  );
+}
 
 const PORTAL_ACCESS_INTENT_RE =
   /portal\s*do\s*aluno|portal do aluno|novoportal|computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|pelo\s+pc|no\s+pc|no\s+computador|pelo\s+computador|pela\s+internet|ambiente\s+virtual|blackboard|\bava\b|link.*(portal|aluno|ava|plataforma)|acessar.*(aula|aulas|conte[uú]do|plataforma|estud)|come[cç]ar.*(aula|aulas|estud)/i;
@@ -70,11 +76,12 @@ export function formatCanonicalPortalAccessHint(
 }
 
 /** Tutorial oficial do time (modelo "Primeiro Acesso - MSG"). */
-export const OFFICIAL_FIRST_ACCESS_VIDEO_URL = "https://youtu.be/vFJP7a1EMsU";
+export const OFFICIAL_FIRST_ACCESS_VIDEO_URL =
+  process.env.ACADEMIC_FIRST_ACCESS_VIDEO_URL?.trim() ?? "";
 export const OFFICIAL_DUDA_ANDROID_URL =
-  "https://play.google.com/store/apps/details?id=br.com.cruzeirodosulvirtual";
+  process.env.ACADEMIC_APP_ANDROID_URL?.trim() ?? "";
 export const OFFICIAL_DUDA_IOS_URL =
-  "https://apps.apple.com/us/app/duda-aplicativo-do-estudante/id6451416655";
+  process.env.ACADEMIC_APP_IOS_URL?.trim() ?? "";
 
 const FIRST_ACCESS_INTENT_RE =
   /primeiro\s*acesso|1[oº]?\s*acesso|nunca (acessei|entrei|loguei)|ainda n[aã]o (acessei|entrei|tenho senha|criei senha)|criar (minha )?senha|cadastrar senha|senha (inicial|provis[oó]ria)|como (fa[cç]o|eu )?(pra |para )?(entrar|acessar|criar senha).*(primeira|primeiro)/i;
@@ -607,7 +614,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 - PROIBIDO responder "entre em contato com a coordenação" / "confirme com a coordenação do seu curso" nesses casos. A orientação é a aba de Rematrícula.
 - Oriente você mesma; não distribua só por ser DP (rematrícula é Atendimento se o aluno pedir humano).
 17. SOLICITAÇÕES ACADÊMICAS (revisão da análise de comprovantes, atividades/horas complementares, compensação de ausência, segunda chamada, declarações, prorrogação):
-- CAMINHO CORRETO, sempre: **Área do Aluno** (\`${OFFICIAL_STUDENT_PORTAL_URL}\`) → **CAA Online** → **Faça a sua solicitação** → selecionar a **unidade** (ex.: UNICID - EAD) → categoria **Acadêmico** → grupo **Atividades Complementares** → opção **Revisão da Análise dos Comprovantes**.
+- CAMINHO CORRETO, sempre: **Área do Aluno** (\`${OFFICIAL_STUDENT_PORTAL_URL}\`) → **CAA Online** → **Faça a sua solicitação** → selecionar a **unidade** cadastrada → categoria **Acadêmico** → grupo **Atividades Complementares** → opção **Revisão da Análise dos Comprovantes**.
 - Comprovante de horas/atividades complementares **reprovado**: entregue esse passo a passo (3–5 passos curtos) + o link. Oriente você mesma; não transfira.
 - PROIBIDO dizer que a revisão fica "na Área do Aluno > Atividades Complementares", "na aba/parte de Atividades Complementares" ou "na opção de revisão dentro de Atividades Complementares". Não existe essa aba: "Atividades Complementares" é só o **grupo** dentro da categoria Acadêmico do **CAA Online**.
 - Outra solicitação cujo caminho exato você NÃO souber: mande abrir **CAA Online → Faça a sua solicitação** e **buscar pelo nome** no próprio formulário. PROIBIDO chutar nome de aba/menu (regra 1).

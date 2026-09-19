@@ -1,9 +1,9 @@
-/**
+﻿/**
  * Regras de mensagem — "quando a mensagem for sobre ISTO, o próximo passo é
  * AQUILO", declarado pelo operador na tela do agente.
  *
  * Este módulo é GENÉRICO de propósito: não existe aqui (nem pode existir)
- * nenhum termo de vertical — polo, curso, matrícula, retenção. O tema é dado
+ * nenhum termo de vertical — polo, curso, cadastro, Retention. O tema é dado
  * do operador; o código só avalia.
  *
  * Precedência é a ORDEM DA LISTA: a primeira regra habilitada que casar

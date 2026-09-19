@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Rede de segurança da distribuição.
  *
- * O aluno escreveu, a IA é a responsável e ninguém respondeu. Cobre falha
+ * O contato escreveu, a IA é a responsável e ninguém respondeu. Cobre falha
  * de LLM/chave, canal fora do ar e qualquer caminho em que o agente fica
  * em silêncio — sem isso o lead fica preso na IA e nunca chega a humano.
  *
@@ -9,7 +9,7 @@
  * de inatividade só enfileiram o mesmo jobId. GET do cron continua
  * dry-run aqui. Override: `AI_AGENT_STUCK_INBOUND_MS` (0 desliga).
  *
- * Nunca envia mensagem ao aluno: só reatribui / enfileira.
+ * Nunca envia mensagem ao contato: só reatribui / enfileira.
  */
 
 import { prismaBase } from "@/lib/prisma-base";
@@ -114,7 +114,7 @@ async function listStuckInbound(args: {
       AND c."lastInboundAt" < ${cutoff}::timestamptz
       AND c."lastInboundAt" >= ${since}::timestamptz
       AND (${org}::text = '' OR c."organizationId" = ${org}::text)
-      -- Ninguém respondeu depois da última mensagem do aluno.
+      -- Ninguém respondeu depois da última mensagem do contato.
       AND NOT EXISTS (
         SELECT 1 FROM messages m
         WHERE m."conversationId" = c.id

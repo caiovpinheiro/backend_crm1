@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Mídia inbound sem legenda → decisão determinística, nunca prompt.
  *
  * Mesmo padrão arquitetural de `audio-inbound.ts`: a política é resolvida
@@ -209,7 +209,7 @@ export function buildMediaAskTextMessage(args: {
 /**
  * Transferência para humano após mídia. Usa a rota de departamento do pack
  * quando existe; sem pack, chama a Distribuição Inteligente direto — é o que
- * mantém a correção válida para comercial, SAC, retenção, qualquer ramo.
+ * mantém a correção válida para comercial, SAC, Retention, qualquer ramo.
  */
 export async function queueMediaHandoff(args: {
   conversationId: string;
