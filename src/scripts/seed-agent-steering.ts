@@ -27,7 +27,7 @@ const ACADEMIC_MEDIA_CAPABILITY_RULES = academic.constants.mediaCapabilityRules;
 
 /** Tools que o runner injetava à força no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [
-  "consultar_matricula",
+  "search_crm_records",
   "transfer_to_department",
   "execute_distribution",
   "transfer_to_human",
