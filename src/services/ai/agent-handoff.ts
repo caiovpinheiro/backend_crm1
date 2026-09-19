@@ -32,6 +32,7 @@ export type OrchestratedHandoffArgs = {
   contactId: string | null;
   dealId?: string | null;
   fromAgentUserId: string;
+  fromAgentName?: string | null;
   target: HandoffTargetKind;
   /** Nome ou id, conforme o destino. */
   name: string;
@@ -55,12 +56,74 @@ export type OrchestratedHandoffResult = {
   error?: string;
 };
 
+export const SELF_AI_HANDOFF_ERROR =
+  "Esse é você mesmo. Siga o atendimento ou escolha outro agente.";
+
 function fold(s: string): string {
   return s
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .trim();
+}
+
+export function namesFoldEqual(a: string, b: string): boolean {
+  const fa = fold(a);
+  const fb = fold(b);
+  return fa.length > 0 && fa === fb;
+}
+
+export function excludeSelfFromAgentNames(
+  names: string[],
+  selfName: string | null | undefined,
+): string[] {
+  return names.filter((n) => n.trim() && !namesFoldEqual(n, selfName ?? ""));
+}
+
+export function formatAiHandoffDestinations(names: string[]): string {
+  if (names.length === 0) {
+    return " Só para outro agente da organização, nunca para você mesmo.";
+  }
+  return ` Destinos válidos: ${names.join(", ")}.`;
+}
+
+export function selfAiDestinationError(args: {
+  wanted: string;
+  selfName?: string | null;
+  selfUserId?: string | null;
+  destUserId?: string | null;
+}): string | null {
+  if (
+    args.destUserId &&
+    args.selfUserId &&
+    args.destUserId === args.selfUserId
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  if (
+    args.wanted.trim() &&
+    args.selfName?.trim() &&
+    namesFoldEqual(args.wanted, args.selfName)
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  return null;
+}
+
+/** nameGate + bloqueio do próprio agente (produção e teste). */
+export function aiAgentDestinationGate(args: {
+  allowedAgentNames: string[];
+  name: string;
+  fromAgentName?: string | null;
+}): string | null {
+  const allowed = excludeSelfFromAgentNames(
+    args.allowedAgentNames,
+    args.fromAgentName,
+  );
+  const blocked = args.fromAgentName?.trim()
+    ? [args.fromAgentName.trim()]
+    : [];
+  return nameGate(allowed, blocked, args.name, "Agente IA");
 }
 
 function looksLikeId(raw: string): boolean {
@@ -452,8 +515,33 @@ export async function executeOrchestratedHandoff(
       error: "Atendimento por IA está desligado nesta organização.",
     };
   }
+  {
+    const selfErr = selfAiDestinationError({
+      wanted: name,
+      selfName: args.fromAgentName,
+      selfUserId: args.fromAgentUserId,
+    });
+    if (selfErr) {
+      return {
+        target: "ai_agent",
+        assigned: false,
+        assignedTo: null,
+        assignedUserId: null,
+        assignedUserType: null,
+        departmentName: null,
+        queuedWaiting: false,
+        distributionReason: null,
+        fallback: null,
+        error: selfErr,
+      };
+    }
+  }
   if (tool) {
-    const gate = nameGate(tool.allowedAgentNames, [], name, "Agente IA");
+    const gate = aiAgentDestinationGate({
+      allowedAgentNames: tool.allowedAgentNames,
+      name,
+      fromAgentName: args.fromAgentName,
+    });
     if (gate) {
       return {
         target: "ai_agent",
@@ -495,7 +583,7 @@ export async function executeOrchestratedHandoff(
       queuedWaiting: false,
       distributionReason: null,
       fallback: null,
-      error: "A conversa já está com este agente.",
+      error: SELF_AI_HANDOFF_ERROR,
     };
   }
   return assignNamedAi({

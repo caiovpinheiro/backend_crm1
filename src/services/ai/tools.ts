@@ -57,7 +57,12 @@ import {
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact, applyExistingTagToContact } from "@/services/tags";
 import { evaluateTransferGate, isIdleOrchestrationMessage } from "@/services/ai/transfer-gate";
-import { executeOrchestratedHandoff } from "@/services/ai/agent-handoff";
+import {
+  excludeSelfFromAgentNames,
+  executeOrchestratedHandoff,
+  formatAiHandoffDestinations,
+  selfAiDestinationError,
+} from "@/services/ai/agent-handoff";
 import {
   departmentNotFoundMessage,
   executeDepartmentHandoff,
@@ -125,6 +130,8 @@ export type RunContext = {
   agentName?: string | null;
   /// Classificador: no máximo uma `tabulate_conversation` por run.
   tabulationAppliedThisRun?: boolean;
+  /// Nomes dos outros agentes IA da org (sem o atual). Destinos da tool.
+  peerAiAgentNames?: string[];
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -1313,20 +1320,33 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
  * de abertura da Pilotagem dele na hora. Sem o interruptor, o especialista
  * só responde no próximo inbound.
  */
+function peerDestinations(ctx: RunContext): string[] {
+  return excludeSelfFromAgentNames(
+    ctx.peerAiAgentNames ?? [],
+    ctx.agentName,
+  );
+}
+
 function transferToAiAgentTool(ctx: RunContext) {
+  const dests = peerDestinations(ctx);
+  const destClause = formatAiHandoffDestinations(dests);
   return tool({
     description:
       "Entrega a conversa a outro agente de IA especializado, que assume a continuidade do atendimento. " +
       "Use quando já entendeu a necessidade e ela é do escopo de outro agente. " +
       "NÃO use em saudação, recado sem assunto ou 'depois eu falo'. " +
-      "Se a política pedir aviso, `noticeMessage` é o que o aluno recebe ANTES da troca. " +
-      "Depois de chamar esta tool NÃO escreva mais nada — quem fala com o aluno agora é o outro agente.",
+      "Se a política pedir aviso, `noticeMessage` é o que o contato recebe ANTES da troca. " +
+      "Nunca transfira para você mesmo." +
+      destClause +
+      " Depois de chamar esta tool NÃO escreva mais nada — quem fala agora é o outro agente.",
     inputSchema: z.object({
       agentName: z
         .string()
         .min(2)
         .describe(
-          "Nome do agente de destino, exatamente como está cadastrado (ex.: 'Agente Retenção').",
+          dests.length > 0
+            ? `Nome do agente de destino, exatamente como está cadastrado (${dests.join(", ")}).`
+            : "Nome de outro agente de destino, exatamente como está cadastrado. Não use o próprio nome.",
         ),
       noticeMessage: z
         .string()
@@ -1349,13 +1369,19 @@ function transferToAiAgentTool(ctx: RunContext) {
     }),
     execute: async ({ agentName, noticeMessage, reason, tagName }) => {
       try {
+        const wanted = agentName.trim();
+        const selfErr = selfAiDestinationError({
+          wanted,
+          selfName: ctx.agentName,
+          selfUserId: ctx.agentUserId,
+        });
+        if (selfErr) return fail(selfErr, { reason: "self_transfer" });
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
         const idle = coordinatorIdleHandoffError(ctx);
         if (idle) return fail(idle);
         if (!ctx.contactId) return fail("Sem contato na conversa.");
 
         const orgId = ctx.organizationId ?? getOrgIdOrNull();
-        const wanted = agentName.trim();
         const target = await prisma.user.findFirst({
           where: {
             type: "AI",
@@ -1389,11 +1415,13 @@ function transferToAiAgentTool(ctx: RunContext) {
               : `Agente "${wanted}" não encontrado ou inativo.`,
           );
         }
-        if (target.id === ctx.agentUserId) {
-          return fail(
-            "Esse é você mesmo. Siga o atendimento ou escolha outro agente.",
-          );
-        }
+        const selfIdErr = selfAiDestinationError({
+          wanted,
+          selfName: ctx.agentName,
+          selfUserId: ctx.agentUserId,
+          destUserId: target.id,
+        });
+        if (selfIdErr) return fail(selfIdErr, { reason: "self_transfer" });
 
         const srcPolicy = ctx.inboxPolicy ?? normalizeInboxPolicy(null);
         const announce = srcPolicy.announceAiTransfer;
@@ -1987,12 +2015,15 @@ function tabulateConversationTool(ctx: RunContext) {
 }
 
 function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
+  const destClause = formatAiHandoffDestinations(peerDestinations(ctx));
   return tool({
     description:
       "Passa a conversa para um destino: departamento (fila escolhe um consultor), uma pessoa da equipe, ou outro agente de IA. " +
       "Use `department` quando a área importa e qualquer consultor serve; `user` para alguém específico; `ai_agent` para um especialista IA da organização. " +
       "Pessoa indisponível (offline/expediente/fila cheia) cai na fila do departamento dela — não deixa o ticket parado nela. " +
-      "Para departamento e pessoa, só chame se o contato pediu humano/atendente ou você não puder seguir com segurança.",
+      "Para departamento e pessoa, só chame se o contato pediu humano/atendente ou você não puder seguir com segurança. " +
+      "Para `ai_agent`, nunca use o próprio agente." +
+      destClause,
     inputSchema: z.object({
       target: z
         .enum(["department", "user", "ai_agent"])
@@ -2012,6 +2043,14 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
     }),
     execute: async ({ target, name, reason }) => {
       try {
+        if (target === "ai_agent") {
+          const selfErr = selfAiDestinationError({
+            wanted: name,
+            selfName: ctx.agentName,
+            selfUserId: ctx.agentUserId,
+          });
+          if (selfErr) return fail(selfErr, { reason: "self_transfer" });
+        }
         if (!ctx.conversationId) return fail("Sem conversa ativa para transferir.");
         if (target === "ai_agent") {
           const idle = coordinatorIdleHandoffError(ctx);
@@ -2024,6 +2063,7 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
           contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
           fromAgentUserId: ctx.agentUserId,
+          fromAgentName: ctx.agentName,
           target,
           name,
           reason,
@@ -2146,17 +2186,6 @@ function withTestModeSimulation(
       ) {
         const idle = coordinatorIdleHandoffError(ctx);
         if (idle) return fail(idle);
-        const wanted = String(args.agentName ?? args.name ?? "").trim();
-        const me = ctx.agentName?.trim() ?? "";
-        if (
-          wanted &&
-          me &&
-          wanted.localeCompare(me, undefined, { sensitivity: "accent" }) === 0
-        ) {
-          return fail(
-            "Esse é você mesmo. Siga o atendimento neste turno; não chame a tool de novo.",
-          );
-        }
       }
       return simulateEffectTool(id, args);
     }) as typeof execute,
@@ -2203,7 +2232,16 @@ export function buildToolSet(
   for (const id of enabledIds) {
     const factory = FACTORY_MAP[id];
     if (!factory) continue;
-    const policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
+    let policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
+    if (id === "transfer_to_ai_agent" || id === "transfer_conversation") {
+      policy = {
+        ...policy,
+        allowedAgentNames: excludeSelfFromAgentNames(
+          policy.allowedAgentNames,
+          ctx.agentName,
+        ),
+      };
+    }
     let built = withArgPolicy(factory(ctx, policy), policy);
     // Antes do governor: a chamada simulada continua contando para os tetos e
     // para o dedup, senão um loop do modelo em modo de teste rodaria solto.

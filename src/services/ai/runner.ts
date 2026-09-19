@@ -669,6 +669,9 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       organizationId: agent.organizationId,
       archetype: agent.archetype,
       agentName: agent.user?.name ?? null,
+      peerAiAgentNames: peers
+        .filter((p) => p.id !== agent.id)
+        .map((p) => p.name),
     };
 
     const governor = new ToolCallGovernor(
