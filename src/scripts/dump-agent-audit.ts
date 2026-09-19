@@ -156,6 +156,10 @@ async function main() {
       contactId: true,
       createdAt: true,
       responsePreview: true,
+      // O snapshot do prompt é do RUN, não da mensagem (schema.prisma,
+      // model AIAgentRun). Selecioná-lo em `messages` derrubava o dump
+      // inteiro com PrismaClientValidationError.
+      systemPromptSnapshot: true,
       messages: {
         select: {
           id: true,
@@ -163,7 +167,6 @@ async function main() {
           content: true,
           toolName: true,
           toolData: true,
-          systemPromptSnapshot: true,
           createdAt: true,
         },
         orderBy: { createdAt: "asc" },
