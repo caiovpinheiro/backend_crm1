@@ -56,7 +56,9 @@ import {
   type PeerAiAgent,
 } from "@/lib/ai-agents/coordinator-route";
 import {
+  buildQueueAlreadyNoticedHint,
   humanQueueContextFromAgent,
+  messageLooksLikeHumanQueueNotice,
   resolveAgentTimezone,
 } from "@/services/ai/human-queue-policy";
 import {
@@ -425,6 +427,21 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .slice(-4)
       .map((m) => m.content)
       .join("\n");
+    // Sem saber que já anunciou a transferência, o agente reanunciava a cada
+    // mensagem; a trava de eco do inbox engolia a resposta e a conversa
+    // morria. Fato de estado, não de vertical: vale para qualquer tenant.
+    const queueNoticeAlreadySent =
+      !classifierRun &&
+      history
+        .slice(-6)
+        .some(
+          (m) =>
+            m.role === "assistant" &&
+            messageLooksLikeHumanQueueNotice(m.content),
+        );
+    const queueRepeatHint = queueNoticeAlreadySent
+      ? buildQueueAlreadyNoticedHint()
+      : "";
     const portalAccessHint = packText
       ? (packOps.formatCanonicalPortalAccessHint?.(
           args.userMessage,
@@ -510,6 +527,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       passwordResetHint,
       campaignDispatchBlock,
       clockHint,
+      queueRepeatHint,
       tabulationCatalog,
     ]
       .filter(Boolean)
