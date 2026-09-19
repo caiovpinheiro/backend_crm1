@@ -17,11 +17,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { encryptSecret } from "@/lib/secret-crypto";
-import {
-  apiKeyHint,
-  looksLikeOpenAiApiKey,
-  sanitizeOpenAiApiKey,
-} from "@/services/ai/agent-key";
+import { apiKeyHint } from "@/services/ai/agent-key";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   assertAutonomousReadiness,
@@ -52,6 +48,51 @@ import {
   parseAuditSource,
   type AuditSource,
 } from "@/lib/ai-agents/observability";
+
+/** Tools que o runtime injeta no arquétipo ATENDIMENTO. */
+const ACADEMIC_RUNTIME_TOOLS = [
+  "consultar_matricula",
+  "transfer_to_department",
+  "execute_distribution",
+  "transfer_to_human",
+  "close_conversation",
+];
+
+function academicSteeringRulesFallback(): string {
+  const academic = getVerticalPack("academic");
+  if (!academic) return "";
+  return [
+    academic.constants.atendimentoRules,
+    academic.constants.mediaCapabilityRules,
+    academic.constants.confidenceRules,
+  ].join("\n\n");
+}
+
+/**
+ * O que o agente já faz hoje precisa APARECER na tela mesmo com as colunas
+ * vazias — senão o editor abre em branco e o primeiro Salvar apagaria o
+ * comportamento herdado do pack. Só afeta a leitura; nada é gravado aqui.
+ */
+function withDisplayedAcademicDefaults<
+  T extends {
+    archetype: string;
+    verticalPack?: string | null;
+    steeringRules?: string | null;
+    enabledTools?: string[] | null;
+  },
+>(row: T): T {
+  const isAcademic =
+    row.archetype !== "COORDENADOR" &&
+    (row.verticalPack === "academic" || row.archetype === "ATENDIMENTO");
+  if (!isAcademic) return row;
+  const steeringRules = row.steeringRules?.trim()
+    ? row.steeringRules
+    : academicSteeringRulesFallback() || row.steeringRules;
+  const enabledTools = Array.from(
+    new Set([...(row.enabledTools ?? []), ...ACADEMIC_RUNTIME_TOOLS]),
+  );
+  return { ...row, steeringRules, enabledTools };
+}
 
 export type AIAgentRow = {
   id: string;
@@ -132,14 +173,16 @@ export async function getAIAgent(id: string) {
   });
   if (!row) return null;
   const { _count, ...rest } = row;
-  return redactAgentOpenaiKey({
-    ...rest,
-    // Devolve a política já normalizada: as regras de mensagem semeadas pelo
-    // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
-    // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
-    inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
-    knowledgeDocsCount: _count.knowledgeDocs,
-  });
+  return redactAgentOpenaiKey(
+    withDisplayedAcademicDefaults({
+      ...rest,
+      // Devolve a política já normalizada: as regras de mensagem semeadas pelo
+      // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
+      // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
+      inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
+      knowledgeDocsCount: _count.knowledgeDocs,
+    }),
+  );
 }
 
 export type CreateAIAgentInput = {
@@ -194,6 +237,11 @@ export type CreateAIAgentInput = {
   markMessagesRead?: boolean;
   autoClosePolicy?: AutoClosePolicy | null;
 
+  // Confirmação de identidade.
+  identityConfirmationEnabled?: boolean;
+  identityConfirmationTemplate?: string | null;
+  identityConfirmationFields?: string[];
+
   /// Origem do save pra auditoria (Onda 0). Default: api.
   auditSource?: AuditSource;
 };
@@ -218,6 +266,9 @@ export function sanitizePilotingInput(input: {
   typingPerCharMs?: unknown;
   markMessagesRead?: unknown;
   autoClosePolicy?: unknown;
+  identityConfirmationEnabled?: unknown;
+  identityConfirmationTemplate?: unknown;
+  identityConfirmationFields?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
@@ -235,6 +286,9 @@ export function sanitizePilotingInput(input: {
     | "typingPerCharMs"
     | "markMessagesRead"
     | "autoClosePolicy"
+    | "identityConfirmationEnabled"
+    | "identityConfirmationTemplate"
+    | "identityConfirmationFields"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -318,6 +372,24 @@ export function sanitizePilotingInput(input: {
     out.autoClosePolicy = normalizeAutoClosePolicy(input.autoClosePolicy);
   }
 
+  if (typeof input.identityConfirmationEnabled === "boolean") {
+    out.identityConfirmationEnabled = input.identityConfirmationEnabled;
+  }
+
+  if (typeof input.identityConfirmationTemplate === "string") {
+    out.identityConfirmationTemplate =
+      input.identityConfirmationTemplate.trim() || null;
+  } else if (input.identityConfirmationTemplate === null) {
+    out.identityConfirmationTemplate = null;
+  }
+
+  if (Array.isArray(input.identityConfirmationFields)) {
+    out.identityConfirmationFields = input.identityConfirmationFields
+      .filter((v): v is string => typeof v === "string")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
   return out;
 }
 
@@ -389,9 +461,9 @@ function openaiKeyFields(
   raw: string | null | undefined,
 ): { openaiApiKeyEnc: string | null; openaiApiKeyHint: string | null } | null {
   if (raw === undefined) return null;
-  const key = sanitizeOpenAiApiKey(raw ?? "");
+  const key = (raw ?? "").trim();
   if (!key) return { openaiApiKeyEnc: null, openaiApiKeyHint: null };
-  if (!looksLikeOpenAiApiKey(key)) {
+  if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) {
     throw new Error("Formato de chave OpenAI inválido. Esperado algo como sk-…");
   }
   return { openaiApiKeyEnc: encryptSecret(key), openaiApiKeyHint: apiKeyHint(key) };
@@ -441,19 +513,6 @@ export async function createAIAgent(input: CreateAIAgentInput) {
 
   const enabledTools = input.enabledTools ?? archetype.defaultTools;
 
-  // As regras do vertical entram no banco AQUI, na criação, e não no runtime.
-  // O agente precisa nascer com o texto que vai obedecer: é o que o operador
-  // abre, lê e edita na tela. Enquanto isso era um fallback de runtime, a
-  // caixa de Regras aparecia vazia e ninguém conseguia corrigir a instrução
-  // que estava no prompt.
-  const packRules = verticalPack
-    ? (getVerticalPack(verticalPack)?.fallbackRules(input.archetype) ?? "")
-    : "";
-  const steeringRules =
-    input.steeringRules !== undefined && input.steeringRules !== null
-      ? input.steeringRules
-      : packRules.trim() || null;
-
   return prisma.$transaction(async (tx) => {
     const orgId = getOrgIdOrThrow();
     const user = await tx.user.create({
@@ -480,7 +539,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           input.systemPromptTemplate ?? archetype.systemPromptTemplate,
         systemPromptOverride: input.systemPromptOverride ?? null,
         productPolicy: input.productPolicy ?? null,
-        steeringRules,
+        steeringRules: input.steeringRules ?? null,
         toolConfig:
           (input.toolConfig as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,

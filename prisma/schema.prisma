@@ -58,7 +58,6 @@ model Organization {
   dealEvents               DealEvent[]
   activityEvents           ActivityEvent[]
   products                 Product[]
-  productMetaLinks         ProductMetaLink[]
   activities               Activity[]
   activityComments         ActivityComment[]
   activityCommentRevisions ActivityCommentRevision[]
@@ -90,7 +89,7 @@ model Organization {
   distributionMembers      DistributionMember[]
   distributionResponsibles DistributionResponsible[]
   distributionLogs         DistributionLog[]
-  distributionPending           DistributionPending[]
+  distributionPending      DistributionPending[]
   distributionLeadsParticipants DistributionLeadsParticipant[]
   distributionLeadsSlots        DistributionLeadsSlot[]
   distributionLeadsAssignments  DistributionLeadsAssignment[]
@@ -185,12 +184,8 @@ model Organization {
   activityAlertStates      ActivityAlertState[]
   dealStageDailySnapshots  DealStageDailySnapshot[]
   keepNotes                KeepNote[]
-  keepCategories           KeepCategory[]
   keepAttachments          KeepAttachment[]
   keepImports              KeepImport[]
-  whatsAppGroups           WhatsAppGroup[]
-  whatsAppGroupMembers     WhatsAppGroupMember[]
-  whatsAppGroupMessages    WhatsAppGroupMessage[]
 
   @@index([status])
   @@map("organizations")
@@ -568,6 +563,7 @@ model User {
   assignedLeads                  Contact[]                 @relation("AssignedTo")
   distributionMembers            DistributionMember[]
   distributionResponsibles       DistributionResponsible[]
+  distributionLeadsParticipants  DistributionLeadsParticipant[]
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
@@ -606,7 +602,6 @@ model User {
   /// hashedPassword = NULL, phone/avatarUrl/signature = NULL.
   isErased                       Boolean                   @default(false)
   agentPermission                AgentPermission?
-  distributionLeadsParticipants  DistributionLeadsParticipant[]
   createdQuickReplies            QuickReply[]              @relation("QuickReplyCreatedBy")
   favoriteMessages               FavoriteMessage[]
   supportTicketsRequested        SupportTicket[]           @relation("SupportTicketRequester")
@@ -629,7 +624,6 @@ model User {
   teamChatForwardsSent           TeamChatMessageForward[]  @relation("TeamChatForwardFrom")
   teamChatForwardsResponded      TeamChatMessageForward[]  @relation("TeamChatForwardResponder")
   keepNotes                    KeepNote[]
-  keepCategories               KeepCategory[]
   keepAttachments              KeepAttachment[]
   keepImports                  KeepImport[]
 
@@ -1572,8 +1566,9 @@ model Deal {
   contact   Contact? @relation(fields: [contactId], references: [id])
   stageId   String
   stage     Stage    @relation(fields: [stageId], references: [id])
-  ownerId     String?
-  owner       User?    @relation(fields: [ownerId], references: [id])
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id])
+  /// Origem da atribuição vigente do owner ("smart" | "leads"; null = manual/IA/legado).
   assignedVia String?
 
   activities     Activity[]
@@ -1682,11 +1677,6 @@ model Product {
   /// legado. Pools novos não usam este campo.
   stock          Decimal      @default(0) @db.Decimal(12, 2)
 
-  /// Capa do produto (1 imagem). Usada ao encaminhar o produto no chat.
-  imageUrl       String?
-  imageMime      String?
-  imageName      String?
-
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
   /// Nullable para zero regressão; backfill move produtos legados ao catálogo
   /// default da org.
@@ -1710,9 +1700,6 @@ model Product {
   discountQuotas     DiscountQuota[]
   /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
   discountCategories DiscountCategory[]
-  /// Vínculo com item do catálogo Commerce da Meta. Separado de `catalogId`
-  /// (catálogo interno Bwipo / capacidades).
-  metaLinks          ProductMetaLink[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1726,32 +1713,6 @@ model Product {
   @@index([organizationId, kind])
   @@index([organizationId, catalogId])
   @@map("products")
-}
-
-/// Vínculo Produto Bwipo ↔ item do catálogo Commerce da Meta (WhatsApp).
-/// Não reutiliza `Product.catalogId` — esse campo é o catálogo interno.
-model ProductMetaLink {
-  id                String       @id @default(cuid())
-  organizationId    String
-  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  productId         String
-  product           Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
-  channelId         String
-  channel           Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  metaCatalogId     String
-  productRetailerId String
-  /// MANUAL | SYNCED | ERROR
-  syncStatus        String       @default("MANUAL")
-  lastSyncedAt      DateTime?
-  lastSyncError     String?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-
-  @@unique([productId, channelId])
-  @@index([organizationId])
-  @@index([channelId])
-  @@index([organizationId, metaCatalogId])
-  @@map("product_meta_links")
 }
 
 model ProductCustomFieldValue {
@@ -2700,12 +2661,7 @@ model ActivityEvent {
   @@index([dealId], map: "activity_events_dealId_idx")
   @@index([actorUserId], map: "activity_events_actorUserId_idx")
   @@index([triggeredByUserId], map: "activity_events_triggeredByUserId_idx")
-  // `idempotencyKey` fica SEM índice: @@unique é impossível numa tabela
-  // particionada por RANGE(occurredAt) (o Postgres exige a coluna de partição
-  // no índice UNIQUE), e um btree comum no pai se constrói nas 49 partições
-  // com lock exclusivo durante a migration do boot. Unicidade do evento vem
-  // da outbox (`activity_outbox_org_idempotency_idx`) + o findFirst antes de
-  // projetar. Ver 20260917190000_activity_outbox.
+  @@unique([organizationId, idempotencyKey], map: "activity_events_org_idempotency_idx")
   @@map("activity_events")
 }
 
@@ -3019,29 +2975,6 @@ model Conversation {
   /// segurar a exclusão do usuário por causa de um estado efêmero.
   aiTestModeById         String?
 
-  /// QUEM É a pessoa desta conversa, depois que algum agente confirmou.
-  ///
-  /// Identificar é caro e chato: custa uma chamada de ferramenta e, quando o
-  /// mesmo telefone tem mais de um cadastro, custa uma pergunta ao cliente.
-  /// O resultado disso pertence à CONVERSA, não ao turno — o run seguinte só
-  /// recebe o histórico de mensagens, então sem esta linha cada transferência
-  /// entre agentes recomeçava do zero e pedia o mesmo número de novo.
-  ///
-  /// Guardar a identidade NÃO concede leitura: o que cada agente pode ver do
-  /// registro continua governado pelo `readableFields` dele. Aqui fica só o
-  /// ponteiro — a fronteira de dado sensível não se move.
-  ///
-  /// Entidade do registro ("deal" | "contact" | "company").
-  aiIdentifiedEntity     String?
-  aiIdentifiedRecordId   String?
-  /// Referência amigável já pronta ("negócio #12"), para o prompt não
-  /// precisar de uma consulta só para citar o cadastro.
-  aiIdentifiedRef        String?
-  /// Rótulo do campo que a pessoa informou. Null = veio do vínculo com o
-  /// telefone, sem ninguém digitar nada.
-  aiIdentifiedBy         String?
-  aiIdentifiedAt         DateTime?
-
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id])
 
@@ -3054,6 +2987,8 @@ model Conversation {
   /// Agente responsável pela conversa na inbox (null = ainda na fila / visível conforme regra de contato).
   assignedToId String?
   assignedTo   User?   @relation("ConversationAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  /// Origem da atribuição vigente ("smart" | "leads"; null = manual/IA/legado).
+  /// `leads` protege o responsável de reavaliações automáticas (offline/expediente).
   assignedVia  String?
   /// Rota de distribuição destinada a esta conversa ("leads"; null = rota normal).
   /// Conversas com routeMode="leads" ficam fora da fila de espera e da
@@ -3521,10 +3456,8 @@ model Channel {
   conversations     Conversation[]
   messages          Message[]
   baileysAuthKeys   BaileysAuthKey[]
-  whatsAppGroups    WhatsAppGroup[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
-  productMetaLinks  ProductMetaLink[]
 
   @@unique([organizationId, number])
   @@index([organizationId])
@@ -3579,69 +3512,6 @@ model BaileysAuthKey {
   @@index([organizationId])
   @@index([channelId])
   @@map("baileys_auth_keys")
-}
-
-/// Snapshot dos grupos da conta WhatsApp QR (Baileys). Não é o stub Group.
-model WhatsAppGroup {
-  id                String       @id @default(cuid())
-  organizationId    String
-  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  channelId         String
-  channel           Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  jid               String
-  name              String       @default("")
-  description       String?      @db.Text
-  ownerJid          String?
-  participantCount  Int          @default(0)
-  syncedAt          DateTime     @default(now())
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-  members           WhatsAppGroupMember[]
-  messages          WhatsAppGroupMessage[]
-
-  @@unique([channelId, jid])
-  @@index([organizationId])
-  @@index([channelId])
-  @@map("whatsapp_groups")
-}
-
-model WhatsAppGroupMember {
-  id             String        @id @default(cuid())
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  groupId        String
-  group          WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  jid            String
-  phone          String?
-  name           String?
-  isAdmin        Boolean       @default(false)
-  isSuperAdmin   Boolean       @default(false)
-
-  @@unique([groupId, jid])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("whatsapp_group_members")
-}
-
-/// Histórico do grupo QR. Não cria Conversation/Deal no inbox.
-model WhatsAppGroupMessage {
-  id             String        @id @default(cuid())
-  organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  groupId        String
-  group          WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  waMessageId    String?
-  fromJid        String
-  fromName       String?
-  fromPhone      String?
-  fromMe         Boolean       @default(false)
-  text           String        @db.Text
-  createdAt      DateTime      @default(now())
-
-  @@index([organizationId])
-  @@index([groupId, createdAt])
-  @@index([groupId, waMessageId])
-  @@map("whatsapp_group_messages")
 }
 
 // ──────────────────────────────────────────────
@@ -3711,6 +3581,9 @@ model Department {
   /// (o lead fica na fila). Quando NENHUM depto da org tem isso true, o motor
   /// mantém o comportamento org-wide (retrocompatível).
   distributionEnabled      Boolean      @default(false)
+  /// Modo de entrada da distribuição deste departamento: "smart" (default,
+  /// comportamento atual) ou "leads" (fora da distribuição/fila smart; a
+  /// distribuição acontece via bloco `execute_distribution` com mode="leads").
   distributionMode         String       @default("smart")
   /// Janela operacional do departamento (cobertura). Null = Seg–Sex 09:00–18:00.
   /// Formato: { start: "09:00", end: "18:00", weekdays: [1,2,3,4,5] }.
@@ -4232,7 +4105,12 @@ model DistributionPending {
   @@map("distribution_pending")
 }
 
-// ── Distribuição por Leads ─────────────────────────────────────────────────
+// ── Distribuição por Leads (modo `leads`) ─────────────────
+// Modo síncrono, SEM fila de espera: o bloco `execute_distribution` com
+// mode="leads" seleciona o próximo slot do rodízio e atribui na hora.
+// Configuração independente do smart (DistributionResponsible): status
+// administrativo próprio + peso 0..5. Não herda presença, pausa, expediente,
+// queueLimit, departamento ou tipo do modo smart.
 
 model DistributionLeadsParticipant {
   id             String       @id @default(cuid())
@@ -4678,6 +4556,20 @@ model Campaign {
   /// Msgs por segundo. Cap server-side: CAMPAIGN_SEND_RATE_MAX (default 30).
   /// Default de criação: CAMPAIGN_SEND_RATE_DEFAULT (default 20).
   sendRate    Int       @default(20)
+
+  /// Trava de disparo por lote (opt-in). `sendLimit` é o tamanho do lote
+  /// escolhido na criação; `sendCap` é o teto acumulado de processados
+  /// (sentCount + failedCount) da rodada atual. Ao bater o teto com
+  /// destinatários ainda PENDING a campanha vai para PAUSED em vez de
+  /// COMPLETED, e cada `resume` libera outro lote (`sendCap += sendLimit`).
+  /// Ambos null = sem trava.
+  ///
+  /// Parada aproximada: os contadores flusham em lote (campaign-counters) e
+  /// vários envios correm em paralelo, então o corte pode passar alguns
+  /// envios do limite.
+  sendLimit Int?
+  sendCap   Int?
+
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?
@@ -5049,6 +4941,11 @@ model AIAgentConfig {
   /// determinísticos do `inbox-handler`, escopo de atendimento (funis,
   /// etapas e tags que o agente pode atender) e as mensagens de handoff.
   inboxPolicy Json?
+
+  /// Confirmação de identidade após identificação do cliente
+  identityConfirmationEnabled Boolean @default(false)
+  identityConfirmationTemplate String? @db.Text
+  identityConfirmationFields   String[] @default([])
 
   /// Pack de vertical do agente (ex.: "academic"). Null = sem interceptos
   /// de vertical. Backfill: todos os agentes existentes → "academic";
@@ -6041,8 +5938,8 @@ model CallProviderConfig {
 /// Registros acadêmicos de alunos (piloto "matriculados"). Origem: relatório
 /// Excel subido manualmente pela org (aba "Dados dos alunos"). Cada linha do
 /// relatório vira um registro (aluno pode ter várias linhas: cursos/ciclos).
-/// Exposto ao agente como a fonte consultável `matricula` do pack acadêmico,
-/// casando por telefone, email ou CPF. NÃO é tenant-scoped via Extension — filtre
+/// Consumido pela tool `consultar_matricula` do agente, casando por telefone,
+/// email ou CPF do contato. NÃO é tenant-scoped via Prisma Extension — filtre
 /// SEMPRE por organizationId explicitamente na camada de serviço.
 model StudentAcademicRecord {
   id             String    @id @default(cuid())
@@ -6071,7 +5968,6 @@ model StudentAcademicRecord {
   createdAt      DateTime  @default(now()) @map("created_at")
 
   @@index([organizationId, cpf])
-  @@index([organizationId, rgm])
   @@index([organizationId, phone])
   @@index([organizationId, email])
   @@map("student_academic_records")
@@ -6510,25 +6406,6 @@ model TeamChatMessageForward {
 // Não confundir com `Note` (timeline de contato/negócio).
 // ──────────────────────────────────────────────
 
-model KeepCategory {
-  id             String     @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId         String
-  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name           String
-  /// Paleta exclusiva de categorias (`ember`…`graphite`). Obrigatória.
-  color          String
-  /// Ordem das seções no modo Categorias. Menor = mais acima.
-  position       Float      @default(0)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  notes          KeepNote[]
-
-  @@index([organizationId, userId, position], map: "keep_categories_owner_pos_idx")
-  @@map("keep_categories")
-}
-
 model KeepNote {
   id             String   @id @default(cuid())
   organizationId String
@@ -6544,13 +6421,8 @@ model KeepNote {
   archived       Boolean   @default(false)
   trashed        Boolean   @default(false)
   trashedAt      DateTime?
-  /// Paleta do mural (`coral` | `peach` | …). Null = fundo padrão do card.
-  color          String?
   /// Ordem no mural (Keep). Menor = mais à frente / acima.
   position       Float     @default(0)
-  /// Categoria opcional (modo Categorias). Null = Sem categoria. Ignorado no modo Normal.
-  categoryId     String?
-  category       KeepCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   /// manual | google_keep_html
   source         String    @default("manual")
   importBatchId  String?
@@ -6560,7 +6432,6 @@ model KeepNote {
   attachments    KeepAttachment[]
 
   @@index([organizationId, userId, trashed, archived, pinned, position], map: "keep_notes_owner_folder_idx")
-  @@index([organizationId, userId, categoryId, position], map: "keep_notes_owner_category_idx")
   @@index([organizationId, importBatchId])
   @@map("keep_notes")
 }

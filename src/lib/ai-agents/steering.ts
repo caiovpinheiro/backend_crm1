@@ -26,7 +26,6 @@ import {
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import { academicDefaultMessageRules } from "@/verticals/academic/default-message-rules";
-import { getVerticalPack } from "@/verticals";
 
 // ── Tool config ───────────────────────────────────────────────
 
@@ -48,15 +47,16 @@ export type ToolPolicy = {
   // transfer_to_department / execute_distribution / transfer_to_human / transfer_conversation
   allowedDepartments: string[];
   blockedDepartments: string[];
+  /// Pessoas (humanos) que o agente pode nomear em `transfer_conversation`.
   allowedUserNames: string[];
+  /// Agentes IA que o agente pode nomear em `transfer_conversation`.
   allowedAgentNames: string[];
 
   // create_activity
   allowedTypes: string[];
   defaultType: string | null;
 
-  // Legado de uma tool de negócio que saiu do motor. Continua sendo lido
-  // porque agente antigo ainda tem valor gravado aqui.
+  // consultar_matricula
   policyText: string | null;
   transferMessage: string | null;
 
@@ -69,18 +69,6 @@ export type ToolPolicy = {
   /// Permite procurar registros de terceiros (`scope: "organization"`).
   /// Falso = o agente só lê o cadastro de quem está na conversa.
   allowOrgWideSearch: boolean;
-  /// Campos que servem para IDENTIFICAR a pessoa quando ela informa o
-  /// número no chat, no formato "entidade.campo" (ex.: "deal.RGM"). O
-  /// casamento é exato — curinga não vale aqui. Identificar não implica
-  /// poder ler: a leitura continua governada por `readableFields`.
-  /// Vazio = o agente não pede nem aceita identificador.
-  identityKeys: string[];
-  /// Campos-chave do registro JÁ associado ao contato (o negócio que veio
-  /// junto com o telefone). Servem para o agente reconhecer o cliente sem
-  /// perguntar nada e, quando há mais de um registro no mesmo telefone,
-  /// para saber por qual campo pedir o desempate.
-  /// Vazio = o agente trata todos os registros do contato como um só.
-  linkedIdentityKeys: string[];
   /// Jargão desta organização que deve acender o aviso de "campo sensível"
   /// na tela de configuração (ex.: o nome que ela dá ao número de
   /// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do
@@ -107,8 +95,6 @@ export function emptyToolPolicy(): ToolPolicy {
     transferMessage: null,
     readableFields: [],
     allowOrgWideSearch: false,
-    identityKeys: [],
-    linkedIdentityKeys: [],
     sensitiveTerms: [],
   };
 }
@@ -160,8 +146,6 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     transferMessage: nullableText(r.transferMessage),
     readableFields: strList(r.readableFields),
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
-    identityKeys: strList(r.identityKeys),
-    linkedIdentityKeys: strList(r.linkedIdentityKeys),
     sensitiveTerms: strList(r.sensitiveTerms),
   };
 }
@@ -184,8 +168,6 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     !p.transferMessage &&
     p.readableFields.length === 0 &&
     !p.allowOrgWideSearch &&
-    p.identityKeys.length === 0 &&
-    p.linkedIdentityKeys.length === 0 &&
     p.sensitiveTerms.length === 0
   );
 }
@@ -561,10 +543,6 @@ export const HUMAN_ATTENDANCE_LABELS = {
     label: "Mensagem quando já há um atendente responsável",
     hint: "Vazio = texto padrão.",
   },
-  queueFollowUpMessage: {
-    label: "Mensagem quando a pessoa insiste e o aviso de fila já foi dado",
-    hint: "Vazio = texto padrão. Não pode repetir o aviso de fila, senão a trava de eco descarta.",
-  },
   audioHandoffMessage: {
     label: "Mensagem quando a pessoa manda áudio e o agente chama a equipe",
     hint: "Vazio = texto padrão, que muda conforme o horário da equipe.",
@@ -574,32 +552,6 @@ export const HUMAN_ATTENDANCE_LABELS = {
     hint: "Somados aos termos que o sistema já reconhece — nunca no lugar deles.",
   },
 } as const;
-
-/**
- * Termos default de pedido de atendente humano.
- *
- * Moram aqui, na camada de configuração, e não no serviço que avalia o
- * gate: são o valor inicial de `inboxPolicy.humanRequestKeywords`, que a
- * org edita na tela. O gate soma os dois (produto + org).
- *
- * Keyword nunca é a única saída: o modelo também pode afirmar o pedido
- * via `userExplicitlyAsked` nas tools de transferência.
- */
-export const DEFAULT_HUMAN_REQUEST_KEYWORDS = [
-  "atendente",
-  "atendentes",
-  "humano",
-  "humana",
-  "consultor",
-  "consultora",
-  "atendimento humano",
-  "falar com alguem",
-  "falar com alguém",
-  "fila",
-  "transferencia",
-  "transferência",
-  "distribu",
-] as const satisfies readonly string[];
 
 export type InboxPolicy = {
   /// Abaixo disso o backend distribui para humano. `null` = usa o
@@ -616,7 +568,9 @@ export type InboxPolicy = {
   /// Interceptos determinísticos do inbox-handler.
   interceptRetention: boolean;
   interceptCourseShopping: boolean;
+  /// Primeiro acesso / portal / AVA / cumprimento que a IA “segura” sozinha.
   interceptFirstAccess: boolean;
+  /// Classificar (folha) ao sair da IA — sem virar dono do WhatsApp.
   tabulateOnExit: TabulateOnExitMode;
 
   /// Termos EXTRA (somados aos regexes do código) que classificam a
@@ -634,21 +588,6 @@ export type InboxPolicy = {
   /// Datas "YYYY-MM-DD" (BRT) em que o intercepto vale. Vazio = usa
   /// `INAUGURAL_LINK_DATES` / default do código.
   inauguralDates: string[];
-
-  /// Pacote de primeiro acesso enviado pelo intercepto (sem LLM).
-  /// `null` / vazio = texto de fábrica. O operador pilota a cópia no CRM.
-  firstAccessPackMessage: string | null;
-
-  /// Depois de outro agente IA transferir (aviso + troca de dono), este
-  /// destino envia na hora a mensagem de abertura da Pilotagem. Desligado
-  /// (default) = só responde no próximo inbound do aluno.
-  speakOnAiTransfer: boolean;
-
-  /// Avisar o aluno ao passar a conversa para outro agente IA.
-  /// Desligado = troca silenciosa (só a tool). Ligado = envia o texto
-  /// abaixo (ou o noticeMessage da tool, se este campo estiver vazio).
-  announceAiTransfer: boolean;
-  announceAiTransferMessage: string | null;
 
   /// Em quais conversas o agente pode entrar (funil, etapa, tag).
   scope: AttendanceScope;
@@ -700,19 +639,19 @@ export type InboxPolicy = {
   queueMessage: string | null;
   /// Texto de "já tem consultor responsável". `null` = padrão.
   assignedConsultantMessage: string | null;
-  /// Texto de quando a pessoa insiste e o aviso de fila já saiu. `null` =
-  /// padrão. Sem ele o turno era descartado por repetição e ninguém
-  /// respondia.
-  queueFollowUpMessage: string | null;
   /// Texto do aviso de áudio que dispara transferência. `null` = padrão.
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
   humanRequestKeywords: string[];
-  /// Cópia do guard de inbound ininteligível. `null` = fallback neutro.
-  nonsenseAskOnceMessage: string | null;
-  nonsenseStopMessage: string | null;
-  /// Escopo/tópicos deste agente, para o coordenador rotear sem usar o nome.
-  routingScope: string | null;
+
+  /// Confirmação de identidade: ativa/desativa
+  identityConfirmationEnabled: boolean;
+  /// Template da mensagem com variáveis {campo}. Ex: "Oi {nome}, vi seu {rgm}..."
+  /// Vazio = texto padrão genérico.
+  identityConfirmationTemplate: string | null;
+  /// Lista de campos do Deal a mostrar. Ex: ["rgm", "curso", "email"]
+  /// Vazio = mostra todos os campos configurados como identityKeys.
+  identityConfirmationFields: string[];
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -768,10 +707,6 @@ export function defaultInboxPolicy(): InboxPolicy {
     inauguralEnabled: false,
     inauguralUrl: null,
     inauguralDates: [],
-    firstAccessPackMessage: null,
-    speakOnAiTransfer: false,
-    announceAiTransfer: false,
-    announceAiTransferMessage: null,
     scope: defaultAttendanceScope(),
     handoffMessage: null,
     retentionHandoffMessage: null,
@@ -786,12 +721,11 @@ export function defaultInboxPolicy(): InboxPolicy {
     humanAttendancePreEndMinutes: null,
     queueMessage: null,
     assignedConsultantMessage: null,
-    queueFollowUpMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
-    nonsenseAskOnceMessage: null,
-    nonsenseStopMessage: null,
-    routingScope: null,
+    identityConfirmationEnabled: false,
+    identityConfirmationTemplate: null,
+    identityConfirmationFields: [],
   };
 }
 
@@ -832,11 +766,6 @@ export function normalizeInboxPolicy(
     // HandoffJustified`). Agora é declarativo — e o default preserva a
     // regra que já vale em produção para esses agentes.
     base.transferPolicy = "on_request_or_topic";
-    const packKeywords =
-      getVerticalPack("academic")?.inboxPolicyDefaults?.humanRequestKeywords;
-    if (packKeywords?.length) {
-      base.humanRequestKeywords = [...packKeywords];
-    }
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
@@ -893,10 +822,6 @@ export function normalizeInboxPolicy(
     inauguralDates: strList(r.inauguralDates).filter((d) =>
       /^\d{4}-\d{2}-\d{2}$/.test(d),
     ),
-    firstAccessPackMessage: nullableText(r.firstAccessPackMessage),
-    speakOnAiTransfer: boolOr(r.speakOnAiTransfer, base.speakOnAiTransfer),
-    announceAiTransfer: boolOr(r.announceAiTransfer, base.announceAiTransfer),
-    announceAiTransferMessage: nullableText(r.announceAiTransferMessage),
     scope: normalizeAttendanceScope(r.scope),
     handoffMessage: nullableText(r.handoffMessage),
     retentionHandoffMessage: nullableText(r.retentionHandoffMessage),
@@ -923,14 +848,14 @@ export function normalizeInboxPolicy(
         : null,
     queueMessage: nullableText(r.queueMessage),
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
-    queueFollowUpMessage: nullableText(r.queueFollowUpMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
-    humanRequestKeywords: Array.isArray(r.humanRequestKeywords)
-      ? strList(r.humanRequestKeywords)
-      : base.humanRequestKeywords,
-    nonsenseAskOnceMessage: nullableText(r.nonsenseAskOnceMessage),
-    nonsenseStopMessage: nullableText(r.nonsenseStopMessage),
-    routingScope: nullableText(r.routingScope),
+    humanRequestKeywords: strList(r.humanRequestKeywords),
+    identityConfirmationEnabled: boolOr(
+      r.identityConfirmationEnabled,
+      base.identityConfirmationEnabled,
+    ),
+    identityConfirmationTemplate: nullableText(r.identityConfirmationTemplate),
+    identityConfirmationFields: strList(r.identityConfirmationFields),
   };
 }
 
