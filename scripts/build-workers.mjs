@@ -185,4 +185,12 @@ await build({
   outfile: path.resolve(projectRoot, "dist/workers/dump-agent-audit.js"),
 });
 
+// Materialização das regras do pack no banco. Roda uma vez no container,
+// ANTES do deploy que tira o fallback do runner.
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/materialize-steering-rules.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/materialize-steering-rules.js"),
+});
+
 console.log("[build-workers] ✓ workers compilados em dist/workers/");

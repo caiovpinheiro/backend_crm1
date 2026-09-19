@@ -29,7 +29,6 @@ import { getVerticalPack } from "@/verticals";
 
 import {
   composeRuntimeOverride,
-  fallbackSteeringRules,
   renderSystemPrompt,
 } from "@/lib/ai-agents/system-prompt";
 import {
@@ -513,11 +512,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     ]
       .filter(Boolean)
       .join("\n");
-    const steeringRules =
-      agent.steeringRules?.trim() ||
-      (packText
-        ? fallbackSteeringRules(agent.archetype, agent.verticalPack)
-        : "");
+    // Regra de atendimento vem do banco, e só do banco. Enquanto o runtime
+    // completava com o texto do pack, o agente obedecia a um documento que
+    // não aparecia na tela: o operador via a caixa de Regras vazia e não
+    // tinha como corrigir uma instrução que estava mandando o modelo usar
+    // ferramenta desligada. O texto é materializado em `steeringRules` por
+    // `scripts/materialize-steering-rules.ts` e na criação do agente.
+    const steeringRules = agent.steeringRules?.trim() || "";
     const curriculumRules = packText
       ? (pack?.constants.curriculumTceRules ?? "")
       : "";

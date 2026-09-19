@@ -52,7 +52,12 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { normalizeToolConfig } from "@/lib/ai-agents/steering";
-import { buildToolSet, type RunContext } from "@/services/ai/tools";
+import {
+  availableToolIdsForPack,
+  AVAILABLE_TOOL_IDS,
+  buildToolSet,
+  type RunContext,
+} from "@/services/ai/tools";
 
 const ctx: RunContext = {
   agentUserId: "ai-user-1",
@@ -62,7 +67,9 @@ const ctx: RunContext = {
   dealId: null,
   userMessage: "",
   priorUserMessages: [],
-  verticalPack: null,
+  // A ferramenta é do pack acadêmico, não do núcleo: sem o pack ela nem
+  // existe para o agente (ver o teste no fim do arquivo).
+  verticalPack: "academic",
   inboxPolicy: null,
 };
 
@@ -142,5 +149,23 @@ describe("consultar_matricula com identificador configurado", () => {
 
   it("chave configurada que o lookup não consulta não cria argumento", () => {
     expect(argNames(buildTool(["curso"]))).toEqual(["cpf", "nomeCompleto"]);
+  });
+});
+
+describe("a ferramenta pertence ao pack, não ao núcleo", () => {
+  it("agente de tenant sem pack acadêmico não recebe a ferramenta", () => {
+    const set = buildToolSet(
+      { ...ctx, verticalPack: null },
+      ["consultar_matricula"],
+      normalizeToolConfig({}),
+    );
+    expect(Object.keys(set)).toEqual([]);
+  });
+
+  it("o núcleo não lista a ferramenta; o pack lista", () => {
+    expect(AVAILABLE_TOOL_IDS).not.toContain("consultar_matricula");
+    expect(availableToolIdsForPack("academic")).toContain(
+      "consultar_matricula",
+    );
   });
 });

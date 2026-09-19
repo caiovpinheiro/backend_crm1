@@ -29,6 +29,10 @@ import * as routing from "@/verticals/academic/department-routing";
 import { pickAcademicCoordinatorPeer } from "@/verticals/academic/coordinator-pick";
 import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept-roster";
 import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
+import {
+  consultarMatriculaTool,
+  CONSULTAR_MATRICULA_TOOL_META,
+} from "@/verticals/academic/tools/consultar-matricula";
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
 import type {
   VerticalIntercept,
@@ -104,8 +108,6 @@ export const academicPack: VerticalPack = {
       "Distribui o atendimento na fila do departamento já definido.",
     closeConversation:
       "Encerra o atendimento somente-IA quando o aluno se despede ou pede para fechar.",
-    consultarMatricula:
-      "Consulta matrícula/RA do aluno na base acadêmica da instituição.",
   },
   inboxPolicyDefaults: {
     interceptRetention: true,
@@ -140,12 +142,11 @@ export const academicPack: VerticalPack = {
   },
   extraTools: [
     {
-      id: "consultar_matricula",
-      label: "Consultar registro acadêmico",
-      description:
-        "Consulta o registro da pessoa no relatório acadêmico da organização. Casa por telefone/e-mail do contato. Demais campos só chegam se o operador liberar na ferramenta.",
-      category: "crm",
-      defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
+      ...CONSULTAR_MATRICULA_TOOL_META,
+      // Arrow, não a referência direta: `consultar-matricula.ts` importa
+      // helpers de `services/ai/tools.ts`, que importa este pack. Resolver o
+      // binding só na chamada mantém o ciclo inofensivo.
+      factory: (ctx, policy) => consultarMatriculaTool(ctx, policy),
     },
   ],
   // Getter, não objeto literal: os textos levam nome de instituição e URLs

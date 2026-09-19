@@ -164,10 +164,11 @@ function queueCtx(ctx: RunContext) {
   return humanQueueContextFromAgent({ inboxPolicy: ctx.inboxPolicy ?? null });
 }
 
-function ok<T>(data: T) {
+/** Exportados para as tools que moram nos verticais (`pack.extraTools`). */
+export function ok<T>(data: T) {
   return { ok: true as const, ...data } as { ok: true } & T;
 }
-function fail(error: string, extra?: { reason?: string }) {
+export function fail(error: string, extra?: { reason?: string }) {
   return extra?.reason
     ? { ok: false as const, error, reason: extra.reason }
     : { ok: false as const, error };
@@ -2087,134 +2088,6 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
   });
 }
 
-// ── consultar_matricula ────────────────────────────────────────
-
-/**
- * Mensagem padrão de transferência quando o aluno pede dado pessoal específico.
- * Mantida no código para consistência (o agente deve reproduzi-la ao transferir).
- */
-const MATRICULA_TRANSFER_MESSAGE =
-  "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
-
-/**
- * Limite de alcance de `podeAcessarPortal`, anexado à description mesmo
- * quando o vertical pack traz cópia própria.
- *
- * O modelo respondeu "seu acesso ao Blackboard está liberado" a partir de
- * `podeAcessarPortal: true`, enquanto o campo do CRM registrava o contrário.
- * O bit é sobre UM acesso; generalizar para outros sistemas é invenção.
- */
-const MATRICULA_SCOPE_NOTE =
-  "ALCANCE: `podeAcessarPortal` responde UMA pergunta — o acesso ao portal está ativo. Não vale como resposta sobre nenhum outro sistema, ferramenta, produto ou campo do cadastro, mesmo que o nome pareça relacionado. Se a pergunta é sobre um item específico registrado no cadastro, esta ferramenta não responde: consulte os campos do CRM. Nunca converta este bit em afirmação sobre outra coisa.";
-
-function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
-  const transferMessage = policy.transferMessage ?? MATRICULA_TRANSFER_MESSAGE;
-  const copy = packToolCopy(ctx);
-  // A allowlist do operador mora no mesmo campo que `search_crm_records`
-  // usa (`toolConfig[tool].readableFields`); a normalização descarta o que
-  // não é coluna do relatório.
-  const readableFields = policy.readableFields;
-  // Identificadores que ESTA organização declarou. Vazio = a ferramenta
-  // mantém exatamente o schema de antes, sem o argumento.
-  const identityKeys = normalizeAcademicIdentityKeys(policy.identityKeys);
-  const identityShape =
-    identityKeys.length > 0
-      ? {
-          identificador: z
-            .object({
-              campo: z.enum(
-                identityKeys as [AcademicIdentityKey, ...AcademicIdentityKey[]],
-              ),
-              valor: z.string().min(3),
-            })
-            .optional()
-            .describe(
-              "Número que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado.",
-            ),
-        }
-      : {};
-  return tool({
-    description: `${
-      copy?.consultarMatricula ??
-      "Consulta o registro do aluno em conversa no relatório de matriculados. Devolve sempre `podeAcessarPortal` (acesso ao portal/AVA) e, dos demais dados, SOMENTE os campos que o operador liberou na configuração desta ferramenta. O casamento é automático por telefone/e-mail do contato."
-    }\n\n${ACADEMIC_LOOKUP_GUIDANCE}\n\n${describeAcademicExposure(
-      readableFields,
-    )}\n\n${describeAcademicIdentity(identityKeys)}\n\n${MATRICULA_SCOPE_NOTE}`,
-    inputSchema: z.object({
-      cpf: z
-        .string()
-        .optional()
-        .describe(
-          "CPF informado pelo aluno no chat (opcional). Só use se o telefone/e-mail não localizar a matrícula. PROIBIDO pedir o CPF ao aluno para desempatar identidade — para isso use `nomeCompleto`.",
-        ),
-      nomeCompleto: z
-        .string()
-        .optional()
-        .describe(
-          "Nome completo que o aluno confirmou no chat. Use quando a chamada anterior devolveu `identidade: \"confirmar_identidade\"`.",
-        ),
-      ...identityShape,
-    }),
-    execute: async (args) => {
-      // `identificador` só existe no schema quando o operador configurou —
-      // daí a leitura por cast em vez de desestruturação: o tipo do arg é
-      // uma união entre a forma com e sem o campo.
-      const { cpf, nomeCompleto } = args;
-      const { identificador } = args as {
-        identificador?: { campo: AcademicIdentityKey; valor: string };
-      };
-      try {
-        const orgId = getOrgIdOrNull();
-        if (!orgId) return fail("Sem organização no contexto.");
-        if (!ctx.contactId) return fail("Sem contato associado à conversa.");
-
-        const contact = await prisma.contact.findUnique({
-          where: { id: ctx.contactId },
-          select: { phone: true, email: true },
-        });
-        if (!contact) return fail("Contato não encontrado.");
-
-        // O identificador informado no chat entra pela chave que o operador
-        // declarou. Antes o número dito pela pessoa não tinha onde entrar: o
-        // modelo repetia a chamada e verbalizava que havia consultado por
-        // ele.
-        const informed = identificador?.valor?.trim() || null;
-        const informedRgm = identificador?.campo === "rgm" ? informed : null;
-        const informedCpf = identificador?.campo === "cpf" ? informed : null;
-
-        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar
-        // a chance de achar o registro. O que o modelo vê sai do filtro
-        // abaixo — a busca ampla não vaza nada por si.
-        const records = await lookupStudent(orgId, {
-          phone: contact.phone,
-          email: contact.email,
-          cpf: cpf?.trim() || informedCpf,
-          rgm: informedRgm,
-        });
-
-        // Filtro de saída: o status derivado sai sempre; os campos do
-        // relatório só quando o operador liberou nominalmente. Antes o
-        // payload trazia curso, polo, série e situação com um "NÃO
-        // DIVULGUE" textual — e o agente respondeu "seu curso está
-        // cancelado". Instrução dentro de payload não é mecanismo de
-        // segurança; allowlist é.
-        return ok(
-          academicLookupForModel({
-            records,
-            readableFields,
-            transferMessage,
-            nomeCompleto: nomeCompleto ?? null,
-          }),
-        );
-      } catch (err) {
-        return fail(
-          err instanceof Error ? err.message : "Falha ao consultar matrícula.",
-        );
-      }
-    },
-  });
-}
-
 // ── close_conversation ─────────────────────────────────────────
 
 function closeConversationTool(ctx: RunContext) {
@@ -2481,7 +2354,6 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   send_whatsapp_template: sendWhatsappTemplateTool,
   transfer_to_department: transferToDepartmentTool,
   execute_distribution: executeDistributionTool,
-  consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
   transfer_to_ai_agent: transferToAiAgentTool,
   transfer_conversation: transferConversationTool,
@@ -2489,6 +2361,21 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   list_tabulations: listTabulationsTool,
   tabulate_conversation: tabulateConversationTool,
 };
+
+/**
+ * Ferramenta que veio do pack do tenant (`extraTools`), não do núcleo.
+ *
+ * O núcleo não conhece o nome nem o assunto dela: recebe o id que está em
+ * `enabledTools` e pergunta ao pack quem constrói. Assim uma ferramenta de
+ * produto (consulta acadêmica, agenda de clínica, rastreio de pedido) entra
+ * sem que `FACTORY_MAP` precise crescer.
+ */
+function packToolFactory(ctx: RunContext, id: string): ToolFactory | null {
+  const extra = getVerticalPack(ctx.verticalPack)?.extraTools?.find(
+    (t) => t.id === id,
+  );
+  return extra ? (extra.factory as ToolFactory) : null;
+}
 
 /**
  * Camada genérica da policy, válida para qualquer tool: anuncia as
@@ -2596,7 +2483,7 @@ export function buildToolSet(
 ): ToolSet {
   const set: Record<string, AnyTool> = {};
   for (const id of enabledIds) {
-    const factory = FACTORY_MAP[id];
+    const factory = FACTORY_MAP[id] ?? packToolFactory(ctx, id);
     if (!factory) continue;
     let policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
     if (id === "transfer_to_ai_agent" || id === "transfer_conversation") {
@@ -2617,4 +2504,11 @@ export function buildToolSet(
   return set as ToolSet;
 }
 
+/** Ferramentas do núcleo — existem para qualquer tenant, de qualquer ramo. */
 export const AVAILABLE_TOOL_IDS = Object.keys(FACTORY_MAP);
+
+/** Núcleo + o que o pack do tenant adiciona. É esta a lista que a tela mostra. */
+export function availableToolIdsForPack(packId?: string | null): string[] {
+  const extra = (getVerticalPack(packId)?.extraTools ?? []).map((t) => t.id);
+  return [...AVAILABLE_TOOL_IDS, ...extra];
+}

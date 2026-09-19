@@ -47,10 +47,16 @@ export async function GET() {
         templateId: templates.find((t) => t.archetypeKey === a.id)?.id ?? null,
         verticalPack: null,
       })),
+      // Núcleo + ferramentas de cada pack. A de pack vai marcada com o `pack`
+      // dela: a tela só oferece a um agente o que o pack DELE traz, senão o
+      // tenant de outro ramo enxerga ferramenta de um produto que não é o
+      // seu. `factory` fica de fora — é função, não metadado de tela.
       tools: [
-        ...TOOLS_CATALOG,
-        ...listVerticalPackIds().flatMap(
-          (id) => getVerticalPack(id)?.extraTools ?? [],
+        ...TOOLS_CATALOG.map((t) => ({ ...t, pack: null as string | null })),
+        ...listVerticalPackIds().flatMap((id) =>
+          (getVerticalPack(id)?.extraTools ?? []).map(
+            ({ factory: _factory, ...meta }) => ({ ...meta, pack: id }),
+          ),
         ),
       ],
       verticalPacks: listVerticalPackIds(),

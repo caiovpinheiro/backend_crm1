@@ -3,7 +3,18 @@
  * Fora de `src/verticals/<id>/`, use só `getVerticalPack` / `runVerticalIntercepts`.
  */
 
-import type { TabulateOnExitMode } from "@/lib/ai-agents/steering";
+import type { TabulateOnExitMode, ToolPolicy } from "@/lib/ai-agents/steering";
+import type { RunContext } from "@/services/ai/tools";
+
+/**
+ * Construtor de uma tool do pack, com a mesma assinatura das tools do núcleo.
+ *
+ * O retorno fica em `unknown` de propósito: o tipo real é o `Tool` do AI SDK,
+ * que é heterogêneo por definição (cada tool tem input e output próprios). O
+ * `buildToolSet` faz o cast uma vez, no mesmo lugar onde já casta as do
+ * núcleo. Tipar aqui só empurraria o `any` para dentro de cada pack.
+ */
+export type VerticalToolFactory = (ctx: RunContext, policy: ToolPolicy) => unknown;
 
 export type VerticalInterceptHit = {
   handled: true;
@@ -90,15 +101,20 @@ export type VerticalPack = {
     transferToDepartment?: string;
     executeDistribution?: string;
     closeConversation?: string;
-    consultarMatricula?: string;
   };
-  /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
+  /**
+   * Ferramentas que só existem neste vertical. O núcleo não as conhece pelo
+   * nome: descobre por aqui quem constrói (`buildToolSet`) e o que mostrar na
+   * tela (`GET /api/ai-agents/tools`). Ferramenta de produto entra por esta
+   * porta, nunca no `FACTORY_MAP`.
+   */
   extraTools?: Array<{
     id: string;
     label: string;
     description: string;
     category: "crm" | "whatsapp" | "handoff";
     defaultForArchetypes: string[];
+    factory: VerticalToolFactory;
   }>;
   /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
   inboxPolicyDefaults?: {

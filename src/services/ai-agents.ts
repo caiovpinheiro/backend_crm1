@@ -53,51 +53,6 @@ import {
   type AuditSource,
 } from "@/lib/ai-agents/observability";
 
-/** Tools que o runtime injeta no arquétipo ATENDIMENTO. */
-const ACADEMIC_RUNTIME_TOOLS = [
-  "consultar_matricula",
-  "transfer_to_department",
-  "execute_distribution",
-  "transfer_to_human",
-  "close_conversation",
-];
-
-function academicSteeringRulesFallback(): string {
-  const academic = getVerticalPack("academic");
-  if (!academic) return "";
-  return [
-    academic.constants.atendimentoRules,
-    academic.constants.mediaCapabilityRules,
-    academic.constants.confidenceRules,
-  ].join("\n\n");
-}
-
-/**
- * O que o agente já faz hoje precisa APARECER na tela mesmo com as colunas
- * vazias — senão o editor abre em branco e o primeiro Salvar apagaria o
- * comportamento herdado do pack. Só afeta a leitura; nada é gravado aqui.
- */
-function withDisplayedAcademicDefaults<
-  T extends {
-    archetype: string;
-    verticalPack?: string | null;
-    steeringRules?: string | null;
-    enabledTools?: string[] | null;
-  },
->(row: T): T {
-  const isAcademic =
-    row.archetype !== "COORDENADOR" &&
-    (row.verticalPack === "academic" || row.archetype === "ATENDIMENTO");
-  if (!isAcademic) return row;
-  const steeringRules = row.steeringRules?.trim()
-    ? row.steeringRules
-    : academicSteeringRulesFallback() || row.steeringRules;
-  const enabledTools = Array.from(
-    new Set([...(row.enabledTools ?? []), ...ACADEMIC_RUNTIME_TOOLS]),
-  );
-  return { ...row, steeringRules, enabledTools };
-}
-
 export type AIAgentRow = {
   id: string;
   userId: string;
@@ -177,16 +132,14 @@ export async function getAIAgent(id: string) {
   });
   if (!row) return null;
   const { _count, ...rest } = row;
-  return redactAgentOpenaiKey(
-    withDisplayedAcademicDefaults({
-      ...rest,
-      // Devolve a política já normalizada: as regras de mensagem semeadas pelo
-      // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
-      // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
-      inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
-      knowledgeDocsCount: _count.knowledgeDocs,
-    }),
-  );
+  return redactAgentOpenaiKey({
+    ...rest,
+    // Devolve a política já normalizada: as regras de mensagem semeadas pelo
+    // pack precisam APARECER na tela. Se a tela recebesse a lista vazia, o
+    // primeiro "Salvar" apagaria o comportamento herdado sem ninguém pedir.
+    inboxPolicy: normalizeInboxPolicy(rest.inboxPolicy, rest.verticalPack),
+    knowledgeDocsCount: _count.knowledgeDocs,
+  });
 }
 
 export type CreateAIAgentInput = {
@@ -488,6 +441,19 @@ export async function createAIAgent(input: CreateAIAgentInput) {
 
   const enabledTools = input.enabledTools ?? archetype.defaultTools;
 
+  // As regras do vertical entram no banco AQUI, na criação, e não no runtime.
+  // O agente precisa nascer com o texto que vai obedecer: é o que o operador
+  // abre, lê e edita na tela. Enquanto isso era um fallback de runtime, a
+  // caixa de Regras aparecia vazia e ninguém conseguia corrigir a instrução
+  // que estava no prompt.
+  const packRules = verticalPack
+    ? (getVerticalPack(verticalPack)?.fallbackRules(input.archetype) ?? "")
+    : "";
+  const steeringRules =
+    input.steeringRules !== undefined && input.steeringRules !== null
+      ? input.steeringRules
+      : packRules.trim() || null;
+
   return prisma.$transaction(async (tx) => {
     const orgId = getOrgIdOrThrow();
     const user = await tx.user.create({
@@ -514,7 +480,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           input.systemPromptTemplate ?? archetype.systemPromptTemplate,
         systemPromptOverride: input.systemPromptOverride ?? null,
         productPolicy: input.productPolicy ?? null,
-        steeringRules: input.steeringRules ?? null,
+        steeringRules,
         toolConfig:
           (input.toolConfig as unknown as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
