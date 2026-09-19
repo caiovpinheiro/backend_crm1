@@ -46,7 +46,16 @@ import { sseBus } from "@/lib/sse-bus";
 import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
-import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
+import {
+  createDeal,
+  createDealEvent,
+  updateDeal,
+  updateDealTx,
+} from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
 import { evaluateTransferGate } from "@/services/ai/transfer-gate";
@@ -55,6 +64,7 @@ import {
   executeDepartmentHandoff,
   resolveDepartmentForAgent,
 } from "@/services/ai/department-handoff";
+import { executeOrchestratedHandoff } from "@/services/ai/agent-handoff";
 import {
   buildQueuedWaitingHint,
   humanQueueContextFromAgent,
@@ -135,6 +145,21 @@ function ok<T>(data: T) {
 }
 function fail(error: string) {
   return { ok: false as const, error };
+}
+
+function fireTabulateOnHumanExit(ctx: RunContext) {
+  const orgId = ctx.organizationId ?? getOrgIdOrNull();
+  if (!orgId || !ctx.contactId) return;
+  void import("@/services/ai/tabulation-classify")
+    .then(({ maybeTabulateOnExit }) =>
+      maybeTabulateOnExit({
+        organizationId: orgId,
+        contactId: ctx.contactId,
+        policy: ctx.inboxPolicy,
+        trigger: "human_handoff",
+      }),
+    )
+    .catch(() => null);
 }
 
 /** Fila humana conforme a política de transferência do agente. */
@@ -232,7 +257,11 @@ function moveStageTool(ctx: RunContext) {
         if (!ctx.dealId) return fail("Sem deal ativo para mover.");
         const deal = await prisma.deal.findUnique({
           where: { id: ctx.dealId },
-          select: { id: true, stageId: true, stage: { select: { pipelineId: true } } },
+          select: {
+            id: true,
+            stageId: true,
+            stage: { select: { name: true, pipelineId: true, pipeline: { select: { name: true } } } },
+          },
         });
         if (!deal) return fail("Deal não encontrado.");
 
@@ -293,11 +322,45 @@ function moveStageTool(ctx: RunContext) {
             };
           }
         }
-        await updateDeal(deal.id, { stageId: target.id });
+        const fromStageId = deal.stageId;
+        const fromPipelineId = deal.stage?.pipelineId ?? null;
+        await prisma.$transaction(async (tx) => {
+          const updated = await updateDealTx(tx, deal.id, { stageId: target.id });
+
+          const timestampIso = updated.updatedAt.toISOString();
+          await insertActivityOutbox(tx, {
+            type: "STAGE_CHANGED",
+            actorType: "AI",
+            actorLabel: "Agente IA",
+            entityType: "DEAL",
+            entityId: deal.id,
+            dealId: deal.id,
+            field: "stageId",
+            oldValue: fromStageId,
+            newValue: target.id,
+            organizationId: updated.organizationId,
+            meta: {
+              from: {
+                id: fromStageId,
+                name: deal.stage?.name ?? null,
+                pipelineId: fromPipelineId,
+                pipelineName: deal.stage?.pipeline?.name ?? null,
+              },
+              to: {
+                id: target.id,
+                name: target.name,
+                pipelineId: target.pipelineId,
+              },
+              reason: reason?.trim() ?? null,
+            },
+            idempotencyKey: `deal:${deal.id}:stage_changed:${target.id}:${timestampIso}`,
+          });
+        });
+
         // Dispara "mudança de fase" quando a IA move o negócio — antes esse
         // caminho só registrava AI_AGENT_ACTION e não acionava automações.
-        if (deal.stageId !== target.id) {
-          void notifyDealStageChanged(deal.id, deal.stageId, target.id, {
+        if (fromStageId !== target.id) {
+          void notifyDealStageChanged(deal.id, fromStageId, target.id, {
             contactId: ctx.contactId ?? undefined,
             depth: 0,
           });
@@ -1241,6 +1304,7 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
         const queuedWaiting =
           result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
           result.distribution?.reason === "NO_DEPARTMENT";
+        fireTabulateOnHumanExit(ctx);
         return ok({
           transferred: true,
           departmentName: result.departmentName,
@@ -1402,6 +1466,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
             const queuedWaiting =
               handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
               handoff.distribution?.reason === "NO_DEPARTMENT";
+            fireTabulateOnHumanExit(ctx);
             return ok({
               assigned: Boolean(handoff.distribution?.success),
               // `assignedUserId` saiu do payload: id interno de usuário não
@@ -1454,6 +1519,7 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
         }
 
         if (result.success) {
+          fireTabulateOnHumanExit(ctx);
           return ok({
             assigned: true,
             assignedTo: result.selectedUserName,
@@ -1724,6 +1790,77 @@ function tabulateConversationTool(ctx: RunContext) {
   });
 }
 
+// ── transfer_conversation ──────────────────────────────────────
+
+function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
+  return tool({
+    description:
+      "Passa a conversa para um destino: departamento (fila escolhe um consultor), uma pessoa da equipe, ou outro agente de IA. " +
+      "Use `department` quando a área importa e qualquer consultor serve; `user` para alguém específico; `ai_agent` para um especialista IA da organização. " +
+      "Pessoa indisponível (offline/expediente/fila cheia) cai na fila do departamento dela — não deixa o ticket parado nela. " +
+      "Para departamento e pessoa, só chame se o contato pediu humano/atendente ou você não puder seguir com segurança.",
+    inputSchema: z.object({
+      target: z
+        .enum(["department", "user", "ai_agent"])
+        .describe(
+          "department = fila do departamento; user = pessoa da equipe; ai_agent = outro agente IA.",
+        ),
+      name: z
+        .string()
+        .min(1)
+        .describe(
+          "Nome do departamento, da pessoa ou do agente IA (como está no CRM). Também aceita o id.",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto, para o próximo atendente ler."),
+    }),
+    execute: async ({ target, name, reason }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa para transferir.");
+        if (target !== "ai_agent" && !transferAllowed(ctx)) {
+          return fail(
+            "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você, ou passe para outro agente IA se o assunto for de outro especialista.",
+          );
+        }
+        const result = await executeOrchestratedHandoff({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId ?? null,
+          dealId: ctx.dealId,
+          fromAgentUserId: ctx.agentUserId,
+          target,
+          name,
+          reason,
+          userMessage: ctx.userMessage,
+          policy: ctx.inboxPolicy,
+          toolPolicy: policy,
+          ops: packOps(ctx),
+        });
+        if (result.error) return fail(result.error);
+        if (result.target !== "ai_agent") fireTabulateOnHumanExit(ctx);
+        return ok({
+          target: result.target,
+          assigned: result.assigned,
+          assignedTo: result.assignedTo,
+          assignedUserType: result.assignedUserType,
+          departmentName: result.departmentName,
+          queuedWaiting: result.queuedWaiting,
+          distributionReason: result.distributionReason,
+          fallback: result.fallback,
+          hint: result.queuedWaiting
+            ? buildQueuedWaitingHint(queueCtx(ctx))
+            : undefined,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao transferir a conversa.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -1745,6 +1882,7 @@ const FACTORY_MAP: Record<string, ToolFactory> = {
   execute_distribution: executeDistributionTool,
   consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
+  transfer_conversation: transferConversationTool,
   close_conversation: closeConversationTool,
   list_tabulations: listTabulationsTool,
   tabulate_conversation: tabulateConversationTool,

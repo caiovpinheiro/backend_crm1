@@ -106,7 +106,15 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     description:
       "Tira a conversa do agente de IA e atribui a um operador humano via fila de Distribuição. Usado sempre que o tema sair do escopo do agente.",
     category: "handoff",
-    defaultForArchetypes: ["SDR", "ATENDIMENTO", "VENDEDOR", "SUPORTE", "ENCERRAMENTO"],
+    defaultForArchetypes: ["SDR", "ATENDIMENTO", "VENDEDOR", "SUPORTE", "ENCERRAMENTO", "COORDENADOR"],
+  },
+  {
+    id: "transfer_conversation",
+    label: "Passar a conversa",
+    description:
+      "Passa a conversa para um departamento (a fila escolhe quem atende), uma pessoa da equipe ou outro agente de IA. Pessoa indisponível vai para a fila do departamento dela.",
+    category: "handoff",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE", "COORDENADOR"],
   },
   {
     id: "close_conversation",

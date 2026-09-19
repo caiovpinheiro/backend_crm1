@@ -44,9 +44,13 @@ export type ToolPolicy = {
   allowedTagNames: string[];
   denyCreateNew: boolean;
 
-  // transfer_to_department / execute_distribution / transfer_to_human
+  // transfer_to_department / execute_distribution / transfer_to_human / transfer_conversation
   allowedDepartments: string[];
   blockedDepartments: string[];
+  /// Pessoas (humanos) que o agente pode nomear em `transfer_conversation`.
+  allowedUserNames: string[];
+  /// Agentes IA que o agente pode nomear em `transfer_conversation`.
+  allowedAgentNames: string[];
 
   // create_activity
   allowedTypes: string[];
@@ -83,6 +87,8 @@ export function emptyToolPolicy(): ToolPolicy {
     denyCreateNew: false,
     allowedDepartments: [],
     blockedDepartments: [],
+    allowedUserNames: [],
+    allowedAgentNames: [],
     allowedTypes: [],
     defaultType: null,
     policyText: null,
@@ -132,6 +138,8 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     denyCreateNew: Boolean(r.denyCreateNew),
     allowedDepartments: strList(r.allowedDepartments),
     blockedDepartments: strList(r.blockedDepartments),
+    allowedUserNames: strList(r.allowedUserNames),
+    allowedAgentNames: strList(r.allowedAgentNames),
     allowedTypes: strList(r.allowedTypes),
     defaultType: nullableText(r.defaultType),
     policyText: nullableText(r.policyText),
@@ -152,6 +160,8 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     !p.denyCreateNew &&
     p.allowedDepartments.length === 0 &&
     p.blockedDepartments.length === 0 &&
+    p.allowedUserNames.length === 0 &&
+    p.allowedAgentNames.length === 0 &&
     p.allowedTypes.length === 0 &&
     !p.defaultType &&
     !p.policyText &&
@@ -205,6 +215,12 @@ export function describeToolPolicy(p: ToolPolicy): string {
   }
   if (p.blockedDepartments.length > 0) {
     lines.push(`Departamentos proibidos: ${p.blockedDepartments.join(", ")}.`);
+  }
+  if (p.allowedUserNames.length > 0) {
+    lines.push(`Pessoas permitidas: ${p.allowedUserNames.join(", ")}.`);
+  }
+  if (p.allowedAgentNames.length > 0) {
+    lines.push(`Agentes IA permitidos: ${p.allowedAgentNames.join(", ")}.`);
   }
   if (p.allowedTypes.length > 0) {
     lines.push(`Tipos permitidos: ${p.allowedTypes.join(", ")}.`);
@@ -552,6 +568,10 @@ export type InboxPolicy = {
   /// Interceptos determinísticos do inbox-handler.
   interceptRetention: boolean;
   interceptCourseShopping: boolean;
+  /// Primeiro acesso / portal / AVA / cumprimento que a IA “segura” sozinha.
+  interceptFirstAccess: boolean;
+  /// Classificar (folha) ao sair da IA — sem virar dono do WhatsApp.
+  tabulateOnExit: TabulateOnExitMode;
 
   /// Termos EXTRA (somados aos regexes do código) que classificam a
   /// mensagem como retenção / dúvida comercial de curso.
@@ -628,6 +648,26 @@ export type InboxPolicy = {
 /** Teto default do lote de inbound (minutos). */
 export const DEFAULT_INBOUND_BATCH_WINDOW_MINUTES = 15;
 
+export type TabulateOnExitMode =
+  | "off"
+  | "on_human_handoff"
+  | "on_close"
+  | "both";
+
+export const TABULATE_ON_EXIT_MODES: TabulateOnExitMode[] = [
+  "off",
+  "on_human_handoff",
+  "on_close",
+  "both",
+];
+
+function isTabulateOnExitMode(v: unknown): v is TabulateOnExitMode {
+  return (
+    typeof v === "string" &&
+    TABULATE_ON_EXIT_MODES.includes(v as TabulateOnExitMode)
+  );
+}
+
 export type UnknownAnswerMode = "handoff" | "clarify" | "acknowledge";
 
 export const UNKNOWN_ANSWER_MODES: UnknownAnswerMode[] = [
@@ -650,6 +690,8 @@ export function defaultInboxPolicy(): InboxPolicy {
     messageRules: [],
     interceptRetention: false,
     interceptCourseShopping: false,
+    interceptFirstAccess: false,
+    tabulateOnExit: "off",
     retentionKeywords: [],
     courseShoppingKeywords: [],
     departmentAliases: { acolhimento: [], retencao: [], atendimento: [] },
@@ -702,6 +744,8 @@ export function normalizeInboxPolicy(
       interceptRetention: true,
     });
     base.interceptCourseShopping = true;
+    base.interceptFirstAccess = true;
+    base.tabulateOnExit = "on_human_handoff";
     base.inauguralEnabled = true;
     // Preserva o comportamento anterior, quando o RAG de modelos era
     // ligado por `pack?.id === "academic"` direto no runner.
@@ -747,6 +791,13 @@ export function normalizeInboxPolicy(
       r.interceptCourseShopping,
       base.interceptCourseShopping,
     ),
+    interceptFirstAccess: boolOr(
+      r.interceptFirstAccess,
+      base.interceptFirstAccess,
+    ),
+    tabulateOnExit: isTabulateOnExitMode(r.tabulateOnExit)
+      ? r.tabulateOnExit
+      : base.tabulateOnExit,
     retentionKeywords: strList(r.retentionKeywords),
     courseShoppingKeywords: strList(r.courseShoppingKeywords),
     departmentAliases: {

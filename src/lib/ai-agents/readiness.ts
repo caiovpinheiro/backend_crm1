@@ -32,7 +32,7 @@ export function assertAutonomousReadiness(args: {
   archetype?: string | null;
 }): void {
   if (args.nextAutonomy !== "AUTONOMOUS") return;
-  if (args.archetype === "TABULACAO" || args.archetype === "ENCERRAMENTO")
+  if (args.archetype === "TABULACAO" || args.archetype === "ENCERRAMENTO" || args.archetype === "COORDENADOR")
     return;
   if (
     !isAutonomousReady({

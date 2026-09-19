@@ -82,7 +82,8 @@ function withDisplayedAcademicDefaults<
   },
 >(row: T): T {
   const isAcademic =
-    row.verticalPack === "academic" || row.archetype === "ATENDIMENTO";
+    row.archetype !== "COORDENADOR" &&
+    (row.verticalPack === "academic" || row.archetype === "ATENDIMENTO");
   if (!isAcademic) return row;
   const steeringRules = row.steeringRules?.trim()
     ? row.steeringRules
@@ -515,6 +516,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           Prisma.JsonNull,
         inboxPolicy:
           (input.inboxPolicy as unknown as Prisma.InputJsonValue | undefined) ??
+          (systemTpl?.defaultInboxPolicy as Prisma.InputJsonValue | undefined) ??
           Prisma.JsonNull,
         tone: input.tone ?? archetype.defaultTone,
         language: input.language ?? "pt-BR",
