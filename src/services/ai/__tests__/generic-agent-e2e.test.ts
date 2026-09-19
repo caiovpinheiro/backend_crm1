@@ -153,6 +153,8 @@ const state = vi.hoisted(() => ({
     status: "OPEN",
     externalId: null as string | null,
   },
+  /// Departamentos de que o próprio agente é membro (trava de auto-rota).
+  agentDepartmentIds: [] as string[],
   conversationUpdates: [] as Array<Record<string, unknown>>,
   runUpdates: [] as Array<Record<string, unknown>>,
   system: "",
@@ -247,6 +249,14 @@ vi.mock("@/lib/prisma", () => {
       deal: {
         findUnique: vi.fn(async () => null),
         findFirst: vi.fn(async () => ({ id: DEAL_ID })),
+      },
+      departmentMember: {
+        findFirst: vi.fn(async ({ where }: any) =>
+          where.userId === AGENT_USER_ID &&
+          state.agentDepartmentIds.includes(where.departmentId)
+            ? { id: "dm-1" }
+            : null,
+        ),
       },
       department: {
         findMany: vi.fn(async () =>
@@ -381,6 +391,7 @@ describe("agente novo, outra org, verticalPack = null", () => {
     state.conversation.assignedToId = AGENT_USER_ID;
     state.conversation.assignedTo = { type: "AI" };
     state.conversation.departmentId = null;
+    state.agentDepartmentIds = [];
     state.distribution = {
       success: false,
       reason: "NO_ELIGIBLE_RESPONSIBLE",
@@ -468,6 +479,23 @@ describe("agente novo, outra org, verticalPack = null", () => {
       departmentName: DEPT_FINANCEIRO.name,
     });
     expect(state.conversation.departmentId).toBe(DEPT_FINANCEIRO.id);
+  });
+
+  // Rotear para o próprio setor não tira a conversa da IA: o `ok` fazia o
+  // modelo anunciar "já te encaminhei" e repetir o pedido no turno seguinte.
+  it("2c) recusa rota para o departamento do próprio agente", async () => {
+    state.agentDepartmentIds = [DEPT_FINANCEIRO.id];
+    state.toolPlan = {
+      tool: "transfer_to_department",
+      args: { departmentName: "Financeiro" },
+    };
+    await runTurn("quero falar sobre a minha fatura");
+
+    expect(state.toolResults.at(-1)?.result).toMatchObject({
+      ok: false,
+      reason: "self_department",
+    });
+    expect(state.conversation.departmentId).toBeNull();
   });
 
   it("2b) departamento inexistente cita os departamentos DESTA org", async () => {

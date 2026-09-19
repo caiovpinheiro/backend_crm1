@@ -71,6 +71,7 @@ import {
   departmentNotFoundMessage,
   executeDepartmentHandoff,
   resolveDepartmentForAgent,
+  selfDepartmentRouteError,
 } from "@/services/ai/department-handoff";
 import {
   buildQueuedWaitingHint,
@@ -1663,6 +1664,11 @@ function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
           });
         }
         if (!dept) return fail(await departmentNotFoundMessage(name));
+        const selfDept = await selfDepartmentRouteError({
+          agentUserId: ctx.agentUserId,
+          departmentId: dept.id,
+        });
+        if (selfDept) return fail(selfDept, { reason: "self_department" });
         await prisma.conversation.update({
           where: { id: ctx.conversationId },
           data: { departmentId: dept.id, updatedAt: new Date() },

@@ -116,6 +116,32 @@ export async function departmentNotFoundMessage(name: string): Promise<string> {
   return `Departamento "${name}" não encontrado. Disponíveis: ${names.join(", ")}.`;
 }
 
+export const SELF_DEPARTMENT_ROUTE_ERROR =
+  "Esse departamento é o seu. Rotear para ele não muda nada e não conecta ninguém: siga o atendimento ou, se precisar de gente, chame a transferência para humano.";
+
+/**
+ * O agente está roteando para o departamento do qual ele próprio é
+ * membro? `transfer_to_department` não tira a conversa da IA — só fixa o
+ * departamento responsável. Apontando para o próprio escopo vira no-op, e
+ * o modelo lê o `ok` como transferência feita: anuncia ao contato que
+ * encaminhou "para o setor X" sendo o setor X, e no turno seguinte pede o
+ * mesmo dado de novo.
+ *
+ * Escalar para humano do próprio departamento continua valendo — isso
+ * passa por `transfer_to_human` / `execute_distribution`, não por aqui.
+ */
+export async function selfDepartmentRouteError(args: {
+  agentUserId?: string | null;
+  departmentId: string;
+}): Promise<string | null> {
+  if (!args.agentUserId) return null;
+  const member = await prisma.departmentMember.findFirst({
+    where: { userId: args.agentUserId, departmentId: args.departmentId },
+    select: { id: true },
+  });
+  return member ? SELF_DEPARTMENT_ROUTE_ERROR : null;
+}
+
 /** Resolve com refino do pack, se houver; senão, genérico. */
 export async function resolveDepartmentForAgent(
   name: string,
