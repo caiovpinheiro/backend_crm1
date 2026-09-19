@@ -152,6 +152,58 @@ export function normalizeAcademicReadableFields(
   return out;
 }
 
+/**
+ * Chaves que o operador pode declarar como IDENTIFICADOR, isto é, o número
+ * que a pessoa informa no chat para o sistema achar o registro dela.
+ *
+ * Lista curta porque é limitada pelo que o lookup sabe consultar hoje, não
+ * pelo que o relatório tem. `cpf` está aqui e continua fora de
+ * `ACADEMIC_RECORD_FIELDS`: identificar por um campo não é o mesmo que
+ * poder dizer o valor dele, e o veto de leitura do documento segue
+ * incondicional.
+ */
+export const ACADEMIC_IDENTITY_KEYS = ["rgm", "cpf"] as const;
+
+export type AcademicIdentityKey = (typeof ACADEMIC_IDENTITY_KEYS)[number];
+
+const IDENTITY_LABELS: Record<AcademicIdentityKey, string> = {
+  // Reusa o rótulo do catálogo para a tela e a description não divergirem.
+  rgm: FIELD_BY_KEY.get("rgm")?.label ?? "rgm",
+  cpf: "CPF",
+};
+
+export function academicIdentityLabel(key: AcademicIdentityKey): string {
+  return IDENTITY_LABELS[key];
+}
+
+/**
+ * Quais identificadores este agente aceita. Aceita a chave com e sem o
+ * prefixo (mesma tolerância de `readableFields`), mas NÃO aceita curinga:
+ * "qualquer campo serve de identificação" não é uma decisão que o operador
+ * deva conseguir tomar com um clique.
+ */
+export function normalizeAcademicIdentityKeys(
+  identityKeys: string[],
+): AcademicIdentityKey[] {
+  if (identityKeys.length === 0) return [];
+  const declared = new Set(identityKeys.map((raw) => stripPrefix(fold(raw))));
+  return ACADEMIC_IDENTITY_KEYS.filter((k) => declared.has(k));
+}
+
+/**
+ * O que o modelo lê sobre identificação. Sem chave declarada o texto diz
+ * para NÃO pedir número nenhum: pedir um dado que a ferramenta não consulta
+ * foi o que produziu a resposta falsa de "verifiquei pelo número que você
+ * passou".
+ */
+export function describeAcademicIdentity(keys: AcademicIdentityKey[]): string {
+  if (keys.length === 0) {
+    return "IDENTIFICAÇÃO: esta operação não configurou nenhum identificador. NUNCA peça número de registro para localizar a pessoa — você não tem como consultá-lo. Se o casamento automático não achou, encaminhe para a equipe.";
+  }
+  const labels = keys.map((k) => academicIdentityLabel(k));
+  return `IDENTIFICAÇÃO: se o casamento automático não localizar, você pode pedir UM destes e reenviar em \`identificador\` — ${labels.join(", ")}. Informe o valor exatamente como a pessoa escreveu. Não achou com ele: diga que não conseguiu confirmar e encaminhe; NUNCA afirme que o número não existe.`;
+}
+
 /** Linha do relatório, no mínimo que esta política precisa ler. */
 export type AcademicRecordLike = {
   cpf?: string | null;
