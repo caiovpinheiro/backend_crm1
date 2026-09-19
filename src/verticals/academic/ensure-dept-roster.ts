@@ -14,6 +14,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
 
 /** Limite de fila alinhado ao seed de consultores (~volume DataCrazy). */
 const QUEUE_LIMIT = 25;
@@ -30,29 +31,7 @@ const DEPT_DEFS = [
 ] as const;
 
 type DeptKey = (typeof DEPT_DEFS)[number]["key"];
-
-/** Email → departamentos. Seed via ACADEMIC_DEPT_ROSTER_JSON (admin/config). */
-function loadRoster(): Array<{ email: string; depts: DeptKey[] }> {
-  const raw = process.env.ACADEMIC_DEPT_ROSTER_JSON?.trim();
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as Array<{ email?: string; depts?: string[] }>;
-    if (!Array.isArray(parsed)) return [];
-    const keys = new Set(DEPT_DEFS.map((d) => d.key));
-    return parsed
-      .filter((r) => r.email && Array.isArray(r.depts))
-      .map((r) => ({
-        email: String(r.email).toLowerCase(),
-        depts: (r.depts ?? []).filter((d): d is DeptKey => keys.has(d as DeptKey)),
-      }))
-      .filter((r) => r.depts.length > 0);
-  } catch {
-    console.warn("[academic] ACADEMIC_DEPT_ROSTER_JSON inválido");
-    return [];
-  }
-}
-
-const ROSTER: Array<{ email: string; depts: DeptKey[] }> = loadRoster();
+type Roster = Array<{ email: string; depts: DeptKey[] }>;
 
 const lastSyncAt = new Map<string, number>();
 const SYNC_TTL_MS = 5 * 60 * 1000;
@@ -185,12 +164,15 @@ async function syncUserDepts(args: {
  * atendimento — ligado por default em qualquer tenant — criava
  * Acolhimento / Retenção / Atendimento - SAC na org errada (ex.: DnaWork).
  */
-async function orgHasAcademicRosterUsers(orgId: string): Promise<boolean> {
+async function orgHasAcademicRosterUsers(
+  orgId: string,
+  roster: Roster,
+): Promise<boolean> {
   const hit = await prisma.user.findFirst({
     where: {
       organizationId: orgId,
       type: "HUMAN",
-      OR: ROSTER.map((row) => ({
+      OR: roster.map((row) => ({
         email: { equals: row.email, mode: "insensitive" as const },
       })),
     },
@@ -216,7 +198,11 @@ export async function ensureAcademicDepartmentRoster(opts?: {
   lastSyncAt.set(orgId, Date.now());
 
   try {
-    if (!(await orgHasAcademicRosterUsers(orgId))) {
+    // Roster é dado de tenant (e-mails de consultores): vem da config da
+    // org. Sem config, não há o que sincronizar.
+    const roster: Roster = (await loadAcademicTenantConfig()).deptRoster;
+    if (roster.length === 0) return { synced: 0, missing: [] };
+    if (!(await orgHasAcademicRosterUsers(orgId, roster))) {
       return { synced: 0, missing: [] };
     }
 
@@ -226,7 +212,7 @@ export async function ensureAcademicDepartmentRoster(opts?: {
     let synced = 0;
     const missing: string[] = [];
 
-    for (const row of ROSTER) {
+    for (const row of roster) {
       const user = await prisma.user.findFirst({
         where: {
           organizationId: orgId,
@@ -267,7 +253,7 @@ export async function ensureAcademicDepartmentRoster(opts?: {
       JSON.stringify({
         event: "academic_dept_roster_synced",
         orgId,
-        roster: ROSTER.length,
+        roster: roster.length,
         synced,
         missing,
         depts: Object.fromEntries(

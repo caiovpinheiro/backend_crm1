@@ -48,6 +48,7 @@ export async function POST(request: Request) {
           : null
         : verticalPack,
     );
+    await pack?.loadTenantConfig?.().catch(() => null);
 
     const enabledTools = Array.isArray(body.enabledTools)
       ? body.enabledTools.filter((t): t is string => typeof t === "string")

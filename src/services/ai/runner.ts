@@ -377,6 +377,9 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
     const pack = getVerticalPack(agent.verticalPack);
+    // Nome da instituição, URLs e roster do tenant: resolvidos ANTES de
+    // qualquer texto de prompt do pack, que é montado de forma síncrona.
+    await pack?.loadTenantConfig?.().catch(() => null);
     const packOps = pack?.ops ?? {};
     // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
     // Classificador não recebe pack/deal/campanha — classifica só pelas mensagens.

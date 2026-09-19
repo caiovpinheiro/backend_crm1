@@ -73,6 +73,12 @@ export type VerticalPackOps = {
 
 export type VerticalPack = {
   id: string;
+  /**
+   * Carrega a config de tenant da org do contexto para o cache do processo.
+   * Chamado antes de montar prompt ou rodar intercept — os textos do pack
+   * são síncronos e precisam da config já resolvida.
+   */
+  loadTenantConfig?: () => Promise<unknown>;
   intercepts: VerticalIntercept[];
   promptBlocks: (ctx: PromptBlockCtx) => Promise<string[]> | string[];
   fallbackRules: (archetype: string) => string;
@@ -125,6 +131,7 @@ export async function runVerticalIntercepts(
   ctx: VerticalInterceptCtx,
 ): Promise<VerticalInterceptHit | null> {
   if (!pack) return null;
+  await pack.loadTenantConfig?.().catch(() => null);
   for (const intercept of pack.intercepts) {
     if (intercept.phase !== ctx.phase) continue;
     const hit = await intercept.run(ctx);
