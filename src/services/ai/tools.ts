@@ -90,6 +90,7 @@ import {
   CRM_SEARCH_GUIDANCE,
   describeCrmExposure,
   describeCrmIdentity,
+  describeLinkedIdentity,
   identityValueMatches,
   loadCrmFieldCatalog,
   matchFieldValues,
@@ -882,6 +883,35 @@ type CrmRecordPayload = {
 };
 
 /**
+ * Os registros já ligados ao contato precisam de desempate?
+ *
+ * Só quando o operador declarou campo-chave E os registros de fato
+ * divergem nele. Dois negócios com o mesmo valor de chave são o mesmo
+ * cliente duplicado — perguntar ali seria ruído. Sem chave declarada a
+ * ferramenta se comporta como antes e devolve todos.
+ */
+function linkedIdentityAmbiguity(args: {
+  catalog: CrmFieldDescriptor[];
+  linkedKeys: string[];
+  records: CrmFieldValue[][];
+}): { label: string } | null {
+  if (args.linkedKeys.length === 0 || args.records.length < 2) return null;
+  for (const field of resolveIdentityFields(args.catalog, args.linkedKeys)) {
+    const seen = new Set(
+      args.records
+        .map(
+          (values) =>
+            values.find((v) => v.field.key === field.key)?.value ?? "",
+        )
+        .filter(Boolean)
+        .map((v) => normalizeIdentityValue(v)),
+    );
+    if (seen.size > 1) return { label: field.label };
+  }
+  return null;
+}
+
+/**
  * Localiza o registro por um campo declarado como identificador.
  *
  * O filtro do banco é por igualdade (valor como veio e sem formatação),
@@ -1000,7 +1030,9 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
   return tool({
     description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(
       exposure,
-    )}\n\n${describeCrmIdentity(identityKeys)}`,
+    )}\n\n${describeCrmIdentity(identityKeys)}\n\n${describeLinkedIdentity(
+      policy.linkedIdentityKeys,
+    )}`,
     inputSchema: z.object({
       query: z
         .string()
@@ -1169,6 +1201,30 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
                 },
               },
             });
+            // Mais de um registro no mesmo telefone: juntar tudo faria o
+            // agente misturar dois contratos da mesma pessoa (ou de duas)
+            // numa resposta só. Com campo-chave declarado ele pergunta por
+            // qual, em vez de escolher sozinho.
+            const ambiguity = linkedIdentityAmbiguity({
+              catalog,
+              linkedKeys: policy.linkedIdentityKeys,
+              records: deals.map((d) =>
+                crmValuesFromRecord(
+                  catalog,
+                  "deal",
+                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+                  customOf(d.customFields),
+                ),
+              ),
+            });
+            if (ambiguity) {
+              return ok({
+                records: [],
+                needsIdentification: true,
+                keyField: ambiguity.label,
+                hint: `Há mais de um registro neste contato. Peça à pessoa que informe o ${ambiguity.label} e chame esta ferramenta de novo com \`identificador\`. NÃO escolha um registro por conta própria e não misture os dados dos dois.`,
+              });
+            }
             for (const d of deals) {
               push(
                 "deal",

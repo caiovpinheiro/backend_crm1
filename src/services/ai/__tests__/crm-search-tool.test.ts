@@ -7,7 +7,7 @@
  *
  * Os dados abaixo espelham o cadastro real de uma aluna em DEV.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const ORG = "org-1";
 const CPF = "39912345678";
@@ -57,6 +57,26 @@ const DEAL_VALUES: Record<string, string> = {
   doc_pendentes: "Sim",
 };
 
+/// Negócios que o mock do Prisma devolve. Mutável: o desempate por
+/// campo-chave só existe com mais de um registro no mesmo contato.
+const dealRow = (id: string, number: number, rgm: string, stage: string) => ({
+  id,
+  number,
+  title: "MILENA BEATRIZ SILVEIRA RIBEIRO",
+  status: "OPEN",
+  value: 0,
+  expectedClose: null,
+  lostReason: null,
+  stage: { name: stage },
+  customFields: DEAL_CUSTOM_FIELDS.map((f) => ({
+    value: f.name === "rgm" ? rgm : DEAL_VALUES[f.name],
+    customField: { name: f.name },
+  })),
+});
+
+const ONE_DEAL = [dealRow("deal-1", 37514, RGM, "Graduação")];
+let dealRows: ReturnType<typeof dealRow>[] = ONE_DEAL;
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     customField: {
@@ -79,22 +99,7 @@ vi.mock("@/lib/prisma", () => ({
       })),
     },
     deal: {
-      findMany: vi.fn(async () => [
-        {
-          id: "deal-1",
-          number: 37514,
-          title: "MILENA BEATRIZ SILVEIRA RIBEIRO",
-          status: "OPEN",
-          value: 0,
-          expectedClose: null,
-          lostReason: null,
-          stage: { name: "Graduação" },
-          customFields: DEAL_CUSTOM_FIELDS.map((f) => ({
-            value: DEAL_VALUES[f.name],
-            customField: { name: f.name },
-          })),
-        },
-      ]),
+      findMany: vi.fn(async () => dealRows),
     },
     company: { findMany: vi.fn(async () => []) },
     product: { findMany: vi.fn(async () => []) },
@@ -121,6 +126,7 @@ type Payload = {
   error?: string;
   total?: number;
   hint?: string;
+  keyField?: string;
   records?: Array<{
     entity: string;
     fields: Array<{ label: string; value: string }>;
@@ -197,6 +203,61 @@ describe("search_crm_records: identificação por campo do negócio", () => {
       IDENTITY,
     );
     expect(out.ok).toBe(false);
+  });
+});
+
+/**
+ * Identificação passiva: o contato chega pelo telefone e já tem negócio
+ * associado. Com campo-chave declarado, dois registros divergentes no
+ * mesmo telefone viram pergunta — nunca escolha silenciosa.
+ */
+describe("search_crm_records: registros já ligados ao contato", () => {
+  const LINKED = { linkedIdentityKeys: ["deal.rgm"] };
+
+  afterEach(() => {
+    dealRows = ONE_DEAL;
+  });
+
+  it("um registro só: responde normalmente", async () => {
+    const out = await search({ query: "curso" }, ["deal.curso"], LINKED);
+    expect(out.ok).toBe(true);
+    expect(deal(out)?.fields).toHaveLength(1);
+  });
+
+  it("dois registros com chaves diferentes: pede o campo-chave", async () => {
+    dealRows = [
+      dealRow("deal-1", 37514, RGM, "Graduação"),
+      dealRow("deal-2", 37515, "20239999", "Pós-graduação"),
+    ];
+
+    const out = await search({ query: "curso" }, ["deal.curso"], LINKED);
+
+    expect(out.ok).toBe(true);
+    expect(out.records).toEqual([]);
+    expect(out.keyField).toBe("RGM");
+    expect(out.hint).toContain("RGM");
+    // Nenhum dado dos dois registros pode vazar na pergunta.
+    expect(JSON.stringify(out)).not.toContain("Pós-graduação");
+  });
+
+  it("mesma chave nos dois: é duplicata, não ambiguidade", async () => {
+    dealRows = [
+      dealRow("deal-1", 37514, RGM, "Graduação"),
+      dealRow("deal-2", 37515, RGM, "Graduação"),
+    ];
+
+    const out = await search({ query: "curso" }, ["deal.curso"], LINKED);
+    expect(out.records?.filter((r) => r.entity === "deal")).toHaveLength(2);
+  });
+
+  it("sem campo-chave declarado devolve todos, como antes", async () => {
+    dealRows = [
+      dealRow("deal-1", 37514, RGM, "Graduação"),
+      dealRow("deal-2", 37515, "20239999", "Pós-graduação"),
+    ];
+
+    const out = await search({ query: "curso" }, ["deal.curso"]);
+    expect(out.records?.filter((r) => r.entity === "deal")).toHaveLength(2);
   });
 });
 

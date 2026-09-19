@@ -74,6 +74,12 @@ export type ToolPolicy = {
   /// poder ler: a leitura continua governada por `readableFields`.
   /// Vazio = o agente não pede nem aceita identificador.
   identityKeys: string[];
+  /// Campos-chave do registro JÁ associado ao contato (o negócio que veio
+  /// junto com o telefone). Servem para o agente reconhecer o cliente sem
+  /// perguntar nada e, quando há mais de um registro no mesmo telefone,
+  /// para saber por qual campo pedir o desempate.
+  /// Vazio = o agente trata todos os registros do contato como um só.
+  linkedIdentityKeys: string[];
   /// Jargão desta organização que deve acender o aviso de "campo sensível"
   /// na tela de configuração (ex.: o nome que ela dá ao número de
   /// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do
@@ -101,6 +107,7 @@ export function emptyToolPolicy(): ToolPolicy {
     readableFields: [],
     allowOrgWideSearch: false,
     identityKeys: [],
+    linkedIdentityKeys: [],
     sensitiveTerms: [],
   };
 }
@@ -153,6 +160,7 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     readableFields: strList(r.readableFields),
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
     identityKeys: strList(r.identityKeys),
+    linkedIdentityKeys: strList(r.linkedIdentityKeys),
     sensitiveTerms: strList(r.sensitiveTerms),
   };
 }
@@ -176,6 +184,7 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     p.readableFields.length === 0 &&
     !p.allowOrgWideSearch &&
     p.identityKeys.length === 0 &&
+    p.linkedIdentityKeys.length === 0 &&
     p.sensitiveTerms.length === 0
   );
 }

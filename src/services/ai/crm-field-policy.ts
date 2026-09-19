@@ -431,6 +431,16 @@ export function describeCrmIdentity(identityKeys: string[]): string {
   ].join("\n");
 }
 
+/**
+ * O que o modelo lê sobre registro já ligado ao contato. Sem chave
+ * declarada nada é dito: a ferramenta devolve todos os registros, como
+ * sempre fez.
+ */
+export function describeLinkedIdentity(linkedKeys: string[]): string {
+  if (linkedKeys.length === 0) return "";
+  return "REGISTROS DO MESMO CONTATO: quando houver mais de um e eles divergirem no campo-chave, a ferramenta devolve `needsIdentification` em vez dos dados. Aí pergunte o campo indicado e chame de novo com `identificador`. Nunca escolha um registro por conta própria.";
+}
+
 export type CrmFieldValue = {
   field: CrmFieldDescriptor;
   value: string;
