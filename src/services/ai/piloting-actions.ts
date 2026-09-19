@@ -162,6 +162,15 @@ export async function sendAgentMessage(args: {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
 
+  // Replay com handoff real: a mensagem fica só como rascunho na conversa
+  // de sandbox (apagada no fim); nenhum provedor é chamado. Antes de
+  // qualquer checagem de canal, para não depender de o sandbox estar
+  // desconectado por acaso.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
+    return saveDraft(args.conversationId, args.agentUserId, text);
+  }
+
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
   if (!args.bypassDuplicateGuard) {
@@ -249,14 +258,6 @@ export async function sendAgentMessage(args: {
     if (lastOut?.authorType === "human") {
       return { status: "skipped", reason: "human_last_outbound" };
     }
-  }
-
-  // Replay com handoff real: a mensagem fica só como rascunho na conversa
-  // de sandbox (apagada no fim); nenhum provedor é chamado. Não depende do
-  // canal estar desconfigurado.
-  if (isReplaySandboxActive()) {
-    recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
-    return saveDraft(args.conversationId, args.agentUserId, text);
   }
 
   const isMeta = args.channel === "meta" || args.channel == null;

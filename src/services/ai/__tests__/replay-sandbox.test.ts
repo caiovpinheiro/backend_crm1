@@ -40,18 +40,84 @@ describe("S1 sandbox do --real-handoff", () => {
 
   it("SSE não publica: operador não vê a conversa de teste", async () => {
     const { sseBus } = await import("@/lib/sse-bus");
-    const dispatch = vi.spyOn(
-      sseBus as unknown as { dispatch: (...a: unknown[]) => void },
-      "dispatch",
-    );
+    const fanout = vi
+      .spyOn(
+        sseBus as unknown as { fanout: (...a: unknown[]) => Promise<void> },
+        "fanout",
+      )
+      .mockResolvedValue(undefined);
     enableReplaySandbox(ORG);
     sseBus.publish("conversation_assigned", {
       organizationId: ORG,
       conversationId: "c1",
     });
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(fanout).not.toHaveBeenCalled();
     expect(blockedEffects().map((b) => b.effect)).toContain("sse_publish");
-    dispatch.mockRestore();
+    fanout.mockRestore();
+  });
+
+  it("desligado: SSE publica normalmente", async () => {
+    const { sseBus } = await import("@/lib/sse-bus");
+    const fanout = vi
+      .spyOn(
+        sseBus as unknown as { fanout: (...a: unknown[]) => Promise<void> },
+        "fanout",
+      )
+      .mockResolvedValue(undefined);
+    sseBus.publish("conversation_assigned", {
+      organizationId: ORG,
+      conversationId: "c1",
+    });
+    expect(fanout).toHaveBeenCalled();
+    expect(blockedEffects()).toHaveLength(0);
+    fanout.mockRestore();
+  });
+
+  it("desligado: o assign nem consulta o tipo do usuário", async () => {
+    const { assignOwnerToContactClusterTx } = await import("@/services/deals");
+    const userFindUnique = vi.fn(async () => ({ type: "HUMAN" }));
+    const tx = {
+      user: { findUnique: userFindUnique },
+      conversation: { findUnique: async () => ({ contactId: null }) },
+      deal: { findUnique: async () => null },
+    };
+    // Sem sandbox o guard não existe: a função segue o caminho normal (aqui
+    // ela para por falta de contato, o que já prova que passou do guard).
+    await assignOwnerToContactClusterTx(tx as never, {
+      userId: "u_humano",
+      via: "smart",
+    }).catch(() => null);
+    expect(userFindUnique).not.toHaveBeenCalled();
+    expect(blockedEffects()).toHaveLength(0);
+  });
+
+  it("só o script de replay liga o sandbox", async () => {
+    const { readFileSync, readdirSync, statSync } = await import("node:fs");
+    const { join, relative } = await import("node:path");
+    const root = join(process.cwd(), "src");
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!full.endsWith(".ts") && !full.endsWith(".tsx")) continue;
+        if (readFileSync(full, "utf8").includes("enableReplaySandbox")) {
+          hits.push(relative(root, full).replaceAll("\\", "/"));
+        }
+      }
+    };
+    walk(root);
+    // Servidor HTTP, worker de inbox e jobs só importam os leitores do flag.
+    // Se um deles passar a LIGAR o sandbox, produção para de enviar mensagem.
+    expect(hits.sort()).toEqual([
+      "scripts/replay-agent-runs.ts",
+      "services/ai/__tests__/replay-sandbox.test.ts",
+      "services/ai/__tests__/replay-sandbox-effects.test.ts",
+      "services/ai/replay-sandbox.ts",
+    ].sort());
   });
 
   it("nenhuma atribuição a usuário humano; agente IA passa", async () => {
