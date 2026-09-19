@@ -58,6 +58,7 @@ model Organization {
   dealEvents               DealEvent[]
   activityEvents           ActivityEvent[]
   products                 Product[]
+  productMetaLinks         ProductMetaLink[]
   activities               Activity[]
   activityComments         ActivityComment[]
   activityCommentRevisions ActivityCommentRevision[]
@@ -1709,6 +1710,9 @@ model Product {
   discountQuotas     DiscountQuota[]
   /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
   discountCategories DiscountCategory[]
+  /// Vínculo com item do catálogo Commerce da Meta. Separado de `catalogId`
+  /// (catálogo interno Bwipo / capacidades).
+  metaLinks          ProductMetaLink[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1722,6 +1726,32 @@ model Product {
   @@index([organizationId, kind])
   @@index([organizationId, catalogId])
   @@map("products")
+}
+
+/// Vínculo Produto Bwipo ↔ item do catálogo Commerce da Meta (WhatsApp).
+/// Não reutiliza `Product.catalogId` — esse campo é o catálogo interno.
+model ProductMetaLink {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  channelId         String
+  channel           Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  metaCatalogId     String
+  productRetailerId String
+  /// MANUAL | SYNCED | ERROR
+  syncStatus        String       @default("MANUAL")
+  lastSyncedAt      DateTime?
+  lastSyncError     String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([productId, channelId])
+  @@index([organizationId])
+  @@index([channelId])
+  @@index([organizationId, metaCatalogId])
+  @@map("product_meta_links")
 }
 
 model ProductCustomFieldValue {
@@ -3471,6 +3501,7 @@ model Channel {
   whatsAppGroups    WhatsAppGroup[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
+  productMetaLinks  ProductMetaLink[]
 
   @@unique([organizationId, number])
   @@index([organizationId])

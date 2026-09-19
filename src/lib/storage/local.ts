@@ -492,6 +492,37 @@ export function storageDriver(): StorageDriver {
  * Salva um arquivo no storage tenant-scoped. Cria diretórios
  * intermediários conforme necessário. **Sobrescreve** se já existir.
  */
+function hasS3Env(): boolean {
+  return Boolean(
+    process.env.S3_ENDPOINT?.trim() &&
+      process.env.S3_BUCKET?.trim() &&
+      process.env.S3_ACCESS_KEY?.trim() &&
+      process.env.S3_SECRET?.trim(),
+  );
+}
+
+/** Link https temporário para a Meta baixar a capa (objeto continua privado). */
+export async function presignStoredGetUrl(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+  expiresIn = 7 * 24 * 60 * 60,
+): Promise<string | null> {
+  if (storageDriver() !== "s3" && !hasS3Env()) return null;
+  try {
+    const s3 = await import("./s3");
+    if (storageDriver() !== "s3") {
+      const local = await readStoredFileLocal(orgId, bucket, fileName);
+      if (local) {
+        await s3.saveFile({ orgId, bucket, fileName, buffer: local.buffer });
+      }
+    }
+    return await s3.presignGetUrl(orgId, bucket, fileName, expiresIn);
+  } catch {
+    return null;
+  }
+}
+
 export async function saveFile(opts: SaveFileOptions): Promise<SaveFileResult> {
   if (storageDriver() === "s3") {
     const s3 = await import("./s3");
