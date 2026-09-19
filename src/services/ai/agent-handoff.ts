@@ -633,4 +633,3 @@ export async function executeOrchestratedHandoff(
   });
 }
 
-export type { ExecuteDistributionResult };

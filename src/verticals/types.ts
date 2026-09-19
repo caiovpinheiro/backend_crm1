@@ -3,6 +3,8 @@
  * Fora de `src/verticals/<id>/`, use só `getVerticalPack` / `runVerticalIntercepts`.
  */
 
+import type { TabulateOnExitMode } from "@/lib/ai-agents/steering";
+
 export type VerticalInterceptHit = {
   handled: true;
   interceptName: string;
@@ -102,7 +104,9 @@ export type VerticalPack = {
   inboxPolicyDefaults?: {
     interceptRetention?: boolean;
     interceptCourseShopping?: boolean;
+    interceptFirstAccess?: boolean;
     inauguralEnabled?: boolean;
+    tabulateOnExit?: TabulateOnExitMode;
     humanRequestKeywords?: string[];
     nonsenseAskOnceMessage?: string | null;
     nonsenseStopMessage?: string | null;
