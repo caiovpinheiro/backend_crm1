@@ -28,9 +28,18 @@ import { resolve } from "node:path";
 const BASELINE = resolve("tsc-baseline.json");
 const LINE_RE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/;
 
-/** Caminhos e espaços variam entre Windows e o runner; a chave, não. */
+/**
+ * Caminhos e espaços variam entre Windows e o runner; a chave, não.
+ * Mensagens do TS trazem o caminho ABSOLUTO do módulo
+ * (`import("/home/runner/work/.../node_modules/next-auth")`), que muda o
+ * hash do mesmo erro entre a máquina de quem gerou e o CI.
+ */
 function normalize(msg) {
-  return msg.replace(/\s+/g, " ").trim();
+  return msg
+    .replace(/(?:[A-Za-z]:)?[\\/][^"')\s]*?[\\/]node_modules[\\/]/g, "node_modules/")
+    .replace(/\\/g, "/")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function collect() {
