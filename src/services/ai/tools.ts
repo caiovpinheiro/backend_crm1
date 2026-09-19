@@ -80,6 +80,9 @@ import { academicLookupForModel } from "@/services/ai/sensitive-fields";
 import {
   ACADEMIC_LOOKUP_GUIDANCE,
   describeAcademicExposure,
+  describeAcademicIdentity,
+  normalizeAcademicIdentityKeys,
+  type AcademicIdentityKey,
 } from "@/services/ai/academic-record-policy";
 import {
   CRM_RECORD_SOURCES,
@@ -1847,13 +1850,32 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
   // usa (`toolConfig[tool].readableFields`); a normalização descarta o que
   // não é coluna do relatório.
   const readableFields = policy.readableFields;
+  // Identificadores que ESTA organização declarou. Vazio = a ferramenta
+  // mantém exatamente o schema de antes, sem o argumento.
+  const identityKeys = normalizeAcademicIdentityKeys(policy.identityKeys);
+  const identityShape =
+    identityKeys.length > 0
+      ? {
+          identificador: z
+            .object({
+              campo: z.enum(
+                identityKeys as [AcademicIdentityKey, ...AcademicIdentityKey[]],
+              ),
+              valor: z.string().min(3),
+            })
+            .optional()
+            .describe(
+              "Número que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado.",
+            ),
+        }
+      : {};
   return tool({
     description: `${
       copy?.consultarMatricula ??
       "Consulta o registro do aluno em conversa no relatório de matriculados. Devolve sempre `podeAcessarPortal` (acesso ao portal/AVA) e, dos demais dados, SOMENTE os campos que o operador liberou na configuração desta ferramenta. O casamento é automático por telefone/e-mail do contato."
     }\n\n${ACADEMIC_LOOKUP_GUIDANCE}\n\n${describeAcademicExposure(
       readableFields,
-    )}\n\n${MATRICULA_SCOPE_NOTE}`,
+    )}\n\n${describeAcademicIdentity(identityKeys)}\n\n${MATRICULA_SCOPE_NOTE}`,
     inputSchema: z.object({
       cpf: z
         .string()
@@ -1867,8 +1889,16 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
         .describe(
           "Nome completo que o aluno confirmou no chat. Use quando a chamada anterior devolveu `identidade: \"confirmar_identidade\"`.",
         ),
+      ...identityShape,
     }),
-    execute: async ({ cpf, nomeCompleto }) => {
+    execute: async (args) => {
+      // `identificador` só existe no schema quando o operador configurou —
+      // daí a leitura por cast em vez de desestruturação: o tipo do arg é
+      // uma união entre a forma com e sem o campo.
+      const { cpf, nomeCompleto } = args;
+      const { identificador } = args as {
+        identificador?: { campo: AcademicIdentityKey; valor: string };
+      };
       try {
         const orgId = getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
@@ -1880,13 +1910,22 @@ function consultarMatriculaTool(ctx: RunContext, policy: ToolPolicy) {
         });
         if (!contact) return fail("Contato não encontrado.");
 
+        // O identificador informado no chat entra pela chave que o operador
+        // declarou. Antes o número dito pela pessoa não tinha onde entrar: o
+        // modelo repetia a chamada e verbalizava que havia consultado por
+        // ele.
+        const informed = identificador?.valor?.trim() || null;
+        const informedRgm = identificador?.campo === "rgm" ? informed : null;
+        const informedCpf = identificador?.campo === "cpf" ? informed : null;
+
         // Casamento amplo (telefone + e-mail + CPF informado) para maximizar
         // a chance de achar o registro. O que o modelo vê sai do filtro
         // abaixo — a busca ampla não vaza nada por si.
         const records = await lookupStudent(orgId, {
           phone: contact.phone,
           email: contact.email,
-          cpf: cpf?.trim() || null,
+          cpf: cpf?.trim() || informedCpf,
+          rgm: informedRgm,
         });
 
         // Filtro de saída: o status derivado sai sempre; os campos do
