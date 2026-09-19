@@ -11,7 +11,7 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createConversationEvent } from "@/services/conversation-events";
-import { assignOwnerToContactClusterTx } from "@/services/deals";
+import { assignOwnerToContactClusterTx, createDealEvent } from "@/services/deals";
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import {
   executeDepartmentHandoff,
@@ -41,6 +41,7 @@ export type OrchestratedHandoffArgs = {
   policy?: InboxPolicy | null;
   toolPolicy?: ToolPolicy | null;
   ops?: VerticalPackOps | null;
+  handoffBy?: "orchestrator_code" | "tool";
 };
 
 export type OrchestratedHandoffResult = {
@@ -327,26 +328,43 @@ async function assignNamedAi(args: {
   contactId: string | null;
   dealId?: string | null;
   user: ResolvedUser;
+  fromAgentUserId: string;
+  by: "orchestrator_code" | "tool";
+  reason?: string;
 }): Promise<OrchestratedHandoffResult> {
   await prisma.$transaction((tx) =>
     assignOwnerToContactClusterTx(tx, {
       userId: args.user.id,
-      via: null,
+      via: "ai_handoff",
       contactId: args.contactId,
       dealId: args.dealId,
       conversationId: args.conversationId,
     }),
   );
 
+  const destLabel = args.user.name;
   await createConversationEvent({
     conversationId: args.conversationId,
     action: "distribuicao",
-    text: `Conversa transferida para o agente ${args.user.name}`,
+    text: `Conversa transferida para o agente ${destLabel} (from=${args.fromAgentUserId} to=${args.user.id} by=${args.by})`,
     actor: "Agente IA",
     authorType: "bot",
-    dedupeStartsWith: ["Conversa transferida para o agente"],
+    actorUserId: args.fromAgentUserId,
+    dedupeStartsWith: [`Conversa transferida para o agente ${destLabel}`],
     dedupeWindowMs: 2 * 60 * 1000,
   }).catch(() => null);
+
+  if (args.dealId) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transferred_to_ai_agent",
+      reason: args.reason ?? null,
+      targetAgentUserId: args.user.id,
+      targetAgentName: args.user.name,
+      by: args.by,
+      fromAgentUserId: args.fromAgentUserId,
+      toAgentUserId: args.user.id,
+    }).catch(() => {});
+  }
 
   if (args.contactId) {
     const dest = await prisma.user.findUnique({
@@ -591,6 +609,9 @@ export async function executeOrchestratedHandoff(
     contactId: args.contactId,
     dealId: args.dealId,
     user: resolved.user,
+    fromAgentUserId: args.fromAgentUserId,
+    by: args.handoffBy ?? "tool",
+    reason,
   });
 }
 

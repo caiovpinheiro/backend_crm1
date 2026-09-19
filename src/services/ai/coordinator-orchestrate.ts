@@ -115,12 +115,14 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
       contactId: runArgs.contactId,
       dealId: runArgs.dealId ?? null,
       fromAgentUserId: agent.userId,
+      fromAgentName: agent.user?.name ?? null,
       target: "ai_agent",
       name: dest.name,
       reason: "Orquestração por assunto",
       userMessage: runArgs.userMessage,
       policy,
       toolPolicy: tools.transfer_conversation ?? null,
+      handoffBy: "orchestrator_code",
     });
     if (!handed.assigned) return null;
   }
@@ -133,13 +135,11 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
 
   return {
     ...nested,
-    toolCalls: [
-      {
-        name: "transfer_to_ai_agent",
-        args: { agentName: dest.name },
-        result: { ok: true, assigned: true, agentName: dest.name },
-      },
-      ...nested.toolCalls,
-    ],
+    routing: {
+      by: "orchestrator_code",
+      fromAgentId: agent.id,
+      toAgentId: dest.id,
+      reason: "orquestracao_por_assunto",
+    },
   };
 }

@@ -69,6 +69,11 @@ type TurnRecord = {
   rule: { action: string; label: string; department: string | null } | null;
   switchedTo: string | null;
   skipped: string | null;
+  handoff?: {
+    fromAgentId: string;
+    toAgentId: string;
+    by?: string;
+  } | null;
 };
 
 function arg(flag: string, fallback = ""): string {
@@ -564,18 +569,20 @@ async function main() {
           }
 
           const applied = applyHandoff(agents, inspectHandoff(result.toolCalls));
-          if (applied.next && applied.next.id !== speaker.id) {
+          if (result.routing?.toAgentId) {
+            const routed = agents.find((a) => a.id === result.routing!.toAgentId);
+            if (routed) current = routed;
+          } else if (applied.next && applied.next.id !== speaker.id) {
             current = applied.next;
           }
           if (applied.skip) skipReason = applied.skip;
-          const shown = current.id !== speaker.id ? current : speaker;
 
           records.push({
             caseId: c.id,
             turnIndex: i,
             inbound,
-            agentId: shown.id,
-            agentName: shown.name,
+            agentId: speaker.id,
+            agentName: speaker.name,
             llmInvoked: true,
             runId: result.runId,
             status: result.status,
@@ -588,8 +595,18 @@ async function main() {
                   department: ruleHit.rule.department,
                 }
               : null,
-            switchedTo: applied.switchedTo,
+            switchedTo:
+              result.routing && result.routing.toAgentId !== result.routing.fromAgentId
+                ? current.name
+                : applied.switchedTo,
             skipped: null,
+            handoff: result.routing
+              ? {
+                  fromAgentId: result.routing.fromAgentId,
+                  toAgentId: result.routing.toAgentId,
+                  by: result.routing.by,
+                }
+              : null,
           });
           logTurn(records[records.length - 1]!);
 

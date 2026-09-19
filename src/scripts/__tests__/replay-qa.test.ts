@@ -142,4 +142,46 @@ describe("scoreReplay", () => {
       true,
     );
   });
+
+  it("Joseph→especialista via routing estruturado não é SELF_TRANSFER", () => {
+    const { findings } = scoreReplay(
+      [
+        {
+          caseId: "h",
+          turnIndex: 0,
+          inbound: "boleto",
+          agentName: "Joseph",
+          text: "",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: "Agente Atendimento",
+          handoff: { fromAgentId: "joseph", toAgentId: "atend", by: "orchestrator_code" },
+          tools: [],
+        },
+      ],
+      [{ id: "h", turns: ["boleto"] }],
+    );
+    expect(findings.some((f) => f.code === "SELF_TRANSFER")).toBe(false);
+  });
+
+  it("auto-chamada from===to gera SELF_TRANSFER", () => {
+    const { findings } = scoreReplay(
+      [
+        {
+          caseId: "h",
+          turnIndex: 0,
+          inbound: "boleto",
+          agentName: "Agente Atendimento",
+          text: "",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: "Agente Atendimento",
+          handoff: { fromAgentId: "atend", toAgentId: "atend", by: "tool" },
+          tools: [{ name: "transfer_to_ai_agent", args: { agentName: "Agente Atendimento" } }],
+        },
+      ],
+      [{ id: "h", turns: ["boleto"] }],
+    );
+    expect(findings.some((f) => f.code === "SELF_TRANSFER")).toBe(true);
+  });
 });

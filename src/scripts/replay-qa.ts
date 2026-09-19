@@ -12,6 +12,11 @@ export type ReplayQaTurn = {
   status: string | null;
   skipped: string | null;
   switchedTo: string | null;
+  handoff?: {
+    fromAgentId: string;
+    toAgentId: string;
+    by?: string;
+  } | null;
   tools: Array<{ name: string; args?: unknown }>;
 };
 
@@ -64,30 +69,10 @@ function looksLikeNonsenseGuard(text: string): boolean {
   );
 }
 
-function foldName(s: string): string {
-  return s
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toLowerCase()
-    .trim();
-}
-
-function toolDestName(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  return String(a.name ?? a.agentName ?? a.agentUserId ?? "").trim();
-}
-
 function selfTransfer(turn: ReplayQaTurn): boolean {
-  const me = foldName(turn.agentName);
-  if (turn.switchedTo && foldName(turn.switchedTo) === me) return true;
-  return turn.tools.some((t) => {
-    if (t.name !== "transfer_to_ai_agent" && t.name !== "transfer_conversation") {
-      return false;
-    }
-    const dest = foldName(toolDestName(t.args));
-    return dest.length > 0 && dest === me;
-  });
+  const h = turn.handoff;
+  if (!h?.fromAgentId || !h?.toAgentId) return false;
+  return h.fromAgentId === h.toAgentId;
 }
 
 export function scoreReplay(

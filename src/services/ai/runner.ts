@@ -175,6 +175,12 @@ export type RunResult = {
   costUsd: number;
   autonomyMode: AIAgentAutonomy;
   toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
+  routing?: {
+    by: "orchestrator_code" | "tool";
+    fromAgentId: string;
+    toAgentId: string;
+    reason?: string;
+  };
   /// Tutorial do modelo interno casado — o inbox envia depois do texto.
   followUpMedia?: AgentFaqMedia[];
   error?: string;
