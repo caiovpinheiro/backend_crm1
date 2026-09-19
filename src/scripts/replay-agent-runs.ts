@@ -34,12 +34,12 @@ import {
   lookupStudent,
 } from "@/services/academic-records";
 import { runAgent, type RunResult } from "@/services/ai/runner";
-import { formatQaReport, scoreReplay } from "@/scripts/replay-qa";
+import { formatQaReport, scoreReplay, fixtureTurnInbound } from "@/scripts/replay-qa";
 
 type FixtureCase = {
   id: string;
   label: string;
-  turns: string[];
+  turns: Array<string | { inbound: string; expect?: { guard?: boolean; human?: boolean } }>;
   contact?: { name?: string; phone?: string | null };
 };
 type FixtureFile = { cases: FixtureCase[] };
@@ -125,7 +125,7 @@ function formatTranscript(cases: FixtureCase[], records: TurnRecord[]): string {
       `===== ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${truncated} =====`,
     );
     lines.push("Script do aluno (ordem):");
-    c.turns.forEach((t, i) => lines.push(`  t${i} ${t}`));
+    c.turns.forEach((t, i) => lines.push(`  t${i} ${fixtureTurnInbound(t)}`));
     lines.push("");
     for (const r of turns) {
       const tools = r.tools.map((t) => t.name).join(",") || "-";
@@ -438,10 +438,10 @@ async function main() {
         console.log(
           `===== CASE ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${cap} =====`,
         );
-        c.turns.forEach((t, i) => console.log(`  t${i} ${t}`));
+        c.turns.forEach((t, i) => console.log(`  t${i} ${fixtureTurnInbound(t)}`));
 
         for (let i = 0; i < c.turns.length; i++) {
-          const inbound = c.turns[i] ?? "";
+          const inbound = fixtureTurnInbound(c.turns[i]!);
           const speaker = current;
 
           if (skipReason) {

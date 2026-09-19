@@ -309,8 +309,17 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .filter((m) => m.role === "user")
       .map((m) => m.content);
 
+    const inboxPolicyForRun = normalizeInboxPolicy(
+      agent.inboxPolicy,
+      agent.verticalPack,
+    );
+
     if (!classifierRun) {
-      const nonsense = nonsenseGuardReply(args.userMessage, priorUserMessages);
+      const nonsense = nonsenseGuardReply(
+        args.userMessage,
+        priorUserMessages,
+        inboxPolicyForRun,
+      );
       if (nonsense) {
         await prisma.aIAgentRun.update({
           where: { id: run.id },
@@ -369,19 +378,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // Modelos internos (tela Internos) como fonte de RAG. Era ligado por
     // `pack?.id === "academic"`, o que escondia a base do time de qualquer
     // agente genérico. Agora é configuração (default true no pack academic).
-    const inboxPolicyForRun = normalizeInboxPolicy(
-      agent.inboxPolicy,
-      agent.verticalPack,
-    );
-    // Documento vencido não entra como fato (o corte é no SQL do retrieval);
-    // no lugar do vazio o operador escolhe o que o agente deve fazer. Bloco
-    // curto e só existe quando há documento vencido relevante DE FATO.
+    const useMessageModelsRag =
+      !classifierRun && inboxPolicyForRun.useMessageModels;
     const expiredKnowledgeBlock = formatExpiredKnowledgeBlock(
       knowledge.expired,
       inboxPolicyForRun.knowledgeExpiredInstruction,
     );
-    const useMessageModelsRag =
-      !classifierRun && inboxPolicyForRun.useMessageModels;
     // O que o operador escreve é absoluto. Com "Regras de atendimento"
     // preenchido, nem o texto canônico do pack nem os hints de runtime
     // (polos, prova, portal, senha, primeiro acesso, certificado) entram

@@ -90,6 +90,8 @@ export type VerticalPack = {
     interceptCourseShopping?: boolean;
     inauguralEnabled?: boolean;
     humanRequestKeywords?: string[];
+    nonsenseAskOnceMessage?: string | null;
+    nonsenseStopMessage?: string | null;
   };
   /**
    * Ops do pack — nomes = exports dos módulos do vertical.

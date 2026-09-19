@@ -655,6 +655,9 @@ export type InboxPolicy = {
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
   humanRequestKeywords: string[];
+  /// Cópia do guard de inbound ininteligível. `null` = fallback neutro.
+  nonsenseAskOnceMessage: string | null;
+  nonsenseStopMessage: string | null;
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -730,6 +733,8 @@ export function defaultInboxPolicy(): InboxPolicy {
     assignedConsultantMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
+    nonsenseAskOnceMessage: null,
+    nonsenseStopMessage: null,
   };
 }
 
@@ -865,6 +870,8 @@ export function normalizeInboxPolicy(
     humanRequestKeywords: Array.isArray(r.humanRequestKeywords)
       ? strList(r.humanRequestKeywords)
       : base.humanRequestKeywords,
+    nonsenseAskOnceMessage: nullableText(r.nonsenseAskOnceMessage),
+    nonsenseStopMessage: nullableText(r.nonsenseStopMessage),
   };
 }
 

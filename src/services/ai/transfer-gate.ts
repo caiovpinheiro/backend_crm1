@@ -165,26 +165,17 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
 }
 
 /**
- * Mensagem sem pedido reconhecível: teclado, nome solto, invenção.
- * Saudação / recado entram em `isIdleOrchestrationMessage`, não aqui.
+ * Sem conteúdo verbal: vazio, só emoji/pontuação, ou tokens sem letras.
+ * Uma palavra real ("Financeiro", "boleto") nunca é nonsense.
  */
 export function isUnintelligibleInbound(raw?: string | null): boolean {
-  if (isIdleOrchestrationMessage(raw)) return false;
   const trimmed = (raw ?? "").trim();
-  if (!trimmed) return false;
-  if (trimmed.length > 120) return false;
-  if (/\d{5,}/.test(trimmed)) return false;
-  if (/@/.test(trimmed)) return false;
-  const n = foldIdle(trimmed);
-  if (
-    /(preciso|ajuda|acesso|matricul|boleto|curso|prova|senha|portal|login|cancel|financ|parcel|pag(a|ar|ament)|nota|horario|aula|contrato|documento|rgm|aluno|polo|\bead\b|como|quando|quanto|onde|porque|quero|minha|meu|\bnao\b|\bsim\b|problema|duvida|declaracao|historico|tce|falar|equipe|atendente|consultor|setor|inscri|duda|microsoft|cnpj|estacion|dificuld|finaliz|referente|reais|desesper|uteis)/.test(
-      n,
-    )
-  ) {
-    return false;
-  }
-  const words = n.split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
-  return words.length > 0 && words.length <= 4;
+  if (!trimmed) return true;
+  if (/\d/.test(trimmed) || /@/.test(trimmed)) return false;
+  const letters = trimmed.replace(/[^\p{L}]+/gu, " ").trim();
+  const tokens = letters.split(/\s+/).filter((w) => w.length >= 2);
+  if (tokens.length === 0) return true;
+  return false;
 }
 
 export function unintelligibleStreak(
@@ -195,30 +186,51 @@ export function unintelligibleStreak(
   let n = 1;
   for (let i = priorUserMessages.length - 1; i >= 0; i--) {
     const prev = priorUserMessages[i];
-    if (isIdleOrchestrationMessage(prev)) continue;
+    if (isIdleOrchestrationMessage(prev) && (prev ?? "").trim()) continue;
     if (isUnintelligibleInbound(prev)) n += 1;
     else break;
   }
   return n;
 }
 
-export const NONSENSE_ASK_ONCE =
-  "Não entendi essa mensagem. Me fala em uma frase o que você precisa (acesso, matrícula, financeiro, cancelar).";
+/** Fallback neutro — sem vocabulário de produto. */
+export const DEFAULT_NONSENSE_ASK_ONCE =
+  "Não entendi essa mensagem. Pode repetir em uma frase o que você precisa?";
+export const DEFAULT_NONSENSE_STOP =
+  "Quando tiver um pedido objetivo, me chama que eu te ajudo. Por aqui não consigo seguir com isso.";
 
-export const NONSENSE_STOP =
-  "Quando tiver um pedido objetivo (acesso, matrícula, financeiro, cancelar), me chama que eu te ajudo. Por aqui não consigo seguir com isso.";
+/** @deprecated use DEFAULT_* ou inboxPolicy */
+export const NONSENSE_ASK_ONCE = DEFAULT_NONSENSE_ASK_ONCE;
+export const NONSENSE_STOP = DEFAULT_NONSENSE_STOP;
+
+export function resolveNonsenseCopy(policy?: InboxPolicy | null): {
+  ask: string;
+  stop: string;
+} {
+  const ask = policy?.nonsenseAskOnceMessage?.trim();
+  const stop = policy?.nonsenseStopMessage?.trim();
+  return {
+    ask: ask || DEFAULT_NONSENSE_ASK_ONCE,
+    stop: stop || DEFAULT_NONSENSE_STOP,
+  };
+}
 
 export function nonsenseGuardReply(
   current: string,
   priorUserMessages: string[],
+  policy?: InboxPolicy | null,
 ): string | null {
+  if (isIdleOrchestrationMessage(current) && (current ?? "").trim()) {
+    return null;
+  }
   const threadHasWork = priorUserMessages.some(
     (p) => !isIdleOrchestrationMessage(p) && !isUnintelligibleInbound(p),
   );
   if (threadHasWork) return null;
   const streak = unintelligibleStreak(current, priorUserMessages);
-  if (streak >= 2) return NONSENSE_STOP;
-  if (streak === 1) return NONSENSE_ASK_ONCE;
+  const copy = resolveNonsenseCopy(policy);
+  if (streak >= 2) return copy.stop;
+  if (streak === 1) return copy.ask;
   return null;
 }
 

@@ -28,7 +28,7 @@
       "label": "Bruno Lima de Oliveira",
       "turns": [
         "Falar com equipe",
-        "Financeiro",
+        { "inbound": "Financeiro", "expect": { "guard": false } },
         "Quero falar com a equipe"
       ],
       "contact": {

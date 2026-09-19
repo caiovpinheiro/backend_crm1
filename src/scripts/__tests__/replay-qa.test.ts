@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { NONSENSE_ASK_ONCE, NONSENSE_STOP } from "@/services/ai/transfer-gate";
+import { DEFAULT_NONSENSE_ASK_ONCE } from "@/services/ai/transfer-gate";
 import { scoreReplay } from "@/scripts/replay-qa";
 
 describe("scoreReplay", () => {
-  it("reprova ASK em Financeiro (falso positivo do guard)", () => {
+  it("FAIL quando fixture declara expect.guard false e o texto é ASK", () => {
     const { fail, findings } = scoreReplay(
       [
         {
@@ -23,17 +23,27 @@ describe("scoreReplay", () => {
           turnIndex: 1,
           inbound: "Financeiro",
           agentName: "Agente Atendimento",
-          text: NONSENSE_ASK_ONCE,
+          text: DEFAULT_NONSENSE_ASK_ONCE,
           status: "COMPLETED",
           skipped: null,
           switchedTo: null,
           tools: [],
         },
       ],
-      [{ id: "403971", turns: ["Falar com equipe", "Financeiro"] }],
+      [
+        {
+          id: "403971",
+          turns: [
+            "Falar com equipe",
+            { inbound: "Financeiro", expect: { guard: false } },
+          ],
+        },
+      ],
     );
     expect(fail).toBeGreaterThan(0);
-    expect(findings.some((f) => f.code === "FALSE_NONSENSE")).toBe(true);
+    expect(findings.some((f) => f.code === "GUARD_FIRED" && f.severity === "fail")).toBe(
+      true,
+    );
   });
 
   it("não reprova regra de mensalidade no Atendimento (produto, não Financeiro)", () => {
@@ -110,34 +120,26 @@ describe("scoreReplay", () => {
     expect(fail).toBe(0);
   });
 
-  it("não conta STOP real em teclado como FALSE_NONSENSE", () => {
-    const { findings } = scoreReplay(
+  it("GUARD_FIRED é WARN quando a fixture não declara expectativa", () => {
+    const { fail, findings } = scoreReplay(
       [
         {
           caseId: "x",
           turnIndex: 0,
-          inbound: "asdfgh",
+          inbound: "👍",
           agentName: "Joseph",
-          text: NONSENSE_ASK_ONCE,
-          status: "COMPLETED",
-          skipped: null,
-          switchedTo: null,
-          tools: [],
-        },
-        {
-          caseId: "x",
-          turnIndex: 1,
-          inbound: "qwerty",
-          agentName: "Joseph",
-          text: NONSENSE_STOP,
+          text: DEFAULT_NONSENSE_ASK_ONCE,
           status: "COMPLETED",
           skipped: null,
           switchedTo: null,
           tools: [],
         },
       ],
-      [{ id: "x", turns: ["asdfgh", "qwerty"] }],
+      [{ id: "x", turns: ["👍"] }],
     );
-    expect(findings.some((f) => f.code === "FALSE_NONSENSE")).toBe(false);
+    expect(fail).toBe(0);
+    expect(findings.some((f) => f.code === "GUARD_FIRED" && f.severity === "warn")).toBe(
+      true,
+    );
   });
 });
