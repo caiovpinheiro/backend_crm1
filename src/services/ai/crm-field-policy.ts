@@ -358,6 +358,63 @@ export function isFieldReadable(
   });
 }
 
+/**
+ * IDENTIFICAR é um terceiro verbo, mais estreito que buscar.
+ *
+ * Buscar varre; identificar confere se o valor que a pessoa apresentou é o
+ * de um campo que a organização declarou como identificador dela (o número
+ * do contrato, do prontuário, do registro). Quem identifica não ganha
+ * leitura: o valor continua passando por `readableFields` em
+ * `partitionFieldValues`.
+ *
+ * Curinga NÃO vale aqui, de propósito. "Libere a entidade inteira para
+ * leitura" é uma decisão plausível do operador; "qualquer campo serve de
+ * senha de identificação" não é — bastaria acertar o valor de um campo
+ * qualquer para abrir o registro de outra pessoa.
+ */
+export function resolveIdentityFields(
+  catalog: CrmFieldDescriptor[],
+  identityKeys: string[],
+): CrmFieldDescriptor[] {
+  if (identityKeys.length === 0) return [];
+  const wanted = new Set(identityKeys.map((k) => fold(k)));
+  // Chave que não existe mais no catálogo (campo apagado) some em silêncio:
+  // o operador não precisa ser bloqueado por configuração órfã.
+  return catalog.filter((f) => wanted.has(fold(f.key)));
+}
+
+/**
+ * Normalização para casamento de identificador. Número sai como dígitos
+ * ("12.345-678" e "12345678" são o mesmo registro); o resto vira texto
+ * dobrado. Identificador guardado com máscara e digitado sem ela (ou o
+ * contrário) é o caso comum, não a exceção.
+ */
+export function normalizeIdentityValue(v: string): string {
+  const s = fold(v);
+  if (!s) return "";
+  const digits = s.replace(/\D/g, "");
+  // Só trata como número quando NÃO há letra: "AB-123" tem que casar por
+  // texto, senão viraria "123" e colidiria com outro registro.
+  if (digits && !/[a-z]/.test(s)) return digits;
+  return s.replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Casamento EXATO, nunca parcial.
+ *
+ * `contains` é aceitável na busca por assunto e inaceitável aqui: um
+ * identificador de 8 dígitos que seja trecho de outro traria o registro
+ * errado, e o agente passaria a afirmar coisas sobre a pessoa errada.
+ */
+export function identityValueMatches(
+  stored: string,
+  informed: string,
+): boolean {
+  const a = normalizeIdentityValue(stored);
+  const b = normalizeIdentityValue(informed);
+  return a.length > 0 && a === b;
+}
+
 export type CrmFieldValue = {
   field: CrmFieldDescriptor;
   value: string;
