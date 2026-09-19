@@ -33,7 +33,7 @@ import {
   canonicalPhone,
   lookupStudent,
 } from "@/services/academic-records";
-import { runAgent, type RunResult } from "@/services/ai/runner";
+import { runAgent, MAX_HISTORY, type RunResult } from "@/services/ai/runner";
 import { formatQaReport, scoreReplay, fixtureTurnInbound } from "@/scripts/replay-qa";
 
 type FixtureCase = {
@@ -69,6 +69,7 @@ type TurnRecord = {
   rule: { action: string; label: string; department: string | null } | null;
   switchedTo: string | null;
   skipped: string | null;
+  at?: string;
   handoff?: {
     fromAgentId: string;
     toAgentId: string;
@@ -453,6 +454,7 @@ async function main() {
             records.push({
               caseId: c.id,
               turnIndex: i,
+              at: new Date().toISOString(),
               inbound,
               agentId: speaker.id,
               agentName: speaker.name,
@@ -534,6 +536,7 @@ async function main() {
             records.push({
               caseId: c.id,
               turnIndex: i,
+              at: new Date().toISOString(),
               inbound,
               agentId: speaker.id,
               agentName: speaker.name,
@@ -559,7 +562,8 @@ async function main() {
             agentId: speaker.id,
             source: "inbox_test",
             userMessage: inbound,
-            history: history.slice(-10),
+            history,
+            historyLimit: MAX_HISTORY,
             contactId: identity.contactId,
           });
 

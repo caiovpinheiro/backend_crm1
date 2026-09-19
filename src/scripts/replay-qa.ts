@@ -32,6 +32,7 @@ export type ReplayQaFixtureTurn =
 export type ReplayQaCase = {
   id: string;
   turns: ReplayQaFixtureTurn[];
+  ruleSkipDeskNames?: string[];
 };
 
 export type QaFinding = {
@@ -44,6 +45,7 @@ export type QaFinding = {
     | "SELF_TRANSFER"
     | "INBOUND_MISMATCH"
     | "MISSING_TURN"
+    | "HUMAN_REQUEST_IGNORED"
     | "PING_PONG";
   severity: "fail" | "warn";
   detail: string;
@@ -66,6 +68,20 @@ function looksLikeNonsenseGuard(text: string): boolean {
   return (
     t.startsWith("Não entendi essa mensagem.") ||
     t.startsWith("Quando tiver um pedido objetivo")
+  );
+}
+
+function endedInHumanDistribution(turn: ReplayQaTurn): boolean {
+  if (
+    turn.skipped?.startsWith("rule_human") ||
+    turn.skipped?.startsWith("tool_human")
+  ) {
+    return true;
+  }
+  return turn.tools.some((t) =>
+    ["transfer_to_human", "execute_distribution", "transfer_to_department"].includes(
+      t.name,
+    ),
   );
 }
 
@@ -127,7 +143,10 @@ export function scoreReplay(
           detail: t.skipped,
         });
       } else if (t.skipped?.startsWith("rule_department")) {
-        const desk = /atend|sac/i.test(t.skipped);
+        const desks = (fx.ruleSkipDeskNames ?? ["atend", "sac"]).map((d) =>
+          d.toLowerCase(),
+        );
+        const desk = desks.some((d) => t.skipped!.toLowerCase().includes(d));
         findings.push({
           caseId: t.caseId,
           turnIndex: t.turnIndex,
@@ -186,6 +205,15 @@ export function scoreReplay(
           code: "SELF_TRANSFER",
           severity: "warn",
           detail: `${t.agentName} transfer_to_ai_agent para si`,
+        });
+      }
+      if (expect.human === true && !endedInHumanDistribution(t)) {
+        findings.push({
+          caseId: t.caseId,
+          turnIndex: t.turnIndex,
+          code: "HUMAN_REQUEST_IGNORED",
+          severity: "fail",
+          detail: `fixture esperava distribuição humana; inbound=${JSON.stringify(t.inbound).slice(0, 80)}`,
         });
       }
     }

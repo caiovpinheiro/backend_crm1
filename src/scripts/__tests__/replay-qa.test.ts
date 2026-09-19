@@ -184,4 +184,30 @@ describe("scoreReplay", () => {
     );
     expect(findings.some((f) => f.code === "SELF_TRANSFER")).toBe(true);
   });
+
+  it("HUMAN_REQUEST_IGNORED quando fixture pede humano e o turno não distribui", () => {
+    const { fail, findings } = scoreReplay(
+      [
+        {
+          caseId: "403971",
+          turnIndex: 0,
+          inbound: "Quero falar com a equipe",
+          agentName: "Joseph",
+          text: "Vou te passar para o especialista.",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: null,
+          tools: [{ name: "transfer_to_ai_agent" }],
+        },
+      ],
+      [
+        {
+          id: "403971",
+          turns: [{ inbound: "Quero falar com a equipe", expect: { human: true } }],
+        },
+      ],
+    );
+    expect(fail).toBeGreaterThan(0);
+    expect(findings.some((f) => f.code === "HUMAN_REQUEST_IGNORED")).toBe(true);
+  });
 });

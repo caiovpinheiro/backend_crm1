@@ -29,7 +29,7 @@
       "turns": [
         "Falar com equipe",
         { "inbound": "Financeiro", "expect": { "guard": false } },
-        "Quero falar com a equipe"
+        { "inbound": "Quero falar com a equipe", "expect": { "human": true } }
       ],
       "contact": {
         "name": "Bruno Lima de Oliveira",

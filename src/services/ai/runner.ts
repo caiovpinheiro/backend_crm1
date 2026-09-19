@@ -186,7 +186,7 @@ export type RunResult = {
   error?: string;
 };
 
-const MAX_HISTORY = 10;
+export const MAX_HISTORY = 10;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   /// Modo de teste do inbox. Único lugar onde o runner precisa saber disso —
