@@ -74,6 +74,9 @@ export type ToolPolicy = {
   /// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do
   /// produto. É só aviso visual — não bloqueia leitura nem busca.
   sensitiveTerms: string[];
+  /// Campos do Deal que servem como identificadores para o cliente
+  /// (ex.: ["deal.RGM", "deal.numero_pedido"]). Genérico e configurável.
+  identityKeys: string[];
 };
 
 export type ToolConfigMap = Record<string, ToolPolicy>;
@@ -96,6 +99,7 @@ export function emptyToolPolicy(): ToolPolicy {
     readableFields: [],
     allowOrgWideSearch: false,
     sensitiveTerms: [],
+    identityKeys: [],
   };
 }
 
@@ -147,6 +151,7 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     readableFields: strList(r.readableFields),
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
     sensitiveTerms: strList(r.sensitiveTerms),
+    identityKeys: strList(r.identityKeys),
   };
 }
 
@@ -168,7 +173,8 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     !p.transferMessage &&
     p.readableFields.length === 0 &&
     !p.allowOrgWideSearch &&
-    p.sensitiveTerms.length === 0
+    p.sensitiveTerms.length === 0 &&
+    p.identityKeys.length === 0
   );
 }
 
