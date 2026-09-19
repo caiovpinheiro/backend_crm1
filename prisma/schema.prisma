@@ -6041,8 +6041,8 @@ model CallProviderConfig {
 /// Registros acadêmicos de alunos (piloto "matriculados"). Origem: relatório
 /// Excel subido manualmente pela org (aba "Dados dos alunos"). Cada linha do
 /// relatório vira um registro (aluno pode ter várias linhas: cursos/ciclos).
-/// Consumido pela tool `consultar_matricula` do agente, casando por telefone,
-/// email ou CPF do contato. NÃO é tenant-scoped via Prisma Extension — filtre
+/// Exposto ao agente como a fonte consultável `matricula` do pack acadêmico,
+/// casando por telefone, email ou CPF. NÃO é tenant-scoped via Extension — filtre
 /// SEMPRE por organizationId explicitamente na camada de serviço.
 model StudentAcademicRecord {
   id             String    @id @default(cuid())

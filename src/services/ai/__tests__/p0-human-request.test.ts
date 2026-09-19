@@ -41,7 +41,7 @@ describe("P0-A pedido de humano", () => {
 
   it("toolset de especialista não perde tools humanas só porque o regex não casou", () => {
     const enabled = [
-      "consultar_matricula",
+      "search_crm_records",
       "transfer_to_ai_agent",
       ...HUMAN_TOOLS,
     ];

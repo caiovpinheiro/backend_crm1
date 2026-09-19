@@ -55,7 +55,8 @@ export type ToolPolicy = {
   allowedTypes: string[];
   defaultType: string | null;
 
-  // consultar_matricula
+  // Legado de uma tool de negócio que saiu do motor. Continua sendo lido
+  // porque agente antigo ainda tem valor gravado aqui.
   policyText: string | null;
   transferMessage: string | null;
 

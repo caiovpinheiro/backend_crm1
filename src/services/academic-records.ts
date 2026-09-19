@@ -5,9 +5,10 @@
  * "Dados dos alunos" (Agentes de IA). Cada linha do relatório vira um
  * `StudentAcademicRecord` — um aluno pode ter várias linhas (cursos/ciclos).
  *
- * A tool `consultar_matricula` do agente lê esses dados casando por
- * telefone, e-mail ou CPF do contato em conversa, para responder de forma
- * personalizada (situação da matrícula, curso, polo, etc.).
+ * O agente chega aqui pela fonte `matricula` do pack acadêmico
+ * (`src/verticals/academic/record-source.ts`), que o motor consulta como
+ * qualquer outra entidade: por telefone/e-mail do contato em conversa ou
+ * pelo campo-chave que o operador configurou (RGM, CPF).
  *
  * Escopo multi-tenant: estes modelos NÃO passam pela Prisma Extension —
  * TODAS as queries filtram `organizationId` explicitamente.

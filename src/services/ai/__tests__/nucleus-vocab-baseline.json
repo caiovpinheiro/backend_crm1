@@ -51,7 +51,6 @@
       "\"Departamento-alvo (opcional). Se omitido, usa o departamento já roteado na conversa. Ex.: 'Retenção'.\",": 1
     },
     "lib/ai-agents/steering.ts": {
-      "// consultar_matricula": 1,
       "/// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do": 1,
       "acolhimento: string[];": 1,
       "retencao: string[];": 1,

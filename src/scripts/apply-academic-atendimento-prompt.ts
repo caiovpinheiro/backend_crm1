@@ -17,7 +17,7 @@ const ACADEMIC_SYSTEM_PROMPT_OVERRIDE = academic.constants.systemPromptOverride;
 const ACADEMIC_TOOLS = [
   "add_tag",
   "create_activity",
-  "consultar_matricula",
+  "search_crm_records",
   "transfer_to_department",
   "execute_distribution",
   "transfer_to_human",
