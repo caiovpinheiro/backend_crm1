@@ -147,6 +147,60 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
   return false;
 }
 
+/**
+ * Mensagem sem pedido reconhecível: teclado, nome solto, invenção.
+ * Saudação / recado entram em `isIdleOrchestrationMessage`, não aqui.
+ */
+export function isUnintelligibleInbound(raw?: string | null): boolean {
+  if (isIdleOrchestrationMessage(raw)) return false;
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return false;
+  if (trimmed.length > 160) return false;
+  if (/\d{5,}/.test(trimmed)) return false;
+  if (/@/.test(trimmed)) return false;
+  const n = foldIdle(trimmed);
+  if (
+    /\b(preciso|ajuda|acesso|matricul|boleto|curso|prova|senha|portal|login|cancel|financ|parcela|nota|horario|aula|contrato|documento|rgm|aluno|polo|\bead\b|como|quando|quanto|onde|porque|por que|quero|minha|meu|nao|sim|problema|duvida|declaracao|historico|tce|falar|equipe|atendente|consultor|setor)\b/.test(
+      n,
+    )
+  ) {
+    return false;
+  }
+  const words = n.split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
+  return words.length > 0 && words.length <= 6;
+}
+
+export function unintelligibleStreak(
+  current: string,
+  priorUserMessages: string[],
+): number {
+  if (!isUnintelligibleInbound(current)) return 0;
+  let n = 1;
+  for (let i = priorUserMessages.length - 1; i >= 0; i--) {
+    const prev = priorUserMessages[i];
+    if (isIdleOrchestrationMessage(prev)) continue;
+    if (isUnintelligibleInbound(prev)) n += 1;
+    else break;
+  }
+  return n;
+}
+
+export const NONSENSE_ASK_ONCE =
+  "Não entendi essa mensagem. Me fala em uma frase o que você precisa (acesso, matrícula, financeiro, cancelar).";
+
+export const NONSENSE_STOP =
+  "Quando tiver um pedido objetivo (acesso, matrícula, financeiro, cancelar), me chama que eu te ajudo. Por aqui não consigo seguir com isso.";
+
+export function nonsenseGuardReply(
+  current: string,
+  priorUserMessages: string[],
+): string | null {
+  const streak = unintelligibleStreak(current, priorUserMessages);
+  if (streak >= 2) return NONSENSE_STOP;
+  if (streak === 1) return NONSENSE_ASK_ONCE;
+  return null;
+}
+
 export type AgentConfigWarning = { field: string; message: string };
 
 /**

@@ -87,6 +87,7 @@ import { isTabulationClassifier } from "@/lib/ai-agents/tabulation-classifier";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 import {
   evaluateTransferGate,
+  nonsenseGuardReply,
   transferBlockedByGate,
 } from "@/services/ai/transfer-gate";
 import {
@@ -308,6 +309,32 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const priorUserMessages = trimToRecentSession(timedHistory)
       .filter((m) => m.role === "user")
       .map((m) => m.content);
+
+    if (!classifierRun) {
+      const nonsense = nonsenseGuardReply(args.userMessage, priorUserMessages);
+      if (nonsense) {
+        await prisma.aIAgentRun.update({
+          where: { id: run.id },
+          data: {
+            status: "COMPLETED",
+            outcome: "ANSWERED",
+            llmInvoked: false,
+            finishedAt: new Date(),
+            interceptsFired: ["nonsense_guard"] as unknown as Prisma.InputJsonValue,
+          },
+        }).catch(() => null);
+        return {
+          runId: run.id,
+          text: nonsense,
+          status: "COMPLETED",
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: 0,
+          autonomyMode: agent.autonomyMode,
+          toolCalls: [],
+        };
+      }
+    }
 
     // RAG em TODO turno. A query sai da mensagem atual + últimas mensagens
     // do cliente: com só a mensagem atual, continuações curtas ("ok", "Não
