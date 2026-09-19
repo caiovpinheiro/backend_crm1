@@ -139,6 +139,7 @@ export async function GET(request: Request, context: RouteContext) {
           include: { contact: { select: { id: true, name: true, email: true, phone: true } } },
         },
         jobOpenings: { select: { id: true, title: true, status: true, poolId: true } },
+        metaLinks: true,
       },
     });
     if (!product) {

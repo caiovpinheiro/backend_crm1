@@ -2,8 +2,13 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  parseProductWhatsAppSendMode,
+  PRODUCT_WHATSAPP_SEND_MODE_KEY,
+} from "@/lib/product-whatsapp-send-mode";
 
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -41,26 +46,71 @@ export async function GET(request: Request) {
     ];
   }
 
-  try {
-    const [products, total] = await Promise.all([
-      prisma.product.findMany({
-        where,
-        orderBy: { name: "asc" },
-        skip: (page - 1) * perPage,
-        take: perPage,
-        include: {
-          courseConfig: {
-            select: { level: true, mode: true, semester: true },
-          },
-        },
-      }),
-      prisma.product.count({ where }),
-    ]);
+  const productInclude = {
+    courseConfig: {
+      select: { level: true, mode: true, semester: true },
+    },
+    metaLinks: {
+      select: {
+        id: true,
+        channelId: true,
+        metaCatalogId: true,
+        productRetailerId: true,
+        syncStatus: true,
+      },
+    },
+  } as const;
 
-    return NextResponse.json({ products, total, page, perPage });
+  try {
+    let products;
+    try {
+      const [rows, total] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          orderBy: { name: "asc" },
+          skip: (page - 1) * perPage,
+          take: perPage,
+          include: productInclude,
+        }),
+        prisma.product.count({ where }),
+      ]);
+      products = { rows, total };
+    } catch (inner) {
+      const raw = inner instanceof Error ? inner.message : "";
+      if (!raw.includes("product_meta_links")) throw inner;
+      const [rows, total] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          orderBy: { name: "asc" },
+          skip: (page - 1) * perPage,
+          take: perPage,
+          include: {
+            courseConfig: {
+              select: { level: true, mode: true, semester: true },
+            },
+          },
+        }),
+        prisma.product.count({ where }),
+      ]);
+      products = {
+        rows: rows.map((p) => ({ ...p, metaLinks: [] })),
+        total,
+      };
+    }
+
+    const sendMode = parseProductWhatsAppSendMode(
+      await getOrgSetting(PRODUCT_WHATSAPP_SEND_MODE_KEY),
+    );
+    return NextResponse.json({
+      products: products.rows,
+      total: products.total,
+      page,
+      perPage,
+      sendMode,
+    });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Erro ao listar produtos.";
-    return NextResponse.json({ message }, { status: 500 });
+    console.error("[products] GET falhou:", e);
+    return NextResponse.json({ message: "Erro ao listar produtos." }, { status: 500 });
   }
   });
 }

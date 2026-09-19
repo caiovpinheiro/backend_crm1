@@ -56,6 +56,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DealStageDailySnapshot",
   "ActivityEvent",
   "Product",
+  "ProductMetaLink",
   // Produtos multi-tipo (ledger + ofertas + unidades). Todos tenant-scoped.
   "OrgUnit",
   "ProductOffer",

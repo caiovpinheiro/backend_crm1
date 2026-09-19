@@ -32,6 +32,7 @@ import {
   S3Client,
   type S3ServiceException,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 
 import { getLogger } from "@/lib/logger";
@@ -479,4 +480,20 @@ export async function readStoredFileRange(
     countError("read_range");
     return null;
   }
+}
+
+/** GET assinado (objeto continua privado). A Meta usa isso para puxar a capa. */
+export async function presignGetUrl(
+  orgId: string,
+  bucket: StorageBucket,
+  fileName: string,
+  expiresIn = 7 * 24 * 60 * 60,
+): Promise<string> {
+  const key = objectKey(orgId, bucket, fileName);
+  const { client, bucket: bucketName } = getS3();
+  return getSignedUrl(
+    client,
+    new GetObjectCommand({ Bucket: bucketName, Key: key }),
+    { expiresIn: Math.min(Math.max(expiresIn, 60), 7 * 24 * 60 * 60) },
+  );
 }

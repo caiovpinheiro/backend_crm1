@@ -15,11 +15,11 @@
  */
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
+import { getMetaGraphApiVersion } from "@/lib/meta-graph-version";
 
 const log = getLogger("meta-ad-resolver");
 
-const GRAPH_API_VERSION = process.env.META_GRAPH_API_VERSION?.trim() || "v21.0";
-const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
+const GRAPH_BASE = `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
 
 type ResolveStatus = "ok" | "not_found" | "no_access" | "rate_limited" | "error";
 

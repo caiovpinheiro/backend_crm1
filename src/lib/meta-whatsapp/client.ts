@@ -1,5 +1,6 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isVerboseLogging } from "@/lib/debug-log";
+import { buildMetaGraphUrl } from "@/lib/meta-graph-version";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import {
   isMetaTransientServiceCode,
@@ -22,8 +23,6 @@ function recordMetaCall(path: string, status: string, t0: number): void {
     // métrica nunca derruba o envio
   }
 }
-
-const GRAPH_VERSION = "v21.0";
 
 /**
  * Timeout das chamadas à Graph/Cloud API da Meta.
@@ -298,8 +297,7 @@ export class MetaWhatsAppClient {
   }
 
   static buildGraphUrl(path: string): string {
-    const p = path.startsWith("/") ? path.slice(1) : path;
-    return `https://graph.facebook.com/${GRAPH_VERSION}/${p}`;
+    return buildMetaGraphUrl(path);
   }
 
   /** Destino Cloud API: `to` (telefone em dígitos) e/ou `recipient` (BSUID). Se ambos, a Meta prioriza o telefone. */
@@ -675,6 +673,187 @@ export class MetaWhatsAppClient {
       method: "POST",
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
+  /**
+   * Catálogo Commerce ligado à WABA.
+   * @see https://developers.facebook.com/docs/graph-api/reference/whats-app-business-account/product_catalogs/
+   */
+  async listProductCatalogs(): Promise<{
+    data?: Array<{ id?: string; name?: string }>;
+  }> {
+    const waba = this.wabaOrThrow();
+    return this.graphFetch<{ data?: Array<{ id?: string; name?: string }> }>(
+      `${waba}/product_catalogs?fields=id,name`,
+    );
+  }
+
+  /**
+   * Cria um item no catálogo Commerce (`POST /{catalog_id}/products`).
+   * `price` na Graph é o valor na menor unidade da moeda (centavos).
+   */
+  async createCatalogProduct(params: {
+    catalogId: string;
+    retailerId: string;
+    name: string;
+    description?: string;
+    priceCents: number;
+    currency: string;
+    imageUrl: string;
+    url: string;
+    availability: "in stock" | "out of stock";
+    brand?: string;
+  }): Promise<{ id: string }> {
+    const catalogId = params.catalogId.trim();
+    return this.graphFetch<{ id: string }>(`${catalogId}/products`, {
+      method: "POST",
+      body: JSON.stringify({
+        retailer_id: params.retailerId.trim(),
+        name: params.name.trim().slice(0, 200),
+        description: (params.description?.trim() || params.name).slice(0, 9999),
+        availability: params.availability,
+        condition: "new",
+        price: params.priceCents,
+        currency: params.currency,
+        url: params.url,
+        image_url: params.imageUrl,
+        ...(params.brand?.trim() ? { brand: params.brand.trim().slice(0, 100) } : {}),
+      }),
+    });
+  }
+
+  async findCatalogProductByRetailerId(
+    catalogId: string,
+    retailerId: string,
+  ): Promise<{ id: string } | null> {
+    const filter = encodeURIComponent(
+      JSON.stringify({ retailer_id: { eq: retailerId.trim() } }),
+    );
+    const payload = await this.graphFetch<{
+      data?: Array<{ id?: string }>;
+    }>(`${catalogId.trim()}/products?filter=${filter}&fields=id,retailer_id`);
+    const id = payload.data?.find((row) => typeof row.id === "string" && row.id.trim())?.id;
+    return id ? { id: id.trim() } : null;
+  }
+
+  async updateCatalogProduct(
+    productItemId: string,
+    params: {
+      name: string;
+      description?: string;
+      priceCents: number;
+      currency: string;
+      imageUrl: string;
+      url: string;
+      availability: "in stock" | "out of stock";
+      brand?: string;
+    },
+  ): Promise<{ success?: boolean }> {
+    return this.graphFetch<{ success?: boolean }>(productItemId.trim(), {
+      method: "POST",
+      body: JSON.stringify({
+        name: params.name.trim().slice(0, 200),
+        description: (params.description?.trim() || params.name).slice(0, 9999),
+        availability: params.availability,
+        condition: "new",
+        price: params.priceCents,
+        currency: params.currency,
+        url: params.url,
+        image_url: params.imageUrl,
+        ...(params.brand?.trim() ? { brand: params.brand.trim().slice(0, 100) } : {}),
+      }),
+    });
+  }
+
+  /**
+   * Mensagem nativa de um produto do catálogo Meta (`interactive.type = product`).
+   * Não substitui sendImage/sendText — caminho adicional.
+   */
+  async sendCatalogProduct(
+    to: string | undefined,
+    params: {
+      catalogId: string;
+      productRetailerId: string;
+      body?: string;
+      footer?: string;
+    },
+    recipient?: string,
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const interactive: Record<string, unknown> = {
+      type: "product",
+      action: {
+        catalog_id: params.catalogId.trim(),
+        product_retailer_id: params.productRetailerId.trim(),
+      },
+    };
+    const body = params.body?.trim();
+    if (body) interactive.body = { text: body.slice(0, 1024) };
+    const footer = params.footer?.trim();
+    if (footer) interactive.footer = { text: footer.slice(0, 60) };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
+  /**
+   * Lista nativa de produtos do catálogo Meta (`interactive.type = product_list`).
+   * Header e body são obrigatórios na Cloud API.
+   */
+  async sendCatalogProductList(
+    to: string | undefined,
+    params: {
+      catalogId: string;
+      header: string;
+      body: string;
+      footer?: string;
+      sections: {
+        title?: string | null;
+        productRetailerIds: string[];
+      }[];
+    },
+    recipient?: string,
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const header = params.header.trim().slice(0, 60) || "Produtos";
+    const body = params.body.trim().slice(0, 1024) || "Confira os produtos.";
+    const interactive: Record<string, unknown> = {
+      type: "product_list",
+      header: { type: "text", text: header },
+      body: { text: body },
+      action: {
+        catalog_id: params.catalogId.trim(),
+        sections: params.sections.slice(0, 10).map((s) => ({
+          ...(s.title?.trim() ? { title: s.title.trim().slice(0, 24) } : {}),
+          product_items: s.productRetailerIds
+            .map((id) => id.trim())
+            .filter(Boolean)
+            .slice(0, 30)
+            .map((product_retailer_id) => ({ product_retailer_id })),
+        })),
+      },
+    };
+    const footer = params.footer?.trim();
+    if (footer) interactive.footer = { text: footer.slice(0, 60) };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         ...dest,
         type: "interactive",
         interactive,
