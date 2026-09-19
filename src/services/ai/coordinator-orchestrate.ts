@@ -15,7 +15,10 @@ import {
   normalizeInboxPolicy,
   normalizeToolConfig,
 } from "@/lib/ai-agents/steering";
-import { executeOrchestratedHandoff } from "@/services/ai/agent-handoff";
+import {
+  aiHandoffCapReached,
+  executeOrchestratedHandoff,
+} from "@/services/ai/agent-handoff";
 import {
   humanQueueContextFromAgent,
   userWantsHumanDistribution,
@@ -99,6 +102,9 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
     agent.verticalPack,
   );
   if (!dest || dest.id === agent.id) return null;
+  // Antes do anúncio: o handoff também recusa no teto, mas lá o contato já
+  // teria lido "vou te passar para X" sem ninguém assumir.
+  if (await aiHandoffCapReached(runArgs.conversationId)) return null;
 
   if (runArgs.conversationId && runArgs.contactId) {
     const announce = policy.announceAiTransfer;

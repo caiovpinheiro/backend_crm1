@@ -98,6 +98,32 @@ export function formatAiHandoffDestinations(names: string[]): string {
   return ` Destinos válidos: ${names.join(", ")}.`;
 }
 
+/// Quantas passagens entre agentes IA uma conversa aguenta antes de a
+/// troca virar sintoma, e não roteamento.
+export const MAX_AI_HANDOFFS_PER_CONVERSATION = 4;
+
+export const AI_HANDOFF_CAP_ERROR =
+  "Esta conversa já passou por agentes demais. Não transfira de novo: resolva com o que você tem ou encaminhe para um humano.";
+
+/**
+ * O teto de repetição do `ToolCallGovernor` é por run, então cada turno
+ * novo reabre o orçamento de transferências e dois agentes podem ficar se
+ * devolvendo a conversa indefinidamente. Aqui o escopo é a CONVERSA.
+ *
+ * A contagem sai dos runs já gravados (`HANDOFF_COMPLETED`), que é o
+ * mesmo rastro que a auditoria lê — sem tabela nova e sem contador em
+ * memória, que não sobrevive a worker reiniciado.
+ */
+export async function aiHandoffCapReached(
+  conversationId?: string | null,
+): Promise<boolean> {
+  if (!conversationId) return false;
+  const done = await prisma.aIAgentRun.count({
+    where: { conversationId, outcome: "HANDOFF_COMPLETED" },
+  });
+  return done >= MAX_AI_HANDOFFS_PER_CONVERSATION;
+}
+
 export function selfAiDestinationError(args: {
   wanted: string;
   selfName?: string | null;
@@ -575,6 +601,20 @@ export async function executeOrchestratedHandoff(
       distributionReason: null,
       fallback: null,
       error: "Atendimento por IA está desligado nesta organização.",
+    };
+  }
+  if (await aiHandoffCapReached(args.conversationId)) {
+    return {
+      target: "ai_agent",
+      assigned: false,
+      assignedTo: null,
+      assignedUserId: null,
+      assignedUserType: null,
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+      error: AI_HANDOFF_CAP_ERROR,
     };
   }
   {
