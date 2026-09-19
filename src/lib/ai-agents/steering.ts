@@ -68,6 +68,12 @@ export type ToolPolicy = {
   /// Permite procurar registros de terceiros (`scope: "organization"`).
   /// Falso = o agente só lê o cadastro de quem está na conversa.
   allowOrgWideSearch: boolean;
+  /// Campos que servem para IDENTIFICAR a pessoa quando ela informa o
+  /// número no chat, no formato "entidade.campo" (ex.: "deal.RGM"). O
+  /// casamento é exato — curinga não vale aqui. Identificar não implica
+  /// poder ler: a leitura continua governada por `readableFields`.
+  /// Vazio = o agente não pede nem aceita identificador.
+  identityKeys: string[];
   /// Jargão desta organização que deve acender o aviso de "campo sensível"
   /// na tela de configuração (ex.: o nome que ela dá ao número de
   /// matrícula, ao prontuário, ao contrato). Somado aos termos genéricos do
@@ -94,6 +100,7 @@ export function emptyToolPolicy(): ToolPolicy {
     transferMessage: null,
     readableFields: [],
     allowOrgWideSearch: false,
+    identityKeys: [],
     sensitiveTerms: [],
   };
 }
@@ -145,6 +152,7 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     transferMessage: nullableText(r.transferMessage),
     readableFields: strList(r.readableFields),
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
+    identityKeys: strList(r.identityKeys),
     sensitiveTerms: strList(r.sensitiveTerms),
   };
 }
@@ -167,6 +175,7 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     !p.transferMessage &&
     p.readableFields.length === 0 &&
     !p.allowOrgWideSearch &&
+    p.identityKeys.length === 0 &&
     p.sensitiveTerms.length === 0
   );
 }
