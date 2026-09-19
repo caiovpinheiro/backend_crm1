@@ -178,4 +178,11 @@ await build({
   outfile: path.resolve(projectRoot, "dist/workers/replay-agent-runs.js"),
 });
 
+// Dump de auditoria dos agentes (somente leitura), rodado no container.
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/dump-agent-audit.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/dump-agent-audit.js"),
+});
+
 console.log("[build-workers] ✓ workers compilados em dist/workers/");

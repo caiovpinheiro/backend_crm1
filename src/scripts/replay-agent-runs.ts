@@ -12,6 +12,9 @@
  *   node dist/workers/replay-agent-runs.js --org teste-dev --start Joseph
  *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
  *   node dist/workers/replay-agent-runs.js --lote 2 --limit 35 --out /tmp/replay-lote2.json
+ *   # --real-handoff: conversa sandbox com id real, tools de efeito rodam de
+ *   #   verdade (executeOrchestratedHandoff + assign) e os eventos gravados
+ *   #   entram no TurnRecord. A conversa é apagada no fim (--keep-sandbox mantém).
  *   # exit 1 se o QA achar ASK em pedido real, inbound fora de ordem, SKIP de regra, etc.
  *   # --qa-continue grava o relatório e não falha o processo
  *
@@ -74,6 +77,17 @@ type TurnRecord = {
     fromAgentId: string;
     toAgentId: string;
     by?: string;
+  } | null;
+  /**
+   * O que o handoff gravou no banco neste turno (`--real-handoff`): eventos
+   * de conversa e o dono resultante. É a diferença entre "a tool devolveu
+   * assigned:true" e "a atribuição aconteceu".
+   */
+  dbHandoff?: {
+    conversationId: string;
+    assignedToId: string | null;
+    assignedToName: string | null;
+    events: Array<{ content: string; createdAt: string }>;
   } | null;
 };
 
@@ -340,6 +354,96 @@ async function ensureReplayStudent(
   return { contactId: contact.id, seededRecord: true };
 }
 
+/** Marca do sandbox: usada para achar e para limpar o que o replay criou. */
+const SANDBOX_CHANNEL = "replay_sandbox";
+
+/**
+ * Conversa sandbox com id real, para `executeOrchestratedHandoff` e o
+ * assign rodarem de verdade. Sem conversationId o runner nunca chega na
+ * atribuição — o harness testava só o que a tool devolvia.
+ */
+async function ensureReplayConversation(args: {
+  organizationId: string;
+  contactId: string;
+  caseId: string;
+  assignedToId: string;
+}): Promise<string> {
+  const externalId = `replay-sandbox-${args.caseId}`;
+  const existing = await prismaBase.conversation.findFirst({
+    where: { organizationId: args.organizationId, externalId },
+    select: { id: true },
+  });
+  if (existing) {
+    await prismaBase.conversation.update({
+      where: { id: existing.id },
+      data: { assignedToId: args.assignedToId, status: "OPEN" },
+    });
+    return existing.id;
+  }
+  const max = await prismaBase.conversation.aggregate({
+    where: { organizationId: args.organizationId },
+    _max: { number: true },
+  });
+  const created = await prismaBase.conversation.create({
+    data: {
+      organizationId: args.organizationId,
+      number: (max._max.number ?? 0) + 1,
+      contactId: args.contactId,
+      channel: SANDBOX_CHANNEL,
+      externalId,
+      inboxName: "Replay (sandbox de teste)",
+      assignedToId: args.assignedToId,
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
+/** Eventos que o handoff gravou nesta conversa depois de `since`. */
+async function readHandoffEvents(
+  conversationId: string,
+  since: Date,
+): Promise<NonNullable<TurnRecord["dbHandoff"]>> {
+  const [conv, events] = await Promise.all([
+    prismaBase.conversation.findUnique({
+      where: { id: conversationId },
+      select: { assignedToId: true, assignedTo: { select: { name: true } } },
+    }),
+    prismaBase.message.findMany({
+      where: {
+        conversationId,
+        isPrivate: true,
+        createdAt: { gte: since },
+      },
+      select: { content: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+  return {
+    conversationId,
+    assignedToId: conv?.assignedToId ?? null,
+    assignedToName: conv?.assignedTo?.name ?? null,
+    events: events.map((e) => ({
+      content: e.content ?? "",
+      createdAt: e.createdAt.toISOString(),
+    })),
+  };
+}
+
+/** Remove o sandbox. Sem isto a org de teste acumula conversa a cada replay. */
+async function cleanupReplayConversations(
+  organizationId: string,
+  conversationIds: string[],
+): Promise<void> {
+  if (conversationIds.length === 0) return;
+  await prismaBase.message.deleteMany({
+    where: { conversationId: { in: conversationIds } },
+  });
+  await prismaBase.conversation.deleteMany({
+    where: { id: { in: conversationIds }, channel: SANDBOX_CHANNEL },
+  });
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL ausente");
@@ -358,6 +462,10 @@ async function main() {
   const limitRaw = arg("--limit");
   const outPath = arg("--out", "replay-agent-runs.out.json");
   const delayMs = Number(arg("--delay", "0")) || 0;
+  // Handoff de verdade: conversa sandbox com id real e tools sem simulação.
+  const realHandoff = process.argv.includes("--real-handoff");
+  const keepSandbox = process.argv.includes("--keep-sandbox");
+  const sandboxConversationIds: string[] = [];
 
   let cases = loadFixtures(fixturePath, lote);
   if (onlyCase) cases = cases.filter((c) => c.id === onlyCase);
@@ -439,6 +547,15 @@ async function main() {
         const history: HistoryTurn[] = [];
         let skipReason: string | null = null;
         const identity = await ensureReplayStudent(org.id, c);
+        const conversationId = realHandoff
+          ? await ensureReplayConversation({
+              organizationId: org.id,
+              contactId: identity.contactId,
+              caseId: c.id,
+              assignedToId: start.userId,
+            })
+          : null;
+        if (conversationId) sandboxConversationIds.push(conversationId);
         const cap = c.turns.length >= 10 ? " (teto 10)" : "";
         console.log("");
         console.log(
@@ -558,14 +675,21 @@ async function main() {
             continue;
           }
 
+          const turnStartedAt = new Date();
           const result = await runAgent({
             agentId: speaker.id,
-            source: "inbox_test",
+            // Com conversa sandbox as tools de efeito executam de verdade;
+            // sem ela, `inbox_test` simula (era o único modo do harness).
+            source: conversationId ? "inbox" : "inbox_test",
             userMessage: inbound,
             history,
             historyLimit: MAX_HISTORY,
             contactId: identity.contactId,
+            conversationId: conversationId ?? undefined,
           });
+          const dbHandoff = conversationId
+            ? await readHandoffEvents(conversationId, turnStartedAt)
+            : null;
 
           history.push({ role: "user", content: inbound });
           if (result.text?.trim()) {
@@ -611,6 +735,7 @@ async function main() {
                   by: result.routing.by,
                 }
               : null,
+            dbHandoff,
           });
           logTurn(records[records.length - 1]!);
 
@@ -620,8 +745,18 @@ async function main() {
     },
   );
 
+  if (realHandoff && !keepSandbox) {
+    await cleanupReplayConversations(org.id, sandboxConversationIds);
+    console.log(`sandbox limpo (${sandboxConversationIds.length} conversas)`);
+  } else if (realHandoff) {
+    console.log(
+      `sandbox preservado (--keep-sandbox): channel=${SANDBOX_CHANNEL}, ${sandboxConversationIds.length} conversas`,
+    );
+  }
+
   const report = {
     org: { id: org.id, slug: org.slug, name: org.name },
+    realHandoff,
     startedAs: { id: start.id, name: start.name },
     at: new Date().toISOString(),
     turns: records,
