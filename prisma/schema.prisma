@@ -6048,6 +6048,7 @@ model StudentAcademicRecord {
   createdAt      DateTime  @default(now()) @map("created_at")
 
   @@index([organizationId, cpf])
+  @@index([organizationId, rgm])
   @@index([organizationId, phone])
   @@index([organizationId, email])
   @@map("student_academic_records")

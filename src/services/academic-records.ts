@@ -223,21 +223,60 @@ function sortRecords<T extends { situacao: string | null; dataMatricula: Date | 
   });
 }
 
+/**
+ * RGM canônico para casamento: sem máscara e sem caixa. A coluna guarda o
+ * valor como veio da planilha (`mapRow` só apara espaço), então a
+ * comparação acontece do lado do Node — ver `lookupStudent`.
+ */
+export function canonicalRgm(v: unknown): string | null {
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return s || null;
+}
+
 export type StudentLookup = {
   phone?: string | null;
   email?: string | null;
   cpf?: string | null;
+  /// Informado pela pessoa no chat. Só é consultado quando o operador
+  /// declarou o RGM como identificador do agente.
+  rgm?: string | null;
 };
 
 /**
  * Busca registros acadêmicos por identidade do contato. Tenta, nesta ordem:
- * CPF -> telefone -> e-mail. Retorna TODAS as linhas do aluno (cursos/ciclos)
- * ordenadas por relevância. Vazio se não achar.
+ * RGM -> CPF -> telefone -> e-mail. Retorna TODAS as linhas do aluno
+ * (cursos/ciclos) ordenadas por relevância. Vazio se não achar.
+ *
+ * O RGM vem primeiro porque é o único que a pessoa digita de propósito para
+ * se identificar: se ela informou um, é esse registro que ela quer, mesmo
+ * que o telefone do contato aponte para outro.
  */
 export async function lookupStudent(
   organizationId: string,
   id: StudentLookup,
 ): Promise<Awaited<ReturnType<typeof prisma.studentAcademicRecord.findMany>>> {
+  const rgm = canonicalRgm(id.rgm);
+  if (rgm) {
+    // Duas grafias no `equals` (como digitado e sem máscara) porque a
+    // coluna guarda o texto cru da planilha e não há índice normalizado
+    // para comparar do lado do Postgres. Casamento EXATO: identificador
+    // parcial não pode abrir o registro de outra pessoa.
+    const candidates = await prisma.studentAcademicRecord.findMany({
+      where: {
+        organizationId,
+        OR: [
+          { rgm: { equals: id.rgm?.trim(), mode: "insensitive" } },
+          { rgm: { equals: rgm, mode: "insensitive" } },
+        ],
+      },
+    });
+    const byRgm = candidates.filter((r) => canonicalRgm(r.rgm) === rgm);
+    if (byRgm.length) return sortRecords(byRgm);
+  }
+
   const cpf = normalizeCpf(id.cpf);
   if (cpf) {
     const byCpf = await prisma.studentAcademicRecord.findMany({
