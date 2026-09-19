@@ -13,7 +13,10 @@ import {
   normalizeBusinessHours,
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
-import type { InboxPolicy } from "@/lib/ai-agents/steering";
+import {
+  DEFAULT_HUMAN_REQUEST_KEYWORDS,
+  type InboxPolicy,
+} from "@/lib/ai-agents/steering";
 
 export type HumanQueueContext = {
   businessHours?: BusinessHoursConfig | null;
@@ -442,9 +445,17 @@ export function buildAssignedConsultantNotice(
   );
 }
 
-const HUMAN_TOKENS =
-  "atendente|atendentes|humano|humana|consultor|consultora|fila|" +
-  "transferencia|atendimento humano";
+/**
+ * Vocabulário de recusa ("não quero atendente"). São os mesmos termos da
+ * configuração: a negação precisa reconhecer o que a keyword reconhece,
+ * senão quem diz que NÃO quer humano é distribuído por conter a palavra.
+ */
+function humanTokensPattern(ctx?: HumanQueueContext): string {
+  return humanRequestKeywords(ctx)
+    .map((k) => normalizeMsg(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .filter(Boolean)
+    .join("|");
+}
 
 /**
  * Recusa explícita de fila humana.
@@ -453,18 +464,38 @@ const HUMAN_TOKENS =
  * "não quero atendente" contém "atendente", e sem esta checagem quem dizia
  * exatamente que NÃO queria ser transferido era distribuído por isso.
  */
-function userRefusesHumanDistribution(n: string): boolean {
+function userRefusesHumanDistribution(
+  n: string,
+  ctx?: HumanQueueContext,
+): boolean {
   const verb =
     "quero|queria|desejo|preciso|precisa|precisava|gostaria|pedi|quis|" +
     "falar|conversar";
+  const tokens = humanTokensPattern(ctx);
   return (
-    new RegExp(
-      `\\b(?:nao|n)\\s+(?:${verb})\\b[^.!?]{0,30}?\\b(?:${HUMAN_TOKENS})\\b`,
-    ).test(n) ||
-    new RegExp(`\\b(?:sem|nem|nada de)\\s+(?:${HUMAN_TOKENS})\\b`).test(n) ||
+    (!!tokens &&
+      (new RegExp(
+        `\\b(?:nao|n)\\s+(?:${verb})\\b[^.!?]{0,30}?(?:${tokens})`,
+      ).test(n) ||
+        new RegExp(`\\b(?:sem|nem|nada de)\\s+(?:${tokens})`).test(n))) ||
     /\bnao\s+(?:me\s+)?(?:transfer\w*|encaminh\w*)/.test(n) ||
     /\bnao\s+quero\s+(?:ser|falar)\b/.test(n)
   );
+}
+
+/**
+ * Lista efetiva de termos de pedido de humano. Vem da configuração da org
+ * (`inboxPolicy.humanRequestKeywords`, default do pack incluído). A lista
+ * default do produto vive em `steering.ts`, junto do resto da config —
+ * não há mais vocabulário de intenção escrito neste serviço.
+ */
+function humanRequestKeywords(ctx?: HumanQueueContext): string[] {
+  // União: os termos da org somam com os do produto (era assim antes,
+  // quando os do produto eram regex fixo aqui).
+  return [
+    ...DEFAULT_HUMAN_REQUEST_KEYWORDS,
+    ...(ctx?.humanRequestKeywords ?? []),
+  ];
 }
 
 /** Pedido explícito de fila / humano / consultor / distribuição. */
@@ -474,31 +505,11 @@ export function userWantsHumanDistribution(
 ): boolean {
   const n = normalizeMsg(userMessage);
   if (!n) return false;
-  if (userRefusesHumanDistribution(n)) return false;
-  for (const extra of ctx?.humanRequestKeywords ?? []) {
-    const needle = normalizeMsg(extra);
-    if (needle && n.includes(needle)) return true;
-  }
-  if (
-    /\b(atendente|humano|consultor|consultora|atendimento humano)\b/.test(n)
-  ) {
-    return true;
-  }
-  if (
-    /falar com (alguem|atendente|humano|consultor)|quero (um )?atendente|passar (para|pro) (humano|atendente|consultor)/.test(
-      n,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(fila|aguardar (o )?consultor|espera(r)? (o )?consultor|distribu)/.test(
-      n,
-    )
-  ) {
-    return true;
-  }
-  return false;
+  if (userRefusesHumanDistribution(n, ctx)) return false;
+  return humanRequestKeywords(ctx).some((kw) => {
+    const needle = normalizeMsg(kw);
+    return !!needle && n.includes(needle);
+  });
 }
 
 /** contato pede para a IA continuar (após oferta de indisponibilidade). */

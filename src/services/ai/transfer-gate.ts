@@ -28,6 +28,13 @@ export type TransferGateInput = {
   /// Mensagens anteriores do cliente na conversa, da mais antiga para a mais nova.
   priorUserMessages?: string[];
   inboxPolicy?: InboxPolicy | null;
+  /**
+   * O modelo afirma que o contato pediu pessoa/equipe/atendente nesta
+   * conversa (parâmetro `userExplicitlyAsked` das tools de transferência).
+   * Vale por si só: a lista de keywords nunca cobre todas as formas de
+   * pedir ("me passa pra alguém", "tem gente aí?").
+   */
+  userExplicitlyAsked?: boolean;
 };
 
 export type TransferGateState = {
@@ -37,6 +44,8 @@ export type TransferGateState = {
   allows: boolean;
   /// O cliente pediu humano em algum momento da conversa.
   askedForHuman: boolean;
+  /// Como o pedido foi reconhecido. `null` = não houve pedido de humano.
+  matchedBy: "keyword" | "model_assertion" | null;
 };
 
 /**
@@ -81,13 +90,23 @@ export function evaluateTransferGate(
   const queueCtx = humanQueueContextFromAgent({
     inboxPolicy: input.inboxPolicy ?? null,
   });
-  const askedForHuman = [
+  const matchedByKeyword = [
     ...(input.priorUserMessages ?? []).slice(-TRANSFER_GATE_HISTORY_DEPTH),
     current,
   ].some((msg) => !!msg?.trim() && userWantsHumanDistribution(msg, queueCtx));
 
+  // Afirmação do modelo tem o mesmo peso da keyword: o gate existe para
+  // impedir transferência que ninguém pediu, não para exigir que o
+  // contato use as palavras que a lista conhece.
+  const askedForHuman = matchedByKeyword || input.userExplicitlyAsked === true;
+  const matchedBy: TransferGateState["matchedBy"] = matchedByKeyword
+    ? "keyword"
+    : input.userExplicitlyAsked === true
+      ? "model_assertion"
+      : null;
+
   if (policyOf(input) === "always") {
-    return { active: false, allows: true, askedForHuman };
+    return { active: false, allows: true, askedForHuman, matchedBy };
   }
 
   const topicJustifies = packTopicJustifies(input.verticalPack);
@@ -99,6 +118,7 @@ export function evaluateTransferGate(
       askedForHuman ||
       Boolean(topicJustifies?.(current, input.inboxPolicy ?? null)),
     askedForHuman,
+    matchedBy,
   };
 }
 

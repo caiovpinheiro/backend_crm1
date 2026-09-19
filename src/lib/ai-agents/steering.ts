@@ -552,6 +552,32 @@ export const HUMAN_ATTENDANCE_LABELS = {
   },
 } as const;
 
+/**
+ * Termos default de pedido de atendente humano.
+ *
+ * Moram aqui, na camada de configuração, e não no serviço que avalia o
+ * gate: são o valor inicial de `inboxPolicy.humanRequestKeywords`, que a
+ * org edita na tela. O gate soma os dois (produto + org).
+ *
+ * Keyword nunca é a única saída: o modelo também pode afirmar o pedido
+ * via `userExplicitlyAsked` nas tools de transferência.
+ */
+export const DEFAULT_HUMAN_REQUEST_KEYWORDS = [
+  "atendente",
+  "atendentes",
+  "humano",
+  "humana",
+  "consultor",
+  "consultora",
+  "atendimento humano",
+  "falar com alguem",
+  "falar com alguém",
+  "fila",
+  "transferencia",
+  "transferência",
+  "distribu",
+] as const satisfies readonly string[];
+
 export type InboxPolicy = {
   /// Abaixo disso o backend distribui para humano. `null` = usa o
   /// default do código (0.4).

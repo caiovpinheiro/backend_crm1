@@ -42,6 +42,10 @@ export type OrchestratedHandoffArgs = {
   toolPolicy?: ToolPolicy | null;
   ops?: VerticalPackOps | null;
   handoffBy?: "orchestrator_code" | "tool";
+  /** Resultado do gate de fila humana (null para destino ai_agent). */
+  gateDecision?: "allowed" | null;
+  /** Como o pedido de humano foi reconhecido — auditoria do gate. */
+  gateMatchedBy?: "keyword" | "model_assertion" | null;
 };
 
 export type OrchestratedHandoffResult = {
@@ -406,6 +410,20 @@ export async function executeOrchestratedHandoff(
   const name = args.name.trim();
   const reason = args.reason?.trim() || "Handoff via agente IA";
   const tool = args.toolPolicy;
+
+  // Auditoria do gate de fila humana: registra se a transferência passou
+  // por keyword da config ou pela afirmação do modelo. Sem isso não dá
+  // para revisar depois o que o modelo alegou.
+  if (args.dealId && args.gateDecision) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transfer_gate",
+      target: args.target,
+      name,
+      reason,
+      gateDecision: args.gateDecision,
+      matchedBy: args.gateMatchedBy ?? null,
+    }).catch(() => {});
+  }
 
   if (args.target === "department") {
     if (tool) {

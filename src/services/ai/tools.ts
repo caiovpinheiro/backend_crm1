@@ -188,6 +188,32 @@ function transferAllowed(ctx: RunContext): boolean {
   }).allows;
 }
 
+export const USER_EXPLICITLY_ASKED_DESCRIPTION =
+  "true SOMENTE se o contato pediu, nesta conversa, para falar com uma " +
+  "pessoa/equipe/atendente — com qualquer palavra ('me passa pra alguém', " +
+  "'quero uma pessoa de verdade', 'tem gente aí?'). false se você está " +
+  "transferindo por decisão sua. Não invente: isto libera a transferência.";
+
+/**
+ * Gate de fila humana + de onde veio a decisão, para o evento de
+ * auditoria. A keyword continua valendo; a afirmação do modelo passa a
+ * valer também, porque lista de termos nunca cobre todas as formas de
+ * pedir atendimento humano.
+ */
+function evaluateHumanTransferGate(
+  ctx: RunContext,
+  userExplicitlyAsked?: boolean,
+): { allowed: boolean; matchedBy: "keyword" | "model_assertion" | null } {
+  const state = evaluateTransferGate({
+    verticalPack: ctx.verticalPack,
+    userMessage: ctx.userMessage,
+    priorUserMessages: ctx.priorUserMessages,
+    inboxPolicy: ctx.inboxPolicy,
+    userExplicitlyAsked,
+  });
+  return { allowed: state.allows, matchedBy: state.matchedBy };
+}
+
 function coordinatorIdleHandoffError(ctx: RunContext): string | null {
   if (ctx.archetype !== "COORDENADOR") return null;
   if (!isIdleOrchestrationMessage(ctx.userMessage)) return null;
@@ -1215,11 +1241,16 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
         .describe(
           "Nome do departamento de destino (opcional).",
         ),
+      userExplicitlyAsked: z
+        .boolean()
+        .optional()
+        .describe(USER_EXPLICITLY_ASKED_DESCRIPTION),
     }),
-    execute: async ({ reason, departmentName }) => {
+    execute: async ({ reason, departmentName, userExplicitlyAsked }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        if (!transferAllowed(ctx)) {
+        const gateState = evaluateHumanTransferGate(ctx, userExplicitlyAsked);
+        if (!gateState.allowed) {
           return policyDeniedHumanTransfer();
         }
         const gate = departmentGate(policy, departmentName);
@@ -1280,6 +1311,10 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
             departmentId: result.departmentId,
             departmentName: result.departmentName,
             selectedUserId: result.distribution?.selectedUserId ?? null,
+            // Auditoria do gate: o pedido de humano foi reconhecido por
+            // keyword da config ou pela afirmação do modelo?
+            gateDecision: "allowed",
+            matchedBy: gateState.matchedBy,
           }).catch(() => {});
         }
         const queuedWaiting =
@@ -2040,8 +2075,14 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
         .string()
         .optional()
         .describe("Motivo curto, para o próximo atendente ler."),
+      userExplicitlyAsked: z
+        .boolean()
+        .optional()
+        .describe(
+          `${USER_EXPLICITLY_ASKED_DESCRIPTION} Só é lido quando target é department ou user.`,
+        ),
     }),
-    execute: async ({ target, name, reason }) => {
+    execute: async ({ target, name, reason, userExplicitlyAsked }) => {
       try {
         if (target === "ai_agent") {
           const selfErr = selfAiDestinationError({
@@ -2052,13 +2093,18 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
           if (selfErr) return fail(selfErr, { reason: "self_transfer" });
         }
         if (!ctx.conversationId) return fail("Sem conversa ativa para transferir.");
+        let gateMatchedBy: "keyword" | "model_assertion" | null = null;
         if (target === "ai_agent") {
           const idle = coordinatorIdleHandoffError(ctx);
           if (idle) return fail(idle);
-        } else if (!transferAllowed(ctx)) {
-          return policyDeniedHumanTransfer();
+        } else {
+          const gateState = evaluateHumanTransferGate(ctx, userExplicitlyAsked);
+          if (!gateState.allowed) return policyDeniedHumanTransfer();
+          gateMatchedBy = gateState.matchedBy;
         }
         const result = await executeOrchestratedHandoff({
+          gateDecision: target === "ai_agent" ? null : "allowed",
+          gateMatchedBy,
           conversationId: ctx.conversationId,
           contactId: ctx.contactId ?? null,
           dealId: ctx.dealId,
