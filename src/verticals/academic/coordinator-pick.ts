@@ -48,21 +48,32 @@ export function pickAcademicCoordinatorPeer(
   }
   if (!topic) return null;
 
+  // Só `routingScope`. O casamento por NOME do agente saiu daqui: "Agente
+  // Acolhimento" virar "Time Boas-vindas" mudava o roteamento em silêncio,
+  // e o nome também não diz nada sobre o assunto em org que não usa essa
+  // nomenclatura. Sem escopo configurado não há sugestão — o coordenador
+  // decide pelo LLM, com a descrição de cada agente no prompt.
   const byScope = (re: RegExp) =>
     usable.find((p) => re.test(fold(p.routingScope ?? ""))) ?? null;
-  const byName = (re: RegExp) =>
-    usable.find((p) => re.test(fold(p.name))) ?? null;
 
-  const onboarding =
-    byScope(/onboard|primeiro.?acesso|boas.?vind|portal|senha/) ??
-    byName(/acolh|primeiro.?acesso|onboard|boas.?vind/);
-  const retention =
-    byScope(/churn|cancel|tranc/) ?? byName(/reten|churn/);
-  const general =
-    byScope(/suporte|horario|contrato|financeiro/) ??
-    byName(/atendiment|\bsac\b|suporte/);
+  if (!usable.some((p) => p.routingScope?.trim())) {
+    console.warn(
+      "[ai]",
+      JSON.stringify({
+        event: "routing_scope_missing",
+        pack: "academic",
+        topic,
+        peers: usable.map((p) => p.id),
+      }),
+    );
+    return null;
+  }
 
-  if (topic === "retention") return retention ?? general ?? usable[0];
-  if (topic === "onboarding") return onboarding ?? general ?? usable[0];
-  return general ?? usable[0];
+  const onboarding = byScope(/onboard|primeiro.?acesso|boas.?vind|portal|senha/);
+  const retention = byScope(/churn|cancel|tranc/);
+  const general = byScope(/suporte|horario|contrato|financeiro/);
+
+  if (topic === "retention") return retention ?? general;
+  if (topic === "onboarding") return onboarding ?? general;
+  return general;
 }
