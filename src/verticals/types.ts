@@ -4,6 +4,7 @@
  */
 
 import type { TabulateOnExitMode, ToolPolicy } from "@/lib/ai-agents/steering";
+import type { RecordSource } from "@/services/ai/record-sources";
 import type { RunContext } from "@/services/ai/tools";
 
 /**
@@ -116,6 +117,17 @@ export type VerticalPack = {
     defaultForArchetypes: string[];
     factory: VerticalToolFactory;
   }>;
+  /**
+   * Tabelas do vertical que a consulta genérica do motor passa a enxergar
+   * como entidade pesquisável, no mesmo pé de contato/negócio/catálogo.
+   *
+   * É a alternativa correta a uma tool de negócio: o dado do relatório
+   * acadêmico, do ERP legado ou do sistema de pedidos entra como FONTE, e o
+   * operador decide na tela quais campos dela são chave, pesquisa e
+   * leitura. O núcleo não conhece nenhuma pelo nome — só chama
+   * `forContact` / `findByFieldValue` / `searchByTerm`.
+   */
+  recordSources?: RecordSource[];
   /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
   inboxPolicyDefaults?: {
     interceptRetention?: boolean;
@@ -139,8 +151,6 @@ export type VerticalPack = {
     atendimentoRules: string;
     confidenceRules: string;
     curriculumTceRules: string;
-    /** Limite de alcance da tool de matrícula. Só entra se a tool está no turno. */
-    enrollmentScopeRules: string;
     mediaCapabilityRules: string;
     systemPromptOverride: string;
   };

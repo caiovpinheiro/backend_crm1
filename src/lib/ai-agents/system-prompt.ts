@@ -198,7 +198,6 @@ export type RenderArgs = {
   /// não entra — agentes com steering próprio continuariam ignorando.
   archetype?: string | null;
   hasProductSearch: boolean;
-  hasEnrollmentLookup: boolean;
   /// `search_crm_records` habilitada. A orientação de uso fica na
   /// description da tool; aqui só entra o empurrão para chamá-la.
   hasCrmFieldSearch: boolean;
@@ -341,13 +340,6 @@ export function renderSystemPrompt(args: RenderArgs): string {
     if (args.specialistPeerBlock?.trim()) {
       lines.push(args.specialistPeerBlock.trim());
     }
-  }
-
-  if (args.hasEnrollmentLookup) {
-    lines.push("");
-    lines.push(
-      "Lembrete: chame a tool de consulta ao cadastro cedo no atendimento para personalizar a resposta.",
-    );
   }
 
   // Sem este empurrão a tool de cadastro ficava inerte: com a consulta

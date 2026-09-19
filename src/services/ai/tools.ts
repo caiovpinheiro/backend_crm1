@@ -44,7 +44,6 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import {
@@ -77,16 +76,7 @@ import {
   buildQueuedWaitingHint,
   humanQueueContextFromAgent,
 } from "@/services/ai/human-queue-policy";
-import { academicLookupForModel } from "@/services/ai/sensitive-fields";
 import {
-  ACADEMIC_LOOKUP_GUIDANCE,
-  describeAcademicExposure,
-  describeAcademicIdentity,
-  normalizeAcademicIdentityKeys,
-  type AcademicIdentityKey,
-} from "@/services/ai/academic-record-policy";
-import {
-  CRM_RECORD_SOURCES,
   CRM_SEARCH_GUIDANCE,
   describeCrmExposure,
   describeCrmIdentity,
@@ -102,6 +92,11 @@ import {
   type CrmFieldValue,
   type CrmSearchEntity,
 } from "@/services/ai/crm-field-policy";
+import {
+  findRecordSource,
+  listRecordSources,
+  type RecordSource,
+} from "@/services/ai/record-sources";
 import {
   loadConversationIdentity,
   rememberConversationIdentity,
@@ -149,6 +144,11 @@ export type RunContext = {
   tabulationAppliedThisRun?: boolean;
   /// Nomes dos outros agentes IA da org (sem o atual). Destinos da tool.
   peerAiAgentNames?: string[];
+  /// Rótulo do tenant por chave de campo ("deal.rgm" → "RGM"), pré-carregado
+  /// pelo runner. A description da tool é montada de forma síncrona, e é
+  /// pelo RÓTULO que o modelo reconhece o que a pessoa escreveu — sem isto
+  /// ele veria só a chave técnica. Ausente = a description usa a chave.
+  crmFieldLabels?: Record<string, string>;
 };
 
 function packOps(ctx: RunContext): Record<string, any> {
@@ -157,6 +157,15 @@ function packOps(ctx: RunContext): Record<string, any> {
 
 function packToolCopy(ctx: RunContext) {
   return getVerticalPack(ctx.verticalPack)?.toolCopy;
+}
+
+/**
+ * Fontes consultáveis deste agente: as do CRM mais as que o pack do tenant
+ * registrou. É por aqui que uma tabela de produto vira entidade pesquisável
+ * sem o núcleo saber o que ela guarda.
+ */
+export function recordSourcesForCtx(ctx: RunContext): RecordSource[] {
+  return listRecordSources(getVerticalPack(ctx.verticalPack)?.recordSources);
 }
 
 /** Horário/cópia da fila humana configurados no agente (Fase 3). */
@@ -850,7 +859,7 @@ function searchProductsTool(_ctx: RunContext) {
  * Busca ampla, leitura estreita.
  *
  * A varredura passa por TODOS os campos (fixos e personalizados) — é assim
- * que o aluno que digita o próprio CPF acha o próprio cadastro. O que sai
+ * que quem digita o próprio documento acha o próprio cadastro. O que sai
  * para o modelo é só o que o operador liberou em
  * `toolConfig.search_crm_records.readableFields`; o resto vira rótulo em
  * `hiddenFields`, sem valor. Ver `crm-field-policy.ts` para o porquê.
@@ -917,108 +926,54 @@ function linkedIdentityAmbiguity(args: {
 }
 
 /**
- * Localiza o registro por um campo declarado como identificador.
+ * Localiza registros por um campo declarado como identificador.
  *
  * O filtro do banco é por igualdade (valor como veio e sem formatação),
  * e o casamento final passa por `identityValueMatches`. Nunca `contains`:
  * um identificador que seja trecho de outro traria a pessoa errada, e o
  * agente passaria a afirmar coisas sobre o cadastro de terceiro.
+ *
+ * Quem executa a consulta é a FONTE (`RecordSource`). O motor não sabe em
+ * qual tabela o campo mora — sabe que a fonte que declarou o campo sabe
+ * procurá-lo.
  */
-async function findRecordByIdentity(args: {
+async function findRecordsByIdentity(args: {
+  source: RecordSource;
   field: CrmFieldDescriptor;
   informed: string;
   catalog: CrmFieldDescriptor[];
-}): Promise<{
-  entity: CrmSearchEntity;
-  recordId: string;
-  ref: string;
-  values: CrmFieldValue[];
-} | null> {
-  const { field, informed, catalog } = args;
+  organizationId: string;
+  contact: { id: string; phone?: string | null; email?: string | null } | null;
+}): Promise<
+  Array<{ recordId: string; ref: string; values: CrmFieldValue[] }>
+> {
+  const { source, field, informed, catalog } = args;
   const normalized = normalizeIdentityValue(informed);
-  if (!normalized) return null;
-  const candidates = [informed.trim(), normalized].filter(Boolean);
+  if (!normalized) return [];
+  const candidates = [...new Set([informed.trim(), normalized])].filter(Boolean);
 
-  const where =
-    field.source === "custom"
-      ? {
-          customFields: {
-            some: {
-              customField: { name: field.name },
-              value: { in: candidates, mode: "insensitive" as const },
-            },
-          },
-        }
-      : { [field.name]: { in: candidates, mode: "insensitive" as const } };
+  const rows = await source.findByFieldValue({
+    organizationId: args.organizationId,
+    contact: args.contact,
+    take: 5,
+    field: { name: field.name, source: field.source },
+    candidates,
+  });
 
-  const storedValue = (values: CrmFieldValue[]): string =>
-    values.find((v) => v.field.key === field.key)?.value ?? "";
-
-  if (field.entity === "deal") {
-    const rows = await prisma.deal.findMany({
-      where,
-      take: 5,
-      orderBy: [{ updatedAt: "desc" }],
-      include: {
-        stage: { select: { name: true } },
-        customFields: { include: { customField: { select: { name: true } } } },
-      },
-    });
-    for (const d of rows) {
-      const values = crmValuesFromRecord(
-        catalog,
-        "deal",
-        { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
-        d.customFields.map((r) => ({
-          name: r.customField.name,
-          value: r.value,
-        })),
-      );
-      if (identityValueMatches(storedValue(values), informed)) {
-        return {
-          entity: "deal",
-          recordId: d.id,
-          ref: `negócio #${d.number}`,
-          values,
-        };
-      }
-    }
-    return null;
+  const out: Array<{ recordId: string; ref: string; values: CrmFieldValue[] }> =
+    [];
+  for (const row of rows) {
+    const values = crmValuesFromRecord(
+      catalog,
+      source.entity,
+      row.builtin,
+      row.custom,
+    );
+    const stored = values.find((v) => v.field.key === field.key)?.value ?? "";
+    if (!identityValueMatches(stored, informed)) continue;
+    out.push({ recordId: row.id, ref: row.ref, values });
   }
-
-  if (field.entity === "contact") {
-    const rows = await prisma.contact.findMany({
-      where,
-      take: 5,
-      include: {
-        customFields: { include: { customField: { select: { name: true } } } },
-      },
-    });
-    for (const c of rows) {
-      const values = crmValuesFromRecord(
-        catalog,
-        "contact",
-        c as unknown as Record<string, unknown>,
-        c.customFields.map((r) => ({
-          name: r.customField.name,
-          value: r.value,
-        })),
-      );
-      if (identityValueMatches(storedValue(values), informed)) {
-        return {
-          entity: "contact",
-          recordId: c.id,
-          ref: `contato #${c.number}`,
-          values,
-        };
-      }
-    }
-    return null;
-  }
-
-  // Empresa e catálogo não identificam pessoa: não faz sentido alguém
-  // provar quem é informando o dado de um terceiro.
-  return null;
+  return out;
 }
 
 function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
@@ -1026,6 +981,13 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
     readableKeys: policy.readableFields,
     orgWide: policy.allowOrgWideSearch,
   };
+  // Quais entidades existem para ESTE agente. Sai do registro de fontes
+  // (núcleo + pack do tenant), nunca de uma lista fixa aqui.
+  const sources = recordSourcesForCtx(ctx);
+  const entityIds = sources.map((s) => s.entity);
+  const entityMenu = sources
+    .map((s) => `${s.entity} (${s.label})`)
+    .join(", ");
   // Campos que ESTA organização declarou como identificadores. Vazio = a
   // ferramenta mantém o schema de antes, sem o argumento.
   const identityKeys = policy.identityKeys;
@@ -1039,28 +1001,31 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
             })
             .optional()
             .describe(
-              "Número que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado. O casamento é exato.",
+              "Dado que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado. O casamento é exato.",
             ),
         }
       : {};
   return tool({
-    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(
+    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados das entidades configuradas nesta organização. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(
       exposure,
-    )}\n\n${describeCrmIdentity(identityKeys)}\n\n${describeLinkedIdentity(
-      policy.linkedIdentityKeys,
-    )}`,
+    )}\n\n${describeCrmIdentity(
+      identityKeys.map((key) => ({
+        key,
+        label: ctx.crmFieldLabels?.[key.toLowerCase()] ?? key,
+      })),
+    )}\n\n${describeLinkedIdentity(policy.linkedIdentityKeys)}`,
     inputSchema: z.object({
       query: z
         .string()
         .min(1)
         .describe(
-          "Termo livre: as palavras da pergunta ('documento pendente', 'curso') ou o dado que a pessoa informou (CPF, RGM, e-mail). Tolera acento e maiúscula.",
+          "Termo livre: as palavras da pergunta da pessoa ou o dado que ela informou. Tolera acento e maiúscula.",
         ),
       entity: z
-        .enum(["contact", "company", "deal", "product", "any"])
+        .enum([...entityIds, "any"] as unknown as [string, ...string[]])
         .optional()
         .describe(
-          "Onde procurar. 'deal' é o negócio/matrícula da pessoa, 'contact' o cadastro dela. Omita para procurar em tudo.",
+          `Onde procurar: ${entityMenu}. Omita para procurar em tudo.`,
         ),
       scope: z
         .enum(["current_contact", "organization"])
@@ -1083,15 +1048,13 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         identificador?: { campo: string; valor: string };
       };
       try {
-        const orgId = getOrgIdOrNull();
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
         const term = query.trim();
         if (!term) return fail("Busca vazia.");
         const take = Math.min(Math.max(limit ?? 5, 1), 5);
         const wanted: CrmSearchEntity[] =
-          !entity || entity === "any"
-            ? [...CRM_RECORD_SOURCES]
-            : [entity as CrmSearchEntity];
+          !entity || entity === "any" ? entityIds : [entity as CrmSearchEntity];
 
         const orgWide = scope === "organization";
         if (orgWide && !exposure.orgWide) {
@@ -1105,6 +1068,7 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
 
         const { fields: catalog } = await loadCrmFieldCatalog({
           sensitiveTerms: policy.sensitiveTerms,
+          sources,
         });
         const records: CrmRecordPayload[] = [];
 
@@ -1112,12 +1076,13 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
           recordEntity: CrmSearchEntity,
           ref: string,
           values: CrmFieldValue[],
+          opts?: { requireMatch?: boolean },
         ) => {
           const { matched, matchedLabels } = matchFieldValues(values, term);
           // No escopo do próprio contato o cadastro é devolvido mesmo sem
           // casar o termo: a pergunta pode ser vaga ("e a minha situação?")
           // e o registro certo é um só. Em busca ampla, sem match não entra.
-          if (orgWide && !matched) return;
+          if (opts?.requireMatch && !matched) return;
           const { visible, hiddenLabels } = partitionFieldValues(
             values,
             exposure,
@@ -1131,127 +1096,159 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
           });
         };
 
-        const customOf = (
-          rows: Array<{ value: string; customField: { name: string } }>,
-        ) => rows.map((r) => ({ name: r.customField.name, value: r.value }));
+        const contact = ctx.contactId
+          ? await prisma.contact.findUnique({
+              where: { id: ctx.contactId },
+              select: { id: true, phone: true, email: true },
+            })
+          : null;
+        if (!orgWide && !contact) return fail("Contato não encontrado.");
+        const baseQuery = { organizationId: orgId, contact, take };
 
         // Identificação vem ANTES da busca por assunto: a pessoa informou o
-        // número dela, então o registro certo é um só e não depende de o
-        // termo casar com algum campo. Não passa pelo portão de busca ampla
-        // de propósito — achar o próprio cadastro por um identificador que
-        // só o dono sabe é justamente para isso que o campo foi declarado.
-        // Sem chave declarada o schema nem expõe o argumento; ignorar aqui
-        // também evita que uma chamada forjada vire erro de ferramenta.
+        // dado dela, então o registro certo não depende de o termo casar com
+        // algum campo. Não passa pelo portão de busca ampla de propósito —
+        // achar o próprio cadastro por um identificador que só o dono sabe é
+        // justamente para isso que o campo foi declarado. Sem chave
+        // declarada o schema nem expõe o argumento; ignorar aqui também
+        // evita que uma chamada forjada vire erro de ferramenta.
         if (identificador && identityKeys.length > 0) {
-          const field = resolveIdentityFields(catalog, identityKeys).find(
-            (f) => f.key === identificador.campo,
+          const personEntities = new Set(
+            sources.filter((s) => s.identifiesPerson).map((s) => s.entity),
           );
-          if (!field) {
+          const field = resolveIdentityFields(
+            catalog,
+            identityKeys,
+            personEntities,
+          ).find((f) => f.key === identificador.campo);
+          const source = field
+            ? findRecordSource(sources, field.entity)
+            : null;
+          if (!field || !source) {
             return fail(
               `"${identificador.campo}" não está configurado como identificador neste agente.`,
             );
           }
-          const found = await findRecordByIdentity({
+          const found = await findRecordsByIdentity({
+            source,
             field,
             informed: identificador.valor,
             catalog,
+            organizationId: orgId,
+            contact,
           });
-          if (!found) {
+          if (found.length === 0) {
             return ok({
               records: [],
+              total: 0,
               identifiedBy: field.label,
-              hint: "Nenhum registro com esse identificador. Confirme o número com a pessoa ou encaminhe para um consultor — não afirme que ela não tem cadastro.",
+              hint: "Nenhum registro com esse identificador. Confirme o dado com a pessoa ou encaminhe para um consultor — não afirme que ela não tem cadastro.",
             });
           }
-          // A pessoa digitou o número: é a fonte mais forte que existe e
-          // sobrescreve palpite anterior. Fica na conversa para o próximo
-          // agente não perguntar de novo.
-          await rememberConversationIdentity({
-            conversationId: ctx.conversationId,
-            entity: found.entity,
-            recordId: found.recordId,
-            ref: found.ref,
-            by: field.label,
-            overwrite: true,
+          // Um registro só: a pessoa digitou o dado, é a fonte mais forte
+          // que existe e sobrescreve palpite anterior. Fica na conversa para
+          // o próximo agente não perguntar de novo. Com vários registros não
+          // há o que fixar — o identificador não distinguiu qual é qual.
+          if (found.length === 1) {
+            await rememberConversationIdentity({
+              conversationId: ctx.conversationId,
+              entity: source.entity,
+              recordId: found[0].recordId,
+              ref: found[0].ref,
+              by: field.label,
+              overwrite: true,
+            });
+          }
+          for (const r of found) push(source.entity, r.ref, r.values);
+          return ok({
+            records,
+            total: records.length,
+            identifiedBy: field.label,
+            ...(found.length > 1
+              ? {
+                  hint: `Este ${field.label} tem ${found.length} registros. Diga que são ${found.length}, use os campos de cada um em \`records\` e pergunte sobre qual a pessoa quer falar antes de responder o resto. NÃO misture os dados dos dois.`,
+                }
+              : {}),
           });
-          push(found.entity, found.ref, found.values);
-          return ok({ records, identifiedBy: field.label });
         }
 
-        if (!orgWide) {
-          const contact = await prisma.contact.findUnique({
-            where: { id: ctx.contactId as string },
-            include: {
-              company: true,
-              customFields: {
-                include: { customField: { select: { name: true } } },
-              },
-            },
-          });
-          if (!contact) return fail("Contato não encontrado.");
+        // A conversa já sabe de quem é. Vale para qualquer agente que pegue
+        // a conversa depois — inclusive o que não participou da
+        // identificação. Sem isto, a transferência reabria a pergunta.
+        const pinned = orgWide
+          ? null
+          : await loadConversationIdentity(ctx.conversationId);
 
-          if (wanted.includes("contact")) {
-            push(
-              "contact",
-              `contato #${contact.number}`,
-              crmValuesFromRecord(
-                catalog,
-                "contact",
-                contact as unknown as Record<string, unknown>,
-                customOf(contact.customFields),
-              ),
-            );
-          }
+        for (const entityId of wanted) {
+          const source = findRecordSource(sources, entityId);
+          // Entidade que só existe porque a organização criou campo
+          // personalizado nela: não há registro para percorrer.
+          if (!source) continue;
 
-          if (wanted.includes("company") && contact.company) {
-            push(
-              "company",
-              `empresa #${contact.company.number}`,
-              crmValuesFromRecord(
-                catalog,
-                "company",
-                contact.company as unknown as Record<string, unknown>,
-                [],
-              ),
-            );
-          }
-
-          if (wanted.includes("deal")) {
-            const all = await prisma.deal.findMany({
-              where: { contactId: contact.id },
-              orderBy: [{ updatedAt: "desc" }],
-              take,
-              include: {
-                stage: { select: { name: true } },
-                customFields: {
-                  include: { customField: { select: { name: true } } },
-                },
-              },
+          // Catálogo é a mesma lista para todo mundo — não é dado de
+          // pessoa, então a busca é sempre ampla e sempre exige casar o
+          // termo, independente do escopo pedido.
+          if (source.sharedCatalog) {
+            const rows = await source.searchByTerm({
+              ...baseQuery,
+              contact: null,
+              term,
             });
-            // A conversa já sabe de quem é. Vale para qualquer agente que
-            // pegue a conversa depois — inclusive o que não participou da
-            // identificação. Sem isto, a transferência reabria a pergunta.
-            const pinned = await loadConversationIdentity(ctx.conversationId);
-            const deals =
-              pinned?.entity === "deal" &&
-              all.some((d) => d.id === pinned.recordId)
-                ? all.filter((d) => d.id === pinned.recordId)
-                : all;
-            // Mais de um registro no mesmo telefone: juntar tudo faria o
-            // agente misturar dois contratos da mesma pessoa (ou de duas)
+            for (const row of rows) {
+              push(
+                entityId,
+                row.ref,
+                crmValuesFromRecord(catalog, entityId, row.builtin, row.custom),
+                { requireMatch: true },
+              );
+            }
+            continue;
+          }
+
+          if (orgWide) {
+            const rows = await source.searchByTerm({
+              ...baseQuery,
+              contact: null,
+              term,
+            });
+            for (const row of rows) {
+              push(
+                entityId,
+                row.ref,
+                crmValuesFromRecord(catalog, entityId, row.builtin, row.custom),
+                { requireMatch: true },
+              );
+            }
+            continue;
+          }
+
+          const rows = await source.forContact(baseQuery);
+          if (rows.length === 0) continue;
+          let valued = rows.map((row) => ({
+            row,
+            values: crmValuesFromRecord(
+              catalog,
+              entityId,
+              row.builtin,
+              row.custom,
+            ),
+          }));
+
+          if (source.multiplePerContact) {
+            if (
+              pinned?.entity === entityId &&
+              valued.some((v) => v.row.id === pinned.recordId)
+            ) {
+              valued = valued.filter((v) => v.row.id === pinned.recordId);
+            }
+            // Mais de um registro no mesmo contato: juntar tudo faria o
+            // agente misturar dois registros da mesma pessoa (ou de duas)
             // numa resposta só. Com campo-chave declarado ele pergunta por
             // qual, em vez de escolher sozinho.
             const ambiguity = linkedIdentityAmbiguity({
               catalog,
               linkedKeys: policy.linkedIdentityKeys,
-              records: deals.map((d) =>
-                crmValuesFromRecord(
-                  catalog,
-                  "deal",
-                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
-                  customOf(d.customFields),
-                ),
-              ),
+              records: valued.map((v) => v.values),
             });
             if (ambiguity) {
               return ok({
@@ -1261,173 +1258,22 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
                 hint: `Há mais de um registro neste contato. Peça à pessoa que informe o ${ambiguity.label} e chame esta ferramenta de novo com \`identificador\`. NÃO escolha um registro por conta própria e não misture os dados dos dois.`,
               });
             }
-            // Um negócio só e nenhuma dúvida: o telefone já identificou a
+            // Um registro só e nenhuma dúvida: o telefone já identificou a
             // pessoa. Registrar isso poupa o próximo agente de refazer a
             // consulta e, principalmente, de perguntar.
-            if (deals.length === 1) {
+            if (valued.length === 1) {
               await rememberConversationIdentity({
                 conversationId: ctx.conversationId,
-                entity: "deal",
-                recordId: deals[0].id,
-                ref: `negócio #${deals[0].number}`,
+                entity: entityId,
+                recordId: valued[0].row.id,
+                ref: valued[0].row.ref,
                 by: null,
                 overwrite: false,
               });
             }
-            for (const d of deals) {
-              push(
-                "deal",
-                `negócio #${d.number}`,
-                crmValuesFromRecord(
-                  catalog,
-                  "deal",
-                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
-                  customOf(d.customFields),
-                ),
-              );
-            }
-          }
-        } else {
-          if (wanted.includes("contact")) {
-            const contacts = await prisma.contact.findMany({
-              where: {
-                OR: [
-                  { name: { contains: term, mode: "insensitive" } },
-                  { email: { contains: term, mode: "insensitive" } },
-                  { phone: { contains: term } },
-                  {
-                    customFields: {
-                      some: { value: { contains: term, mode: "insensitive" } },
-                    },
-                  },
-                ],
-              },
-              take,
-              include: {
-                customFields: {
-                  include: { customField: { select: { name: true } } },
-                },
-              },
-            });
-            for (const c of contacts) {
-              push(
-                "contact",
-                `contato #${c.number}`,
-                crmValuesFromRecord(
-                  catalog,
-                  "contact",
-                  c as unknown as Record<string, unknown>,
-                  customOf(c.customFields),
-                ),
-              );
-            }
           }
 
-          if (wanted.includes("deal")) {
-            const deals = await prisma.deal.findMany({
-              where: {
-                OR: [
-                  { title: { contains: term, mode: "insensitive" } },
-                  {
-                    customFields: {
-                      some: { value: { contains: term, mode: "insensitive" } },
-                    },
-                  },
-                ],
-              },
-              take,
-              include: {
-                stage: { select: { name: true } },
-                customFields: {
-                  include: { customField: { select: { name: true } } },
-                },
-              },
-            });
-            for (const d of deals) {
-              push(
-                "deal",
-                `negócio #${d.number}`,
-                crmValuesFromRecord(
-                  catalog,
-                  "deal",
-                  { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
-                  customOf(d.customFields),
-                ),
-              );
-            }
-          }
-
-          if (wanted.includes("company")) {
-            const companies = await prisma.company.findMany({
-              where: {
-                OR: [
-                  { name: { contains: term, mode: "insensitive" } },
-                  { domain: { contains: term, mode: "insensitive" } },
-                  { city: { contains: term, mode: "insensitive" } },
-                ],
-              },
-              take,
-            });
-            for (const co of companies) {
-              push(
-                "company",
-                `empresa #${co.number}`,
-                crmValuesFromRecord(
-                  catalog,
-                  "company",
-                  co as unknown as Record<string, unknown>,
-                  [],
-                ),
-              );
-            }
-          }
-        }
-
-        // Catálogo é a mesma lista para todo mundo — não é dado de pessoa,
-        // então a busca de produto é sempre ampla, independente do escopo.
-        if (wanted.includes("product")) {
-          const products = await prisma.product.findMany({
-            where: {
-              isActive: true,
-              OR: [
-                { name: { contains: term, mode: "insensitive" } },
-                { sku: { contains: term, mode: "insensitive" } },
-                { description: { contains: term, mode: "insensitive" } },
-                {
-                  customValues: {
-                    some: { value: { contains: term, mode: "insensitive" } },
-                  },
-                },
-              ],
-            },
-            take,
-            include: {
-              customValues: {
-                include: { customField: { select: { name: true } } },
-              },
-            },
-          });
-          for (const p of products) {
-            const values = crmValuesFromRecord(
-              catalog,
-              "product",
-              { ...p, price: Number(p.price) },
-              customOf(p.customValues),
-            );
-            const { matched, matchedLabels } = matchFieldValues(values, term);
-            if (!matched) continue;
-            const { visible, hiddenLabels } = partitionFieldValues(
-              values,
-              exposure,
-            );
-            records.push({
-              entity: "product",
-              ref: `item #${p.number}`,
-              fields: visible,
-              hiddenFields: hiddenLabels,
-              matchedFields: matchedLabels,
-            });
-          }
+          for (const v of valued) push(entityId, v.row.ref, v.values);
         }
 
         const trimmed = records.slice(0, take);
@@ -1453,7 +1299,7 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         }
 
         // O termo NÃO volta no payload: quando o cliente digita o próprio
-        // CPF para se identificar, ecoar a busca reinjetaria o documento no
+        // documento para se identificar, ecoar a busca reinjetaria o dado no
         // contexto do modelo pela porta dos fundos.
         return ok({
           scope: orgWide ? "organization" : "current_contact",
@@ -2410,9 +2256,9 @@ function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
  * lista de quem é "efeito" é `EFFECT_TOOLS` (`effect-claims.ts`), a mesma que
  * a auditoria de efeito usa — não existe segunda lista para desincronizar.
  *
- * Consulta (`search_products`, `consultar_matricula`) e as tools que não
- * mudam atribuição nem estado de atendimento continuam executando: o valor do
- * teste é ver o agente real, e sem elas a resposta seria outra.
+ * As tools de consulta e as que não mudam atribuição nem estado de
+ * atendimento continuam executando: o valor do teste é ver o agente real, e
+ * sem elas a resposta seria outra.
  */
 function withTestModeSimulation(
   id: string,

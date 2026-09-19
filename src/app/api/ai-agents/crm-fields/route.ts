@@ -7,6 +7,8 @@ import {
   CRM_SEARCH_GUIDANCE,
   loadCrmFieldCatalog,
 } from "@/services/ai/crm-field-policy";
+import { listRecordSources } from "@/services/ai/record-sources";
+import { getVerticalPack } from "@/verticals";
 
 /** Onde a allowlist é gravada — a tela não precisa deduzir o caminho. */
 const TOOL_ID = "search_crm_records";
@@ -38,11 +40,14 @@ export async function GET(request: Request) {
     let selected: string[] | null = null;
     let orgWide: boolean | null = null;
     let sensitiveTerms: string[] = [];
+    let identityKeys: string[] | null = null;
+    let linkedIdentityKeys: string[] | null = null;
+    let verticalPack: string | null = null;
 
     if (agentId) {
       const agent = await prisma.aIAgentConfig.findUnique({
         where: { id: agentId },
-        select: { toolConfig: true, enabledTools: true },
+        select: { toolConfig: true, enabledTools: true, verticalPack: true },
       });
       if (!agent) {
         return NextResponse.json(
@@ -57,9 +62,18 @@ export async function GET(request: Request) {
       selected = policy.readableFields;
       orgWide = policy.allowOrgWideSearch;
       sensitiveTerms = policy.sensitiveTerms;
+      identityKeys = policy.identityKeys;
+      linkedIdentityKeys = policy.linkedIdentityKeys;
+      verticalPack = agent.verticalPack ?? null;
     }
 
-    const catalog = await loadCrmFieldCatalog({ sensitiveTerms });
+    // As entidades saem do registro de fontes do agente: as do CRM mais as
+    // que o pack do tenant registrou. Sem isto a tela não mostraria a fonte
+    // de produto que o motor já sabe consultar.
+    const catalog = await loadCrmFieldCatalog({
+      sensitiveTerms,
+      sources: listRecordSources(getVerticalPack(verticalPack)?.recordSources),
+    });
 
     return NextResponse.json({
       toolId: TOOL_ID,
@@ -74,6 +88,9 @@ export async function GET(request: Request) {
       selected,
       allowOrgWideSearch: orgWide,
       sensitiveTerms,
+      /// Campos-chave gravados hoje. A tela usa para não divergir do banco.
+      identityKeys,
+      linkedIdentityKeys,
     });
   });
 }

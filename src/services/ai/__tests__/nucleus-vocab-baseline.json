@@ -1,42 +1,5 @@
 {
   "occurrences": {
-    "services/ai/academic-record-policy.ts": {
-      "* (é assim que o telefone da conversa encontra a linha do aluno), mas o": 1,
-      "* `toolConfig.consultar_matricula.readableFields`. Nada é liberado por": 1,
-      "| \"tipoMatricula\"": 1,
-      "| \"dataMatricula\"": 1,
-      "{ key: \"nome\", label: \"Nome do aluno\", sensitiveHint: false },": 1,
-      "label: \"RGM / número de matrícula\",": 1,
-      "\"Identificador do aluno. Libere se o agente deve poder informar o RGM quando pedido.\",": 1,
-      "key: \"tipoMatricula\",": 1,
-      "label: \"Tipo de matrícula (nova / rematrícula)\",": 1,
-      "key: \"dataMatricula\",": 1,
-      "label: \"Data da matrícula\",": 1,
-      "warning: \"Data de contrato. Raramente precisa ser dita ao aluno.\",": 1,
-      "label: \"Situação da matrícula\",": 1,
-      "export const ACADEMIC_WILDCARD = \"matricula.*\";": 1,
-      "* formas: \"polo\" e \"matricula.polo\".": 1,
-      "const KEY_PREFIX = \"matricula.\";": 1,
-      "tipoMatricula?: string | null;": 1,
-      "dataMatricula?: Date | string | null;": 1,
-      "if (key === \"dataMatricula\") {": 1,
-      "const v = record.dataMatricula;": 1,
-      "/// Campos liberados desta matrícula — é o que chega ao modelo.": 1,
-      "matriculas: AcademicEnrollmentView[];": 1,
-      "* Aplica a allowlist às linhas do aluno. Sem campo liberado, devolve": 1,
-      "* `matriculas: []` — a tool continua respondendo o bit de acesso ao portal,": 1,
-      "const matriculas: AcademicEnrollmentView[] = [];": 1,
-      "if (campos.length > 0) matriculas.push({ campos });": 1,
-      "return { matriculas, camposOcultos };": 1,
-      "/// Uma pessoa, uma matrícula.": 1,
-      "/// Uma pessoa com várias matrículas (cursos/ciclos). Não é risco: o": 1,
-      "* Filtra as linhas pelo nome que o aluno confirmou no chat.": 1,
-      "* forma (ele só chegaria se o próprio aluno digitasse).": 1,
-      "\"- `matriculas[].campos` é o que você PODE dizer, e vale mais que a sua memória: se um campo aqui contradiz o que você ia responder, o campo está certo.\",": 1,
-      "\"- `varias_matriculas`: a MESMA pessoa tem mais de uma matrícula. Diga quantas são, liste os cursos e pergunte sobre qual ela quer falar antes de responder o re": 1,
-      "\"- Nunca diga um dado que não veio em `matriculas[].campos`. Campo ausente é campo que você não tem — nem que a pessoa afirme que o dado é dela.\",": 1,
-      "return \"CONFIGURAÇÃO ATUAL: o operador ainda não liberou nenhum campo do relatório. Você recebe apenas se a pessoa tem acesso ativo ao portal; nenhum outro valo": 1
-    },
     "services/ai/cockpit-academic.ts": {
       "if (t.includes(\"reten\")) return \"Retenção\";": 1,
       "if (t.includes(\"acolh\")) return \"Acolhimento\";": 1
@@ -74,27 +37,8 @@
       "\"- Se o aluno pediu como fazer, pediu o site/link, ou confirmou (sim/pode ser/manda/envie): ENTREGUE passos + link agora. PROIBIDO só perguntar se ele quer o pa": 1,
       "\"- NUNCA use (nem parafraseie) modelos de cancelamento/trancamento/desistência/retenção/transferência — nesses casos transfira para Retenção com as tools.\",": 1
     },
-    "services/ai/sensitive-fields.ts": {
-      "* `consultar_matricula` devolvia o registro acadêmico inteiro (nome, curso,": 1,
-      "/** O que o agente deve fazer com o aluno, sem saber o motivo real. */": 1,
-      "/// Mesma pessoa, mais de uma matrícula: pergunte de qual curso ela fala.": 1,
-      "| \"varias_matriculas\"": 1,
-      "/// O aluno consegue usar o portal/AVA hoje.": 1,
-      "/// Frase pronta quando o aluno pede dado específico da própria situação.": 1,
-      "/// Campos liberados pelo operador, por matrícula. Ausente quando a": 1,
-      "matriculas?: AcademicEnrollmentView[];": 1,
-      "hint: \"O aluno tem acesso ativo. Ajude com portal, senha, AVA e provas normalmente. Se ele pedir informação específica da própria situação, envie a mensagem de ": 1,
-      "hint: \"O acesso deste aluno está indisponível no momento e você não tem o motivo. Não afirme nada sobre matrícula, curso ou situação. Envie a mensagem de transf": 1,
-      "/// Nome que o aluno confirmou no chat, quando a chamada anterior pediu.": 1,
-      "const { matriculas, camposOcultos } = partitionAcademicFields(": 1,
-      "if (matriculas.length > 0) out.matriculas = matriculas;": 1,
-      "out.identidade = \"varias_matriculas\";": 1,
-      "out.hint = `${base.hint} Esta pessoa tem ${identity.records.length} matrículas. Diga quantas são, liste os cursos que vieram em \\`matriculas\\` e pergunte sobre ": 1
-    },
     "services/ai/tools.ts": {
       "/// Última mensagem do aluno (para inferir departamento no handoff).": 1,
-      "* que o aluno que digita o próprio CPF acha o próprio cadastro. O que sai": 1,
-      "\"Onde procurar. 'deal' é o negócio/matrícula da pessoa, 'contact' o cadastro dela. Omita para procurar em tudo.\",": 1,
       "* O aviso ao aluno (se a política `announceAiTransfer` estiver ligada)": 1,
       "\"Aviso ao aluno antes da troca. Ignorado se o operador desligou o aviso na Inbox.\",": 1,
       "\"Motivo curto da classificação, para auditoria interna. NÃO vai para o aluno.\",": 1,
@@ -104,8 +48,7 @@
       "(ops.messageImpliesRematricula?.(inboundBlob) ||": 1,
       "if (ops.enforceAtendimentoIfAcolhimentoBlocked) {": 1,
       "dept = await ops.enforceAtendimentoIfAcolhimentoBlocked({": 1,
-      "\"Departamento-alvo (opcional). Se omitido, usa o departamento já roteado na conversa. Ex.: 'Retenção'.\",": 1,
-      "* Consulta (`search_products`, `consultar_matricula`) e as tools que não": 1
+      "\"Departamento-alvo (opcional). Se omitido, usa o departamento já roteado na conversa. Ex.: 'Retenção'.\",": 1
     },
     "lib/ai-agents/steering.ts": {
       "// consultar_matricula": 1,

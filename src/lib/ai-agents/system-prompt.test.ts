@@ -20,7 +20,6 @@ const BASE: RenderArgs = {
   override: null,
   productPolicy: null,
   hasProductSearch: false,
-  hasEnrollmentLookup: false,
   hasCrmFieldSearch: false,
   tone: "profissional",
   language: "pt-BR",

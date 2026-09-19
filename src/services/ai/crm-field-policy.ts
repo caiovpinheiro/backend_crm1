@@ -16,13 +16,17 @@
  *    operador liberou nominalmente na configuração do agente. Nada é
  *    liberado por default.
  *
- * O motivo da regra 2 está em `sensitive-fields.ts`: uma tool já devolveu o
- * registro inteiro com uma instrução em caixa alta pedindo sigilo, e o
- * modelo divulgou o dado ao cliente. Instrução dentro de payload não é
- * mecanismo de segurança — o dado não pode chegar ao modelo.
+ * A regra 2 nasceu de um incidente: uma tool devolveu o registro inteiro
+ * com uma instrução em caixa alta pedindo sigilo, e o modelo divulgou o
+ * dado ao cliente. Instrução dentro de payload não é mecanismo de
+ * segurança — o dado não pode chegar ao modelo.
  */
 
 import { prisma } from "@/lib/prisma";
+import {
+  CORE_RECORD_SOURCES,
+  type RecordSource,
+} from "@/services/ai/record-sources";
 
 /**
  * Entidade de um campo. Texto livre de propósito: é o mesmo valor que
@@ -30,47 +34,6 @@ import { prisma } from "@/lib/prisma";
  * restringe a lista nenhuma.
  */
 export type CrmSearchEntity = string;
-
-/**
- * Entidades cujos REGISTROS o motor sabe procurar. Capacidade do produto
- * (existe model Prisma e query correspondente), não escolha de cliente.
- */
-export const CRM_RECORD_SOURCES = [
-  "contact",
-  "company",
-  "deal",
-  "product",
-] as const;
-
-export type CrmRecordSource = (typeof CRM_RECORD_SOURCES)[number];
-
-export function isRecordSource(entity: string): entity is CrmRecordSource {
-  return (CRM_RECORD_SOURCES as readonly string[]).includes(entity);
-}
-
-/**
- * Onde existe tabela de valores de campo personalizado no schema
- * (`ContactCustomFieldValue`, `DealCustomFieldValue`,
- * `ProductCustomFieldValue`). Fato de schema: `company` aceita definição de
- * campo personalizado mas não tem onde guardar valor.
- */
-const CUSTOM_VALUE_SOURCES: readonly string[] = ["contact", "deal", "product"];
-
-export function supportsCustomValues(entity: string): boolean {
-  return CUSTOM_VALUE_SOURCES.includes(entity);
-}
-
-/** Rótulo de entidade em linguagem de produto. Desconhecida = o próprio valor. */
-const ENTITY_LABELS: Record<string, string> = {
-  contact: "Contatos",
-  company: "Empresas",
-  deal: "Negócios",
-  product: "Catálogo",
-};
-
-export function entityLabel(entity: string): string {
-  return ENTITY_LABELS[entity] ?? entity;
-}
 
 export type CrmFieldDescriptor = {
   /// Chave estável usada na configuração do operador: "<entidade>.<campo>".
@@ -92,56 +55,9 @@ export type CrmFieldDescriptor = {
   /// organização definiu campo personalizado numa entidade sem tabela de
   /// valores — a tela mostra em vez de esconder.
   valueAvailable: boolean;
-};
-
-/**
- * Colunas do próprio CRM, por entidade.
- *
- * Não são dado de cliente nem de ramo: `Contact.email` e `Deal.title`
- * existem igual em todo tenant, e não há como ler uma coluna sem nomeá-la.
- * A lista é curta de propósito — refletir o schema inteiro traria ~40
- * colunas de rastreio (utm, gclid, adResolved*), FKs e timestamps para a
- * tela do operador, aumentando a superfície de exposição sem serventia no
- * atendimento. Campo específico de um cliente é campo personalizado, e
- * esses vêm do banco.
- */
-const BUILTIN_FIELDS: Record<
-  CrmRecordSource,
-  Array<{ name: string; label: string }>
-> = {
-  contact: [
-    { name: "name", label: "Nome" },
-    { name: "email", label: "E-mail" },
-    { name: "phone", label: "Telefone" },
-    { name: "source", label: "Origem" },
-    { name: "lifecycleStage", label: "Estágio do ciclo de vida" },
-  ],
-  company: [
-    { name: "name", label: "Nome da empresa" },
-    { name: "domain", label: "Domínio" },
-    { name: "industry", label: "Setor" },
-    { name: "size", label: "Porte" },
-    { name: "phone", label: "Telefone da empresa" },
-    { name: "city", label: "Cidade" },
-    { name: "state", label: "Estado" },
-    { name: "notes", label: "Observações da empresa" },
-  ],
-  deal: [
-    { name: "title", label: "Título do negócio" },
-    { name: "stage", label: "Etapa do funil" },
-    { name: "status", label: "Situação do negócio" },
-    { name: "value", label: "Valor do negócio" },
-    { name: "expectedClose", label: "Previsão de fechamento" },
-    { name: "lostReason", label: "Motivo da perda" },
-  ],
-  product: [
-    { name: "name", label: "Nome do item" },
-    { name: "sku", label: "SKU/código" },
-    { name: "price", label: "Preço (BRL)" },
-    { name: "unit", label: "Unidade" },
-    { name: "type", label: "Tipo" },
-    { name: "description", label: "Descrição" },
-  ],
+  /// `false` = a fonte declarou o campo como não-legível. Serve para ACHAR
+  /// o registro e nunca para ser dito; não existe configuração que libere.
+  readable: boolean;
 };
 
 /**
@@ -245,6 +161,9 @@ export type CrmEntityGroup = {
   searchable: boolean;
   /// Existe tabela de valores de campo personalizado para ela.
   customValuesSupported: boolean;
+  /// Um registro desta entidade pertence a uma pessoa, então um campo dela
+  /// pode ser declarado como identificador.
+  identifiesPerson: boolean;
   builtinCount: number;
   customCount: number;
   fields: CrmFieldDescriptor[];
@@ -267,8 +186,12 @@ export type CrmFieldCatalog = {
 export async function loadCrmFieldCatalog(opts?: {
   /// Jargão da organização, somado aos termos genéricos, só para o aviso.
   sensitiveTerms?: string[];
+  /// Fontes consultáveis deste tenant (núcleo + pack). Omitido = só o núcleo.
+  sources?: RecordSource[];
 }): Promise<CrmFieldCatalog> {
   const extraTerms = opts?.sensitiveTerms ?? [];
+  const sources = opts?.sources ?? CORE_RECORD_SOURCES;
+  const sourceOf = new Map(sources.map((s) => [s.entity, s]));
 
   // Sem filtro de entidade: quem filtra aqui esconde o campo que o cliente
   // criou numa entidade que este código não previa.
@@ -279,13 +202,13 @@ export async function loadCrmFieldCatalog(opts?: {
 
   const declared = [...new Set(custom.map((c) => c.entity))].sort();
   const entityIds: CrmSearchEntity[] = [
-    ...CRM_RECORD_SOURCES,
-    ...declared.filter((e) => !isRecordSource(e)),
+    ...sources.map((s) => s.entity),
+    ...declared.filter((e) => !sourceOf.has(e)),
   ];
 
   const entities: CrmEntityGroup[] = entityIds.map((entity) => {
-    const builtin = isRecordSource(entity) ? BUILTIN_FIELDS[entity] : [];
-    const fields: CrmFieldDescriptor[] = builtin.map((f) => ({
+    const source = sourceOf.get(entity) ?? null;
+    const fields: CrmFieldDescriptor[] = (source?.fields ?? []).map((f) => ({
       key: crmFieldKey(entity, f.name),
       entity,
       name: f.name,
@@ -294,6 +217,7 @@ export async function loadCrmFieldCatalog(opts?: {
       type: null,
       sensitiveHint: looksSensitive(f.name, f.label, extraTerms),
       valueAvailable: true,
+      readable: f.readable !== false,
     }));
 
     for (const c of custom) {
@@ -306,16 +230,18 @@ export async function loadCrmFieldCatalog(opts?: {
         source: "custom",
         type: c.type,
         sensitiveHint: looksSensitive(c.name, c.label, extraTerms),
-        valueAvailable: supportsCustomValues(entity),
+        valueAvailable: source?.supportsCustomValues === true,
+        readable: true,
       });
     }
 
     return {
       entity,
-      label: entityLabel(entity),
+      label: source?.label ?? entity,
       wildcardKey: `${entity}.*`,
-      searchable: isRecordSource(entity),
-      customValuesSupported: supportsCustomValues(entity),
+      searchable: source !== null,
+      customValuesSupported: source?.supportsCustomValues === true,
+      identifiesPerson: source?.identifiesPerson === true,
       builtinCount: fields.filter((f) => f.source === "builtin").length,
       customCount: fields.filter((f) => f.source === "custom").length,
       fields,
@@ -375,12 +301,19 @@ export function isFieldReadable(
 export function resolveIdentityFields(
   catalog: CrmFieldDescriptor[],
   identityKeys: string[],
+  /// Entidades cujos registros pertencem a uma pessoa. Omitido = não filtra
+  /// (chamadas que só precisam resolver o rótulo da chave).
+  personEntities?: Set<string>,
 ): CrmFieldDescriptor[] {
   if (identityKeys.length === 0) return [];
   const wanted = new Set(identityKeys.map((k) => fold(k)));
   // Chave que não existe mais no catálogo (campo apagado) some em silêncio:
   // o operador não precisa ser bloqueado por configuração órfã.
-  return catalog.filter((f) => wanted.has(fold(f.key)));
+  return catalog.filter(
+    (f) =>
+      wanted.has(fold(f.key)) &&
+      (!personEntities || personEntities.has(f.entity)),
+  );
 }
 
 /**
@@ -420,13 +353,20 @@ export function identityValueMatches(
  * NÃO pedir número: pedir um dado que a ferramenta não consulta é como o
  * agente conseguia prometer uma busca que nunca aconteceria.
  */
-export function describeCrmIdentity(identityKeys: string[]): string {
-  if (identityKeys.length === 0) {
+export function describeCrmIdentity(
+  /// Chave + rótulo do tenant. O rótulo é o que deixa o modelo mapear o que
+  /// a pessoa escreveu no campo certo sem o núcleo saber o que o campo é.
+  identityFields: Array<{ key: string; label: string }>,
+): string {
+  if (identityFields.length === 0) {
     return "IDENTIFICAÇÃO: esta organização não declarou campo de identificação. NÃO peça número de cadastro nem código equivalente — você não tem como consultar por ele.";
   }
   return [
     "IDENTIFICAÇÃO: quando a pessoa informar um destes, mande em `identificador` para localizar o registro dela:",
-    ...identityKeys.map((k) => `- ${k}`),
+    ...identityFields.map((f) =>
+      f.label && f.label !== f.key ? `- ${f.key} — ${f.label}` : `- ${f.key}`,
+    ),
+    "Use o rótulo para reconhecer o que a pessoa escreveu: ela fala pelo nome que a operação usa, não pela chave técnica.",
     "O casamento é exato. Use só o que a pessoa escreveu nesta conversa.",
   ].join("\n");
 }
@@ -464,8 +404,9 @@ export function partitionFieldValues(
   for (const v of values) {
     if (!v.value || !v.value.trim()) continue;
     // `sensitiveHint` NÃO entra nesta decisão de propósito: o aviso é da
-    // tela, a autoridade é a allowlist do operador.
-    if (isFieldReadable(exposure, v.field.key)) {
+    // tela, a autoridade é a allowlist do operador. `readable: false` entra:
+    // é veto da fonte (chave de identificação), acima da allowlist.
+    if (v.field.readable !== false && isFieldReadable(exposure, v.field.key)) {
       visible.push({ label: v.field.label, value: v.value.trim() });
     } else if (!hiddenLabels.includes(v.field.label)) {
       hiddenLabels.push(v.field.label);

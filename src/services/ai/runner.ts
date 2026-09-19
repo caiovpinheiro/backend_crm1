@@ -86,6 +86,8 @@ import {
 } from "@/services/ai/provider";
 import { ARCHETYPE_MAP } from "@/lib/ai-agents/archetypes";
 import { isTabulationClassifier } from "@/lib/ai-agents/tabulation-classifier";
+import { loadCrmFieldCatalog } from "@/services/ai/crm-field-policy";
+import { listRecordSources } from "@/services/ai/record-sources";
 import { buildToolSet, type RunContext } from "@/services/ai/tools";
 import {
   evaluateTransferGate,
@@ -525,15 +527,6 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examModalityRules = packText
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
-    // Alcance da tool de cadastro. Preso ao turno em que a tool existe:
-    // regra sobre ferramenta desligada é ruído no prompt. Vem por aqui e não
-    // pelo texto canônico do pack porque o `steeringRules` salvo do agente
-    // pode estar defasado — e aí o texto canônico não chega ao prompt.
-    const enrollmentScopeRules =
-      packText &&
-      (pack?.extraTools ?? []).some((t) => runtimeTools.includes(t.id))
-        ? (pack?.constants.enrollmentScopeRules ?? "")
-        : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as
     // tools vão usar: o prompt não pode instruir o que a tool vai recusar.
     const transferGate = evaluateTransferGate({
@@ -570,7 +563,6 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             ),
             examModalityRules,
             curriculumRules,
-            enrollmentScopeRules,
             inboxPolicyForRun.announceAiTransfer
               ? inboxPolicyForRun.announceAiTransferMessage?.trim()
                 ? `## Transferência entre agentes IA
@@ -656,9 +648,6 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
       productPolicy: agent.productPolicy,
       archetype: classifierRun ? "TABULACAO" : agent.archetype,
       hasProductSearch: runtimeTools.includes("search_products"),
-      hasEnrollmentLookup: (getVerticalPack(agent.verticalPack)?.extraTools ?? []).some(
-        (t) => runtimeTools.includes(t.id),
-      ),
       hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),
       tone: agent.tone,
       language: agent.language,
@@ -689,6 +678,22 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
       data: { systemPromptSnapshot: systemPrompt },
     });
 
+    // Rótulos do tenant para a description da consulta genérica. A tool é
+    // montada de forma síncrona e o catálogo vem do banco, então ele é
+    // resolvido aqui. Sem os rótulos o modelo veria só a chave técnica
+    // ("deal.rgm") e não reconheceria o que a pessoa escreveu.
+    const crmFieldLabels = runtimeTools.includes("search_crm_records")
+      ? await loadCrmFieldCatalog({
+          sources: listRecordSources(pack?.recordSources),
+        })
+          .then((catalog) =>
+            Object.fromEntries(
+              catalog.fields.map((f) => [f.key.toLowerCase(), f.label]),
+            ),
+          )
+          .catch(() => ({}) as Record<string, string>)
+      : undefined;
+
     const ctx: RunContext = {
       agentUserId: agent.userId,
       agentId: agent.id,
@@ -707,6 +712,7 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
       peerAiAgentNames: peers
         .filter((p) => p.id !== agent.id)
         .map((p) => p.name),
+      crmFieldLabels,
     };
 
     const governor = new ToolCallGovernor(

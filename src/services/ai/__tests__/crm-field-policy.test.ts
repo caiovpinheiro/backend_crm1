@@ -34,6 +34,7 @@ function field(
     type: "TEXT",
     sensitiveHint: looksSensitive(name, label, extraTerms),
     valueAvailable: true,
+    readable: true,
   };
 }
 

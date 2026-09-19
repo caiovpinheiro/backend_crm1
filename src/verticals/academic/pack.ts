@@ -8,7 +8,6 @@ import {
   ACADEMIC_CONFIDENCE_RULES,
   ACADEMIC_CURRICULUM_TCE_RULES,
   ACADEMIC_DEPARTMENT_ALIASES,
-  ACADEMIC_ENROLLMENT_SCOPE_RULES,
   ACADEMIC_HANDOFF_KEYWORDS,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
   academicExamModalityRules,
@@ -29,10 +28,7 @@ import * as routing from "@/verticals/academic/department-routing";
 import { pickAcademicCoordinatorPeer } from "@/verticals/academic/coordinator-pick";
 import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept-roster";
 import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
-import {
-  consultarMatriculaTool,
-  CONSULTAR_MATRICULA_TOOL_META,
-} from "@/verticals/academic/tools/consultar-matricula";
+import { academicRecordSource } from "@/verticals/academic/record-source";
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
 import type {
   VerticalIntercept,
@@ -140,15 +136,10 @@ export const academicPack: VerticalPack = {
     buildAvaDisciplinesMessage,
     pickCoordinatorPeer: pickAcademicCoordinatorPeer,
   },
-  extraTools: [
-    {
-      ...CONSULTAR_MATRICULA_TOOL_META,
-      // Arrow, não a referência direta: `consultar-matricula.ts` importa
-      // helpers de `services/ai/tools.ts`, que importa este pack. Resolver o
-      // binding só na chamada mantém o ciclo inofensivo.
-      factory: (ctx, policy) => consultarMatriculaTool(ctx, policy),
-    },
-  ],
+  // O relatório acadêmico entra como ENTIDADE consultável pela ferramenta
+  // genérica do núcleo, não como tool própria. Quais campos dela são chave,
+  // pesquisa e leitura é decisão do operador na tela — ver `record-source.ts`.
+  recordSources: [academicRecordSource],
   // Getter, não objeto literal: os textos levam nome de instituição e URLs
   // da org do contexto, então são montados a cada leitura. Congelar no
   // módulo devolveria a config da primeira org que rodasse no processo.
@@ -158,7 +149,6 @@ export const academicPack: VerticalPack = {
       atendimentoRules: academicAtendimentoRules(),
       confidenceRules: ACADEMIC_CONFIDENCE_RULES,
       curriculumTceRules: ACADEMIC_CURRICULUM_TCE_RULES,
-      enrollmentScopeRules: ACADEMIC_ENROLLMENT_SCOPE_RULES,
       mediaCapabilityRules: ACADEMIC_MEDIA_CAPABILITY_RULES,
       systemPromptOverride: academicSystemPromptOverride(),
     };

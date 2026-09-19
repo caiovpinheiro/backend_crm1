@@ -96,7 +96,7 @@ async function main() {
         override: runtimeOverride,
         productPolicy: agent.productPolicy,
         hasProductSearch: runtimeTools.includes("search_products"),
-        hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
+        hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),
         tone: agent.tone,
         language: agent.language,
         autonomyMode: agent.autonomyMode,

@@ -11,15 +11,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  normalizeAcademicIdentityKeys,
-  describeAcademicIdentity,
-} from "@/services/ai/academic-record-policy";
-import {
   emptyToolPolicy,
   normalizeToolPolicy,
   isEmptyToolPolicy,
 } from "@/lib/ai-agents/steering";
 import {
+  describeCrmIdentity,
   identityValueMatches,
   normalizeIdentityValue,
   resolveIdentityFields,
@@ -37,6 +34,7 @@ function field(key: string, name: string): CrmFieldDescriptor {
     type: "TEXT",
     sensitiveHint: false,
     valueAvailable: true,
+    readable: true,
   };
 }
 
@@ -44,6 +42,7 @@ const catalog = [
   field("deal.RGM", "RGM"),
   field("deal.curso", "curso"),
   field("contact.cpf", "cpf"),
+  field("product.sku", "SKU"),
 ];
 
 describe("ToolPolicy.identityKeys", () => {
@@ -111,31 +110,50 @@ describe("casamento exato", () => {
   });
 });
 
-describe("identificadores do domínio acadêmico", () => {
-  it("sem configuração não há identificador e o texto proíbe pedir", () => {
-    expect(normalizeAcademicIdentityKeys([])).toEqual([]);
-    const txt = describeAcademicIdentity([]);
-    expect(txt).toContain("NUNCA peça");
+/**
+ * Só registro de PESSOA identifica alguém. Deixar o SKU de um item do
+ * catálogo servir de identificador abriria o cadastro de quem comprou ele.
+ */
+describe("fonte que não é de pessoa nunca identifica", () => {
+  const pessoas = new Set(["deal", "contact"]);
+
+  it("chave de entidade de pessoa passa", () => {
+    const out = resolveIdentityFields(catalog, ["deal.RGM"], pessoas);
+    expect(out.map((f) => f.key)).toEqual(["deal.RGM"]);
   });
 
-  it("aceita a chave com e sem prefixo", () => {
-    expect(normalizeAcademicIdentityKeys(["rgm"])).toEqual(["rgm"]);
-    expect(normalizeAcademicIdentityKeys(["matricula.rgm"])).toEqual(["rgm"]);
+  it("chave de catálogo é descartada mesmo se o operador declarou", () => {
+    expect(resolveIdentityFields(catalog, ["product.sku"], pessoas)).toEqual(
+      [],
+    );
+  });
+});
+
+/**
+ * O modelo mapeia "minha matrícula é 987654" no campo certo pelo RÓTULO do
+ * tenant. Sem ele o núcleo teria de saber o que "matrícula" significa.
+ */
+describe("descrição da identificação no prompt", () => {
+  it("sem chave declarada, proíbe pedir número", () => {
+    const txt = describeCrmIdentity([]);
+    expect(txt).toContain("NÃO peça");
   });
 
-  it("curinga não libera identificador", () => {
-    expect(normalizeAcademicIdentityKeys(["*"])).toEqual([]);
-    expect(normalizeAcademicIdentityKeys(["matricula.*"])).toEqual([]);
+  it("leva a chave E o rótulo do tenant", () => {
+    const txt = describeCrmIdentity([
+      { key: "deal.rgm", label: "Matrícula (RGM)" },
+      { key: "deal.numero_pedido", label: "Número do pedido" },
+    ]);
+    expect(txt).toContain("deal.rgm");
+    expect(txt).toContain("Matrícula (RGM)");
+    expect(txt).toContain("Número do pedido");
+    expect(txt).toContain("exato");
   });
 
-  it("descarta chave que o lookup não sabe consultar", () => {
-    expect(normalizeAcademicIdentityKeys(["curso", "polo"])).toEqual([]);
-  });
-
-  it("o texto nomeia o identificador aceito e veta afirmar inexistência", () => {
-    const txt = describeAcademicIdentity(["rgm"]);
-    expect(txt).toContain("RGM");
-    expect(txt).toContain("identificador");
-    expect(txt.toLowerCase()).toContain("não existe");
+  it("chave sem rótulo próprio não vira linha duplicada", () => {
+    const txt = describeCrmIdentity([
+      { key: "deal.codigo", label: "deal.codigo" },
+    ]);
+    expect(txt).toContain("- deal.codigo\n");
   });
 });
