@@ -95,7 +95,36 @@ type TurnRecord = {
     assignedToName: string | null;
     events: Array<{ content: string; createdAt: string }>;
   } | null;
+  /**
+   * Distribuição humana resolvida neste turno. Em sandbox vem com
+   * `simulated: true` — o operador/departamento é quem SERIA escolhido, e
+   * nada foi atribuído.
+   */
+  distribution?: {
+    assignedTo: string | null;
+    departmentName: string | null;
+    simulated: boolean;
+  } | null;
 };
+
+/** Distribuição que a tool resolveu neste turno (real ou simulada). */
+function inspectDistribution(
+  calls: RunResult["toolCalls"],
+): TurnRecord["distribution"] {
+  for (const c of calls) {
+    if (c.name !== "execute_distribution" && c.name !== "transfer_to_human") {
+      continue;
+    }
+    const res = asRecord(c.result);
+    if (res.assigned !== true) continue;
+    return {
+      assignedTo: (res.assignedTo as string | null) ?? null,
+      departmentName: (res.departmentName as string | null) ?? null,
+      simulated: res.simulated === true,
+    };
+  }
+  return null;
+}
 
 function arg(flag: string, fallback = ""): string {
   const i = process.argv.indexOf(flag);
@@ -558,6 +587,21 @@ async function main() {
       );
       process.exit(1);
     }
+    // Resíduo de rodada interrompida (Ctrl-C, deploy no meio) ficaria como
+    // conversa órfã no inbox da org de teste e sujaria os eventos lidos
+    // neste run. Limpa antes de começar, não só no fim.
+    const leftover = await prismaBase.conversation.findMany({
+      where: { organizationId: org.id, channel: SANDBOX_CHANNEL },
+      select: { id: true },
+    });
+    if (leftover.length) {
+      await cleanupReplayConversations(
+        org.id,
+        leftover.map((c) => c.id),
+      );
+      console.log(`sandbox residual limpo (${leftover.length} conversas)`);
+    }
+
     // Liga os guards de efeito colateral (SSE, distribuição, envio,
     // automação, atribuição a humano) antes do primeiro turno.
     enableReplaySandbox(org.id);
@@ -814,6 +858,7 @@ async function main() {
                 }
               : null,
             dbHandoff,
+            distribution: inspectDistribution(result.toolCalls),
           });
           logTurn(records[records.length - 1]!);
 

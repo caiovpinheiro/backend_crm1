@@ -18,6 +18,16 @@ export type ReplayQaTurn = {
     by?: string;
   } | null;
   tools: Array<{ name: string; args?: unknown }>;
+  /**
+   * Distribuição humana resolvida no turno. No sandbox do `--real-handoff`
+   * ela vem `simulated: true`: o consultor foi escolhido e não recebeu. Para
+   * o QA isso é entrega humana — o que se testa é o agente ter encaminhado.
+   */
+  distribution?: {
+    assignedTo: string | null;
+    departmentName: string | null;
+    simulated: boolean;
+  } | null;
 };
 
 export type ReplayQaTurnExpect = {
@@ -78,6 +88,7 @@ function endedInHumanDistribution(turn: ReplayQaTurn): boolean {
   ) {
     return true;
   }
+  if (turn.distribution?.assignedTo) return true;
   return turn.tools.some((t) =>
     ["transfer_to_human", "execute_distribution", "transfer_to_department"].includes(
       t.name,

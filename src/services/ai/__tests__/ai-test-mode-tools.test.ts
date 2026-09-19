@@ -136,6 +136,8 @@ describe("modo de teste bloqueia ferramenta de efeito", () => {
     })) as Record<string, unknown>;
 
     expect(vi.mocked(executeDepartmentHandoff)).toHaveBeenCalledTimes(1);
-    expect(result.simulated).toBeUndefined();
+    // A tool sempre declara o campo; fora do sandbox ele é falso (a
+    // distribuição atribuiu de verdade).
+    expect(result.simulated).toBe(false);
   });
 });

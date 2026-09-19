@@ -11,6 +11,10 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createConversationEvent } from "@/services/conversation-events";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { assignOwnerToContactClusterTx, createDealEvent } from "@/services/deals";
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import {
@@ -59,6 +63,8 @@ export type OrchestratedHandoffResult = {
   distributionReason: string | null;
   fallback: "department_queue" | null;
   error?: string;
+  /** Destino resolvido sem atribuir (replay em sandbox). */
+  simulated?: boolean;
 };
 
 export const SELF_AI_HANDOFF_ERROR =
@@ -261,6 +267,26 @@ async function assignNamedHuman(args: {
   reason: string;
 }): Promise<OrchestratedHandoffResult> {
   const orgId = getOrgIdOrThrow();
+
+  // Replay em sandbox: transferir para um humano NOMEADO penduraria a
+  // conversa de teste no inbox dele. Resolve o destino e devolve como
+  // entregue-simulado — para o QA o agente encaminhou, que é o que se testa.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("human_assignment", `named_user=${args.user.id}`);
+    return {
+      target: "user",
+      assigned: true,
+      simulated: true,
+      assignedTo: args.user.name,
+      assignedUserId: args.user.id,
+      assignedUserType: "HUMAN",
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+    };
+  }
+
   const claimed = await prisma.$transaction(async (tx) => {
     const ok = await claimConversationAssignmentTx(tx, {
       conversationId: args.conversationId,

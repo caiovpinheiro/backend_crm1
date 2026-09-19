@@ -1740,6 +1740,8 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
             fireTabulateOnHumanExit(ctx);
             return ok({
               assigned: Boolean(handoff.distribution?.success),
+              // Sandbox do replay: quem receberia, sem receber de fato.
+              simulated: handoff.distribution?.simulated === true,
               // `assignedUserId` saiu do payload: id interno de usuário não
               // tem uso para o modelo e não precisa ser serializado.
               assignedTo: handoff.distribution?.selectedUserName ?? null,
@@ -1794,6 +1796,8 @@ function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
           return ok({
             assigned: true,
             assignedTo: result.selectedUserName,
+            simulated: result.simulated === true,
+            departmentName: departmentName?.trim() || null,
           });
         }
         // Não é erro de execução — é resultado de negócio (sem elegível, etc.).
@@ -2137,6 +2141,7 @@ function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
           assigned: result.assigned,
           assignedTo: result.assignedTo,
           assignedUserType: result.assignedUserType,
+          simulated: result.simulated === true,
           departmentName: result.departmentName,
           queuedWaiting: result.queuedWaiting,
           distributionReason: result.distributionReason,

@@ -212,6 +212,12 @@ export interface DistributionResult {
   selectedUserId: string | null;
   selectedUserName: string | null;
   evaluated: EvaluatedResponsibleSummary[];
+  /**
+   * Escolha resolvida sem atribuir (replay em sandbox). Quem lê o resultado
+   * precisa distinguir "o consultor recebeu" de "o consultor receberia" —
+   * sem isso o relatório do replay mente nas duas direções.
+   */
+  simulated?: boolean;
 }
 
 function toSummary(
@@ -605,7 +611,8 @@ export async function executeDistribution(
       `conversationId=${rawInput.conversationId ?? "-"} dealId=${rawInput.dealId ?? "-"}`,
     );
     const { triggerSource: _ignored, ...simInput } = rawInput;
-    return simulateDistribution(simInput);
+    const simulated = await simulateDistribution(simInput);
+    return { ...simulated, simulated: true };
   }
 
   if (!(await hasOrganizationWidget("smart_distribution"))) {
