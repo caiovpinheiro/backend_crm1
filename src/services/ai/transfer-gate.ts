@@ -140,7 +140,24 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
     ) {
       return true;
     }
-    if (/^(ok+|obrigad[oa]|valeu|tchau|ate mais|combinado)$/.test(n)) {
+    if (/^(ok+|obrigad[oa]|valeu|tchau|ate mais|combinado|entendi|perfeito|deu certo|consegui|ta bom|ja sim)$/.test(n)) {
+      return true;
+    }
+  }
+  if (n.length < 55) {
+    if (
+      /^(oi+|ola+|oie+|oii+|hey|hello)(\s+[a-z]+){0,4}( tudo bem| td bem| td)?$/.test(
+        n,
+      )
+    ) {
+      return true;
+    }
+    if (
+      /^(bom dia|boa tarde|boa noite)\b/.test(n) &&
+      !/\b(acesso|matricul|financ|cancel|senha|portal|prova|contrato|boleto)\w*/.test(
+        n,
+      )
+    ) {
       return true;
     }
   }
@@ -155,19 +172,19 @@ export function isUnintelligibleInbound(raw?: string | null): boolean {
   if (isIdleOrchestrationMessage(raw)) return false;
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return false;
-  if (trimmed.length > 160) return false;
+  if (trimmed.length > 120) return false;
   if (/\d{5,}/.test(trimmed)) return false;
   if (/@/.test(trimmed)) return false;
   const n = foldIdle(trimmed);
   if (
-    /\b(preciso|ajuda|acesso|matricul|boleto|curso|prova|senha|portal|login|cancel|financ|parcela|nota|horario|aula|contrato|documento|rgm|aluno|polo|\bead\b|como|quando|quanto|onde|porque|por que|quero|minha|meu|nao|sim|problema|duvida|declaracao|historico|tce|falar|equipe|atendente|consultor|setor)\b/.test(
+    /(preciso|ajuda|acesso|matricul|boleto|curso|prova|senha|portal|login|cancel|financ|parcel|pag(a|ar|ament)|nota|horario|aula|contrato|documento|rgm|aluno|polo|\bead\b|como|quando|quanto|onde|porque|quero|minha|meu|\bnao\b|\bsim\b|problema|duvida|declaracao|historico|tce|falar|equipe|atendente|consultor|setor|inscri|duda|microsoft|cnpj|estacion|dificuld|finaliz|referente|reais|desesper|uteis)/.test(
       n,
     )
   ) {
     return false;
   }
   const words = n.split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
-  return words.length > 0 && words.length <= 6;
+  return words.length > 0 && words.length <= 4;
 }
 
 export function unintelligibleStreak(
@@ -195,6 +212,10 @@ export function nonsenseGuardReply(
   current: string,
   priorUserMessages: string[],
 ): string | null {
+  const threadHasWork = priorUserMessages.some(
+    (p) => !isIdleOrchestrationMessage(p) && !isUnintelligibleInbound(p),
+  );
+  if (threadHasWork) return null;
   const streak = unintelligibleStreak(current, priorUserMessages);
   if (streak >= 2) return NONSENSE_STOP;
   if (streak === 1) return NONSENSE_ASK_ONCE;

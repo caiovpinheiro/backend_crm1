@@ -11,7 +11,9 @@
  * EasyPanel (/app, depois do deploy):
  *   node dist/workers/replay-agent-runs.js --org teste-dev --start Joseph
  *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
- *   node dist/workers/replay-agent-runs.js --lote 2 --limit 10
+ *   node dist/workers/replay-agent-runs.js --lote 2 --limit 35 --out /tmp/replay-lote2.json
+ *   # exit 1 se o QA achar ASK em pedido real, inbound fora de ordem, SKIP de regra, etc.
+ *   # --qa-continue grava o relatório e não falha o processo
  *
  * O harness cria contato + linha de matriculado (se a org não tiver relatório
  * casando o telefone). Sem isso consultar_matricula sempre falha.
@@ -32,6 +34,7 @@ import {
   lookupStudent,
 } from "@/services/academic-records";
 import { runAgent, type RunResult } from "@/services/ai/runner";
+import { formatQaReport, scoreReplay } from "@/scripts/replay-qa";
 
 type FixtureCase = {
   id: string;
@@ -87,27 +90,54 @@ function asRecord(v: unknown): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
-function clip(s: string, n = 240): string {
-  const t = s.replace(/\s+/g, " ").trim();
-  return t.length <= n ? t : t.slice(0, n) + "…";
-}
-
 function logTurn(r: TurnRecord): void {
   const tools = r.tools.map((t) => t.name).join(",") || "-";
+  const status = r.skipped ? `SKIP ${r.skipped}` : r.status ?? "-";
+  const dest = r.switchedTo ? ` → ${r.switchedTo}` : "";
+  console.log("");
   console.log(
-    [
-      r.caseId,
-      `t${r.turnIndex}`,
-      r.agentName,
-      r.skipped ? `SKIP ${r.skipped}` : r.status,
-      r.switchedTo ? `→ ${r.switchedTo}` : "",
-      tools,
-      clip(r.inbound, 60),
-      clip(r.text, 80),
-    ]
-      .filter(Boolean)
-      .join(" | "),
+    `--- ${r.caseId} t${r.turnIndex} | ${r.agentName}${dest} | ${status} | tools=${tools} ---`,
   );
+  console.log(`ALUNO:\n${r.inbound}`);
+  console.log(`AGENTE:\n${r.text?.trim() ? r.text : "(sem texto)"}`);
+}
+
+function transcriptPathFor(outPath: string): string {
+  return outPath.replace(/\.json$/i, "") + ".txt";
+}
+
+function formatTranscript(cases: FixtureCase[], records: TurnRecord[]): string {
+  const byCase = new Map<string, TurnRecord[]>();
+  for (const r of records) {
+    const list = byCase.get(r.caseId) ?? [];
+    list.push(r);
+    byCase.set(r.caseId, list);
+  }
+  const lines: string[] = [
+    "Replay — transcrição completa (inbound do fixture + resposta do agente).",
+    "O lote 2 é inbound-only, sem mídia, máx. 10 turnos do aluno. Ordem = ordem do dump.",
+    "",
+  ];
+  for (const c of cases) {
+    const turns = byCase.get(c.id) ?? [];
+    const truncated = c.turns.length >= 10 ? " (bateu no teto de 10)" : "";
+    lines.push(
+      `===== ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${truncated} =====`,
+    );
+    lines.push("Script do aluno (ordem):");
+    c.turns.forEach((t, i) => lines.push(`  t${i} ${t}`));
+    lines.push("");
+    for (const r of turns) {
+      const tools = r.tools.map((t) => t.name).join(",") || "-";
+      const status = r.skipped ? `SKIP ${r.skipped}` : r.status ?? "-";
+      const dest = r.switchedTo ? ` → ${r.switchedTo}` : "";
+      lines.push(`--- t${r.turnIndex} ${r.agentName}${dest} ${status} tools=${tools}`);
+      lines.push(`ALUNO: ${r.inbound}`);
+      lines.push(`AGENTE: ${r.text?.trim() ? r.text : "(sem texto)"}`);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
 }
 
 function loadFixtures(path: string | null, lote: string): FixtureCase[] {
@@ -403,6 +433,12 @@ async function main() {
         const history: HistoryTurn[] = [];
         let skipReason: string | null = null;
         const identity = await ensureReplayStudent(org.id, c);
+        const cap = c.turns.length >= 10 ? " (teto 10)" : "";
+        console.log("");
+        console.log(
+          `===== CASE ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${cap} =====`,
+        );
+        c.turns.forEach((t, i) => console.log(`  t${i} ${t}`));
 
         for (let i = 0; i < c.turns.length; i++) {
           const inbound = c.turns[i] ?? "";
@@ -433,10 +469,18 @@ async function main() {
             speaker.verticalPack,
           );
           const ruleHit = evaluateMessageRules(inbound, policy.messageRules);
+          const deptDest =
+            ruleHit?.rule.action === "transfer_department"
+              ? mapDepartmentToAgent(agents, ruleHit.rule.department ?? "")
+              : null;
+          const alreadyOnDeptDesk =
+            ruleHit?.rule.action === "transfer_department" &&
+            (!deptDest || deptDest.id === speaker.id);
 
           if (
             ruleHit &&
             ruleHit.rule.action !== "answer_with_knowledge" &&
+            !alreadyOnDeptDesk &&
             !(
               speaker.archetype === "COORDENADOR" &&
               (ruleHit.rule.action === "assign_owner" ||
@@ -563,7 +607,24 @@ async function main() {
   };
 
   writeFileSync(resolve(outPath), JSON.stringify(report, null, 2), "utf8");
+  const txtPath = transcriptPathFor(outPath);
+  writeFileSync(resolve(txtPath), formatTranscript(cases, records), "utf8");
   console.log(`wrote ${outPath} (${records.length} turns)`);
+  console.log(`wrote ${txtPath} (transcrição completa)`);
+
+  const qa = scoreReplay(records, cases);
+  const qaText = formatQaReport(qa);
+  console.log(qaText);
+  const qaPath = outPath.replace(/\.json$/i, "") + ".qa.json";
+  writeFileSync(
+    resolve(qaPath),
+    JSON.stringify({ fail: qa.fail, warn: qa.warn, findings: qa.findings }, null, 2),
+    "utf8",
+  );
+  console.log(`wrote ${qaPath}`);
+  if (qa.fail > 0 && process.argv.includes("--qa-continue") === false) {
+    process.exitCode = 1;
+  }
 }
 
 main()

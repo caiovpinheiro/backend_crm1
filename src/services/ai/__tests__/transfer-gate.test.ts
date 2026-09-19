@@ -13,9 +13,38 @@ import {
 } from "@/lib/ai-agents/steering";
 import {
   evaluateTransferGate,
+  isIdleOrchestrationMessage,
+  nonsenseGuardReply,
   transferBlockedByGate,
   validateUnknownAnswerAgainstGate,
 } from "@/services/ai/transfer-gate";
+
+describe("nonsenseGuard — regressões lote 2 (não abortar pedido real)", () => {
+  it.each([
+    "Financeiro",
+    "Referente as parcelas",
+    "Regras de pagamento",
+    "Olá, fiz matrícula hj",
+    "Cancelamento/trancamento",
+    "Que irei paga",
+  ])("não marca %s como lixo", (msg) => {
+    expect(nonsenseGuardReply(msg, [])).toBeNull();
+  });
+
+  it("não dispara ASK no meio de um ticket já com assunto", () => {
+    const prior = ["Você pode me mandar o contrato"];
+    expect(nonsenseGuardReply("Financeiro", prior)).toBeNull();
+    expect(nonsenseGuardReply("Olá Felipe, tudo bem ?", ["Falar com equipe"])).toBeNull();
+    expect(nonsenseGuardReply("Deu certo", ["Acesso a Plataforma"])).toBeNull();
+  });
+
+  it("saudações compostas são idle, não ASK", () => {
+    expect(isIdleOrchestrationMessage("Oii, boa tarde")).toBe(true);
+    expect(isIdleOrchestrationMessage("Olá Felipe, tudo bem ?")).toBe(true);
+    expect(isIdleOrchestrationMessage("Boa tarde, Camila!")).toBe(true);
+    expect(nonsenseGuardReply("Oii, boa tarde", [])).toBeNull();
+  });
+});
 
 describe("evaluateTransferGate", () => {
   it("sem pack não há gate — o agente genérico pode transferir", () => {
