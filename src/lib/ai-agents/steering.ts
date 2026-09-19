@@ -948,6 +948,17 @@ export function buildUnknownAnswerBlock(
   return lines.join("\n");
 }
 
+/** Keywords padrão que acionam pedido de humano (quando nada é configurado). */
+export const DEFAULT_HUMAN_REQUEST_KEYWORDS: string[] = [
+  "atendente",
+  "humano",
+  "pessoa",
+  "consultor",
+  "humana",
+  "operador",
+  "suporte",
+];
+
 /** true se algum dos termos extras aparece na mensagem (sem acento/caixa). */
 export function matchesAnyKeyword(
   message: string | null | undefined,
