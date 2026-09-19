@@ -258,11 +258,14 @@ export async function ensureWhatsAppConversationForContact(
   if (!opts?.skipActivityLog) {
     void logEvent({
       type: "CONVERSATION_CREATED",
+      actorType: "INTEGRATION",
+      actorLabel: contact.name ?? "Contato",
       entityType: "CONVERSATION",
       entityId: created.id,
       entityLabel: contact.name ?? contact.phone ?? null,
       conversationId: created.id,
       contactId: contact.id,
+      channel: "whatsapp",
       meta: {
         channel: "whatsapp",
         inboxName: defaultChannel.name,

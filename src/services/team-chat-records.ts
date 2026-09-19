@@ -279,6 +279,7 @@ export async function logAnchoredTimeline(input: {
     if (!deal) return;
     await logEvent({
       type: "TEAM_CHAT_ANCHORED",
+      actorType: "HUMAN",
       entityType: "DEAL",
       entityId: deal.id,
       entityLabel: deal.title || `Negócio #${deal.number}`,
@@ -296,6 +297,7 @@ export async function logAnchoredTimeline(input: {
     if (!conv) return;
     await logEvent({
       type: "TEAM_CHAT_ANCHORED",
+      actorType: "HUMAN",
       entityType: "CONVERSATION",
       entityId: conv.id,
       entityLabel: `Atendimento #${conv.number}`,
@@ -312,6 +314,7 @@ export async function logAnchoredTimeline(input: {
   if (!contact) return;
   await logEvent({
     type: "TEAM_CHAT_ANCHORED",
+      actorType: "HUMAN",
     entityType: "CONTACT",
     entityId: contact.id,
     entityLabel: contact.name || `Contato #${contact.number}`,

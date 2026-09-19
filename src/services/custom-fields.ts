@@ -2,10 +2,15 @@ import { Prisma, type CustomFieldType } from "@prisma/client";
 import { randomUUID } from "crypto";
 
 import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
-import { prisma } from "@/lib/prisma";
+import { prisma, type ScopedTx } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
-import { getRequestContext } from "@/lib/request-context";
+import { getOrgIdOrNull, getRequestContext } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
+import { userIdForFk } from "@/services/activity-log";
 
 /**
  * Auto-cura da migração 20260711000000_add_show_in_deal_panel quando o
@@ -503,12 +508,13 @@ async function getDealCustomFieldValuesRaw(dealId: string) {
   });
 }
 
-export async function upsertDealCustomFieldValues(
+export async function upsertDealCustomFieldValuesTx(
+  tx: ScopedTx,
   dealId: string,
-  values: { fieldId: string; value: string }[]
+  values: { fieldId: string; value: string }[],
 ) {
   const ops = values.map((v) =>
-    prisma.dealCustomFieldValue.upsert({
+    tx.dealCustomFieldValue.upsert({
       where: {
         dealId_customFieldId: {
           dealId,
@@ -524,7 +530,16 @@ export async function upsertDealCustomFieldValues(
     })
   );
 
-  return prisma.$transaction(ops);
+  return Promise.all(ops);
+}
+
+export async function upsertDealCustomFieldValues(
+  dealId: string,
+  values: { fieldId: string; value: string }[]
+) {
+  return prisma.$transaction(async (tx) =>
+    upsertDealCustomFieldValuesTx(tx, dealId, values),
+  );
 }
 
 /**
@@ -562,6 +577,99 @@ export async function setDealCustomFieldValuesBulk(
     await prisma.dealCustomFieldValue.updateMany({
       where: { dealId: { in: dealIds }, customFieldId, value: { not: value } },
       data: { value },
+    });
+  }
+}
+
+/**
+ * Mesma lógica de `setDealCustomFieldValuesBulk`, mas dentro de uma
+ * transação e emitindo `CUSTOM_FIELD_UPDATED` na outbox para os pares
+ * cujo valor efetivamente mudou. Usado em operações em lote que precisam
+ * de garantia de entrega ao dashboard.
+ */
+export async function setDealCustomFieldValuesBulkTx(
+  tx: ScopedTx,
+  dealIds: string[],
+  values: { fieldId: string; value: string }[],
+  options: {
+    actorUserId?: string | null;
+    actorType?: "HUMAN" | "SYSTEM";
+    /** Chave estável para idempotência em retries (ex.: operationId do bulk job). */
+    batchKey?: string;
+  } = {},
+) {
+  if (dealIds.length === 0 || values.length === 0) return;
+  const valueByField = new Map(values.map((v) => [v.fieldId, v.value]));
+  const fieldIds = [...valueByField.keys()];
+
+  // Snapshot dos valores atuais para emitir eventos apenas onde houve mudança.
+  const currentRows = await tx.dealCustomFieldValue.findMany({
+    where: { dealId: { in: dealIds }, customFieldId: { in: fieldIds } },
+    select: { dealId: true, customFieldId: true, value: true },
+  });
+  const currentByKey = new Map(
+    currentRows.map((r) => [`${r.dealId}:${r.customFieldId}`, r.value]),
+  );
+
+  const rows: { dealId: string; customFieldId: string; value: string }[] = [];
+  const changed: { dealId: string; customFieldId: string; oldValue: string | null; newValue: string }[] = [];
+  for (const dealId of dealIds) {
+    for (const [customFieldId, newValue] of valueByField) {
+      rows.push({ dealId, customFieldId, value: newValue });
+      const oldValue = currentByKey.get(`${dealId}:${customFieldId}`) ?? null;
+      if (oldValue !== newValue) {
+        changed.push({ dealId, customFieldId, oldValue, newValue });
+      }
+    }
+  }
+
+  await tx.dealCustomFieldValue.createMany({
+    data: rows.map((r) => withOrgFromCtx(r)),
+    skipDuplicates: true,
+  });
+
+  for (const [customFieldId, value] of valueByField) {
+    await tx.dealCustomFieldValue.updateMany({
+      where: { dealId: { in: dealIds }, customFieldId, value: { not: value } },
+      data: { value },
+    });
+  }
+
+  if (changed.length === 0) return;
+
+  const customFields = await tx.customField.findMany({
+    where: { id: { in: fieldIds } },
+    select: { id: true, name: true },
+  });
+  const fieldNameById = new Map(customFields.map((f) => [f.id, f.name]));
+
+  const deals = await tx.deal.findMany({
+    where: { id: { in: dealIds } },
+    select: { id: true, organizationId: true },
+  });
+  const orgByDeal = new Map(deals.map((d) => [d.id, d.organizationId]));
+
+  const actorUserId = userIdForFk(options.actorUserId);
+  for (const item of changed) {
+    const idempotencyKey = options.batchKey
+      ? `bulk:${options.batchKey}:deal:${item.dealId}:field:${item.customFieldId}`
+      : `deal:${item.dealId}:custom_field:${item.customFieldId}:updated:${new Date().toISOString()}`;
+    await insertActivityOutbox(tx, {
+      type: "CUSTOM_FIELD_UPDATED",
+      actorType: options.actorType ?? (actorUserId ? "HUMAN" : "SYSTEM"),
+      actorUserId,
+      entityType: "DEAL",
+      entityId: item.dealId,
+      dealId: item.dealId,
+      field: item.customFieldId,
+      oldValue: item.oldValue,
+      newValue: item.newValue,
+      organizationId: orgByDeal.get(item.dealId) ?? getOrgIdOrNull() ?? "",
+      meta: {
+        fieldName: fieldNameById.get(item.customFieldId) ?? null,
+        newValue: item.newValue,
+      },
+      idempotencyKey,
     });
   }
 }

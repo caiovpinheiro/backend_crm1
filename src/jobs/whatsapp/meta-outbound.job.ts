@@ -76,6 +76,9 @@ async function afterSuccessfulSend(
     entityLabel: payload.senderName ?? "Mensagem enviada",
     conversationId: payload.conversationId,
     contactId: payload.contactId,
+    channel: "WhatsApp",
+    actorType: "INTEGRATION",
+    actorLabel: payload.senderName ?? "WhatsApp",
     meta: {
       preview: payload.content.slice(0, 200),
       channel: "WhatsApp",

@@ -106,6 +106,7 @@ async function deliver(
     // TODO: sem provider de e-mail transacional. Registra pendência.
     void logEvent({
       type: "STAKEHOLDER_NOTIFY_PENDING",
+      actorType: "AUTOMATION",
       entityType: "CONTACT",
       entityId: st.contactId,
       contactId: st.contactId,
@@ -119,6 +120,7 @@ async function deliver(
   if (!ch || !ch.channelRef) {
     void logEvent({
       type: "STAKEHOLDER_NOTIFY_PENDING",
+      actorType: "AUTOMATION",
       entityType: "CONTACT",
       entityId: st.contactId,
       contactId: st.contactId,
@@ -180,6 +182,7 @@ export async function notifyStakeholdersOnSend(
   if (params.dealId) {
     void logEvent({
       type: "STAKEHOLDERS_NOTIFIED",
+      actorType: "AUTOMATION",
       entityType: "DEAL",
       entityId: params.dealId,
       dealId: params.dealId,
@@ -239,6 +242,7 @@ export async function evaluateStakeholderRules(params: {
   if (params.dealId) {
     void logEvent({
       type: "STAKEHOLDER_RULES_EVALUATED",
+      actorType: "AUTOMATION",
       entityType: "DEAL",
       entityId: params.dealId,
       dealId: params.dealId,
@@ -273,6 +277,7 @@ export async function requestStakeholderFeedback(
   if (params.dealId) {
     void logEvent({
       type: "STAKEHOLDER_FEEDBACK_REQUESTED",
+      actorType: "AUTOMATION",
       entityType: "DEAL",
       entityId: params.dealId,
       dealId: params.dealId,

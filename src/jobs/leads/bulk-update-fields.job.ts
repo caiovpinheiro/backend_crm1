@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import {
   setContactCustomFieldValuesBulk,
   setDealCustomFieldValuesBulk,
+  setDealCustomFieldValuesBulkTx,
   upsertContactCustomFieldValues,
   upsertDealCustomFieldValues,
 } from "@/services/custom-fields";
@@ -247,7 +248,7 @@ export async function processBulkUpdateFields(
     };
 
     try {
-      const outcome = await applyChunkUpdates(chunk, bundle);
+      const outcome = await applyChunkUpdates(chunk, bundle, operationId, payload.initiatedByUserId);
       chunkSucceeded = outcome.succeeded;
       chunkFailed = outcome.failedDealIds.length;
       const now = new Date().toISOString();
@@ -361,6 +362,8 @@ const NO_CONTACT_MESSAGE =
 async function applyChunkUpdates(
   dealIds: string[],
   bundle: DealUpdateBundle,
+  operationId: string,
+  initiatedByUserId: string | null,
 ): Promise<{ succeeded: number; failedDealIds: string[] }> {
   const {
     dealCustom,
@@ -372,7 +375,13 @@ async function applyChunkUpdates(
   } = bundle;
 
   if (dealCustom.length > 0) {
-    await setDealCustomFieldValuesBulk(dealIds, dealCustom);
+    await prisma.$transaction(async (tx) => {
+      await setDealCustomFieldValuesBulkTx(tx, dealIds, dealCustom, {
+        actorUserId: initiatedByUserId ?? undefined,
+        actorType: initiatedByUserId ? "HUMAN" : "SYSTEM",
+        batchKey: operationId,
+      });
+    });
   }
 
   if (dealNativePatch) {

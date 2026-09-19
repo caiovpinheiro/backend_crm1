@@ -1,23 +1,25 @@
 /**
  * Activity Log central (Kommo-grade) — log de atividade unificado.
  *
- * Substitui gradualmente `createDealEvent()`: este helper aceita
- * qualquer tipo de entidade-sujeito (DEAL, CONTACT, CONVERSATION, ...)
- * e resolve a atribuicao rica de ator a partir do `RequestContext`
- * (tipo + label + sublabel + ref).
- *
  * Caracteristicas:
- *   - Fire-and-forget: nunca derruba a request principal. Erros sao
- *     logados em console.warn e suprimidos.
+ *   - Fire-and-forget: nunca derruba a request principal (feed informativo).
+ *   - Outbox transacional: eventos que alimentam rollups sao inseridos em
+ *     `activity_outbox` dentro da mesma transacao da mutacao e projetados
+ *     por um worker dedicado. Ver `src/services/activity-outbox.ts`.
  *   - Org-scoped: `organizationId` explícito ou herdado do RequestContext.
- *   - Idempotente em relacao ao ator: se nao houver `actor` no contexto,
- *     deriva um default sensato (HUMAN se houver `userId` real, SYSTEM
- *     caso contrario).
- *   - Sem dependencia circular: `services/deals.ts` pode importar e
- *     `createDealEvent` vira um wrapper fino sobre este.
+ *   - actorType obrigatório no input: sem fallback silencioso para SYSTEM.
+ *   - Dimensões normalizadas (pipeline, stage, tabulation, department,
+ *     channel, source) promovidas a colunas para rollups.
+ *
+ * NOTA sobre mensagens:
+ *   Rollups de MESSAGE_SENT/MESSAGE_RECEIVED (volume, tempo, heatmap,
+ *   connections, attendants) leem da tabela `Message`, que ja e a fonte
+ *   operacional transacional. Os eventos `MESSAGE_SENT`/`MESSAGE_RECEIVED`
+ *   aqui servem para timeline/auditoria e permanecem fire-and-forget.
  */
 
-import type { ActorType, EventEntityType, Prisma } from "@prisma/client";
+import { Prisma, type ActorType, type EventEntityType } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 
 import { getAutomationOrigin } from "@/lib/automation-origin";
 import { prisma } from "@/lib/prisma";
@@ -29,14 +31,6 @@ import {
 } from "@/lib/request-context";
 import { mirrorConversationChatEvent } from "@/services/conversation-event-mirror";
 
-/**
- * M7/M8 — quando `IMPORT_SKIP_ACTIVITY_LOG` está setado (truthy), suprime a
- * gravação de activity events. Deve ser configurado APENAS no processo do
- * etl-worker durante cargas em massa: cada linha de import gerava 1+ evento
- * (um por campo alterado no update), acumulando promises fire-and-forget que
- * competem pela conexão e inundam `activity_events`. No processo da API
- * (requests interativos) o flag NÃO deve ser setado.
- */
 function shouldSkipActivityLog(): boolean {
   const v = process.env.IMPORT_SKIP_ACTIVITY_LOG;
   if (!v) return false;
@@ -45,25 +39,27 @@ function shouldSkipActivityLog(): boolean {
 }
 
 export type LogEventInput = {
-  /// Tipo do evento (SCREAMING_SNAKE_CASE). Ex.: STAGE_CHANGED,
-  /// MESSAGE_SENT, CONTACT_CREATED, OWNER_CHANGED, FIELD_CHANGED,
-  /// TAG_ADDED, AUTOMATION_EXECUTED, AI_AGENT_HANDOFF.
   type: string;
 
   // ── Sujeito ────────────────────────────────────────────────────
   entityType: EventEntityType;
   entityId: string;
-  /// Snapshot textual do sujeito (titulo do lead, "Lead #<number>",
-  /// nome do contato, codigo da conversa). Recomendado para nao
-  /// precisar de join na hora de renderizar o feed.
   entityLabel?: string | null;
 
-  // Escopo secundario para filtros rapidos. Preencha o que fizer
-  // sentido — ex.: mensagem nova num deal aberto do contato passa
-  // os 3 (dealId, contactId, conversationId).
   dealId?: string | null;
   contactId?: string | null;
   conversationId?: string | null;
+
+  // ── Dimensões normalizadas (snapshot no momento do evento) ─────
+  pipelineId?: string | null;
+  fromStageId?: string | null;
+  toStageId?: string | null;
+  tabulationId?: string | null;
+  departmentId?: string | null;
+  channel?: string | null;
+  /// Snapshot real da origem no momento do evento. Backfill marca
+  /// sourceIsReconstructed=true.
+  source?: string | null;
 
   // ── Conteudo ───────────────────────────────────────────────────
   field?: string | null;
@@ -71,96 +67,73 @@ export type LogEventInput = {
   newValue?: string | null;
   meta?: Record<string, unknown>;
 
-  // ── Override de ator (raro) ────────────────────────────────────
-  /// Quando o caller sabe melhor que o contexto quem fez a acao
-  /// (ex.: worker de automation que recebe o actor por payload),
-  /// pode forcar aqui em vez de mexer no RequestContext.
+  // ── Ator ─────────────────────────────────────────────────────────
+  /// Obrigatório. Call site deve informar HUMAN, AI, AUTOMATION,
+  /// INTEGRATION ou SYSTEM explicitamente.
+  actorType: ActorType;
+  actorUserId?: string | null;
+  actorLabel?: string | null;
+  actorSublabel?: string | null;
+  actorRef?: string | null;
+  /// Override rico de ator (type/label/sublabel/ref). Quando presente,
+  /// complementa actorType sem substituir o tipo.
   actor?: ContextActor;
+  /// Usuário humano que deu origem a uma execução automatizada. Distinto
+  /// de actorUserId — preserva a atribuição do disparador para rollups
+  /// de produtividade. Ex.: botão "Executar automação" ou gatilho
+  /// disparado por uma ação humana.
+  triggeredByUserId?: string | null;
 
   /// Org explícita — use quando o caller está fora de `withOrgContext`
-  /// ou o ALS pode já ter sido encerrado (ex.: `void logEvent` após delete).
+  /// ou o ALS pode já ter sido encerrado.
   organizationId?: string | null;
+
+  /// Chave de idempotência. Quando presente, o projector da outbox usa
+  /// ON CONFLICT para evitar duplicar a linha em activity_events em caso
+  /// de reprocessamento. Eventos fire-and-forget deixam null.
+  idempotencyKey?: string | null;
 };
 
-/**
- * `withSystemContext` / webhook / cron gravam placeholders (`"system"`,
- * `"webhook"`, `"cron"`) em `RequestContext.userId`. Esses valores NÃO
- * existem em `users` — passar pra FK (`deal_events.userId`,
- * `activity_events.actorUserId`) estoura P2003.
- *
- * Não inventa user. Null/vazio/placeholder → `null` (schema permite).
- */
 export function userIdForFk(
   raw: string | null | undefined,
 ): string | null {
   if (raw == null) return null;
   const trimmed = raw.trim();
-  if (
-    !trimmed ||
-    trimmed === "system" ||
-    trimmed === "webhook" ||
-    trimmed === "cron"
-  ) {
+  if (!trimmed || trimmed === "system" || trimmed === "webhook" || trimmed === "cron") {
     return null;
   }
   return trimmed;
 }
 
-/// Default seguro: se o contexto nao trouxer ator, infere a partir do
-/// userId. Mantem a auditoria minimamente util mesmo em call-sites
-/// que ainda nao foram migrados pra popular `actor`.
 function resolveActor(input: LogEventInput): {
   actorType: ActorType;
   actorUserId: string | null;
+  triggeredByUserId: string | null;
   actorLabel: string | null;
   actorSublabel: string | null;
   actorRef: string | null;
 } {
-  const override = input.actor;
   const ctx = getRequestContext();
-  const ctxActor = override ?? getActorContext();
+  const ctxActor = input.actor ?? getActorContext();
 
-  const safeUserId = userIdForFk(ctx?.userId);
-
-  if (ctxActor) {
-    return {
-      actorType: ctxActor.type as ActorType,
-      actorUserId: safeUserId,
-      actorLabel: ctxActor.label ?? null,
-      actorSublabel: ctxActor.sublabel ?? null,
-      actorRef: ctxActor.ref ?? null,
-    };
-  }
-
-  if (safeUserId) {
-    return {
-      actorType: "HUMAN" as ActorType,
-      actorUserId: safeUserId,
-      actorLabel: null,
-      actorSublabel: null,
-      actorRef: null,
-    };
-  }
+  const safeUserId =
+    input.actorType === "HUMAN"
+      ? userIdForFk(input.actorUserId ?? ctx?.userId)
+      : userIdForFk(input.actorUserId);
+  const safeTriggeredByUserId = userIdForFk(
+    input.triggeredByUserId ?? ctx?.triggeredByUserId,
+  );
 
   return {
-    actorType: "SYSTEM" as ActorType,
-    actorUserId: null,
-    actorLabel: "Sistema",
-    actorSublabel: null,
-    actorRef: null,
+    actorType: input.actorType,
+    actorUserId: safeUserId,
+    triggeredByUserId: safeTriggeredByUserId,
+    actorLabel: ctxActor?.label ?? input.actorLabel ?? null,
+    actorSublabel: ctxActor?.sublabel ?? input.actorSublabel ?? null,
+    actorRef: ctxActor?.ref ?? input.actorRef ?? null,
   };
 }
 
-/**
- * Anexa a origem de automacao (`automationId` + numero do card) ao `meta`
- * do evento quando a escrita acontece dentro de um passo de automacao.
- *
- * Chave `automationOrigin` — lida pela timeline/feed para renderizar
- * "via automação «X» · card #N". Nao sobrescreve um `automationOrigin`
- * que o caller tenha passado explicitamente. Eventos gravados fora de
- * automacao (acao manual, cron, webhook) seguem sem a chave, e a UI
- * degrada omitindo a linha.
- */
 export function withAutomationOriginMeta(
   meta: Record<string, unknown> | undefined,
 ): Prisma.InputJsonValue {
@@ -172,46 +145,147 @@ export function withAutomationOriginMeta(
   return { ...base, automationOrigin: origin } as Prisma.InputJsonValue;
 }
 
-/// Helper principal. Fire-and-forget (retorna Promise mas catch interno
-/// evita propagar falhas para o caller). Use `await` se quiser garantir
-/// ordem com outras escritas — em geral, deixe sem await.
+function deriveDimensions(
+  input: LogEventInput,
+  meta: Record<string, unknown>,
+): Pick<
+  Prisma.ActivityEventUncheckedCreateInput,
+  | "pipelineId"
+  | "fromStageId"
+  | "toStageId"
+  | "tabulationId"
+  | "departmentId"
+  | "channel"
+  | "source"
+  | "sourceIsReconstructed"
+> {
+  return {
+    pipelineId:
+      input.pipelineId ??
+      (typeof meta.pipelineId === "string" ? meta.pipelineId : null) ??
+      (typeof meta.to === "object" &&
+      meta.to !== null &&
+      typeof (meta.to as Record<string, unknown>).pipelineId === "string"
+        ? ((meta.to as Record<string, unknown>).pipelineId as string)
+        : null) ??
+      (input.type === "STAGE_CHANGED" &&
+      typeof meta.from === "object" &&
+      meta.from !== null &&
+      typeof (meta.from as Record<string, unknown>).pipelineId === "string"
+        ? ((meta.from as Record<string, unknown>).pipelineId as string)
+        : null),
+    fromStageId:
+      input.fromStageId ??
+      (typeof meta.fromStageId === "string" ? meta.fromStageId : null) ??
+      (typeof meta.from === "object" &&
+      meta.from !== null &&
+      typeof (meta.from as Record<string, unknown>).id === "string"
+        ? ((meta.from as Record<string, unknown>).id as string)
+        : null),
+    toStageId:
+      input.toStageId ??
+      (typeof meta.toStageId === "string" ? meta.toStageId : null) ??
+      (typeof meta.to === "object" &&
+      meta.to !== null &&
+      typeof (meta.to as Record<string, unknown>).id === "string"
+        ? ((meta.to as Record<string, unknown>).id as string)
+        : null) ??
+      (typeof meta.stageId === "string" ? meta.stageId : null),
+    tabulationId:
+      input.tabulationId ??
+      (typeof meta.tabulationId === "string" ? meta.tabulationId : null),
+    departmentId:
+      input.departmentId ??
+      (typeof meta.departmentId === "string" ? meta.departmentId : null) ??
+      (typeof meta.tabulationDepartmentId === "string"
+        ? meta.tabulationDepartmentId
+        : null),
+    channel:
+      input.channel ?? (typeof meta.channel === "string" ? meta.channel : null),
+    source:
+      input.source ?? (typeof meta.source === "string" ? meta.source : null),
+    sourceIsReconstructed: input.source ? false : undefined,
+  };
+}
+
+type PrismaLike = PrismaClient | Prisma.TransactionClient;
+
+export async function runLogEvent(
+  prismaLike: PrismaLike,
+  input: LogEventInput,
+): Promise<void> {
+  const actor = resolveActor(input);
+  const meta = input.meta ?? {};
+  const metaJson = withAutomationOriginMeta(meta);
+  const orgId =
+    input.organizationId ?? getRequestContext()?.organizationId ?? null;
+  if (!orgId) {
+    throw new Error(
+      "[logEvent] RequestContext sem organizationId. " +
+        "Envolva o handler em withOrgContext ou passe organizationId.",
+    );
+  }
+
+  const dims = deriveDimensions(input, meta);
+
+  const data = withOrg(
+    {
+      type: input.type,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      entityLabel: input.entityLabel ?? null,
+      dealId: input.dealId ?? null,
+      contactId: input.contactId ?? null,
+      conversationId: input.conversationId ?? null,
+      pipelineId: dims.pipelineId,
+      fromStageId: dims.fromStageId,
+      toStageId: dims.toStageId,
+      tabulationId: dims.tabulationId,
+      departmentId: dims.departmentId,
+      channel: dims.channel,
+      source: dims.source,
+      sourceIsReconstructed: dims.source ?? false ? false : undefined,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      triggeredByUserId: actor.triggeredByUserId,
+      actorLabel: actor.actorLabel,
+      actorSublabel: actor.actorSublabel,
+      actorRef: actor.actorRef,
+      field: input.field ?? null,
+      oldValue: input.oldValue ?? null,
+      newValue: input.newValue ?? null,
+      meta: metaJson,
+      idempotencyKey: input.idempotencyKey ?? null,
+    },
+    orgId,
+  );
+
+  try {
+    await prismaLike.activityEvent.create({ data });
+  } catch (err) {
+    // Reprocessamento idempotente: se a chave já existe, o evento já foi
+    // projetado. Outras violações de unicidade/falhas continuam propagando.
+    const target = err instanceof Prisma.PrismaClientKnownRequestError
+      ? (err.meta?.target ?? "")
+      : "";
+    const targetText = Array.isArray(target) ? target.join(" ") : String(target);
+    if (
+      input.idempotencyKey &&
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002" &&
+      targetText.includes("activity_events_org_idempotency_idx")
+    ) {
+      return;
+    }
+    throw err;
+  }
+}
+
 export async function logEvent(input: LogEventInput): Promise<void> {
   if (shouldSkipActivityLog()) return;
   try {
     const actor = resolveActor(input);
-    const metaJson = withAutomationOriginMeta(input.meta);
-    const orgId =
-      input.organizationId ?? getRequestContext()?.organizationId ?? null;
-    if (!orgId) {
-      throw new Error(
-        "[withOrgFromCtx] RequestContext sem organizationId. " +
-          "Envolva o handler em withOrgContext ou passe organizationId.",
-      );
-    }
-
-    await prisma.activityEvent.create({
-      data: withOrg(
-        {
-          type: input.type,
-          entityType: input.entityType,
-          entityId: input.entityId,
-          entityLabel: input.entityLabel ?? null,
-          dealId: input.dealId ?? null,
-          contactId: input.contactId ?? null,
-          conversationId: input.conversationId ?? null,
-          actorType: actor.actorType,
-          actorUserId: actor.actorUserId,
-          actorLabel: actor.actorLabel,
-          actorSublabel: actor.actorSublabel,
-          actorRef: actor.actorRef,
-          field: input.field ?? null,
-          oldValue: input.oldValue ?? null,
-          newValue: input.newValue ?? null,
-          meta: metaJson,
-        },
-        orgId,
-      ),
-    });
+    await runLogEvent(prisma as unknown as PrismaClient, input);
     await mirrorConversationChatEvent({
       type: input.type,
       entityType: input.entityType,
@@ -227,9 +301,6 @@ export async function logEvent(input: LogEventInput): Promise<void> {
       actorUserId: actor.actorUserId,
     });
   } catch (err) {
-    // ATENCAO: logEvent jamais deve derrubar a request principal.
-    // Falhas de FK / org context ausente / DB indisponivel sao
-    // logadas mas suprimidas.
     console.warn("[activity-log] logEvent failed:", {
       type: input.type,
       entityType: input.entityType,
@@ -239,35 +310,21 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   }
 }
 
-/**
- * Atalho para registrar uma falha de envio de mensagem no Activity Log.
- *
- * Centraliza o `type: "MESSAGE_FAILED"` para que todas as origens (webhook
- * de status da Meta, envio imediato via API e Baileys) gerem o mesmo evento
- * — assim aparece no feed `/logs` e nas estatisticas. Fire-and-forget.
- *
- * O texto do erro vai em `newValue` (renderizado no feed) e em `meta.error`
- * (consumido por tooltips/detalhes). `source` distingue a origem da falha.
- */
 export async function logMessageFailed(input: {
   messageId: string;
   conversationId?: string | null;
   contactId?: string | null;
   dealId?: string | null;
-  /// Nome do contato/destinatario — usado como label da Origem no feed.
   contactLabel?: string | null;
   contactSublabel?: string | null;
   error?: string | null;
-  /// Origem da falha: "meta" (webhook), "api" (envio imediato) ou "baileys".
   source?: "meta" | "api" | "baileys" | string;
   errorCode?: string | number | null;
   channel?: string | null;
+  actorType?: ActorType;
+  actorUserId?: string | null;
 }): Promise<void> {
   const errorText = input.error?.trim() || "Falha no envio";
-  // Sem override de ator: deixamos `logEvent` derivar do contexto —
-  // agente (HUMAN) no envio imediato via API, SYSTEM no webhook/worker.
-  // O contato (destinatario) vai por `contactId`/`entityLabel` e é
-  // resolvido como "Origem" (Cliente) no feed.
   await logEvent({
     type: "MESSAGE_FAILED",
     entityType: "MESSAGE",
@@ -276,6 +333,9 @@ export async function logMessageFailed(input: {
     conversationId: input.conversationId ?? null,
     contactId: input.contactId ?? null,
     dealId: input.dealId ?? null,
+    channel: input.channel ?? "WhatsApp",
+    actorType: input.actorType ?? "SYSTEM",
+    actorUserId: input.actorUserId ?? null,
     newValue: errorText,
     meta: {
       error: errorText,
@@ -288,13 +348,6 @@ export async function logMessageFailed(input: {
   });
 }
 
-/**
- * Atalho para registrar leitura (ack `read` da Meta/WhatsApp) no Activity Log.
- *
- * Alimenta `/logs`, timeline do negócio e estatísticas futuras (taxa de
- * leitura). Só deve ser chamado na transição para `read` (não em reentrega).
- * Fire-and-forget.
- */
 export async function logMessageRead(input: {
   messageId: string;
   conversationId?: string | null;
@@ -315,13 +368,11 @@ export async function logMessageRead(input: {
     conversationId: input.conversationId ?? null,
     contactId: input.contactId ?? null,
     dealId: input.dealId ?? null,
+    channel: input.channel ?? "WhatsApp",
+    actorType: "SYSTEM",
+    actorLabel: "WhatsApp",
+    actorSublabel: "confirmação de leitura",
     newValue: preview,
-    actor: {
-      type: "SYSTEM",
-      label: "WhatsApp",
-      sublabel: "confirmação de leitura",
-      ref: null,
-    },
     meta: {
       preview,
       source: input.source ?? "meta",
@@ -332,8 +383,6 @@ export async function logMessageRead(input: {
   });
 }
 
-/// Atalho usado pelo backfill / wrapper de `createDealEvent`. Recebe
-/// o objeto serializado direto e nao deriva ator do contexto.
 export async function logEventRaw(
   data: Prisma.ActivityEventUncheckedCreateInput,
 ): Promise<void> {

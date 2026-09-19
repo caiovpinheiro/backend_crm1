@@ -40,7 +40,15 @@ export async function GET(request: Request) {
         from: period.from,
         to: period.to,
       });
-      return NextResponse.json({ items });
+      return NextResponse.json(
+        { items },
+        {
+          headers: {
+            "Cache-Control": "private, max-age=60, stale-while-revalidate=300",
+            Vary: "Cookie, Authorization, Accept-Encoding",
+          },
+        },
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("system_activity_sessions")) {

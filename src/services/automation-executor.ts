@@ -68,6 +68,10 @@ import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
 import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { tabulationLogMeta } from "@/services/tabulations";
 import {
   createContext,
@@ -88,7 +92,10 @@ import {
   ensureWhatsAppConversationForContact,
   maybeResolveUnansweredOutboundTicket,
 } from "@/services/whatsapp-conversation";
-import { activeConversationOnAccountWhere } from "@/services/conversations";
+import {
+  activeConversationOnAccountWhere,
+  updateConversationStatusInTx,
+} from "@/services/conversations";
 
 const log = getLogger("automation");
 
@@ -503,35 +510,10 @@ async function resolveOutboundAuthor(
 type ResolvedTabulation = {
   tabulationId: string;
   ancestorIds: string[];
-  departmentId: string;
+  departmentId: string | null;
   name: string;
   number: number;
 };
-
-/**
- * Loga `CONVERSATION_TABULATED` — a fonte do dashboard de motivos de
- * encerramento. `departmentId` é o da própria tabulação (não o da conversa),
- * pra o registro cair na árvore a que a opção pertence mesmo quando a conversa
- * está sem departamento.
- */
-function logTabulated(
-  conv: { id: string; externalId: string | null },
-  contactId: string,
-  tab: Omit<ResolvedTabulation, "departmentId"> & {
-    departmentId: string | null;
-  },
-  extraMeta: Record<string, unknown>,
-): void {
-  void logEvent({
-    type: "CONVERSATION_TABULATED",
-    entityType: "CONVERSATION",
-    entityId: conv.id,
-    entityLabel: conv.externalId ?? null,
-    conversationId: conv.id,
-    contactId,
-    meta: tabulationLogMeta(tab, { source: "automation", ...extraMeta }),
-  });
-}
 
 async function conversationHasRealAttendanceById(
   conversationId: string,
@@ -572,7 +554,6 @@ async function finishConversationsForContact(
 ): Promise<void> {
   if (!rt.contactId) return;
   const { getOrgSettingBool } = await import("@/lib/org-settings");
-  const { updateConversationStatusInDb } = await import("@/services/conversations");
 
   const [keepAgent, keepDepartment] = await Promise.all([
     getOrgSettingBool("conversation.keepAgentOnEnd", false),
@@ -597,11 +578,16 @@ async function finishConversationsForContact(
   const { resolveAutoCloseTabulation, resolveTabulationForStep } = await import(
     "@/services/tabulations"
   );
+
+  // Pré-resolve tabulação de cada conversa fora das transações.
+  type CloseItem = {
+    conv: (typeof convs)[number];
+    rowOrg: string | null;
+    autoTab: ResolvedTabulation | null;
+  };
+  const items: CloseItem[] = [];
   for (const c of convs) {
     const rowOrg = c.organizationId ?? orgId;
-    // Passo explícito > folha já gravada pelo classificador > padrão do depto.
-    // Sem isso, Encerrar conversa depois do Tabulador apagava a escolha da IA
-    // (ou encerrava sem motivo).
     const alreadyApplied =
       !chosen && rowOrg && c.tabulationId
         ? await resolveTabulationForStep({
@@ -611,7 +597,7 @@ async function finishConversationsForContact(
         : null;
     const canAutoCloseTab =
       Boolean(rowOrg) && (await conversationHasRealAttendanceById(c.id));
-    const autoTab =
+    const rawAutoTab =
       chosen ??
       alreadyApplied ??
       (rowOrg && canAutoCloseTab
@@ -620,59 +606,98 @@ async function finishConversationsForContact(
             departmentId: c.departmentId,
           }).catch(() => null)
         : null);
+    const autoTab: ResolvedTabulation | null = rawAutoTab
+      ? {
+          tabulationId: rawAutoTab.tabulationId,
+          ancestorIds: rawAutoTab.ancestorIds,
+          name: rawAutoTab.name,
+          number: rawAutoTab.number,
+          departmentId:
+            (rawAutoTab as { departmentId?: string | null }).departmentId ??
+            c.departmentId ??
+            null,
+        }
+      : null;
+    items.push({ conv: c, rowOrg, autoTab });
+  }
 
-    const updated = await updateConversationStatusInDb(c.id, "RESOLVED", {
-      ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
-      clearAssignedTo,
-      clearDepartment,
-    });
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+    const chunk = items.slice(i, i + CHUNK_SIZE);
+    await prisma.$transaction(async (tx) => {
+      for (const { conv: c, autoTab } of chunk) {
+        const { row: updated } = await updateConversationStatusInTx(tx, c.id, "RESOLVED", {
+          ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
+          clearAssignedTo,
+          clearDepartment,
+        });
 
-    if (autoTab) {
-      logTabulated(
-        c,
-        rt.contactId,
-        {
-          tabulationId: autoTab.tabulationId,
-          ancestorIds: autoTab.ancestorIds,
-          name: autoTab.name,
-          number: autoTab.number,
-          // Sem escolha explícita, `autoTab` veio da árvore do próprio
-          // departamento da conversa — os dois valores coincidem.
-          departmentId: chosen?.departmentId ?? alreadyApplied?.departmentId ?? c.departmentId,
-        },
-        chosen ? { step: "tabulate_conversation" } : { auto: true },
-      );
-    }
+        const closedAtIso = updated.closedAt?.toISOString() ?? new Date().toISOString();
 
-    void logEvent({
-      type: "CONVERSATION_CLOSED",
-      entityType: "CONVERSATION",
-      entityId: c.id,
-      entityLabel: c.externalId ?? null,
-      conversationId: c.id,
-      contactId: rt.contactId,
-      field: "status",
-      oldValue: c.status,
-      newValue: updated.status,
-      meta: { from: c.status, to: "RESOLVED", source: "automation" },
-    });
+        if (autoTab) {
+          await insertActivityOutbox(tx, {
+            type: "CONVERSATION_TABULATED",
+            actorType: "AUTOMATION",
+            triggeredByUserId: rt.triggeredByUserId ?? null,
+            entityType: "CONVERSATION",
+            entityId: c.id,
+            entityLabel: c.externalId ?? null,
+            conversationId: c.id,
+            contactId: rt.contactId,
+            departmentId:
+              autoTab.departmentId ?? c.departmentId,
+            organizationId: updated.organizationId,
+            meta: tabulationLogMeta(
+              {
+                tabulationId: autoTab.tabulationId,
+                ancestorIds: autoTab.ancestorIds,
+                departmentId: autoTab.departmentId ?? c.departmentId,
+                name: autoTab.name,
+                number: autoTab.number,
+              },
+              chosen ? { step: "tabulate_conversation" } : { auto: true },
+            ),
+            idempotencyKey: `conversation:${c.id}:tabulated:${autoTab.tabulationId}:${closedAtIso}`,
+          });
+        }
 
-    try {
-      if (rowOrg) {
-        sseBus.publish("conversation_updated", {
-          organizationId: rowOrg,
+        await insertActivityOutbox(tx, {
+          type: "CONVERSATION_CLOSED",
+          actorType: "AUTOMATION",
+          triggeredByUserId: rt.triggeredByUserId ?? null,
+          entityType: "CONVERSATION",
+          entityId: c.id,
+          entityLabel: c.externalId ?? null,
           conversationId: c.id,
           contactId: rt.contactId,
-          status: "RESOLVED",
-        });
-        sseBus.publish("conversation_timeline_updated", {
-          organizationId: rowOrg,
-          conversationId: c.id,
-          type: "CONVERSATION_CLOSED",
+          field: "status",
+          oldValue: c.status,
+          newValue: updated.status,
+          organizationId: updated.organizationId,
+          meta: { from: c.status, to: "RESOLVED", source: "automation" },
+          idempotencyKey: `conversation:${c.id}:closed:${closedAtIso}`,
         });
       }
-    } catch {
-      /* best-effort */
+    });
+
+    for (const { conv: c, rowOrg } of chunk) {
+      try {
+        if (rowOrg) {
+          sseBus.publish("conversation_updated", {
+            organizationId: rowOrg,
+            conversationId: c.id,
+            contactId: rt.contactId,
+            status: "RESOLVED",
+          });
+          sseBus.publish("conversation_timeline_updated", {
+            organizationId: rowOrg,
+            conversationId: c.id,
+            type: "CONVERSATION_CLOSED",
+          });
+        }
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -1376,6 +1401,10 @@ type RuntimeContext = {
       `triggeredByName` — o inbox exibe o selo "Manual" + avatar do agente
       (colab) na própria mensagem enviada, sem card de status separado. */
   triggeredByName?: string | null;
+  /** Id do agente que disparou a automação manualmente. Usado pelo
+      Activity Log para atribuir o evento ao colaborador correto quando
+      a ação automatizada nasce dele (ex.: /run de uma automação). */
+  triggeredByUserId?: string | null;
   contactId?: string;
   dealId?: string;
   event: string;
@@ -1700,11 +1729,16 @@ async function resolveRuntimeContext(
     rawTriggeredByName && (await messageSupportsTriggeredBy())
       ? rawTriggeredByName
       : null;
+  const triggeredByUserId =
+    typeof data.triggeredByUserId === "string" && data.triggeredByUserId.trim()
+      ? data.triggeredByUserId.trim()
+      : null;
 
   return {
     automationId,
     automationName: automationName ?? null,
     triggeredByName,
+    triggeredByUserId,
     contactId,
     dealId,
     event: ctx.event,
@@ -1989,7 +2023,7 @@ async function executeStep(
       if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
         createDealEvent(
           targetDealId,
-          null,
+          rt.triggeredByUserId ?? null,
           "STAGE_CHANGED",
           {
             from: { id: currentDeal.stageId, name: currentDeal.stage?.name ?? currentDeal.stageId },
@@ -2057,7 +2091,7 @@ async function executeStep(
 
       createDealEvent(
         targetDealId,
-        null,
+        rt.triggeredByUserId ?? null,
         "STATUS_CHANGED",
         {
           from: before.status,
@@ -2076,7 +2110,7 @@ async function executeStep(
       if (before.stageId !== updated.stageId) {
         createDealEvent(
           targetDealId,
-          null,
+          rt.triggeredByUserId ?? null,
           "STAGE_CHANGED",
           {
             from: { id: before.stageId },
@@ -2187,7 +2221,7 @@ async function executeStep(
         // automaticamente via `withAutomationOriginMeta`.
         createDealEvent(
           dealIdForEvent,
-          null,
+          rt.triggeredByUserId ?? null,
           "OWNER_CHANGED",
           {
             from: ownerBefore
@@ -2415,6 +2449,14 @@ async function executeStep(
         return {};
       }
 
+      const { isTabulationClassifier } = await import(
+        "@/lib/ai-agents/tabulation-classifier"
+      );
+      const classifier = isTabulationClassifier({
+        ...agentUser.aiAgentConfig,
+        name: agentUser.name,
+      });
+
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
       let contactForOpening: string | null = null;
       if (target === "deal") {
@@ -2422,7 +2464,9 @@ async function executeStep(
         if (!targetDealId) {
           throw new Error("transfer_to_ai_agent: dealId ausente");
         }
-        await assignDealOwner(targetDealId, agentUserId);
+        if (!classifier) {
+          await assignDealOwner(targetDealId, agentUserId);
+        }
         // Resolve o contact do deal pra poder disparar a saudação
         // proativa (precisa do contactId, não do dealId).
         const deal = await prisma.deal.findUnique({
@@ -2435,12 +2479,15 @@ async function executeStep(
         if (!targetContactId) {
           throw new Error("transfer_to_ai_agent: contactId ausente");
         }
-        await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
-        );
+        if (!classifier) {
+          await prisma.$transaction((tx) =>
+            propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
+          );
+        }
         contactForOpening = targetContactId;
       }
 
+      // Classificador só carimba a folha — nunca vira dono do WhatsApp.
       // Saudação proativa: dispara imediatamente após a atribuição,
       // sem esperar o cliente mandar mensagem. Isso resolve o caso de
       // automações cujo trigger é "Negócio criado" / etc. — antes, o
@@ -2453,15 +2500,7 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        const { isTabulationClassifier } = await import(
-          "@/lib/ai-agents/tabulation-classifier"
-        );
-        if (
-          isTabulationClassifier({
-            ...agentUser.aiAgentConfig,
-            name: agentUser.name,
-          })
-        ) {
+        if (classifier) {
           const { triggerTabulationClassifyForContact } = await import(
             "@/services/ai/tabulation-classify"
           );
@@ -4477,25 +4516,60 @@ async function executeStep(
         where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
         select: { id: true, externalId: true, organizationId: true },
       });
-      for (const c of convs) {
-        await prisma.conversation.update({
-          where: { id: c.id },
-          data: { tabulationId: chosen.tabulationId },
-        });
-        logTabulated(c, rt.contactId, chosen, {
-          step: "tabulate_conversation",
-        });
-        try {
-          const rowOrg = c.organizationId ?? orgId;
-          if (rowOrg) {
-            sseBus.publish("conversation_timeline_updated", {
-              organizationId: rowOrg,
-              conversationId: c.id,
+
+      const CHUNK_SIZE = 50;
+      for (let i = 0; i < convs.length; i += CHUNK_SIZE) {
+        const chunk = convs.slice(i, i + CHUNK_SIZE);
+        const chunkIds = chunk.map((c) => c.id);
+        await prisma.$transaction(async (tx) => {
+          await tx.conversation.updateMany({
+            where: { id: { in: chunkIds } },
+            data: { tabulationId: chosen.tabulationId },
+          });
+          const updated = await tx.conversation.findMany({
+            where: { id: { in: chunkIds } },
+            select: {
+              id: true,
+              externalId: true,
+              organizationId: true,
+              closedAt: true,
+              updatedAt: true,
+            },
+          });
+          for (const row of updated) {
+            const timestampIso = row.closedAt?.toISOString() ?? row.updatedAt.toISOString();
+            await insertActivityOutbox(tx, {
               type: "CONVERSATION_TABULATED",
+              actorType: "AUTOMATION",
+              triggeredByUserId: rt.triggeredByUserId ?? null,
+              entityType: "CONVERSATION",
+              entityId: row.id,
+              entityLabel: row.externalId ?? null,
+              conversationId: row.id,
+              contactId: rt.contactId,
+              departmentId: chosen.departmentId,
+              organizationId: row.organizationId,
+              meta: tabulationLogMeta(chosen, {
+                step: "tabulate_conversation",
+              }),
+              idempotencyKey: `conversation:${row.id}:tabulated:${chosen.tabulationId}:${timestampIso}`,
             });
           }
-        } catch {
-          /* best-effort */
+        });
+
+        for (const c of chunk) {
+          try {
+            const rowOrg = c.organizationId ?? orgId;
+            if (rowOrg) {
+              sseBus.publish("conversation_timeline_updated", {
+                organizationId: rowOrg,
+                conversationId: c.id,
+                type: "CONVERSATION_TABULATED",
+              });
+            }
+          } catch {
+            /* best-effort */
+          }
         }
       }
       return {};
@@ -5183,7 +5257,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   if (rt.dealId) {
     createDealEvent(
       rt.dealId,
-      null,
+      rt.triggeredByUserId ?? null,
       "AUTOMATION_EXECUTED",
       {
         automationId,
@@ -5209,6 +5283,8 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       entityLabel: automation.name,
       contactId: rt.contactId,
       conversationId: rt.conversation?.id ?? null,
+      actorType: "AUTOMATION",
+      triggeredByUserId: rt.triggeredByUserId ?? null,
       meta: {
         automationId,
         automationName: automation.name,

@@ -12,9 +12,15 @@
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
-import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { fireTrigger } from "@/services/automation-triggers";
-import { updateConversationStatusInDb } from "@/services/conversations";
+import {
+  updateConversationStatusInDb,
+  updateConversationStatusInTx,
+} from "@/services/conversations";
 import {
   resolveAutoCloseTabulation,
   tabulationLogMeta,
@@ -93,49 +99,64 @@ export async function closeAiOnlyConversation(
     departmentId: conv.departmentId,
   }).catch(() => null);
 
-  const updated = await updateConversationStatusInDb(conv.id, "RESOLVED", {
-    ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
-    clearAssignedTo: !keepAgent,
-    clearDepartment: !keepDepartment,
-  });
+  const { row: updated } = await prisma.$transaction(async (tx) => {
+    const result = await updateConversationStatusInTx(tx, conv.id, "RESOLVED", {
+      ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
+      clearAssignedTo: !keepAgent,
+      clearDepartment: !keepDepartment,
+    });
 
-  await logEvent({
-    type: "CONVERSATION_CLOSED",
-    entityType: "CONVERSATION",
-    entityId: conv.id,
-    entityLabel: updated.externalId ?? null,
-    conversationId: conv.id,
-    contactId,
-    field: "status",
-    oldValue: conv.status,
-    newValue: "RESOLVED",
-    meta: {
-      action: "ai_close",
-      source: "AI_AGENT",
-      reason: args.reason ?? null,
-    },
-  }).catch(() => null);
+    const closedAtIso = result.row.closedAt?.toISOString() ?? new Date().toISOString();
 
-  if (autoTab) {
-    await logEvent({
-      type: "CONVERSATION_TABULATED",
+    await insertActivityOutbox(tx, {
+      type: "CONVERSATION_CLOSED",
+      actorType: "AI",
+      actorLabel: "Agente IA",
       entityType: "CONVERSATION",
       entityId: conv.id,
-      entityLabel: updated.externalId ?? null,
+      entityLabel: result.row.externalId ?? null,
       conversationId: conv.id,
       contactId,
-      meta: tabulationLogMeta(
-        {
-          tabulationId: autoTab.tabulationId,
-          ancestorIds: autoTab.ancestorIds,
-          departmentId: conv.departmentId,
-          name: autoTab.name,
-          number: autoTab.number,
-        },
-        { source: "AI_AGENT", auto: true },
-      ),
-    }).catch(() => null);
-  }
+      field: "status",
+      oldValue: conv.status,
+      newValue: "RESOLVED",
+      organizationId: result.row.organizationId,
+      meta: {
+        action: "ai_close",
+        source: "AI_AGENT",
+        reason: args.reason ?? null,
+      },
+      idempotencyKey: `conversation:${conv.id}:closed:${closedAtIso}`,
+    });
+
+    if (autoTab) {
+      await insertActivityOutbox(tx, {
+        type: "CONVERSATION_TABULATED",
+        actorType: "AI",
+        actorLabel: "Agente IA",
+        entityType: "CONVERSATION",
+        entityId: conv.id,
+        entityLabel: result.row.externalId ?? null,
+        conversationId: conv.id,
+        contactId,
+        departmentId: conv.departmentId,
+        organizationId: result.row.organizationId,
+        meta: tabulationLogMeta(
+          {
+            tabulationId: autoTab.tabulationId,
+            ancestorIds: autoTab.ancestorIds,
+            departmentId: conv.departmentId,
+            name: autoTab.name,
+            number: autoTab.number,
+          },
+          { source: "AI_AGENT", auto: true },
+        ),
+        idempotencyKey: `conversation:${conv.id}:tabulated:${autoTab.tabulationId}:${closedAtIso}`,
+      });
+    }
+
+    return result;
+  });
 
   try {
     sseBus.publish("conversation_timeline_updated", {
@@ -180,6 +201,26 @@ export async function closeAiOnlyConversation(
       reason: args.reason ?? null,
     },
   }).catch(() => null);
+
+  const closer = await prisma.user.findFirst({
+    where: { id: conv.assignedToId ?? "", type: "AI" },
+    select: { aiAgentConfig: { select: { inboxPolicy: true, verticalPack: true } } },
+  });
+  if (closer?.aiAgentConfig) {
+    const { normalizeInboxPolicy } = await import("@/lib/ai-agents/steering");
+    const { maybeTabulateOnExit } = await import(
+      "@/services/ai/tabulation-classify"
+    );
+    await maybeTabulateOnExit({
+      organizationId: conv.organizationId,
+      contactId,
+      policy: normalizeInboxPolicy(
+        closer.aiAgentConfig.inboxPolicy,
+        closer.aiAgentConfig.verticalPack,
+      ),
+      trigger: "close",
+    }).catch(() => null);
+  }
 
   return { closed: true, reason: "CLOSED" };
 }

@@ -121,6 +121,7 @@ export async function onCommercialDealWon(dealId: string): Promise<void> {
       } else if (cfg.creationTrigger === "MANUAL") {
         void logEvent({
           type: "FULFILLMENT_SETUP_REQUIRED",
+          actorType: "HUMAN",
           entityType: "DEAL",
           entityId: dealId,
           dealId,
@@ -146,6 +147,8 @@ async function createOperationalDeal(
   if (!stageId) {
     void logEvent({
       type: "FULFILLMENT_SKIPPED_NO_STAGE",
+      actorType: "AUTOMATION",
+      actorLabel: "Fulfillment",
       entityType: "DEAL",
       entityId: deal.id,
       dealId: deal.id,
@@ -171,6 +174,8 @@ async function createOperationalDeal(
 
   void logEvent({
     type: "FULFILLMENT_OPERATION_CREATED",
+    actorType: "AUTOMATION",
+    actorLabel: "Fulfillment",
     entityType: "DEAL",
     entityId: deal.id,
     dealId: deal.id,

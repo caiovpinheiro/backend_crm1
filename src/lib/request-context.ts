@@ -59,10 +59,14 @@ export type RequestContext = {
   /// Prisma Extension seta `SET LOCAL app.is_super_admin`.
   isSuperAdmin: boolean;
   /// Atribuicao rica de ator para o log de atividade (ActivityEvent).
-  /// Opcional para nao quebrar call sites existentes — quando ausente,
-  /// `logEvent()` deriva um ator default (HUMAN se houver userId real,
-  /// SYSTEM caso contrario).
+  /// Complementa `actorType`/`actorUserId` passados explicitamente no
+  /// `logEvent()`; nunca substitui o `actorType` obrigatorio do input.
   actor?: ContextActor;
+  /// Usuário humano que deu origem a uma execução automatizada disparada
+  /// a partir deste contexto de request (ex.: gatilho de mudança de fase
+  /// gerado por uma ação humana). Usado pelo `logEvent` como fallback de
+  /// `triggeredByUserId` quando o caller não passa explicitamente.
+  triggeredByUserId?: string;
 };
 
 /**

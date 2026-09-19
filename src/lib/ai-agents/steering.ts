@@ -643,6 +643,15 @@ export type InboxPolicy = {
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
   humanRequestKeywords: string[];
+
+  /// Confirmação de identidade: ativa/desativa
+  identityConfirmationEnabled: boolean;
+  /// Template da mensagem com variáveis {campo}. Ex: "Oi {nome}, vi seu {rgm}..."
+  /// Vazio = texto padrão genérico.
+  identityConfirmationTemplate: string | null;
+  /// Lista de campos do Deal a mostrar. Ex: ["rgm", "curso", "email"]
+  /// Vazio = mostra todos os campos configurados como identityKeys.
+  identityConfirmationFields: string[];
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -714,6 +723,9 @@ export function defaultInboxPolicy(): InboxPolicy {
     assignedConsultantMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
+    identityConfirmationEnabled: false,
+    identityConfirmationTemplate: null,
+    identityConfirmationFields: [],
   };
 }
 
@@ -838,6 +850,12 @@ export function normalizeInboxPolicy(
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
     humanRequestKeywords: strList(r.humanRequestKeywords),
+    identityConfirmationEnabled: boolOr(
+      r.identityConfirmationEnabled,
+      base.identityConfirmationEnabled,
+    ),
+    identityConfirmationTemplate: nullableText(r.identityConfirmationTemplate),
+    identityConfirmationFields: strList(r.identityConfirmationFields),
   };
 }
 

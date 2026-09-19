@@ -23,6 +23,7 @@ export const EFFECT_TOOLS: Record<string, EffectKind> = {
   execute_distribution: "transfer",
   transfer_to_human: "transfer",
   transfer_to_department: "transfer",
+  transfer_conversation: "transfer",
   create_deal: "deal_created",
   move_stage: "stage_moved",
   send_whatsapp_template: "template_sent",

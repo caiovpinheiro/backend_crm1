@@ -24,6 +24,7 @@ const TRANSFER_TOOLS = new Set([
   "transfer_to_human",
   "transfer_to_department",
   "execute_distribution",
+  "transfer_conversation",
 ]);
 
 /** A tool recusou por causa do gate (mensagem vem de `academicDistributionAllowed`). */

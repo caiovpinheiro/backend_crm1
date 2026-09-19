@@ -1272,6 +1272,7 @@ export async function createContact(data: CreateContactInput) {
 
       void logEvent({
         type: "CONTACT_CREATED",
+      actorType: "HUMAN",
         entityType: "CONTACT",
         entityId: created.id,
         entityLabel: created.name ?? created.phone ?? created.email ?? null,
@@ -1416,6 +1417,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
       if (before == null && after == null) continue;
       void logEvent({
         type: "CONTACT_FIELD_CHANGED",
+      actorType: "HUMAN",
         entityType: "CONTACT",
         entityId: id,
         entityLabel: updated.name ?? updated.phone ?? updated.email ?? null,
@@ -1430,6 +1432,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     if (data.assignedToId !== undefined && prev.assignedToId !== data.assignedToId) {
       void logEvent({
         type: "CONTACT_OWNER_CHANGED",
+      actorType: "HUMAN",
         entityType: "CONTACT",
         entityId: id,
         entityLabel: updated.name ?? updated.phone ?? updated.email ?? null,

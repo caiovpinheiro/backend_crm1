@@ -87,6 +87,8 @@ async function maybeAlertLow(
   if (threshold === null || balance > threshold) return;
   void logEvent({
     type: "ALLOCATION_LOW",
+    actorType: "AUTOMATION",
+    actorLabel: "Alocação",
     entityType: dealId ? "DEAL" : "PRODUCT",
     entityId: dealId ?? poolId,
     dealId: dealId ?? null,

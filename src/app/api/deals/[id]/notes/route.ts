@@ -172,6 +172,7 @@ export async function POST(request: Request, ctx: Ctx) {
       // criada (chat vs painel do deal vs n8n).
       void logEvent({
         type: "NOTE_ADDED",
+      actorType: "HUMAN",
         entityType: mirroredMessageId ? "MESSAGE" : "DEAL",
         entityId: mirroredMessageId ?? deal.id,
         entityLabel: senderName,

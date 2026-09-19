@@ -160,6 +160,7 @@ export async function POST(request: Request) {
           // o 1º GET /timeline após o create frequentemente voltava vazio.
           await logEvent({
             type: "CONVERSATION_CREATED",
+      actorType: "HUMAN",
             entityType: "CONVERSATION",
             entityId: conversation.id,
             entityLabel: contact.name ?? contact.phone ?? null,
@@ -303,6 +304,7 @@ export async function POST(request: Request) {
         );
         void logEvent({
           type: "CONVERSATION_CREATED",
+      actorType: "HUMAN",
           entityType: "CONVERSATION",
           entityId: conversation.id,
           entityLabel: contact.name ?? contact.phone ?? null,

@@ -18,7 +18,10 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import { releaseOtherAutomationContexts } from "@/services/automation-context";
-import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { sseBus } from "@/lib/sse-bus";
 
 const log = getLogger("idle-inbound");
@@ -154,32 +157,39 @@ export async function maybeResolveIdleReopenTicket(args: {
   });
   if (!prior) return false;
 
-  await prisma.conversation.update({
-    where: { id: conv.id },
-    data: {
-      status: "RESOLVED",
-      closedAt: new Date(),
-      assignedToId: null,
-      updatedAt: new Date(),
-    },
+  const closedAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    const updated = await tx.conversation.update({
+      where: { id: conv.id },
+      data: {
+        status: "RESOLVED",
+        closedAt,
+        assignedToId: null,
+        updatedAt: closedAt,
+      },
+    });
+
+    await insertActivityOutbox(tx, {
+      type: "CONVERSATION_CLOSED",
+      actorType: "AUTOMATION",
+      actorLabel: "Inatividade",
+      entityType: "CONVERSATION",
+      entityId: conv.id,
+      entityLabel: conv.externalId ?? null,
+      conversationId: conv.id,
+      contactId: args.contactId,
+      field: "status",
+      oldValue: "OPEN",
+      newValue: "RESOLVED",
+      organizationId: updated.organizationId,
+      meta: { from: "OPEN", to: "RESOLVED", source: "idle_inbound" },
+      idempotencyKey: `conversation:${conv.id}:closed:${closedAt.toISOString()}`,
+    });
   });
   await releaseOtherAutomationContexts({
     contactId: args.contactId,
     conversationId: conv.id,
   }).catch(() => {});
-
-  void logEvent({
-    type: "CONVERSATION_CLOSED",
-    entityType: "CONVERSATION",
-    entityId: conv.id,
-    entityLabel: conv.externalId ?? null,
-    conversationId: conv.id,
-    contactId: args.contactId,
-    field: "status",
-    oldValue: "OPEN",
-    newValue: "RESOLVED",
-    meta: { from: "OPEN", to: "RESOLVED", source: "idle_inbound" },
-  });
   try {
     if (conv.organizationId) {
       sseBus.publish("conversation_updated", {

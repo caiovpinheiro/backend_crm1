@@ -42,6 +42,39 @@ type ListenerEntry = {
 
 const REDIS_CHANNEL = "crm:sse:events";
 
+/**
+ * O `card` é enfeite (evita um GET na lista); o evento é obrigatório. Um
+ * `findFirst` preso (pool esgotado) não pode segurar o fan-out — sem teto o
+ * evento nunca chega ao browser e não sobra rastro de onde parou.
+ *
+ * O race libera o evento mas NÃO cancela a query: a conexão do pool segue
+ * ocupada até ela terminar. Timeout aqui em volume é sintoma de pool
+ * esgotado, não a doença.
+ */
+const INBOX_CARD_BUDGET_MS = 2_000;
+
+async function inboxSseCardWithinBudget(
+  event: string,
+  data: unknown,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      withInboxSseCard(event, data),
+      new Promise<unknown>((resolve) => {
+        timer = setTimeout(() => {
+          console.error(
+            `[sse-bus] card snapshot de "${event}" passou de ${INBOX_CARD_BUDGET_MS}ms — publicando sem card`,
+          );
+          resolve(data);
+        }, INBOX_CARD_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function sseRedisPubSubEnabled(): boolean {
   // Com REDIS_URL, liga pub/sub por padrão — necessário no EasyPanel
   // (várias réplicas): webhook cai numa instância e o EventSource noutra.
@@ -170,11 +203,12 @@ class SseBus {
       // _broadcast: true } e a flag _broadcast pode ser respeitada no
       // futuro). Por ora, dropamos e logamos pra detectar publishers
       // legados.
-      if (process.env.NODE_ENV !== "production") {
-        console.warn(
-          `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
-        );
-      }
+      //
+      // Loga em produção também: o drop silencioso já apareceu como
+      // "mensagem não atualiza no chat" sem nenhum rastro no servidor.
+      console.error(
+        `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
+      );
       return;
     }
 
@@ -210,7 +244,7 @@ class SseBus {
   private async fanout(event: string, orgId: string, data: unknown) {
     let payload = data;
     try {
-      payload = await withInboxSseCard(event, data);
+      payload = await inboxSseCardWithinBudget(event, data);
     } catch (e) {
       console.error("[sse-bus] inbox card snapshot:", e);
     }

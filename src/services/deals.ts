@@ -1,5 +1,6 @@
 import {
   Prisma,
+  type ActorType,
   type ConversationStatus,
   type DealRole,
   type DealStatus,
@@ -16,6 +17,7 @@ import {
   userIdForFk,
   withAutomationOriginMeta,
 } from "@/services/activity-log";
+import { insertActivityOutbox, type ActivityOutboxInput } from "@/services/activity-outbox";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { cache } from "@/lib/cache";
@@ -187,6 +189,8 @@ export async function createDealEventsMany(
           entityType: "DEAL",
           entityId: r.input.dealId,
           dealId: r.input.dealId,
+          actorType: r.userId ? "HUMAN" : "SYSTEM",
+          actorUserId: r.userId,
           field: r.columns.field,
           oldValue: r.columns.oldValue,
           newValue: r.columns.newValue,
@@ -196,6 +200,40 @@ export async function createDealEventsMany(
     },
   );
   await Promise.all(workers);
+}
+
+function buildDealEventActivityInput(
+  dealId: string,
+  userId: string | null,
+  type: string,
+  meta: Record<string, unknown> = {},
+  actorOverride?: ContextActor,
+): {
+  actorType: ActorType;
+  actorUserId: string | null;
+  triggeredByUserId: string | null;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+} {
+  const safeUserId = userIdForFk(userId);
+
+  // Ator explícito: override > contexto HUMAN > SYSTEM só quando o
+  // userId for null/placeholder (sweepers/webhooks). Nunca fallback
+  // silencioso para handlers humanos.
+  const actorType: ActorType = actorOverride?.type
+    ? (actorOverride.type as ActorType)
+    : safeUserId
+      ? "HUMAN"
+      : "SYSTEM";
+
+  const actorUserId = actorType === "HUMAN" ? safeUserId : null;
+  const triggeredByUserId =
+    actorType !== "HUMAN" && actorType !== "SYSTEM" ? safeUserId : null;
+
+  const { field, oldValue, newValue } = deriveDealEventColumns(meta);
+
+  return { actorType, actorUserId, triggeredByUserId, field, oldValue, newValue };
 }
 
 export function createDealEvent(
@@ -209,7 +247,7 @@ export function createDealEvent(
    * `RequestContext` não captura — ex.: `move_stage` disparado por
    * automação passa `{ type: "AUTOMATION", label: "Automação: <nome>" }`
    * para que a timeline mostre "por Automação: <nome>" em vez de
-   * "por Sistema". Sem override, o `logEvent` usa o ator do contexto.
+   * "por Sistema". Sem override, o ator é inferido a partir do contexto.
    */
   actorOverride?: ContextActor,
 ) {
@@ -217,10 +255,8 @@ export function createDealEvent(
   // `withAutomationOriginMeta`) — o endpoint da timeline cai no
   // `deal_events` legado quando o deal nao tem activity_events.
   const metaJson = withAutomationOriginMeta(meta);
-  const { field, oldValue, newValue } = deriveDealEventColumns(meta);
-  // Placeholders do worker (`"system"` via withSystemContext) e ids que
-  // não existem em `users` quebram `deal_events_userId_fkey`. Schema
-  // permite null — não inventar user.
+  const { actorType, actorUserId, triggeredByUserId, field, oldValue, newValue } =
+    buildDealEventActivityInput(dealId, userId, type, meta, actorOverride);
   const safeUserId = userIdForFk(userId);
   const orgId = getOrgIdOrNull();
 
@@ -234,6 +270,9 @@ export function createDealEvent(
     field,
     oldValue,
     newValue,
+    actorType,
+    actorUserId,
+    triggeredByUserId,
     meta,
     organizationId: orgId,
     ...(actorOverride ? { actor: actorOverride } : {}),
@@ -252,6 +291,65 @@ export function createDealEvent(
         data: withOrg({ dealId, userId: null, type, meta: metaJson }, orgId),
       }),
     );
+}
+
+/**
+ * Versao transacional de createDealEvent para eventos que alimentam
+ * rollups/dashboard. Grava `deal_events` (legado) e insere na outbox dentro
+ * da mesma transacao da mutacao. O worker de outbox projeta em
+ * `activity_events`.
+ */
+/**
+ * Versao transacional de createDealEvent para eventos que alimentam
+ * rollups/dashboard. Grava `deal_events` (legado) e insere na outbox dentro
+ * da mesma transacao da mutacao. O worker de outbox projeta em
+ * `activity_events`.
+ *
+ * TODO(Fase 3): a idempotencyKey deriva de deal_events.id. Quando
+ * deal_events for removido, gerar a chave a partir de outra origem
+ * (uuid v7 criado na mutacao, ou o proprio id da outbox).
+ */
+export async function createDealEventTx(
+  tx: ScopedTx,
+  dealId: string,
+  userId: string | null,
+  type: string,
+  meta: Record<string, unknown> = {},
+  actorOverride?: ContextActor,
+): Promise<string> {
+  const metaJson = withAutomationOriginMeta(meta);
+  const { actorType, actorUserId, triggeredByUserId, field, oldValue, newValue } =
+    buildDealEventActivityInput(dealId, userId, type, meta, actorOverride);
+  const safeUserId = userIdForFk(userId);
+  const orgId = getOrgIdOrNull();
+
+  if (!orgId) {
+    throw new Error("[createDealEventTx] organizationId ausente");
+  }
+
+  const dealEvent = await tx.dealEvent.create({
+    data: withOrg({ dealId, userId: safeUserId, type, meta: metaJson }, orgId),
+  });
+
+  const outboxInput: ActivityOutboxInput = {
+    type,
+    entityType: "DEAL",
+    entityId: dealId,
+    dealId,
+    field,
+    oldValue,
+    newValue,
+    actorType,
+    actorUserId,
+    triggeredByUserId,
+    meta,
+    organizationId: orgId,
+    idempotencyKey: `deal_event:${dealEvent.id}`,
+    ...(actorOverride ? { actor: actorOverride } : {}),
+  };
+
+  await insertActivityOutbox(tx, outboxInput);
+  return dealEvent.id;
 }
 
 export type GetDealsParams = {
@@ -584,14 +682,19 @@ export async function nextDealNumber(): Promise<number> {
   return allocateOrgNumber("Deal", getOrgIdOrThrow());
 }
 
-export async function createDeal(data: CreateDealInput) {
+export type CreateDealResult = Prisma.DealGetPayload<{ include: typeof listInclude }>;
+
+export async function createDealTx(
+  tx: ScopedTx,
+  data: CreateDealInput,
+): Promise<CreateDealResult> {
   // Título opcional. Prioridade:
   //  1. título informado
   //  2. "Negócio {Nome do Contato}" quando há contactId
   //  3. "Negócio - #<number>" (fallback numérico, resolvido no loop)
   let rawTitle = data.title?.trim() ?? "";
   if (!rawTitle && data.contactId) {
-    const contact = await prisma.contact.findFirst({
+    const contact = await tx.contact.findFirst({
       where: { id: data.contactId },
       select: { name: true },
     });
@@ -604,7 +707,7 @@ export async function createDeal(data: CreateDealInput) {
   // aggregates num import de 5 mil linhas (stress sa221601).
   let position = data.position;
   if (position === undefined) {
-    const maxPos = await prisma.deal.aggregate({
+    const maxPos = await tx.deal.aggregate({
       where: { stageId: data.stageId },
       _max: { position: true },
     });
@@ -619,8 +722,8 @@ export async function createDeal(data: CreateDealInput) {
   // P2002 residual de `number` (ver `allocateOrgNumber` em lib/prisma.ts).
   const number = await allocateOrgNumber("Deal", getOrgIdOrThrow());
   const title = rawTitle || `Negócio - #${number}`;
-  const created = await prisma.deal.create({
-    data: withOrgFromCtx({
+  const created = await tx.deal.create({
+    data: withOrg({
       ...(data.id ? { id: data.id } : {}),
       number,
       title,
@@ -634,9 +737,14 @@ export async function createDeal(data: CreateDealInput) {
       stageId: data.stageId,
       ownerId: data.ownerId === undefined ? undefined : data.ownerId,
       dealRole: data.dealRole === undefined ? undefined : data.dealRole,
-    }),
+    }, getOrgIdOrThrow()),
     include: listInclude,
   });
+  return created;
+}
+
+export async function createDeal(data: CreateDealInput): Promise<CreateDealResult> {
+  const created = await createDealTx(prisma, data);
   await invalidateBoardsForPipelines([created.stage?.pipelineId]);
   return created;
 }
@@ -716,7 +824,11 @@ export type UpdateDealInput = {
   propagateToChat?: boolean;
 };
 
-export async function updateDeal(id: string, data: UpdateDealInput) {
+export async function updateDealTx(
+  tx: ScopedTx,
+  id: string,
+  data: UpdateDealInput,
+) {
   // Importante: usar UncheckedUpdateInput evita conflito com a extension
   // multi-tenant que injeta `organizationId` em `data` no update.
   // No checked input (`DealUpdateInput`), `organizationId` não é aceito.
@@ -746,39 +858,44 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     throw new Error("EMPTY_UPDATE");
   }
 
-  // Troca de estágio pode ser cross-pipeline: guarda o funil de origem
-  // pra invalidar os dois boards depois do commit.
-  const previousPipelineId =
-    data.stageId === undefined ? null : await pipelineIdOfDeal(id);
+  const row = await tx.deal.update({
+    where: { id },
+    data:
+      data.ownerId !== undefined
+        ? // Troca manual de responsável zera a origem de motor.
+          { ...payload, assignedVia: null }
+        : payload,
+    include: listInclude,
+  });
 
-  // REGRA DE HERANÇA DE RESPONSÁVEL (ver `assignDealOwner` abaixo).
-  let chatAssigneeChanges: ConversationAssigneeChange[] = [];
-  const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.deal.update({
-      where: { id },
-      data:
-        data.ownerId !== undefined
-          ? // Troca manual de responsável zera a origem de motor.
-            { ...payload, assignedVia: null }
-          : payload,
-      include: listInclude,
-    });
-
-    if (data.ownerId !== undefined) {
-      const contactId =
-        data.contactId !== undefined ? data.contactId : row.contactId;
-      chatAssigneeChanges = await propagateOwnerToContactAndChat(
+  if (data.ownerId !== undefined) {
+    const contactId =
+      data.contactId !== undefined ? data.contactId : row.contactId;
+    // eslint-disable-next-line no-param-reassign
+    (row as unknown as { chatAssigneeChanges: ConversationAssigneeChange[] }).chatAssigneeChanges =
+      await propagateOwnerToContactAndChat(
         tx,
         contactId,
         data.ownerId,
         { conversations: data.propagateToChat !== false },
       );
-    }
+  }
 
-    return row;
-  });
-  if (chatAssigneeChanges.length > 0) {
-    await logConversationAssigneeChanges(chatAssigneeChanges);
+  return row;
+}
+
+export async function updateDeal(id: string, data: UpdateDealInput) {
+  // Troca de estágio pode ser cross-pipeline: guarda o funil de origem
+  // pra invalidar os dois boards depois do commit.
+  const previousPipelineId =
+    data.stageId === undefined ? null : await pipelineIdOfDeal(id);
+
+  const updated = (await prisma.$transaction(async (tx) =>
+    updateDealTx(tx, id, data),
+  )) as unknown as { chatAssigneeChanges?: ConversationAssigneeChange[]; stage?: { pipelineId?: string | null } | null };
+
+  if (updated.chatAssigneeChanges && updated.chatAssigneeChanges.length > 0) {
+    await logConversationAssigneeChanges(updated.chatAssigneeChanges);
   }
 
   await invalidateBoardsForPipelines([
@@ -811,6 +928,7 @@ async function logConversationAssigneeChanges(
       entityLabel: c.entityLabel,
       conversationId: c.conversationId,
       contactId: c.contactId,
+      actorType: "HUMAN",
       field: "assignedTo",
       oldValue: c.fromName,
       newValue: c.toName,
@@ -1181,6 +1299,7 @@ export async function clearContactOwnershipOnClose(args: {
       entityType: "CONTACT",
       entityId: contactId,
       contactId,
+      actorType: "HUMAN",
       field: "assignedToId",
       oldValue: fromName,
       newValue: null,
@@ -1313,6 +1432,22 @@ function buildStatusSyncPatch(
 export type MoveDealOptions = {
   /** Motivo da perda — usado quando o destino é o estágio Perdido. */
   lostReason?: string | null;
+  /**
+   * Chamado dentro da mesma transacao do UPDATE do deal (antes do commit).
+   * Utilizado para registrar eventos de forma atomica com a mutacao.
+   */
+  afterUpdate?: (
+    tx: ScopedTx,
+    ctx: {
+      dealId: string;
+      oldStageId: string;
+      targetStageId: string;
+      fromPipelineId: string | null;
+      toPipelineId: string;
+      becameWon: boolean;
+      becameLost: boolean;
+    },
+  ) => Promise<void>;
 };
 
 const MOVE_DEAL_MAX_RETRIES = 3;
@@ -1552,27 +1687,38 @@ export async function moveDeal(
               where: { id: dealId },
               data: { position: newPos, ...statusPatch },
             });
-            return;
+          } else {
+            // Cross-stage: idem — ponto médio no destino, SEM shift em massa
+            // (`position+1` no destino e `position-1` na origem custavam ~900ms
+            // por move em estágios grandes; posições esparsas na origem
+            // preservam a ordem sem nenhum UPDATE adicional).
+            const targetSiblings = await tx.deal.count({
+              where: { stageId: targetStageId },
+            });
+            const clamped = Math.min(position, targetSiblings);
+            const newPos = await resolveInsertionPosition(
+              tx,
+              targetStageId,
+              clamped,
+            );
+
+            await tx.deal.update({
+              where: { id: dealId },
+              data: { stageId: targetStageId, position: newPos, ...statusPatch },
+            });
           }
 
-          // Cross-stage: idem — ponto médio no destino, SEM shift em massa
-          // (`position+1` no destino e `position-1` na origem custavam ~900ms
-          // por move em estágios grandes; posições esparsas na origem
-          // preservam a ordem sem nenhum UPDATE adicional).
-          const targetSiblings = await tx.deal.count({
-            where: { stageId: targetStageId },
-          });
-          const clamped = Math.min(position, targetSiblings);
-          const newPos = await resolveInsertionPosition(
-            tx,
-            targetStageId,
-            clamped,
-          );
-
-          await tx.deal.update({
-            where: { id: dealId },
-            data: { stageId: targetStageId, position: newPos, ...statusPatch },
-          });
+          if (options?.afterUpdate) {
+            await options.afterUpdate(tx, {
+              dealId,
+              oldStageId,
+              targetStageId,
+              fromPipelineId,
+              toPipelineId: targetStage.pipelineId,
+              becameWon,
+              becameLost,
+            });
+          }
         },
         { timeout: 20_000, maxWait: 10_000 },
       );
@@ -1681,24 +1827,30 @@ export type MarkDealTerminalOptions = {
   pipelineId?: string | null;
 };
 
+export async function markDealWonTx(
+  tx: ScopedTx,
+  id: string,
+  opts?: MarkDealTerminalOptions,
+) {
+  const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
+  if (!deal) throw new Error("NOT_FOUND");
+  const movePatch = await buildTerminalStageMovePatch(tx, deal, "won", opts?.pipelineId);
+  return tx.deal.update({
+    where: { id },
+    data: {
+      status: "WON",
+      closedAt: new Date(),
+      lostReason: null,
+      ...movePatch,
+    },
+    include: listInclude,
+  });
+}
+
 export async function markDealWon(id: string, opts?: MarkDealTerminalOptions) {
   // Só o negócio. NÃO encerrar conversa: fila segue encerrar + keepAgentOnEnd,
   // independente de GANHO/PERDIDO.
-  const result = await prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
-    if (!deal) throw new Error("NOT_FOUND");
-    const movePatch = await buildTerminalStageMovePatch(tx, deal, "won", opts?.pipelineId);
-    return tx.deal.update({
-      where: { id },
-      data: {
-        status: "WON",
-        closedAt: new Date(),
-        lostReason: null,
-        ...movePatch,
-      },
-      include: listInclude,
-    });
-  });
+  const result = await prisma.$transaction(async (tx) => markDealWonTx(tx, id, opts));
   // Pós-commit (fire-and-forget; import dinâmico evita ciclo deals<->fulfillment).
   void import("@/services/product-fulfillment").then((m) => m.onDealWon(id));
   // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
@@ -1707,12 +1859,33 @@ export async function markDealWon(id: string, opts?: MarkDealTerminalOptions) {
   return result;
 }
 
-export async function markDealLost(
+export async function markDealLostTx(
+  tx: ScopedTx,
   id: string,
-  lostReason?: string | null,
+  lostReason: string | null,
   opts?: MarkDealTerminalOptions,
 ) {
-  // Só o negócio. NÃO encerrar conversa — ver markDealWon.
+  const reason = lostReason?.trim() || null;
+  const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
+  if (!deal) throw new Error("NOT_FOUND");
+  const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost", opts?.pipelineId);
+  return tx.deal.update({
+    where: { id },
+    data: {
+      status: "LOST",
+      closedAt: new Date(),
+      lostReason: reason,
+      ...movePatch,
+    },
+    include: listInclude,
+  });
+}
+
+export async function validateMarkDealLost(
+  id: string,
+  lostReason: string | null,
+  opts?: MarkDealTerminalOptions,
+): Promise<{ pipelineId: string; dealPipelineId: string | null }> {
   const reason = lostReason?.trim() || null;
 
   const dealPeek = await prisma.deal.findUnique({
@@ -1739,31 +1912,26 @@ export async function markDealLost(
     await assertLostReasonAllowed(reason, pipelineId);
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
-    if (!deal) throw new Error("NOT_FOUND");
-    const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost", opts?.pipelineId);
-    return tx.deal.update({
-      where: { id },
-      data: {
-        status: "LOST",
-        closedAt: new Date(),
-        lostReason: reason,
-        ...movePatch,
-      },
-      include: listInclude,
-    });
-  });
+  return { pipelineId, dealPipelineId: dealPeek.stage.pipelineId };
+}
+
+export async function markDealLost(
+  id: string,
+  lostReason?: string | null,
+  opts?: MarkDealTerminalOptions,
+) {
+  // Só o negócio. NÃO encerrar conversa — ver markDealWon.
+  const { pipelineId, dealPipelineId } = await validateMarkDealLost(id, lostReason ?? null, opts);
+  const result = await prisma.$transaction(async (tx) =>
+    markDealLostTx(tx, id, lostReason ?? null, opts),
+  );
   // Perda: estorna alocações (no-op se não houver; cobre "desistência" no funil B2C).
   void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
-  await invalidateBoardsForPipelines([
-    result.stage?.pipelineId,
-    dealPeek.stage.pipelineId,
-  ]);
+  await invalidateBoardsForPipelines([result.stage?.pipelineId, dealPipelineId]);
   return result;
 }
 
-export async function reopenDeal(id: string) {
+export async function reopenDealTx(tx: ScopedTx, id: string) {
   // Reabrir SÓ troca o status (LOST/WON → OPEN) e mantém o `stageId` atual.
   //
   // Antes movíamos o deal automaticamente para o "último estágio operacional"
@@ -1777,7 +1945,7 @@ export async function reopenDeal(id: string) {
   // automação (trigger `message_received` com filtro `stage == Perdido`, por
   // exemplo) ou movendo manualmente no kanban — ambos caminhos JÁ registram
   // `STAGE_CHANGED` corretamente (automation-executor L1124 / route deals).
-  const result = await prisma.deal.update({
+  return tx.deal.update({
     where: { id },
     data: {
       status: "OPEN",
@@ -1786,6 +1954,10 @@ export async function reopenDeal(id: string) {
     },
     include: listInclude,
   });
+}
+
+export async function reopenDeal(id: string) {
+  const result = await prisma.$transaction(async (tx) => reopenDealTx(tx, id));
   // Reabertura: estorna alocações consumidas no ganho (lança inversos).
   void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
   await invalidateBoardsForPipelines([result.stage?.pipelineId]);

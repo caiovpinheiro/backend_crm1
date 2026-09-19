@@ -22,12 +22,16 @@
  * fora do smart, sem fila e sem fallback.
  */
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type ActorType } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import {
   assignOwnerToContactClusterTx,
   invalidateBoardsForPipelines,
@@ -518,6 +522,42 @@ export async function executeLeadsDistribution(
         tx,
       );
 
+      const actorType: ActorType =
+        input.triggerSource === "AUTOMATION" ? "AUTOMATION" : "SYSTEM";
+      await insertActivityOutbox(tx, {
+        type: "LEAD_DISTRIBUTED",
+        actorType,
+        entityType: target.dealId
+          ? "DEAL"
+          : target.conversationId
+            ? "CONVERSATION"
+            : "CONTACT",
+        entityId: target.dealId ?? target.conversationId ?? target.contactId!,
+        entityLabel: slot.userName ?? null,
+        dealId: target.dealId,
+        contactId: target.contactId,
+        conversationId: target.conversationId,
+        field: "owner",
+        newValue: slot.userName ?? null,
+        organizationId: orgId,
+        meta: {
+          reason: "ASSIGNED",
+          mode: "leads",
+          triggerSource: input.triggerSource,
+          selectedUserId: slot.userId,
+          assignmentId: assignment.id,
+          slotIndex: slot.slotIndex,
+        },
+        actor: {
+          type: actorType,
+          label:
+            input.triggerSource === "AUTOMATION"
+              ? "Automação · Distribuição"
+              : "Distribuição por Leads",
+        },
+        idempotencyKey: `lead:${assignment.id}:distributed`,
+      });
+
       return {
         kind: "ASSIGNED",
         slot,
@@ -629,34 +669,6 @@ export async function executeLeadsDistribution(
       console.warn("[leads] lead_distributed guard falhou", e);
     }
   }
-
-  logEvent({
-    type: "LEAD_DISTRIBUTED",
-    entityType: target.dealId
-      ? "DEAL"
-      : target.conversationId
-        ? "CONVERSATION"
-        : "CONTACT",
-    entityId: target.dealId ?? target.conversationId ?? target.contactId!,
-    entityLabel: slot.userName ?? null,
-    dealId: target.dealId,
-    contactId: target.contactId,
-    conversationId: target.conversationId,
-    field: "owner",
-    newValue: slot.userName ?? null,
-    meta: {
-      reason: "ASSIGNED",
-      mode: "leads",
-      triggerSource: input.triggerSource,
-      selectedUserId: slot.userId,
-      assignmentId,
-      slotIndex: slot.slotIndex,
-    },
-    actor: {
-      type: input.triggerSource === "AUTOMATION" ? "AUTOMATION" : "SYSTEM",
-      label: "Distribuição por Leads",
-    },
-  }).catch((e) => console.error("[leads] logEvent falhou", e));
 
   return {
     success: true,

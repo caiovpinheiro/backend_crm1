@@ -2,6 +2,7 @@ import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
 import { debugInfo } from "@/lib/debug-log";
+import { getRequestContext } from "@/lib/request-context";
 
 export const AUTOMATION_JOBS_QUEUE_NAME = "automation-jobs" as const;
 export const BAILEYS_OUTBOUND_QUEUE_NAME = "baileys-outbound" as const;
@@ -440,6 +441,17 @@ function readAppMode(): string {
 }
 
 export async function enqueueAutomationJob(payload: AutomationJobPayload) {
+  // Propaga o usuário que disparou a automação a partir do RequestContext
+  // atual (ex.: handler que moveu etapa, enviou mensagem, etc.) para que
+  // rollups de agente atribuam corretamente eventos gerados por automação.
+  const ctx = getRequestContext();
+  if (ctx?.userId && !payload.context.data) {
+    payload.context.data = { triggeredByUserId: ctx.userId };
+  } else if (ctx?.userId && typeof payload.context.data === "object") {
+    const d = payload.context.data as Record<string, unknown>;
+    if (!d.triggeredByUserId) d.triggeredByUserId = ctx.userId;
+  }
+
   const workerMode = readAutomationWorkerMode();
   debugInfo(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode || "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event} appMode=${readAppMode()}`);
 

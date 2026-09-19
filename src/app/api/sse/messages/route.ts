@@ -74,18 +74,30 @@ export async function GET(request: Request) {
 
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  // Idempotente: chamado pelo abort do request, pelo cancel() do stream e
+  // pelo enqueue que falha no heartbeat.
+  function teardown() {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+    unsubscribe?.();
+    unsubscribe = null;
+  }
 
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(encoder.encode(": connected\n\n"));
 
-      const heartbeat = setInterval(() => {
+      // 25s: proxy corta conexão ociosa antes disso e cada reconexão perde
+      // os eventos da janela — o stream não tem replay nem Last-Event-ID.
+      heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": heartbeat\n\n"));
         } catch {
-          clearInterval(heartbeat);
+          teardown();
         }
-      }, 60_000);
+      }, 25_000);
 
       unsubscribe = sseBus.subscribe(
         { organizationId, isSuperAdmin },
@@ -103,21 +115,12 @@ export async function GET(request: Request) {
         },
       );
 
-      void new Promise<void>((resolve) => {
-        const checkClosed = setInterval(() => {
-          try {
-            controller.enqueue(encoder.encode(""));
-          } catch {
-            clearInterval(checkClosed);
-            clearInterval(heartbeat);
-            unsubscribe?.();
-            resolve();
-          }
-        }, 10_000);
-      });
+      // Cliente que vai embora sem `cancel()`: sem isto o listener do bus
+      // ficaria preso até o próximo heartbeat falhar (até 25s).
+      request.signal.addEventListener("abort", teardown, { once: true });
     },
     cancel() {
-      unsubscribe?.();
+      teardown();
     },
   });
 

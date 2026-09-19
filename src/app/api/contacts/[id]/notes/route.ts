@@ -58,6 +58,7 @@ export async function POST(request: Request, ctx: Ctx) {
       });
       void logEvent({
         type: "NOTE_ADDED",
+      actorType: "HUMAN",
         entityType: dealId ? "DEAL" : "CONTACT",
         entityId: dealId || contactId,
         entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,

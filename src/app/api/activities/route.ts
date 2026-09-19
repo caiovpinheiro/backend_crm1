@@ -183,6 +183,7 @@ export async function POST(request: Request) {
         // Tarefa criada ligada só a contato (ou solta) — também loga.
         void logEvent({
           type: "ACTIVITY_ADDED",
+      actorType: "HUMAN",
           entityType: "ACTIVITY",
           entityId: activity.id,
           entityLabel: b.title,

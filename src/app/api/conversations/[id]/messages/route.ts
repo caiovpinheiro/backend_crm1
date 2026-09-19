@@ -772,6 +772,8 @@ export async function POST(request: Request, context: RouteContext) {
               entityLabel: null,
               conversationId: fresh.id,
               contactId: fresh.contactId,
+              channel: fresh.channel,
+              actorType: "HUMAN",
               meta: { channel: fresh.channel, source: "reply_reopen", previousConversationId },
             });
             fireTrigger("conversation_created", {
@@ -932,6 +934,8 @@ export async function POST(request: Request, context: RouteContext) {
           conversationId: conv.id,
           contactId: conv.contactId,
           dealId: openDeal?.id ?? null,
+          actorType: "HUMAN",
+          actorLabel: senderName,
           meta: {
             preview: content.slice(0, 200),
             source: "inbox_composer",
@@ -1021,6 +1025,9 @@ export async function POST(request: Request, context: RouteContext) {
           entityLabel: senderName ?? "Mensagem enviada",
           conversationId: conv.id,
           contactId: conv.contactId,
+          channel: channelLabel,
+          actorType: "HUMAN",
+          actorLabel: senderName,
           meta: {
             preview: content.slice(0, 200),
             channel: channelLabel,
@@ -1281,6 +1288,9 @@ export async function POST(request: Request, context: RouteContext) {
         entityLabel: senderName ?? "Mensagem enviada",
         conversationId: conv.id,
         contactId: conv.contactId,
+        channel: "WhatsApp",
+        actorType: "HUMAN",
+        actorLabel: senderName,
         meta: {
           preview: content.slice(0, 200),
           channel: "WhatsApp",

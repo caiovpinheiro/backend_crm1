@@ -5,7 +5,14 @@ import { canEditFieldForUser, requirePermissionForUser, requirePipelineScope, re
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal } from "@/services/deals";
+import {
+  createDealEvent,
+  createDealEventTx,
+  deleteDeal,
+  getDealById,
+  isValidDealStatus,
+  updateDealTx,
+} from "@/services/deals";
 import { getDealPanelFieldsForDeal } from "@/services/contacts";
 import { logEvent } from "@/services/activity-log";
 
@@ -211,7 +218,7 @@ export async function PUT(request: Request, context: RouteContext) {
 
     const payload = Object.fromEntries(
       Object.entries(data).filter(([, v]) => v !== undefined)
-    ) as Parameters<typeof updateDeal>[1];
+    ) as Parameters<typeof updateDealTx>[2];
 
     // Mover de etapa exige `deal:change_stage` — não basta `deal:edit`, senão
     // o PUT furava o gate do POST /move e um operador sem a permission
@@ -288,9 +295,64 @@ export async function PUT(request: Request, context: RouteContext) {
           if (pipeDenied) return pipeDenied;
         }
       }
-      const deal = await updateDeal(dealId, payload);
 
       const uid = authResult.user.id;
+      const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
+      const toStagePromise =
+        payload.stageId !== undefined && payload.stageId !== existing.stage.id
+          ? prisma.stage.findUnique({
+              where: { id: payload.stageId },
+              select: {
+                id: true,
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { id: true, name: true } },
+              },
+            })
+          : Promise.resolve(null);
+      const toUserPromise =
+        payload.ownerId !== undefined && payload.ownerId !== existing.owner?.id && payload.ownerId
+          ? prisma.user.findUnique({ where: { id: payload.ownerId }, select: { name: true } })
+          : Promise.resolve(null);
+      const [toStage, toUser] = await Promise.all([toStagePromise, toUserPromise]);
+
+      const deal = await prisma.$transaction(async (tx) => {
+        const updated = await updateDealTx(tx, dealId, payload);
+
+        if (payload.stageId !== undefined && payload.stageId !== existing.stage.id && toStage) {
+          const toPipelineId = toStage.pipelineId ?? null;
+          const pipelineChanged =
+            !!fromPipelineId && !!toPipelineId && fromPipelineId !== toPipelineId;
+          await createDealEventTx(tx, dealId, uid, "STAGE_CHANGED", {
+            from: {
+              id: existing.stage.id,
+              name: existing.stage.name,
+              pipelineId: fromPipelineId,
+              pipelineName:
+                (existing.stage as { pipeline?: { name?: string } }).pipeline?.name ?? null,
+            },
+            to: {
+              id: payload.stageId,
+              name: toStage.name ?? payload.stageId,
+              pipelineId: toPipelineId,
+              pipelineName: toStage.pipeline?.name ?? null,
+            },
+            ...(pipelineChanged ? { pipelineChanged: true } : {}),
+          });
+        }
+
+        if (payload.ownerId !== undefined && payload.ownerId !== existing.owner?.id) {
+          await createDealEventTx(tx, dealId, uid, "OWNER_CHANGED", {
+            from: existing.owner ? { id: existing.owner.id, name: existing.owner.name } : null,
+            to: payload.ownerId
+              ? { id: payload.ownerId, name: toUser?.name ?? payload.ownerId }
+              : null,
+          });
+        }
+
+        return updated;
+      });
+
       if (payload.title !== undefined && payload.title !== existing.title) {
         createDealEvent(dealId, uid, "FIELD_UPDATED", { field: "title", from: existing.title, to: payload.title }).catch(() => {});
       }
@@ -300,35 +362,8 @@ export async function PUT(request: Request, context: RouteContext) {
       if (payload.expectedClose !== undefined) {
         createDealEvent(dealId, uid, "FIELD_UPDATED", { field: "expectedClose", from: existing.expectedClose, to: payload.expectedClose }).catch(() => {});
       }
-      if (payload.stageId !== undefined && payload.stageId !== existing.stage.id) {
-        const toStage = await prisma.stage.findUnique({
-          where: { id: payload.stageId },
-          select: {
-            name: true,
-            pipelineId: true,
-            pipeline: { select: { id: true, name: true } },
-          },
-        });
-        const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
-        const toPipelineId = toStage?.pipelineId ?? null;
-        const pipelineChanged =
-          !!fromPipelineId && !!toPipelineId && fromPipelineId !== toPipelineId;
-        createDealEvent(dealId, uid, "STAGE_CHANGED", {
-          from: {
-            id: existing.stage.id,
-            name: existing.stage.name,
-            pipelineId: fromPipelineId,
-            pipelineName:
-              (existing.stage as { pipeline?: { name?: string } }).pipeline?.name ?? null,
-          },
-          to: {
-            id: payload.stageId,
-            name: toStage?.name ?? payload.stageId,
-            pipelineId: toPipelineId,
-            pipelineName: toStage?.pipeline?.name ?? null,
-          },
-          ...(pipelineChanged ? { pipelineChanged: true } : {}),
-        }).catch(() => {});
+      if (payload.stageId !== undefined && payload.stageId !== existing.stage.id && toStage) {
+        const toPipelineId = toStage.pipelineId ?? null;
         fireTrigger("stage_changed", {
           dealId,
           contactId: existing.contactId ?? undefined,
@@ -341,8 +376,6 @@ export async function PUT(request: Request, context: RouteContext) {
         }).catch(() => {});
       }
       if (payload.ownerId !== undefined && payload.ownerId !== existing.owner?.id) {
-        const toUser = payload.ownerId ? await prisma.user.findUnique({ where: { id: payload.ownerId }, select: { name: true } }) : null;
-        createDealEvent(dealId, uid, "OWNER_CHANGED", { from: existing.owner ? { id: existing.owner.id, name: existing.owner.name } : null, to: payload.ownerId ? { id: payload.ownerId, name: toUser?.name ?? payload.ownerId } : null }).catch(() => {});
         fireTrigger("agent_changed", {
           dealId,
           contactId: existing.contactId ?? undefined,
@@ -440,6 +473,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     // preservando a auditoria da exclusão.
     void logEvent({
       type: "DEAL_DELETED",
+      actorType: "HUMAN",
       entityType: "DEAL",
       entityId: existing.id,
       entityLabel: dealLabel,

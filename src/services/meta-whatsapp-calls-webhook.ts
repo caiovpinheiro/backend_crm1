@@ -626,6 +626,8 @@ async function emitWhatsappCallClosed(params: {
     dealId: deal?.id ?? null,
     contactId: params.contactId,
     conversationId: params.conversationId,
+    actorType: "INTEGRATION",
+    actorLabel: "WhatsApp · Ligação",
     meta: {
       callId: params.callId,
       provider: "whatsapp",

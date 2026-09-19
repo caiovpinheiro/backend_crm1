@@ -499,6 +499,8 @@ export async function processWebhookEvent(
               dealId: dealForLog?.id ?? null,
               contactId: contactIdForLog,
               conversationId,
+              actorType: "INTEGRATION",
+              actorLabel: input.provider ?? "Ligação",
               meta: {
                 callId: call.id,
                 provider: input.provider,

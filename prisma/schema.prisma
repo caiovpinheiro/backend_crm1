@@ -4942,6 +4942,11 @@ model AIAgentConfig {
   /// etapas e tags que o agente pode atender) e as mensagens de handoff.
   inboxPolicy Json?
 
+  /// Confirmação de identidade após identificação do cliente
+  identityConfirmationEnabled Boolean @default(false)
+  identityConfirmationTemplate String? @db.Text
+  identityConfirmationFields   String[] @default([])
+
   /// Pack de vertical do agente (ex.: "academic"). Null = sem interceptos
   /// de vertical. Backfill: todos os agentes existentes → "academic";
   /// novos nascem null.

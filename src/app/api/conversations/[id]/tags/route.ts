@@ -167,6 +167,7 @@ export async function POST(request: Request, ctx: Ctx) {
         conversationId: id,
         contactId: targets.contactId,
         dealId: targets.dealId,
+        actorType: "HUMAN",
         newValue: tag?.name ?? tagId,
         meta: { tagName: tag?.name ?? tagId, tagId },
       });
@@ -204,6 +205,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
       });
       void logEvent({
         type: "TAG_REMOVED",
+      actorType: "HUMAN",
         entityType: "CONVERSATION",
         entityId: id,
         conversationId: id,

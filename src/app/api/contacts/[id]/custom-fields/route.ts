@@ -86,6 +86,7 @@ export async function PUT(request: Request, ctx: Ctx) {
         if (before === c.value) continue;
         void logEvent({
           type: "CONTACT_FIELD_CHANGED",
+      actorType: "HUMAN",
           entityType: "CONTACT",
           entityId: id,
           entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,

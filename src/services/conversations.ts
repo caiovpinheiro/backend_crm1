@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { Prisma, type ConversationStatus } from "@prisma/client";
+import { Prisma, type Conversation, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
@@ -11,7 +11,7 @@ import {
 } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
-import { allocateOrgNumber, prisma } from "@/lib/prisma";
+import { allocateOrgNumber, prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
   countableReplyWhere,
@@ -33,6 +33,10 @@ import {
 } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { logEvent, userIdForFk } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
 import { metaSessionWindowWhere } from "@/lib/meta-session-window";
@@ -2605,6 +2609,7 @@ export async function assignConversationsInline(params: {
       }
       await logEvent({
         type: "ASSIGNEE_CHANGED",
+      actorType: "HUMAN",
         entityType: "CONVERSATION",
         entityId: conversationId,
         entityLabel: result.conversation.externalId ?? null,
@@ -2762,27 +2767,26 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
-export async function updateConversationStatusInDb(
-  id: string,
+type UpdateConversationStatusExtra = {
+  tabulationId?: string | null;
+  clearAssignedTo?: boolean;
+  clearDepartment?: boolean;
+  followUp?: boolean;
+};
+
+type ClearedAssigneeSnapshot = {
+  id: string;
+  name: string | null;
+  archetype?: string | null;
+  enabledTools?: string[] | null;
+} | null;
+
+export function buildConversationStatusPatch(
   status: ConversationStatus,
-  extra?: {
-    tabulationId?: string | null;
-    /** Ao encerrar (RESOLVED), desvincula o atendente (assignedToId=null). */
-    clearAssignedTo?: boolean;
-    /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
-    clearDepartment?: boolean;
-    /**
-     * Acompanhar: aba Resolvendo. Ticket permanece OPEN, sem closedAt,
-     * sem disparar encerramento. Pode gravar tabulationId sem fechar.
-     */
-    followUp?: boolean;
-  },
-) {
+  extra?: UpdateConversationStatusExtra,
+): Prisma.ConversationUncheckedUpdateInput {
   const followUp = extra?.followUp === true;
 
-  // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
-  // com o status pra UI/relatorios sem consultar historico de eventos.
-  // Acompanhar NÃO preenche closedAt. Outros (PENDING/SNOOZED) não mexem.
   const closedAtPatch: { closedAt: Date | null } | Record<string, never> =
     status === "RESOLVED" && !followUp
       ? { closedAt: new Date() }
@@ -2790,8 +2794,6 @@ export async function updateConversationStatusInDb(
         ? { closedAt: null }
         : {};
 
-  // Reabrir (OPEN sem follow-up) limpa a tabulacao — "novo ciclo".
-  // Acompanhar pode persistir a folha sem encerrar.
   const tabulationPatch: { tabulationId: string | null } | Record<string, never> =
     followUp && extra && "tabulationId" in extra
       ? { tabulationId: extra.tabulationId ?? null }
@@ -2801,9 +2803,6 @@ export async function updateConversationStatusInDb(
           ? { tabulationId: extra.tabulationId ?? null }
           : {};
 
-  // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
-  // finalizar". Quando desligadas, o caller passa clearAssignedTo/
-  // clearDepartment=true e desvinculamos os campos aqui.
   const followUpPatch: { followUpAt: Date | null } | Record<string, never> =
     followUp
       ? { followUpAt: new Date() }
@@ -2819,21 +2818,28 @@ export async function updateConversationStatusInDb(
         }
       : {};
 
-  // Snapshot ANTES do update: precisamos de quem era o atendente para
-  // logar a remoção e limpar deal/contato (abaixo).
-  let clearedAssignee: {
-    id: string;
-    name: string | null;
-    archetype?: string | null;
-    enabledTools?: string[] | null;
-  } | null = null;
-  let closeContactId: string | null = null;
+  return {
+    status,
+    ...closedAtPatch,
+    ...tabulationPatch,
+    ...followUpPatch,
+    ...clearPatch,
+    ...(status === "RESOLVED" ? { hasError: false } : {}),
+  };
+}
+
+export async function updateConversationStatusInTx(
+  tx: ScopedTx,
+  id: string,
+  status: ConversationStatus,
+  extra?: UpdateConversationStatusExtra,
+): Promise<{ row: Conversation & { contact: { id: string; number: number | null; name: string | null; email: string | null; phone: string | null; avatarUrl: string | null } | null }; clearedAssignee: ClearedAssigneeSnapshot }> {
+  let clearedAssignee: ClearedAssigneeSnapshot = null;
   if (status === "RESOLVED" && extra?.clearAssignedTo) {
-    const prev = await prisma.conversation.findUnique({
+    const prev = await tx.conversation.findUnique({
       where: { id },
       select: {
         assignedToId: true,
-        contactId: true,
         assignedTo: {
           select: {
             name: true,
@@ -2849,23 +2855,27 @@ export async function updateConversationStatusInDb(
         archetype: prev.assignedTo?.aiAgentConfig?.archetype ?? null,
         enabledTools: prev.assignedTo?.aiAgentConfig?.enabledTools ?? null,
       };
-      closeContactId = prev.contactId ?? null;
     }
   }
 
-  const updated = await prisma.conversation.update({
+  const row = await tx.conversation.update({
     where: { id },
-    data: {
-      status,
-      ...closedAtPatch,
-      ...tabulationPatch,
-      ...followUpPatch,
-      ...clearPatch,
-      // Encerrar remove da fila Erro — hasError sticky não é mais acionável.
-      ...(status === "RESOLVED" ? { hasError: false } : {}),
-    },
+    data: buildConversationStatusPatch(status, extra),
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
+
+  return { row, clearedAssignee };
+}
+
+export async function updateConversationStatusInDb(
+  id: string,
+  status: ConversationStatus,
+  extra?: UpdateConversationStatusExtra,
+) {
+  const followUp = extra?.followUp === true;
+  const { row: updated, clearedAssignee } = await prisma.$transaction(async (tx) =>
+    updateConversationStatusInTx(tx, id, status, extra),
+  );
 
   // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
   if (status === "RESOLVED" || status === "OPEN") {
@@ -2928,11 +2938,12 @@ export async function updateConversationStatusInDb(
     if (!skipUnassignLog) {
       await logEvent({
         type: "ASSIGNEE_CHANGED",
+      actorType: "HUMAN",
         entityType: "CONVERSATION",
         entityId: id,
         entityLabel: updated.externalId ?? null,
         conversationId: id,
-        contactId: closeContactId,
+        contactId: updated.contactId,
         field: "assignedTo",
         oldValue: clearedAssignee.name,
         newValue: null,
@@ -2952,10 +2963,10 @@ export async function updateConversationStatusInDb(
         /* best-effort */
       }
     }
-    if (closeContactId) {
+    if (updated.contactId) {
       const { clearContactOwnershipOnClose } = await import("@/services/deals");
       await clearContactOwnershipOnClose({
-        contactId: closeContactId,
+        contactId: updated.contactId,
         clearedUserId: clearedAssignee.id,
         actorUserId: userIdForFk(getRequestContext()?.userId),
       }).catch(() => {});
@@ -3145,12 +3156,90 @@ export async function resolveConversationsInline(params: {
     const toResolve = convs.filter((c) => c.status !== "RESOLVED");
     if (toResolve.length === 0) continue;
 
-    await prisma.conversation.updateMany({
-      where: {
-        id: { in: toResolve.map((c) => c.id) },
-        status: { not: "RESOLVED" },
-      },
-      data: closePatch,
+    const toResolveIds = toResolve.map((c) => c.id);
+
+    const { tabulationLogMeta } = applyTab
+      ? await import("@/services/tabulations")
+      : { tabulationLogMeta: null };
+
+    const resolvedRows = await prisma.$transaction(async (tx) => {
+      await tx.conversation.updateMany({
+        where: {
+          id: { in: toResolveIds },
+          status: { not: "RESOLVED" },
+        },
+        data: closePatch,
+      });
+
+      const rows = await tx.conversation.findMany({
+        where: { id: { in: toResolveIds }, status: "RESOLVED" },
+        select: {
+          id: true,
+          status: true,
+          closedAt: true,
+          contactId: true,
+          departmentId: true,
+          organizationId: true,
+          externalId: true,
+          assignedToId: true,
+          assignedTo: { select: { name: true } },
+          contact: { select: { name: true } },
+        },
+      });
+
+      for (const conv of rows) {
+        const closedAtIso = conv.closedAt?.toISOString() ?? new Date().toISOString();
+        const closedInput: ActivityOutboxInput = {
+          type: "CONVERSATION_CLOSED",
+          actorType: "HUMAN",
+          entityType: "CONVERSATION",
+          entityId: conv.id,
+          entityLabel: conv.contact?.name ?? conv.externalId ?? null,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          field: "status",
+          oldValue: conv.status,
+          newValue: "RESOLVED",
+          organizationId: conv.organizationId,
+          meta: {
+            from: conv.status,
+            to: "RESOLVED",
+            source,
+            ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
+            ...(params.skipAutomations ? { skipAutomations: true } : {}),
+          },
+          idempotencyKey: `conversation:${conv.id}:closed:${closedAtIso}`,
+        };
+        await insertActivityOutbox(tx, closedInput);
+
+        if (applyTab && tab && tabulationLogMeta) {
+          const tabulatedInput: ActivityOutboxInput = {
+            type: "CONVERSATION_TABULATED",
+            actorType: "HUMAN",
+            entityType: "CONVERSATION",
+            entityId: conv.id,
+            entityLabel: conv.contact?.name ?? conv.externalId ?? null,
+            conversationId: conv.id,
+            contactId: conv.contactId,
+            departmentId: tab.departmentId,
+            organizationId: conv.organizationId,
+            meta: tabulationLogMeta(
+              {
+                tabulationId: tab.tabulationId,
+                ancestorIds: tab.ancestorIds,
+                departmentId: tab.departmentId,
+                name: tab.name,
+                number: tab.number,
+              },
+              { source },
+            ),
+            idempotencyKey: `conversation:${conv.id}:tabulated:${tab.tabulationId}:${closedAtIso}`,
+          };
+          await insertActivityOutbox(tx, tabulatedInput);
+        }
+      }
+
+      return rows;
     });
     updated += toResolve.length;
 
@@ -3176,14 +3265,11 @@ export async function resolveConversationsInline(params: {
       }
     }
 
-    const { tabulationLogMeta } = applyTab
-      ? await import("@/services/tabulations")
-      : { tabulationLogMeta: null };
-
-    for (const conv of toResolve) {
+    for (const conv of resolvedRows) {
       if (!params.keepAgent && conv.assignedToId) {
         void logEvent({
           type: "ASSIGNEE_CHANGED",
+          actorType: "HUMAN",
           entityType: "CONVERSATION",
           entityId: conv.id,
           entityLabel: conv.contact?.name ?? conv.externalId ?? null,
@@ -3198,45 +3284,6 @@ export async function resolveConversationsInline(params: {
             reason: "conversation_closed",
             source,
           },
-        }).catch(() => {});
-      }
-      void logEvent({
-        type: "CONVERSATION_CLOSED",
-        entityType: "CONVERSATION",
-        entityId: conv.id,
-        entityLabel: conv.contact?.name ?? conv.externalId ?? null,
-        conversationId: conv.id,
-        contactId: conv.contactId,
-        field: "status",
-        oldValue: conv.status,
-        newValue: "RESOLVED",
-        meta: {
-          from: conv.status,
-          to: "RESOLVED",
-          source,
-          ...(applyTab && tab ? { tabulationId: tab.tabulationId } : {}),
-          ...(params.skipAutomations ? { skipAutomations: true } : {}),
-        },
-      }).catch(() => {});
-
-      if (applyTab && tab && tabulationLogMeta) {
-        void logEvent({
-          type: "CONVERSATION_TABULATED",
-          entityType: "CONVERSATION",
-          entityId: conv.id,
-          entityLabel: conv.contact?.name ?? conv.externalId ?? null,
-          conversationId: conv.id,
-          contactId: conv.contactId,
-          meta: tabulationLogMeta(
-            {
-              tabulationId: tab.tabulationId,
-              ancestorIds: tab.ancestorIds,
-              departmentId: tab.departmentId,
-              name: tab.name,
-              number: tab.number,
-            },
-            { source },
-          ),
         }).catch(() => {});
       }
 

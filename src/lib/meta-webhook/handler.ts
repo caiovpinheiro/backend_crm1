@@ -2974,6 +2974,8 @@ export async function processMetaWebhookPayload(
                 conversationId: conversation.id,
                 contactId: contact.id,
                 dealId: openDeal?.id ?? null,
+                channel: "WhatsApp",
+                actorType: "INTEGRATION",
                 actor: {
                   type: "INTEGRATION",
                   label: contact.name ?? profileName ?? "Contato",
@@ -3137,8 +3139,11 @@ export async function processMetaWebhookPayload(
             );
 
             try {
+              // Org da própria conversa, não do contexto: o guard
+              // fail-closed do sse-bus descarta o evento sem org, e o
+              // inbound roda no worker-meta-webhook.
               sseBus.publish("new_message", {
-                organizationId: getOrgIdOrNull(),
+                organizationId: conversation.organizationId,
                 conversationId: conversation.id,
                 contactId: contact.id,
                 direction: "in",
@@ -3147,7 +3152,7 @@ export async function processMetaWebhookPayload(
                 timestamp: parsed.timestamp,
               });
             } catch (err) {
-              log.debug("Falha ao publicar SSE (não-fatal):", err);
+              log.warn("Falha ao publicar SSE (não-fatal):", err);
             }
 
             // Push notification ao operador (PWA — funciona com app

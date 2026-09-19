@@ -83,7 +83,12 @@ export async function GET(request: Request) {
         filters,
         parseDealSections(searchParams.get("section")),
       );
-      return NextResponse.json(data);
+      return NextResponse.json(data, {
+        headers: {
+          "Cache-Control": "private, max-age=30, stale-while-revalidate=120",
+          Vary: "Cookie, Authorization, Accept-Encoding",
+        },
+      });
     } catch (e) {
       console.error("[api/painel/deals]", e);
       return NextResponse.json(

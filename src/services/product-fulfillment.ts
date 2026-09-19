@@ -110,6 +110,8 @@ export async function onDealWon(dealId: string): Promise<void> {
           if (err instanceof InsufficientInventoryError) {
             void logEvent({
               type: "INVENTORY_CONSUME_FAILED",
+              actorType: "AUTOMATION",
+              actorLabel: "Fulfillment",
               entityType: "DEAL",
               entityId: dealId,
               dealId,
@@ -143,6 +145,8 @@ export async function onDealWon(dealId: string): Promise<void> {
           });
           void logEvent({
             type: "COURSE_POST_SALE_CREATED",
+            actorType: "AUTOMATION",
+            actorLabel: "Fulfillment",
             entityType: "DEAL",
             entityId: dealId,
             dealId,
@@ -157,6 +161,8 @@ export async function onDealWon(dealId: string): Promise<void> {
         if (!clientCompanyId) {
           void logEvent({
             type: "JOB_OPENING_SKIPPED_NO_COMPANY",
+            actorType: "AUTOMATION",
+            actorLabel: "Fulfillment",
             entityType: "DEAL",
             entityId: dealId,
             dealId,
@@ -190,6 +196,8 @@ export async function onDealWon(dealId: string): Promise<void> {
         });
         void logEvent({
           type: "JOB_OPENING_CREATED",
+          actorType: "AUTOMATION",
+          actorLabel: "Fulfillment",
           entityType: "DEAL",
           entityId: dealId,
           dealId,

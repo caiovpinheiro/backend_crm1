@@ -8,7 +8,11 @@ import {
   requireStageScope,
 } from "@/lib/authz/resource-policy";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEvent, getDealById, moveDeal } from "@/services/deals";
+import {
+  createDealEventTx,
+  getDealById,
+  moveDeal,
+} from "@/services/deals";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -87,32 +91,52 @@ export async function POST(request: Request, context: RouteContext) {
           pipelineId: fromPipelineId,
           pipelineName: existing.stage.pipeline?.name ?? null,
         };
-        const deal = await moveDeal(dealId, b.stageId, b.position, { lostReason });
+        const uid = userLike.id;
+        const fromStatus = existing.status;
+        const stageChanged = b.stageId !== fromStage.id;
+
+        const deal = await moveDeal(dealId, b.stageId, b.position, {
+          lostReason,
+          afterUpdate: stageChanged
+            ? async (tx, ctx) => {
+                const toStage = await tx.stage.findUnique({
+                  where: { id: ctx.targetStageId },
+                  select: { name: true, pipelineId: true, pipeline: { select: { name: true } } },
+                });
+                const pipelineChanged =
+                  !!ctx.fromPipelineId && ctx.toPipelineId !== ctx.fromPipelineId;
+                await createDealEventTx(
+                  tx,
+                  dealId,
+                  uid,
+                  "STAGE_CHANGED",
+                  {
+                    from: fromStage,
+                    to: {
+                      id: ctx.targetStageId,
+                      name: toStage?.name ?? ctx.targetStageId,
+                      pipelineId: ctx.toPipelineId,
+                      pipelineName: toStage?.pipeline?.name ?? null,
+                    },
+                    ...(pipelineChanged ? { pipelineChanged: true } : {}),
+                  },
+                );
+
+                if (ctx.becameWon || ctx.becameLost) {
+                  await createDealEventTx(tx, dealId, uid, "STATUS_CHANGED", {
+                    from: fromStatus,
+                    to: ctx.becameWon ? "WON" : "LOST",
+                    ...(ctx.becameLost && lostReason ? { lostReason } : {}),
+                  });
+                }
+              }
+            : undefined,
+        });
         if (!deal) {
           return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
         }
 
-        if (b.stageId !== fromStage.id) {
-          const uid = userLike.id;
-          const toStage = (deal as {
-            stage?: {
-              id: string;
-              name: string;
-              pipeline?: { id: string; name: string } | null;
-            };
-          }).stage;
-          const pipelineChanged = fromPipelineId && toPipelineId !== fromPipelineId;
-          createDealEvent(dealId, uid, "STAGE_CHANGED", {
-            from: fromStage,
-            to: {
-              id: b.stageId as string,
-              name: toStage?.name ?? b.stageId,
-              pipelineId: toStage?.pipeline?.id ?? toPipelineId,
-              pipelineName: toStage?.pipeline?.name ?? null,
-            },
-            ...(pipelineChanged ? { pipelineChanged: true } : {}),
-          }).catch(() => {});
-
+        if (stageChanged) {
           fireTrigger("stage_changed", {
             dealId,
             contactId: existing.contactId ?? undefined,
@@ -124,17 +148,8 @@ export async function POST(request: Request, context: RouteContext) {
             },
           }).catch(() => {});
 
-          // Estágios terminais (Ganho/Perdido): o moveDeal sincroniza
-          // Deal.status — aqui replicamos os side effects do fluxo de
-          // status (evento + trigger) pra manter paridade com PUT /status.
-          const fromStatus = existing.status;
           const newStatus = (deal as { status?: string }).status;
           if (newStatus && newStatus !== fromStatus) {
-            createDealEvent(dealId, uid, "STATUS_CHANGED", {
-              from: fromStatus,
-              to: newStatus,
-              ...(newStatus === "LOST" && lostReason ? { lostReason } : {}),
-            }).catch(() => {});
             if (newStatus === "WON") {
               fireTrigger("deal_won", {
                 dealId,

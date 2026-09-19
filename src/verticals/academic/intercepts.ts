@@ -19,6 +19,13 @@ import {
   messageLooksLikeFirstAccessPack,
   parseFirstAccessChoice,
 } from "@/verticals/academic/atendimento-prompt";
+
+function academicSelfServeInterceptsOn(
+  policy: { interceptFirstAccess?: boolean } | null | undefined,
+): boolean {
+  if (!policy) return true;
+  return policy.interceptFirstAccess !== false;
+}
 import {
   closeAiOnlyConversation,
   shouldCloseAfterAgentFarewell,
@@ -141,6 +148,7 @@ export async function runAcademicInterceptPipeline(
   if (phase === "pre_assignee") {
     const __hit = await (async (): Promise<VerticalInterceptHit | null> => {
           // Primeiro acesso (pedido, "não consegui", ou "1"/portal): a IA atende.
+          if (!academicSelfServeInterceptsOn(policy)) return null;
           {
             const lastBotFa = await prisma.message.findFirst({
               where: {
@@ -266,7 +274,10 @@ export async function runAcademicInterceptPipeline(
   if (phase === "pre_assignee") {
     const __hit = await (async (): Promise<VerticalInterceptHit | null> => {
           // Blackboard / ver disciplinas — caminho do Portal, sem fila.
-          if (isAvaOrDisciplinesIntent(args.userMessage)) {
+          if (
+            academicSelfServeInterceptsOn(policy) &&
+            isAvaOrDisciplinesIntent(args.userMessage)
+          ) {
             const orgIdAva = getOrgIdOrNull();
             let avaAi: string | null = null;
             if (conversation?.assignedToId) {
@@ -351,8 +362,9 @@ export async function runAcademicInterceptPipeline(
     const __hit = await (async (): Promise<VerticalInterceptHit | null> => {
           // "oi" / "olá" / "?" — a IA cumprimenta. Nunca vira fila das 8h.
           if (
-            isBareGreetingMessage(args.userMessage) ||
-            /^\?+$/.test((args.userMessage ?? "").trim())
+            academicSelfServeInterceptsOn(policy) &&
+            (isBareGreetingMessage(args.userMessage) ||
+              /^\?+$/.test((args.userMessage ?? "").trim()))
           ) {
             const orgIdG = getOrgIdOrNull();
             let greetAi: string | null = null;

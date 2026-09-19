@@ -11,7 +11,7 @@
  * v2, não entra na seleção v1.
  */
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type ActorType } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { getOrgSetting, getOrgSettingBool } from "@/lib/org-settings";
@@ -19,6 +19,10 @@ import { isDistributionEnabled } from "./enabled";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import {
   assignDealOwner,
   assignOwnerToContactClusterTx,
@@ -417,6 +421,10 @@ async function emitDistributionEvent(
     departmentName = dept?.name ?? null;
   }
   try {
+    const actorType: ActorType =
+      input.triggerSource === "AUTOMATION" || input.triggerSource === "AI_AGENT"
+        ? "AUTOMATION"
+        : "SYSTEM";
     await logEvent({
       type: success ? "LEAD_DISTRIBUTED" : "LEAD_DISTRIBUTION_FAILED",
       entityType: assignedDealId ? "DEAL" : conversationId ? "CONVERSATION" : "CONTACT",
@@ -425,6 +433,7 @@ async function emitDistributionEvent(
       dealId: assignedDealId,
       contactId: input.contactId ?? null,
       conversationId,
+      actorType,
       field: "owner",
       newValue: selectedUserName ?? null,
       meta: {
@@ -434,11 +443,7 @@ async function emitDistributionEvent(
         ...(departmentName ? { departmentName } : {}),
       },
       actor: {
-        type:
-          input.triggerSource === "AUTOMATION" ||
-          input.triggerSource === "AI_AGENT"
-            ? "AUTOMATION"
-            : "SYSTEM",
+        type: actorType,
         label:
           input.triggerSource === "AI_AGENT"
             ? "Agente IA · Distribuição"
@@ -1092,6 +1097,43 @@ export async function executeDistribution(
         lastExecutionAt: new Date(),
       },
     });
+
+    const distributedAt = new Date();
+    const actorType: ActorType =
+      input.triggerSource === "AUTOMATION" || input.triggerSource === "AI_AGENT"
+        ? "AUTOMATION"
+        : "SYSTEM";
+    await insertActivityOutbox(tx, {
+      type: "LEAD_DISTRIBUTED",
+      actorType,
+      entityType: assignedDealId
+        ? "DEAL"
+        : input.conversationId
+          ? "CONVERSATION"
+          : "CONTACT",
+      entityId: assignedDealId ?? input.conversationId ?? input.contactId!,
+      entityLabel: selected.name ?? null,
+      dealId: assignedDealId,
+      contactId: input.contactId ?? null,
+      conversationId: input.conversationId ?? null,
+      field: "owner",
+      newValue: selected.name ?? null,
+      organizationId: orgId,
+      meta: {
+        reason: "ASSIGNED",
+        triggerSource: input.triggerSource,
+        selectedUserId: selected.userId,
+      },
+      actor: {
+        type: actorType,
+        label:
+          input.triggerSource === "AI_AGENT"
+            ? "Agente IA · Distribuição"
+            : "Distribuição Inteligente",
+      },
+      idempotencyKey: `lead:${assignedDealId ?? input.conversationId ?? input.contactId!}:distributed:${distributedAt.toISOString()}`,
+    });
+
     return true;
   });
 
@@ -1148,14 +1190,6 @@ export async function executeDistribution(
 
   await resolvePendingFor(input.dealId, input.contactId, selected.userId);
   await writeLog(input, true, "ASSIGNED", selected.userId, evaluated);
-  await emitDistributionEvent(
-    input,
-    true,
-    "ASSIGNED",
-    selected.userId,
-    selected.name,
-    assignedDealId,
-  );
 
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
   // Await: o card precisa estar no funil operacional assim que o consultor

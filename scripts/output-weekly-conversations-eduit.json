@@ -1,0 +1,111 @@
+{
+  "organization": "EduIT",
+  "organizationId": "org_eduit",
+  "period": {
+    "start": "2026-09-13T00:00:00.000Z",
+    "end": "2026-09-18T23:59:59.000Z"
+  },
+  "summary": {
+    "totalConversations": 1,
+    "totalMessages": 8,
+    "humanMessages": 8,
+    "botMessages": 0,
+    "systemMessages": 0,
+    "inboundMessages": 0,
+    "outboundMessages": 8,
+    "agentInteractions": {
+      "Admin EduIT": 1
+    },
+    "aiAgentInteractions": {},
+    "departmentStats": {
+      "Sem departamento": {
+        "count": 1,
+        "conversations": [
+          "#1"
+        ]
+      }
+    },
+    "channelStats": {
+      "whatsapp": 1
+    }
+  },
+  "conversations": [
+    {
+      "number": 1,
+      "contact": "Aluno Mock (+55 11 90000-0001)",
+      "status": "OPEN",
+      "channel": "whatsapp",
+      "assignedTo": "Admin EduIT",
+      "assignedToType": "HUMAN",
+      "department": "Sem departamento",
+      "createdAt": "2026-09-14T17:55:24.337Z",
+      "updatedAt": "2026-09-14T17:55:24.337Z",
+      "totalMessages": 8,
+      "humanMessages": 8,
+      "botMessages": 0,
+      "systemMessages": 0,
+      "inbound": 0,
+      "outbound": 8,
+      "hasHumanReply": false,
+      "hasAgentReply": false,
+      "messages": [
+        {
+          "timestamp": "2026-09-14T17:55:24.337Z",
+          "direction": "in",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "Olá! Preciso de ajuda com a minha matrícula."
+        },
+        {
+          "timestamp": "2026-09-14T18:00:27.046Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Posso ajudar em algo mais?"
+        },
+        {
+          "timestamp": "2026-09-14T18:00:40.319Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Posso te explicar as opções disponíveis."
+        },
+        {
+          "timestamp": "2026-09-14T18:00:49.767Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Só um momento, por favor. Vou verificar para você."
+        },
+        {
+          "timestamp": "2026-09-14T18:01:57.351Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Olá! Como posso ajudar?"
+        },
+        {
+          "timestamp": "2026-09-14T18:31:08.126Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Olá! Como posso ajudar?"
+        },
+        {
+          "timestamp": "2026-09-14T18:31:53.102Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Só um momento, por favor. Vou verificar para você."
+        },
+        {
+          "timestamp": "2026-09-14T18:32:05.982Z",
+          "direction": "out",
+          "authorType": "human",
+          "aiAgent": null,
+          "preview": "*Admin EduIT*: Posso ajudar em algo mais?"
+        }
+      ]
+    }
+  ]
+}

@@ -71,6 +71,7 @@ export async function POST(request: Request, ctx: Ctx) {
         });
         void logEvent({
           type: "CONTACT_TAG_ADDED",
+      actorType: "HUMAN",
           entityType: "CONTACT",
           entityId: contactId,
           entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,
@@ -117,6 +118,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
         });
         void logEvent({
           type: "CONTACT_TAG_REMOVED",
+      actorType: "HUMAN",
           entityType: "CONTACT",
           entityId: contactId,
           entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,

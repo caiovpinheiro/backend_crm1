@@ -175,6 +175,35 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Outbox do Activity Log (Fase 2).
+  const activityOutboxDepth = new Gauge({
+    name: "crm_activity_outbox_depth",
+    help: "Itens pendentes na outbox do Activity Log.",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+
+  const activityOutboxAge = new Gauge({
+    name: "crm_activity_outbox_oldest_seconds",
+    help: "Idade do item mais antigo na outbox (segundos).",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+
+  const activityOutboxDead = new Gauge({
+    name: "crm_activity_outbox_dead_letter",
+    help: "Itens em dead letter na outbox.",
+    labelNames: ["organization"] as const,
+    registers: [registry],
+  });
+
+  const activityOutboxProcessed = new Counter({
+    name: "crm_activity_outbox_processed_total",
+    help: "Eventos projetados da outbox para activity_events.",
+    labelNames: ["organization", "status"] as const,
+    registers: [registry],
+  });
+
   return {
     http: { requests: httpRequests, duration: httpDuration },
     sse: { subscribers: sseSubscribers, messages: sseMessages },
@@ -186,6 +215,7 @@ function buildMetrics(registry: Registry): AppMetrics {
     errors,
     cacheHits,
     cacheMisses,
+    activityOutbox: { depth: activityOutboxDepth, age: activityOutboxAge, dead: activityOutboxDead, processed: activityOutboxProcessed },
   };
 }
 
@@ -221,6 +251,12 @@ export type AppMetrics = {
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
+  activityOutbox: {
+    depth: Gauge<"organization">;
+    age: Gauge<"organization">;
+    dead: Gauge<"organization">;
+    processed: Counter<"organization" | "status">;
+  };
 };
 
 function ensureRegistry(): { registry: Registry; metrics: AppMetrics } {
@@ -247,7 +283,7 @@ export async function renderMetrics(): Promise<{
   body: string;
   contentType: string;
 }> {
-  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool()]);
+  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool(), snapshotActivityOutbox()]);
   const body = await registry.metrics();
   return { body, contentType: registry.contentType };
 }
@@ -267,6 +303,15 @@ async function snapshotDbPool(): Promise<void> {
     await mod.collectDbPool();
   } catch {
     // pool nao exposto — ok.
+  }
+}
+
+async function snapshotActivityOutbox(): Promise<void> {
+  try {
+    const mod = await import("@/services/activity-outbox-metrics");
+    await mod.collectActivityOutboxMetrics();
+  } catch {
+    // outbox ainda nao inicializado ou db indisponivel — ok.
   }
 }
 

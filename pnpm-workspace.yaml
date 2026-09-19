@@ -1,0 +1,11 @@
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@whiskeysockets/baileys': set this to true or false
+  esbuild: set this to true or false
+  ffmpeg-static: set this to true or false
+  msgpackr-extract: set this to true or false
+  pg: true
+  prisma: true
+  protobufjs: set this to true or false
+  unrs-resolver: set this to true or false

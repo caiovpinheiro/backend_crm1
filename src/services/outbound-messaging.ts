@@ -122,6 +122,8 @@ async function reopenIfResolved(
       entityLabel: null,
       conversationId: fresh.id,
       contactId: fresh.contactId,
+      actorType: "HUMAN",
+      channel: fresh.channel,
       meta: {
         channel: fresh.channel,
         source: "outbound_reopen",
@@ -250,6 +252,7 @@ export async function createInternalNoteOnConversation(args: {
       conversationId: conv.id,
       contactId: conv.contactId,
       dealId,
+      actorType: "HUMAN",
       meta: { preview: content.slice(0, 200), source: "outbound_service", isPrivate: true },
     });
   })();
@@ -400,6 +403,9 @@ export async function sendTextToConversation(args: {
       entityLabel: senderName,
       conversationId: conv.id,
       contactId: conv.contactId,
+      channel: "WhatsApp",
+      actorType: "HUMAN",
+      actorLabel: senderName,
       meta: {
         preview: content.slice(0, 200),
         channel: "WhatsApp",
@@ -635,6 +641,9 @@ export async function sendInteractiveButtonsToConversation(args: {
       entityLabel: senderName,
       conversationId: conv.id,
       contactId: conv.contactId,
+      channel: "WhatsApp",
+      actorType: "HUMAN",
+      actorLabel: senderName,
       meta: {
         preview: body.slice(0, 200),
         channel: "WhatsApp",
@@ -943,6 +952,9 @@ export async function sendInteractiveListToConversation(args: {
       entityLabel: senderName,
       conversationId: conv.id,
       contactId: conv.contactId,
+      channel: "WhatsApp",
+      actorType: "HUMAN",
+      actorLabel: senderName,
       meta: {
         preview: body.slice(0, 200),
         channel: "WhatsApp",
@@ -1163,6 +1175,9 @@ export async function sendFlowToConversation(args: {
       entityLabel: senderName,
       conversationId: conv.id,
       contactId: conv.contactId,
+      channel: "WhatsApp",
+      actorType: "HUMAN",
+      actorLabel: senderName,
       meta: {
         preview: body.slice(0, 200),
         channel: "WhatsApp",

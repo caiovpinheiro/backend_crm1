@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } from "@/lib/authz/resource-policy";
+import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import {
-  createDeal,
-  createDealEvent,
+  createDealEventTx,
+  createDealTx,
   flattenDealListItem,
   getDeals,
   isValidDealStatus,
@@ -149,6 +150,7 @@ export async function POST(request: Request) {
     if (typeof b.stageId !== "string" || !b.stageId) {
       return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
     }
+    const stageId = b.stageId;
 
     if (b.status !== undefined && b.status !== null) {
       if (typeof b.status !== "string" || !isValidDealStatus(b.status)) {
@@ -182,41 +184,50 @@ export async function POST(request: Request) {
     }
 
     try {
-      const stageScope = await requireStageScope(authResult.user, "move", b.stageId);
+      const stageScope = await requireStageScope(authResult.user, "move", stageId);
       if (stageScope) return stageScope;
-      const deal = await createDeal({
-        title: typeof b.title === "string" ? b.title : undefined,
-        stageId: b.stageId,
-        value: typeof b.value === "number" ? b.value : undefined,
-        status:
-          typeof b.status === "string" && isValidDealStatus(b.status) ? b.status : undefined,
-        expectedClose,
-        lostReason:
-          b.lostReason === null
-            ? null
-            : typeof b.lostReason === "string"
-              ? b.lostReason
-              : undefined,
-        position: typeof b.position === "number" ? b.position : undefined,
-        contactId:
-          b.contactId === null
-            ? null
-            : typeof b.contactId === "string"
-              ? b.contactId
-              : undefined,
-        ownerId:
-          b.ownerId === null
-            ? null
-            : typeof b.ownerId === "string"
-              ? b.ownerId
-              : undefined,
+      const uid = authResult.user.id;
+      const deal = await prisma.$transaction(async (tx) => {
+        const created = await createDealTx(tx, {
+          title: typeof b.title === "string" ? b.title : undefined,
+          stageId,
+          value: typeof b.value === "number" ? b.value : undefined,
+          status:
+            typeof b.status === "string" && isValidDealStatus(b.status) ? b.status : undefined,
+          expectedClose,
+          lostReason:
+            b.lostReason === null
+              ? null
+              : typeof b.lostReason === "string"
+                ? b.lostReason
+                : undefined,
+          position: typeof b.position === "number" ? b.position : undefined,
+          contactId:
+            b.contactId === null
+              ? null
+              : typeof b.contactId === "string"
+                ? b.contactId
+                : undefined,
+          ownerId:
+            b.ownerId === null
+              ? null
+              : typeof b.ownerId === "string"
+                ? b.ownerId
+                : undefined,
+        });
+        await createDealEventTx(
+          tx,
+          created.id,
+          uid,
+          "CREATED",
+          {
+            stageId,
+            createdAt: created.createdAt instanceof Date ? created.createdAt.toISOString() : created.createdAt,
+          },
+        );
+        return created;
       });
 
-      const uid = authResult.user.id;
-      createDealEvent(deal.id, uid, "CREATED", {
-        stageId: b.stageId,
-        createdAt: deal.createdAt instanceof Date ? deal.createdAt.toISOString() : deal.createdAt,
-      }).catch(() => {});
       fireTrigger("deal_created", {
         dealId: deal.id,
         contactId: deal.contactId ?? undefined,

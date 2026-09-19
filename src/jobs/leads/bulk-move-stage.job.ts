@@ -1,10 +1,17 @@
 import type { Job } from "bullmq";
+import { Prisma } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { withAutomationOriginMeta, userIdForFk } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEventsMany, type DealEventInput } from "@/services/deals";
+import type { DealEventInput } from "@/services/deals";
 import type { BulkMoveStagePayload } from "@/lib/queue";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 
 import {
   type BulkOperationErrorEntry,
@@ -185,45 +192,99 @@ export async function processBulkMoveStage(
           : targetStage.isLost
             ? ("LOST" as const)
             : ("OPEN" as const);
-        await prisma.deal.updateMany({
-          where: {
-            id: { in: toMove.map((d) => d.id) },
-            stageId: { not: targetStageId }, // defesa contra concorrência
-          },
-          data:
-            syncedStatus === "OPEN"
-              ? { stageId: targetStageId, status: "OPEN", closedAt: null, lostReason: null }
-              : syncedStatus === "LOST"
-                ? {
-                    stageId: targetStageId,
-                    status: "LOST",
-                    closedAt: new Date(),
-                    lostReason: lostReason?.trim() || null,
-                  }
-                : { stageId: targetStageId, status: "WON", closedAt: new Date(), lostReason: null },
+        await prisma.$transaction(async (tx) => {
+          await tx.deal.updateMany({
+            where: {
+              id: { in: toMove.map((d) => d.id) },
+              stageId: { not: targetStageId }, // defesa contra concorrência
+            },
+            data:
+              syncedStatus === "OPEN"
+                ? { stageId: targetStageId, status: "OPEN", closedAt: null, lostReason: null }
+                : syncedStatus === "LOST"
+                  ? {
+                      stageId: targetStageId,
+                      status: "LOST",
+                      closedAt: new Date(),
+                      lostReason: lostReason?.trim() || null,
+                    }
+                  : { stageId: targetStageId, status: "WON", closedAt: new Date(), lostReason: null },
+          });
+
+          const updatedRows = await tx.deal.findMany({
+            where: { id: { in: toMove.map((d) => d.id) } },
+            select: { id: true, organizationId: true, updatedAt: true },
+          });
+          const updatedAtById = new Map(updatedRows.map((r) => [r.id, r.updatedAt]));
+
+          const dealEvents: Prisma.DealEventCreateManyInput[] = [];
+          for (const deal of toMove) {
+            const timestampIso = updatedAtById.get(deal.id)?.toISOString() ?? new Date().toISOString();
+            dealEvents.push(
+              withOrgFromCtx({
+                dealId: deal.id,
+                userId: userIdForFk(initiatedByUserId),
+                type: "STAGE_CHANGED",
+                meta: withAutomationOriginMeta({
+                  from: { id: deal.stageId, name: deal.stage.name },
+                  to: { id: targetStage.id, name: targetStage.name },
+                }),
+              }),
+            );
+            const outboxInput: ActivityOutboxInput = {
+              type: "STAGE_CHANGED",
+              actorType: initiatedByUserId ? "HUMAN" : "SYSTEM",
+              actorUserId: userIdForFk(initiatedByUserId),
+              entityType: "DEAL",
+              entityId: deal.id,
+              dealId: deal.id,
+              field: "stageId",
+              oldValue: deal.stageId,
+              newValue: targetStageId,
+              organizationId: updatedRows.find((r) => r.id === deal.id)?.organizationId ?? organizationId,
+              meta: {
+                from: { id: deal.stageId, name: deal.stage.name },
+                to: { id: targetStage.id, name: targetStage.name },
+              },
+              idempotencyKey: `deal:${deal.id}:stage_changed:${targetStageId}:${timestampIso}`,
+            };
+            await insertActivityOutbox(tx, outboxInput);
+
+            if (deal.status !== syncedStatus) {
+              dealEvents.push(
+                withOrgFromCtx({
+                  dealId: deal.id,
+                  userId: userIdForFk(initiatedByUserId),
+                  type: "STATUS_CHANGED",
+                  meta: withAutomationOriginMeta({ from: deal.status, to: syncedStatus }),
+                }),
+              );
+              await insertActivityOutbox(tx, {
+                type: "STATUS_CHANGED",
+                actorType: initiatedByUserId ? "HUMAN" : "SYSTEM",
+                actorUserId: userIdForFk(initiatedByUserId),
+                entityType: "DEAL",
+                entityId: deal.id,
+                dealId: deal.id,
+                field: "status",
+                oldValue: deal.status,
+                newValue: syncedStatus,
+                organizationId: updatedRows.find((r) => r.id === deal.id)?.organizationId ?? organizationId,
+                meta: { from: deal.status, to: syncedStatus },
+                idempotencyKey: `deal:${deal.id}:status_changed:${syncedStatus}:${timestampIso}`,
+              });
+            }
+          }
+
+          if (dealEvents.length > 0) {
+            await tx.dealEvent.createMany({ data: dealEvents });
+          }
         });
         chunkSucceeded += toMove.length;
 
-        // Efeitos colaterais do chunk. Antes eram disparados por deal sem
-        // await: 50 deals × (2 inserts + findMany de automações + avaliação
-        // de condições) saíam todos de uma vez sobre um pool pequeno, o que
-        // explica os timeouts intermitentes num handler que parece enxuto.
-        // Agora os eventos viram um createMany e os gatilhos passam por um
-        // semáforo. Falhas continuam apenas logadas.
-        const events: DealEventInput[] = [];
+        // Gatilhos continuam fora da transação para não segurar conexão.
         const triggers: (() => Promise<void>)[] = [];
-
         for (const deal of toMove) {
-          events.push({
-            dealId: deal.id,
-            userId: initiatedByUserId,
-            type: "STAGE_CHANGED",
-            meta: {
-              from: { id: deal.stageId, name: deal.stage.name },
-              to: { id: targetStage.id, name: targetStage.name },
-            },
-          });
-
           triggers.push(() =>
             fireTrigger("stage_changed", {
               dealId: deal.id,
@@ -237,12 +298,6 @@ export async function processBulkMoveStage(
           );
 
           if (deal.status !== syncedStatus) {
-            events.push({
-              dealId: deal.id,
-              userId: initiatedByUserId,
-              type: "STATUS_CHANGED",
-              meta: { from: deal.status, to: syncedStatus },
-            });
             if (syncedStatus === "WON") {
               triggers.push(() =>
                 fireTrigger("deal_won", {
@@ -261,12 +316,6 @@ export async function processBulkMoveStage(
           }
         }
 
-        await createDealEventsMany(events).catch((err: unknown) => {
-          chunkLog.warn(
-            { err: truncateErrorMessage(err) },
-            "createDealEventsMany falhou (best-effort)",
-          );
-        });
         await runWithConcurrency(triggers, SIDE_EFFECT_CONCURRENCY);
       }
 

@@ -8,10 +8,17 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgSettingBool } from "@/lib/org-settings";
+import type { InboxPolicy, TabulateOnExitMode } from "@/lib/ai-agents/steering";
 import { sseBus } from "@/lib/sse-bus";
-import { logEvent } from "@/services/activity-log";
+import {
+  insertActivityOutbox,
+  type ActivityOutboxInput,
+} from "@/services/activity-outbox";
 import { fireTrigger } from "@/services/automation-triggers";
-import { updateConversationStatusInDb } from "@/services/conversations";
+import {
+  updateConversationStatusInDb,
+  updateConversationStatusInTx,
+} from "@/services/conversations";
 import { tabulationHistoryWindowStart } from "@/lib/zoned-date";
 import {
   formatTabulationCatalogBlock,
@@ -91,45 +98,82 @@ export async function applyConversationTabulation(args: {
       getOrgSettingBool("conversation.keepAgentOnEnd", false),
       getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
     ]);
-    await updateConversationStatusInDb(conv.id, "RESOLVED", {
-      tabulationId: chosen.tabulationId,
-      clearAssignedTo: !keepAgent,
-      clearDepartment: !keepDepartment,
-    });
-    await logEvent({
-      type: "CONVERSATION_CLOSED",
-      entityType: "CONVERSATION",
-      entityId: conv.id,
-      entityLabel: conv.externalId ?? null,
-      conversationId: conv.id,
-      contactId,
-      field: "status",
-      oldValue: conv.status,
-      newValue: "RESOLVED",
-      meta: {
-        action: "ai_tabulate_close",
-        source: args.source ?? "AI_AGENT",
-      },
-    }).catch(() => null);
-  } else if (!alreadySame) {
-    await prisma.conversation.update({
-      where: { id: conv.id },
-      data: { tabulationId: chosen.tabulationId },
-    });
-  }
+    await prisma.$transaction(async (tx) => {
+      const { row: updated } = await updateConversationStatusInTx(tx, conv.id, "RESOLVED", {
+        tabulationId: chosen.tabulationId,
+        clearAssignedTo: !keepAgent,
+        clearDepartment: !keepDepartment,
+      });
 
-  if (!alreadySame) {
-    await logEvent({
-      type: "CONVERSATION_TABULATED",
-      entityType: "CONVERSATION",
-      entityId: conv.id,
-      entityLabel: conv.externalId ?? null,
-      conversationId: conv.id,
-      contactId,
-      meta: tabulationLogMeta(chosen, {
-        source: args.source ?? "AI_AGENT",
-      }),
-    }).catch(() => null);
+      const timestampIso =
+        updated.closedAt?.toISOString() ?? updated.updatedAt.toISOString();
+
+      await insertActivityOutbox(tx, {
+        type: "CONVERSATION_CLOSED",
+        actorType: "AI",
+        actorLabel: "Agente IA",
+        entityType: "CONVERSATION",
+        entityId: conv.id,
+        entityLabel: conv.externalId ?? null,
+        conversationId: conv.id,
+        contactId,
+        field: "status",
+        oldValue: conv.status,
+        newValue: "RESOLVED",
+        organizationId: updated.organizationId,
+        meta: {
+          action: "ai_tabulate_close",
+          source: args.source ?? "AI_AGENT",
+        },
+        idempotencyKey: `conversation:${conv.id}:closed:${timestampIso}`,
+      });
+
+      if (!alreadySame) {
+        await insertActivityOutbox(tx, {
+          type: "CONVERSATION_TABULATED",
+          actorType: "AI",
+          actorLabel: "Agente IA",
+          entityType: "CONVERSATION",
+          entityId: conv.id,
+          entityLabel: conv.externalId ?? null,
+          conversationId: conv.id,
+          contactId,
+          departmentId: chosen.departmentId,
+          organizationId: updated.organizationId,
+          meta: tabulationLogMeta(chosen, {
+            source: args.source ?? "AI_AGENT",
+          }),
+          idempotencyKey: `conversation:${conv.id}:tabulated:${chosen.tabulationId}:${timestampIso}`,
+        });
+      }
+    });
+  } else if (!alreadySame) {
+    await prisma.$transaction(async (tx) => {
+      const updated = await tx.conversation.update({
+        where: { id: conv.id },
+        data: { tabulationId: chosen.tabulationId },
+      });
+
+      const timestampIso =
+        updated.closedAt?.toISOString() ?? updated.updatedAt.toISOString();
+
+      await insertActivityOutbox(tx, {
+        type: "CONVERSATION_TABULATED",
+        actorType: "AI",
+        actorLabel: "Agente IA",
+        entityType: "CONVERSATION",
+        entityId: conv.id,
+        entityLabel: conv.externalId ?? null,
+        conversationId: conv.id,
+        contactId,
+        departmentId: chosen.departmentId,
+        organizationId: updated.organizationId,
+        meta: tabulationLogMeta(chosen, {
+          source: args.source ?? "AI_AGENT",
+        }),
+        idempotencyKey: `conversation:${conv.id}:tabulated:${chosen.tabulationId}:${timestampIso}`,
+      });
+    });
   }
 
   try {
@@ -356,4 +400,55 @@ export async function triggerTabulationClassifyForContact(args: {
     tabulationId: chosenFallback.tabulationId,
     tabulationName: chosenFallback.name,
   };
+}
+
+export function shouldTabulateOnExit(
+  mode: TabulateOnExitMode | undefined,
+  trigger: "human_handoff" | "close",
+): boolean {
+  if (!mode || mode === "off") return false;
+  if (mode === "both") return true;
+  return mode === trigger;
+}
+
+/**
+ * Carimba a folha de tabulação sem atribuir o classificador ao WhatsApp.
+ */
+export async function maybeTabulateOnExit(args: {
+  organizationId: string;
+  contactId: string | null | undefined;
+  policy: InboxPolicy | null | undefined;
+  trigger: "human_handoff" | "close";
+}): Promise<ClassifyTriggerResult | { status: "skipped"; reason: "off" | "no_contact" | "no_classifier" }> {
+  if (!args.contactId) return { status: "skipped", reason: "no_contact" };
+  if (!shouldTabulateOnExit(args.policy?.tabulateOnExit, args.trigger)) {
+    return { status: "skipped", reason: "off" };
+  }
+  const agents = await prisma.user.findMany({
+    where: {
+      organizationId: args.organizationId,
+      type: "AI",
+      aiAgentConfig: { active: true },
+    },
+    select: {
+      id: true,
+      name: true,
+      aiAgentConfig: {
+        select: { archetype: true, enabledTools: true, active: true },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 40,
+  });
+  const classifier = agents.find((u) =>
+    isTabulationClassifier({
+      ...(u.aiAgentConfig ?? { archetype: "ATENDIMENTO", enabledTools: [] }),
+      name: u.name,
+    }),
+  );
+  if (!classifier) return { status: "skipped", reason: "no_classifier" };
+  return triggerTabulationClassifyForContact({
+    contactId: args.contactId,
+    agentUserId: classifier.id,
+  });
 }

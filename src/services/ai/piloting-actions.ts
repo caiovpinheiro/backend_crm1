@@ -813,6 +813,7 @@ export async function executeAgentHandoff(
 
   void logEvent({
     type: "AI_AGENT_HANDOFF",
+      actorType: "HUMAN",
     entityType: "CONVERSATION",
     entityId: args.conversationId,
     conversationId: args.conversationId,

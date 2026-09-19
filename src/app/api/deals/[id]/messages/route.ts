@@ -42,7 +42,6 @@ import {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { withRateLimit } from "@/lib/rate-limit";
-import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 import {
   createInternalNoteOnConversation,
@@ -182,21 +181,7 @@ async function createDealOnlyNote(args: {
     noteId: note.id,
     preview: args.content.slice(0, 200),
     source: "deal_messages_endpoint",
-  }).catch(() => {});
-
-  void logEvent({
-    type: "NOTE_ADDED",
-    entityType: "DEAL",
-    entityId: args.dealId,
-    entityLabel: args.actor.name ?? args.actor.email ?? "API",
-    contactId: args.contactId,
-    dealId: args.dealId,
-    meta: {
-      preview: args.content.slice(0, 200),
-      source: "deal_messages_endpoint",
-      isPrivate: true,
-      noteId: note.id,
-    },
+    isPrivate: true,
   }).catch(() => {});
 
   return NextResponse.json(

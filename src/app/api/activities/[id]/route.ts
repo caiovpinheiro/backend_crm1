@@ -195,6 +195,7 @@ export async function PUT(request: Request, context: RouteContext) {
             entityId: id,
             entityLabel: activity.title,
             contactId: targetContactId ?? null,
+            actorType: "HUMAN",
             field: field ?? null,
             oldValue: oldV ?? null,
             newValue: newV ?? null,
@@ -334,6 +335,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       // Tarefa ligada apenas a contato (ou solta) também é auditada.
       void logEvent({
         type: "ACTIVITY_DELETED",
+      actorType: "HUMAN",
         entityType: "ACTIVITY",
         entityId: id,
         entityLabel: existing.title,

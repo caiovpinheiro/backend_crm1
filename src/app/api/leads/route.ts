@@ -20,8 +20,9 @@ import {
   upsertDealCustomFieldValues,
 } from "@/services/custom-fields";
 import {
-  createDeal,
-  createDealEvent,
+  type CreateDealResult,
+  createDealEventTx,
+  createDealTx,
   findOpenDealForContactInPipeline,
   isValidDealStatus,
 } from "@/services/deals";
@@ -491,7 +492,7 @@ export async function POST(request: Request) {
         }
       }
 
-      let dealResult: Awaited<ReturnType<typeof createDeal>> | null = null;
+      let dealResult: CreateDealResult | null = null;
       let dealCreated = false;
       let dealReused = false;
       if (deal) {
@@ -515,28 +516,34 @@ export async function POST(request: Request) {
           deal.title && deal.title.trim()
             ? deal.title.trim()
             : `Lead - ${contact.name ?? "novo contato"}`;
-        dealResult = await createDeal({
-          title: fallbackTitle,
-          stageId: deal.stageId,
-          value: deal.value,
-          status:
-            deal.status && isValidDealStatus(deal.status) ? deal.status : undefined,
-          expectedClose:
-            deal.expectedClose === undefined ? undefined : deal.expectedClose,
-          position: deal.position,
-          contactId,
-          ownerId: deal.ownerId === undefined ? undefined : deal.ownerId,
+        dealResult = await prisma.$transaction(async (tx) => {
+          const created = await createDealTx(tx, {
+            title: fallbackTitle,
+            stageId: deal.stageId,
+            value: deal.value,
+            status:
+              deal.status && isValidDealStatus(deal.status) ? deal.status : undefined,
+            expectedClose:
+              deal.expectedClose === undefined ? undefined : deal.expectedClose,
+            position: deal.position,
+            contactId,
+            ownerId: deal.ownerId === undefined ? undefined : deal.ownerId,
+          });
+          await createDealEventTx(
+            tx,
+            created.id,
+            authResult.user.id,
+            "CREATED",
+            {
+              stageId: deal.stageId,
+              via: "api/leads",
+              source: contact.source ?? null,
+            },
+          );
+          return created;
         });
         dealCreated = true;
 
-        createDealEvent(dealResult.id, authResult.user.id, "CREATED", {
-          stageId: deal.stageId,
-          via: "api/leads",
-          // Origem do lead (form, chatbot, anúncio, etc.) — vinda no
-          // payload como contact.source. Combinado ao actor INTEGRATION
-          // (nome do token), o feed responde "de onde veio cada lead".
-          source: contact.source ?? null,
-        }).catch(() => {});
         fireTrigger("deal_created", {
           dealId: dealResult.id,
           contactId,

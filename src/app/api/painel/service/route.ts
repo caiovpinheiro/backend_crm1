@@ -25,7 +25,12 @@ export async function GET(request: Request) {
         clock,
         parseServiceSections(searchParams.get("section")),
       );
-      return NextResponse.json(data);
+      return NextResponse.json(data, {
+        headers: {
+          "Cache-Control": "private, max-age=30, stale-while-revalidate=120",
+          Vary: "Cookie, Authorization, Accept-Encoding",
+        },
+      });
     } catch (e) {
       console.error("[api/painel/service]", e);
       return NextResponse.json(

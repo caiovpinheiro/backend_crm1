@@ -161,7 +161,15 @@ function auditOnDeal(
   meta: Record<string, unknown>,
 ): void {
   if (!dealId) return;
-  void logEvent({ type, entityType: "DEAL", entityId: dealId, dealId, meta });
+  void logEvent({
+    type,
+    entityType: "DEAL",
+    entityId: dealId,
+    dealId,
+    actorType: "AUTOMATION",
+    actorLabel: "Estoque",
+    meta,
+  });
 }
 
 export type ConsumeInput = {

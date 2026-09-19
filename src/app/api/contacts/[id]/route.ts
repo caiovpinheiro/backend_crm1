@@ -258,6 +258,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     // a FK apagaria este próprio evento). id preservado em entityId/meta.
     void logEvent({
       type: "CONTACT_DELETED",
+      actorType: "HUMAN",
       entityType: "CONTACT",
       entityId: id,
       entityLabel: snap?.name ?? snap?.phone ?? snap?.email ?? null,

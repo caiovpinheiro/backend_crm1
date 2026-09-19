@@ -237,6 +237,11 @@ export type CreateAIAgentInput = {
   markMessagesRead?: boolean;
   autoClosePolicy?: AutoClosePolicy | null;
 
+  // Confirmação de identidade.
+  identityConfirmationEnabled?: boolean;
+  identityConfirmationTemplate?: string | null;
+  identityConfirmationFields?: string[];
+
   /// Origem do save pra auditoria (Onda 0). Default: api.
   auditSource?: AuditSource;
 };
@@ -261,6 +266,9 @@ export function sanitizePilotingInput(input: {
   typingPerCharMs?: unknown;
   markMessagesRead?: unknown;
   autoClosePolicy?: unknown;
+  identityConfirmationEnabled?: unknown;
+  identityConfirmationTemplate?: unknown;
+  identityConfirmationFields?: unknown;
 }): Partial<
   Pick<
     CreateAIAgentInput,
@@ -278,6 +286,9 @@ export function sanitizePilotingInput(input: {
     | "typingPerCharMs"
     | "markMessagesRead"
     | "autoClosePolicy"
+    | "identityConfirmationEnabled"
+    | "identityConfirmationTemplate"
+    | "identityConfirmationFields"
   >
 > {
   const out: Partial<CreateAIAgentInput> = {};
@@ -359,6 +370,24 @@ export function sanitizePilotingInput(input: {
     out.autoClosePolicy = null;
   } else if (input.autoClosePolicy !== undefined) {
     out.autoClosePolicy = normalizeAutoClosePolicy(input.autoClosePolicy);
+  }
+
+  if (typeof input.identityConfirmationEnabled === "boolean") {
+    out.identityConfirmationEnabled = input.identityConfirmationEnabled;
+  }
+
+  if (typeof input.identityConfirmationTemplate === "string") {
+    out.identityConfirmationTemplate =
+      input.identityConfirmationTemplate.trim() || null;
+  } else if (input.identityConfirmationTemplate === null) {
+    out.identityConfirmationTemplate = null;
+  }
+
+  if (Array.isArray(input.identityConfirmationFields)) {
+    out.identityConfirmationFields = input.identityConfirmationFields
+      .filter((v): v is string => typeof v === "string")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
 
   return out;

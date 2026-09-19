@@ -107,7 +107,9 @@ export const academicPack: VerticalPack = {
   inboxPolicyDefaults: {
     interceptRetention: true,
     interceptCourseShopping: true,
+    interceptFirstAccess: true,
     inauguralEnabled: true,
+    tabulateOnExit: "on_human_handoff",
   },
   ops: {
     ...closure,

@@ -10,9 +10,9 @@ import { canAccessField } from "@/lib/authz/scope-grants";
 import { prisma } from "@/lib/prisma";
 import {
   getDealCustomFieldValues,
-  upsertDealCustomFieldValues,
+  upsertDealCustomFieldValuesTx,
 } from "@/services/custom-fields";
-import { createDealEvent, getDealById } from "@/services/deals";
+import { createDealEventTx, getDealById } from "@/services/deals";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -87,9 +87,6 @@ export async function PUT(request: Request, ctx: Ctx) {
         );
       }
       const oldValues = await getDealCustomFieldValues(dealId);
-      await upsertDealCustomFieldValues(dealId, cleaned);
-      const updated = await getDealCustomFieldValues(dealId);
-
       const uid = authResult.user.id;
       const fieldIds = cleaned.map((c) => c.fieldId);
       const fieldDefs = await prisma.customField.findMany({
@@ -101,16 +98,28 @@ export async function PUT(request: Request, ctx: Ctx) {
         (oldValues as { fieldId: string; value: string }[]).map((v) => [v.fieldId, v.value]),
       );
 
-      for (const item of cleaned) {
-        const prev = oldMap.get(item.fieldId) ?? "";
-        if (prev !== item.value) {
-          createDealEvent(dealId, uid, "CUSTOM_FIELD_UPDATED", {
-            fieldLabel: labelMap.get(item.fieldId) ?? item.fieldId,
-            from: prev,
-            to: item.value,
-          }).catch(() => {});
+      const updated = await prisma.$transaction(async (tx) => {
+        await upsertDealCustomFieldValuesTx(tx, dealId, cleaned);
+
+        for (const item of cleaned) {
+          const prev = oldMap.get(item.fieldId) ?? "";
+          if (prev !== item.value) {
+            await createDealEventTx(
+              tx,
+              dealId,
+              uid,
+              "CUSTOM_FIELD_UPDATED",
+              {
+                fieldLabel: labelMap.get(item.fieldId) ?? item.fieldId,
+                from: prev,
+                to: item.value,
+              },
+            );
+          }
         }
-      }
+
+        return getDealCustomFieldValues(dealId);
+      });
 
       return NextResponse.json(updated);
     });
