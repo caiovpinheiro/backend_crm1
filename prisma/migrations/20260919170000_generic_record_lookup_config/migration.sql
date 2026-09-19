@@ -94,13 +94,14 @@ FROM mapped m
 WHERE c."id" = m."id";
 
 -- Template de sistema: agente novo não pode nascer pedindo uma ferramenta
--- que o motor não constrói mais.
+-- que o motor não constrói mais. Em template a coluna é `defaultTools`
+-- (`enabledTools` só existe em `ai_agent_configs`).
 UPDATE "ai_agent_templates"
-SET "enabledTools" = (
+SET "defaultTools" = (
   SELECT array_agg(DISTINCT t)
   FROM unnest(
-    array_remove("enabledTools", 'consultar_matricula')
+    array_remove("defaultTools", 'consultar_matricula')
     || ARRAY['search_crm_records']
   ) AS t
 )
-WHERE 'consultar_matricula' = ANY ("enabledTools");
+WHERE 'consultar_matricula' = ANY ("defaultTools");
