@@ -45,23 +45,34 @@ jobs:
         run: npm run lint
 
       - name: Test
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/vitest.log
+          {
+            echo "### vitest"
+            echo '```'
+            grep -E "Test Files|Tests  " /tmp/vitest.log | tail -4
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Catraca: o passivo de tipos fica congelado em tsc-baseline.json e o
       # job só falha com erro novo (ou com erro do baseline já corrigido,
       # que precisa sair do arquivo).
+      #
+      # O resumo vai para o GITHUB_STEP_SUMMARY porque o log bruto do job
+      # exige autenticação para ler; o summary não.
       - name: Typecheck (baseline)
-        run: node scripts/tsc-baseline.mjs
-
-      # O baseline é sensível ao ambiente (deps opcionais que existem aqui e
-      # não na máquina de quem gerou). Falhou? o log já traz o arquivo pronto
-      # para colar, em vez de exigir uma rodada de adivinhação.
-      - name: Baseline regravado (para copiar)
-        if: failure()
-        env:
-          UPDATE_TSC_BASELINE: "1"
         run: |
-          node scripts/tsc-baseline.mjs || true
-          echo "::group::tsc-baseline.json (gerado neste runner)"
-          cat tsc-baseline.json
-          echo "::endgroup::"
+          set -o pipefail
+          node scripts/tsc-baseline.mjs 2>&1 | tee /tmp/tsc.log
+        continue-on-error: false
+
+      - name: Resumo do typecheck
+        if: always()
+        run: |
+          {
+            echo "### tsc (catraca)"
+            echo '```'
+            head -c 30000 /tmp/tsc.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
