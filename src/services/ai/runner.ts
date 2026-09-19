@@ -789,7 +789,7 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
     // seria esconder do operador exatamente o que ele foi ver: a resposta que
     // o cliente receberia. A auditoria de produção fica intacta.
     const claimBlocked = effectAudit.blocked && !testMode;
-    const selfName = (agent.user?.name ?? "").trim();
+    const selfUserId = agent.userId;
     const aiHandoffAway = result.toolCalls.some((c) => {
       const payload = c.result;
       if (!payload || typeof payload !== "object") return false;
@@ -802,15 +802,15 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
           !Array.isArray(c.args) &&
           (c.args as { target?: unknown }).target === "ai_agent");
       if (!isAiTool) return false;
-      const dest = String(
-        c.args && typeof c.args === "object" && !Array.isArray(c.args)
-          ? ((c.args as { agentName?: unknown; name?: unknown }).agentName ??
-            (c.args as { name?: unknown }).name ??
-            "")
-          : "",
+      // Destino pelo id que a tool resolveu, não pelo nome que o modelo
+      // escreveu: nome é editável, acentuado e pode repetir entre agentes —
+      // com dois "Atendimento" a comparação por nome dizia "é você mesmo" e
+      // engolia a fala de um handoff que aconteceu de verdade.
+      const destUserId = String(
+        (payload as { targetAgentUserId?: unknown }).targetAgentUserId ?? "",
       ).trim();
-      if (!dest) return (payload as { assigned?: unknown }).assigned === true;
-      return dest.localeCompare(selfName, undefined, { sensitivity: "accent" }) !== 0;
+      if (!destUserId) return (payload as { assigned?: unknown }).assigned === true;
+      return destUserId !== selfUserId;
     });
     // O modelo escreve "vou te encaminhar" mesmo com o interruptor desligado.
     // Aviso oficial: tool envia em produção. Aqui só devolvemos texto no

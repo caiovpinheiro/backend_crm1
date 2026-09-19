@@ -206,14 +206,19 @@ function toolSucceeded(result: unknown): boolean {
 function inspectHandoff(calls: RunResult["toolCalls"]): {
   kind: "ai_agent" | "department" | "human" | null;
   name: string;
+  /** Destino resolvido pela tool. Quando existe, manda mais que o nome. */
+  userId?: string;
 } {
   for (const c of calls) {
     if (!toolSucceeded(c.result)) continue;
     const args = asRecord(c.args);
+    const res = asRecord(c.result);
+    const targetUserId = String(res.targetAgentUserId ?? "").trim() || undefined;
     if (c.name === "transfer_conversation") {
       const target = String(args.target ?? "");
       const name = String(args.name ?? "").trim();
-      if (target === "ai_agent") return { kind: "ai_agent", name };
+      if (target === "ai_agent")
+        return { kind: "ai_agent", name, userId: targetUserId };
       if (target === "department") return { kind: "department", name };
       if (target === "user") return { kind: "human", name };
     }
@@ -221,6 +226,7 @@ function inspectHandoff(calls: RunResult["toolCalls"]): {
       return {
         kind: "ai_agent",
         name: String(args.name ?? args.agentName ?? args.agentUserId ?? "").trim(),
+        userId: targetUserId,
       };
     }
     if (c.name === "transfer_to_department") {
@@ -262,10 +268,17 @@ function mapDepartmentToAgent(
 
 function applyHandoff(
   agents: AgentRow[],
-  handoff: { kind: "ai_agent" | "department" | "human" | null; name: string },
+  handoff: {
+    kind: "ai_agent" | "department" | "human" | null;
+    name: string;
+    userId?: string;
+  },
 ): { next: AgentRow | null; skip: string | null; switchedTo: string | null } {
   if (handoff.kind === "ai_agent") {
-    const dest = findAgent(agents, handoff.name);
+    // Id primeiro: o nome só decide quando a tool não resolveu o destino.
+    const dest =
+      agents.find((a) => !!handoff.userId && a.userId === handoff.userId) ??
+      findAgent(agents, handoff.name);
     if (dest) return { next: dest, skip: null, switchedTo: dest.name };
     return { next: null, skip: null, switchedTo: `unresolved:${handoff.name}` };
   }

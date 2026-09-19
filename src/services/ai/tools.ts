@@ -1575,6 +1575,9 @@ function transferToAiAgentTool(ctx: RunContext) {
           // promessa feita ao aluno (`effect-claims`).
           assigned: true,
           agentName: target.name,
+          // Id do destino resolvido: quem lê o resultado (runner, QA) compara
+          // por id. Nome de agente é editável e repete entre orgs.
+          targetAgentUserId: target.id,
           tagApplied,
           noticeStatus: noticeText ? "sent" : "off",
           openingStatus,
