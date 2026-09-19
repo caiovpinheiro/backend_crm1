@@ -32,6 +32,9 @@ export type HumanQueueContext = {
   queueMessage?: string | null;
   /// Texto de "já tem consultor responsável". `null` = padrão.
   assignedConsultantMessage?: string | null;
+  /// Texto para quando a pessoa insiste e o aviso de fila já saiu.
+  /// `null` = padrão.
+  queueFollowUpMessage?: string | null;
   /// Texto do aviso de áudio que dispara transferência. `null` = padrão.
   audioHandoffMessage?: string | null;
   /// Termos extras que contam como pedido de atendente humano.
@@ -51,6 +54,7 @@ export function humanQueueContextFromAgent(input: {
     preEndMinutes: p?.humanAttendancePreEndMinutes ?? null,
     queueMessage: p?.queueMessage ?? null,
     assignedConsultantMessage: p?.assignedConsultantMessage ?? null,
+    queueFollowUpMessage: p?.queueFollowUpMessage ?? null,
     audioHandoffMessage: p?.audioHandoffMessage ?? null,
     humanRequestKeywords: p?.humanRequestKeywords ?? [],
   };
@@ -442,6 +446,38 @@ export function buildAssignedConsultantNotice(
   return (
     "Já te passei para um *consultor* da equipe. Ele continua daqui — " +
     "pode levar um pouquinho, mas seu pedido já está com alguém, tá? 💛"
+  );
+}
+
+/**
+ * Saída quando a resposta do turno foi barrada por repetição (aviso de fila
+ * já dado ou near-duplicate). Sem ela o cliente escreve e não recebe nada.
+ *
+ * O texto não pode casar com `messageLooksLikeHumanQueueNotice`: dois avisos
+ * de fila são near-duplicate entre si por definição, então um follow-up com
+ * vocabulário de fila seria descartado pela mesma trava que ele existe para
+ * cobrir.
+ */
+export function buildQueueFollowUpMessage(ctx?: HumanQueueContext): string {
+  const custom = ctx?.queueFollowUpMessage?.trim();
+  if (custom) return custom;
+  return (
+    "Seu pedido continua registrado com a equipe, viu? " +
+    "Enquanto isso, me conta em uma frase o que você precisa " +
+    "que eu já deixo anotado aqui 💛"
+  );
+}
+
+/**
+ * Fato de estado para o prompt: o agente já anunciou a transferência nesta
+ * conversa. Sem isso ele reanuncia a cada turno, a trava de eco engole a
+ * resposta e o cliente fica no vácuo.
+ */
+export function buildQueueAlreadyNoticedHint(): string {
+  return (
+    "Você JÁ avisou nesta conversa que o pedido foi encaminhado/está na fila. " +
+    "NÃO repita esse aviso nem reformule: responda o que a pessoa perguntou " +
+    "agora ou faça UMA pergunta objetiva que adiante o atendimento."
   );
 }
 

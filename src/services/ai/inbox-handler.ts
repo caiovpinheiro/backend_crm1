@@ -42,6 +42,7 @@ import {
   buildAssignedConsultantNotice,
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
+  buildQueueFollowUpMessage,
   humanAttendanceStartHint,
   humanQueueContextFromAgent,
   isHumanAttendanceWindowOpen,
@@ -215,6 +216,25 @@ function queueCtxOf(
     businessHours,
   });
   return { ...ctx, offHoursMessage: businessHours?.offHoursMessage ?? null };
+}
+
+/**
+ * Última saída quando o texto do turno foi barrado por repetição. Ficar mudo
+ * é pior que repetir: a pessoa escreveu e não recebeu nada — foi o que
+ * aconteceu depois de dois avisos de fila idênticos seguidos.
+ *
+ * O throttle é o próprio near-duplicate contra as saídas recentes do bot:
+ * o follow-up é texto fixo, então sai no máximo uma vez por janela.
+ */
+function pickQueueFollowUp(
+  queue: HumanQueueContext,
+  recentBotContents: Array<string | null | undefined>,
+): string | null {
+  const followUp = buildQueueFollowUpMessage(queue);
+  const repeated = recentBotContents.some(
+    (c) => c && isNearDuplicateBotText(followUp, c),
+  );
+  return repeated ? null : followUp;
 }
 
 /** Mensagem genérica de fila — texto e horário vêm da Pilotagem. */
@@ -1432,6 +1452,14 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       } else {
         outbound = handoffText;
       }
+      // Aviso já dado e nada novo a dizer deixava o turno sem nenhuma saída:
+      // a pessoa escrevia e não recebia resposta. O follow-up não repete o
+      // aviso e é throttled pelas próprias mensagens recentes do bot.
+      const usedFollowUp = outbound === null;
+      outbound ??= pickQueueFollowUp(
+        queue,
+        recentBot.map((m) => m.content),
+      );
 
       if (outbound) {
         await sendAgentMessage({
@@ -1452,6 +1480,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         reason: "tool_transfer",
         gotHuman,
         alreadyNoticed,
+        followUp: usedFollowUp ? Boolean(outbound) : false,
+        mute: outbound === null,
         durationMs: Date.now() - startedAt.getTime(),
       });
       return;
@@ -1488,7 +1518,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     }
     // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
     if (text) {
-      const recentSame = await prisma.message.findFirst({
+      const recentOut = await prisma.message.findMany({
         where: {
           conversationId: args.conversationId,
           direction: "out",
@@ -1498,14 +1528,38 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
         },
         orderBy: { createdAt: "desc" },
+        take: 4,
         select: { content: true },
       });
+      // A comparação de eco continua só com a última: ampliar a janela aqui
+      // calaria resposta legítima. As demais servem ao throttle do follow-up.
+      const recentSame = recentOut[0];
       if (
         recentSame?.content &&
         isNearDuplicateBotText(text, recentSame.content)
       ) {
+        // Descartar sem nada no lugar deixava a conversa muda justamente
+        // quando a pessoa insistia.
+        const followUp = pickQueueFollowUp(
+          queueCtxOf(policy, hours),
+          recentOut.map((m) => m.content),
+        );
+        if (followUp) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: followUp,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+          }).catch(() => null);
+        }
         logAi("reply_near_duplicate_skipped", {
           conversationId: args.conversationId,
+          followUp: Boolean(followUp),
           durationMs: Date.now() - startedAt.getTime(),
         });
         await markRunResponseDiscarded({

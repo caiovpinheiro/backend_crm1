@@ -560,6 +560,10 @@ export const HUMAN_ATTENDANCE_LABELS = {
     label: "Mensagem quando já há um atendente responsável",
     hint: "Vazio = texto padrão.",
   },
+  queueFollowUpMessage: {
+    label: "Mensagem quando a pessoa insiste e o aviso de fila já foi dado",
+    hint: "Vazio = texto padrão. Não pode repetir o aviso de fila, senão a trava de eco descarta.",
+  },
   audioHandoffMessage: {
     label: "Mensagem quando a pessoa manda áudio e o agente chama a equipe",
     hint: "Vazio = texto padrão, que muda conforme o horário da equipe.",
@@ -695,6 +699,10 @@ export type InboxPolicy = {
   queueMessage: string | null;
   /// Texto de "já tem consultor responsável". `null` = padrão.
   assignedConsultantMessage: string | null;
+  /// Texto de quando a pessoa insiste e o aviso de fila já saiu. `null` =
+  /// padrão. Sem ele o turno era descartado por repetição e ninguém
+  /// respondia.
+  queueFollowUpMessage: string | null;
   /// Texto do aviso de áudio que dispara transferência. `null` = padrão.
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
@@ -777,6 +785,7 @@ export function defaultInboxPolicy(): InboxPolicy {
     humanAttendancePreEndMinutes: null,
     queueMessage: null,
     assignedConsultantMessage: null,
+    queueFollowUpMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
     nonsenseAskOnceMessage: null,
@@ -913,6 +922,7 @@ export function normalizeInboxPolicy(
         : null,
     queueMessage: nullableText(r.queueMessage),
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
+    queueFollowUpMessage: nullableText(r.queueFollowUpMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
     humanRequestKeywords: Array.isArray(r.humanRequestKeywords)
       ? strList(r.humanRequestKeywords)
