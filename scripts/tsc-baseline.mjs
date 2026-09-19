@@ -85,9 +85,17 @@ for (const [key, count] of Object.entries(baseline)) {
   if (now < count) corrigidos.push(`${key} (${now}x, baseline ${count}x)`);
 }
 
-console.log(
-  `tsc: ${total} erros agora, ${baseTotal} no baseline (${Object.keys(baseline).length} chaves)`,
-);
+const resumo = `tsc: ${total} erros agora, ${baseTotal} no baseline (${Object.keys(baseline).length} chaves)`;
+console.log(resumo);
+
+// No CI o log bruto do job exige autenticação para ler; anotação, não.
+// Sem isto, uma catraca vermelha em branch de auditoria vira adivinhação.
+if (process.env.GITHUB_ACTIONS === "true") {
+  const cmd = (m) => console.log(`::error::${m.replaceAll("\n", " ")}`);
+  cmd(resumo);
+  for (const n of novos.slice(0, 40)) cmd(`NOVO ${n}`);
+  for (const c of corrigidos.slice(0, 40)) cmd(`CORRIGIDO ${c}`);
+}
 
 if (novos.length) {
   console.error(`\n${novos.length} erro(s) de tipo NOVO(S) — fora do baseline:`);
