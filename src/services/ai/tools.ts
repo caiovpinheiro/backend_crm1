@@ -67,6 +67,11 @@ import {
   selfAiDestinationError,
 } from "@/services/ai/agent-handoff";
 import {
+  loadConversationPeerHistory,
+  peerAlreadyAttended,
+  PEER_ALREADY_ATTENDED_ERROR,
+} from "@/services/ai/conversation-peers";
+import {
   departmentNotFoundMessage,
   executeDepartmentHandoff,
   resolveDepartmentForAgent,
@@ -1545,7 +1550,7 @@ function transferToAiAgentTool(ctx: RunContext) {
           select: {
             id: true,
             name: true,
-            aiAgentConfig: { select: { inboxPolicy: true } },
+            aiAgentConfig: { select: { id: true, inboxPolicy: true } },
           },
         });
         if (!target) {
@@ -1576,6 +1581,22 @@ function transferToAiAgentTool(ctx: RunContext) {
         });
         if (selfIdErr) return fail(selfIdErr, { reason: "self_transfer" });
 
+        // Devolver a conversa para quem já tentou é o pingue-pongue que o
+        // contato sente como "ninguém me atende". Aqui não dá para cair na
+        // fila humana direto — o texto do turno é do modelo —, então a tool
+        // recusa dizendo qual é a saída.
+        if (
+          peerAlreadyAttended(
+            await loadConversationPeerHistory(ctx.conversationId),
+            { id: target.aiAgentConfig?.id, name: target.name },
+          )
+        ) {
+          return fail(PEER_ALREADY_ATTENDED_ERROR, {
+            reason: "peer_already_attended",
+          });
+        }
+
+        const handoffStartedAt = new Date();
         const srcPolicy = ctx.inboxPolicy ?? normalizeInboxPolicy(null);
         const announce = srcPolicy.announceAiTransfer;
         const canned = srcPolicy.announceAiTransferMessage?.trim();
@@ -1664,6 +1685,7 @@ function transferToAiAgentTool(ctx: RunContext) {
               channel:
                 conv?.channelRef?.provider === "BAILEYS_MD" ? "baileys" : "meta",
               ignorePriorBotOutbound: true,
+              handoffStartedAt,
             });
             openingStatus = opening.status;
             if (opening.status === "skipped") {

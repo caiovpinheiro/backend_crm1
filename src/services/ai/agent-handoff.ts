@@ -22,6 +22,10 @@ import {
   resolveDepartmentByNameGeneric,
   type DepartmentHandoffResult,
 } from "@/services/ai/department-handoff";
+import {
+  loadConversationPeerHistory,
+  peerAlreadyAttended,
+} from "@/services/ai/conversation-peers";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { isAssigneeCurrentlyEligible } from "@/services/distribution/assignee-eligibility";
 import { claimConversationAssignmentTx } from "@/services/distribution/claim";
@@ -387,6 +391,8 @@ async function assignNamedAi(args: {
   fromAgentUserId: string;
   by: "orchestrator_code" | "tool";
   reason?: string;
+  /** Início do handoff — quem recebe não se apresenta no meio do atendimento. */
+  startedAt?: Date | null;
 }): Promise<OrchestratedHandoffResult> {
   await prisma.$transaction((tx) =>
     assignOwnerToContactClusterTx(tx, {
@@ -439,6 +445,7 @@ async function assignNamedAi(args: {
       await triggerAgentOpeningForContact({
         contactId: args.contactId,
         agentUserId: args.user.id,
+        handoffStartedAt: args.startedAt ?? null,
       }).catch(() => null);
     }
   }
@@ -456,12 +463,35 @@ async function assignNamedAi(args: {
   };
 }
 
+/**
+ * Transferência IA→IA que não tem para onde ir vira fila humana, com o
+ * departamento inferido pelo contexto (mesmo caminho de `transfer_to_human`).
+ */
+async function handoffToHumanQueue(
+  args: OrchestratedHandoffArgs,
+  reason: string,
+  why: string,
+): Promise<OrchestratedHandoffResult> {
+  const deptResult = await executeDepartmentHandoff({
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    dealId: args.dealId,
+    userMessage: args.userMessage,
+    departmentName: null,
+    reason: `${reason} (${why})`,
+    policy: args.policy,
+    ops: args.ops,
+  });
+  return fromDepartmentResult(deptResult, "department_queue");
+}
+
 export async function executeOrchestratedHandoff(
   args: OrchestratedHandoffArgs,
 ): Promise<OrchestratedHandoffResult> {
   const name = args.name.trim();
   const reason = args.reason?.trim() || "Handoff via agente IA";
   const tool = args.toolPolicy;
+  const startedAt = new Date();
 
   // Auditoria do gate de fila humana: registra se a transferência passou
   // por keyword da config ou pela afirmação do modelo. Sem isso não dá
@@ -603,19 +633,19 @@ export async function executeOrchestratedHandoff(
       error: "Atendimento por IA está desligado nesta organização.",
     };
   }
+  // Ficar sem destino IA não pode terminar em erro devolvido ao modelo: ele
+  // reformula e tenta de novo, e o contato continua girando. A saída é a
+  // mesma da tool de humano — fila da Distribuição Inteligente.
   if (await aiHandoffCapReached(args.conversationId)) {
-    return {
-      target: "ai_agent",
-      assigned: false,
-      assignedTo: null,
-      assignedUserId: null,
-      assignedUserType: null,
-      departmentName: null,
-      queuedWaiting: false,
-      distributionReason: null,
-      fallback: null,
-      error: AI_HANDOFF_CAP_ERROR,
-    };
+    return handoffToHumanQueue(args, reason, "teto de transferências entre agentes");
+  }
+  if (
+    peerAlreadyAttended(
+      await loadConversationPeerHistory(args.conversationId),
+      { name },
+    )
+  ) {
+    return handoffToHumanQueue(args, reason, `${name} já atendeu esta conversa`);
   }
   {
     const selfErr = selfAiDestinationError({
@@ -696,6 +726,7 @@ export async function executeOrchestratedHandoff(
     fromAgentUserId: args.fromAgentUserId,
     by: args.handoffBy ?? "tool",
     reason,
+    startedAt,
   });
 }
 

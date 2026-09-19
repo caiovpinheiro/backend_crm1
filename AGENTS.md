@@ -104,6 +104,26 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 - Rate limit de sessão existe — debounce no FE; não desligar o limiter.
 - Super-admin (`isSuperAdmin`) é o único sem `organizationId`.
 
+## Atendimento IA — contrato
+
+O motor sabe COMO atender; a configuração do tenant diz O QUE atender. Regra de negócio não entra em código, e garantia de atendimento não depende de o cliente ter escrito bem o prompt.
+
+Ciclo de todo atendimento, igual em qualquer tenant: **identificar** (uma vez por conversa, pelos campos-chave configurados — identificação é insumo, não pedágio) → **entender** o assunto (assunto é do atendimento, não da frase: repetir o pedido não cria assunto novo) → **tentar resolver** com o que o operador ligou (prompt, RAG, tools) → **encaminhar** uma vez por assunto, com contexto, para quem resolve (IA ou fila humana).
+
+Garantias do motor (não são configuráveis — o cliente não precisa escrever no prompt):
+
+- Toda mensagem do cliente recebe resposta. Turno não termina sem saída (`inbox-handler.ts`, follow-up de fila).
+- A identificação é da conversa, não do agente (`Conversation.aiIdentified*`). Quem recebe não pergunta de novo.
+- Ninguém devolve a conversa para um agente que já atendeu este assunto (`conversationPeerHistory`).
+- Sem destino IA válido, vai para a fila humana. Não existe terceira saída chamada silêncio.
+- Agente que recebe transferência no meio do atendimento não se reapresenta.
+- Não afirmar efeito que não aconteceu (guardrail de efeito) e não repetir a mesma frase (trava de eco).
+- Todo atendimento termina com desfecho: resolvido, na fila humana, ou encerrado pelo cliente.
+
+Pilotado pelo cliente: prompt/tom/abertura de cada agente, `routingScope` (é por ele que o roteamento decide), RAG e `steeringRules`, tools ligadas e campos que elas leem, campos-chave de identificação e de desempate, fila humana (departamentos, horário, termos que contam como pedido de humano, mensagens padrão).
+
+Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
+
 ## Conceitos
 
 - `Organization` = tenant · `OrgUnit` = filial/CNPJ · `Company` = cliente B2B · `Group` = não usar.

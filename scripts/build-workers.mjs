@@ -193,4 +193,11 @@ await build({
   outfile: path.resolve(projectRoot, "dist/workers/materialize-steering-rules.js"),
 });
 
+// Medição do contrato de atendimento por conversa (somente leitura).
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/audit-attendance.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/audit-attendance.js"),
+});
+
 console.log("[build-workers] ✓ workers compilados em dist/workers/");

@@ -64,7 +64,10 @@ export async function recordInboxInterceptRun(args: {
   outcome?: AIAgentRunOutcome | null;
   /** Motivo persistido quando `outcome=RESPONSE_DISCARDED`. */
   discardReason?: string | null;
-}): Promise<void> {
+  /// Id do run criado, ou null quando não deu para gravar. Quem só observa
+  /// ignora; o escalonamento do orquestrador precisa dele para montar o
+  /// `RunResult` do turno.
+}): Promise<string | null> {
   try {
     let agentId = args.agentId ?? null;
     if (!agentId && args.agentUserId) {
@@ -74,7 +77,7 @@ export async function recordInboxInterceptRun(args: {
       });
       agentId = cfg?.id ?? null;
     }
-    if (!agentId) return;
+    if (!agentId) return null;
 
     let configHash = args.configHash ?? null;
     if (!configHash) {
@@ -114,7 +117,8 @@ export async function recordInboxInterceptRun(args: {
         contactId: args.contactId,
       }).catch(() => "ANSWERED" as AIAgentRunOutcome));
 
-    await prisma.aIAgentRun.create({
+    const run = await prisma.aIAgentRun.create({
+      select: { id: true },
       data: withOrgFromCtx({
         agentId,
         source: "inbox",
@@ -143,10 +147,12 @@ export async function recordInboxInterceptRun(args: {
         responsePreview: `[intercept:${args.interceptName}]`,
       }),
     });
+    return run?.id ?? null;
   } catch (err) {
     console.warn("[ai] recordInboxInterceptRun failed", {
       intercept: args.interceptName,
       err: err instanceof Error ? err.message : String(err),
     });
+    return null;
   }
 }
