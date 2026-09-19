@@ -11,7 +11,11 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createConversationEvent } from "@/services/conversation-events";
-import { assignOwnerToContactClusterTx } from "@/services/deals";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
+import { assignOwnerToContactClusterTx, createDealEvent } from "@/services/deals";
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import {
   executeDepartmentHandoff,
@@ -32,6 +36,7 @@ export type OrchestratedHandoffArgs = {
   contactId: string | null;
   dealId?: string | null;
   fromAgentUserId: string;
+  fromAgentName?: string | null;
   target: HandoffTargetKind;
   /** Nome ou id, conforme o destino. */
   name: string;
@@ -40,6 +45,11 @@ export type OrchestratedHandoffArgs = {
   policy?: InboxPolicy | null;
   toolPolicy?: ToolPolicy | null;
   ops?: VerticalPackOps | null;
+  handoffBy?: "orchestrator_code" | "tool";
+  /** Resultado do gate de fila humana (null para destino ai_agent). */
+  gateDecision?: "allowed" | null;
+  /** Como o pedido de humano foi reconhecido — auditoria do gate. */
+  gateMatchedBy?: "keyword" | "model_assertion" | null;
 };
 
 export type OrchestratedHandoffResult = {
@@ -53,7 +63,12 @@ export type OrchestratedHandoffResult = {
   distributionReason: string | null;
   fallback: "department_queue" | null;
   error?: string;
+  /** Destino resolvido sem atribuir (replay em sandbox). */
+  simulated?: boolean;
 };
+
+export const SELF_AI_HANDOFF_ERROR =
+  "Esse é você mesmo. Siga o atendimento ou escolha outro agente.";
 
 function fold(s: string): string {
   return s
@@ -61,6 +76,65 @@ function fold(s: string): string {
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .trim();
+}
+
+export function namesFoldEqual(a: string, b: string): boolean {
+  const fa = fold(a);
+  const fb = fold(b);
+  return fa.length > 0 && fa === fb;
+}
+
+export function excludeSelfFromAgentNames(
+  names: string[],
+  selfName: string | null | undefined,
+): string[] {
+  return names.filter((n) => n.trim() && !namesFoldEqual(n, selfName ?? ""));
+}
+
+export function formatAiHandoffDestinations(names: string[]): string {
+  if (names.length === 0) {
+    return " Só para outro agente da organização, nunca para você mesmo.";
+  }
+  return ` Destinos válidos: ${names.join(", ")}.`;
+}
+
+export function selfAiDestinationError(args: {
+  wanted: string;
+  selfName?: string | null;
+  selfUserId?: string | null;
+  destUserId?: string | null;
+}): string | null {
+  if (
+    args.destUserId &&
+    args.selfUserId &&
+    args.destUserId === args.selfUserId
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  if (
+    args.wanted.trim() &&
+    args.selfName?.trim() &&
+    namesFoldEqual(args.wanted, args.selfName)
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  return null;
+}
+
+/** nameGate + bloqueio do próprio agente (produção e teste). */
+export function aiAgentDestinationGate(args: {
+  allowedAgentNames: string[];
+  name: string;
+  fromAgentName?: string | null;
+}): string | null {
+  const allowed = excludeSelfFromAgentNames(
+    args.allowedAgentNames,
+    args.fromAgentName,
+  );
+  const blocked = args.fromAgentName?.trim()
+    ? [args.fromAgentName.trim()]
+    : [];
+  return nameGate(allowed, blocked, args.name, "Agente IA");
 }
 
 function looksLikeId(raw: string): boolean {
@@ -193,6 +267,26 @@ async function assignNamedHuman(args: {
   reason: string;
 }): Promise<OrchestratedHandoffResult> {
   const orgId = getOrgIdOrThrow();
+
+  // Replay em sandbox: transferir para um humano NOMEADO penduraria a
+  // conversa de teste no inbox dele. Resolve o destino e devolve como
+  // entregue-simulado — para o QA o agente encaminhou, que é o que se testa.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("human_assignment", `named_user=${args.user.id}`);
+    return {
+      target: "user",
+      assigned: true,
+      simulated: true,
+      assignedTo: args.user.name,
+      assignedUserId: args.user.id,
+      assignedUserType: "HUMAN",
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+    };
+  }
+
   const claimed = await prisma.$transaction(async (tx) => {
     const ok = await claimConversationAssignmentTx(tx, {
       conversationId: args.conversationId,
@@ -264,26 +358,43 @@ async function assignNamedAi(args: {
   contactId: string | null;
   dealId?: string | null;
   user: ResolvedUser;
+  fromAgentUserId: string;
+  by: "orchestrator_code" | "tool";
+  reason?: string;
 }): Promise<OrchestratedHandoffResult> {
   await prisma.$transaction((tx) =>
     assignOwnerToContactClusterTx(tx, {
       userId: args.user.id,
-      via: null,
+      via: "ai_handoff",
       contactId: args.contactId,
       dealId: args.dealId,
       conversationId: args.conversationId,
     }),
   );
 
+  const destLabel = args.user.name;
   await createConversationEvent({
     conversationId: args.conversationId,
     action: "distribuicao",
-    text: `Conversa transferida para o agente ${args.user.name}`,
+    text: `Conversa transferida para o agente ${destLabel} (from=${args.fromAgentUserId} to=${args.user.id} by=${args.by})`,
     actor: "Agente IA",
     authorType: "bot",
-    dedupeStartsWith: ["Conversa transferida para o agente"],
+    actorUserId: args.fromAgentUserId,
+    dedupeStartsWith: [`Conversa transferida para o agente ${destLabel}`],
     dedupeWindowMs: 2 * 60 * 1000,
   }).catch(() => null);
+
+  if (args.dealId) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transferred_to_ai_agent",
+      reason: args.reason ?? null,
+      targetAgentUserId: args.user.id,
+      targetAgentName: args.user.name,
+      by: args.by,
+      fromAgentUserId: args.fromAgentUserId,
+      toAgentUserId: args.user.id,
+    }).catch(() => {});
+  }
 
   if (args.contactId) {
     const dest = await prisma.user.findUnique({
@@ -325,6 +436,20 @@ export async function executeOrchestratedHandoff(
   const name = args.name.trim();
   const reason = args.reason?.trim() || "Handoff via agente IA";
   const tool = args.toolPolicy;
+
+  // Auditoria do gate de fila humana: registra se a transferência passou
+  // por keyword da config ou pela afirmação do modelo. Sem isso não dá
+  // para revisar depois o que o modelo alegou.
+  if (args.dealId && args.gateDecision) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transfer_gate",
+      target: args.target,
+      name,
+      reason,
+      gateDecision: args.gateDecision,
+      matchedBy: args.gateMatchedBy ?? null,
+    }).catch(() => {});
+  }
 
   if (args.target === "department") {
     if (tool) {
@@ -452,8 +577,33 @@ export async function executeOrchestratedHandoff(
       error: "Atendimento por IA está desligado nesta organização.",
     };
   }
+  {
+    const selfErr = selfAiDestinationError({
+      wanted: name,
+      selfName: args.fromAgentName,
+      selfUserId: args.fromAgentUserId,
+    });
+    if (selfErr) {
+      return {
+        target: "ai_agent",
+        assigned: false,
+        assignedTo: null,
+        assignedUserId: null,
+        assignedUserType: null,
+        departmentName: null,
+        queuedWaiting: false,
+        distributionReason: null,
+        fallback: null,
+        error: selfErr,
+      };
+    }
+  }
   if (tool) {
-    const gate = nameGate(tool.allowedAgentNames, [], name, "Agente IA");
+    const gate = aiAgentDestinationGate({
+      allowedAgentNames: tool.allowedAgentNames,
+      name,
+      fromAgentName: args.fromAgentName,
+    });
     if (gate) {
       return {
         target: "ai_agent",
@@ -495,7 +645,7 @@ export async function executeOrchestratedHandoff(
       queuedWaiting: false,
       distributionReason: null,
       fallback: null,
-      error: "A conversa já está com este agente.",
+      error: SELF_AI_HANDOFF_ERROR,
     };
   }
   return assignNamedAi({
@@ -503,7 +653,9 @@ export async function executeOrchestratedHandoff(
     contactId: args.contactId,
     dealId: args.dealId,
     user: resolved.user,
+    fromAgentUserId: args.fromAgentUserId,
+    by: args.handoffBy ?? "tool",
+    reason,
   });
 }
 
-export type { ExecuteDistributionResult };

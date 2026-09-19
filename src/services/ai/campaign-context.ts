@@ -1,9 +1,9 @@
-/**
+﻿/**
  * Contexto do último disparo (campanha / template WhatsApp) para o agente.
  *
  * A bolha no inbox muitas vezes grava só o rótulo
  * ("Modelo de mensagem enviado… Nome: calouros_agost0209") sem o corpo
- * que o aluno viu. Sem esse texto o LLM trata "como faço para ver?"
+ * que o contato viu. Sem esse texto o LLM trata "como faço para ver?"
  * como conversa nova.
  *
  * Resolve o corpo em WhatsAppTemplateConfig (modelos da Meta / Configurações)
@@ -96,8 +96,8 @@ export function formatCampaignDispatchBlock(
     : "";
   return [
     "",
-    "ÚLTIMO DISPARO PARA ESTE ALUNO (contexto obrigatório):",
-    `O aluno recebeu ${who}${named} no WhatsApp, pouco antes desta resposta.`,
+    "ÚLTIMO DISPARO PARA ESTE contato (contexto obrigatório):",
+    `O contato recebeu ${who}${named} no WhatsApp, pouco antes desta resposta.`,
     "A mensagem atual dele quase sempre se refere A ESTE texto — não reinicie o atendimento nem pergunte 'o que você quer ver?'.",
     "Responda com base no conteúdo abaixo + na pergunta dele:",
     "---",
@@ -128,8 +128,8 @@ export async function hydrateOutboundTemplateContent(args: {
     ? `Disparo da campanha "${campaign}"`
     : name
       ? `Disparo do modelo "${name}"`
-      : "Disparo automático enviado ao aluno";
-  return `${title} (o aluno viu este texto no WhatsApp):\n${clip(body)}`;
+      : "Disparo automático enviado ao contato";
+  return `${title} (o contato viu este texto no WhatsApp):\n${clip(body)}`;
 }
 
 function slugAlnum(s: string): string {

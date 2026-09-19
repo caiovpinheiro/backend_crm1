@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Runner principal do agente de IA.
  *
  * Um "run" é uma invocação completa do agente respondendo a um ponto
@@ -55,7 +55,6 @@ import {
 import {
   humanQueueContextFromAgent,
   resolveAgentTimezone,
-  userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
 import {
   formatMessageModelsBlock,
@@ -176,12 +175,18 @@ export type RunResult = {
   costUsd: number;
   autonomyMode: AIAgentAutonomy;
   toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
+  routing?: {
+    by: "orchestrator_code" | "tool";
+    fromAgentId: string;
+    toAgentId: string;
+    reason?: string;
+  };
   /// Tutorial do modelo interno casado — o inbox envia depois do texto.
   followUpMedia?: AgentFaqMedia[];
   error?: string;
 };
 
-const MAX_HISTORY = 10;
+export const MAX_HISTORY = 10;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   /// Modo de teste do inbox. Único lugar onde o runner precisa saber disso —
@@ -310,8 +315,17 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       .filter((m) => m.role === "user")
       .map((m) => m.content);
 
+    const inboxPolicyForRun = normalizeInboxPolicy(
+      agent.inboxPolicy,
+      agent.verticalPack,
+    );
+
     if (!classifierRun) {
-      const nonsense = nonsenseGuardReply(args.userMessage, priorUserMessages);
+      const nonsense = nonsenseGuardReply(
+        args.userMessage,
+        priorUserMessages,
+        inboxPolicyForRun,
+      );
       if (nonsense) {
         await prisma.aIAgentRun.update({
           where: { id: run.id },
@@ -363,6 +377,9 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
     const pack = getVerticalPack(agent.verticalPack);
+    // Nome da instituição, URLs e roster do tenant: resolvidos ANTES de
+    // qualquer texto de prompt do pack, que é montado de forma síncrona.
+    await pack?.loadTenantConfig?.().catch(() => null);
     const packOps = pack?.ops ?? {};
     // Hints/ops de vertical: só quando o agente tem pack (não hardcoded academic).
     // Classificador não recebe pack/deal/campanha — classifica só pelas mensagens.
@@ -370,19 +387,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     // Modelos internos (tela Internos) como fonte de RAG. Era ligado por
     // `pack?.id === "academic"`, o que escondia a base do time de qualquer
     // agente genérico. Agora é configuração (default true no pack academic).
-    const inboxPolicyForRun = normalizeInboxPolicy(
-      agent.inboxPolicy,
-      agent.verticalPack,
-    );
-    // Documento vencido não entra como fato (o corte é no SQL do retrieval);
-    // no lugar do vazio o operador escolhe o que o agente deve fazer. Bloco
-    // curto e só existe quando há documento vencido relevante DE FATO.
+    const useMessageModelsRag =
+      !classifierRun && inboxPolicyForRun.useMessageModels;
     const expiredKnowledgeBlock = formatExpiredKnowledgeBlock(
       knowledge.expired,
       inboxPolicyForRun.knowledgeExpiredInstruction,
     );
-    const useMessageModelsRag =
-      !classifierRun && inboxPolicyForRun.useMessageModels;
     // O que o operador escreve é absoluto. Com "Regras de atendimento"
     // preenchido, nem o texto canônico do pack nem os hints de runtime
     // (polos, prova, portal, senha, primeiro acesso, certificado) entram
@@ -469,26 +479,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
         ) ?? "")
       : "";
     const clockHint = hasPack ? formatLocalClockHint() : "";
-    const askedHumanNow = userWantsHumanDistribution(
-      args.userMessage,
-      humanQueueContextFromAgent({ inboxPolicy: inboxPolicyForRun }),
-    );
-    let runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
-    if (
-      inboxPolicyForRun.transferPolicy === "on_request_or_topic" &&
-      !classifierRun &&
-      agent.archetype !== "COORDENADOR" &&
-      agent.archetype !== "TABULACAO" &&
-      agent.archetype !== "ENCERRAMENTO" &&
-      !askedHumanNow
-    ) {
-      runtimeTools = runtimeTools.filter(
-        (id) =>
-          id !== "transfer_to_human" &&
-          id !== "execute_distribution" &&
-          id !== "transfer_to_department",
-      );
-    }
+    const runtimeTools = [...(args.enabledTools ?? agent.enabledTools)];
     const tabulationCatalog =
       runtimeTools.includes("tabulate_conversation") ||
       runtimeTools.includes("list_tabulations")
@@ -529,12 +520,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const examModalityRules = packText
       ? (packOps.academicExamModalityRules?.(examsOnlineOnly) ?? "")
       : "";
-    // Alcance da tool de matrícula. Preso ao turno em que a tool existe:
+    // Alcance da tool de cadastro. Preso ao turno em que a tool existe:
     // regra sobre ferramenta desligada é ruído no prompt. Vem por aqui e não
     // pelo texto canônico do pack porque o `steeringRules` salvo do agente
     // pode estar defasado — e aí o texto canônico não chega ao prompt.
     const enrollmentScopeRules =
-      packText && runtimeTools.includes("consultar_matricula")
+      packText &&
+      (pack?.extraTools ?? []).some((t) => runtimeTools.includes(t.id))
         ? (pack?.constants.enrollmentScopeRules ?? "")
         : "";
     // Gate de transferência avaliado UMA vez, com o mesmo input que as
@@ -569,13 +561,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             inboxPolicyForRun.announceAiTransfer
               ? inboxPolicyForRun.announceAiTransferMessage?.trim()
                 ? `## Transferência entre agentes IA
-Avise o aluno com este texto (substitua {{target_agent}} pelo nome do destino):
+Avise o contato com este texto (substitua {{target_agent}} pelo nome do destino):
 ${inboxPolicyForRun.announceAiTransferMessage.trim()}
 O CRM também envia esse aviso; não invente outra frase.`
                 : `## Transferência entre agentes IA
 Avise em UMA frase curta via noticeMessage da tool. O destino é outro agente IA — não diga "setor" nem fila humana.`
               : `## Transferência entre agentes IA
-NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar". A troca de dono é silenciosa.`,
+NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou te encaminhar". A troca de dono é silenciosa.`,
           ],
         });
 
@@ -589,6 +581,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
             [] as Array<{
               id: string;
               archetype: string | null;
+              inboxPolicy: unknown;
               user: { name: string | null } | null;
             }>,
           )
@@ -600,6 +593,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
             select: {
               id: true,
               archetype: true,
+              inboxPolicy: true,
               user: { select: { name: true } },
             },
           }),
@@ -608,12 +602,18 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       id: row.id,
       name: row.user?.name?.trim() || "Agente",
       archetype: row.archetype,
+      routingScope: normalizeInboxPolicy(row.inboxPolicy, agent.verticalPack)
+        .routingScope,
     }));
     const coordinatorRoutingBlock =
       agent.archetype === "COORDENADOR"
         ? formatCoordinatorRoutingBlock({
             peers,
-            suggested: suggestCoordinatorAiAgent(args.userMessage, peers),
+      suggested: suggestCoordinatorAiAgent(
+            args.userMessage,
+            peers,
+            agent.verticalPack,
+          ),
           })
         : null;
     const specialistPeerBlock =
@@ -643,7 +643,9 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       productPolicy: agent.productPolicy,
       archetype: classifierRun ? "TABULACAO" : agent.archetype,
       hasProductSearch: runtimeTools.includes("search_products"),
-      hasEnrollmentLookup: runtimeTools.includes("consultar_matricula"),
+      hasEnrollmentLookup: (getVerticalPack(agent.verticalPack)?.extraTools ?? []).some(
+        (t) => runtimeTools.includes(t.id),
+      ),
       hasCrmFieldSearch: runtimeTools.includes("search_crm_records"),
       tone: agent.tone,
       language: agent.language,
@@ -689,6 +691,9 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
       organizationId: agent.organizationId,
       archetype: agent.archetype,
       agentName: agent.user?.name ?? null,
+      peerAiAgentNames: peers
+        .filter((p) => p.id !== agent.id)
+        .map((p) => p.name),
     };
 
     const governor = new ToolCallGovernor(
@@ -784,7 +789,7 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
     // seria esconder do operador exatamente o que ele foi ver: a resposta que
     // o cliente receberia. A auditoria de produção fica intacta.
     const claimBlocked = effectAudit.blocked && !testMode;
-    const selfName = (agent.user?.name ?? "").trim();
+    const selfUserId = agent.userId;
     const aiHandoffAway = result.toolCalls.some((c) => {
       const payload = c.result;
       if (!payload || typeof payload !== "object") return false;
@@ -797,15 +802,15 @@ NÃO avise o aluno que vai transferir. Chame a tool e pare. Não escreva "vou te
           !Array.isArray(c.args) &&
           (c.args as { target?: unknown }).target === "ai_agent");
       if (!isAiTool) return false;
-      const dest = String(
-        c.args && typeof c.args === "object" && !Array.isArray(c.args)
-          ? ((c.args as { agentName?: unknown; name?: unknown }).agentName ??
-            (c.args as { name?: unknown }).name ??
-            "")
-          : "",
+      // Destino pelo id que a tool resolveu, não pelo nome que o modelo
+      // escreveu: nome é editável, acentuado e pode repetir entre agentes —
+      // com dois "Atendimento" a comparação por nome dizia "é você mesmo" e
+      // engolia a fala de um handoff que aconteceu de verdade.
+      const destUserId = String(
+        (payload as { targetAgentUserId?: unknown }).targetAgentUserId ?? "",
       ).trim();
-      if (!dest) return (payload as { assigned?: unknown }).assigned === true;
-      return dest.localeCompare(selfName, undefined, { sensitivity: "accent" }) !== 0;
+      if (!destUserId) return (payload as { assigned?: unknown }).assigned === true;
+      return destUserId !== selfUserId;
     });
     // O modelo escreve "vou te encaminhar" mesmo com o interruptor desligado.
     // Aviso oficial: tool envia em produção. Aqui só devolvemos texto no

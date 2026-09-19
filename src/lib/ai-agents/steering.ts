@@ -26,6 +26,7 @@ import {
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
 import { academicDefaultMessageRules } from "@/verticals/academic/default-message-rules";
+import { getVerticalPack } from "@/verticals";
 
 // ── Tool config ───────────────────────────────────────────────
 
@@ -551,6 +552,32 @@ export const HUMAN_ATTENDANCE_LABELS = {
   },
 } as const;
 
+/**
+ * Termos default de pedido de atendente humano.
+ *
+ * Moram aqui, na camada de configuração, e não no serviço que avalia o
+ * gate: são o valor inicial de `inboxPolicy.humanRequestKeywords`, que a
+ * org edita na tela. O gate soma os dois (produto + org).
+ *
+ * Keyword nunca é a única saída: o modelo também pode afirmar o pedido
+ * via `userExplicitlyAsked` nas tools de transferência.
+ */
+export const DEFAULT_HUMAN_REQUEST_KEYWORDS = [
+  "atendente",
+  "atendentes",
+  "humano",
+  "humana",
+  "consultor",
+  "consultora",
+  "atendimento humano",
+  "falar com alguem",
+  "falar com alguém",
+  "fila",
+  "transferencia",
+  "transferência",
+  "distribu",
+] as const satisfies readonly string[];
+
 export type InboxPolicy = {
   /// Abaixo disso o backend distribui para humano. `null` = usa o
   /// default do código (0.4).
@@ -654,6 +681,11 @@ export type InboxPolicy = {
   audioHandoffMessage: string | null;
   /// Termos EXTRA que contam como pedido explícito de atendente humano.
   humanRequestKeywords: string[];
+  /// Cópia do guard de inbound ininteligível. `null` = fallback neutro.
+  nonsenseAskOnceMessage: string | null;
+  nonsenseStopMessage: string | null;
+  /// Escopo/tópicos deste agente, para o coordenador rotear sem usar o nome.
+  routingScope: string | null;
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -729,6 +761,9 @@ export function defaultInboxPolicy(): InboxPolicy {
     assignedConsultantMessage: null,
     audioHandoffMessage: null,
     humanRequestKeywords: [],
+    nonsenseAskOnceMessage: null,
+    nonsenseStopMessage: null,
+    routingScope: null,
   };
 }
 
@@ -769,6 +804,11 @@ export function normalizeInboxPolicy(
     // HandoffJustified`). Agora é declarativo — e o default preserva a
     // regra que já vale em produção para esses agentes.
     base.transferPolicy = "on_request_or_topic";
+    const packKeywords =
+      getVerticalPack("academic")?.inboxPolicyDefaults?.humanRequestKeywords;
+    if (packKeywords?.length) {
+      base.humanRequestKeywords = [...packKeywords];
+    }
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return base;
   const r = v as Record<string, unknown>;
@@ -856,7 +896,12 @@ export function normalizeInboxPolicy(
     queueMessage: nullableText(r.queueMessage),
     assignedConsultantMessage: nullableText(r.assignedConsultantMessage),
     audioHandoffMessage: nullableText(r.audioHandoffMessage),
-    humanRequestKeywords: strList(r.humanRequestKeywords),
+    humanRequestKeywords: Array.isArray(r.humanRequestKeywords)
+      ? strList(r.humanRequestKeywords)
+      : base.humanRequestKeywords,
+    nonsenseAskOnceMessage: nullableText(r.nonsenseAskOnceMessage),
+    nonsenseStopMessage: nullableText(r.nonsenseStopMessage),
+    routingScope: nullableText(r.routingScope),
   };
 }
 

@@ -3,6 +3,8 @@
  * Fora de `src/verticals/<id>/`, use só `getVerticalPack` / `runVerticalIntercepts`.
  */
 
+import type { TabulateOnExitMode } from "@/lib/ai-agents/steering";
+
 export type VerticalInterceptHit = {
   handled: true;
   interceptName: string;
@@ -73,6 +75,12 @@ export type VerticalPackOps = {
 
 export type VerticalPack = {
   id: string;
+  /**
+   * Carrega a config de tenant da org do contexto para o cache do processo.
+   * Chamado antes de montar prompt ou rodar intercept — os textos do pack
+   * são síncronos e precisam da config já resolvida.
+   */
+  loadTenantConfig?: () => Promise<unknown>;
   intercepts: VerticalIntercept[];
   promptBlocks: (ctx: PromptBlockCtx) => Promise<string[]> | string[];
   fallbackRules: (archetype: string) => string;
@@ -85,10 +93,23 @@ export type VerticalPack = {
     consultarMatricula?: string;
   };
   /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
+  extraTools?: Array<{
+    id: string;
+    label: string;
+    description: string;
+    category: "crm" | "whatsapp" | "handoff";
+    defaultForArchetypes: string[];
+  }>;
+  /** Defaults de inboxPolicy quando o agente tem este pack (antes do JSON salvo). */
   inboxPolicyDefaults?: {
     interceptRetention?: boolean;
     interceptCourseShopping?: boolean;
+    interceptFirstAccess?: boolean;
     inauguralEnabled?: boolean;
+    tabulateOnExit?: TabulateOnExitMode;
+    humanRequestKeywords?: string[];
+    nonsenseAskOnceMessage?: string | null;
+    nonsenseStopMessage?: string | null;
   };
   /**
    * Ops do pack — nomes = exports dos módulos do vertical.
@@ -114,6 +135,7 @@ export async function runVerticalIntercepts(
   ctx: VerticalInterceptCtx,
 ): Promise<VerticalInterceptHit | null> {
   if (!pack) return null;
+  await pack.loadTenantConfig?.().catch(() => null);
   for (const intercept of pack.intercepts) {
     if (intercept.phase !== ctx.phase) continue;
     const hit = await intercept.run(ctx);

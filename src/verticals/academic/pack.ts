@@ -3,14 +3,14 @@
  */
 
 import {
-  ACADEMIC_ATENDIMENTO_RULES,
+  academicAtendimentoRules,
+  academicSystemPromptOverride,
   ACADEMIC_CONFIDENCE_RULES,
   ACADEMIC_CURRICULUM_TCE_RULES,
   ACADEMIC_DEPARTMENT_ALIASES,
   ACADEMIC_ENROLLMENT_SCOPE_RULES,
   ACADEMIC_HANDOFF_KEYWORDS,
   ACADEMIC_MEDIA_CAPABILITY_RULES,
-  ACADEMIC_SYSTEM_PROMPT_OVERRIDE,
   academicExamModalityRules,
   buildAvaDisciplinesMessage,
   formatCanonicalPortalAccessHint,
@@ -26,7 +26,9 @@ import {
 } from "@/verticals/academic/atendimento-prompt";
 import * as closure from "@/verticals/academic/closure";
 import * as routing from "@/verticals/academic/department-routing";
+import { pickAcademicCoordinatorPeer } from "@/verticals/academic/coordinator-pick";
 import { ensureAcademicDepartmentRoster } from "@/verticals/academic/ensure-dept-roster";
+import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
 import * as inaugural from "@/verticals/academic/inaugural-class-link";
 import type {
   VerticalIntercept,
@@ -68,11 +70,12 @@ const academicIntercepts: VerticalIntercept[] = [
 
 export const academicPack: VerticalPack = {
   id: "academic",
+  loadTenantConfig: loadAcademicTenantConfig,
   intercepts: academicIntercepts,
   promptBlocks: (ctx) => {
     const blocks: string[] = [];
     if (ctx.archetype === "ATENDIMENTO" || !ctx.archetype) {
-      blocks.push(ACADEMIC_ATENDIMENTO_RULES);
+      blocks.push(academicAtendimentoRules());
       blocks.push(ACADEMIC_CURRICULUM_TCE_RULES);
       blocks.push(ACADEMIC_MEDIA_CAPABILITY_RULES);
       blocks.push(ACADEMIC_CONFIDENCE_RULES);
@@ -85,7 +88,7 @@ export const academicPack: VerticalPack = {
   fallbackRules: (archetype) => {
     if (archetype !== "ATENDIMENTO") return "";
     return [
-      ACADEMIC_ATENDIMENTO_RULES,
+      academicAtendimentoRules(),
       ACADEMIC_CURRICULUM_TCE_RULES,
       ACADEMIC_MEDIA_CAPABILITY_RULES,
       ACADEMIC_CONFIDENCE_RULES,
@@ -110,6 +113,11 @@ export const academicPack: VerticalPack = {
     interceptFirstAccess: true,
     inauguralEnabled: true,
     tabulateOnExit: "on_human_handoff",
+    humanRequestKeywords: [
+      "falar com equipe",
+      "falar com a equipe",
+      "falar com o time",
+    ],
   },
   ops: {
     ...closure,
@@ -128,14 +136,30 @@ export const academicPack: VerticalPack = {
     formatCanonicalPortalAccessHint,
     academicExamModalityRules,
     buildAvaDisciplinesMessage,
+    pickCoordinatorPeer: pickAcademicCoordinatorPeer,
   },
-  constants: {
-    handoffKeywords: [...ACADEMIC_HANDOFF_KEYWORDS],
-    atendimentoRules: ACADEMIC_ATENDIMENTO_RULES,
-    confidenceRules: ACADEMIC_CONFIDENCE_RULES,
-    curriculumTceRules: ACADEMIC_CURRICULUM_TCE_RULES,
-    enrollmentScopeRules: ACADEMIC_ENROLLMENT_SCOPE_RULES,
-    mediaCapabilityRules: ACADEMIC_MEDIA_CAPABILITY_RULES,
-    systemPromptOverride: ACADEMIC_SYSTEM_PROMPT_OVERRIDE,
+  extraTools: [
+    {
+      id: "consultar_matricula",
+      label: "Consultar registro acadêmico",
+      description:
+        "Consulta o registro da pessoa no relatório acadêmico da organização. Casa por telefone/e-mail do contato. Demais campos só chegam se o operador liberar na ferramenta.",
+      category: "crm",
+      defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
+    },
+  ],
+  // Getter, não objeto literal: os textos levam nome de instituição e URLs
+  // da org do contexto, então são montados a cada leitura. Congelar no
+  // módulo devolveria a config da primeira org que rodasse no processo.
+  get constants() {
+    return {
+      handoffKeywords: [...ACADEMIC_HANDOFF_KEYWORDS],
+      atendimentoRules: academicAtendimentoRules(),
+      confidenceRules: ACADEMIC_CONFIDENCE_RULES,
+      curriculumTceRules: ACADEMIC_CURRICULUM_TCE_RULES,
+      enrollmentScopeRules: ACADEMIC_ENROLLMENT_SCOPE_RULES,
+      mediaCapabilityRules: ACADEMIC_MEDIA_CAPABILITY_RULES,
+      systemPromptOverride: academicSystemPromptOverride(),
+    };
   },
 };

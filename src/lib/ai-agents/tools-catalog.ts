@@ -69,14 +69,6 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     defaultForArchetypes: ["ATENDIMENTO", "SUPORTE", "VENDEDOR"],
   },
   {
-    id: "consultar_matricula",
-    label: "Consultar matrícula do aluno",
-    description:
-      "Consulta o registro do aluno em conversa no relatório de matriculados. Casa por telefone/e-mail do contato. Devolve sempre o acesso ao portal; curso, polo, série e os demais campos só chegam ao agente se você liberar em 'Campos do relatório'. Sem liberação, ele encaminha para um consultor em vez de responder.",
-    category: "crm",
-    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
-  },
-  {
     id: "send_whatsapp_template",
     label: "Enviar template WhatsApp",
     description:
@@ -112,7 +104,7 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     id: "transfer_to_ai_agent",
     label: "Transferir para outro agente IA",
     description:
-      "Entrega a conversa a outro agente de IA da organização, que assume a continuidade do atendimento. Usado pelo agente de primeiro contato para direcionar cada caso ao agente especializado. O aluno recebe um aviso antes da troca, e conversa, contato e negócios abertos passam para o agente de destino.",
+      "Entrega a conversa a outro agente de IA da organização, que assume a continuidade do atendimento. Usado pelo agente de primeiro contato para direcionar cada caso ao agente especializado. O contato recebe um aviso antes da troca, e conversa, contato e negócios abertos passam para o agente de destino.",
     category: "handoff",
     defaultForArchetypes: [],
   },

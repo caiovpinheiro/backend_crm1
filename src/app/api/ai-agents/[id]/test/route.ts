@@ -182,7 +182,7 @@ export async function POST(
         select: { systemPromptSnapshot: true },
       });
 
-      // O playground precisa mostrar o que o aluno veria. Sem isso o
+      // O playground precisa mostrar o que o contato veria. Sem isso o
       // marcador interno de confiança aparecia na tela do operador e virava
       // defeito fantasma no teste.
       const parsed = parseAgentConfidence(result.text ?? "");

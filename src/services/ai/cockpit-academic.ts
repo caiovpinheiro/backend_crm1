@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Métricas do cockpit — abas do agente acadêmico (hoje, fuso SP).
  * Somente leitura. Falha em qualquer query devolve zeros para não derrubar o painel.
  */

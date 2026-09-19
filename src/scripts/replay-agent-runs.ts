@@ -12,6 +12,9 @@
  *   node dist/workers/replay-agent-runs.js --org teste-dev --start Joseph
  *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
  *   node dist/workers/replay-agent-runs.js --lote 2 --limit 35 --out /tmp/replay-lote2.json
+ *   # --real-handoff: conversa sandbox com id real, tools de efeito rodam de
+ *   #   verdade (executeOrchestratedHandoff + assign) e os eventos gravados
+ *   #   entram no TurnRecord. A conversa é apagada no fim (--keep-sandbox mantém).
  *   # exit 1 se o QA achar ASK em pedido real, inbound fora de ordem, SKIP de regra, etc.
  *   # --qa-continue grava o relatório e não falha o processo
  *
@@ -33,13 +36,19 @@ import {
   canonicalPhone,
   lookupStudent,
 } from "@/services/academic-records";
-import { runAgent, type RunResult } from "@/services/ai/runner";
-import { formatQaReport, scoreReplay } from "@/scripts/replay-qa";
+import { runAgent, MAX_HISTORY, type RunResult } from "@/services/ai/runner";
+import {
+  blockedEffects,
+  disableReplaySandbox,
+  enableReplaySandbox,
+  REPLAY_SANDBOX_SETTING_KEY,
+} from "@/services/ai/replay-sandbox";
+import { formatQaReport, scoreReplay, fixtureTurnInbound } from "@/scripts/replay-qa";
 
 type FixtureCase = {
   id: string;
   label: string;
-  turns: string[];
+  turns: Array<string | { inbound: string; expect?: { guard?: boolean; human?: boolean } }>;
   contact?: { name?: string; phone?: string | null };
 };
 type FixtureFile = { cases: FixtureCase[] };
@@ -69,7 +78,53 @@ type TurnRecord = {
   rule: { action: string; label: string; department: string | null } | null;
   switchedTo: string | null;
   skipped: string | null;
+  at?: string;
+  handoff?: {
+    fromAgentId: string;
+    toAgentId: string;
+    by?: string;
+  } | null;
+  /**
+   * O que o handoff gravou no banco neste turno (`--real-handoff`): eventos
+   * de conversa e o dono resultante. É a diferença entre "a tool devolveu
+   * assigned:true" e "a atribuição aconteceu".
+   */
+  dbHandoff?: {
+    conversationId: string;
+    assignedToId: string | null;
+    assignedToName: string | null;
+    events: Array<{ content: string; createdAt: string }>;
+  } | null;
+  /**
+   * Distribuição humana resolvida neste turno. Em sandbox vem com
+   * `simulated: true` — o operador/departamento é quem SERIA escolhido, e
+   * nada foi atribuído.
+   */
+  distribution?: {
+    assignedTo: string | null;
+    departmentName: string | null;
+    simulated: boolean;
+  } | null;
 };
+
+/** Distribuição que a tool resolveu neste turno (real ou simulada). */
+function inspectDistribution(
+  calls: RunResult["toolCalls"],
+): TurnRecord["distribution"] {
+  for (const c of calls) {
+    if (c.name !== "execute_distribution" && c.name !== "transfer_to_human") {
+      continue;
+    }
+    const res = asRecord(c.result);
+    if (res.assigned !== true) continue;
+    return {
+      assignedTo: (res.assignedTo as string | null) ?? null,
+      departmentName: (res.departmentName as string | null) ?? null,
+      simulated: res.simulated === true,
+    };
+  }
+  return null;
+}
 
 function arg(flag: string, fallback = ""): string {
   const i = process.argv.indexOf(flag);
@@ -125,7 +180,7 @@ function formatTranscript(cases: FixtureCase[], records: TurnRecord[]): string {
       `===== ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${truncated} =====`,
     );
     lines.push("Script do aluno (ordem):");
-    c.turns.forEach((t, i) => lines.push(`  t${i} ${t}`));
+    c.turns.forEach((t, i) => lines.push(`  t${i} ${fixtureTurnInbound(t)}`));
     lines.push("");
     for (const r of turns) {
       const tools = r.tools.map((t) => t.name).join(",") || "-";
@@ -180,14 +235,19 @@ function toolSucceeded(result: unknown): boolean {
 function inspectHandoff(calls: RunResult["toolCalls"]): {
   kind: "ai_agent" | "department" | "human" | null;
   name: string;
+  /** Destino resolvido pela tool. Quando existe, manda mais que o nome. */
+  userId?: string;
 } {
   for (const c of calls) {
     if (!toolSucceeded(c.result)) continue;
     const args = asRecord(c.args);
+    const res = asRecord(c.result);
+    const targetUserId = String(res.targetAgentUserId ?? "").trim() || undefined;
     if (c.name === "transfer_conversation") {
       const target = String(args.target ?? "");
       const name = String(args.name ?? "").trim();
-      if (target === "ai_agent") return { kind: "ai_agent", name };
+      if (target === "ai_agent")
+        return { kind: "ai_agent", name, userId: targetUserId };
       if (target === "department") return { kind: "department", name };
       if (target === "user") return { kind: "human", name };
     }
@@ -195,6 +255,7 @@ function inspectHandoff(calls: RunResult["toolCalls"]): {
       return {
         kind: "ai_agent",
         name: String(args.name ?? args.agentName ?? args.agentUserId ?? "").trim(),
+        userId: targetUserId,
       };
     }
     if (c.name === "transfer_to_department") {
@@ -236,10 +297,17 @@ function mapDepartmentToAgent(
 
 function applyHandoff(
   agents: AgentRow[],
-  handoff: { kind: "ai_agent" | "department" | "human" | null; name: string },
+  handoff: {
+    kind: "ai_agent" | "department" | "human" | null;
+    name: string;
+    userId?: string;
+  },
 ): { next: AgentRow | null; skip: string | null; switchedTo: string | null } {
   if (handoff.kind === "ai_agent") {
-    const dest = findAgent(agents, handoff.name);
+    // Id primeiro: o nome só decide quando a tool não resolveu o destino.
+    const dest =
+      agents.find((a) => !!handoff.userId && a.userId === handoff.userId) ??
+      findAgent(agents, handoff.name);
     if (dest) return { next: dest, skip: null, switchedTo: dest.name };
     return { next: null, skip: null, switchedTo: `unresolved:${handoff.name}` };
   }
@@ -334,6 +402,135 @@ async function ensureReplayStudent(
   return { contactId: contact.id, seededRecord: true };
 }
 
+/** Marca do sandbox: usada para achar e para limpar o que o replay criou. */
+const SANDBOX_CHANNEL = "replay_sandbox";
+
+/**
+ * Conversa sandbox com id real, para `executeOrchestratedHandoff` e o
+ * assign rodarem de verdade. Sem conversationId o runner nunca chega na
+ * atribuição — o harness testava só o que a tool devolvia.
+ */
+async function ensureReplayConversation(args: {
+  organizationId: string;
+  contactId: string;
+  caseId: string;
+  assignedToId: string;
+}): Promise<string> {
+  const externalId = `replay-sandbox-${args.caseId}`;
+  const existing = await prismaBase.conversation.findFirst({
+    where: { organizationId: args.organizationId, externalId },
+    select: { id: true },
+  });
+  if (existing) {
+    await prismaBase.conversation.update({
+      where: { id: existing.id },
+      data: { assignedToId: args.assignedToId, status: "OPEN" },
+    });
+    return existing.id;
+  }
+  const max = await prismaBase.conversation.aggregate({
+    where: { organizationId: args.organizationId },
+    _max: { number: true },
+  });
+  const created = await prismaBase.conversation.create({
+    data: {
+      organizationId: args.organizationId,
+      number: (max._max.number ?? 0) + 1,
+      contactId: args.contactId,
+      channel: SANDBOX_CHANNEL,
+      externalId,
+      inboxName: "Replay (sandbox de teste)",
+      assignedToId: args.assignedToId,
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
+/** Eventos que o handoff gravou nesta conversa depois de `since`. */
+async function readHandoffEvents(
+  conversationId: string,
+  since: Date,
+): Promise<NonNullable<TurnRecord["dbHandoff"]>> {
+  const [conv, events] = await Promise.all([
+    prismaBase.conversation.findUnique({
+      where: { id: conversationId },
+      select: { assignedToId: true, assignedTo: { select: { name: true } } },
+    }),
+    prismaBase.message.findMany({
+      where: {
+        conversationId,
+        isPrivate: true,
+        createdAt: { gte: since },
+      },
+      select: { content: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+  return {
+    conversationId,
+    assignedToId: conv?.assignedToId ?? null,
+    assignedToName: conv?.assignedTo?.name ?? null,
+    events: events.map((e) => ({
+      content: e.content ?? "",
+      createdAt: e.createdAt.toISOString(),
+    })),
+  };
+}
+
+/** Remove o sandbox. Sem isto a org de teste acumula conversa a cada replay. */
+async function cleanupReplayConversations(
+  organizationId: string,
+  conversationIds: string[],
+): Promise<void> {
+  if (conversationIds.length === 0) return;
+  // Ordem importa: o que referencia a conversa/contato sai antes dela.
+  const convs = await prismaBase.conversation.findMany({
+    where: { id: { in: conversationIds }, channel: SANDBOX_CHANNEL },
+    select: { id: true, contactId: true },
+  });
+  const ids = convs.map((c) => c.id);
+  const contactIds = [
+    ...new Set(convs.map((c) => c.contactId).filter((v): v is string => !!v)),
+  ];
+  if (ids.length === 0) return;
+
+  // Deals (e o que pende neles) que o turno criou no contato de sandbox.
+  const deals = contactIds.length
+    ? await prismaBase.deal.findMany({
+        where: { organizationId, contactId: { in: contactIds } },
+        select: { id: true },
+      })
+    : [];
+  const dealIds = deals.map((d) => d.id);
+  if (dealIds.length) {
+    await prismaBase.dealEvent.deleteMany({ where: { dealId: { in: dealIds } } });
+  }
+  if (contactIds.length) {
+    await prismaBase.activity.deleteMany({
+      where: { organizationId, contactId: { in: contactIds } },
+    });
+  }
+  await prismaBase.message.deleteMany({
+    where: { conversationId: { in: ids } },
+  });
+  await prismaBase.conversation.deleteMany({
+    where: { id: { in: ids }, channel: SANDBOX_CHANNEL },
+  });
+  if (dealIds.length) {
+    await prismaBase.deal.deleteMany({ where: { id: { in: dealIds } } });
+  }
+  // O contato de replay é reaproveitado entre rodadas (e tem o registro
+  // acadêmico fake pendurado nele). Não apaga: zera a atribuição para não
+  // sobrar dono de um handoff de teste.
+  if (contactIds.length) {
+    await prismaBase.contact.updateMany({
+      where: { organizationId, id: { in: contactIds } },
+      data: { assignedToId: null },
+    });
+  }
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL ausente");
@@ -352,6 +549,10 @@ async function main() {
   const limitRaw = arg("--limit");
   const outPath = arg("--out", "replay-agent-runs.out.json");
   const delayMs = Number(arg("--delay", "0")) || 0;
+  // Handoff de verdade: conversa sandbox com id real e tools sem simulação.
+  const realHandoff = process.argv.includes("--real-handoff");
+  const keepSandbox = process.argv.includes("--keep-sandbox");
+  const sandboxConversationIds: string[] = [];
 
   let cases = loadFixtures(fixturePath, lote);
   if (onlyCase) cases = cases.filter((c) => c.id === onlyCase);
@@ -369,6 +570,41 @@ async function main() {
   if (!org) {
     console.error(`org slug=${orgSlug} não encontrada`);
     process.exit(1);
+  }
+
+  if (realHandoff) {
+    // Fail-closed: o modo só roda em org marcada como de teste. A marca é
+    // config da organização, não slug no código — produção nunca liga a
+    // chave e o script aborta antes de tocar em qualquer linha.
+    const flag = await prismaBase.organizationSetting.findFirst({
+      where: { organizationId: org.id, key: REPLAY_SANDBOX_SETTING_KEY },
+      select: { value: true },
+    });
+    if (flag?.value?.trim().toLowerCase() !== "true") {
+      console.error(
+        `--real-handoff recusado: org ${org.slug} não está marcada como org de teste ` +
+          `(defina ${REPLAY_SANDBOX_SETTING_KEY}=true em organization_settings).`,
+      );
+      process.exit(1);
+    }
+    // Resíduo de rodada interrompida (Ctrl-C, deploy no meio) ficaria como
+    // conversa órfã no inbox da org de teste e sujaria os eventos lidos
+    // neste run. Limpa antes de começar, não só no fim.
+    const leftover = await prismaBase.conversation.findMany({
+      where: { organizationId: org.id, channel: SANDBOX_CHANNEL },
+      select: { id: true },
+    });
+    if (leftover.length) {
+      await cleanupReplayConversations(
+        org.id,
+        leftover.map((c) => c.id),
+      );
+      console.log(`sandbox residual limpo (${leftover.length} conversas)`);
+    }
+
+    // Liga os guards de efeito colateral (SSE, distribuição, envio,
+    // automação, atribuição a humano) antes do primeiro turno.
+    enableReplaySandbox(org.id);
   }
 
   const dbAgents = await prismaBase.aIAgentConfig.findMany({
@@ -433,21 +669,31 @@ async function main() {
         const history: HistoryTurn[] = [];
         let skipReason: string | null = null;
         const identity = await ensureReplayStudent(org.id, c);
+        const conversationId = realHandoff
+          ? await ensureReplayConversation({
+              organizationId: org.id,
+              contactId: identity.contactId,
+              caseId: c.id,
+              assignedToId: start.userId,
+            })
+          : null;
+        if (conversationId) sandboxConversationIds.push(conversationId);
         const cap = c.turns.length >= 10 ? " (teto 10)" : "";
         console.log("");
         console.log(
           `===== CASE ${c.id} ${c.label ?? ""} | ${c.turns.length} inbound${cap} =====`,
         );
-        c.turns.forEach((t, i) => console.log(`  t${i} ${t}`));
+        c.turns.forEach((t, i) => console.log(`  t${i} ${fixtureTurnInbound(t)}`));
 
         for (let i = 0; i < c.turns.length; i++) {
-          const inbound = c.turns[i] ?? "";
+          const inbound = fixtureTurnInbound(c.turns[i]!);
           const speaker = current;
 
           if (skipReason) {
             records.push({
               caseId: c.id,
               turnIndex: i,
+              at: new Date().toISOString(),
               inbound,
               agentId: speaker.id,
               agentName: speaker.name,
@@ -529,6 +775,7 @@ async function main() {
             records.push({
               caseId: c.id,
               turnIndex: i,
+              at: new Date().toISOString(),
               inbound,
               agentId: speaker.id,
               agentName: speaker.name,
@@ -550,13 +797,21 @@ async function main() {
             continue;
           }
 
+          const turnStartedAt = new Date();
           const result = await runAgent({
             agentId: speaker.id,
-            source: "inbox_test",
+            // Com conversa sandbox as tools de efeito executam de verdade;
+            // sem ela, `inbox_test` simula (era o único modo do harness).
+            source: conversationId ? "inbox" : "inbox_test",
             userMessage: inbound,
-            history: history.slice(-10),
+            history,
+            historyLimit: MAX_HISTORY,
             contactId: identity.contactId,
+            conversationId: conversationId ?? undefined,
           });
+          const dbHandoff = conversationId
+            ? await readHandoffEvents(conversationId, turnStartedAt)
+            : null;
 
           history.push({ role: "user", content: inbound });
           if (result.text?.trim()) {
@@ -564,18 +819,20 @@ async function main() {
           }
 
           const applied = applyHandoff(agents, inspectHandoff(result.toolCalls));
-          if (applied.next && applied.next.id !== speaker.id) {
+          if (result.routing?.toAgentId) {
+            const routed = agents.find((a) => a.id === result.routing!.toAgentId);
+            if (routed) current = routed;
+          } else if (applied.next && applied.next.id !== speaker.id) {
             current = applied.next;
           }
           if (applied.skip) skipReason = applied.skip;
-          const shown = current.id !== speaker.id ? current : speaker;
 
           records.push({
             caseId: c.id,
             turnIndex: i,
             inbound,
-            agentId: shown.id,
-            agentName: shown.name,
+            agentId: speaker.id,
+            agentName: speaker.name,
             llmInvoked: true,
             runId: result.runId,
             status: result.status,
@@ -588,8 +845,20 @@ async function main() {
                   department: ruleHit.rule.department,
                 }
               : null,
-            switchedTo: applied.switchedTo,
+            switchedTo:
+              result.routing && result.routing.toAgentId !== result.routing.fromAgentId
+                ? current.name
+                : applied.switchedTo,
             skipped: null,
+            handoff: result.routing
+              ? {
+                  fromAgentId: result.routing.fromAgentId,
+                  toAgentId: result.routing.toAgentId,
+                  by: result.routing.by,
+                }
+              : null,
+            dbHandoff,
+            distribution: inspectDistribution(result.toolCalls),
           });
           logTurn(records[records.length - 1]!);
 
@@ -599,8 +868,23 @@ async function main() {
     },
   );
 
+  if (realHandoff && !keepSandbox) {
+    await cleanupReplayConversations(org.id, sandboxConversationIds);
+    console.log(`sandbox limpo (${sandboxConversationIds.length} conversas)`);
+  } else if (realHandoff) {
+    console.log(
+      `sandbox preservado (--keep-sandbox): channel=${SANDBOX_CHANNEL}, ${sandboxConversationIds.length} conversas`,
+    );
+  }
+
+  if (realHandoff) disableReplaySandbox();
+
   const report = {
     org: { id: org.id, slug: org.slug, name: org.name },
+    realHandoff,
+    // Cada efeito que teria saído do sandbox (envio, SSE, distribuição,
+    // automação, dono humano) e foi recusado.
+    sandboxBlocked: realHandoff ? blockedEffects() : [],
     startedAs: { id: start.id, name: start.name },
     at: new Date().toISOString(),
     turns: records,

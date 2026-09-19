@@ -1,0 +1,79 @@
+name: Checks
+
+# Lint + testes + catraca de tipos em QUALQUER branch e em PR.
+#
+# Deliberadamente SEM job de build ou deploy: o `build-and-deploy.yml` roda
+# só em main/DEV_BRANCH/digitalocean (ou dispatch manual) e, em qualquer
+# branch que não seja main/digitalocean, ele publica a tag `dev` e dispara
+# o redeploy do EasyPanel de DEV. Uma branch de auditoria não pode subir
+# nada — daí este workflow separado.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Mesma versão do `build-and-deploy.yml`: Node 24 (npm 11) é quem
+          # gerou o package-lock.json. Com npm 10 o `npm ci` aborta.
+          node-version: 24
+          cache: npm
+
+      # `postinstall` roda `prisma generate`, que só precisa de um
+      # DATABASE_URL resolvível — não conecta em banco nenhum.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/vitest.log
+          {
+            echo "### vitest"
+            echo '```'
+            grep -E "Test Files|Tests  " /tmp/vitest.log | tail -4
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Catraca: o passivo de tipos fica congelado em tsc-baseline.json e o
+      # job só falha com erro novo (ou com erro do baseline já corrigido,
+      # que precisa sair do arquivo).
+      #
+      # O resumo vai para o GITHUB_STEP_SUMMARY porque o log bruto do job
+      # exige autenticação para ler; o summary não.
+      - name: Typecheck (baseline)
+        # catraca de tsc em ajuste — tornar bloqueante depois
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          node scripts/tsc-baseline.mjs 2>&1 | tee /tmp/tsc.log
+
+      - name: Resumo do typecheck
+        if: always()
+        run: |
+          {
+            echo "### tsc (catraca)"
+            echo '```'
+            head -c 30000 /tmp/tsc.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

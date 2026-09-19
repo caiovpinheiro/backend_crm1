@@ -63,6 +63,7 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
     select: {
       id: true,
       archetype: true,
+      inboxPolicy: true,
       user: { select: { name: true } },
     },
   });
@@ -70,8 +71,14 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
     id: row.id,
     name: row.user?.name?.trim() || "Agente",
     archetype: row.archetype,
+    routingScope: normalizeInboxPolicy(row.inboxPolicy, agent.verticalPack)
+      .routingScope,
   }));
-  const dest = suggestCoordinatorAiAgent(runArgs.userMessage, peers);
+  const dest = suggestCoordinatorAiAgent(
+    runArgs.userMessage,
+    peers,
+    agent.verticalPack,
+  );
   if (!dest || dest.id === agent.id) return null;
 
   if (runArgs.conversationId && runArgs.contactId) {
@@ -108,12 +115,14 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
       contactId: runArgs.contactId,
       dealId: runArgs.dealId ?? null,
       fromAgentUserId: agent.userId,
+      fromAgentName: agent.user?.name ?? null,
       target: "ai_agent",
       name: dest.name,
       reason: "Orquestração por assunto",
       userMessage: runArgs.userMessage,
       policy,
       toolPolicy: tools.transfer_conversation ?? null,
+      handoffBy: "orchestrator_code",
     });
     if (!handed.assigned) return null;
   }
@@ -126,13 +135,11 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
 
   return {
     ...nested,
-    toolCalls: [
-      {
-        name: "transfer_to_ai_agent",
-        args: { agentName: dest.name },
-        result: { ok: true, assigned: true, agentName: dest.name },
-      },
-      ...nested.toolCalls,
-    ],
+    routing: {
+      by: "orchestrator_code",
+      fromAgentId: agent.id,
+      toAgentId: dest.id,
+      reason: "orquestracao_por_assunto",
+    },
   };
 }

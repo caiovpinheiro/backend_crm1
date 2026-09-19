@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { ARCHETYPES } from "@/lib/ai-agents/archetypes";
@@ -9,7 +9,7 @@ import {
 } from "@/lib/ai-agents/steering";
 import { MESSAGE_RULE_LABELS } from "@/lib/ai-agents/message-rules";
 import { listAgentTemplates } from "@/services/ai-agent-templates";
-import { listVerticalPackIds } from "@/verticals";
+import { listVerticalPackIds, getVerticalPack } from "@/verticals";
 import { AGENT_MAX_STEPS } from "@/services/ai/runner";
 import { DEFAULT_TOOL_CALL_LIMITS } from "@/services/ai/tool-governor";
 
@@ -45,9 +45,14 @@ export async function GET() {
         suggestedModel: a.suggestedModel,
         systemPromptTemplate: a.systemPromptTemplate,
         templateId: templates.find((t) => t.archetypeKey === a.id)?.id ?? null,
-        verticalPack: a.id === "ATENDIMENTO" ? "academic" : null,
+        verticalPack: null,
       })),
-      tools: TOOLS_CATALOG,
+      tools: [
+        ...TOOLS_CATALOG,
+        ...listVerticalPackIds().flatMap(
+          (id) => getVerticalPack(id)?.extraTools ?? [],
+        ),
+      ],
       verticalPacks: listVerticalPackIds(),
       // Rótulos em linguagem de operador para a tela do agente — o FE não
       // deve traduzir "image"/"handoff" por conta própria.

@@ -14,6 +14,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
 
 /** Limite de fila alinhado ao seed de consultores (~volume DataCrazy). */
 const QUEUE_LIMIT = 25;
@@ -30,30 +31,7 @@ const DEPT_DEFS = [
 ] as const;
 
 type DeptKey = (typeof DEPT_DEFS)[number]["key"];
-
-/** Email → departamentos canônicos. */
-const ROSTER: Array<{ email: string; depts: DeptKey[] }> = [
-  {
-    email: "wesley.guerreiro@cruzeiroead.com.br",
-    depts: ["acolhimento", "retencao"],
-  },
-  {
-    email: "danubia.sousa@cruzeiroead.com.br",
-    depts: ["acolhimento", "retencao"],
-  },
-  {
-    email: "marilia.nascimento@cruzeiroead.com.br",
-    depts: ["acolhimento"],
-  },
-  { email: "beatriz.andrade@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "breno.silva@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "erica.ferreira@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "emanuel.felipe@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "felipe.guimaraes@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "joyce.pereira@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "julia.rodrigues@cruzeiroead.com.br", depts: ["atendimento"] },
-  { email: "mariana.vecoso@cruzeiroead.com.br", depts: ["atendimento"] },
-];
+type Roster = Array<{ email: string; depts: DeptKey[] }>;
 
 const lastSyncAt = new Map<string, number>();
 const SYNC_TTL_MS = 5 * 60 * 1000;
@@ -186,12 +164,15 @@ async function syncUserDepts(args: {
  * atendimento — ligado por default em qualquer tenant — criava
  * Acolhimento / Retenção / Atendimento - SAC na org errada (ex.: DnaWork).
  */
-async function orgHasAcademicRosterUsers(orgId: string): Promise<boolean> {
+async function orgHasAcademicRosterUsers(
+  orgId: string,
+  roster: Roster,
+): Promise<boolean> {
   const hit = await prisma.user.findFirst({
     where: {
       organizationId: orgId,
       type: "HUMAN",
-      OR: ROSTER.map((row) => ({
+      OR: roster.map((row) => ({
         email: { equals: row.email, mode: "insensitive" as const },
       })),
     },
@@ -217,7 +198,11 @@ export async function ensureAcademicDepartmentRoster(opts?: {
   lastSyncAt.set(orgId, Date.now());
 
   try {
-    if (!(await orgHasAcademicRosterUsers(orgId))) {
+    // Roster é dado de tenant (e-mails de consultores): vem da config da
+    // org. Sem config, não há o que sincronizar.
+    const roster: Roster = (await loadAcademicTenantConfig()).deptRoster;
+    if (roster.length === 0) return { synced: 0, missing: [] };
+    if (!(await orgHasAcademicRosterUsers(orgId, roster))) {
       return { synced: 0, missing: [] };
     }
 
@@ -227,7 +212,7 @@ export async function ensureAcademicDepartmentRoster(opts?: {
     let synced = 0;
     const missing: string[] = [];
 
-    for (const row of ROSTER) {
+    for (const row of roster) {
       const user = await prisma.user.findFirst({
         where: {
           organizationId: orgId,
@@ -268,7 +253,7 @@ export async function ensureAcademicDepartmentRoster(opts?: {
       JSON.stringify({
         event: "academic_dept_roster_synced",
         orgId,
-        roster: ROSTER.length,
+        roster: roster.length,
         synced,
         missing,
         depts: Object.fromEntries(

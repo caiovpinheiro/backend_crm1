@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Debounce de mensagens inbound para o Agente IA — CAMINHO LEGADO.
  *
  * APOSENTADO pelo `turn-manager.ts` (Fase 1 do runtime de IA). Com
@@ -306,7 +306,7 @@ async function flushDebounce(
 
 /**
  * Depois de atribuir/transferir no inbox para um User type=AI: responde
- * inbound sem resposta, ou manda a saudação se o aluno ainda não falou.
+ * inbound sem resposta, ou manda a saudação se o contato ainda não falou.
  * Fire-and-forget — o HTTP do assign não espera o LLM.
  */
 export function kickAiAfterInboxAssign(args: {

@@ -78,11 +78,11 @@ Qualificar leads recém-chegados, descobrir o que eles precisam e, quando houver
     shortDescription:
       "Responde dúvidas frequentes e abre chamados quando necessário.",
     longDescription:
-      "Atende leads e clientes existentes, responde perguntas corriqueiras usando a base de conhecimento, registra a solicitação quando precisar escalar, e transfere pra um humano sempre que o tema sair do escopo. Inclui regras acadêmicas (matrícula, portal, Blackboard).",
+      "Atende leads e clientes existentes, responde perguntas corriqueiras usando a base de conhecimento, registra a solicitação quando precisar escalar, e transfere pra um humano sempre que o tema sair do escopo.",
     defaultTools: [
       "add_tag",
       "create_activity",
-      "consultar_matricula",
+      "search_crm_records",
       "transfer_to_department",
       "execute_distribution",
       "transfer_to_human",
@@ -94,7 +94,7 @@ Qualificar leads recém-chegados, descobrir o que eles precisam e, quando houver
     systemPromptTemplate: `Você é {{agent_name}}, consultora de suporte virtual da {{company_name}}. Seu nome não importa — você conversa como pessoa real pelo WhatsApp.
 
 ## Sua missão
-Resolver dúvidas de primeiro nível com base na documentação, no relatório de matriculados (\`consultar_matricula\`) e nas tools. Quando precisar de humano, roteie o departamento (Acolhimento / Retenção / Atendimento) e acione a distribuição — não espere automação de início de pipe.
+Resolver dúvidas de primeiro nível com a documentação, o cadastro e as tools. Quando precisar de humano, roteie o departamento da organização e acione a distribuição — não espere automação de início de pipe.
 
 ## Tom de voz
 {{tone}}. Responda em {{language}}.
@@ -111,7 +111,7 @@ Resolver dúvidas de primeiro nível com base na documentação, no relatório d
     shortDescription:
       "Entende o assunto e passa a conversa para departamento, pessoa ou agente especialista.",
     longDescription:
-      "Não resolve a dúvida do cliente. Lê o que chegou, decide o destino e passa a conversa: fila de um departamento, alguém da equipe ou outro agente de IA. Não responde FAQ de primeiro acesso nem retenção sozinho.",
+      "Não resolve a dúvida do cliente. Lê o que chegou, decide o destino e passa a conversa: fila de um departamento, alguém da equipe ou outro agente de IA. Não responde FAQ operacional sozinho.",
     defaultTools: ["transfer_conversation", "transfer_to_human"],
     defaultTone: "objetivo, claro e direto (WhatsApp)",
     suggestedModel: "gpt-4.1-mini",

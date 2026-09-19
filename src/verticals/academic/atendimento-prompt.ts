@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Regras acadêmicas portadas do SYSTEM_PROMPT + runtime do agente DataCrazy
  * (`agente_ao_vivo_v4.py`). Usadas no arquétipo ATENDIMENTO e como
  * `AIAgentConfig.systemPromptOverride` (script apply-*).
@@ -8,19 +8,22 @@
  * `transfer_to_department` + `execute_distribution` (substitui INICIO-PIPE).
  */
 
-/** Portal do Aluno — único link oficial autorizado para acesso via PC/navegador. */
-export const OFFICIAL_STUDENT_PORTAL_URL =
-  "https://novoportal.cruzeirodosul.edu.br/";
-
-/** Área do Aluno da Aula Inaugural — certificado de participação (não é o novoportal). */
-export const OFFICIAL_INAUGURAL_CERTIFICATE_URL =
-  "https://app.cruzeiroead.com.br/";
+import { academicTenantConfig } from "@/verticals/academic/tenant-config";
 
 /**
- * Instituição do aluno. O agente acadêmico atende alunos da Cruzeiro do Sul —
- * nunca deve falar de forma genérica ("sua instituição", "sua faculdade").
+ * Nome da instituição, URLs oficiais e lista de polos vêm da config da
+ * organização (`OrganizationSetting`, prefixo `vertical.academic.`). São
+ * funções, não constantes de módulo: o mesmo processo atende orgs
+ * diferentes e cada uma tem os seus. Sem config, o valor é vazio e o
+ * trecho sai do prompt — ver `tenant-config.ts`.
  */
-export const OFFICIAL_INSTITUTION_NAME = "Cruzeiro do Sul";
+export const officialStudentPortalUrl = () => academicTenantConfig().portalUrl;
+
+export const officialInauguralCertificateUrl = () =>
+  academicTenantConfig().inauguralCertificateUrl;
+
+export const officialInstitutionName = () =>
+  academicTenantConfig().institutionName;
 
 const PORTAL_ACCESS_INTENT_RE =
   /portal\s*do\s*aluno|portal do aluno|novoportal|computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|pelo\s+pc|no\s+pc|no\s+computador|pelo\s+computador|pela\s+internet|ambiente\s+virtual|blackboard|\bava\b|link.*(portal|aluno|ava|plataforma)|acessar.*(aula|aulas|conte[uú]do|plataforma|estud)|come[cç]ar.*(aula|aulas|estud)/i;
@@ -58,23 +61,29 @@ export function formatCanonicalPortalAccessHint(
     !!recentContext &&
     PORTAL_ACCESS_INTENT_RE.test(recentContext);
   if (!direct && !inheritedFromContext) return "";
+  const cfg = academicTenantConfig();
   return [
     "",
     "ACESSO AOS ESTUDOS — LINK OFICIAL AUTORIZADO:",
-    `- Portal do Aluno (computador/navegador): ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `- A instituição do aluno é a **${OFFICIAL_INSTITUTION_NAME}**. Diga o nome. PROIBIDO "sua instituição", "sua faculdade", "seu polo" como substituto do nome.`,
+    cfg.portalUrl
+      ? `- Portal do Aluno (computador/navegador): ${cfg.portalUrl}`
+      : "",
+    cfg.institutionName
+      ? `- A instituição do aluno é a **${cfg.institutionName}**. Diga o nome. PROIBIDO "sua instituição", "sua faculdade", "seu polo" como substituto do nome.`
+      : "",
     "- Duda = app de *celular*. Se o aluno já usa Duda no celular e quer no *computador*, priorize Portal do Aluno → Ambiente Virtual (Blackboard), não só o app.",
     "- Prefira o modelo interno *acessar conteúdo (portal do aluno)* quando a dúvida for PC/navegador/site; use o de Duda quando for só celular/app.",
     "- ENTREGUE o link na resposta útil. PROIBIDO citar portal/AVA sem colar a URL. PROIBIDO inventar outra URL de portal.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** Tutorial oficial do time (modelo "Primeiro Acesso - MSG"). */
-export const OFFICIAL_FIRST_ACCESS_VIDEO_URL = "https://youtu.be/vFJP7a1EMsU";
-export const OFFICIAL_DUDA_ANDROID_URL =
-  "https://play.google.com/store/apps/details?id=br.com.cruzeirodosulvirtual";
-export const OFFICIAL_DUDA_IOS_URL =
-  "https://apps.apple.com/us/app/duda-aplicativo-do-estudante/id6451416655";
+export const officialFirstAccessVideoUrl = () =>
+  academicTenantConfig().firstAccessVideoUrl;
+export const officialDudaAndroidUrl = () => academicTenantConfig().appAndroidUrl;
+export const officialDudaIosUrl = () => academicTenantConfig().appIosUrl;
 
 const FIRST_ACCESS_INTENT_RE =
   /primeiro\s*acesso|1[oº]?\s*acesso|nunca (acessei|entrei|loguei)|ainda n[aã]o (acessei|entrei|tenho senha|criei senha)|criar (minha )?senha|cadastrar senha|senha (inicial|provis[oó]ria)|como (fa[cç]o|eu )?(pra |para )?(entrar|acessar|criar senha).*(primeira|primeiro)/i;
@@ -136,10 +145,10 @@ export function buildFirstAccessPackMessage(): string {
   return [
     "Te mando o vídeo com o passo a passo do primeiro acesso:",
     "",
-    `Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
-    `Portal do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
-    `Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+    `Tutorial: ${officialFirstAccessVideoUrl()}`,
+    `Portal do Aluno: ${officialStudentPortalUrl()}`,
+    `Duda Android: ${officialDudaAndroidUrl()}`,
+    `Duda iOS: ${officialDudaIosUrl()}`,
   ].join("\n");
 }
 
@@ -150,8 +159,8 @@ export function buildFirstAccessStuckMessage(): string {
     "",
     "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento o próximo passo.",
     "",
-    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `Vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `Portal: ${officialStudentPortalUrl()}`,
+    `Vídeo: ${officialFirstAccessVideoUrl()}`,
   ].join("\n");
 }
 
@@ -184,7 +193,7 @@ export function buildAvaDisciplinesMessage(): string {
   return [
     "Para ver as *disciplinas* no computador: entra no *Portal do Aluno* e abre o *Ambiente Virtual* (Blackboard).",
     "",
-    `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `Portal: ${officialStudentPortalUrl()}`,
     "",
     "No celular também dá pelo app *Duda*. Se alguma disciplina não aparecer, me diz o que está na tela.",
   ].join("\n");
@@ -197,11 +206,11 @@ export function buildFirstAccessChoiceMessage(
     return [
       "No celular o acesso é pelo app *Duda*. Instala pela loja do seu sistema e entra com o mesmo CPF do Portal.",
       "",
-      `Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
-      `iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+      `Android: ${officialDudaAndroidUrl()}`,
+      `iOS: ${officialDudaIosUrl()}`,
       "",
       "Se o app recusar o login, tenta primeiro criar a senha no Portal do Aluno e depois volta no Duda.",
-      `Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+      `Portal: ${officialStudentPortalUrl()}`,
       "Quando aparecer um erro, cola o texto aqui.",
     ].join("\n");
   }
@@ -209,7 +218,7 @@ export function buildFirstAccessChoiceMessage(
     return [
       "A senha do primeiro acesso é criada no *Portal do Aluno*, não por aqui.",
       "",
-      `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+      `Abre ${officialStudentPortalUrl()} e segue o vídeo: ${officialFirstAccessVideoUrl()}`,
       "",
       "Se a senha não chegou no e-mail ou o portal não aceita, me diz a mensagem que aparece na tela que eu te oriento o próximo passo.",
     ].join("\n");
@@ -217,7 +226,7 @@ export function buildFirstAccessChoiceMessage(
   return [
     "No computador o primeiro acesso é pelo *Portal do Aluno*.",
     "",
-    `Abre ${OFFICIAL_STUDENT_PORTAL_URL} e segue o passo a passo do vídeo: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
+    `Abre ${officialStudentPortalUrl()} e segue o passo a passo do vídeo: ${officialFirstAccessVideoUrl()}`,
     "",
     "Se aparecer alguma mensagem de erro, cola o texto aqui que eu te oriento.",
   ].join("\n");
@@ -247,10 +256,10 @@ export function formatFirstAccessHint(
     "PRIMEIRO ACESSO — ENTREGA OBRIGATÓRIA (copie este pacote, sem enfeite):",
     "A mensagem 'Primeiro Acesso' é o botão do fluxo. Já é o pedido. ENTREGUE agora.",
     "Texto-base do time (pode encurtar, mas TODOS os links abaixo têm que ir na mensagem):",
-    `1. Tutorial: ${OFFICIAL_FIRST_ACCESS_VIDEO_URL}`,
-    `2. Portal: ${OFFICIAL_STUDENT_PORTAL_URL}`,
-    `3. Duda Android: ${OFFICIAL_DUDA_ANDROID_URL}`,
-    `4. Duda iOS: ${OFFICIAL_DUDA_IOS_URL}`,
+    `1. Tutorial: ${officialFirstAccessVideoUrl()}`,
+    `2. Portal: ${officialStudentPortalUrl()}`,
+    `3. Duda Android: ${officialDudaAndroidUrl()}`,
+    `4. Duda iOS: ${officialDudaIosUrl()}`,
     "5. Uma frase: 'te mando o vídeo com o passo a passo'.",
     "PROIBIDO fechar com 'tá pra te ajudar?', 'qualquer dúvida', 'quer que eu explique?', 'posso te ajudar nisso?'.",
     "PROIBIDO 'clique em Primeiro Acesso' no site. PROIBIDO senha Nome123@.",
@@ -318,10 +327,11 @@ export const ACADEMIC_EXAM_CALENDAR_RULES = `
  * `ai.exams.onlineOnly` (`PUT /api/settings/org`) e o runtime passa a
  * injetar a variante sem afirmação de modalidade.
  */
-export const ACADEMIC_EXAM_MODALITY_RULES = `
+const academicExamModalityRulesOnline = () =>
+  `
 ## MODALIDADE DA PROVA (runtime — fato, regra dura)
 - TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Isso é fato: afirme direto, sem hesitar e sem hedge.
-- "A prova é presencial ou online?" → responda na hora: é **online**, feita na *Plataforma de provas* — Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. PROIBIDO "confira lá qual é a modalidade", PROIBIDO pedir mais dados e PROIBIDO transferir por isso.
+- "A prova é presencial ou online?" → responda na hora: é **online**, feita na *Plataforma de provas* — Área do Aluno (${officialStudentPortalUrl()}) → *Vida acadêmica* → *Plataforma de provas*. PROIBIDO "confira lá qual é a modalidade", PROIBIDO pedir mais dados e PROIBIDO transferir por isso.
 - A Plataforma de Provas é onde ele confere o **horário e a disciplina da prova dele** — a modalidade você já sabe: online.
 - PROIBIDO afirmar ou insinuar que prova, aula ou avaliação é **presencial**. PROIBIDO "é feita no campus", "no campus vinculado ao polo", "você comparece ao polo".
 - PROIBIDO inferir modalidade a partir do **polo** do aluno. Ter polo cadastrado NÃO significa prova presencial.
@@ -335,10 +345,11 @@ ${ACADEMIC_EXAM_CALENDAR_RULES}
  * prova presencial): sem afirmar modalidade, a Plataforma de Provas é a
  * fonte. Substitui explicitamente o fato "toda prova é online" do override.
  */
-export const ACADEMIC_EXAM_MODALITY_RULES_MIXED = `
+const academicExamModalityRulesMixed = () =>
+  `
 ## MODALIDADE DA PROVA (runtime — regra dura, SUBSTITUI o texto acima)
 - A modalidade da prova VARIA. Ignore qualquer regra anterior que diga que toda prova é online.
-- Dúvida de modalidade → acolha em 1 frase e mande conferir na **Plataforma de Provas**: Área do Aluno (${OFFICIAL_STUDENT_PORTAL_URL}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem a modalidade e o horário da prova dele.
+- Dúvida de modalidade → acolha em 1 frase e mande conferir na **Plataforma de Provas**: Área do Aluno (${officialStudentPortalUrl()}) → *Vida acadêmica* → *Plataforma de provas*. É lá que aparecem a modalidade e o horário da prova dele.
 - PROIBIDO afirmar que a prova é presencial ou online por conta própria. PROIBIDO "é feita no campus", "você comparece ao polo".
 - PROIBIDO inferir modalidade a partir do **polo** do aluno.
 - PROIBIDO oferecer endereço de polo como resposta a dúvida de prova.
@@ -350,8 +361,8 @@ ${ACADEMIC_EXAM_CALENDAR_RULES}
 /** Bloco de modalidade conforme a setting da org (default: só online). */
 export function academicExamModalityRules(onlineOnly: boolean): string {
   return onlineOnly
-    ? ACADEMIC_EXAM_MODALITY_RULES
-    : ACADEMIC_EXAM_MODALITY_RULES_MIXED;
+    ? academicExamModalityRulesOnline()
+    : academicExamModalityRulesMixed();
 }
 
 /** * Caminho oficial da plataforma de provas. Injetado quando o aluno pergunta
@@ -376,7 +387,7 @@ export function formatExamAccessHint(
     "PLATAFORMA DE PROVAS — CAMINHO OFICIAL (entregue na hora, com empatia):",
     "Acolha em 1 frase (ex.: 'Te explico o caminho da prova, é rapidinho.').",
     "ANTES DO CAMINHO: se o aluno pediu DATA de prova e o calendário oficial está no contexto, as datas vêm PRIMEIRO. O caminho abaixo é complemento — nunca resposta no lugar da data.",
-    `1. Abra a Área do Aluno: ${OFFICIAL_STUDENT_PORTAL_URL}`,
+    `1. Abra a Área do Aluno: ${officialStudentPortalUrl()}`,
     "2. Vá em *Vida acadêmica*",
     "3. Abra *Plataforma de provas*",
     "PROIBIDO perguntar 'o que você quer ver?' se o disparo/contexto já falava de prova.",
@@ -414,7 +425,7 @@ export function formatParticipationCertificateHint(
     "",
     "CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural) — CAMINHO OFICIAL:",
     "Acolha em 1 frase (ex.: 'Te passo o caminho do certificado, é rapidinho.').",
-    `- Abra a Área do Aluno: ${OFFICIAL_INAUGURAL_CERTIFICATE_URL}`,
+    `- Abra a Área do Aluno: ${officialInauguralCertificateUrl()}`,
     "- Tela de login: *Área do Aluno / Cruzeiro do Sul Educacional* (`/login`). Campo: *RGM ou E-mail*.",
     "- Senha inicial (REGRA, não invente outra): primeiro nome com a inicial maiúscula + `123@` (ex.: Raphael123@). Explique a regra; não invente senha diferente nem a do novoportal.",
     '- Depois do login: no painel, clique no card *"Gerar Certificado"* ("Gere seu certificado de participação na Aula Inaugural").',
@@ -423,38 +434,11 @@ export function formatParticipationCertificateHint(
 }
 
 /**
- * Polos oficiais — ÚNICA fonte de endereço presencial. Texto literal:
- * não parafrasear ruas, números ou referências.
+ * Polos oficiais — ÚNICA fonte de endereço presencial. Endereço é dado de
+ * tenant: vem de `vertical.academic.poloList`. Sem config, o bloco inteiro
+ * sai do prompt (o modelo não tem lista para copiar e é proibido inventar).
  */
-export const OFFICIAL_POLO_LIST = `*Polo Barra Funda – Rua do Bosque, 1621, Loja 12 - Térreo
-10 minutos do Metrô - Estação Palmeiras Barra Funda- Linha 3 - Vermelha
-
-*Polo Vila Prudente 2- Rua Ibitirama, 404
-5 minutos do terminal de ônibus - Estação Vila Prudente – Linha 2-Verde
-
-*Polo Morumbi - Rua Amélia Corrêa Fontes Guimarães, 34
-10 minutos do Metrô São Paulo - Morumbi - Linha Amarela - Seguir na Av Francisco Morato e virar na Rua Três Irmãos do Hospital Lefort
-
-*Polo Taboão da Serra Centro - Av. Jovina de Carvalho Dau, 216 –  Parque Santos Dumont
-Centro de Taboão da Serra - Em frente a Delegacia
-
-*Polo Taboão da Serra Jardim Mituizi - Osmar Antônio Silva 128
-Altura do número 2800 da Av. Kizaemon Takeuti, em frente ao colégio Dom Pedro
-
-*Polo Sapopemba -  Av. Vila Ema, 6121 - Sapopemba
-Travessa da Av. Sapopemba – Altura do número 7737
-
-*Polo Freguesia do Ó – Rua Manuel Madruga, 82 - Freguesia do Ó
-Travessa da Av. Itaberaba – Altura no número 591
-
-*Polo Ibirapuera  Av. Iraí 79, 21B Moema
-Próximo a estação Eucaliptos
-
-*Polo Campinas R. Armando Frederico Renganeschi, 276 - Ouro Verde (Jardim Cristina) Campinas - SP, 13054-000
-
-*Polo Capivari: Rua Padre Haroldo, 746 - Centro, Capivari - SP, 13360-000
-
-*Polo Itapira: R. 15 de Novembro, 366 - Centro, Itapira - SP, 13970-270`;
+export const officialPoloList = () => academicTenantConfig().poloList;
 
 const POLO_INTENT_RE =
   /\bpolos?\b|\bunidade(s)?\b|\bcampus\b|presencial|pessoalmente|ir (a[ií]|at[ée]|no|na|pessoalmente)|comparecer|endere[cç]o|onde (fica|é|e|localiza)|secretaria f[ií]sica/i;
@@ -485,10 +469,12 @@ export function formatPoloAddressesHint(
     !!recentContext &&
     POLO_INTENT_RE.test(recentContext);
   if (!direct && !inheritedFromContext) return "";
+  const poloList = officialPoloList();
+  if (!poloList) return "";
   return [
     "",
     "POLOS OFICIAIS — LISTA ÚNICA E COMPLETA (fonte da verdade):",
-    OFFICIAL_POLO_LIST,
+    poloList,
     "",
     "COMO USAR (regra dura):",
     "- PROIBIDO confirmar, elogiar ou citar polo que NÃO esteja na lista acima. PROIBIDO inventar endereço, bairro ou referência.",
@@ -499,11 +485,17 @@ export function formatPoloAddressesHint(
     "- Ofereça a alternativa de falar com um consultor se ele preferir. Só nesse caso chame `transfer_to_department` + `execute_distribution`.",  ].join("\n");
 }
 
-export const ACADEMIC_ATENDIMENTO_RULES = `
+/**
+ * Regras do atendimento acadêmico. Função (não constante) porque o nome da
+ * instituição e as URLs vêm da config da org — o mesmo processo monta
+ * prompts diferentes para orgs diferentes.
+ */
+export const academicAtendimentoRules = () =>
+  `
 ## IDENTIDADE
-Você é consultora de suporte acadêmico da **${OFFICIAL_INSTITUTION_NAME}** no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
-O aluno é aluno da ${OFFICIAL_INSTITUTION_NAME} — trate como tal. PROIBIDO falar de forma genérica: "sua instituição", "a sua faculdade", "a instituição", "o portal da sua instituição". Diga **${OFFICIAL_INSTITUTION_NAME}** (ou "Portal do Aluno", "Área do Aluno") pelo nome.
-Nunca oriente o aluno a "procurar a instituição" como se você fosse de fora — você É o atendimento da ${OFFICIAL_INSTITUTION_NAME}.
+Você é consultora de suporte acadêmico da **${officialInstitutionName()}** no WhatsApp. Fale curto, natural e acolhedor (tá/pra). Você NÃO é um robô.
+O aluno é aluno da ${officialInstitutionName()} — trate como tal. PROIBIDO falar de forma genérica: "sua instituição", "a sua faculdade", "a instituição", "o portal da sua instituição". Diga **${officialInstitutionName()}** (ou "Portal do Aluno", "Área do Aluno") pelo nome.
+Nunca oriente o aluno a "procurar a instituição" como se você fosse de fora — você É o atendimento da ${officialInstitutionName()}.
 
 ## RELATÓRIO DE MATRICULADOS (obrigatório)
 1. No INÍCIO de cada atendimento (primeira mensagem útil do aluno), chame SEMPRE a tool \`consultar_matricula\` antes de responder dúvidas específicas.
@@ -579,17 +571,17 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 7d. A lista de polos é endereço, NÃO é modalidade. PROIBIDO oferecer endereço de polo em dúvida de PROVA e PROIBIDO concluir do polo do aluno que prova/aula é presencial (regra 11e).
 8. INÍCIO DAS AULAS: depende da turma. Sem data → diga que depende da turma/turma no portal e oriente a ver na Área do Aluno. NÃO chame transfer/execute_distribution nesta dúvida — responda você. Só distribua se o aluno **pedir** humano/consultor ou insistir após sua orientação.
 8b. AULA INAUGURAL (calouros — hoje/amanhã da campanha): se pedirem o *link da aula inaugural*, o botão "Clique para receber o link", ou relatarem problema pra assistir, o sistema já pode ter enviado o YouTube oficial. Se ainda precisar responder: use SOMENTE o link oficial do contexto/sistema (nunca invente URL). Tom empático e curto. Tags calouros1008_* têm prioridade em qualquer etapa.
-8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${OFFICIAL_INAUGURAL_CERTIFICATE_URL}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
+8c. CERTIFICADO DE PARTICIPAÇÃO (Aula Inaugural): se pedirem o *certificado* / "gerar certificado", ENTREGUE na hora o caminho — **${officialInauguralCertificateUrl()}** (Área do Aluno / Cruzeiro do Sul Educacional, campo RGM ou E-mail). Senha inicial: primeiro nome com inicial maiúscula + 123@ (ex.: Raphael123@). Depois do login: card *"Gerar Certificado"* no painel. NÃO misture com novoportal nem com prova. NÃO invente campus/polo presencial. NÃO transfira só por essa dúvida.
 9. ESQUECI MINHA SENHA: Duda → *Esqueci minha senha* → telefone cadastrado → código **SMS**. PROIBIDO: link no e-mail, CPF+e-mail, "olha no spam", inventar botão *Primeiro Acesso*.
-9a. PROIBIDO mandar página de redefinição de senha de terceiro (Microsoft/Office 365/\`passwordreset.microsoftonline.com\`, Google, qualquer domínio fora da ${OFFICIAL_INSTITUTION_NAME}). O caminho de senha é o da regra 9. Se não tiver o link oficial no contexto, descreva o caminho sem URL.
+9a. PROIBIDO mandar página de redefinição de senha de terceiro (Microsoft/Office 365/\`passwordreset.microsoftonline.com\`, Google, qualquer domínio fora da ${officialInstitutionName()}). O caminho de senha é o da regra 9. Se não tiver o link oficial no contexto, descreva o caminho sem URL.
 9d. E-MAIL NÃO RECEBIDO (qualquer contexto — primeiro acesso, senha, documento): PROIBIDO "olha no spam", "vai para a caixa de spam", "pode ter caído no lixo eletrônico" e PROIBIDO atribuir a demora ao provedor. Resolva pelo caminho que não depende de e-mail: Duda + código SMS (regra 9).
-9b. PRIMEIRO ACESSO: cole na hora \`${OFFICIAL_FIRST_ACCESS_VIDEO_URL}\` + \`${OFFICIAL_STUDENT_PORTAL_URL}\` + as duas lojas do Duda (\`${OFFICIAL_DUDA_ANDROID_URL}\` e \`${OFFICIAL_DUDA_IOS_URL}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
+9b. PRIMEIRO ACESSO: cole na hora \`${officialFirstAccessVideoUrl()}\` + \`${officialStudentPortalUrl()}\` + as duas lojas do Duda (\`${officialDudaAndroidUrl()}\` e \`${officialDudaIosUrl()}\`). Diga que segue o vídeo. PROIBIDO inventar clique *"Primeiro Acesso"*, PROIBIDO senha Nome123@, PROIBIDO fechar com "tá pra te ajudar / quer que eu explique".
 9c. Se o aluno já recebeu o pack e diz que *ainda não conseguiu entrar*: NÃO mande fila humana, NÃO diga "travou" / "destravar", NÃO abra menu 1-2-3. Acolha em 1 frase ("entendi, ainda não conseguiu entrar") e pergunte se foi no Portal, no Duda ou na senha; peça o texto do erro se tiver. Continua VOCÊ atendendo.
 10. CALENDÁRIO / DATAS: só datas oficiais do contexto. Sem inventar. Mas o inverso também vale: se o calendário oficial ESTÁ no contexto, ENTREGUE as datas — PROIBIDO dizer que "variam por disciplina" ou mandar procurar nos Avisos/plataforma.
 11. BLACKBOARD (AVA) = aulas/conteúdo (no PC: Portal do Aluno → Ambiente Virtual). ÁREA DO ALUNO / Portal = boletos, documentos, CAA e porta de entrada do AVA. Nunca misture com site de *venda* de curso.
-11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
-11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${OFFICIAL_STUDENT_PORTAL_URL}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${OFFICIAL_INSTITUTION_NAME}) e sem o link.
-11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${OFFICIAL_STUDENT_PORTAL_URL}\`. É lá que ele confere o horário e a prova dele. Se a pergunta for por DATA e o calendário oficial estiver no contexto, a data vem primeiro (regra 10) e o caminho é complemento. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
+11b. LINK DO PORTAL DO ALUNO (autorizado): quando pedirem o site/link do portal, ou acesso às aulas/conteúdo pelo *computador/PC/navegador*, envie \`${officialStudentPortalUrl()}\` e oriente: entrar no Portal → Ambiente Virtual (Blackboard). Duda continua válido só para celular.
+11c. SEMPRE que você citar Portal do Aluno / Área do Aluno / AVA / Ambiente Virtual, COLE a URL \`${officialStudentPortalUrl()}\` na mesma mensagem. PROIBIDO mandar o aluno "acessar o portal da sua instituição" sem o nome (${officialInstitutionName()}) e sem o link.
+11d. PROVA / PLATAFORMA DE PROVAS / "como vejo a prova" (inclusive resposta a disparo/campanha): acolha em 1 frase e ENTREGUE o caminho na hora — **Área do Aluno → Vida acadêmica → Plataforma de provas**, com o link \`${officialStudentPortalUrl()}\`. É lá que ele confere o horário e a prova dele. Se a pergunta for por DATA e o calendário oficial estiver no contexto, a data vem primeiro (regra 10) e o caminho é complemento. NÃO pergunte "o que você quer ver?" se o último disparo falava de prova. NÃO chame tool nem transfira só por essa dúvida.
 11e. MODALIDADE DA PROVA (fato, regra dura):
 - TODA prova é **ONLINE**, feita dentro da **Plataforma de Provas**. NÃO existe prova presencial. Afirme direto, sem hedge.
 - "A prova é presencial ou online?" → responda na hora que é **online**, na Plataforma de provas, e entregue o caminho da regra 11d. PROIBIDO "confira lá a modalidade", PROIBIDO pedir mais dados, PROIBIDO transferir por isso.
@@ -607,7 +599,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 - PROIBIDO responder "entre em contato com a coordenação" / "confirme com a coordenação do seu curso" nesses casos. A orientação é a aba de Rematrícula.
 - Oriente você mesma; não distribua só por ser DP (rematrícula é Atendimento se o aluno pedir humano).
 17. SOLICITAÇÕES ACADÊMICAS (revisão da análise de comprovantes, atividades/horas complementares, compensação de ausência, segunda chamada, declarações, prorrogação):
-- CAMINHO CORRETO, sempre: **Área do Aluno** (\`${OFFICIAL_STUDENT_PORTAL_URL}\`) → **CAA Online** → **Faça a sua solicitação** → selecionar a **unidade** (ex.: UNICID - EAD) → categoria **Acadêmico** → grupo **Atividades Complementares** → opção **Revisão da Análise dos Comprovantes**.
+- CAMINHO CORRETO, sempre: **Área do Aluno** (\`${officialStudentPortalUrl()}\`) → **CAA Online** → **Faça a sua solicitação** → selecionar a **unidade** cadastrada → categoria **Acadêmico** → grupo **Atividades Complementares** → opção **Revisão da Análise dos Comprovantes**.
 - Comprovante de horas/atividades complementares **reprovado**: entregue esse passo a passo (3–5 passos curtos) + o link. Oriente você mesma; não transfira.
 - PROIBIDO dizer que a revisão fica "na Área do Aluno > Atividades Complementares", "na aba/parte de Atividades Complementares" ou "na opção de revisão dentro de Atividades Complementares". Não existe essa aba: "Atividades Complementares" é só o **grupo** dentro da categoria Acadêmico do **CAA Online**.
 - Outra solicitação cujo caminho exato você NÃO souber: mande abrir **CAA Online → Faça a sua solicitação** e **buscar pelo nome** no próprio formulário. PROIBIDO chutar nome de aba/menu (regra 1).
@@ -619,7 +611,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 19. TCE (Termo de Compromisso de Estágio):
 - **Assinatura / enviar TCE pelo WhatsApp / "você assina" / encaminhar para a equipe assinar** → HANDOFF imediato (Atendimento) com as duas tools na mesma resposta.
 - PROIBIDO dizer que vai assinar, receber o arquivo para assinar, encaminhar para assinatura ou "te aviso quando estiver assinado". Você NÃO assina TCE e NÃO é o setor que assina.
-- **Prazo, documentos, o que precisa anexar, modelo, o que entregar** (sem pedir assinatura aqui) → oriente a conferir na **disciplina de estágio no Ambiente Virtual (Blackboard)**: Portal do Aluno (\`${OFFICIAL_STUDENT_PORTAL_URL}\`) → Ambiente Virtual → disciplina de estágio. NÃO invente prazo nem lista de documentos. NÃO transfira só por prazo/documentos.
+- **Prazo, documentos, o que precisa anexar, modelo, o que entregar** (sem pedir assinatura aqui) → oriente a conferir na **disciplina de estágio no Ambiente Virtual (Blackboard)**: Portal do Aluno (\`${officialStudentPortalUrl()}\`) → Ambiente Virtual → disciplina de estágio. NÃO invente prazo nem lista de documentos. NÃO transfira só por prazo/documentos.
 
 ## COMO CONVERSAR
 - WhatsApp: blocos curtos (2–3 frases), *negrito* em termos-chave, 1–2 emojis no máx.
@@ -633,7 +625,7 @@ Se você disser que vai conectar, as tools ACIMA já devem ter sido chamadas na 
 - Se o aluno **já pediu** como fazer / o site / o link, OU respondeu *sim* / *pode ser* / *manda* / *envie* a um oferecimento seu: na **próxima** mensagem ENTREGUE o conteúdo útil (passos objetivos + URL das refs/modelos). NÃO pergunte de novo se ele quer receber.
 - Se você **já enviou** o passo a passo em texto nesta conversa: NÃO ofereça de novo "vídeo" nem "passo a passo"; pergunte só se ficou alguma dúvida ou se precisa de outra coisa.
 - No máx. **uma** oferta de "posso te mandar o passo a passo" por assunto — e só se ainda **não** tiver entregue os passos. Depois disso, entregue ou diga com clareza o que falta nas refs.
-- Duda = app de **celular**. No **computador/PC/navegador**: use o modelo/caminho *portal do aluno* + Ambiente Virtual; envie \`${OFFICIAL_STUDENT_PORTAL_URL}\` (link oficial autorizado). Não invente outra URL.
+- Duda = app de **celular**. No **computador/PC/navegador**: use o modelo/caminho *portal do aluno* + Ambiente Virtual; envie \`${officialStudentPortalUrl()}\` (link oficial autorizado). Não invente outra URL.
 - Se o aluno disser que já usa Duda no celular e quer no PC: explique a diferença e mande o portal — não fique só no app.
 - Empatia sim; pergunta só se faltar um dado para destravar. Se já dá para resolver, resolva.
 
@@ -655,7 +647,7 @@ A nota mede se VOCÊ consegue seguir o turno — não se a KB trouxe um card.
 `.trim();
 
 /** Prompt override pronto para colar / script em agentes existentes. */
-export const ACADEMIC_SYSTEM_PROMPT_OVERRIDE = ACADEMIC_ATENDIMENTO_RULES;
+export const academicSystemPromptOverride = () => academicAtendimentoRules();
 
 /**
  * Bloco curto injetado sempre no runtime acadêmico (mesmo se o

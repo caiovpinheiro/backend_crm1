@@ -1,9 +1,9 @@
-/**
+﻿/**
  * Construção da query de recuperação.
  *
  * Antes a busca usava só a mensagem atual. Continuações curtas — "ok",
  * "Não fez ainda?", "já disse", "quero" — não recuperavam nada, e o turno
- * respondia sem base. Metade da conversa do aluno é dêitica: o assunto está
+ * respondia sem base. Metade da conversa do contato é dêitica: o assunto está
  * na mensagem anterior, não na atual.
  *
  * Agora a query é a mensagem atual mais as últimas mensagens do cliente, e

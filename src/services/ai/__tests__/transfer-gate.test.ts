@@ -14,6 +14,7 @@ import {
 import {
   evaluateTransferGate,
   isIdleOrchestrationMessage,
+  isUnintelligibleInbound,
   nonsenseGuardReply,
   transferBlockedByGate,
   validateUnknownAnswerAgainstGate,
@@ -22,12 +23,17 @@ import {
 describe("nonsenseGuard — regressões lote 2 (não abortar pedido real)", () => {
   it.each([
     "Financeiro",
+    "boleto",
     "Referente as parcelas",
     "Regras de pagamento",
     "Olá, fiz matrícula hj",
     "Cancelamento/trancamento",
     "Que irei paga",
+    "ok",
+    "sim",
+    "tce",
   ])("não marca %s como lixo", (msg) => {
+    expect(isUnintelligibleInbound(msg)).toBe(false);
     expect(nonsenseGuardReply(msg, [])).toBeNull();
   });
 
@@ -36,6 +42,22 @@ describe("nonsenseGuard — regressões lote 2 (não abortar pedido real)", () =
     expect(nonsenseGuardReply("Financeiro", prior)).toBeNull();
     expect(nonsenseGuardReply("Olá Felipe, tudo bem ?", ["Falar com equipe"])).toBeNull();
     expect(nonsenseGuardReply("Deu certo", ["Acesso a Plataforma"])).toBeNull();
+  });
+
+  it("só emoji/pontuação é ininteligível; palavra real não", () => {
+    expect(isUnintelligibleInbound("👍")).toBe(true);
+    expect(isUnintelligibleInbound("???")).toBe(true);
+    expect(isUnintelligibleInbound("...")).toBe(true);
+    expect(isUnintelligibleInbound("Financeiro")).toBe(false);
+    expect(isUnintelligibleInbound("boleto")).toBe(false);
+  });
+
+  it("cópia do guard vem da inboxPolicy", () => {
+    const reply = nonsenseGuardReply("👍", [], {
+      ...normalizeInboxPolicy(null),
+      nonsenseAskOnceMessage: "Pode repetir, por favor?",
+    });
+    expect(reply).toBe("Pode repetir, por favor?");
   });
 
   it("saudações compostas são idle, não ASK", () => {

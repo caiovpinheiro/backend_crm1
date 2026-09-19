@@ -24,6 +24,10 @@ import {
   syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
 import { getHumanAttendanceForConversation } from "@/services/attendance-guards";
@@ -208,6 +212,12 @@ export interface DistributionResult {
   selectedUserId: string | null;
   selectedUserName: string | null;
   evaluated: EvaluatedResponsibleSummary[];
+  /**
+   * Escolha resolvida sem atribuir (replay em sandbox). Quem lê o resultado
+   * precisa distinguir "o consultor recebeu" de "o consultor receberia" —
+   * sem isso o relatório do replay mente nas duas direções.
+   */
+  simulated?: boolean;
 }
 
 function toSummary(
@@ -593,6 +603,18 @@ async function writeLog(
 export async function executeDistribution(
   rawInput: ExecuteDistributionInput,
 ): Promise<DistributionResult> {
+  // Replay com handoff real: resolve quem SERIA escolhido, sem atribuir.
+  // Um replay não pode colocar conversa de teste na fila de um consultor.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect(
+      "distribution_assign",
+      `conversationId=${rawInput.conversationId ?? "-"} dealId=${rawInput.dealId ?? "-"}`,
+    );
+    const { triggerSource: _ignored, ...simInput } = rawInput;
+    const simulated = await simulateDistribution(simInput);
+    return { ...simulated, simulated: true };
+  }
+
   if (!(await hasOrganizationWidget("smart_distribution"))) {
     return {
       success: false,

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Ações operacionais do agente de IA ("piloting") — lado do servidor.
  *
  * Reúnem duas primitivas compartilhadas entre o `inbox-handler`
@@ -25,6 +25,10 @@ import {
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
@@ -71,7 +75,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Despedida enviada → encerra o atendimento se o aluno já havia fechado o
+ * Despedida enviada → encerra o atendimento se o contato já havia fechado o
  * assunto. Fica aqui (e não só no inbox) porque a resposta pode sair pela
  * tool `send_message` ou pelo follow-up — todas passam por este envio.
  * Saudação e aviso de fora de horário nunca encerram.
@@ -144,7 +148,7 @@ export async function sendAgentMessage(args: {
   /**
    * Após handoff a tool já limpa o assignee. Sem este bypass a mensagem
    * de "vou te transferir" morre no assertAiStillAuthorized (unassigned)
-   * e o aluno fica sem resposta.
+   * e o contato fica sem resposta.
    */
   bypassAssigneeCheck?: boolean;
   /**
@@ -157,6 +161,15 @@ export async function sendAgentMessage(args: {
 }): Promise<SendAgentMessageResult> {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
+
+  // Replay com handoff real: a mensagem fica só como rascunho na conversa
+  // de sandbox (apagada no fim); nenhum provedor é chamado. Antes de
+  // qualquer checagem de canal, para não depender de o sandbox estar
+  // desconectado por acaso.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
+    return saveDraft(args.conversationId, args.agentUserId, text);
+  }
 
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
@@ -579,7 +592,8 @@ export type TriggerOpeningResult =
         | "off_hours"
         | "no_contact"
         | "tabulation_classifier"
-        | "farewell_closer";
+        | "farewell_closer"
+        | "replay_sandbox";
     };
 
 /**
@@ -605,6 +619,12 @@ export async function triggerAgentOpeningForContact(args: {
   /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
   ignorePriorBotOutbound?: boolean;
 }): Promise<TriggerOpeningResult> {
+  // Replay com handoff real: a saudação do agente que recebeu o handoff
+  // sairia pelo canal do contato.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_opening:${args.contactId}`);
+    return { status: "skipped", reason: "replay_sandbox" };
+  }
   // Usa a conversa aberta mais recente do contato. Na prática, o CRM
   // mantém 1 conversa por contato para canais (Meta/Baileys), então
   // isso resolve ao único canal ativo dele.

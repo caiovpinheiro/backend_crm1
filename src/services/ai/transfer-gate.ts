@@ -28,6 +28,13 @@ export type TransferGateInput = {
   /// Mensagens anteriores do cliente na conversa, da mais antiga para a mais nova.
   priorUserMessages?: string[];
   inboxPolicy?: InboxPolicy | null;
+  /**
+   * O modelo afirma que o contato pediu pessoa/equipe/atendente nesta
+   * conversa (parâmetro `userExplicitlyAsked` das tools de transferência).
+   * Vale por si só: a lista de keywords nunca cobre todas as formas de
+   * pedir ("me passa pra alguém", "tem gente aí?").
+   */
+  userExplicitlyAsked?: boolean;
 };
 
 export type TransferGateState = {
@@ -37,6 +44,8 @@ export type TransferGateState = {
   allows: boolean;
   /// O cliente pediu humano em algum momento da conversa.
   askedForHuman: boolean;
+  /// Como o pedido foi reconhecido. `null` = não houve pedido de humano.
+  matchedBy: "keyword" | "model_assertion" | null;
 };
 
 /**
@@ -81,13 +90,23 @@ export function evaluateTransferGate(
   const queueCtx = humanQueueContextFromAgent({
     inboxPolicy: input.inboxPolicy ?? null,
   });
-  const askedForHuman = [
+  const matchedByKeyword = [
     ...(input.priorUserMessages ?? []).slice(-TRANSFER_GATE_HISTORY_DEPTH),
     current,
   ].some((msg) => !!msg?.trim() && userWantsHumanDistribution(msg, queueCtx));
 
+  // Afirmação do modelo tem o mesmo peso da keyword: o gate existe para
+  // impedir transferência que ninguém pediu, não para exigir que o
+  // contato use as palavras que a lista conhece.
+  const askedForHuman = matchedByKeyword || input.userExplicitlyAsked === true;
+  const matchedBy: TransferGateState["matchedBy"] = matchedByKeyword
+    ? "keyword"
+    : input.userExplicitlyAsked === true
+      ? "model_assertion"
+      : null;
+
   if (policyOf(input) === "always") {
-    return { active: false, allows: true, askedForHuman };
+    return { active: false, allows: true, askedForHuman, matchedBy };
   }
 
   const topicJustifies = packTopicJustifies(input.verticalPack);
@@ -99,6 +118,7 @@ export function evaluateTransferGate(
       askedForHuman ||
       Boolean(topicJustifies?.(current, input.inboxPolicy ?? null)),
     askedForHuman,
+    matchedBy,
   };
 }
 
@@ -154,7 +174,7 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
     }
     if (
       /^(bom dia|boa tarde|boa noite)\b/.test(n) &&
-      !/\b(acesso|matricul|financ|cancel|senha|portal|prova|contrato|boleto)\w*/.test(
+      !/\b(acesso|senha|portal|prova|contrato|boleto)\w*/.test(
         n,
       )
     ) {
@@ -165,26 +185,17 @@ export function isIdleOrchestrationMessage(raw?: string | null): boolean {
 }
 
 /**
- * Mensagem sem pedido reconhecível: teclado, nome solto, invenção.
- * Saudação / recado entram em `isIdleOrchestrationMessage`, não aqui.
+ * Sem conteúdo verbal: vazio, só emoji/pontuação, ou tokens sem letras.
+ * Uma palavra real ("Financeiro", "boleto") nunca é nonsense.
  */
 export function isUnintelligibleInbound(raw?: string | null): boolean {
-  if (isIdleOrchestrationMessage(raw)) return false;
   const trimmed = (raw ?? "").trim();
-  if (!trimmed) return false;
-  if (trimmed.length > 120) return false;
-  if (/\d{5,}/.test(trimmed)) return false;
-  if (/@/.test(trimmed)) return false;
-  const n = foldIdle(trimmed);
-  if (
-    /(preciso|ajuda|acesso|matricul|boleto|curso|prova|senha|portal|login|cancel|financ|parcel|pag(a|ar|ament)|nota|horario|aula|contrato|documento|rgm|aluno|polo|\bead\b|como|quando|quanto|onde|porque|quero|minha|meu|\bnao\b|\bsim\b|problema|duvida|declaracao|historico|tce|falar|equipe|atendente|consultor|setor|inscri|duda|microsoft|cnpj|estacion|dificuld|finaliz|referente|reais|desesper|uteis)/.test(
-      n,
-    )
-  ) {
-    return false;
-  }
-  const words = n.split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
-  return words.length > 0 && words.length <= 4;
+  if (!trimmed) return true;
+  if (/\d/.test(trimmed) || /@/.test(trimmed)) return false;
+  const letters = trimmed.replace(/[^\p{L}]+/gu, " ").trim();
+  const tokens = letters.split(/\s+/).filter((w) => w.length >= 2);
+  if (tokens.length === 0) return true;
+  return false;
 }
 
 export function unintelligibleStreak(
@@ -195,30 +206,51 @@ export function unintelligibleStreak(
   let n = 1;
   for (let i = priorUserMessages.length - 1; i >= 0; i--) {
     const prev = priorUserMessages[i];
-    if (isIdleOrchestrationMessage(prev)) continue;
+    if (isIdleOrchestrationMessage(prev) && (prev ?? "").trim()) continue;
     if (isUnintelligibleInbound(prev)) n += 1;
     else break;
   }
   return n;
 }
 
-export const NONSENSE_ASK_ONCE =
-  "Não entendi essa mensagem. Me fala em uma frase o que você precisa (acesso, matrícula, financeiro, cancelar).";
+/** Fallback neutro — sem vocabulário de produto. */
+export const DEFAULT_NONSENSE_ASK_ONCE =
+  "Não entendi essa mensagem. Pode repetir em uma frase o que você precisa?";
+export const DEFAULT_NONSENSE_STOP =
+  "Quando tiver um pedido objetivo, me chama que eu te ajudo. Por aqui não consigo seguir com isso.";
 
-export const NONSENSE_STOP =
-  "Quando tiver um pedido objetivo (acesso, matrícula, financeiro, cancelar), me chama que eu te ajudo. Por aqui não consigo seguir com isso.";
+/** @deprecated use DEFAULT_* ou inboxPolicy */
+export const NONSENSE_ASK_ONCE = DEFAULT_NONSENSE_ASK_ONCE;
+export const NONSENSE_STOP = DEFAULT_NONSENSE_STOP;
+
+export function resolveNonsenseCopy(policy?: InboxPolicy | null): {
+  ask: string;
+  stop: string;
+} {
+  const ask = policy?.nonsenseAskOnceMessage?.trim();
+  const stop = policy?.nonsenseStopMessage?.trim();
+  return {
+    ask: ask || DEFAULT_NONSENSE_ASK_ONCE,
+    stop: stop || DEFAULT_NONSENSE_STOP,
+  };
+}
 
 export function nonsenseGuardReply(
   current: string,
   priorUserMessages: string[],
+  policy?: InboxPolicy | null,
 ): string | null {
+  if (isIdleOrchestrationMessage(current) && (current ?? "").trim()) {
+    return null;
+  }
   const threadHasWork = priorUserMessages.some(
     (p) => !isIdleOrchestrationMessage(p) && !isUnintelligibleInbound(p),
   );
   if (threadHasWork) return null;
   const streak = unintelligibleStreak(current, priorUserMessages);
-  if (streak >= 2) return NONSENSE_STOP;
-  if (streak === 1) return NONSENSE_ASK_ONCE;
+  const copy = resolveNonsenseCopy(policy);
+  if (streak >= 2) return copy.stop;
+  if (streak === 1) return copy.ask;
   return null;
 }
 

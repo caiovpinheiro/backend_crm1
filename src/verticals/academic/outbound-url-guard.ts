@@ -12,36 +12,27 @@
  * sai é conferido contra um fato do sistema.
  */
 
-import {
-  OFFICIAL_DUDA_ANDROID_URL,
-  OFFICIAL_DUDA_IOS_URL,
-  OFFICIAL_FIRST_ACCESS_VIDEO_URL,
-  OFFICIAL_INAUGURAL_CERTIFICATE_URL,
-  OFFICIAL_STUDENT_PORTAL_URL,
-} from "./atendimento-prompt";
+import { academicTenantConfig } from "@/verticals/academic/tenant-config";
 
 /**
- * Hosts sempre liberados: os das constantes oficiais mais os domínios da
- * própria instituição e as duas lojas de app (o Duda é distribuído por elas).
+ * Hosts sempre liberados: os das URLs oficiais da org mais os sufixos de
+ * domínio dela. Tudo vem da config (`vertical.academic.*`) — URL e domínio
+ * são dados de tenant, e a lista muda por organização.
  */
-const ALWAYS_ALLOWED_HOSTS = new Set(
-  [
-    OFFICIAL_STUDENT_PORTAL_URL,
-    OFFICIAL_INAUGURAL_CERTIFICATE_URL,
-    OFFICIAL_FIRST_ACCESS_VIDEO_URL,
-    OFFICIAL_DUDA_ANDROID_URL,
-    OFFICIAL_DUDA_IOS_URL,
-  ]
-    .map(hostOf)
-    .filter((h): h is string => h !== null),
-);
-
-/** Sufixos de domínio da instituição — cobre subdomínio novo sem recompilar. */
-const ALLOWED_SUFFIXES = [
-  "cruzeirodosul.edu.br",
-  "cruzeirodosulvirtual.com.br",
-  "cruzeiroead.com.br",
-];
+function alwaysAllowedHosts(): Set<string> {
+  const cfg = academicTenantConfig();
+  return new Set(
+    [
+      cfg.portalUrl,
+      cfg.inauguralCertificateUrl,
+      cfg.firstAccessVideoUrl,
+      cfg.appAndroidUrl,
+      cfg.appIosUrl,
+    ]
+      .map(hostOf)
+      .filter((h): h is string => h !== null),
+  );
+}
 
 const URL_RE = /https?:\/\/[^\s<>()[\]{}"']+/gi;
 
@@ -54,8 +45,8 @@ function hostOf(url: string): string | null {
 }
 
 function isAllowedHost(host: string): boolean {
-  if (ALWAYS_ALLOWED_HOSTS.has(host)) return true;
-  return ALLOWED_SUFFIXES.some(
+  if (alwaysAllowedHosts().has(host)) return true;
+  return academicTenantConfig().allowedUrlSuffixes.some(
     (suffix) => host === suffix || host.endsWith(`.${suffix}`),
   );
 }

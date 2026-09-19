@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Primeiro atendimento por Agente IA (pipe acadêmico).
  *
  * Regras:
@@ -508,7 +508,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     // ...mas só quando é HERANÇA mesmo. Se o consultor foi atribuído NESTA
     // conversa (distribuição/transferência), ele fica: a saudação de
     // `lead_distributed` sai como bot e não marca `hasHumanReply`, então
-    // sem esta checagem o próximo inbound do aluno tirava o dono do ticket.
+    // sem esta checagem o próximo inbound do contato tirava o dono do ticket.
     if (
       await humanWasAssignedInThisConversation(
         args.conversationId,

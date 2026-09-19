@@ -8,7 +8,7 @@ import {
   type RenderArgs,
 } from "@/lib/ai-agents/system-prompt";
 import {
-  ACADEMIC_SYSTEM_PROMPT_OVERRIDE,
+  academicSystemPromptOverride,
 } from "@/verticals/academic/atendimento-prompt";
 
 /**
@@ -106,12 +106,12 @@ describe("override duplicado das regras de steering", () => {
   const fallback = fallbackSteeringRules("ATENDIMENTO", "academic");
 
   /** A cópia velha do banco: mesmas seções, texto que já divergiu. */
-  const staleCopy = ACADEMIC_SYSTEM_PROMPT_OVERRIDE.split(/\r?\n/)
+  const staleCopy = academicSystemPromptOverride().split(/\r?\n/)
     .map((l) => (l.startsWith("#") ? l : l.slice(0, Math.ceil(l.length / 2))))
     .join("\n");
 
   it("reconhece a cópia salva, idêntica ou divergente", () => {
-    expect(duplicatesSteeringRules(ACADEMIC_SYSTEM_PROMPT_OVERRIDE, fallback)).toBe(
+    expect(duplicatesSteeringRules(academicSystemPromptOverride(), fallback)).toBe(
       true,
     );
     expect(duplicatesSteeringRules(staleCopy, fallback)).toBe(true);
@@ -199,3 +199,4 @@ describe("dado pessoal liberado pelo operador", () => {
     expect(proibicoes).toEqual([]);
   });
 });
+

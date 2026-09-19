@@ -1,21 +1,21 @@
-/**
+﻿/**
  * Rede de segurança da RESPOSTA da IA.
  *
  * O debounce de inbound guarda o timer em memória (`setTimeout` de ~2,5s em
  * `inbound-debounce.ts`). Se o processo reinicia dentro dessa janela — e
  * deploy é frequente — a resposta pendente morre com o container e ninguém
  * reprocessa: a conversa fica na aba do Agente IA com a última mensagem do
- * aluno, para sempre. Mesmo efeito quando o flush estoura exceção antes de
+ * contato, para sempre. Mesmo efeito quando o flush estoura exceção antes de
  * chegar ao envio.
  *
- * Aqui varremos exatamente esse estado (última mensagem é do aluno, a IA é a
+ * Aqui varremos exatamente esse estado (última mensagem é do contato, a IA é a
  * responsável, ninguém respondeu) e reprocessamos pelo caminho normal
  * (`maybeReplyAsAIAgent`), que reavalia TODOS os guardas — autorização,
  * horário, handoff, anti-duplicata. Não montamos mensagem aqui.
  *
  * A distribuição de segurança (`stuck-inbound`, 15 min) segue como último
  * recurso: esta varredura roda antes, para a IA ter a chance de atender em
- * vez de o aluno ir para a fila humana por um restart de container.
+ * vez de o contato ir para a fila humana por um restart de container.
  */
 
 import { cache } from "@/lib/cache";
@@ -150,7 +150,7 @@ export async function retryUnansweredAiInbound(
       status: "listed",
     };
 
-    // Alguém respondeu depois da última mensagem do aluno? Então não está
+    // Alguém respondeu depois da última mensagem do contato? Então não está
     // sem resposta (o `lastInboundAt` pode estar defasado).
     const answered = await prismaBase.message.findFirst({
       where: {

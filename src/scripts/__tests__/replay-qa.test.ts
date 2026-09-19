@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { NONSENSE_ASK_ONCE, NONSENSE_STOP } from "@/services/ai/transfer-gate";
+import { DEFAULT_NONSENSE_ASK_ONCE } from "@/services/ai/transfer-gate";
 import { scoreReplay } from "@/scripts/replay-qa";
 
 describe("scoreReplay", () => {
-  it("reprova ASK em Financeiro (falso positivo do guard)", () => {
+  it("FAIL quando fixture declara expect.guard false e o texto é ASK", () => {
     const { fail, findings } = scoreReplay(
       [
         {
@@ -23,17 +23,27 @@ describe("scoreReplay", () => {
           turnIndex: 1,
           inbound: "Financeiro",
           agentName: "Agente Atendimento",
-          text: NONSENSE_ASK_ONCE,
+          text: DEFAULT_NONSENSE_ASK_ONCE,
           status: "COMPLETED",
           skipped: null,
           switchedTo: null,
           tools: [],
         },
       ],
-      [{ id: "403971", turns: ["Falar com equipe", "Financeiro"] }],
+      [
+        {
+          id: "403971",
+          turns: [
+            "Falar com equipe",
+            { inbound: "Financeiro", expect: { guard: false } },
+          ],
+        },
+      ],
     );
     expect(fail).toBeGreaterThan(0);
-    expect(findings.some((f) => f.code === "FALSE_NONSENSE")).toBe(true);
+    expect(findings.some((f) => f.code === "GUARD_FIRED" && f.severity === "fail")).toBe(
+      true,
+    );
   });
 
   it("não reprova regra de mensalidade no Atendimento (produto, não Financeiro)", () => {
@@ -110,34 +120,94 @@ describe("scoreReplay", () => {
     expect(fail).toBe(0);
   });
 
-  it("não conta STOP real em teclado como FALSE_NONSENSE", () => {
-    const { findings } = scoreReplay(
+  it("GUARD_FIRED é WARN quando a fixture não declara expectativa", () => {
+    const { fail, findings } = scoreReplay(
       [
         {
           caseId: "x",
           turnIndex: 0,
-          inbound: "asdfgh",
+          inbound: "👍",
           agentName: "Joseph",
-          text: NONSENSE_ASK_ONCE,
-          status: "COMPLETED",
-          skipped: null,
-          switchedTo: null,
-          tools: [],
-        },
-        {
-          caseId: "x",
-          turnIndex: 1,
-          inbound: "qwerty",
-          agentName: "Joseph",
-          text: NONSENSE_STOP,
+          text: DEFAULT_NONSENSE_ASK_ONCE,
           status: "COMPLETED",
           skipped: null,
           switchedTo: null,
           tools: [],
         },
       ],
-      [{ id: "x", turns: ["asdfgh", "qwerty"] }],
+      [{ id: "x", turns: ["👍"] }],
     );
-    expect(findings.some((f) => f.code === "FALSE_NONSENSE")).toBe(false);
+    expect(fail).toBe(0);
+    expect(findings.some((f) => f.code === "GUARD_FIRED" && f.severity === "warn")).toBe(
+      true,
+    );
+  });
+
+  it("Joseph→especialista via routing estruturado não é SELF_TRANSFER", () => {
+    const { findings } = scoreReplay(
+      [
+        {
+          caseId: "h",
+          turnIndex: 0,
+          inbound: "boleto",
+          agentName: "Joseph",
+          text: "",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: "Agente Atendimento",
+          handoff: { fromAgentId: "joseph", toAgentId: "atend", by: "orchestrator_code" },
+          tools: [],
+        },
+      ],
+      [{ id: "h", turns: ["boleto"] }],
+    );
+    expect(findings.some((f) => f.code === "SELF_TRANSFER")).toBe(false);
+  });
+
+  it("auto-chamada from===to gera SELF_TRANSFER", () => {
+    const { findings } = scoreReplay(
+      [
+        {
+          caseId: "h",
+          turnIndex: 0,
+          inbound: "boleto",
+          agentName: "Agente Atendimento",
+          text: "",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: "Agente Atendimento",
+          handoff: { fromAgentId: "atend", toAgentId: "atend", by: "tool" },
+          tools: [{ name: "transfer_to_ai_agent", args: { agentName: "Agente Atendimento" } }],
+        },
+      ],
+      [{ id: "h", turns: ["boleto"] }],
+    );
+    expect(findings.some((f) => f.code === "SELF_TRANSFER")).toBe(true);
+  });
+
+  it("HUMAN_REQUEST_IGNORED quando fixture pede humano e o turno não distribui", () => {
+    const { fail, findings } = scoreReplay(
+      [
+        {
+          caseId: "403971",
+          turnIndex: 0,
+          inbound: "Quero falar com a equipe",
+          agentName: "Joseph",
+          text: "Vou te passar para o especialista.",
+          status: "COMPLETED",
+          skipped: null,
+          switchedTo: null,
+          tools: [{ name: "transfer_to_ai_agent" }],
+        },
+      ],
+      [
+        {
+          id: "403971",
+          turns: [{ inbound: "Quero falar com a equipe", expect: { human: true } }],
+        },
+      ],
+    );
+    expect(fail).toBeGreaterThan(0);
+    expect(findings.some((f) => f.code === "HUMAN_REQUEST_IGNORED")).toBe(true);
   });
 });

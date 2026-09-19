@@ -1,15 +1,8 @@
 /**
  * QA determinístico do replay: o JSON do harness passa ou falha.
- * Não usa LLM. Se este relatório passar e o operador ainda vir ASK em
- * "Financeiro", o deploy não inclui o código — não é "parece ok no log".
+ * Não usa LLM. Guard disparado vira WARN com o inbound; fixture pode
+ * declarar `expect.guard` (dado, não recalcular a função do runtime).
  */
-import {
-  NONSENSE_ASK_ONCE,
-  NONSENSE_STOP,
-  isIdleOrchestrationMessage,
-  nonsenseGuardReply,
-} from "@/services/ai/transfer-gate";
-
 export type ReplayQaTurn = {
   caseId: string;
   turnIndex: number;
@@ -19,55 +12,94 @@ export type ReplayQaTurn = {
   status: string | null;
   skipped: string | null;
   switchedTo: string | null;
+  handoff?: {
+    fromAgentId: string;
+    toAgentId: string;
+    by?: string;
+  } | null;
   tools: Array<{ name: string; args?: unknown }>;
+  /**
+   * Distribuição humana resolvida no turno. No sandbox do `--real-handoff`
+   * ela vem `simulated: true`: o consultor foi escolhido e não recebeu. Para
+   * o QA isso é entrega humana — o que se testa é o agente ter encaminhado.
+   */
+  distribution?: {
+    assignedTo: string | null;
+    departmentName: string | null;
+    simulated: boolean;
+  } | null;
 };
 
-export type ReplayQaCase = { id: string; turns: string[] };
+export type ReplayQaTurnExpect = {
+  guard?: boolean;
+  human?: boolean;
+};
+
+export type ReplayQaFixtureTurn =
+  | string
+  | { inbound: string; expect?: ReplayQaTurnExpect };
+
+export type ReplayQaCase = {
+  id: string;
+  turns: ReplayQaFixtureTurn[];
+  ruleSkipDeskNames?: string[];
+};
 
 export type QaFinding = {
   caseId: string;
   turnIndex: number;
   code:
-    | "FALSE_NONSENSE"
+    | "GUARD_FIRED"
     | "EMPTY_COMPLETED"
     | "RULE_SKIP"
     | "SELF_TRANSFER"
     | "INBOUND_MISMATCH"
     | "MISSING_TURN"
+    | "HUMAN_REQUEST_IGNORED"
     | "PING_PONG";
   severity: "fail" | "warn";
   detail: string;
 };
 
-function foldName(s: string): string {
-  return s
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toLowerCase()
-    .trim();
+export function fixtureTurnInbound(turn: ReplayQaFixtureTurn): string {
+  return typeof turn === "string" ? turn : turn.inbound;
 }
 
-function isCannedNonsense(text: string): boolean {
+export function fixtureTurnExpect(
+  turn: ReplayQaFixtureTurn | undefined,
+): ReplayQaTurnExpect {
+  if (!turn || typeof turn === "string") return {};
+  return turn.expect ?? {};
+}
+
+function looksLikeNonsenseGuard(text: string): boolean {
   const t = (text ?? "").trim();
-  return t === NONSENSE_ASK_ONCE || t === NONSENSE_STOP || t.startsWith("Não entendi essa mensagem.") || t.startsWith("Quando tiver um pedido objetivo");
+  if (!t) return false;
+  return (
+    t.startsWith("Não entendi essa mensagem.") ||
+    t.startsWith("Quando tiver um pedido objetivo")
+  );
 }
 
-function toolDestName(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  return String(a.name ?? a.agentName ?? a.agentUserId ?? "").trim();
+function endedInHumanDistribution(turn: ReplayQaTurn): boolean {
+  if (
+    turn.skipped?.startsWith("rule_human") ||
+    turn.skipped?.startsWith("tool_human")
+  ) {
+    return true;
+  }
+  if (turn.distribution?.assignedTo) return true;
+  return turn.tools.some((t) =>
+    ["transfer_to_human", "execute_distribution", "transfer_to_department"].includes(
+      t.name,
+    ),
+  );
 }
 
 function selfTransfer(turn: ReplayQaTurn): boolean {
-  const me = foldName(turn.agentName);
-  if (turn.switchedTo && foldName(turn.switchedTo) === me) return true;
-  return turn.tools.some((t) => {
-    if (t.name !== "transfer_to_ai_agent" && t.name !== "transfer_conversation") {
-      return false;
-    }
-    const dest = foldName(toolDestName(t.args));
-    return dest.length > 0 && dest === me;
-  });
+  const h = turn.handoff;
+  if (!h?.fromAgentId || !h?.toAgentId) return false;
+  return h.fromAgentId === h.toAgentId;
 }
 
 export function scoreReplay(
@@ -93,18 +125,20 @@ export function scoreReplay(
         detail: `fixture ${fx.turns.length} inbound, replay ${rec.length}`,
       });
     }
-    const priors: string[] = [];
     let switches = 0;
     let prevAgent = rec[0]?.agentName ?? "";
     for (const t of rec) {
-      const expected = fx.turns[t.turnIndex];
-      if (expected != null && expected !== t.inbound) {
+      const fxTurn = fx.turns[t.turnIndex];
+      const expectedInbound =
+        fxTurn != null ? fixtureTurnInbound(fxTurn) : undefined;
+      const expect = fixtureTurnExpect(fxTurn);
+      if (expectedInbound != null && expectedInbound !== t.inbound) {
         findings.push({
           caseId: t.caseId,
           turnIndex: t.turnIndex,
           code: "INBOUND_MISMATCH",
           severity: "fail",
-          detail: `esperado ${JSON.stringify(expected).slice(0, 80)}`,
+          detail: `esperado ${JSON.stringify(expectedInbound).slice(0, 80)}`,
         });
       }
       if (t.agentName !== prevAgent) {
@@ -120,7 +154,10 @@ export function scoreReplay(
           detail: t.skipped,
         });
       } else if (t.skipped?.startsWith("rule_department")) {
-        const desk = /atend|sac/i.test(t.skipped);
+        const desks = (fx.ruleSkipDeskNames ?? ["atend", "sac"]).map((d) =>
+          d.toLowerCase(),
+        );
+        const desk = desks.some((d) => t.skipped!.toLowerCase().includes(d));
         findings.push({
           caseId: t.caseId,
           turnIndex: t.turnIndex,
@@ -154,19 +191,23 @@ export function scoreReplay(
           detail: "handoff/tool sem fala no mesmo turno",
         });
       }
-      if (isCannedNonsense(t.text)) {
-        const allowed = nonsenseGuardReply(t.inbound, priors);
-        if (!allowed) {
-          findings.push({
-            caseId: t.caseId,
-            turnIndex: t.turnIndex,
-            code: "FALSE_NONSENSE",
-            severity: "fail",
-            detail: isIdleOrchestrationMessage(t.inbound)
-              ? "saudação/ack tratada como lixo"
-              : `ASK/STOP em pedido real: ${t.inbound.slice(0, 80)}`,
-          });
-        }
+      const guardFired = looksLikeNonsenseGuard(t.text);
+      if (guardFired) {
+        findings.push({
+          caseId: t.caseId,
+          turnIndex: t.turnIndex,
+          code: "GUARD_FIRED",
+          severity: expect.guard === false ? "fail" : "warn",
+          detail: `inbound=${JSON.stringify(t.inbound).slice(0, 80)}`,
+        });
+      } else if (expect.guard === true) {
+        findings.push({
+          caseId: t.caseId,
+          turnIndex: t.turnIndex,
+          code: "GUARD_FIRED",
+          severity: "fail",
+          detail: `fixture esperava guard; inbound=${JSON.stringify(t.inbound).slice(0, 80)}`,
+        });
       }
       if (selfTransfer(t)) {
         findings.push({
@@ -177,7 +218,15 @@ export function scoreReplay(
           detail: `${t.agentName} transfer_to_ai_agent para si`,
         });
       }
-      priors.push(t.inbound);
+      if (expect.human === true && !endedInHumanDistribution(t)) {
+        findings.push({
+          caseId: t.caseId,
+          turnIndex: t.turnIndex,
+          code: "HUMAN_REQUEST_IGNORED",
+          severity: "fail",
+          detail: `fixture esperava distribuição humana; inbound=${JSON.stringify(t.inbound).slice(0, 80)}`,
+        });
+      }
     }
     if (switches >= 3) {
       findings.push({
