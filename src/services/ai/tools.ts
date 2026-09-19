@@ -89,9 +89,13 @@ import {
   CRM_RECORD_SOURCES,
   CRM_SEARCH_GUIDANCE,
   describeCrmExposure,
+  describeCrmIdentity,
+  identityValueMatches,
   loadCrmFieldCatalog,
   matchFieldValues,
+  normalizeIdentityValue,
   partitionFieldValues,
+  resolveIdentityFields,
   type CrmFieldDescriptor,
   type CrmFieldExposure,
   type CrmFieldValue,
@@ -877,13 +881,126 @@ type CrmRecordPayload = {
   matchedFields: string[];
 };
 
+/**
+ * Localiza o registro por um campo declarado como identificador.
+ *
+ * O filtro do banco é por igualdade (valor como veio e sem formatação),
+ * e o casamento final passa por `identityValueMatches`. Nunca `contains`:
+ * um identificador que seja trecho de outro traria a pessoa errada, e o
+ * agente passaria a afirmar coisas sobre o cadastro de terceiro.
+ */
+async function findRecordByIdentity(args: {
+  field: CrmFieldDescriptor;
+  informed: string;
+  catalog: CrmFieldDescriptor[];
+}): Promise<{
+  entity: CrmSearchEntity;
+  ref: string;
+  values: CrmFieldValue[];
+} | null> {
+  const { field, informed, catalog } = args;
+  const normalized = normalizeIdentityValue(informed);
+  if (!normalized) return null;
+  const candidates = [informed.trim(), normalized].filter(Boolean);
+
+  const where =
+    field.source === "custom"
+      ? {
+          customFields: {
+            some: {
+              customField: { name: field.name },
+              value: { in: candidates, mode: "insensitive" as const },
+            },
+          },
+        }
+      : { [field.name]: { in: candidates, mode: "insensitive" as const } };
+
+  const storedValue = (values: CrmFieldValue[]): string =>
+    values.find((v) => v.field.key === field.key)?.value ?? "";
+
+  if (field.entity === "deal") {
+    const rows = await prisma.deal.findMany({
+      where,
+      take: 5,
+      orderBy: [{ updatedAt: "desc" }],
+      include: {
+        stage: { select: { name: true } },
+        customFields: { include: { customField: { select: { name: true } } } },
+      },
+    });
+    for (const d of rows) {
+      const values = crmValuesFromRecord(
+        catalog,
+        "deal",
+        { ...d, stage: d.stage?.name ?? null, value: Number(d.value) },
+        d.customFields.map((r) => ({
+          name: r.customField.name,
+          value: r.value,
+        })),
+      );
+      if (identityValueMatches(storedValue(values), informed)) {
+        return { entity: "deal", ref: `negócio #${d.number}`, values };
+      }
+    }
+    return null;
+  }
+
+  if (field.entity === "contact") {
+    const rows = await prisma.contact.findMany({
+      where,
+      take: 5,
+      include: {
+        customFields: { include: { customField: { select: { name: true } } } },
+      },
+    });
+    for (const c of rows) {
+      const values = crmValuesFromRecord(
+        catalog,
+        "contact",
+        c as unknown as Record<string, unknown>,
+        c.customFields.map((r) => ({
+          name: r.customField.name,
+          value: r.value,
+        })),
+      );
+      if (identityValueMatches(storedValue(values), informed)) {
+        return { entity: "contact", ref: `contato #${c.number}`, values };
+      }
+    }
+    return null;
+  }
+
+  // Empresa e catálogo não identificam pessoa: não faz sentido alguém
+  // provar quem é informando o dado de um terceiro.
+  return null;
+}
+
 function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
   const exposure: CrmFieldExposure = {
     readableKeys: policy.readableFields,
     orgWide: policy.allowOrgWideSearch,
   };
+  // Campos que ESTA organização declarou como identificadores. Vazio = a
+  // ferramenta mantém o schema de antes, sem o argumento.
+  const identityKeys = policy.identityKeys;
+  const identityShape =
+    identityKeys.length > 0
+      ? {
+          identificador: z
+            .object({
+              campo: z.enum(identityKeys as [string, ...string[]]),
+              valor: z.string().min(3),
+            })
+            .optional()
+            .describe(
+              "Número que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado. O casamento é exato.",
+            ),
+        }
+      : {};
   return tool({
-    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(exposure)}`,
+    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados de contato, empresa, negócio e catálogo. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(
+      exposure,
+    )}\n\n${describeCrmIdentity(identityKeys)}`,
     inputSchema: z.object({
       query: z
         .string()
@@ -910,8 +1027,13 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         .max(10)
         .optional()
         .describe("Máximo de registros a retornar (1-10, padrão 5)."),
+      ...identityShape,
     }),
-    execute: async ({ query, entity, scope, limit }) => {
+    execute: async (args) => {
+      const { query, entity, scope, limit } = args;
+      const { identificador } = args as {
+        identificador?: { campo: string; valor: string };
+      };
       try {
         const orgId = getOrgIdOrNull();
         if (!orgId) return fail("Sem organização no contexto.");
@@ -964,6 +1086,38 @@ function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
         const customOf = (
           rows: Array<{ value: string; customField: { name: string } }>,
         ) => rows.map((r) => ({ name: r.customField.name, value: r.value }));
+
+        // Identificação vem ANTES da busca por assunto: a pessoa informou o
+        // número dela, então o registro certo é um só e não depende de o
+        // termo casar com algum campo. Não passa pelo portão de busca ampla
+        // de propósito — achar o próprio cadastro por um identificador que
+        // só o dono sabe é justamente para isso que o campo foi declarado.
+        // Sem chave declarada o schema nem expõe o argumento; ignorar aqui
+        // também evita que uma chamada forjada vire erro de ferramenta.
+        if (identificador && identityKeys.length > 0) {
+          const field = resolveIdentityFields(catalog, identityKeys).find(
+            (f) => f.key === identificador.campo,
+          );
+          if (!field) {
+            return fail(
+              `"${identificador.campo}" não está configurado como identificador neste agente.`,
+            );
+          }
+          const found = await findRecordByIdentity({
+            field,
+            informed: identificador.valor,
+            catalog,
+          });
+          if (!found) {
+            return ok({
+              records: [],
+              identifiedBy: field.label,
+              hint: "Nenhum registro com esse identificador. Confirme o número com a pessoa ou encaminhe para um consultor — não afirme que ela não tem cadastro.",
+            });
+          }
+          push(found.entity, found.ref, found.values);
+          return ok({ records, identifiedBy: field.label });
+        }
 
         if (!orgWide) {
           const contact = await prisma.contact.findUnique({

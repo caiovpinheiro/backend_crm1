@@ -148,6 +148,58 @@ async function search(
 
 const deal = (p: Payload) => p.records?.find((r) => r.entity === "deal");
 
+/**
+ * Identificação por campo declarado: é o caminho que o aluno usa quando
+ * digita o próprio RGM. Sem `identityKeys` a ferramenta nem expõe o
+ * argumento, e era por isso que o agente nunca pedia o número.
+ */
+describe("search_crm_records: identificação por campo do negócio", () => {
+  const IDENTITY = { identityKeys: ["deal.rgm"] };
+
+  it("sem identityKeys o argumento não existe", async () => {
+    const out = await search({
+      query: "matricula",
+      identificador: { campo: "deal.rgm", valor: RGM },
+    });
+    // O arg extra é ignorado pelo schema: cai na busca por termo de antes.
+    expect(out.ok).toBe(true);
+    expect(out.records?.length).toBeGreaterThan(0);
+  });
+
+  it("acha o negócio pelo RGM informado", async () => {
+    const out = await search(
+      { query: "matricula", identificador: { campo: "deal.rgm", valor: RGM } },
+      ["deal.curso"],
+      IDENTITY,
+    );
+
+    expect(out.ok).toBe(true);
+    expect(deal(out)?.fields).toEqual([
+      { label: "Curso", value: "CST EM GESTÃO DE RECURSOS HUMANOS" },
+    ]);
+  });
+
+  it("identificar não libera leitura: o RGM continua retido", async () => {
+    const out = await search(
+      { query: "matricula", identificador: { campo: "deal.rgm", valor: RGM } },
+      ["deal.curso"],
+      IDENTITY,
+    );
+
+    expect(deal(out)?.hiddenFields).toContain("RGM");
+    expect(JSON.stringify(out)).not.toContain(RGM);
+  });
+
+  it("campo não declarado como identificador é recusado", async () => {
+    const out = await search(
+      { query: "x", identificador: { campo: "deal.cpf", valor: CPF } },
+      [],
+      IDENTITY,
+    );
+    expect(out.ok).toBe(false);
+  });
+});
+
 describe("search_crm_records", () => {
   it("sem liberação do operador nenhum valor chega ao modelo", async () => {
     const out = await search({ query: "curso" });

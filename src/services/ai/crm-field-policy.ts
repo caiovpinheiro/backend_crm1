@@ -415,6 +415,22 @@ export function identityValueMatches(
   return a.length > 0 && a === b;
 }
 
+/**
+ * O que o modelo lê sobre identificação. Sem chave declarada o texto manda
+ * NÃO pedir número: pedir um dado que a ferramenta não consulta é como o
+ * agente conseguia prometer uma busca que nunca aconteceria.
+ */
+export function describeCrmIdentity(identityKeys: string[]): string {
+  if (identityKeys.length === 0) {
+    return "IDENTIFICAÇÃO: esta organização não declarou campo de identificação. NÃO peça número de cadastro nem código equivalente — você não tem como consultar por ele.";
+  }
+  return [
+    "IDENTIFICAÇÃO: quando a pessoa informar um destes, mande em `identificador` para localizar o registro dela:",
+    ...identityKeys.map((k) => `- ${k}`),
+    "O casamento é exato. Use só o que a pessoa escreveu nesta conversa.",
+  ].join("\n");
+}
+
 export type CrmFieldValue = {
   field: CrmFieldDescriptor;
   value: string;
