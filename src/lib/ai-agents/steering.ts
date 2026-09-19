@@ -76,6 +76,9 @@ export type ToolPolicy = {
   /// Campos do Deal que servem como identificadores para o cliente
   /// (ex.: ["deal.RGM", "deal.numero_pedido"]). Genérico e configurável.
   identityKeys: string[];
+  /// Campos-chave usados para detectar ambiguidade entre registros já
+  /// ligados ao contato (ex.: telefone vinculado a dois RGMs distintos).
+  linkedIdentityKeys: string[];
 };
 
 export type ToolConfigMap = Record<string, ToolPolicy>;
@@ -99,6 +102,7 @@ export function emptyToolPolicy(): ToolPolicy {
     allowOrgWideSearch: false,
     sensitiveTerms: [],
     identityKeys: [],
+    linkedIdentityKeys: [],
   };
 }
 
@@ -151,6 +155,7 @@ export function normalizeToolPolicy(v: unknown): ToolPolicy {
     allowOrgWideSearch: Boolean(r.allowOrgWideSearch),
     sensitiveTerms: strList(r.sensitiveTerms),
     identityKeys: strList(r.identityKeys),
+    linkedIdentityKeys: strList(r.linkedIdentityKeys),
   };
 }
 
@@ -173,7 +178,8 @@ export function isEmptyToolPolicy(p: ToolPolicy): boolean {
     p.readableFields.length === 0 &&
     !p.allowOrgWideSearch &&
     p.sensitiveTerms.length === 0 &&
-    p.identityKeys.length === 0
+    p.identityKeys.length === 0 &&
+    p.linkedIdentityKeys.length === 0
   );
 }
 
