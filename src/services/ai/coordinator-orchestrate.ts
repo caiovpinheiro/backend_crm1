@@ -7,6 +7,7 @@
 
 import { prisma } from "@/lib/prisma";
 import {
+  isReplyToAgentQuestion,
   suggestCoordinatorAiAgent,
   type PeerAiAgent,
 } from "@/lib/ai-agents/coordinator-route";
@@ -56,6 +57,24 @@ export async function maybeOrchestrateCoordinatorTurn(args: {
     )
   ) {
     return null;
+  }
+
+  // Especialista já atendendo: responder à pergunta dele não é assunto
+  // novo. No coordenador vale o contrário — perguntar "como posso ajudar?"
+  // e rotear pela resposta é exatamente o trabalho dele.
+  if (agent.archetype !== "COORDENADOR") {
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: runArgs.conversationId ?? undefined,
+        direction: "out",
+        isPrivate: false,
+      },
+      orderBy: { createdAt: "desc" },
+      select: { content: true },
+    });
+    if (isReplyToAgentQuestion(runArgs.userMessage, lastOut?.content)) {
+      return null;
+    }
   }
 
   const rows = await prisma.aIAgentConfig.findMany({

@@ -59,6 +59,31 @@ export function pickPeerByRoutingScope(
   return bestScore > 0 ? best : null;
 }
 
+/// Acima disso a mensagem traz assunto próprio, não é só a resposta.
+const SHORT_REPLY_MAX_WORDS = 6;
+
+/**
+ * A mensagem do contato é a resposta à pergunta que o agente acabou de
+ * fazer? O roteamento por escopo lê cada inbound como assunto novo, então
+ * "Financeiro" respondendo a "qual o motivo?" era roteado como se o
+ * contato tivesse aberto um chamado financeiro — e a conversa ficava indo
+ * e voltando entre dois agentes sem ninguém concluir nada.
+ *
+ * Só forma do diálogo: pergunta anterior + resposta curta. Sem vocabulário
+ * de assunto, que é configuração de cada organização.
+ */
+export function isReplyToAgentQuestion(
+  userMessage: string | null | undefined,
+  lastAgentMessage: string | null | undefined,
+): boolean {
+  const asked = (lastAgentMessage ?? "").trim();
+  if (!asked.endsWith("?")) return false;
+  const words = fold(userMessage ?? "")
+    .split(" ")
+    .filter(Boolean);
+  return words.length > 0 && words.length <= SHORT_REPLY_MAX_WORDS;
+}
+
 export function suggestCoordinatorAiAgent(
   userMessage: string | null | undefined,
   peers: PeerAiAgent[],
