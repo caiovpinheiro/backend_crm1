@@ -7,6 +7,10 @@ import {
 
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { allocateOrgNumber, prisma, type ScopedTx } from "@/lib/prisma";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { withOrg, withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
@@ -962,6 +966,26 @@ export async function assignOwnerToContactClusterTx(
     fromOwnerId: string | null;
   }[];
 }> {
+  // Replay com handoff real: handoff entre agentes IA é o que o replay
+  // exercita e fica contido no sandbox. Dono humano, não — um consultor
+  // acordaria com uma conversa de teste na fila dele.
+  if (isReplaySandboxActive()) {
+    const target = await tx.user.findUnique({
+      where: { id: args.userId },
+      select: { type: true },
+    });
+    if (target?.type !== "AI") {
+      recordBlockedEffect("human_assignment", `userId=${args.userId}`);
+      return {
+        contactId: args.contactId ?? null,
+        dealIds: [],
+        fromOwnerId: null,
+        pipelineIds: [],
+        agentChangedDeals: [],
+      };
+    }
+  }
+
   let contactId = args.contactId ?? null;
   if (!contactId && args.conversationId) {
     const conv = await tx.conversation.findUnique({

@@ -37,6 +37,12 @@ import {
   lookupStudent,
 } from "@/services/academic-records";
 import { runAgent, MAX_HISTORY, type RunResult } from "@/services/ai/runner";
+import {
+  blockedEffects,
+  disableReplaySandbox,
+  enableReplaySandbox,
+  REPLAY_SANDBOX_SETTING_KEY,
+} from "@/services/ai/replay-sandbox";
 import { formatQaReport, scoreReplay, fixtureTurnInbound } from "@/scripts/replay-qa";
 
 type FixtureCase = {
@@ -436,12 +442,51 @@ async function cleanupReplayConversations(
   conversationIds: string[],
 ): Promise<void> {
   if (conversationIds.length === 0) return;
+  // Ordem importa: o que referencia a conversa/contato sai antes dela.
+  const convs = await prismaBase.conversation.findMany({
+    where: { id: { in: conversationIds }, channel: SANDBOX_CHANNEL },
+    select: { id: true, contactId: true },
+  });
+  const ids = convs.map((c) => c.id);
+  const contactIds = [
+    ...new Set(convs.map((c) => c.contactId).filter((v): v is string => !!v)),
+  ];
+  if (ids.length === 0) return;
+
+  // Deals (e o que pende neles) que o turno criou no contato de sandbox.
+  const deals = contactIds.length
+    ? await prismaBase.deal.findMany({
+        where: { organizationId, contactId: { in: contactIds } },
+        select: { id: true },
+      })
+    : [];
+  const dealIds = deals.map((d) => d.id);
+  if (dealIds.length) {
+    await prismaBase.dealEvent.deleteMany({ where: { dealId: { in: dealIds } } });
+  }
+  if (contactIds.length) {
+    await prismaBase.activity.deleteMany({
+      where: { organizationId, contactId: { in: contactIds } },
+    });
+  }
   await prismaBase.message.deleteMany({
-    where: { conversationId: { in: conversationIds } },
+    where: { conversationId: { in: ids } },
   });
   await prismaBase.conversation.deleteMany({
-    where: { id: { in: conversationIds }, channel: SANDBOX_CHANNEL },
+    where: { id: { in: ids }, channel: SANDBOX_CHANNEL },
   });
+  if (dealIds.length) {
+    await prismaBase.deal.deleteMany({ where: { id: { in: dealIds } } });
+  }
+  // O contato de replay é reaproveitado entre rodadas (e tem o registro
+  // acadêmico fake pendurado nele). Não apaga: zera a atribuição para não
+  // sobrar dono de um handoff de teste.
+  if (contactIds.length) {
+    await prismaBase.contact.updateMany({
+      where: { organizationId, id: { in: contactIds } },
+      data: { assignedToId: null },
+    });
+  }
 }
 
 async function main() {
@@ -483,6 +528,26 @@ async function main() {
   if (!org) {
     console.error(`org slug=${orgSlug} não encontrada`);
     process.exit(1);
+  }
+
+  if (realHandoff) {
+    // Fail-closed: o modo só roda em org marcada como de teste. A marca é
+    // config da organização, não slug no código — produção nunca liga a
+    // chave e o script aborta antes de tocar em qualquer linha.
+    const flag = await prismaBase.organizationSetting.findFirst({
+      where: { organizationId: org.id, key: REPLAY_SANDBOX_SETTING_KEY },
+      select: { value: true },
+    });
+    if (flag?.value?.trim().toLowerCase() !== "true") {
+      console.error(
+        `--real-handoff recusado: org ${org.slug} não está marcada como org de teste ` +
+          `(defina ${REPLAY_SANDBOX_SETTING_KEY}=true em organization_settings).`,
+      );
+      process.exit(1);
+    }
+    // Liga os guards de efeito colateral (SSE, distribuição, envio,
+    // automação, atribuição a humano) antes do primeiro turno.
+    enableReplaySandbox(org.id);
   }
 
   const dbAgents = await prismaBase.aIAgentConfig.findMany({
@@ -754,9 +819,14 @@ async function main() {
     );
   }
 
+  if (realHandoff) disableReplaySandbox();
+
   const report = {
     org: { id: org.id, slug: org.slug, name: org.name },
     realHandoff,
+    // Cada efeito que teria saído do sandbox (envio, SSE, distribuição,
+    // automação, dono humano) e foi recusado.
+    sandboxBlocked: realHandoff ? blockedEffects() : [],
     startedAs: { id: start.id, name: start.name },
     at: new Date().toISOString(),
     turns: records,

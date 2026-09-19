@@ -24,6 +24,10 @@ import {
   syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
 import { getHumanAttendanceForConversation } from "@/services/attendance-guards";
@@ -593,6 +597,17 @@ async function writeLog(
 export async function executeDistribution(
   rawInput: ExecuteDistributionInput,
 ): Promise<DistributionResult> {
+  // Replay com handoff real: resolve quem SERIA escolhido, sem atribuir.
+  // Um replay não pode colocar conversa de teste na fila de um consultor.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect(
+      "distribution_assign",
+      `conversationId=${rawInput.conversationId ?? "-"} dealId=${rawInput.dealId ?? "-"}`,
+    );
+    const { triggerSource: _ignored, ...simInput } = rawInput;
+    return simulateDistribution(simInput);
+  }
+
   if (!(await hasOrganizationWidget("smart_distribution"))) {
     return {
       success: false,

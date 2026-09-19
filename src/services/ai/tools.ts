@@ -48,6 +48,10 @@ import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
+import {
   assignOwnerToContactClusterTx,
   createDeal,
   createDealEvent,
@@ -527,6 +531,11 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
     }),
     execute: async ({ templateName, languageCode, bodyVariables }) => {
       try {
+        // Replay com handoff real: nada sai para o WhatsApp do contato.
+        if (isReplaySandboxActive(ctx.organizationId)) {
+          recordBlockedEffect("outbound_send", `template:${templateName}`);
+          return fail("Envio bloqueado: replay em sandbox.");
+        }
         if (!ctx.contactId) return fail("Sem contato.");
         // Multi-tenancy: resolve o cliente Meta a partir do canal da
         // conversa atual em vez do singleton global. Sem isso, o LLM da

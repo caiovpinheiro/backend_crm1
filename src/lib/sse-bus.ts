@@ -7,6 +7,10 @@ import {
 } from "@/lib/cache/keys";
 import { withInboxSseCard } from "@/lib/inbox-sse-card";
 import { metrics, safeLabel } from "@/lib/metrics";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 
 /**
  * Multi-tenancy do SSE Bus
@@ -196,6 +200,13 @@ class SseBus {
       data && typeof data === "object" && "organizationId" in data
         ? ((data as Record<string, unknown>).organizationId as string | null | undefined) ?? null
         : null;
+
+    // Replay com handoff real: o operador não pode ver conversa de teste
+    // aparecendo no inbox dele.
+    if (isReplaySandboxActive(orgId)) {
+      recordBlockedEffect("sse_publish", event);
+      return;
+    }
 
     if (!orgId) {
       // fail-closed: sem org, ninguem recebe (exceto super-admin se for

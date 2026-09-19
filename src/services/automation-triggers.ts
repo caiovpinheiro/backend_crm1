@@ -1,6 +1,10 @@
 import { isAckOrGreetingText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 import { getActiveContext } from "@/services/automation-context";
@@ -839,6 +843,12 @@ export async function notifyDealStageChanged(
 ): Promise<void> {
   try {
     if (!dealId || !toStageId) return;
+    // Replay com handoff real: nenhuma automação da org roda por causa de
+    // um card de teste mudando de etapa.
+    if (isReplaySandboxActive()) {
+      recordBlockedEffect("automation_trigger", `deal_stage_changed:${dealId}`);
+      return;
+    }
     // Sem mudança real de etapa: não dispara (reordenar na mesma coluna,
     // patch redundante, etc.).
     if (fromStageId && fromStageId === toStageId) return;

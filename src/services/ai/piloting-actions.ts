@@ -25,6 +25,10 @@ import {
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
@@ -245,6 +249,14 @@ export async function sendAgentMessage(args: {
     if (lastOut?.authorType === "human") {
       return { status: "skipped", reason: "human_last_outbound" };
     }
+  }
+
+  // Replay com handoff real: a mensagem fica só como rascunho na conversa
+  // de sandbox (apagada no fim); nenhum provedor é chamado. Não depende do
+  // canal estar desconfigurado.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
+    return saveDraft(args.conversationId, args.agentUserId, text);
   }
 
   const isMeta = args.channel === "meta" || args.channel == null;
@@ -579,7 +591,8 @@ export type TriggerOpeningResult =
         | "off_hours"
         | "no_contact"
         | "tabulation_classifier"
-        | "farewell_closer";
+        | "farewell_closer"
+        | "replay_sandbox";
     };
 
 /**
@@ -605,6 +618,12 @@ export async function triggerAgentOpeningForContact(args: {
   /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
   ignorePriorBotOutbound?: boolean;
 }): Promise<TriggerOpeningResult> {
+  // Replay com handoff real: a saudação do agente que recebeu o handoff
+  // sairia pelo canal do contato.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_opening:${args.contactId}`);
+    return { status: "skipped", reason: "replay_sandbox" };
+  }
   // Usa a conversa aberta mais recente do contato. Na prática, o CRM
   // mantém 1 conversa por contato para canais (Meta/Baileys), então
   // isso resolve ao único canal ativo dele.
