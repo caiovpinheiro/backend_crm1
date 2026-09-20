@@ -208,7 +208,7 @@ const costCapSchema = z.object({
 });
 
 export const v2AgentConfigSchema = z.object({
-  name: z.string().min(1),
+  name: z.string(),
   flow: z.enum(["reception", "full", "onboarding"]).optional().default("full"),
   channelIds: z.array(z.string()).optional().default([]),
   model: z.string().optional().default("gpt-4o-mini"),
