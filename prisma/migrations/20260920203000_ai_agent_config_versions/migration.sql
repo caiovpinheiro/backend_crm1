@@ -3,9 +3,9 @@
 BEGIN;
 
 ALTER TABLE "ai_agent_configs"
-  ADD COLUMN "draft_config" JSONB;
+  ADD COLUMN IF NOT EXISTS "draft_config" JSONB;
 
-CREATE TABLE "ai_agent_config_versions" (
+CREATE TABLE IF NOT EXISTS "ai_agent_config_versions" (
   "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   "organizationId" TEXT NOT NULL,
   "agentId" TEXT NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE "ai_agent_config_versions" (
   UNIQUE ("agentId", "version_number")
 );
 
-CREATE INDEX idx_aiconfigversions_org ON "ai_agent_config_versions"("organizationId");
-CREATE INDEX idx_aiconfigversions_agent_created ON "ai_agent_config_versions"("agentId", "createdAt");
+CREATE INDEX IF NOT EXISTS idx_aiconfigversions_org ON "ai_agent_config_versions"("organizationId");
+CREATE INDEX IF NOT EXISTS idx_aiconfigversions_agent_created ON "ai_agent_config_versions"("agentId", "createdAt");
 
 COMMIT;
