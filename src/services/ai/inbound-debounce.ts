@@ -151,6 +151,10 @@ export async function scheduleAiReply(
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
 
+  // Não processa via debounce se a conversa pertence ao motor v2.
+  const { isSimpleEngineConversation } = await import("@/services/ai-v2/agent-resolver");
+  if (await isSimpleEngineConversation(input.conversationId)) return;
+
   // Allowlist (default aberto em produção). Se restricted, bloqueia.
   try {
     const allowed = await isContactAllowedForAi(input.contactId);

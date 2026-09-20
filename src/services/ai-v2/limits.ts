@@ -1,0 +1,69 @@
+/**
+ * Contadores de paradas do motor v2 (SPEC 3.16).
+ * Nenhum domínio de cliente.
+ */
+
+import type { V2AgentConfig } from "@/lib/ai-v2/types";
+
+export interface V2Counters {
+  courtesyReplies: number;
+  helpOffers: number;
+  stalledExchanges: number;
+  nonsenseMessages: number;
+  loopCount: number;
+  lastLoopMessage?: string;
+}
+
+export function defaultV2Counters(): V2Counters {
+  return {
+    courtesyReplies: 0,
+    helpOffers: 0,
+    stalledExchanges: 0,
+    nonsenseMessages: 0,
+    loopCount: 0,
+  };
+}
+
+export function parseV2Counters(raw: unknown): V2Counters {
+  if (!raw || typeof raw !== "object") return defaultV2Counters();
+  const r = raw as Record<string, unknown>;
+  return {
+    courtesyReplies: Number(r.courtesyReplies) || 0,
+    helpOffers: Number(r.helpOffers) || 0,
+    stalledExchanges: Number(r.stalledExchanges) || 0,
+    nonsenseMessages: Number(r.nonsenseMessages) || 0,
+    loopCount: Number(r.loopCount) || 0,
+    lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
+  };
+}
+
+export function shouldStopCourtesy(config: V2AgentConfig, counters: V2Counters): boolean {
+  return counters.courtesyReplies >= config.limits.maxCourtesyReplies;
+}
+
+export function shouldStopHelpOffer(config: V2AgentConfig, counters: V2Counters): boolean {
+  return counters.helpOffers >= config.limits.maxHelpOffers;
+}
+
+export function shouldStopStalled(config: V2AgentConfig, counters: V2Counters): boolean {
+  return counters.stalledExchanges >= config.limits.maxStalledExchanges;
+}
+
+export function shouldStopNonsense(config: V2AgentConfig, counters: V2Counters): boolean {
+  return counters.nonsenseMessages >= config.limits.nonsenseLimit;
+}
+
+export function detectLoop(
+  config: V2AgentConfig,
+  counters: V2Counters,
+  message: string,
+): boolean {
+  const normalized = message.toLowerCase().trim();
+  if (counters.lastLoopMessage && counters.lastLoopMessage === normalized) {
+    counters.loopCount++;
+  } else {
+    counters.loopCount = 1;
+    counters.lastLoopMessage = normalized;
+  }
+  return counters.loopCount >= config.limits.maxLoopCount;
+}

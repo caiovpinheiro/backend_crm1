@@ -5074,6 +5074,8 @@ model AIAgentKnowledgeDoc {
   /// Orientação injetada quando `expiredBehavior = instruct`. Null = usa o
   /// texto default do agente (`inboxPolicy.knowledgeExpiredInstruction`).
   expiredInstruction String?            @db.Text
+  /// IDs dos temas aos quais este documento está associado (motor v2).
+  themeIds       String[]              @default([])
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
@@ -5241,13 +5243,21 @@ model AISimpleConversationState {
   agentId                String
   stage                  String        @default("new")
   mode                   String?
+  themeId                String?
   humanActive            Boolean       @default(false)
+  owner                  String        @default("agente")
+  originStageId          String?
+  postCloseWindowEndAt   DateTime?
+  closeReason            String?
+  versionId              String?
   identificationAttempts Int           @default(0)
+  counters               Json          @default("{}")
   createdAt              DateTime      @default(now())
   updatedAt              DateTime      @updatedAt
 
   @@index([organizationId])
   @@index([agentId])
+  @@index([conversationId])
   @@map("ai_simple_conversation_states")
 }
 
@@ -5276,6 +5286,69 @@ model AISimpleTurnLog {
   @@index([agentId])
   @@index([turnId])
   @@map("ai_simple_turn_logs")
+}
+
+// ──────────────────────────────────────────────
+// AI v2 pending interactive options
+// ──────────────────────────────────────────────
+model AIV2PendingInteractive {
+  id              String    @id @default(cuid())
+  organizationId  String
+  conversationId  String
+  turnId          String?
+  messageId       String?
+  validUntil      DateTime
+  options         Json      @default("[]")
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  resolvedTarget  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([organizationId])
+  @@index([conversationId])
+  @@index([validUntil])
+  @@map("ai_v2_pending_interactives")
+}
+
+// ──────────────────────────────────────────────
+// AI v2 knowledge gaps (Primeiros dias)
+// ──────────────────────────────────────────────
+model AIV2KnowledgeGap {
+  id             String   @id @default(cuid())
+  organizationId String
+  agentId        String
+  themeId        String?
+  question       String
+  frequency      Int      @default(1)
+  status         String   @default("pending")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId, status])
+  @@index([updatedAt])
+  @@map("ai_v2_knowledge_gaps")
+}
+
+// ──────────────────────────────────────────────
+// AI v2 survey responses
+// ──────────────────────────────────────────────
+model AIAgentSurveyResponse {
+  id             String   @id @default(cuid())
+  organizationId String
+  contactId      String
+  dealId         String?
+  agentId        String
+  score          Int
+  reason         String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId, createdAt])
+  @@index([contactId])
+  @@map("ai_agent_survey_responses")
 }
 
 // ──────────────────────────────────────────────

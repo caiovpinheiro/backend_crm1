@@ -53,7 +53,7 @@ import {
   parseAuditSource,
   type AuditSource,
 } from "@/lib/ai-agents/observability";
-import { validateSimpleConfig } from "@/lib/ai-simple/config";
+import { validateV2Config } from "@/lib/ai-v2/config";
 
 /** Tools que o runtime injeta no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [
@@ -496,9 +496,9 @@ export function sanitizeVerticalPack(
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
   if (input.engine === "simple" && input.simpleConfig !== null) {
-    const validation = validateSimpleConfig(input.simpleConfig ?? {});
+    const validation = validateV2Config(input.simpleConfig ?? {});
     if (!validation.ok) {
-      throw new Error(`Configuração v2 inválida: ${validation.errors.message}`);
+      throw new Error(`Configuração v2 inválida: ${(validation.errors as any).issues.map((e: any) => `${e.path.join(".")}: ${e.message}`).join("; ")}`);
     }
   }
   let systemTpl: Awaited<ReturnType<typeof findSystemTemplateByArchetype>> =
@@ -684,9 +684,9 @@ export type UpdateAIAgentInput = Partial<
 
 export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
   if (input.simpleConfig !== undefined && input.simpleConfig !== null) {
-    const validation = validateSimpleConfig(input.simpleConfig);
+    const validation = validateV2Config(input.simpleConfig);
     if (!validation.ok) {
-      throw new Error(`Configuração v2 inválida: ${validation.errors.message}`);
+      throw new Error(`Configuração v2 inválida: ${(validation.errors as any).issues.map((e: any) => `${e.path.join(".")}: ${e.message}`).join("; ")}`);
     }
   }
   const existing = await prisma.aIAgentConfig.findUnique({

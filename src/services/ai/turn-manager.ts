@@ -27,7 +27,7 @@ import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { resolveSimpleAgentForConversation } from "@/services/ai-simple/agent-resolver";
+import { resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
@@ -359,7 +359,7 @@ export async function onInboundMessageForAi(
     }
   }
 
-  const simpleAgent = await resolveSimpleAgentForConversation(
+  const simpleAgent = await resolveV2AgentForConversation(
     input.conversationId,
   );
   const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
@@ -670,11 +670,9 @@ export async function runTurn(turn: {
 
         const simple = await isSimpleEngineTurn(turn.conversationId);
         if (simple) {
-          const { processSimpleTurn } = await import("@/services/ai-simple/engine");
-          await processSimpleTurn({
-            organizationId: turn.organizationId,
+          const { processV2Turn } = await import("@/services/ai-v2/engine");
+          await processV2Turn({
             conversationId: turn.conversationId,
-            contactId: turn.contactId ?? "",
             channel: turn.channel === "baileys" ? "baileys" : "meta",
             userMessage: text,
             turnId: turn.id,
