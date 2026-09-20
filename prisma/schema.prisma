@@ -4952,6 +4952,14 @@ model AIAgentConfig {
   /// novos nascem null.
   verticalPack String?
 
+  /// Motor de execução: "legacy" (runner/tools/inbox-handler antigos)
+  /// ou "simple" (motor v2 declarativo). Default legacy preserva
+  /// comportamento de agentes existentes.
+  engine String? @default("legacy")
+
+  /// Configuração JSON do motor v2 (simple), validada por Zod.
+  simpleConfig Json?
+
   /// Template de origem (Onda 3). Dual-write com `archetype` enquanto
   /// o FE/migração não abandonam o enum legado.
   templateId String?
@@ -5220,6 +5228,53 @@ model AIAgentMessage {
   @@index([organizationId])
   @@index([runId, createdAt])
   @@map("ai_agent_messages")
+}
+
+// ──────────────────────────────────────────────
+// AI Simple Engine (v2)
+// ──────────────────────────────────────────────
+model AISimpleConversationState {
+  id                     String       @id @default(cuid())
+  organizationId         String
+  conversationId         String       @unique
+  agentId                String
+  stage                  String        @default("new")
+  mode                   String?
+  humanActive            Boolean       @default(false)
+  identificationAttempts Int           @default(0)
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@map("ai_simple_conversation_states")
+}
+
+model AISimpleTurnLog {
+  id                String        @id @default(cuid())
+  organizationId    String
+  conversationId    String
+  agentId           String
+  turnId            String?
+  inboundText       String        @db.Text
+  contextSnapshot   Json          @default("{}")
+  prompt            String        @db.Text
+  llmOutput         Json?
+  discardedActions  Json          @default("[]")
+  executedActions   Json          @default("[]")
+  reply             String?       @db.Text
+  handoff           Boolean       @default(false)
+  error             String?       @db.Text
+  latencyMs         Int?
+  inputTokens       Int           @default(0)
+  outputTokens      Int           @default(0)
+  createdAt         DateTime      @default(now())
+
+  @@index([organizationId])
+  @@index([conversationId])
+  @@index([agentId])
+  @@index([turnId])
+  @@map("ai_simple_turn_logs")
 }
 
 // ──────────────────────────────────────────────

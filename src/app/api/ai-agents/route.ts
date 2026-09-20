@@ -118,6 +118,15 @@ export async function POST(request: Request) {
         const vp = sanitizeVerticalPack(body.verticalPack);
         return vp !== undefined ? { verticalPack: vp } : {};
       })(),
+      ...(typeof body.engine === "string" &&
+      (body.engine === "legacy" || body.engine === "simple")
+        ? { engine: body.engine }
+        : {}),
+      ...(typeof body.simpleConfig === "object" && body.simpleConfig !== null
+        ? { simpleConfig: body.simpleConfig as Record<string, unknown> }
+        : body.simpleConfig === null
+          ? { simpleConfig: null }
+          : {}),
       ...sanitizePilotingInput({
         openingMessage: body.openingMessage,
         openingDelayMs: body.openingDelayMs,

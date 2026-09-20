@@ -810,7 +810,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // a IA depois de transferência explícita. Humano falando *durante* o
     // run continua abortando em `assertAiStillAuthorized({ since })`.
 
-    const cfg = assignee.aiAgentConfig;
+    const cfg = assignee.aiAgentConfig as Record<string, unknown>;
+    if (cfg.engine === "simple") {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "simple_engine_delegated",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
     const { isTabulationClassifier } = await import(
       "@/lib/ai-agents/tabulation-classifier"
     );

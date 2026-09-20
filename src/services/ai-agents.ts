@@ -48,6 +48,7 @@ import {
   parseAuditSource,
   type AuditSource,
 } from "@/lib/ai-agents/observability";
+import { validateSimpleConfig } from "@/lib/ai-simple/config";
 
 /** Tools que o runtime injeta no arquétipo ATENDIMENTO. */
 const ACADEMIC_RUNTIME_TOOLS = [
@@ -218,6 +219,11 @@ export type CreateAIAgentInput = {
   /// `""`/`null` limpa. CRM multi-tenant: não há chave global.
   openaiApiKey?: string | null;
   verticalPack?: string | null;
+
+  /// Motor de execução: "legacy" (padrão) ou "simple" (v2 declarativa).
+  engine?: "legacy" | "simple";
+  /// Configuração JSON do motor v2, validada por Zod.
+  simpleConfig?: Record<string, unknown> | null;
 
   // Piloting (controles operacionais).
   openingMessage?: string | null;
@@ -483,6 +489,12 @@ export function sanitizeVerticalPack(
 
 export async function createAIAgent(input: CreateAIAgentInput) {
   const archetype = getArchetype(input.archetype);
+  if (input.engine === "simple" && input.simpleConfig !== null) {
+    const validation = validateSimpleConfig(input.simpleConfig ?? {});
+    if (!validation.ok) {
+      throw new Error(`Configuração v2 inválida: ${validation.errors.message}`);
+    }
+  }
   let systemTpl: Awaited<ReturnType<typeof findSystemTemplateByArchetype>> =
     null;
   try {
@@ -590,6 +602,10 @@ export async function createAIAgent(input: CreateAIAgentInput) {
               } as unknown as Prisma.InputJsonValue)
             : Prisma.JsonNull),
         verticalPack,
+        engine: input.engine ?? "legacy",
+        simpleConfig:
+          (input.simpleConfig as unknown as Prisma.InputJsonValue | undefined) ??
+          Prisma.JsonNull,
         // Onda 3 — campos novos; cast até `prisma generate` no ambiente.
         // Tetos em 0 = runtime usa o default seguro (AGENT_MAX_STEPS/24/3).
         ...( {
@@ -598,7 +614,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
           maxToolCallsPerRun: input.maxToolCallsPerRun ?? 0,
           maxRepeatsPerTool: input.maxRepeatsPerTool ?? 0,
         } as Record<string, unknown>),
-      } as Parameters<typeof tx.aIAgentConfig.create>[0]["data"]),
+      } as unknown as Parameters<typeof tx.aIAgentConfig.create>[0]["data"]),
     });
 
     const auditSource = parseAuditSource(input.auditSource);
@@ -633,6 +649,8 @@ export async function createAIAgent(input: CreateAIAgentInput) {
               active: config.active,
               openingMessage: config.openingMessage,
               autoClosePolicy: config.autoClosePolicy,
+              engine: (config as Record<string, unknown>).engine,
+              simpleConfig: (config as Record<string, unknown>).simpleConfig,
             },
           ),
         ),
@@ -651,6 +669,12 @@ export type UpdateAIAgentInput = Partial<
 };
 
 export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
+  if (input.simpleConfig !== undefined && input.simpleConfig !== null) {
+    const validation = validateSimpleConfig(input.simpleConfig);
+    if (!validation.ok) {
+      throw new Error(`Configuração v2 inválida: ${validation.errors.message}`);
+    }
+  }
   const existing = await prisma.aIAgentConfig.findUnique({
     where: { id },
     include: {
@@ -759,6 +783,15 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.verticalPack !== undefined
           ? { verticalPack: input.verticalPack }
           : {}),
+        ...(input.engine !== undefined ? { engine: input.engine } : {}),
+        ...(input.simpleConfig !== undefined
+          ? {
+              simpleConfig:
+                input.simpleConfig === null
+                  ? Prisma.JsonNull
+                  : (input.simpleConfig as unknown as Prisma.InputJsonValue),
+            }
+          : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
 
         // Piloting.
@@ -857,6 +890,8 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         typingPerCharMs: existing.typingPerCharMs,
         markMessagesRead: existing.markMessagesRead,
         autoClosePolicy: existing.autoClosePolicy,
+        engine: (existing as Record<string, unknown>).engine,
+        simpleConfig: (existing as Record<string, unknown>).simpleConfig,
       };
       const afterSnap: Record<string, unknown> = {
         ...beforeSnap,
@@ -943,6 +978,10 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
           : {}),
         ...(input.autoClosePolicy !== undefined
           ? { autoClosePolicy: input.autoClosePolicy }
+          : {}),
+        ...(input.engine !== undefined ? { engine: input.engine } : {}),
+        ...(input.simpleConfig !== undefined
+          ? { simpleConfig: input.simpleConfig }
           : {}),
       };
       const diff = buildAgentConfigDiff(beforeSnap, afterSnap, changedKeys);

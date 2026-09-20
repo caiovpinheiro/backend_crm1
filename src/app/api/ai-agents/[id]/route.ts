@@ -164,6 +164,15 @@ export async function PUT(
         inboxPolicy: body.inboxPolicy,
         verticalPack: body.verticalPack,
       }),
+      ...(typeof body.engine === "string" &&
+      (body.engine === "legacy" || body.engine === "simple")
+        ? { engine: body.engine }
+        : {}),
+      ...(typeof body.simpleConfig === "object" && body.simpleConfig !== null
+        ? { simpleConfig: body.simpleConfig as Record<string, unknown> }
+        : body.simpleConfig === null
+          ? { simpleConfig: null }
+          : {}),
       auditSource: parseAuditSource(body.auditSource ?? body.source),
     };
 

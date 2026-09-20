@@ -169,6 +169,7 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
     ) last_in ON true
     WHERE u.type = 'AI'
       AND a.active = true
+      AND (a."engine" IS NULL OR a."engine" <> 'simple')
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
       AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
@@ -376,6 +377,7 @@ export async function tickOnce(now: Date = new Date()) {
     JOIN "ai_agent_configs" a ON a."userId" = u.id
     WHERE u.type = 'AI'
       AND a.active = true
+      AND (a."engine" IS NULL OR a."engine" <> 'simple')
       AND a."inactivityTimerMs" > 0
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = true

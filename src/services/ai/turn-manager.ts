@@ -27,6 +27,7 @@ import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { resolveSimpleAgentForConversation } from "@/services/ai-simple/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
@@ -358,7 +359,12 @@ export async function onInboundMessageForAi(
     }
   }
 
-  if (!isTurnManagerEnabled()) {
+  const simpleAgent = await resolveSimpleAgentForConversation(
+    input.conversationId,
+  );
+  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
+
+  if (!useTurnManager) {
     const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
     await scheduleAiReply(input);
     return;
@@ -446,6 +452,34 @@ export function armFastPath(turnId: string, dueAt: number): void {
 export function clearFastPathTimers(): void {
   for (const timer of fastPathTimers.values()) clearTimeout(timer);
   fastPathTimers.clear();
+}
+
+/**
+ * Verifica se a conversa está atribuída a um agente que usa o motor
+ * simples (v2). Se não houver assignee, a v1 continua responsável.
+ */
+async function isSimpleEngineTurn(conversationId: string): Promise<boolean> {
+  try {
+    const conv = (await (prismaBase as unknown as {
+      conversation: { findUnique: (args: unknown) => Promise<unknown> };
+    }).conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        assignedTo: {
+          select: {
+            aiAgentConfig: { select: { engine: true } },
+          },
+        },
+      },
+    })) as { assignedTo?: { aiAgentConfig?: { engine?: string } } } | null;
+    return conv?.assignedTo?.aiAgentConfig?.engine === "simple";
+  } catch (err) {
+    console.error("[ai-turn] isSimpleEngineTurn falhou", {
+      conversationId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 // ── Promoção / claim / processamento ────────────────────────
@@ -634,17 +668,30 @@ export async function runTurn(turn: {
           return;
         }
 
-        const { maybeReplyAsAIAgent } = await import(
-          "@/services/ai/inbox-handler"
-        );
-        await maybeReplyAsAIAgent({
-          conversationId: turn.conversationId,
-          contactId: turn.contactId ?? "",
-          userMessage: text,
-          channel: turn.channel === "baileys" ? "baileys" : "meta",
-          inboundMessageIds: messageIds,
-          turnId: turn.id,
-        });
+        const simple = await isSimpleEngineTurn(turn.conversationId);
+        if (simple) {
+          const { processSimpleTurn } = await import("@/services/ai-simple/engine");
+          await processSimpleTurn({
+            organizationId: turn.organizationId,
+            conversationId: turn.conversationId,
+            contactId: turn.contactId ?? "",
+            channel: turn.channel === "baileys" ? "baileys" : "meta",
+            userMessage: text,
+            turnId: turn.id,
+          });
+        } else {
+          const { maybeReplyAsAIAgent } = await import(
+            "@/services/ai/inbox-handler"
+          );
+          await maybeReplyAsAIAgent({
+            conversationId: turn.conversationId,
+            contactId: turn.contactId ?? "",
+            userMessage: text,
+            channel: turn.channel === "baileys" ? "baileys" : "meta",
+            inboundMessageIds: messageIds,
+            turnId: turn.id,
+          });
+        }
 
         await completeTurn(turn.id, turn.organizationId);
         logTurn("completed", {

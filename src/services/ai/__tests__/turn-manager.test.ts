@@ -85,6 +85,11 @@ const db = vi.hoisted(() => {
             return false;
           }
         }
+        if ("is" in c && typeof c.is === "object" && c.is !== null) {
+          if (value === null || typeof value !== "object" || !matches(value as Record<string, unknown>, c.is as Record<string, unknown>)) {
+            return false;
+          }
+        }
         continue;
       }
       if (value !== cond) return false;
@@ -227,18 +232,67 @@ const db = vi.hoisted(() => {
         .map((m) => ({ ...m })),
   };
 
-  return { turns, messages, state, conversationTurn, message };
+  const conversations = new Map<string, Record<string, unknown>>();
+  const users = new Map<string, Record<string, unknown>>();
+
+  const conversation = {
+    findUnique: async ({ where }: { where: { id: string } }) => {
+      const row = conversations.get(where.id);
+      return row ? { ...row } : null;
+    },
+    updateMany: async ({
+      where,
+      data,
+    }: {
+      where?: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => {
+      const hits = [...conversations.values()].filter((r) => matches(r, where));
+      for (const row of hits) Object.assign(row, data);
+      return { count: hits.length };
+    },
+  };
+
+  const user = {
+    findFirst: async ({
+      where,
+      orderBy,
+    }: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, "asc" | "desc">;
+    }) => {
+      const rows = sortRows(
+        [...users.values()].filter((r) => matches(r, where)),
+        orderBy,
+      );
+      return rows[0] ? { ...rows[0] } : null;
+    },
+  };
+
+  return { turns, messages, state, conversationTurn, message, conversation, user, conversations, users, setConversation: (id: string, data: Record<string, unknown>) => conversations.set(id, { ...data, id }), setUser: (id: string, data: Record<string, unknown>) => users.set(id, { ...data, id }) };
 });
 
 const turns = db.turns as unknown as Map<string, TurnRow>;
 const messages = db.messages as unknown as Map<string, MessageRow>;
+const conversations = db.conversations as unknown as Map<string, Record<string, unknown>>;
+const users = db.users as unknown as Map<string, Record<string, unknown>>;
+const setConversation = db.setConversation as (id: string, data: Record<string, unknown>) => void;
+const setUser = db.setUser as (id: string, data: Record<string, unknown>) => void;
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { conversationTurn: db.conversationTurn, message: db.message },
+  prisma: {
+    conversationTurn: db.conversationTurn,
+    message: db.message,
+  },
 }));
 
 vi.mock("@/lib/prisma-base", () => ({
-  prismaBase: { conversationTurn: db.conversationTurn, message: db.message },
+  prismaBase: {
+    conversationTurn: db.conversationTurn,
+    message: db.message,
+    conversation: db.conversation,
+    user: db.user,
+  },
 }));
 
 vi.mock("@/lib/prisma-helpers", () => ({
@@ -345,6 +399,8 @@ function firstTurn() {
 beforeEach(() => {
   turns.clear();
   messages.clear();
+  conversations.clear();
+  users.clear();
   db.state.seq = 0;
   vi.clearAllMocks();
   claimInboundMessageForAi.mockResolvedValue(true);
@@ -703,6 +759,81 @@ describe("entrypoint de ingestão", () => {
   });
 
   it("com a flag ligada abre turno e não toca no debounce legado", async () => {
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
+    expect(scheduleAiReply).not.toHaveBeenCalled();
+    expect(turns.size).toBe(1);
+  });
+
+  it("flag desligada + agente simple atribuído usa Turn Manager (não debounce v1)", async () => {
+    process.env.AI_TURN_MANAGER = "0";
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: "ai-user-1",
+      assignedTo: {
+        id: "ai-user-1",
+        aiAgentConfig: { id: "agent-1", engine: "simple" },
+      },
+    });
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
+    expect(scheduleAiReply).not.toHaveBeenCalled();
+    expect(turns.size).toBe(1);
+  });
+
+  it("flag desligada + agente legacy usa debounce v1", async () => {
+    process.env.AI_TURN_MANAGER = "0";
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: "ai-user-1",
+      assignedTo: {
+        id: "ai-user-1",
+        aiAgentConfig: { id: "agent-1", engine: "legacy" },
+      },
+    });
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
+    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
+    expect(turns.size).toBe(0);
+  });
+
+  it("flag desligada + sem responsável + agente simple padrão atribui e usa Turn Manager", async () => {
+    process.env.AI_TURN_MANAGER = "0";
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: null,
+      assignedTo: null,
+    });
+    setUser("ai-user-1", {
+      organizationId: ORG,
+      type: "AI",
+      aiAgentConfig: { id: "agent-1", active: true, engine: "simple" },
+      createdAt: new Date(),
+    });
     addMessage("m1", "Oi");
 
     await onInboundMessageForAi({

@@ -111,6 +111,11 @@ export async function retryUnansweredAiInbound(
       contactId: true,
       organizationId: true,
       lastInboundAt: true,
+      assignedTo: {
+        select: {
+          aiAgentConfig: { select: { engine: true } },
+        },
+      },
       contact: { select: { name: true } },
       channelRef: {
         select: {
@@ -149,6 +154,13 @@ export async function retryUnansweredAiInbound(
       idleMinutes,
       status: "listed",
     };
+
+    // Motor v2 simples tem seu próprio ciclo de retry/handoff.
+    if (row.assignedTo?.aiAgentConfig?.engine === "simple") {
+      result.skipped++;
+      result.items.push({ ...base, status: "skipped", reason: "simple_engine" });
+      continue;
+    }
 
     // Alguém respondeu depois da última mensagem do contato? Então não está
     // sem resposta (o `lastInboundAt` pode estar defasado).

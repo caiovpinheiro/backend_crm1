@@ -170,6 +170,8 @@ const AUDIT_FIELD_KEYS = [
   "typingPerCharMs",
   "markMessagesRead",
   "autoClosePolicy",
+  "engine",
+  "simpleConfig",
 ] as const;
 
 export type AuditDiffEntry = {

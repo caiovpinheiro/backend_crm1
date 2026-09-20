@@ -81,6 +81,11 @@ export async function sweepFinishedAiConversations(
       organizationId: true,
       contactId: true,
       updatedAt: true,
+      assignedTo: {
+        select: {
+          aiAgentConfig: { select: { engine: true } },
+        },
+      },
       contact: { select: { name: true } },
     },
     orderBy: { updatedAt: "desc" },
@@ -94,6 +99,12 @@ export async function sweepFinishedAiConversations(
 
   for (const row of rows) {
     if (!row.contactId) continue;
+
+    // Motor v2 simples gerencia seu próprio encerramento.
+    if (row.assignedTo?.aiAgentConfig?.engine === "simple") {
+      skipped++;
+      continue;
+    }
 
     const recent = await prismaBase.message.findMany({
       where: {
