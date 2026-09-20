@@ -5,6 +5,7 @@ import {
   createV2Agent,
   listV2Agents,
 } from "@/services/ai-v2/agents";
+import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 
 export async function GET() {
   const r = await requireAuth();
@@ -13,6 +14,7 @@ export async function GET() {
   if (denied) return denied;
 
   try {
+    await ensureV2AgentSchema();
     const items = await listV2Agents(r.session.user.organizationId!);
     return NextResponse.json({ agents: items });
   } catch (err) {
@@ -31,6 +33,7 @@ export async function POST(request: Request) {
   if (denied) return denied;
 
   try {
+    await ensureV2AgentSchema();
     const body = (await request.json()) as {
       name?: string;
       preset?: string;

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { publishV2AgentVersion } from "@/services/ai-v2/agents";
+import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -11,6 +12,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (denied) return denied;
 
   try {
+    await ensureV2AgentSchema();
     const body = (await request.json()) as { comment?: string };
     const result = await publishV2AgentVersion(
       id,

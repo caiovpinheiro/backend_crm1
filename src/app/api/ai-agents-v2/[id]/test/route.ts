@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { getV2Agent } from "@/services/ai-v2/agents";
+import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { simulateV2Turn } from "@/services/ai-v2/test-turn";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -12,6 +13,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (denied) return denied;
 
   try {
+    await ensureV2AgentSchema();
     const body = (await request.json()) as { userMessage?: string };
     const userMessage = body.userMessage?.trim() ?? "oi";
     const agent = await getV2Agent(id, r.session.user.organizationId!);
