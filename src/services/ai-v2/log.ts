@@ -30,6 +30,8 @@ export async function logV2Turn(args: {
   themeId?: string;
   appliedRuleId?: string;
   versionId?: string;
+  toolCalls?: unknown[];
+  governorStats?: Record<string, unknown>;
 }): Promise<void> {
   const model = "gpt-4o-mini"; // Simplificado; idealmente receber da config.
   const costUsd = estimateCost(model, args.inputTokens, args.outputTokens);
@@ -44,7 +46,11 @@ export async function logV2Turn(args: {
       agentId: args.agentId,
       turnId: args.turnId ?? null,
       inboundText: args.inboundText,
-      contextSnapshot: args.crmContext as unknown as Record<string, unknown>,
+      contextSnapshot: {
+        ...(args.crmContext as unknown as Record<string, unknown>),
+        ...(args.toolCalls ? { toolCalls: args.toolCalls } : {}),
+        ...(args.governorStats ? { governorStats: args.governorStats } : {}),
+      },
       prompt: args.prompt,
       llmOutput: (args.llmOutput ?? null) as Record<string, unknown> | null,
       executedActions: args.executedActions as unknown as Record<string, unknown>,

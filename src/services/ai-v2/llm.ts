@@ -5,16 +5,30 @@
  */
 
 import { z } from "zod";
+import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
+import { renderMessage } from "@/lib/ai-v2/message-render";
+import {
+  ToolCallGovernor,
+  normalizeToolCallLimits,
+  replayPayload,
+  denialPayload,
+  type ToolCallLimits,
+} from "@/services/ai/tool-governor";
 import type {
   V2Action,
   V2AgentConfig,
   V2LLMOutput,
-  V2Sentiment,
   V2CRMContext,
 } from "@/lib/ai-v2/types";
+import {
+  searchV2Products,
+  searchV2CrmRecords,
+  searchV2Knowledge,
+  listV2MessageModels,
+} from "./tools";
 
 const v2ActionSchema: z.ZodType<V2Action> = z.object({
   type: z.enum([
@@ -38,6 +52,159 @@ const v2ActionSchema: z.ZodType<V2Action> = z.object({
   ]),
 }).passthrough();
 
+function flattenForRender(
+  input: Record<string, unknown>,
+  prefix = "",
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      Object.assign(out, flattenForRender(value as Record<string, unknown>, fullKey));
+    } else {
+      out[fullKey] = value;
+    }
+  }
+  return out;
+}
+
+function activeTheme(config: V2AgentConfig, themeId?: string) {
+  if (!themeId) return null;
+  return config.themes.find((t) => t.id === themeId) ?? null;
+}
+
+export function buildV2ToolSet(args: {
+  config: V2AgentConfig;
+  context: V2CRMContext;
+  agentId: string;
+  apiKey: string;
+  themeId?: string;
+  limits?: ToolCallLimits;
+}): { tools: ToolSet; governor: ToolCallGovernor } {
+  const theme = activeTheme(args.config, args.themeId);
+  const themeToolIds = theme?.allowedTools ? new Set(theme.allowedTools) : null;
+  const allowedDocIds = theme?.knowledgeDocIds && theme.knowledgeDocIds.length > 0
+    ? theme.knowledgeDocIds
+    : args.config.allowedKnowledgeDocIds;
+  const allowedModelIds = theme?.messageModelIds && theme.messageModelIds.length > 0
+    ? theme.messageModelIds
+    : args.config.allowedMessageModelIds;
+
+  const enabledToolNames = new Set(args.config.enabledTools ?? []);
+  if (enabledToolNames.size === 0 && !themeToolIds) {
+    return { tools: {}, governor: new ToolCallGovernor(normalizeToolCallLimits(undefined)) };
+  }
+
+  const limits = args.limits ?? normalizeToolCallLimits({
+    maxToolCallsPerRun: args.config.toolGovernor?.maxCallsPerTurn ?? 6,
+    maxRepeatsPerTool: args.config.toolGovernor?.maxRepeatsPerTool ?? 2,
+  });
+  const governor = new ToolCallGovernor(limits);
+
+  function wrapTool(
+    toolName: string,
+    description: string,
+    inputSchema: z.ZodTypeAny,
+    execute: (input: any) => Promise<unknown>,
+  ) {
+    if (themeToolIds && !themeToolIds.has(toolName)) return undefined;
+    if (!themeToolIds && !enabledToolNames.has(toolName)) return undefined;
+    return tool({
+      description,
+      inputSchema,
+      execute: async (input: unknown) => {
+        const decision = governor.decide(toolName, input);
+        if (decision.action === "deny") {
+          return denialPayload(toolName, decision.reason);
+        }
+        if (decision.action === "replay") {
+          return replayPayload(toolName, decision.previousResult);
+        }
+        try {
+          const result = await execute(input);
+          governor.record(toolName, input, result);
+          return result;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const failure = { ok: false as const, error: msg };
+          governor.record(toolName, input, failure);
+          return failure;
+        }
+      },
+    });
+  }
+
+  const tools: ToolSet = {};
+
+  const searchProducts = wrapTool(
+    "search_products",
+    "Busca produtos ou serviços ativos no catálogo interno. Use antes de responder preço, disponibilidade ou características.",
+    z.object({
+      query: z.string().min(1).describe("Termo de busca (nome, SKU, descrição, atributo)."),
+      type: z.enum(["PRODUCT", "SERVICE"]).optional().describe("Filtro opcional por tipo."),
+      limit: z.number().int().min(1).max(20).optional().describe("Máximo de resultados (1-20)."),
+    }),
+    async (input) => searchV2Products(input),
+  );
+  if (searchProducts) tools.search_products = searchProducts;
+
+  const searchCrm = wrapTool(
+    "search_crm_records",
+    "Busca dados de contatos e negócios no CRM. Use para localizar cadastro, histórico ou informações já registradas.",
+    z.object({
+      query: z.string().min(1).describe("Termo de busca livre."),
+      scope: z
+        .enum(["current_contact", "organization"])
+        .optional()
+        .describe("'current_contact' (padrão) restringe ao contato/negócio atual. 'organization' busca em todo o CRM."),
+      limit: z.number().int().min(1).max(10).optional().describe("Máximo de resultados (1-10)."),
+    }),
+    async (input) =>
+      searchV2CrmRecords({
+        ...input,
+        contactId: args.context.contact?.id as string | undefined,
+        dealId: args.context.selectedDeal?.id as string | undefined,
+      }),
+  );
+  if (searchCrm) tools.search_crm_records = searchCrm;
+
+  const knowledge = wrapTool(
+    "knowledge_search",
+    "Busca trechos relevantes na base de conhecimento do agente. Use para fundamentar respostas e evitar inventar dados.",
+    z.object({
+      query: z.string().min(1).describe("Pergunta ou termo de busca na base."),
+      limit: z.number().int().min(1).max(5).optional().describe("Máximo de trechos (1-5)."),
+    }),
+    async (input) =>
+      searchV2Knowledge({
+        agentId: args.agentId,
+        apiKey: args.apiKey,
+        query: input.query,
+        allowedDocIds,
+        limit: input.limit,
+      }),
+  );
+  if (knowledge) tools.knowledge_search = knowledge;
+
+  const messageModels = wrapTool(
+    "list_message_models",
+    "Lista modelos de mensagem internos (templates operacionais) relevantes à pergunta. Use para seguir procedimentos já cadastrados.",
+    z.object({
+      query: z.string().min(1).describe("Assunto ou palavras-chave da mensagem."),
+      limit: z.number().int().min(1).max(5).optional().describe("Máximo de modelos (1-5)."),
+    }),
+    async (input) =>
+      listV2MessageModels({
+        query: input.query,
+        allowedIds: allowedModelIds,
+        limit: input.limit,
+      }),
+  );
+  if (messageModels) tools.list_message_models = messageModels;
+
+  return { tools, governor };
+}
+
 const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
   reply: z.string(),
   theme: z.string().optional(),
@@ -57,7 +224,7 @@ export async function callV2LLMTest(
   agentId: string,
   config: V2AgentConfig,
   userMessage: string,
-): Promise<{ output: V2LLMOutput; inputTokens: number; outputTokens: number; latencyMs: number }> {
+): Promise<ReturnType<typeof callV2LLM>> {
   const emptyContext: V2CRMContext = {
     contact: null,
     deals: [],
@@ -112,6 +279,8 @@ function buildV2SystemPrompt(
   }
 
   lines.push(`# Etapa atual\n${stage}`);
+  lines.push("# Tools de consulta disponíveis");
+  lines.push("Antes de responder, você pode chamar: search_products, search_crm_records, knowledge_search, list_message_models. Não chame a mesma tool com os mesmos argumentos mais de uma vez.");
   lines.push("# Saída obrigatória");
   lines.push("Responda com um JSON EXATAMENTE neste formato:");
   lines.push(JSON.stringify({
@@ -144,7 +313,14 @@ export async function callV2LLM(args: {
   themeInstructions?: string;
   collectedVariables?: Record<string, unknown>;
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
-}): Promise<{ output: V2LLMOutput; inputTokens: number; outputTokens: number; latencyMs: number }> {
+}): Promise<{
+  output: V2LLMOutput;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  governorStats: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
+  toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+}> {
   const apiKey = await getAgentApiKey(args.agentId);
   const system = buildV2SystemPrompt(
     args.config,
@@ -161,16 +337,36 @@ export async function callV2LLM(args: {
   ];
 
   const startedAt = Date.now();
+  const { tools, governor } = buildV2ToolSet({
+    config: args.config,
+    context: args.context,
+    agentId: args.agentId,
+    apiKey,
+    themeId: args.themeId,
+  });
+  const hasTools = Object.keys(tools).length > 0;
 
-  async function attempt(): Promise<{ output: V2LLMOutput; inputTokens: number; outputTokens: number }> {
+  const renderVars = flattenForRender({
+    contact: args.context.contact ?? {},
+    deal: args.context.selectedDeal ?? {},
+    ...((args.collectedVariables as Record<string, unknown>) ?? {}),
+    organization: args.config.organizationName || "",
+  });
+
+  async function attempt(): Promise<{
+    output: V2LLMOutput;
+    inputTokens: number;
+    outputTokens: number;
+    toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+  }> {
     const result = await generateWithTools({
       model: args.config.model,
       apiKey,
       system,
       messages: messages as any,
+      tools,
       temperature: behaviorToTemperature(args.config.responseBehavior),
-      maxSteps: 1,
-      toolChoice: "none",
+      maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
     });
 
     const text = result.text.trim();
@@ -187,10 +383,16 @@ export async function callV2LLM(args: {
       throw new Error(`Invalid LLM output schema: ${validated.error.message}`);
     }
 
+    const output = validated.data as V2LLMOutput;
+
+    // Aplica renderizador de mensagens em todas as respostas.
+    output.reply = renderMessage(output.reply, renderVars) ?? output.reply;
+
     return {
-      output: validated.data as V2LLMOutput,
+      output,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      toolCalls: result.toolCalls,
     };
   }
 
@@ -198,7 +400,7 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
-      return { ...r, latencyMs: Date.now() - startedAt };
+      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats() };
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }

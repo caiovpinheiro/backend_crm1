@@ -309,6 +309,8 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   let inputTokens = 0;
   let outputTokens = 0;
   let latencyMs = 0;
+  let toolCalls: Array<{ toolName: string; args: unknown; result: unknown }> | undefined;
+  let governorStats: { totalCalls: number; replays: number; denials: number; limitHit: boolean } | undefined;
   let sentReply: string | undefined;
   let executedActions: V2ActionResult[] = [];
   let discardedActions: V2Action[] = [];
@@ -431,6 +433,8 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     inputTokens = llmResult.inputTokens;
     outputTokens = llmResult.outputTokens;
     latencyMs = llmResult.latencyMs;
+    toolCalls = llmResult.toolCalls;
+    governorStats = llmResult.governorStats;
   }
 
   if (!llmOutput) {
@@ -480,6 +484,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       inboundText: input.userMessage, crmContext: context, prompt, llmOutput, reply: identMsg,
       executedActions, discardedActions, handoff: false, latencyMs, inputTokens, outputTokens,
       owner, stage: "identifying", themeId, appliedRuleId, versionId,
+      toolCalls, governorStats,
     });
     return { handoff: false, closed: false, sentReply: identMsg };
   }
@@ -551,6 +556,8 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     themeId,
     appliedRuleId,
     versionId,
+    toolCalls,
+    governorStats,
   });
 
   return { handoff: anyHandoff, closed: anyClose, sentReply };
@@ -580,7 +587,15 @@ async function callLLMWithTheme(
   rule: ReturnType<typeof evaluateV2Rules> | null,
   owner: string,
   stage: V2Stage,
-): Promise<{ llmOutput?: V2LLMOutput; prompt: string; inputTokens: number; outputTokens: number; latencyMs: number }> {
+): Promise<{
+  llmOutput?: V2LLMOutput;
+  prompt: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  toolCalls?: Array<{ toolName: string; args: unknown; result: unknown }>;
+  governorStats?: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
+}> {
   const theme = getV2ThemeById(config, themeId);
   const themeInstructions = theme
     ? `${theme.instructions}\nFerramentas permitidas: ${theme.allowedTools.join(", ")}`
@@ -623,6 +638,8 @@ async function callLLMWithTheme(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       latencyMs: result.latencyMs,
+      toolCalls: result.toolCalls,
+      governorStats: result.governorStats,
     };
   } catch (err) {
     return {

@@ -11,7 +11,7 @@
 
 export type V2MessageFormatter = (key: string, value: unknown) => string | undefined;
 
-const KEY_CHARS = /[\p{L}\p{N}_ ]/u;
+const KEY_CHARS = /[\p{L}\p{N}_. ]/u;
 
 function isKeyChar(char: string): boolean {
   return KEY_CHARS.test(char);
@@ -22,9 +22,30 @@ function readKey(template: string, start: number): { key: string; end: number } 
   while (i < template.length && isKeyChar(template[i])) {
     i++;
   }
-  const key = template.slice(start, i).trim();
+  let key = template.slice(start, i).trim();
+  // Trailing dot/colon/comma usado como pontuação não faz parte da chave
+  // (ex.: "@Email." => "Email"). Ponto interno vira caminho aninhado.
+  while (key.length > 0 && /[.:\\,;!?]$/.test(key)) {
+    if (i < template.length && isKeyChar(template[i])) break;
+    key = key.slice(0, -1).trim();
+    i--;
+  }
   if (!key) return null;
-  return { key, end: i };
+  return { key, end: start + key.length };
+}
+
+function resolveVariable(variables: Record<string, unknown>, key: string): unknown {
+  const direct = variables[key];
+  if (direct !== undefined) return direct;
+  if (!key.includes(".")) return undefined;
+  const parts = key.split(".");
+  let current: unknown = variables;
+  for (const part of parts) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+    if (current === undefined) return undefined;
+  }
+  return current;
 }
 
 function findMatchingBrace(template: string, start: number): number {
@@ -40,7 +61,7 @@ function findMatchingBrace(template: string, start: number): number {
 }
 
 function hasTruthyValue(variables: Record<string, unknown>, key: string): boolean {
-  const value = variables[key];
+  const value = resolveVariable(variables, key);
   if (value === null || value === undefined) return false;
   if (typeof value === "string" && value.trim() === "") return false;
   if (Array.isArray(value) && value.length === 0) return false;
@@ -95,7 +116,7 @@ export function renderMessage(
       }
 
       // Referência simples
-      result += formatValue(key, variables[key], formatter);
+      result += formatValue(key, resolveVariable(variables, key), formatter);
       i = end;
       continue;
     }

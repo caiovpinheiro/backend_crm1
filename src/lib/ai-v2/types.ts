@@ -88,6 +88,10 @@ export interface V2Theme {
   tabulationId?: string;
   /** Máximo de turnos neste tema antes de handoff (0 = sem limite). */
   maxTurns?: number;
+  /** IDs dos documentos de conhecimento permitidos neste tema. */
+  knowledgeDocIds?: string[];
+  /** IDs dos modelos de mensagem permitidos neste tema. */
+  messageModelIds?: string[];
 }
 
 export type V2RuleConditionType =
@@ -331,6 +335,21 @@ export interface V2AgentConfig {
   autonomyMode: V2AutonomyMode;
   costCap?: V2CostCap;
   dailyTokenCap?: number;
+  /** Nome da organização para variáveis de mensagem. */
+  organizationName?: string;
+  /** Tools habilitadas globalmente (usadas quando o tema não restringe). */
+  enabledTools?: string[];
+  /** Limites de chamadas de ferramenta por turno. */
+  toolGovernor?: V2ToolGovernorConfig;
+  /** IDs globais dos documentos de conhecimento permitidos. */
+  allowedKnowledgeDocIds?: string[];
+  /** IDs globais dos modelos de mensagem permitidos. */
+  allowedMessageModelIds?: string[];
+}
+
+export interface V2ToolGovernorConfig {
+  maxCallsPerTurn: number;
+  maxRepeatsPerTool: number;
 }
 
 /** Ação estruturada executada pelo motor (não confundir com V2RuleAction, que é config). */

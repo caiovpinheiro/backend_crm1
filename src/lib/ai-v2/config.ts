@@ -41,6 +41,8 @@ const themeSchema = z.object({
   allowedTools: z.array(z.string()).optional().default([]),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  knowledgeDocIds: z.array(z.string()).optional().default([]),
+  messageModelIds: z.array(z.string()).optional().default([]),
   productPolicy: productPolicySchema.optional().default({
     enabled: false,
     maxItems: 3,
@@ -240,6 +242,17 @@ export const v2AgentConfigSchema = z.object({
   autonomyMode: z.enum(["autonomous", "draft"]).optional().default("autonomous"),
   costCap: costCapSchema.optional(),
   dailyTokenCap: z.number().int().min(0).optional(),
+  organizationName: z.string().optional().default(""),
+  enabledTools: z.array(z.string()).optional().default([]),
+  toolGovernor: z
+    .object({
+      maxCallsPerTurn: z.number().int().min(1).optional().default(6),
+      maxRepeatsPerTool: z.number().int().min(1).optional().default(2),
+    })
+    .optional()
+    .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
+  allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
+  allowedMessageModelIds: z.array(z.string()).optional().default([]),
 });
 
 export type V2AgentConfigInput = z.input<typeof v2AgentConfigSchema>;
