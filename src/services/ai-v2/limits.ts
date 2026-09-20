@@ -12,6 +12,8 @@ export interface V2Counters {
   nonsenseMessages: number;
   loopCount: number;
   lastLoopMessage?: string;
+  aiTransferCount: number;
+  surveyPending: boolean;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -21,6 +23,8 @@ export function defaultV2Counters(): V2Counters {
     stalledExchanges: 0,
     nonsenseMessages: 0,
     loopCount: 0,
+    aiTransferCount: 0,
+    surveyPending: false,
   };
 }
 
@@ -34,6 +38,8 @@ export function parseV2Counters(raw: unknown): V2Counters {
     nonsenseMessages: Number(r.nonsenseMessages) || 0,
     loopCount: Number(r.loopCount) || 0,
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
+    aiTransferCount: Number(r.aiTransferCount) || 0,
+    surveyPending: Boolean(r.surveyPending),
   };
 }
 

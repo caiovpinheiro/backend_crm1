@@ -329,12 +329,11 @@ async function main() {
       // Blocos de prompt do vertical pack, se houver
       const blocks: string[] = [];
       try {
-        const packBlocks =
-          pack?.promptBlocks({
-            archetype: agent.archetype,
-            userMessage: "",
-            recentContext: "",
-          }) ?? [];
+        const packBlocks = await pack?.promptBlocks({
+          archetype: agent.archetype,
+          userMessage: "",
+          recentContext: "",
+        }) ?? [];
         blocks.push(...packBlocks);
       } catch {
         // ignore
@@ -421,7 +420,7 @@ async function main() {
         verticalPack: agent.verticalPack,
         model: agent.model,
         temperature: agent.temperature,
-        responseBehavior: agent.responseBehavior,
+        responseBehavior: (agent as any).responseBehavior,
         maxTokens: agent.maxTokens,
         tone: agent.tone,
         language: agent.language,

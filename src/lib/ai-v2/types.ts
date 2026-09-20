@@ -219,6 +219,23 @@ export interface V2LimitsConfig {
   loopDetectionWindowMinutes: number;
   /** Máximo de repetições considerado loop. */
   maxLoopCount: number;
+  /** Máximo de transferências entre agentes de IA antes de ir para uma pessoa. */
+  maxAiTransfers: number;
+}
+
+export interface V2BusinessHoursSlot {
+  /// 0=Dom, 1=Seg, … 6=Sáb.
+  day: number;
+  /// "HH:mm" 24h.
+  start: string;
+  end: string;
+}
+
+export interface V2BusinessHoursConfig {
+  enabled: boolean;
+  timezone: string;
+  weekdays: V2BusinessHoursSlot[];
+  offHoursMessage?: string;
 }
 
 export interface V2MediaKindConfig {
@@ -339,6 +356,8 @@ export interface V2AgentConfig {
   enabledTools?: string[];
   /** Limites de chamadas de ferramenta por turno. */
   toolGovernor?: V2ToolGovernorConfig;
+  /** Horário de atendimento do agente. */
+  businessHours?: V2BusinessHoursConfig | null;
   /** IDs globais dos documentos de conhecimento permitidos. */
   allowedKnowledgeDocIds?: string[];
   /** IDs globais dos modelos de mensagem permitidos. */
@@ -368,7 +387,8 @@ export type V2ActionType =
   | "set_theme"
   | "set_variable"
   | "record_knowledge_gap"
-  | "start_survey";
+  | "start_survey"
+  | "send_message";
 
 export interface V2Action {
   type: V2ActionType;

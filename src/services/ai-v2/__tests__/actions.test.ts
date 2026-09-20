@@ -12,7 +12,7 @@ vi.mock("@/lib/prisma", () => ({
     product: { findFirst: vi.fn() },
     note: { create: vi.fn() },
     conversation: { findUnique: vi.fn() },
-    contact: { findUnique: vi.fn() },
+    contact: { findUnique: vi.fn(), update: vi.fn() },
     message: { create: vi.fn() },
     whatsAppTemplateConfig: { findFirst: vi.fn() },
   },
@@ -32,6 +32,10 @@ vi.mock("@/lib/meta-whatsapp/enrich-template-flow", () => ({
 
 vi.mock("@/lib/sse-bus", () => ({
   sseBus: { publish: vi.fn() },
+}));
+
+vi.mock("../handoff", () => ({
+  simpleHandoff: vi.fn().mockResolvedValue(undefined),
 }));
 
 function ctx(overrides: Record<string, unknown> = {}) {
@@ -100,5 +104,36 @@ describe("executeV2Actions effect tools", () => {
     expect(sendAgentMessage).toHaveBeenCalledWith(
       expect.objectContaining({ text: expect.stringContaining("Notebook Pro") }),
     );
+  });
+
+  it("handoff delega para simpleHandoff com destino específico", async () => {
+    const { simpleHandoff } = await import("../handoff");
+    const action: V2Action = { type: "handoff", destination: { type: "user", id: "u-99" } };
+    const res = await executeV2Actions([action], ctx());
+    expect(res.results[0].ok).toBe(true);
+    expect(simpleHandoff).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: { type: "user", id: "u-99" } }),
+    );
+  });
+
+  it("update_field bloqueia campo somente leitura", async () => {
+    const action: V2Action = { type: "update_field", entity: "contact", field: "name", value: "Novo" };
+    const config = {
+      contextFields: { contact: [{ key: "name", label: "Nome", permissions: ["read"] }], deal: [] },
+    } as unknown as V2AgentConfig;
+    const res = await executeV2Actions([action], ctx({ config }));
+    expect(res.results[0].ok).toBe(false);
+    expect(res.results[0].error).toContain("read-only");
+  });
+
+  it("update_field permite campo com permissão de escrita", async () => {
+    (prisma.contact.update as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "contact-1" });
+    const action: V2Action = { type: "update_field", entity: "contact", field: "email", value: "novo@exemplo.com" };
+    const config = {
+      contextFields: { contact: [{ key: "email", label: "Email", permissions: ["read", "write"] }], deal: [] },
+    } as unknown as V2AgentConfig;
+    const res = await executeV2Actions([action], ctx({ config }));
+    expect(res.results[0].ok).toBe(true);
+    expect(prisma.contact.update).toHaveBeenCalled();
   });
 });

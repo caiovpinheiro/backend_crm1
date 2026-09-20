@@ -51,6 +51,7 @@ async function loadContactFields(
       phone: true,
       email: true,
       customValues: true,
+      tags: { select: { tag: { select: { name: true } } } },
     } as Record<string, unknown>,
   });
   if (!contact) return {};
@@ -73,6 +74,11 @@ async function loadContactFields(
   out.name = contact.name;
   out.phone = contact.phone;
   out.email = contact.email;
+  if (Array.isArray(contact.tags)) {
+    out.tags = (contact.tags as Array<{ tag?: { name?: string } }>)
+      .map((t) => t.tag?.name)
+      .filter((n): n is string => Boolean(n));
+  }
   return out;
 }
 

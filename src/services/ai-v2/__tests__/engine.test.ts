@@ -97,7 +97,7 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
   } as unknown as V2AgentConfig;
 }
 
-function makeState(stage: string, owner = "agente") {
+function makeState(stage: string, owner = "agente", counters: Record<string, unknown> = {}) {
   return {
     id: "state-1",
     conversationId: "conv-1",
@@ -105,7 +105,7 @@ function makeState(stage: string, owner = "agente") {
     stage,
     owner,
     themeId: null,
-    counters: {},
+    counters,
     versionId: null,
     postCloseWindowEndAt: null,
     closeReason: null,
@@ -371,5 +371,88 @@ describe("processV2Turn", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalled();
     const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0].text ?? "";
     expect(sent).toBe(config.handoff.message);
+  });
+
+  it("regra contact_tag dispara ação terminal sem chamar LLM", async () => {
+    const config = baseConfig({
+      rules: [
+        {
+          id: "tag-vip",
+          name: "VIP",
+          order: 1,
+          conditions: [{ type: "contact_tag", values: ["VIP"] }],
+          actions: [{ type: "send_message", message: "Atendimento VIP." }],
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("excedido limite de transferências IA força handoff para destino padrão", async () => {
+    const config = baseConfig({
+      limits: { maxAiTransfers: 1 } as any,
+      handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["humano"] },
+      themes: [
+        {
+          id: "vendas",
+          name: "Vendas",
+          instructions: "venda",
+          when: [],
+          examples: [],
+          allowedTools: ["handoff"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { aiTransferCount: 1 }));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Vou passar.",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Para IA",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-2" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Quero falar com outro bot",
+    });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: { type: "department" } }),
+    );
   });
 });

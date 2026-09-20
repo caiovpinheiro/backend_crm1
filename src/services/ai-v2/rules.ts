@@ -3,7 +3,7 @@
  * Nenhum domínio de cliente.
  */
 
-import type { V2AgentConfig, V2Rule, V2RuleAction, V2RuleCondition, V2CRMContext } from "@/lib/ai-v2/types";
+import type { V2AgentConfig, V2Rule, V2RuleAction, V2RuleCondition, V2CRMContext, V2BusinessHoursSlot } from "@/lib/ai-v2/types";
 
 export type V2RuleEvaluationInput = {
   userMessage: string;
@@ -13,7 +13,41 @@ export type V2RuleEvaluationInput = {
   contactTags?: string[];
   dealStageName?: string;
   withinBusinessHours: boolean;
+  surveyReceived?: boolean;
 };
+
+function parseTime(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+function weekdayFromString(s: string): number | undefined {
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[s];
+}
+
+export function isWithinV2BusinessHours(config: V2AgentConfig, now = new Date()): boolean {
+  const bh = config.businessHours;
+  if (!bh || !bh.enabled || bh.weekdays.length === 0) return true;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: bh.timezone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+  });
+  const parts = formatter.formatToParts(now);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const weekday = weekdayFromString(parts.find((p) => p.type === "weekday")?.value ?? "");
+  if (weekday === undefined) return true;
+  const minutes = hour * 60 + minute;
+  const slot = bh.weekdays.find((s: V2BusinessHoursSlot) => s.day === weekday);
+  if (!slot) return false;
+  const start = parseTime(slot.start);
+  const end = parseTime(slot.end);
+  return minutes >= start && minutes < end;
+}
 
 function normalize(s: string): string {
   return s
@@ -68,7 +102,7 @@ function evaluateCondition(
       result = !context.selectedDeal;
       break;
     case "survey_received":
-      result = false; // preenchido externamente se necessário
+      result = input.surveyReceived ?? false;
       break;
     case "media_kind":
       result = condition.values?.some((v) => input.mediaKinds?.includes(v)) ?? false;

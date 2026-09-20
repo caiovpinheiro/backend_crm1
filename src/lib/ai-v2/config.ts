@@ -138,6 +138,7 @@ const limitsConfigSchema = z.object({
   silenceMinutes: z.number().int().min(0).optional().default(30),
   loopDetectionWindowMinutes: z.number().int().min(0).optional().default(60),
   maxLoopCount: z.number().int().min(0).optional().default(3),
+  maxAiTransfers: z.number().int().min(0).optional().default(3),
 });
 
 const mediaKindConfigSchema = z.object({
@@ -252,6 +253,25 @@ export const v2AgentConfigSchema = z.object({
     .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  businessHours: z
+    .object({
+      enabled: z.boolean().optional().default(false),
+      timezone: z.string().optional().default("America/Sao_Paulo"),
+      weekdays: z
+        .array(
+          z.object({
+            day: z.number().int().min(0).max(6),
+            start: z.string(),
+            end: z.string(),
+          }),
+        )
+        .optional()
+        .default([]),
+      offHoursMessage: z.string().optional(),
+    })
+    .optional()
+    .nullable()
+    .default(null),
 });
 
 export type V2AgentConfigInput = z.input<typeof v2AgentConfigSchema>;

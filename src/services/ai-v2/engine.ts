@@ -12,7 +12,7 @@ import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
 import { loadV2Context, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
-import { evaluateV2Rules } from "./rules";
+import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
@@ -64,6 +64,17 @@ function allQueryToolResultsEmpty(
   const queryCalls = toolCalls.filter((c) => QUERY_TOOL_NAMES.has(c.toolName));
   if (queryCalls.length === 0) return false;
   return queryCalls.every((c) => isEmptyQueryResult(c.result));
+}
+
+function resolveHandoffDestination(
+  config: V2AgentConfig,
+  destination: V2Destination,
+  counters: V2Counters,
+): V2Destination {
+  if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
+    return config.handoff.defaultDestination;
+  }
+  return destination;
 }
 
 export type V2TurnInput = {
@@ -301,17 +312,20 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       channel: input.channel,
       autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
     });
+    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+    if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
       dealId: loadedContext.dealId,
-      destination: config.handoff.defaultDestination,
+      destination: mediaDestination,
     });
     await upsertV2ConversationState({
       organizationId: orgId,
       conversationId: input.conversationId,
       agentId: resolved!.agentConfigId,
       owner: "pessoa",
+      counters: counters as V2Counters,
       versionId: versionId,
     });
     await logV2Turn({
@@ -324,14 +338,16 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   // Regras determinísticas
+  const withinBusinessHours = isWithinV2BusinessHours(config);
   const rule = evaluateV2Rules(config, {
     userMessage: input.userMessage,
     messageType: input.messageType,
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
-    contactTags: [],
+    contactTags: (context.contact?.tags as string[]) ?? [],
     dealStageName: loadedContext.selectedDeal?.stageName as string,
-    withinBusinessHours: true,
+    withinBusinessHours,
     mediaKinds: media ? [media.kind] : [],
+    surveyReceived: counters.surveyPending,
   }, context);
 
   let appliedRuleId = rule?.id;
@@ -351,34 +367,39 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   let anyClose = false;
   let collectedVariables: Record<string, unknown> = { ...automationVariables };
 
-  // Simplificação: se regra mandou handoff/close direto, executa.
+  // Regra determinística: executa ações; se for terminal (handoff/close/mensagem),
+  // encerra o turno; se for set_theme/set_variable, segue para o LLM com estado atualizado.
   if (rule) {
-    const quickActions = rule.actions.filter((a) => ["handoff", "close_conversation", "no_reply"].includes(a.type));
-    if (quickActions.length > 0) {
-      const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, "AUTONOMOUS");
-      const res = await executeV2Actions(rule.actions as unknown as V2Action[], actionCtx);
-      executedActions = res.results;
-      anyHandoff = res.anyHandoff;
-      anyClose = res.anyClose;
-      // Logs e saída
-      await logV2Turn({
-        organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
-        inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: res.anyHandoff ? config.handoff.message : undefined,
-        executedActions, discardedActions: [], handoff: anyHandoff, closed: anyClose, latencyMs: Date.now() - startedAt,
-        inputTokens: 0, outputTokens: 0, owner, stage, appliedRuleId, versionId,
-      });
+    const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, "AUTONOMOUS", (v) => { counters.surveyPending = v; });
+    const res = await executeV2Actions(rule.actions as unknown as V2Action[], actionCtx);
+    executedActions = res.results;
+    anyHandoff = res.anyHandoff;
+    anyClose = res.anyClose;
+    if (res.themeId) themeId = res.themeId;
 
-      if (anyHandoff) {
-        await upsertV2ConversationState({
-          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-          owner: "pessoa", versionId: versionId,
-        });
-        return { handoff: true, closed: false };
-      }
-      if (anyClose) {
-        await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule");
-        return { handoff: false, closed: true };
-      }
+    const terminalTypes = new Set(["handoff", "close_conversation", "no_reply", "send_message", "send_message_model", "send_whatsapp_template"]);
+    const isTerminal = rule.actions.some((a) => terminalTypes.has(a.type as string));
+
+    // Logs e saída
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: res.anyHandoff ? config.handoff.message : undefined,
+      executedActions, discardedActions: [], handoff: anyHandoff, closed: anyClose, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, appliedRuleId, versionId,
+    });
+
+    if (anyHandoff) {
+      await upsertV2ConversationState({
+        organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+        owner: "pessoa", counters: counters as V2Counters, versionId: versionId,
+      });
+      return { handoff: true, closed: false };
+    }
+    if (anyClose) {
+      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule");
+      return { handoff: false, closed: true };
+    }
+    if (isTerminal) {
       return { handoff: false, closed: false };
     }
   }
@@ -388,7 +409,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     if (!loadedContext.selectedDeal) {
       const onDealNotFound = config.entry.onDealNotFound;
       if (onDealNotFound === "handoff") {
-        await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, "Não encontrei seu cadastro. Vou transferir para um atendente.");
+        await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, "Não encontrei seu cadastro. Vou transferir para um atendente.", counters);
         return { handoff: true, closed: false };
       } else if (onDealNotFound === "create_deal") {
         await createInitialDeal(contactId);
@@ -447,8 +468,10 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       } else {
         const nextState = incrementStepAttempt(prevState, step.id);
         if (shouldHandoffOnboardingStep(step, nextState)) {
-          await simpleHandoff({ conversationId: input.conversationId, contactId, dealId: loadedContext.dealId, destination: step.handoffOnStuck });
-          await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", versionId: versionId });
+          const onboardingDestination = resolveHandoffDestination(config, step.handoffOnStuck, counters);
+          if (onboardingDestination.type === "ai_agent") counters.aiTransferCount += 1;
+          await simpleHandoff({ conversationId: input.conversationId, contactId, dealId: loadedContext.dealId, destination: onboardingDestination });
+          await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", counters: counters as V2Counters, versionId: versionId });
           return { handoff: true, closed: false };
         }
         collectedVariables.onboarding_state = nextState as unknown as Record<string, unknown>;
@@ -487,7 +510,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   if (!llmOutput) {
     const fallback = config.handoff.message;
-    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback);
+    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters);
     return { handoff: true, closed: false, sentReply: fallback };
   }
 
@@ -512,7 +535,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   replyText = guard.text;
 
   // Executa ações
-  const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT");
+  const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT", (v) => { counters.surveyPending = v; });
   const actionRes = await executeV2Actions(allowedActions, actionCtx);
   executedActions = actionRes.results;
   anyHandoff = actionRes.anyHandoff || llmOutput.handoff;
@@ -550,11 +573,13 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       await sendReply(handoffMsg);
       sentReply = sentReply ? `${sentReply}\n${handoffMsg}`.trim() : handoffMsg;
     }
+    const handoffDestination = resolveHandoffDestination(config, activeTheme?.handoffDestination ?? config.handoff.defaultDestination, counters);
+    if (handoffDestination.type === "ai_agent") counters.aiTransferCount += 1;
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
       dealId: loadedContext.dealId,
-      destination: activeTheme?.handoffDestination ?? config.handoff.defaultDestination,
+      destination: handoffDestination,
     });
     owner = "pessoa";
   }
@@ -709,6 +734,7 @@ async function handoffAndReply(
   stateRow: Awaited<ReturnType<typeof getV2ConversationState>>,
   versionId: string | undefined,
   message: string,
+  counters: V2Counters,
 ): Promise<void> {
   await sendV2TextMessage({
     conversationId: input.conversationId,
@@ -718,17 +744,20 @@ async function handoffAndReply(
     channel: input.channel,
     autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
   });
+  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+  if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   await simpleHandoff({
     conversationId: input.conversationId,
     contactId,
     dealId: loadedContext.dealId,
-    destination: config.handoff.defaultDestination,
+    destination: fallbackDestination,
   });
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId: input.conversationId,
     agentId: resolved!.agentConfigId,
     owner: "pessoa",
+    counters: counters as V2Counters,
     versionId,
   });
   await logV2Turn({
@@ -823,6 +852,7 @@ function buildActionCtx(
   input: V2TurnInput,
   contactId: string,
   autonomyMode: "AUTONOMOUS" | "DRAFT",
+  setSurveyPending?: (pending: boolean) => void,
 ) {
   return {
     agentUserId,
@@ -836,5 +866,6 @@ function buildActionCtx(
     llmOutput: {} as any,
     channel: input.channel,
     autonomyMode,
+    setSurveyPending,
   };
 }

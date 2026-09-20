@@ -6,9 +6,8 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import type { V2Action, V2ActionType, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput } from "@/lib/ai-v2/types";
+import type { V2Action, V2ActionType, V2AgentConfig, V2Destination, V2LLMOutput } from "@/lib/ai-v2/types";
 import { sendAgentMessage } from "@/services/ai/piloting-actions";
-import { executeDistribution } from "@/services/distribution";
 import { applyExistingTagToContact } from "@/services/tags";
 import { createDeal, updateDeal } from "@/services/deals";
 import { createActivity } from "@/services/activities";
@@ -21,7 +20,8 @@ import {
 } from "@/lib/meta-whatsapp/build-template-components";
 import { renderMessage, defaultFormatter } from "@/lib/ai-v2/message-render";
 import { recordV2KnowledgeGap } from "./onboarding";
-import { recordSurveyResponse } from "./survey";
+import { buildSurveyMessage, recordSurveyResponse } from "./survey";
+import { simpleHandoff } from "./handoff";
 import type { V2LoadedContext } from "./context";
 
 export type V2ActionResult = {
@@ -44,23 +44,17 @@ export interface V2ActionContext {
   llmOutput: V2LLMOutput;
   channel?: string;
   autonomyMode: "AUTONOMOUS" | "DRAFT";
+  setSurveyPending?: (pending: boolean) => void;
 }
 
 async function executeHandoff(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const destination = (action.destination ?? ctx.config.handoff.defaultDestination) as V2Destination;
-  let departmentId: string | undefined;
-
-  if (destination.type === "department") departmentId = destination.id;
-
   try {
-    await executeDistribution({
+    await simpleHandoff({
       conversationId: ctx.conversationId,
-      contactId: ctx.contactId ?? null,
-      dealId: ctx.dealId ?? null,
-      triggerSource: "AI_AGENT",
-      departmentId: departmentId ?? null,
-      reassign: true,
-      allowOrgWideFallback: false,
+      contactId: ctx.contactId,
+      dealId: ctx.dealId,
+      destination,
     });
     return { action, ok: true };
   } catch (err) {
@@ -84,11 +78,21 @@ async function executeAddTag(action: V2Action, ctx: V2ActionContext): Promise<V2
   }
 }
 
+function isFieldWritable(config: V2AgentConfig, entity: string, field: string): boolean {
+  const fields = entity === "contact" ? config.contextFields.contact : config.contextFields.deal;
+  const cfg = fields.find((f) => f.key === field);
+  if (!cfg) return false;
+  return cfg.permissions.includes("write");
+}
+
 async function executeUpdateField(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const entity = typeof action.entity === "string" ? action.entity : "";
   const field = typeof action.field === "string" ? action.field : "";
   const value = action.value;
   if (!field) return { action, ok: false, error: "Missing field" };
+  if (!isFieldWritable(ctx.config, entity, field)) {
+    return { action, ok: false, error: `Field ${entity}.${field} is read-only` };
+  }
   try {
     if (entity === "deal" && ctx.dealId) {
       await updateDeal(ctx.dealId, { [field]: value } as any);
@@ -216,9 +220,28 @@ async function executeRecordKnowledgeGap(action: V2Action, ctx: V2ActionContext)
 }
 
 async function executeStartSurvey(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  if (!ctx.contactId) return { action, ok: false, error: "No contact" };
   const score = Number(action.score);
+  // Sem score = iniciar pesquisa; com score = registrar resposta.
+  if (Number.isNaN(score)) {
+    const question = buildSurveyMessage(ctx.config);
+    if (!question) return { action, ok: false, error: "Survey disabled" };
+    try {
+      await sendV2TextMessage({
+        conversationId: ctx.conversationId,
+        contactId: ctx.contactId,
+        agentUserId: ctx.agentUserId,
+        text: renderMessage(question, messageVars(ctx), defaultFormatter()),
+        channel: ctx.channel,
+        autonomyMode: ctx.autonomyMode,
+      });
+      ctx.setSurveyPending?.(true);
+      return { action, ok: true };
+    } catch (err) {
+      return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
   const reason = typeof action.reason === "string" ? action.reason : undefined;
-  if (Number.isNaN(score) || !ctx.contactId) return { action, ok: false, error: "Invalid survey" };
   try {
     await recordSurveyResponse({
       organizationId: ctx.organizationId,
@@ -228,10 +251,34 @@ async function executeStartSurvey(action: V2Action, ctx: V2ActionContext): Promi
       score,
       reason,
     });
+    ctx.setSurveyPending?.(false);
     return { action, ok: true };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+async function executeSendMessage(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  const text = typeof action.text === "string" ? action.text : typeof action.message === "string" ? action.message : "";
+  if (!text) return { action, ok: false, error: "Missing message text" };
+  try {
+    const rendered = renderMessage(text, messageVars(ctx), defaultFormatter());
+    await sendV2TextMessage({
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      agentUserId: ctx.agentUserId,
+      text: rendered,
+      channel: ctx.channel,
+      autonomyMode: ctx.autonomyMode,
+    });
+    return { action, ok: true };
+  } catch (err) {
+    return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function executeNoReply(action: V2Action, _ctx: V2ActionContext): Promise<V2ActionResult> {
+  return { action, ok: true };
 }
 
 async function executeAskWithOptions(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
@@ -432,6 +479,8 @@ const EXECUTORS: Partial<Record<V2ActionType, (action: V2Action, ctx: V2ActionCo
   record_knowledge_gap: executeRecordKnowledgeGap,
   start_survey: executeStartSurvey,
   ask_with_options: executeAskWithOptions,
+  send_message: executeSendMessage,
+  no_reply: executeNoReply,
   send_message_model: executeSendMessageModel,
   send_product: executeSendProduct,
   send_whatsapp_template: executeSendWhatsappTemplate,
