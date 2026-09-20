@@ -11,6 +11,7 @@ import type { Prisma } from "@prisma/client";
 export type AgentBehaviorConfigSlice = {
   archetype: string;
   model: string;
+  responseBehavior: string;
   temperature: number;
   maxTokens: number;
   systemPromptTemplate: string;
@@ -70,6 +71,7 @@ export function hashAgentBehaviorConfig(
   const payload = [
     slice.archetype,
     slice.model,
+    slice.responseBehavior,
     String(slice.temperature),
     String(slice.maxTokens),
     slice.systemPromptTemplate,
@@ -94,6 +96,7 @@ export function hashAgentBehaviorConfig(
 export function behaviorSliceFromAgent(agent: {
   archetype: string;
   model: string;
+  responseBehavior: string;
   temperature: number;
   maxTokens: number;
   systemPromptTemplate: string;
@@ -115,6 +118,7 @@ export function behaviorSliceFromAgent(agent: {
   return {
     archetype: agent.archetype,
     model: agent.model,
+    responseBehavior: agent.responseBehavior,
     temperature: agent.temperature,
     maxTokens: agent.maxTokens,
     systemPromptTemplate: agent.systemPromptTemplate,
@@ -140,6 +144,7 @@ const AUDIT_FIELD_KEYS = [
   "avatarUrl",
   "archetype",
   "model",
+  "responseBehavior",
   "temperature",
   "maxTokens",
   "systemPromptTemplate",

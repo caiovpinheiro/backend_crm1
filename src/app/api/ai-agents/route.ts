@@ -73,6 +73,10 @@ export async function POST(request: Request) {
       model: typeof body.model === "string" ? body.model : undefined,
       temperature:
         typeof body.temperature === "number" ? body.temperature : undefined,
+      responseBehavior:
+        typeof body.responseBehavior === "string"
+          ? body.responseBehavior
+          : undefined,
       maxTokens:
         typeof body.maxTokens === "number" ? body.maxTokens : undefined,
       maxSteps:

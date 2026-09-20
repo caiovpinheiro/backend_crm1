@@ -4823,6 +4823,7 @@ model AIAgentConfig {
   archetype            AIAgentArchetype @default(SDR)
   model                String           @default("gpt-4o-mini")
   temperature          Float            @default(0.7)
+  responseBehavior     String           @default("balanced")
   maxTokens            Int              @default(1024)
 
   /// Chave OpenAI própria deste agente (criptografada). Null = usa a

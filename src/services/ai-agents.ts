@@ -14,6 +14,11 @@ import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  behaviorToTemperature,
+  normalizeResponseBehavior,
+  temperatureToBehavior,
+} from "@/lib/ai-agents/response-behavior";
 import { nextUserNumber } from "@/lib/public-id";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { encryptSecret } from "@/lib/secret-crypto";
@@ -193,6 +198,7 @@ export type CreateAIAgentInput = {
   templateId?: string | null;
   model?: string;
   temperature?: number;
+  responseBehavior?: string;
   maxTokens?: number;
   /// Tetos do tool-loop. 0/omitido = default seguro do runtime.
   maxSteps?: number;
@@ -545,7 +551,14 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         userId: user.id,
         archetype: input.archetype,
         model: input.model ?? archetype.suggestedModel,
-        temperature: input.temperature ?? 0.7,
+        responseBehavior: input.responseBehavior
+          ? normalizeResponseBehavior(input.responseBehavior)
+          : input.temperature != null
+            ? temperatureToBehavior(input.temperature)
+            : "balanced",
+        temperature: input.responseBehavior
+          ? behaviorToTemperature(normalizeResponseBehavior(input.responseBehavior))
+          : input.temperature ?? behaviorToTemperature("balanced"),
         maxTokens: input.maxTokens ?? 1024,
         systemPromptTemplate:
           input.systemPromptTemplate ?? archetype.systemPromptTemplate,
@@ -631,6 +644,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
               name: input.name,
               archetype: input.archetype,
               model: config.model,
+              responseBehavior: (config as Record<string, unknown>).responseBehavior as string,
               temperature: config.temperature,
               maxTokens: config.maxTokens,
               systemPromptTemplate: config.systemPromptTemplate,
@@ -727,8 +741,21 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.archetype ? { archetype: input.archetype } : {}),
         ...(nextTemplateId !== undefined ? { templateId: nextTemplateId } : {}),
         ...(input.model ? { model: input.model } : {}),
-        ...(input.temperature !== undefined
-          ? { temperature: input.temperature }
+        ...(input.responseBehavior !== undefined || input.temperature !== undefined
+          ? {
+              responseBehavior:
+                input.responseBehavior !== undefined
+                  ? normalizeResponseBehavior(input.responseBehavior)
+                  : input.temperature != null
+                    ? temperatureToBehavior(input.temperature)
+                    : normalizeResponseBehavior((existing as Record<string, unknown>).responseBehavior as string | undefined, existing.temperature),
+              temperature:
+                input.responseBehavior !== undefined
+                  ? behaviorToTemperature(normalizeResponseBehavior(input.responseBehavior))
+                  : input.temperature != null
+                    ? input.temperature
+                    : behaviorToTemperature(normalizeResponseBehavior((existing as Record<string, unknown>).responseBehavior as string | undefined, existing.temperature)),
+            }
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
         ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
@@ -850,7 +877,7 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
                   : (input.autoClosePolicy as unknown as Prisma.InputJsonValue),
             }
           : {}),
-      },
+      } as any,
     });
 
     const changedKeys = Object.keys(input).filter((k) => k !== "auditSource");
@@ -860,6 +887,7 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         avatarUrl: existing.user.avatarUrl,
         archetype: existing.archetype,
         model: existing.model,
+        responseBehavior: (existing as Record<string, unknown>).responseBehavior,
         temperature: existing.temperature,
         maxTokens: existing.maxTokens,
         systemPromptTemplate: existing.systemPromptTemplate,
@@ -899,8 +927,21 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
         ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
         ...(input.archetype !== undefined ? { archetype: input.archetype } : {}),
         ...(input.model !== undefined ? { model: input.model } : {}),
-        ...(input.temperature !== undefined
-          ? { temperature: input.temperature }
+        ...(input.responseBehavior !== undefined || input.temperature !== undefined
+          ? {
+              responseBehavior:
+                input.responseBehavior !== undefined
+                  ? normalizeResponseBehavior(input.responseBehavior)
+                  : input.temperature != null
+                    ? temperatureToBehavior(input.temperature)
+                    : beforeSnap.responseBehavior,
+              temperature:
+                input.responseBehavior !== undefined
+                  ? behaviorToTemperature(normalizeResponseBehavior(input.responseBehavior))
+                  : input.temperature != null
+                    ? input.temperature
+                    : beforeSnap.temperature,
+            }
           : {}),
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
         ...(input.systemPromptTemplate !== undefined
