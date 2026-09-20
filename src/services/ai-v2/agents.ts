@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { nextUserNumber } from "@/lib/public-id";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import {
   blankPreset,
@@ -89,23 +90,52 @@ export async function createV2Agent(organizationId: string, input: {
     config = { ...preset, name: input.name || preset.name };
   }
 
-  const row = await (prisma as unknown as {
-    aIAgentConfig: {
-      create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
-    };
-  }).aIAgentConfig.create({
-    data: {
-      organizationId,
-      name: input.name,
-      active: input.active ?? true,
-      engine: "simple",
-      archetype: "ATENDIMENTO",
-      simpleConfig: config as unknown as Record<string, unknown>,
-      autonomyMode: "AUTONOMOUS",
-      dailyTokenCap: 0,
-    },
+  const safeSlug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "agente";
+  let email = `${safeSlug}@ai.local`;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const exists = await (prisma as any).user.findFirst({ where: { email } });
+    if (!exists) break;
+    email = `${safeSlug}-${Math.random().toString(36).slice(2, 6)}@ai.local`;
+  }
+
+  const systemPromptTemplate = config.tone
+    ? `Tom: ${config.tone}\n${config.globalRules.join("\n")}`
+    : "";
+
+  return await (prisma as any).$transaction(async (tx: any) => {
+    const user = await tx.user.create({
+      data: {
+        name: input.name,
+        email,
+        type: "AI",
+        role: "MEMBER",
+        hashedPassword: null,
+        avatarUrl: null,
+        organizationId,
+        number: await nextUserNumber(organizationId, tx),
+      },
+    });
+
+    const row = await tx.aIAgentConfig.create({
+      data: {
+        organizationId,
+        userId: user.id,
+        name: input.name,
+        active: input.active ?? true,
+        engine: "simple",
+        archetype: "ATENDIMENTO",
+        model: config.model ?? "gpt-4o-mini",
+        responseBehavior: config.responseBehavior ?? "balanced",
+        temperature: 0.4,
+        systemPromptTemplate,
+        simpleConfig: config as unknown as Record<string, unknown>,
+        autonomyMode: "AUTONOMOUS",
+        dailyTokenCap: 0,
+        enabledTools: [],
+      },
+    });
+    return { id: row.id, config };
   });
-  return { id: row.id, config };
 }
 
 export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown }): Promise<{ id: string; config: V2AgentConfig }> {
