@@ -13,7 +13,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   try {
     const agent = await getV2Agent(id, r.session.user.organizationId!);
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
-    return NextResponse.json(agent);
+    return NextResponse.json({
+      ...agent,
+      simpleConfig: agent.draftConfig ?? agent.publishedConfig,
+    });
   } catch (err) {
     console.error("[GET /api/ai-agents-v2/[id]]", err);
     return NextResponse.json(

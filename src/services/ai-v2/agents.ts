@@ -47,27 +47,45 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
   }));
 }
 
-export async function getV2Agent(id: string, organizationId: string): Promise<{ id: string; name: string; active: boolean; simpleConfig: V2AgentConfig; archetype: string | null; createdAt: Date; updatedAt: Date } | null> {
-  const row = await (prisma as unknown as {
-    aIAgentConfig: {
-      findUnique: (args: { where: { id: string; organizationId: string }; select: Record<string, boolean> }) => Promise<{
-        id: string;
-        name: string;
-        active: boolean;
-        simpleConfig: unknown;
-        archetype: string | null;
-        createdAt: Date;
-        updatedAt: Date;
-      } | null>;
-    };
-  }).aIAgentConfig.findUnique({
+export type V2AgentDetail = {
+  id: string;
+  name: string;
+  active: boolean;
+  publishedConfig: V2AgentConfig;
+  draftConfig?: V2AgentConfig;
+  archetype: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export async function getV2Agent(id: string, organizationId: string): Promise<V2AgentDetail | null> {
+  const row = await (prisma as any).aIAgentConfig.findUnique({
     where: { id, organizationId },
-    select: { id: true, name: true, active: true, simpleConfig: true, archetype: true, createdAt: true, updatedAt: true },
+    select: {
+      id: true,
+      name: true,
+      active: true,
+      simpleConfig: true,
+      draftConfig: true,
+      archetype: true,
+      createdAt: true,
+      updatedAt: true,
+    },
   });
   if (!row) return null;
   try {
-    const config = normalizeV2Config(row.simpleConfig);
-    return { ...row, simpleConfig: config };
+    const publishedConfig = normalizeV2Config(row.simpleConfig);
+    const draftConfig = row.draftConfig ? normalizeV2Config(row.draftConfig) : undefined;
+    return {
+      id: row.id,
+      name: row.name,
+      active: row.active,
+      publishedConfig,
+      draftConfig,
+      archetype: row.archetype,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
   } catch (err) {
     console.error("[ai-v2] invalid config for agent", id, err);
     return null;
@@ -129,6 +147,7 @@ export async function createV2Agent(organizationId: string, input: {
         temperature: 0.4,
         systemPromptTemplate,
         simpleConfig: config as unknown as Record<string, unknown>,
+        draftConfig: config as unknown as Record<string, unknown>,
         autonomyMode: "AUTONOMOUS",
         dailyTokenCap: 0,
         enabledTools: [],
@@ -163,6 +182,90 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
     id: row.id,
     config: config ?? normalizeV2Config(row.simpleConfig),
   };
+}
+
+export async function saveV2AgentDraft(
+  id: string,
+  organizationId: string,
+  input: { config?: unknown },
+): Promise<{ id: string; config: V2AgentConfig }> {
+  let config: V2AgentConfig | undefined;
+  if (input.config !== undefined) {
+    const validated = validateV2Config(input.config);
+    if (!validated.ok) throw new Error(formatZodIssues(validated.errors));
+    config = validated.data;
+  }
+
+  const data: Record<string, unknown> = {};
+  if (config) data.draftConfig = config as unknown as Record<string, unknown>;
+
+  const row = await (prisma as any).aIAgentConfig.update({
+    where: { id, organizationId },
+    data,
+  });
+  return {
+    id: row.id,
+    config: config ?? normalizeV2Config(row.draftConfig ?? row.simpleConfig),
+  };
+}
+
+export async function publishV2AgentVersion(
+  id: string,
+  organizationId: string,
+  userId: string | undefined,
+  comment?: string,
+): Promise<{ id: string; versionNumber: number; config: V2AgentConfig }> {
+  const agent = await (prisma as any).aIAgentConfig.findUnique({
+    where: { id, organizationId },
+    select: { simpleConfig: true, draftConfig: true },
+  });
+  if (!agent) throw new Error("Agente não encontrado.");
+
+  const source = agent.draftConfig ?? agent.simpleConfig;
+  if (!source) throw new Error("Nenhuma configuração para publicar.");
+  const config = normalizeV2Config(source);
+
+  return await (prisma as any).$transaction(async (tx: any) => {
+    const lastVersion = await tx.aIAgentConfigVersion.findFirst({
+      where: { agentId: id },
+      orderBy: { versionNumber: "desc" },
+      select: { versionNumber: true },
+    });
+    const nextVersion = (lastVersion?.versionNumber ?? 0) + 1;
+
+    await tx.aIAgentConfigVersion.create({
+      data: {
+        organizationId,
+        agentId: id,
+        versionNumber: nextVersion,
+        config: config as unknown as Record<string, unknown>,
+        comment: comment ?? null,
+        createdById: userId ?? null,
+      },
+    });
+
+    await tx.aIAgentConfig.update({
+      where: { id, organizationId },
+      data: {
+        simpleConfig: config as unknown as Record<string, unknown>,
+        active: true,
+      },
+    });
+
+    return { id, versionNumber: nextVersion, config };
+  });
+}
+
+export async function listV2AgentVersions(
+  id: string,
+  organizationId: string,
+): Promise<{ versionNumber: number; comment?: string | null; createdAt: Date; createdById?: string | null }[]> {
+  const rows = await (prisma as any).aIAgentConfigVersion.findMany({
+    where: { agentId: id, organizationId },
+    orderBy: { versionNumber: "desc" },
+    select: { versionNumber: true, comment: true, createdAt: true, createdById: true },
+  });
+  return rows;
 }
 
 export async function deleteV2Agent(id: string, organizationId: string): Promise<void> {

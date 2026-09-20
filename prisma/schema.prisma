@@ -111,6 +111,7 @@ model Organization {
   systemUsageSessions      SystemUsageSession[]
   systemActivitySessions   SystemActivitySession[]
   aiAgentConfigs           AIAgentConfig[]
+  aiAgentConfigVersions    AIAgentConfigVersion[]
   aiAgentTemplates         AgentTemplate[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
@@ -4961,6 +4962,11 @@ model AIAgentConfig {
   /// Configuração JSON do motor v2 (simple), validada por Zod.
   simpleConfig Json?
 
+  /// Rascunho da configuração v2. Quando preenchido, a tela de edição
+  /// carrega este campo em vez de `simpleConfig`. Publicar copia o
+  /// rascunho para `simpleConfig` e cria uma versão.
+  draftConfig Json?
+
   /// Template de origem (Onda 3). Dual-write com `archetype` enquanto
   /// o FE/migração não abandonam o enum legado.
   templateId String?
@@ -4972,12 +4978,32 @@ model AIAgentConfig {
   knowledgeDocs AIAgentKnowledgeDoc[]
   runs          AIAgentRun[]
   configAudits  AIAgentConfigAudit[]
+  versions      AIAgentConfigVersion[]
 
   @@index([organizationId])
   @@index([organizationId, active])
   @@index([archetype])
   @@index([templateId])
   @@map("ai_agent_configs")
+}
+
+/// Versão publicada da configuração de um agente v2.
+model AIAgentConfigVersion {
+  id              String          @id @default(cuid())
+  organizationId  String
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agentId         String
+  agent           AIAgentConfig   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  versionNumber   Int
+  config          Json
+  comment         String?         @db.Text
+  createdById     String?
+  createdAt       DateTime        @default(now())
+
+  @@unique([agentId, versionNumber])
+  @@index([organizationId])
+  @@index([agentId, createdAt])
+  @@map("ai_agent_config_versions")
 }
 
 /// Molde reutilizável de agente (sistema ou por org). Dual-write com
