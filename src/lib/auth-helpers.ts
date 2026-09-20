@@ -17,6 +17,7 @@ import {
   type AuthzContext,
   type PermissionKey,
 } from "./authz";
+export { requirePermission } from "./authz";
 import {
   enterRequestContext,
   runWithContext,
