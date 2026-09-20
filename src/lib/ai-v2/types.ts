@@ -335,8 +335,6 @@ export interface V2AgentConfig {
   autonomyMode: V2AutonomyMode;
   costCap?: V2CostCap;
   dailyTokenCap?: number;
-  /** Nome da organização para variáveis de mensagem. */
-  organizationName?: string;
   /** Tools habilitadas globalmente (usadas quando o tema não restringe). */
   enabledTools?: string[];
   /** Limites de chamadas de ferramenta por turno. */

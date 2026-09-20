@@ -258,4 +258,118 @@ describe("processV2Turn", () => {
     const upsert = mocks.upsertState.mock.calls.find((c) => c[0].owner === "pessoa");
     expect(upsert).toBeTruthy();
   });
+
+  it("ações de efeito fora da allowlist do tema são descartadas pelo executor", async () => {
+    const config = baseConfig({
+      themes: [
+        {
+          id: "vendas",
+          name: "Vendas",
+          instructions: "venda",
+          when: ["produto"],
+          examples: [],
+          allowedTools: ["add_tag"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Vou enviar.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Produto",
+        actions: [
+          { type: "add_tag", tag: "interesse" },
+          { type: "send_product", productId: "p1" },
+        ],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [],
+      governorStats: { totalCalls: 0, replays: 0, denials: 0, limitHit: false },
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Quero produto",
+    });
+
+    const passedActions = mocks.executeActions.mock.calls[0][0];
+    expect(passedActions.map((a: any) => a.type)).toEqual(["add_tag"]);
+    const logCall = mocks.logTurn.mock.calls.find((c) => c[0].reply);
+    expect(logCall?.[0].discardedActions.map((a: any) => a.type)).toContain("send_product");
+  });
+
+  it("consulta vazia e sem dados do cliente força handoff com a mensagem configurada", async () => {
+    const config = baseConfig({
+      themes: [
+        {
+          id: "suporte",
+          name: "Suporte",
+          instructions: "suporte",
+          when: [],
+          examples: [],
+          allowedTools: ["knowledge_search"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: null, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Aqui está a resposta.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Tentativa",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [] } }],
+      governorStats: { totalCalls: 1, replays: 0, denials: 0, limitHit: false },
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Como funciona x?",
+    });
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+    const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0].text ?? "";
+    expect(sent).toBe(config.handoff.message);
+  });
 });

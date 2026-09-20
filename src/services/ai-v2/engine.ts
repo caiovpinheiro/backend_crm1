@@ -33,6 +33,39 @@ import {
 } from "./onboarding";
 import { loadV2AutomationBridge, mapAutomationVariables } from "./automation-bridge";
 
+const QUERY_TOOL_NAMES = new Set([
+  "search_products",
+  "search_crm_records",
+  "knowledge_search",
+  "list_message_models",
+]);
+
+function isEmptyQueryResult(result: unknown): boolean {
+  if (result === null || result === undefined) return true;
+  if (typeof result !== "object") return false;
+  const r = result as Record<string, unknown>;
+  if ("total" in r && typeof r.total === "number") return r.total === 0;
+  if ("products" in r && Array.isArray(r.products)) return r.products.length === 0;
+  if ("contacts" in r || "deals" in r) {
+    return (
+      (!Array.isArray(r.contacts) || r.contacts.length === 0) &&
+      (!Array.isArray(r.deals) || r.deals.length === 0)
+    );
+  }
+  if ("chunks" in r && Array.isArray(r.chunks)) return r.chunks.length === 0;
+  if ("models" in r && Array.isArray(r.models)) return r.models.length === 0;
+  return false;
+}
+
+function allQueryToolResultsEmpty(
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+): boolean {
+  if (!toolCalls || toolCalls.length === 0) return false;
+  const queryCalls = toolCalls.filter((c) => QUERY_TOOL_NAMES.has(c.toolName));
+  if (queryCalls.length === 0) return false;
+  return queryCalls.every((c) => isEmptyQueryResult(c.result));
+}
+
 export type V2TurnInput = {
   conversationId: string;
   channel: "meta" | "baileys" | string;
@@ -437,6 +470,21 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     governorStats = llmResult.governorStats;
   }
 
+  // Guarda: se usou tools de consulta, todas voltaram vazias e não tem dados do
+  // cliente, não pode inventar resposta. Força handoff com a mensagem configurada.
+  if (
+    llmOutput &&
+    !llmOutput.handoff &&
+    !llmOutput.concluded &&
+    allQueryToolResultsEmpty(toolCalls) &&
+    !context.contact &&
+    !context.selectedDeal
+  ) {
+    llmOutput.handoff = true;
+    llmOutput.reply = config.handoff.message;
+    llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
+  }
+
   if (!llmOutput) {
     const fallback = config.handoff.message;
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback);
@@ -498,9 +546,9 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   // Handoff via LLM
   if (anyHandoff && !anyClose) {
     const handoffMsg = renderMessage(config.handoff.message, vars, defaultFormatter());
-    if (handoffMsg.trim() && handoffMsg !== replyText) {
+    if (handoffMsg.trim() && sentReply !== handoffMsg) {
       await sendReply(handoffMsg);
-      sentReply = `${replyText}\n${handoffMsg}`.trim();
+      sentReply = sentReply ? `${sentReply}\n${handoffMsg}`.trim() : handoffMsg;
     }
     await simpleHandoff({
       conversationId: input.conversationId,

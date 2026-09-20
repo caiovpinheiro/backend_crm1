@@ -242,7 +242,6 @@ export const v2AgentConfigSchema = z.object({
   autonomyMode: z.enum(["autonomous", "draft"]).optional().default("autonomous"),
   costCap: costCapSchema.optional(),
   dailyTokenCap: z.number().int().min(0).optional(),
-  organizationName: z.string().optional().default(""),
   enabledTools: z.array(z.string()).optional().default([]),
   toolGovernor: z
     .object({

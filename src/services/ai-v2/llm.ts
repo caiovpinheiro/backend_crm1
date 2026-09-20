@@ -350,7 +350,6 @@ export async function callV2LLM(args: {
     contact: args.context.contact ?? {},
     deal: args.context.selectedDeal ?? {},
     ...((args.collectedVariables as Record<string, unknown>) ?? {}),
-    organization: args.config.organizationName || "",
   });
 
   async function attempt(): Promise<{
