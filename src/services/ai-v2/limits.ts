@@ -73,3 +73,47 @@ export function detectLoop(
   }
   return counters.loopCount >= config.limits.maxLoopCount;
 }
+
+export type V2StopAction = "none" | "handoff" | "close" | "silence";
+
+export interface V2StopResult {
+  blocksReply: boolean;
+  action: V2StopAction;
+  reason: string;
+}
+
+export function evaluateV2StopLimits(
+  config: V2AgentConfig,
+  counters: V2Counters,
+  message: string,
+): V2StopResult {
+  detectLoop(config, counters, message);
+  if (counters.loopCount >= config.limits.maxLoopCount) {
+    return {
+      blocksReply: true,
+      action: config.limits.nonsenseAction === "handoff" ? "handoff" : "silence",
+      reason: "loop detectado",
+    };
+  }
+  if (shouldStopCourtesy(config, counters)) {
+    return { blocksReply: true, action: "none", reason: "limite de respostas de cortesia" };
+  }
+  if (shouldStopHelpOffer(config, counters)) {
+    return { blocksReply: true, action: "none", reason: "limite de ofertas de ajuda" };
+  }
+  if (shouldStopNonsense(config, counters)) {
+    return {
+      blocksReply: true,
+      action: config.limits.nonsenseAction === "handoff" ? "handoff" : "silence",
+      reason: "limite de mensagens sem sentido",
+    };
+  }
+  if (shouldStopStalled(config, counters)) {
+    return {
+      blocksReply: true,
+      action: config.limits.stalledExchangesAction,
+      reason: "limite de trocas sem avanço",
+    };
+  }
+  return { blocksReply: false, action: "none", reason: "" };
+}

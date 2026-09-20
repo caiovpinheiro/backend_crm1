@@ -455,4 +455,87 @@ describe("processV2Turn", () => {
       expect.objectContaining({ destination: { type: "department" } }),
     );
   });
+
+  it("governor limit hit sem resultados e sem dados do cliente força handoff", async () => {
+    const config = baseConfig({
+      themes: [
+        {
+          id: "suporte",
+          name: "Suporte",
+          instructions: "suporte",
+          when: [],
+          examples: [],
+          allowedTools: ["knowledge_search"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: null, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Resposta da memória",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Tentativa",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [] } }],
+      governorStats: { totalCalls: 5, replays: 0, denials: 0, limitHit: true },
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Como funciona x?",
+    });
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+    const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0].text ?? "";
+    expect(sent).toBe(config.handoff.message);
+  });
+
+  it("send_message vindo de regra respeita limite de cortesia e não chama LLM", async () => {
+    const config = baseConfig({
+      limits: { maxCourtesyReplies: 1 } as any,
+      rules: [
+        {
+          id: "vip",
+          name: "VIP",
+          order: 1,
+          conditions: [{ type: "contact_tag", values: ["VIP"] }],
+          actions: [{ type: "send_message", message: "Atendimento VIP." }],
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { courtesyReplies: 1 }));
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(result.handoff).toBe(false);
+    expect(result.closed).toBe(false);
+  });
 });

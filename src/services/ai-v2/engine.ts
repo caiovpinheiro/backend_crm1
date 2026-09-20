@@ -5,7 +5,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
-import type { V2Action, V2AgentConfig, V2CRMContext, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
 import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
 import { createDeal } from "@/services/deals";
@@ -20,7 +20,7 @@ import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage } from "./actions";
 import { getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
-import { parseV2Counters, type V2Counters } from "./limits";
+import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior } from "./closure";
 import { simpleHandoff } from "./handoff";
 import {
@@ -371,14 +371,40 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   // encerra o turno; se for set_theme/set_variable, segue para o LLM com estado atualizado.
   if (rule) {
     const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, "AUTONOMOUS", (v) => { counters.surveyPending = v; });
-    const res = await executeV2Actions(rule.actions as unknown as V2Action[], actionCtx);
+    const stop = evaluateV2StopLimits(config, counters, input.userMessage);
+
+    let ruleActions = rule.actions as unknown as V2Action[];
+    const replyActionTypes = new Set(["send_message", "send_message_model", "send_whatsapp_template"]);
+    if (stop.blocksReply && ruleActions.some((a) => replyActionTypes.has(a.type))) {
+      ruleActions = ruleActions.filter((a) => !replyActionTypes.has(a.type));
+      if (stop.action === "handoff") ruleActions.push({ type: "handoff" });
+      else if (stop.action === "close") ruleActions.push({ type: "close_conversation" });
+      else if (stop.action === "silence" || stop.action === "none") {
+        // A resposta da regra foi bloqueada pelos limites de parada. Encerra o
+        // turno sem enviar nada e sem chamar o LLM, evitando duas mensagens do
+        // agente seguidas.
+        await logV2Turn({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+          inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: undefined,
+          executedActions, discardedActions: [], handoff: false, closed: false, latencyMs: Date.now() - startedAt,
+          inputTokens: 0, outputTokens: 0, owner, stage, appliedRuleId, versionId,
+        } as any);
+        await upsertV2ConversationState({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+          owner, counters: counters as V2Counters, versionId: versionId,
+        });
+        return { handoff: false, closed: false };
+      }
+    }
+
+    const res = await executeV2Actions(ruleActions, actionCtx);
     executedActions = res.results;
     anyHandoff = res.anyHandoff;
     anyClose = res.anyClose;
     if (res.themeId) themeId = res.themeId;
 
     const terminalTypes = new Set(["handoff", "close_conversation", "no_reply", "send_message", "send_message_model", "send_whatsapp_template"]);
-    const isTerminal = rule.actions.some((a) => terminalTypes.has(a.type as string));
+    const isTerminal = ruleActions.some((a) => terminalTypes.has(a.type as string));
 
     // Logs e saída
     await logV2Turn({
@@ -508,6 +534,22 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
   }
 
+  // Governor: se estourou o limite de chamadas e não tem material nem dado do
+  // cliente, não pode responder de memória.
+  if (
+    llmOutput &&
+    !llmOutput.handoff &&
+    !llmOutput.concluded &&
+    governorStats?.limitHit &&
+    (!toolCalls?.length || allQueryToolResultsEmpty(toolCalls)) &&
+    !context.contact &&
+    !context.selectedDeal
+  ) {
+    llmOutput.handoff = true;
+    llmOutput.reply = config.handoff.message;
+    llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados";
+  }
+
   if (!llmOutput) {
     const fallback = config.handoff.message;
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters);
@@ -558,6 +600,21 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       toolCalls, governorStats,
     });
     return { handoff: false, closed: false, sentReply: identMsg };
+  }
+
+  // Limites de parada: se a resposta estiver bloqueada, descarta o texto e aplica a ação configurada
+  const stopLimits = evaluateV2StopLimits(config, counters, input.userMessage);
+  if (stopLimits.blocksReply) {
+    replyText = "";
+    if (stopLimits.action === "handoff") {
+      anyHandoff = true;
+      llmOutput.handoff = true;
+    } else if (stopLimits.action === "close") {
+      anyClose = true;
+      llmOutput.concluded = true;
+    } else if (stopLimits.action === "silence") {
+      replyText = "";
+    }
   }
 
   // Envia reply se houver e não for handoff/close
