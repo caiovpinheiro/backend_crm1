@@ -113,19 +113,19 @@ function prismaToOwner(raw: string): V2Owner {
   return "agente";
 }
 
-async function loadAgentConfig(agentConfigId: string): Promise<{ config: V2AgentConfig; versionId?: string } | null> {
+async function loadAgentConfig(agentConfigId: string): Promise<{ config: V2AgentConfig; active: boolean; versionId?: string } | null> {
   const row = await (prisma as unknown as {
     aIAgentConfig: {
-      findUnique: (args: { where: { id: string }; select: { simpleConfig: boolean; id: boolean } }) => Promise<{ id: string; simpleConfig: unknown } | null>;
+      findUnique: (args: { where: { id: string }; select: { simpleConfig: boolean; id: boolean; active: boolean } }) => Promise<{ id: string; simpleConfig: unknown; active: boolean } | null>;
     };
   }).aIAgentConfig.findUnique({
     where: { id: agentConfigId },
-    select: { id: true, simpleConfig: true },
+    select: { id: true, simpleConfig: true, active: true },
   });
   if (!row || !row.simpleConfig) return null;
   try {
     const config = normalizeV2Config(row.simpleConfig);
-    return { config, versionId: row.id };
+    return { config, active: row.active ?? true, versionId: row.id };
   } catch (err) {
     console.error("[ai-v2] invalid config", err);
     return null;
@@ -188,6 +188,9 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const agent = await loadAgentConfig(resolved!.agentConfigId);
   if (!agent) {
     return { handoff: false, closed: false, error: "Agent config not found or invalid" };
+  }
+  if (!agent.active) {
+    return { handoff: false, closed: false, error: "Agent inactive" };
   }
   const config = agent.config;
 

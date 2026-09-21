@@ -538,4 +538,80 @@ describe("processV2Turn", () => {
     expect(result.handoff).toBe(false);
     expect(result.closed).toBe(false);
   });
+
+  it("agente desativado não responde no canal real (parte C, item 3)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: false });
+    mocks.loadContext.mockResolvedValue({ contact: { name: "João" }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    expect(result.error).toBe("Agent inactive");
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("allowedPhoneNumbers preenchida ignora números fora da lista (parte C, item 1)", async () => {
+    const config = baseConfig({ allowedPhoneNumbers: ["11999999999"] });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.prismaConversationFindUnique.mockResolvedValue({ contactId: "contact-1" });
+    mocks.loadContext.mockResolvedValue({ contact: { phone: "11888888888" }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    expect(result.error).toBe("Phone number not in allowed test list");
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("modo sugestão envia mensagem como DRAFT, não autônomo (parte C, item 4)", async () => {
+    const config = baseConfig({ autonomyMode: "suggest" });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Oi, João!",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Saudação",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0];
+    expect(sent?.text).toBe("Oi, João!");
+    expect(sent?.autonomyMode).toBe("DRAFT");
+  });
 });
