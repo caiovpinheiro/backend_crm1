@@ -144,7 +144,13 @@ export function buildV2ToolSet(args: {
       type: z.enum(["PRODUCT", "SERVICE"]).optional().describe("Filtro opcional por tipo."),
       limit: z.number().int().min(1).max(20).optional().describe("Máximo de resultados (1-20)."),
     }),
-    async (input) => searchV2Products(input),
+    async (input) =>
+      searchV2Products({
+        ...input,
+        allowedIds: args.config.productPolicy?.enabled
+          ? args.config.productPolicy.allowedProductIds
+          : undefined,
+      }),
   );
   if (searchProducts) tools.search_products = searchProducts;
 
@@ -207,14 +213,26 @@ export function buildV2ToolSet(args: {
 
 const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
   reply: z.string(),
-  theme: z.string().optional(),
-  messageModel: z.object({ id: z.string(), adapt: z.boolean().optional().default(false) }).optional(),
+  theme: z
+    .union([z.string(), z.null()])
+    .optional()
+    .transform((v) => (typeof v === "string" ? v : undefined)),
+  messageModel: z
+    .union([
+      z.object({ id: z.string(), adapt: z.boolean().optional().default(false) }),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => (v && typeof v === "object" && "id" in v ? v : undefined)),
   handoff: z.boolean().optional().default(false),
   concluded: z.boolean().optional().default(false),
   confirmed: z.boolean().nullable().optional().default(null),
   outOfScope: z.boolean().optional().default(false),
   sentiment: z.enum(["neutral", "dissatisfied", "angry"]).optional().default("neutral"),
-  tabulationId: z.string().optional(),
+  tabulationId: z
+    .union([z.string(), z.null()])
+    .optional()
+    .transform((v) => (typeof v === "string" ? v : undefined)),
   collected: z.record(z.string(), z.string()).optional().default({}),
   reason: z.string().optional().default(""),
   actions: z.array(v2ActionSchema).optional().default([]),

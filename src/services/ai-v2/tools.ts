@@ -47,6 +47,7 @@ function scoreTextMatch(haystack: string, query: string): number {
 export async function searchV2Products(args: {
   query: string;
   type?: "PRODUCT" | "SERVICE";
+  allowedIds?: string[];
   limit?: number;
 }): Promise<{
   query: string;
@@ -67,11 +68,13 @@ export async function searchV2Products(args: {
   const term = args.query.trim();
   const take = Math.min(Math.max(args.limit ?? 5, 1), 20);
 
+  const allowedIds = Array.isArray(args.allowedIds) && args.allowedIds.length > 0 ? args.allowedIds : null;
   const where: Record<string, unknown> = {
     organizationId: orgId,
     isActive: true,
   };
   if (args.type) where.type = args.type;
+  if (allowedIds) where.id = { in: allowedIds };
 
   const candidates = await prisma.product.findMany({
     where,

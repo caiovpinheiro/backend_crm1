@@ -181,8 +181,8 @@ describe("theme selection", () => {
   it("selects theme by keyword", () => {
     const config = baseConfig();
     config.themes = [
-      { id: "t1", name: "Fatura", when: ["fatura", "boleto"], instructions: "", allowedTools: [], examples: [], allowedKnowledgeDocIds: [], allowedMessageModelIds: [], productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [], actions: [] } },
-      { id: "t2", name: "Suporte", when: ["bug", "erro"], instructions: "", allowedTools: [], examples: [], allowedKnowledgeDocIds: [], allowedMessageModelIds: [], productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [], actions: [] } },
+      { id: "t1", name: "Fatura", when: ["fatura", "boleto"], instructions: "", allowedTools: [], examples: [], allowedKnowledgeDocIds: [], allowedMessageModelIds: [], productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [], allowedProductIds: [], actions: [] } },
+      { id: "t2", name: "Suporte", when: ["bug", "erro"], instructions: "", allowedTools: [], examples: [], allowedKnowledgeDocIds: [], allowedMessageModelIds: [], productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [], allowedProductIds: [], actions: [] } },
     ];
     const selected = selectV2Theme(config, "Quero pagar minha fatura", undefined);
     expect(selected?.id).toBe("t1");

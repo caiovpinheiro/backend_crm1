@@ -30,7 +30,7 @@ export async function simulateV2Turn(
   config: V2AgentConfig,
   userMessage: string,
 ): Promise<V2TestTurnResult> {
-  const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null };
+  const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
 
   const rule = evaluateV2Rules(
     config,

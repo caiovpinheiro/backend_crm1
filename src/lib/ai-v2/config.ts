@@ -22,6 +22,7 @@ const productPolicySchema = z.object({
   showImage: z.boolean().optional().default(false),
   showLink: z.boolean().optional().default(false),
   citableFields: z.array(z.string()).optional().default([]),
+  allowedProductIds: z.array(z.string()).optional().default([]),
   filter: z.record(z.string(), z.string()).optional(),
   actions: z.array(z.string()).optional().default([]),
 });
@@ -51,6 +52,7 @@ const themeSchema = z.object({
     showImage: false,
     showLink: false,
     citableFields: [],
+    allowedProductIds: [],
     actions: [],
   } as any),
   handoffDestination: destinationSchema.optional(),
@@ -416,6 +418,7 @@ function emptyProductPolicy(): V2ProductPolicy {
     showImage: false,
     showLink: false,
     citableFields: [],
+    allowedProductIds: [],
   };
 }
 
@@ -519,6 +522,7 @@ export function salesPreset(): V2AgentConfig {
         showImage: true,
         showLink: true,
         citableFields: ["name", "price", "description"],
+        allowedProductIds: [],
       },
     },
   ];

@@ -92,6 +92,8 @@ export interface V2ProductPolicy {
   showLink: boolean;
   /** Campos do produto que podem ser citados. */
   citableFields: string[];
+  /** IDs de produtos específicos permitidos. Vazio = todos ativos. */
+  allowedProductIds: string[];
   /** Filtros fixos de categoria/ativo/etc. */
   filter?: Record<string, string>;
   /** IDs de ações ligadas ao produto permitidas no tema. */
