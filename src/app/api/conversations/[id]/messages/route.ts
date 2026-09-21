@@ -30,7 +30,7 @@ import { fireTrigger, buildMessageTriggerData } from "@/services/automation-trig
 import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
-import { logEvent } from "@/services/activity-log";
+import { isWhatsappOrderSnapshot } from "@/lib/whatsapp-catalog-order";
 import {
   enrichEventMessageActors,
   resolveLifecycleEventActor,
@@ -137,6 +137,22 @@ export type InboxMessageDto = {
    *  compartilhado entre agentes). Alimenta a estrela preenchida no
    *  menu contextual e no bubble. */
   favoritedByMe?: boolean;
+  /** Pedido do catálogo WhatsApp. Ausente em mensagens que não são `order`. */
+  catalogOrder?: {
+    catalogId: string;
+    text: string | null;
+    currency: string;
+    total: number;
+    items: Array<{
+      productRetailerId: string;
+      quantity: number;
+      itemPrice: number;
+      currency: string;
+      productId: string | null;
+      name: string;
+      imageUrl: string | null;
+    }>;
+  } | null;
 };
 
 /** Resumo de uma conexão (Channel) para exibir o canal na UI do inbox/contato. */
@@ -202,6 +218,7 @@ const MSG_SELECT = {
   authorType: true, triggeredByName: true,
   mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
   sendStatus: true, sendError: true, channelId: true,
+  catalogOrder: true,
 } satisfies Prisma.MessageSelect;
 
 type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
@@ -219,18 +236,34 @@ async function findMessagesSafe(args: {
   orderBy: Prisma.MessageOrderByWithRelationInput;
   take: number;
 }): Promise<MsgRow[]> {
-  try {
-    return await prisma.message.findMany({ ...args, select: MSG_SELECT });
-  } catch (e) {
-    const code = (e as { code?: string })?.code;
-    const message = e instanceof Error ? e.message : String(e);
-    if (code === "P2022" || /triggeredByName/i.test(message)) {
-      const { triggeredByName: _omit, ...safeSelect } = MSG_SELECT;
-      const rows = await prisma.message.findMany({ ...args, select: safeSelect });
-      return rows.map((r) => ({ ...r, triggeredByName: null })) as MsgRow[];
+  const select: Prisma.MessageSelect = { ...MSG_SELECT };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const rows = await prisma.message.findMany({ ...args, select });
+      return rows.map((r) => ({
+        ...r,
+        triggeredByName:
+          "triggeredByName" in r ? (r.triggeredByName as string | null) : null,
+        catalogOrder: "catalogOrder" in r ? r.catalogOrder : null,
+      })) as MsgRow[];
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      const message = e instanceof Error ? e.message : String(e);
+      const missing =
+        code === "P2022" || /does not exist|Unknown field/i.test(message);
+      if (!missing) throw e;
+      if (/catalogOrder|catalog_order/i.test(message) && select.catalogOrder) {
+        delete select.catalogOrder;
+        continue;
+      }
+      if (/triggeredByName/i.test(message) && select.triggeredByName) {
+        delete select.triggeredByName;
+        continue;
+      }
+      throw e;
     }
-    throw e;
   }
+  throw new Error("Falha ao listar mensagens.");
 }
 
 // ── GET ──────────────────────────────────────
@@ -566,6 +599,7 @@ export async function GET(request: Request, context: RouteContext) {
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
       channelId: r.channelId ?? null,
       favoritedByMe: favoritedIds.has(r.id) || undefined,
+      catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
     };
     });
 
@@ -605,6 +639,7 @@ export async function GET(request: Request, context: RouteContext) {
           sendError: r.sendError ?? undefined,
           status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
           channelId: r.channelId ?? null,
+          catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
         }));
 
       const ticketIds = [...historyTickets.map((t) => t.id), conv.id];

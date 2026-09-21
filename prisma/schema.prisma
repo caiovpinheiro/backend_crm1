@@ -3158,6 +3158,8 @@ model Message {
   reactions        Json                    @default("[]")
   sendStatus       String                  @default("sent")
   sendError        String?
+  /// Pedido do catálogo WhatsApp (`type=order`). Preço e quantidade são os do payload da Meta.
+  catalogOrder     Json?                   @map("catalog_order")
   /// Token do botão Flow (Cloud API) por envio — correlaciona com webhook de retorno.
   flowToken        String?                 @map("flow_token")
   /// Template config usado no envio outbound (FK). Permite ao webhook
