@@ -7,6 +7,7 @@ import type { V2Action, V2AgentConfig, V2CRMContext } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { callV2LLMTest } from "./llm";
+import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
 
@@ -61,6 +62,11 @@ export async function simulateV2Turn(
   history: V2TestTurnHistoryItem[] = [],
 ): Promise<V2TestTurnResult> {
   const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+
+  const apiKey = await tryGetAgentApiKey(agentId);
+  if (!apiKey) {
+    throw new Error("NO_OPENAI_KEY");
+  }
 
   const rule = evaluateV2Rules(
     config,

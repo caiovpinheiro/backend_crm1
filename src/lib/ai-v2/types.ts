@@ -26,7 +26,7 @@ export type V2FieldPermission = "read" | "cite" | "write";
 
 export type V2Flow = "reception" | "full" | "onboarding";
 
-export type V2AutonomyMode = "autonomous" | "draft";
+export type V2AutonomyMode = "auto" | "suggest";
 
 export type V2Sentiment = "neutral" | "dissatisfied" | "angry";
 
@@ -407,6 +407,8 @@ export interface V2AgentConfig {
   allowedKnowledgeDocIds?: string[];
   /** IDs globais dos modelos de mensagem permitidos. */
   allowedMessageModelIds?: string[];
+  /** Telefones permitidos para resposta em modo de teste. Vazio = responde qualquer número. */
+  allowedPhoneNumbers?: string[];
   /** Tamanho preferido das respostas. */
   responseLength?: "short" | "medium" | "long";
   /** Saídas quando o agente não soube, pediu pessoa, sem material ou deu erro. */

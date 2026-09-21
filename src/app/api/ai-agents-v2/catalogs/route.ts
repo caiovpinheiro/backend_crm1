@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
+import { SUPPORTED_V2_MODELS } from "@/lib/ai-v2/config";
 
 export async function GET() {
   const r = await requireAuth();
@@ -95,6 +96,7 @@ export async function GET() {
       dealCustomFields: customFields.filter((f: any) => f.entity === "DEAL"),
       products,
       whatsappTemplates: whatsappTemplateCatalog,
+      models: SUPPORTED_V2_MODELS.map((m) => ({ id: m.id, name: m.label })),
     });
   } catch (err) {
     console.error("[GET /api/ai-agents-v2/catalogs]", err);

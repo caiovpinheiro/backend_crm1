@@ -73,6 +73,10 @@ export type V2AgentDetail = {
   active: boolean;
   publishedConfig: V2AgentConfig;
   draftConfig?: V2AgentConfig;
+  /** True se existe rascunho e ele difere da config publicada. */
+  hasUnpublishedChanges: boolean;
+  /** Número da última versão publicada (0 se nunca publicado). */
+  lastVersionNumber: number;
   archetype: string | null;
   hasOwnOpenaiKey: boolean;
   openaiApiKeyHint: string | null;
@@ -80,23 +84,39 @@ export type V2AgentDetail = {
   updatedAt: Date;
 };
 
+function configsEqual(a: V2AgentConfig, b: V2AgentConfig): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS" | "DRAFT" {
+  return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
+}
+
 export async function getV2Agent(id: string, organizationId: string): Promise<V2AgentDetail | null> {
   const row = await (prisma as any).aIAgentConfig.findFirst({
     where: { id, organizationId, engine: "simple" },
     include: {
       user: { select: { name: true } },
+      _count: { select: { versions: true } },
     },
   });
   if (!row) return null;
   try {
     const publishedConfig = normalizeV2Config(row.simpleConfig);
     const draftConfig = row.draftConfig ? normalizeV2Config(row.draftConfig) : undefined;
+    const lastVersion = await (prisma as any).aIAgentConfigVersion.findFirst({
+      where: { agentId: id },
+      orderBy: { versionNumber: "desc" },
+      select: { versionNumber: true },
+    });
     return {
       id: row.id,
       name: row.user?.name ?? "",
       active: row.active,
       publishedConfig,
       draftConfig,
+      hasUnpublishedChanges: draftConfig ? !configsEqual(publishedConfig, draftConfig) : false,
+      lastVersionNumber: lastVersion?.versionNumber ?? 0,
       archetype: row.archetype,
       hasOwnOpenaiKey: Boolean(row.openaiApiKeyEnc),
       openaiApiKeyHint: row.openaiApiKeyHint ?? null,
@@ -165,7 +185,7 @@ export async function createV2Agent(organizationId: string, input: {
         systemPromptTemplate,
         simpleConfig: config as unknown as Record<string, unknown>,
         draftConfig: config as unknown as Record<string, unknown>,
-        autonomyMode: "AUTONOMOUS",
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         dailyTokenCap: 0,
         enabledTools: [],
         ...(openaiKeyFields(input.openaiApiKey) ?? {}),
@@ -191,7 +211,10 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
 
   const data: Record<string, unknown> = {};
   if (input.active !== undefined) data.active = input.active;
-  if (config) data.simpleConfig = config as unknown as Record<string, unknown>;
+  if (config) {
+    data.simpleConfig = config as unknown as Record<string, unknown>;
+    data.autonomyMode = mapV2AutonomyToPrisma(config.autonomyMode);
+  }
   const keyUpdate = openaiKeyFields(input.openaiApiKey);
   if (keyUpdate) {
     data.openaiApiKeyEnc = keyUpdate.openaiApiKeyEnc;
@@ -283,6 +306,7 @@ export async function publishV2AgentVersion(
       where: { id, organizationId },
       data: {
         simpleConfig: config as unknown as Record<string, unknown>,
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         active: true,
       },
     });

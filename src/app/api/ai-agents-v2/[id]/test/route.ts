@@ -28,6 +28,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json(result);
   } catch (err) {
     console.error("[POST /api/ai-agents-v2/[id]/test]", err);
+    const raw = err instanceof Error ? err.message : String(err);
+    if (raw === "NO_OPENAI_KEY" || raw.includes("chave OpenAI") || raw.includes("NO_KEY_MSG")) {
+      return NextResponse.json(
+        { ok: false, code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para testar o agente." },
+        { status: 400 },
+      );
+    }
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao testar agente v2." },
       { status: 500 },

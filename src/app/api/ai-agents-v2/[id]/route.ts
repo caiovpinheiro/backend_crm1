@@ -17,7 +17,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
     return NextResponse.json({
       ...agent,
-      simpleConfig: agent.draftConfig ?? agent.publishedConfig,
+      config: agent.draftConfig ?? agent.publishedConfig,
     });
   } catch (err) {
     console.error("[GET /api/ai-agents-v2/[id]]", err);

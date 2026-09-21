@@ -32,6 +32,14 @@ import {
   shouldHandoffOnboardingStep,
 } from "./onboarding";
 import { loadV2AutomationBridge, mapAutomationVariables, continueV2AutomationOnClose } from "./automation-bridge";
+import {
+  normalizePhoneDigits,
+  phoneMatchesAllowlist,
+} from "@/services/ai/phone-allowlist";
+
+function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS" | "DRAFT" {
+  return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
+}
 
 const QUERY_TOOL_NAMES = new Set([
   "search_products",
@@ -136,6 +144,29 @@ async function getConversationContact(conversationId: string): Promise<string | 
   return conv?.contactId ?? null;
 }
 
+async function getConversationPhone(conversationId: string): Promise<string | null> {
+  const conv = await (prisma as unknown as {
+    conversation: {
+      findUnique: (args: {
+        where: { id: string };
+        select: { contact: { select: { phone: boolean } } };
+      }) => Promise<{ contact: { phone: string | null } | null } | null>;
+    };
+  }).conversation.findUnique({
+    where: { id: conversationId },
+    select: { contact: { select: { phone: true } } },
+  });
+  return conv?.contact?.phone ?? null;
+}
+
+function isPhoneAllowed(config: V2AgentConfig, phone: string | null): boolean {
+  const allowed = config.allowedPhoneNumbers ?? [];
+  if (allowed.length === 0) return true;
+  if (!phone) return false;
+  const allowSet = new Set(allowed.map((a) => normalizePhoneDigits(a)).filter(Boolean));
+  return phoneMatchesAllowlist(phone, allowSet);
+}
+
 function mergeCollectedVariables(
   existing: Record<string, unknown>,
   collected: Record<string, string>,
@@ -163,6 +194,13 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const contactId = await getConversationContact(input.conversationId) ?? undefined;
   if (!contactId) {
     return { handoff: false, closed: false, error: "Conversation without contact" };
+  }
+
+  // Filtro de números de teste: se a config restringe telefones, ignora
+  // qualquer outro número mesmo com agente ativo/canal vinculado.
+  const phone = await getConversationPhone(input.conversationId);
+  if (!isPhoneAllowed(config, phone)) {
+    return { handoff: false, closed: false, error: "Phone number not in allowed test list" };
   }
 
   // Resolver org pela conversa
@@ -269,7 +307,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         agentUserId: resolved!.userId,
         text: short,
         channel: input.channel,
-        autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -287,7 +325,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         agentUserId: resolved!.userId,
         text: reply,
         channel: input.channel,
-        autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -310,7 +348,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       agentUserId: resolved!.userId,
       text: handoffMessage,
       channel: input.channel,
-      autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
+      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
     });
     const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
     if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
@@ -577,7 +615,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   replyText = guard.text;
 
   // Executa ações
-  const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT", (v) => { counters.surveyPending = v; });
+  const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });
   const actionRes = await executeV2Actions(allowedActions, actionCtx);
   executedActions = actionRes.results;
   anyHandoff = actionRes.anyHandoff || llmOutput.handoff;
@@ -702,7 +740,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       agentUserId: resolved!.userId,
       text,
       channel: input.channel,
-      autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
+      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
     });
   }
 }
@@ -799,7 +837,7 @@ async function handoffAndReply(
     agentUserId: resolved!.userId,
     text: message,
     channel: input.channel,
-    autonomyMode: config.autonomyMode === "autonomous" ? "AUTONOMOUS" : "DRAFT",
+    autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
   });
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;

@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+export const SUPPORTED_V2_MODELS = [
+  { id: "gpt-4o-mini", label: "GPT-4o mini" },
+  { id: "gpt-4o", label: "GPT-4o" },
+  { id: "gpt-4-turbo", label: "GPT-4 Turbo" },
+  { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo" },
+] as const;
+
 import type {
   V2AgentConfig,
   V2Destination,
@@ -285,7 +292,7 @@ export const v2AgentConfigSchema = z.object({
   survey: surveyConfigSchema.optional().default({} as any),
   onboarding: onboardingConfigSchema.optional(),
   allowedDomains: z.array(z.string()).optional().default([]),
-  autonomyMode: z.enum(["autonomous", "draft"]).optional().default("autonomous"),
+  autonomyMode: z.enum(["auto", "suggest"]).optional().default("suggest"),
   costCap: costCapSchema.optional(),
   dailyTokenCap: z.number().int().min(0).optional(),
   enabledTools: z.array(z.string()).optional().default([]),
@@ -298,6 +305,7 @@ export const v2AgentConfigSchema = z.object({
     .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   fallback: fallbackSchema,
   scope: scopeSchema,
@@ -409,7 +417,7 @@ function basePreset(): V2AgentConfig {
     sentiment: { enabled: false },
     survey: { enabled: false },
     allowedDomains: [],
-    autonomyMode: "autonomous",
+    autonomyMode: "suggest",
   });
 }
 
