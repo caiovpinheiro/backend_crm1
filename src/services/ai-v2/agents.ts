@@ -100,7 +100,14 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       _count: { select: { versions: true } },
     },
   });
-  if (!row) return null;
+  if (!row) {
+    const anyRow = await (prisma as any).aIAgentConfig.findUnique({
+      where: { id },
+      select: { organizationId: true, engine: true, userId: true },
+    });
+    console.error(`[getV2Agent] not found id=${id} org=${organizationId} engine=simple; anyRow=`, anyRow);
+    return null;
+  }
   try {
     const publishedConfig = normalizeV2Config(row.simpleConfig);
     const draftConfig = row.draftConfig ? normalizeV2Config(row.draftConfig) : undefined;

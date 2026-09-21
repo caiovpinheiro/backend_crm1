@@ -13,7 +13,9 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
   try {
     await ensureV2AgentSchema();
-    const agent = await getV2Agent(id, r.session.user.organizationId!);
+    const orgId = r.session.user.organizationId!;
+    console.log(`[GET /api/ai-agents-v2/[id]] id=${id} orgId=${orgId} userId=${r.session.user.id}`);
+    const agent = await getV2Agent(id, orgId);
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
     return NextResponse.json({
       ...agent,
