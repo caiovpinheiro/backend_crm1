@@ -55,7 +55,6 @@ export async function GET() {
       }),
       p.pipeline.findMany({
         where: { organizationId },
-        select: { id: true, name: true },
         include: { stages: { select: { id: true, name: true }, orderBy: { position: "asc" } } },
         orderBy: { name: "asc" },
       }),
