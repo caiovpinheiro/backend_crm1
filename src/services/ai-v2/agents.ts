@@ -43,7 +43,19 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
     include: { user: { select: { name: true } } },
   });
   return rows.map((r) => {
-    const cfg = r.simpleConfig ? normalizeV2Config(r.simpleConfig) : null;
+    // Uma config malformada (schema antigo, agente de teste abandonado) não
+    // pode derrubar a listagem inteira da org — loga e cai pro default.
+    let cfg: { flow?: string } | null = null;
+    if (r.simpleConfig) {
+      try {
+        cfg = normalizeV2Config(r.simpleConfig);
+      } catch (err) {
+        console.error(
+          `[listV2Agents] simpleConfig invalido em ${r.id}:`,
+          err instanceof z.ZodError ? formatZodIssues(err) : err,
+        );
+      }
+    }
     return {
       id: r.id,
       name: r.user?.name ?? "",
