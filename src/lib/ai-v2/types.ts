@@ -43,6 +43,39 @@ export interface V2Variable {
   value: string;
 }
 
+export interface V2FallbackConfig {
+  unknown?: {
+    message?: string;
+    action?: "handoff" | "silence";
+    retries?: number;
+  };
+  humanRequest?: { message?: string };
+  noSource?: { message?: string };
+  error?: { message?: string };
+}
+
+export interface V2ScopeConfig {
+  message?: string;
+  onInsist?: "handoff" | "close";
+  forbidden?: { subject: string; destination?: V2Destination }[];
+}
+
+export interface V2InactivityConfig {
+  enabled?: boolean;
+  nudgeAfter?: number;
+  nudgeMessage?: string;
+  closeAfter?: number;
+}
+
+export interface V2TabulationConfig {
+  enabled?: boolean;
+  when?: "on_close" | "on_transfer" | "always";
+  required?: boolean;
+  fallbackId?: string;
+  byTheme?: Record<string, string>;
+  mode?: "suggest" | "require";
+}
+
 export interface V2Destination {
   type: "department" | "distribution_rule" | "user" | "ai_agent" | "automation";
   id?: string;
@@ -92,6 +125,8 @@ export interface V2Theme {
   knowledgeDocIds?: string[];
   /** IDs dos modelos de mensagem permitidos neste tema. */
   messageModelIds?: string[];
+  /** Quem responde neste tema: "self" ou id de outro agente de IA. */
+  answerBy?: "self" | string;
 }
 
 export type V2RuleConditionType =
@@ -152,6 +187,8 @@ export interface V2Rule {
 }
 
 export interface V2EntryConfig {
+  /** Se a mensagem de abertura está habilitada. */
+  openingEnabled?: boolean;
   /** Mensagem de abertura na primeira mensagem do cliente. */
   openingMessage?: string;
   /** Mensagem de confirmação após encontrar o negócio. */
@@ -166,6 +203,8 @@ export interface V2EntryConfig {
   confirmationFields: string[];
   /** Mapeamento variável da automação → variável do agente. */
   automationVariablesMapping: Record<string, string>;
+  /** Máximo de tentativas de identificação antes de transferir. */
+  maxAttempts?: number;
 }
 
 export interface V2HandoffConfig {
@@ -236,6 +275,8 @@ export interface V2BusinessHoursConfig {
   timezone: string;
   weekdays: V2BusinessHoursSlot[];
   offHoursMessage?: string;
+  /** Ação quando chega mensagem fora do horário. */
+  outsideAction?: "message" | "handoff" | "silence";
 }
 
 export interface V2MediaKindConfig {
@@ -362,6 +403,16 @@ export interface V2AgentConfig {
   allowedKnowledgeDocIds?: string[];
   /** IDs globais dos modelos de mensagem permitidos. */
   allowedMessageModelIds?: string[];
+  /** Tamanho preferido das respostas. */
+  responseLength?: "short" | "medium" | "long";
+  /** Saídas quando o agente não soube, pediu pessoa, sem material ou deu erro. */
+  fallback?: V2FallbackConfig;
+  /** Fora do escopo / assuntos proibidos. */
+  scope?: V2ScopeConfig;
+  /** Inatividade do cliente. */
+  inactivity?: V2InactivityConfig;
+  /** Tabulação ao encerrar/transferir. */
+  tabulation?: V2TabulationConfig;
 }
 
 export interface V2ToolGovernorConfig {

@@ -56,6 +56,7 @@ const themeSchema = z.object({
   handoffDestination: destinationSchema.optional(),
   tabulationId: z.string().optional(),
   maxTurns: z.number().int().min(0).optional(),
+  answerBy: z.enum(["self"]).or(z.string()).optional().default("self"),
 });
 
 const ruleConditionSchema = z.object({
@@ -108,7 +109,44 @@ const ruleSchema = z.object({
   actions: z.array(ruleActionSchema).optional().default([]),
 });
 
+const fallbackSchema = z.object({
+  unknown: z.object({
+    message: z.string().optional(),
+    action: z.enum(["handoff", "silence"]).optional(),
+    retries: z.number().int().min(0).optional(),
+  }).optional(),
+  humanRequest: z.object({ message: z.string().optional() }).optional(),
+  noSource: z.object({ message: z.string().optional() }).optional(),
+  error: z.object({ message: z.string().optional() }).optional(),
+}).optional();
+
+const scopeSchema = z.object({
+  message: z.string().optional(),
+  onInsist: z.enum(["handoff", "close"]).optional(),
+  forbidden: z.array(z.object({
+    subject: z.string(),
+    destination: destinationSchema.optional(),
+  })).optional().default([]),
+}).optional();
+
+const inactivitySchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  nudgeAfter: z.number().int().min(0).optional().default(30),
+  nudgeMessage: z.string().optional(),
+  closeAfter: z.number().int().min(0).optional().default(1440),
+}).optional();
+
+const tabulationSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  when: z.enum(["on_close", "on_transfer", "always"]).optional().default("on_close"),
+  required: z.boolean().optional().default(false),
+  fallbackId: z.string().optional(),
+  byTheme: z.record(z.string(), z.string()).optional().default({}),
+  mode: z.enum(["suggest", "require"]).optional().default("suggest"),
+}).optional();
+
 const entryConfigSchema = z.object({
+  openingEnabled: z.boolean().optional().default(true),
   openingMessage: z.string().optional(),
   confirmationMessage: z.string().optional(),
   identificationMessage: z.string().optional(),
@@ -116,6 +154,7 @@ const entryConfigSchema = z.object({
   confirmContact: z.boolean().optional().default(true),
   confirmationFields: z.array(z.string()).optional().default([]),
   automationVariablesMapping: z.record(z.string(), z.string()).optional().default({}),
+  maxAttempts: z.number().int().min(1).optional().default(2),
 });
 
 const closureConfigSchema = z.object({
@@ -253,6 +292,11 @@ export const v2AgentConfigSchema = z.object({
     .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
+  fallback: fallbackSchema,
+  scope: scopeSchema,
+  inactivity: inactivitySchema,
+  tabulation: tabulationSchema,
   businessHours: z
     .object({
       enabled: z.boolean().optional().default(false),
@@ -268,6 +312,7 @@ export const v2AgentConfigSchema = z.object({
         .optional()
         .default([]),
       offHoursMessage: z.string().optional(),
+      outsideAction: z.enum(["message", "handoff", "silence"]).optional().default("message"),
     })
     .optional()
     .nullable()
