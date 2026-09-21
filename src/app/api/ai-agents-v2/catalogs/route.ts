@@ -71,12 +71,16 @@ export async function GET() {
       }),
       p.whatsAppTemplateConfig.findMany({
         where: { organizationId },
-        select: { id: true, name: true },
-        orderBy: { name: "asc" },
+        select: { id: true, metaTemplateName: true, label: true },
+        orderBy: { metaTemplateName: "asc" },
       }),
     ]);
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
+    const whatsappTemplateCatalog = whatsappTemplates.map((t: any) => ({
+      id: t.id,
+      name: t.metaTemplateName || t.label || "Template",
+    }));
 
     return NextResponse.json({
       departments,
@@ -90,7 +94,7 @@ export async function GET() {
       contactCustomFields: customFields.filter((f: any) => f.entity === "CONTACT"),
       dealCustomFields: customFields.filter((f: any) => f.entity === "DEAL"),
       products,
-      whatsappTemplates,
+      whatsappTemplates: whatsappTemplateCatalog,
     });
   } catch (err) {
     console.error("[GET /api/ai-agents-v2/catalogs]", err);
