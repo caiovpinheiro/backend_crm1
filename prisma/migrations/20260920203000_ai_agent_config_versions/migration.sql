@@ -9,13 +9,13 @@ CREATE TABLE IF NOT EXISTS "ai_agent_config_versions" (
   "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   "organizationId" TEXT NOT NULL,
   "agentId" TEXT NOT NULL,
-  "version_number" INTEGER NOT NULL,
+  "versionNumber" INTEGER NOT NULL,
   "config" JSONB NOT NULL,
   "comment" TEXT,
-  "created_by_id" TEXT,
+  "createdById" TEXT,
   "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE ("agentId", "version_number")
+  UNIQUE ("agentId", "versionNumber")
 );
 
 CREATE INDEX IF NOT EXISTS idx_aiconfigversions_org ON "ai_agent_config_versions"("organizationId");

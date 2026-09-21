@@ -6,20 +6,20 @@
 BEGIN;
 
 ALTER TABLE "ai_simple_conversation_states"
-  ADD COLUMN "owner" TEXT NOT NULL DEFAULT 'agente',
-  ADD COLUMN "origin_stage_id" TEXT,
-  ADD COLUMN "post_close_window_end_at" TIMESTAMPTZ,
-  ADD COLUMN "close_reason" TEXT,
-  ADD COLUMN "version_id" TEXT,
-  ADD COLUMN "theme_id" TEXT,
-  ADD COLUMN "counters" JSONB NOT NULL DEFAULT '{}';
+  ADD COLUMN IF NOT EXISTS "owner" TEXT NOT NULL DEFAULT 'agente',
+  ADD COLUMN IF NOT EXISTS "originStageId" TEXT,
+  ADD COLUMN IF NOT EXISTS "postCloseWindowEndAt" TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS "closeReason" TEXT,
+  ADD COLUMN IF NOT EXISTS "versionId" TEXT,
+  ADD COLUMN IF NOT EXISTS "themeId" TEXT,
+  ADD COLUMN IF NOT EXISTS "counters" JSONB NOT NULL DEFAULT '{}';
 
-CREATE INDEX idx_aisimplecs_conv ON "ai_simple_conversation_states"("conversationId");
+CREATE INDEX IF NOT EXISTS idx_aisimplecs_conv ON "ai_simple_conversation_states"("conversationId");
 
 ALTER TABLE "ai_agent_knowledge_docs"
-  ADD COLUMN "theme_ids" TEXT[] NOT NULL DEFAULT '{}';
+  ADD COLUMN IF NOT EXISTS "themeIds" TEXT[] NOT NULL DEFAULT '{}';
 
-CREATE TABLE "ai_v2_pending_interactives" (
+CREATE TABLE IF NOT EXISTS "ai_v2_pending_interactives" (
   "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   "organizationId" TEXT NOT NULL,
   "conversationId" TEXT NOT NULL,
@@ -34,11 +34,11 @@ CREATE TABLE "ai_v2_pending_interactives" (
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_aiv2pi_org ON "ai_v2_pending_interactives"("organizationId");
-CREATE INDEX idx_aiv2pi_conv ON "ai_v2_pending_interactives"("conversationId");
-CREATE INDEX idx_aiv2pi_valid ON "ai_v2_pending_interactives"("validUntil");
+CREATE INDEX IF NOT EXISTS idx_aiv2pi_org ON "ai_v2_pending_interactives"("organizationId");
+CREATE INDEX IF NOT EXISTS idx_aiv2pi_conv ON "ai_v2_pending_interactives"("conversationId");
+CREATE INDEX IF NOT EXISTS idx_aiv2pi_valid ON "ai_v2_pending_interactives"("validUntil");
 
-CREATE TABLE "ai_v2_knowledge_gaps" (
+CREATE TABLE IF NOT EXISTS "ai_v2_knowledge_gaps" (
   "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   "organizationId" TEXT NOT NULL,
   "agentId" TEXT NOT NULL,
@@ -50,11 +50,11 @@ CREATE TABLE "ai_v2_knowledge_gaps" (
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_aiv2kg_org ON "ai_v2_knowledge_gaps"("organizationId");
-CREATE INDEX idx_aiv2kg_agent_status ON "ai_v2_knowledge_gaps"("agentId", "status");
-CREATE INDEX idx_aiv2kg_updated ON "ai_v2_knowledge_gaps"("updatedAt");
+CREATE INDEX IF NOT EXISTS idx_aiv2kg_org ON "ai_v2_knowledge_gaps"("organizationId");
+CREATE INDEX IF NOT EXISTS idx_aiv2kg_agent_status ON "ai_v2_knowledge_gaps"("agentId", "status");
+CREATE INDEX IF NOT EXISTS idx_aiv2kg_updated ON "ai_v2_knowledge_gaps"("updatedAt");
 
-CREATE TABLE "ai_agent_survey_responses" (
+CREATE TABLE IF NOT EXISTS "ai_agent_survey_responses" (
   "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   "organizationId" TEXT NOT NULL,
   "contactId" TEXT NOT NULL,
@@ -66,8 +66,8 @@ CREATE TABLE "ai_agent_survey_responses" (
   "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_aisurvey_org ON "ai_agent_survey_responses"("organizationId");
-CREATE INDEX idx_aisurvey_agent ON "ai_agent_survey_responses"("agentId", "createdAt");
-CREATE INDEX idx_aisurvey_contact ON "ai_agent_survey_responses"("contactId");
+CREATE INDEX IF NOT EXISTS idx_aisurvey_org ON "ai_agent_survey_responses"("organizationId");
+CREATE INDEX IF NOT EXISTS idx_aisurvey_agent ON "ai_agent_survey_responses"("agentId", "createdAt");
+CREATE INDEX IF NOT EXISTS idx_aisurvey_contact ON "ai_agent_survey_responses"("contactId");
 
 COMMIT;

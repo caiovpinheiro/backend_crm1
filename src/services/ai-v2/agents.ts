@@ -69,8 +69,8 @@ export type V2AgentDetail = {
 };
 
 export async function getV2Agent(id: string, organizationId: string): Promise<V2AgentDetail | null> {
-  const row = await (prisma as any).aIAgentConfig.findUnique({
-    where: { id, organizationId },
+  const row = await (prisma as any).aIAgentConfig.findFirst({
+    where: { id, organizationId, engine: "simple" },
     include: {
       user: { select: { name: true } },
     },
@@ -171,8 +171,8 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
     config = validated.data;
   }
 
-  const agent = await (prisma as any).aIAgentConfig.findUnique({
-    where: { id, organizationId },
+  const agent = await (prisma as any).aIAgentConfig.findFirst({
+    where: { id, organizationId, engine: "simple" },
     select: { userId: true, simpleConfig: true },
   });
   if (!agent) throw new Error("Agente não encontrado.");
@@ -216,8 +216,14 @@ export async function saveV2AgentDraft(
   const data: Record<string, unknown> = {};
   if (config) data.draftConfig = config as unknown as Record<string, unknown>;
 
+  const existing = await (prisma as any).aIAgentConfig.findFirst({
+    where: { id, organizationId, engine: "simple" },
+    select: { id: true, draftConfig: true, simpleConfig: true },
+  });
+  if (!existing) throw new Error("Agente não encontrado.");
+
   const row = await (prisma as any).aIAgentConfig.update({
-    where: { id, organizationId },
+    where: { id },
     data,
   });
   return {
@@ -232,8 +238,8 @@ export async function publishV2AgentVersion(
   userId: string | undefined,
   comment?: string,
 ): Promise<{ id: string; versionNumber: number; config: V2AgentConfig }> {
-  const agent = await (prisma as any).aIAgentConfig.findUnique({
-    where: { id, organizationId },
+  const agent = await (prisma as any).aIAgentConfig.findFirst({
+    where: { id, organizationId, engine: "simple" },
     select: { simpleConfig: true, draftConfig: true },
   });
   if (!agent) throw new Error("Agente não encontrado.");
@@ -288,10 +294,10 @@ export async function listV2AgentVersions(
 export async function deleteV2Agent(id: string, organizationId: string): Promise<void> {
   await (prisma as unknown as {
     aIAgentConfig: {
-      deleteMany: (args: { where: { id: string; organizationId: string } }) => Promise<void>;
+      deleteMany: (args: { where: { id: string; organizationId: string; engine: string } }) => Promise<void>;
     };
   }).aIAgentConfig.deleteMany({
-    where: { id, organizationId },
+    where: { id, organizationId, engine: "simple" },
   });
 }
 

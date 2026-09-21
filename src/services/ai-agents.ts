@@ -118,6 +118,7 @@ export type AIAgentRow = {
 
 export async function listAIAgents(): Promise<AIAgentRow[]> {
   const rows = await prisma.aIAgentConfig.findMany({
+    where: { engine: { not: "simple" } },
     orderBy: { createdAt: "desc" },
     include: {
       user: {
@@ -177,7 +178,7 @@ export async function getAIAgent(id: string) {
       _count: { select: { knowledgeDocs: true } },
     },
   });
-  if (!row) return null;
+  if (!row || row.engine === "simple") return null;
   const { _count, ...rest } = row;
   return redactAgentOpenaiKey(
     withDisplayedAcademicDefaults({
@@ -696,7 +697,7 @@ export async function updateAIAgent(id: string, input: UpdateAIAgentInput) {
       _count: { select: { knowledgeDocs: true } },
     },
   });
-  if (!existing) throw new Error("Agente não encontrado.");
+  if (!existing || existing.engine === "simple") throw new Error("Agente não encontrado.");
 
   const nextAutonomy = input.autonomyMode ?? existing.autonomyMode;
   const nextActive = input.active ?? existing.active;
@@ -1049,7 +1050,7 @@ export async function toggleAIAgentActive(id: string) {
     where: { id },
     include: { _count: { select: { knowledgeDocs: true } } },
   });
-  if (!existing) throw new Error("Agente não encontrado.");
+  if (!existing || existing.engine === "simple") throw new Error("Agente não encontrado.");
   const nextActive = !existing.active;
   if (nextActive) {
     assertAutonomousReadiness({
@@ -1074,7 +1075,7 @@ export async function deleteAIAgent(id: string) {
     where: { id },
     select: { userId: true },
   });
-  if (!existing) return;
+  if (!existing || existing.engine === "simple") return;
 
   // Deletando o User cascateia pro AIAgentConfig (relation 1:1) e pros
   // Knowledge/Run via onDelete CASCADE. Mensagens mantêm a referência

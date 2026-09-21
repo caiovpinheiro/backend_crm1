@@ -67,7 +67,11 @@ ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
   && cd /opt/prisma-cli \
   && npm install prisma@${PRISMA_VERSION} --omit=dev --no-audit --no-fund \
-  && chown -R nextjs:nodejs /opt/prisma-cli
+  && chown -R nextjs:nodejs /opt/prisma-cli \
+  # Disponibiliza `prisma` e `npx prisma` dentro do container manualmente.
+  && mkdir -p /app/node_modules \
+  && ln -s /opt/prisma-cli/node_modules/.bin/prisma /usr/local/bin/prisma \
+  && ln -s /opt/prisma-cli/node_modules/prisma /app/node_modules/prisma
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh \
