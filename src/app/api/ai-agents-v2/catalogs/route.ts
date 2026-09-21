@@ -29,7 +29,7 @@ export async function GET() {
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.user.findMany({
-        where: { organizationId, active: true },
+        where: { organizationId, isErased: false, type: "HUMAN" },
         select: { id: true, name: true, type: true },
         orderBy: { name: "asc" },
       }),
