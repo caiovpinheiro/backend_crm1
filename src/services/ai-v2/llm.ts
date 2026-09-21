@@ -8,6 +8,7 @@ import { z } from "zod";
 import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
+import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
 import { renderMessage } from "@/lib/ai-v2/message-render";
 import {
@@ -101,6 +102,17 @@ export function buildV2ToolSet(args: {
   });
   const governor = new ToolCallGovernor(limits);
 
+  // Snapshot do RequestContext no momento em que o tool set é montado
+  // (ainda dentro da mesma continuation síncrona do handler/job). O
+  // `generateText` do AI SDK executa `tool.execute()` depois de uma
+  // ida e volta HTTP à OpenAI — nessa travessia o AsyncLocalStorage
+  // pode perder o store (observado em teste real: `knowledge_search`
+  // explodia com "organization context ausente" mesmo com o handler
+  // corretamente envolto em contexto). Reentrar o ctx aqui garante que
+  // `prisma`/`getOrgIdOrThrow()` continuem scoped dentro do tool,
+  // independente de como o SDK agenda a chamada.
+  const capturedCtx = getRequestContext();
+
   function wrapTool(
     toolName: string,
     description: string,
@@ -121,7 +133,9 @@ export function buildV2ToolSet(args: {
           return replayPayload(toolName, decision.previousResult);
         }
         try {
-          const result = await execute(input);
+          const result = capturedCtx
+            ? await runWithContext(capturedCtx, () => execute(input))
+            : await execute(input);
           governor.record(toolName, input, result);
           return result;
         } catch (err) {
