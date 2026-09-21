@@ -35,8 +35,8 @@ export async function GET() {
       }),
       p.aIAgentConfig.findMany({
         where: { organizationId, engine: "simple" },
-        select: { id: true, name: true },
-        orderBy: { name: "asc" },
+        include: { user: { select: { name: true } } },
+        orderBy: { user: { name: "asc" } },
       }),
       p.messageTemplate.findMany({
         where: { organizationId },
@@ -76,11 +76,13 @@ export async function GET() {
       }),
     ]);
 
+    const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
+
     return NextResponse.json({
       departments,
       distributionRules,
       users,
-      aiAgents,
+      aiAgents: aiAgentCatalog,
       messageTemplates,
       knowledgeDocs,
       channels,
