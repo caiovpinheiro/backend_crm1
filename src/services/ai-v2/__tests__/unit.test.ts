@@ -34,7 +34,7 @@ const baseConfig = (): V2AgentConfig =>
     survey: {},
     themes: [],
     rules: [],
-    autonomyMode: "autonomous",
+    autonomyMode: "auto",
   } as unknown as V2AgentConfig);
 
 describe("config validation", () => {

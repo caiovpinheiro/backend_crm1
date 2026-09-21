@@ -45,7 +45,7 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
     survey: {},
     themes: [],
     rules: [],
-    autonomyMode: "autonomous",
+    autonomyMode: "auto",
     enabledTools: ["search_products", "search_crm_records", "knowledge_search", "list_message_models"],
     ...overrides,
   } as unknown as V2AgentConfig;

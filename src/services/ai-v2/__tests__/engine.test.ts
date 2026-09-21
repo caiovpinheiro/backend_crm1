@@ -92,7 +92,7 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
     survey: {},
     themes: [],
     rules: [],
-    autonomyMode: "autonomous",
+    autonomyMode: "auto",
     ...overrides,
   } as unknown as V2AgentConfig;
 }
