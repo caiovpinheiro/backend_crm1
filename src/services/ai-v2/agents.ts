@@ -124,8 +124,9 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       updatedAt: row.updatedAt,
     };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error("[ai-v2] invalid config for agent", id, err);
-    return null;
+    throw new Error(`Configuração inválida para o agente ${id}: ${msg}`);
   }
 }
 
