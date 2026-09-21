@@ -41,6 +41,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       name?: string;
       active?: boolean;
       config?: unknown;
+      openaiApiKey?: string | null;
     };
     const agent = await updateV2Agent(id, r.session.user.organizationId!, body);
     return NextResponse.json(agent);

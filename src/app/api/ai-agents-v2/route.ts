@@ -39,6 +39,7 @@ export async function POST(request: Request) {
       preset?: string;
       config?: unknown;
       active?: boolean;
+      openaiApiKey?: string | null;
     };
     if (!body.name || typeof body.name !== "string") {
       return NextResponse.json({ message: "name é obrigatório." }, { status: 400 });
@@ -48,6 +49,7 @@ export async function POST(request: Request) {
       preset: body.preset,
       config: body.config,
       active: body.active,
+      openaiApiKey: body.openaiApiKey,
     });
     return NextResponse.json(agent, { status: 201 });
   } catch (err) {

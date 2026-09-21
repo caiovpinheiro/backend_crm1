@@ -13,6 +13,7 @@ import {
   normalizeV2Config,
   validateV2Config,
 } from "@/lib/ai-v2/config";
+import { openaiKeyFields } from "@/services/ai-v2/agent-key";
 
 export type V2AgentListItem = {
   id: string;
@@ -61,6 +62,8 @@ export type V2AgentDetail = {
   publishedConfig: V2AgentConfig;
   draftConfig?: V2AgentConfig;
   archetype: string | null;
+  hasOwnOpenaiKey: boolean;
+  openaiApiKeyHint: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -83,6 +86,8 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       publishedConfig,
       draftConfig,
       archetype: row.archetype,
+      hasOwnOpenaiKey: Boolean(row.openaiApiKeyEnc),
+      openaiApiKeyHint: row.openaiApiKeyHint ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -97,6 +102,7 @@ export async function createV2Agent(organizationId: string, input: {
   preset?: string;
   config?: unknown;
   active?: boolean;
+  openaiApiKey?: string | null;
 }): Promise<{ id: string; config: V2AgentConfig }> {
   let config: V2AgentConfig;
   if (input.config) {
@@ -150,13 +156,14 @@ export async function createV2Agent(organizationId: string, input: {
         autonomyMode: "AUTONOMOUS",
         dailyTokenCap: 0,
         enabledTools: [],
+        ...(openaiKeyFields(input.openaiApiKey) ?? {}),
       },
     });
     return { id: row.id, config };
   });
 }
 
-export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown }): Promise<{ id: string; config: V2AgentConfig }> {
+export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null }): Promise<{ id: string; config: V2AgentConfig }> {
   let config: V2AgentConfig | undefined;
   if (input.config !== undefined) {
     const validated = validateV2Config(input.config);
@@ -173,6 +180,11 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
   const data: Record<string, unknown> = {};
   if (input.active !== undefined) data.active = input.active;
   if (config) data.simpleConfig = config as unknown as Record<string, unknown>;
+  const keyUpdate = openaiKeyFields(input.openaiApiKey);
+  if (keyUpdate) {
+    data.openaiApiKeyEnc = keyUpdate.openaiApiKeyEnc;
+    data.openaiApiKeyHint = keyUpdate.openaiApiKeyHint;
+  }
 
   const row = await (prisma as any).$transaction(async (tx: any) => {
     if (input.name !== undefined && agent.userId) {
