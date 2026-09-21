@@ -1,0 +1,1 @@
+SELECT table_name, column_name FROM information_schema.columns WHERE table_name IN ('ai_agent_config_versions','ai_simple_conversation_states','ai_agent_knowledge_docs') ORDER BY table_name, ordinal_position;
