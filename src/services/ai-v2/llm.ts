@@ -140,7 +140,13 @@ export function buildV2ToolSet(args: {
           return result;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          const failure = { ok: false as const, error: msg };
+          // DIAGNÓSTICO TEMPORÁRIO (remover após achar a causa do bug
+          // "organization context ausente" em prod/dev — ver ai-v2 RAG):
+          // expõe se capturedCtx existia no momento em que a tool foi
+          // montada, pra distinguir "nunca capturou" de "capturou mas
+          // perdeu no meio do execute()".
+          const diag = `capturedCtxAtBuild=${capturedCtx ? `org:${capturedCtx.organizationId}` : "AUSENTE"} ctxNoCatch=${getRequestContext() ? `org:${getRequestContext()?.organizationId}` : "AUSENTE"}`;
+          const failure = { ok: false as const, error: `${msg} [[diag: ${diag}]]` };
           governor.record(toolName, input, failure);
           return failure;
         }
