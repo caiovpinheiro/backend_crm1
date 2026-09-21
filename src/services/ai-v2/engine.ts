@@ -17,7 +17,7 @@ import { selectV2Theme, getV2ThemeById } from "./themes";
 import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
 import { guardV2Output } from "./output-guard";
-import { executeV2Actions, sendV2TextMessage } from "./actions";
+import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates } from "./actions";
 import { getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
@@ -31,7 +31,7 @@ import {
   parseV2OnboardingState,
   shouldHandoffOnboardingStep,
 } from "./onboarding";
-import { loadV2AutomationBridge, mapAutomationVariables } from "./automation-bridge";
+import { loadV2AutomationBridge, mapAutomationVariables, continueV2AutomationOnClose } from "./automation-bridge";
 
 const QUERY_TOOL_NAMES = new Set([
   "search_products",
@@ -422,7 +422,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: true, closed: false };
     }
     if (anyClose) {
-      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule");
+      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables);
       return { handoff: false, closed: true };
     }
     if (isTerminal) {
@@ -649,7 +649,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       await sendReply(goodbyeRendered);
       sentReply = goodbyeRendered;
     }
-    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred");
+    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables);
   } else {
     // Atualiza estado
     await upsertV2ConversationState({
@@ -873,7 +873,15 @@ async function closeState(
   config: V2AgentConfig,
   versionId: string | undefined,
   reason: string,
+  contactId?: string,
+  collectedVariables?: Record<string, unknown>,
 ): Promise<void> {
+  if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
+    await applyV2ClosureFieldUpdates(config, contactId, dealId);
+  }
+  if (config.closure.nextAutomationStepId && contactId) {
+    await continueV2AutomationOnClose({ config, contactId, collectedVariables: collectedVariables ?? {} });
+  }
   const windowHours = config.closure.postCloseWindowHours;
   const postCloseWindowEndAt = new Date(Date.now() + windowHours * 60 * 60 * 1000);
   await (prisma as unknown as {

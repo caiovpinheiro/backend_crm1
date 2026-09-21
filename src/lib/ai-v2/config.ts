@@ -167,6 +167,10 @@ const closureConfigSchema = z.object({
   goodbyeMessage: z.string().optional(),
   returnToOriginStage: z.boolean().optional().default(true),
   nextAutomationStepId: z.string().optional(),
+  fieldUpdates: z
+    .array(z.object({ entity: z.enum(["contact", "deal"]), key: z.string(), value: z.string() }))
+    .optional()
+    .default([]),
 });
 
 const limitsConfigSchema = z.object({

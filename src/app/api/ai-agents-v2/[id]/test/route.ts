@@ -14,13 +14,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   try {
     await ensureV2AgentSchema();
-    const body = (await request.json()) as { userMessage?: string };
+    const body = (await request.json()) as {
+      userMessage?: string;
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+    };
     const userMessage = body.userMessage?.trim() ?? "oi";
+    const history = Array.isArray(body.history) ? body.history : [];
     const agent = await getV2Agent(id, r.session.user.organizationId!);
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
 
     const configToTest = agent.draftConfig ?? agent.publishedConfig;
-    const result = await simulateV2Turn(id, configToTest, userMessage);
+    const result = await simulateV2Turn(id, configToTest, userMessage, history);
     return NextResponse.json(result);
   } catch (err) {
     console.error("[POST /api/ai-agents-v2/[id]/test]", err);

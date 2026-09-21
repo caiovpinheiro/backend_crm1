@@ -239,6 +239,8 @@ export interface V2ClosureConfig {
   returnToOriginStage: boolean;
   /** Step da automação para continuar ao encerrar, se houver. */
   nextAutomationStepId?: string;
+  /** Campos do contato/negócio a atualizar automaticamente ao encerrar. */
+  fieldUpdates?: Array<{ entity: "contact" | "deal"; key: string; value: string }>;
 }
 
 export interface V2LimitsConfig {

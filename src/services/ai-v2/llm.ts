@@ -242,6 +242,7 @@ export async function callV2LLMTest(
   agentId: string,
   config: V2AgentConfig,
   userMessage: string,
+  previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
 ): Promise<ReturnType<typeof callV2LLM>> {
   const emptyContext: V2CRMContext = {
     contact: null,
@@ -255,7 +256,7 @@ export async function callV2LLMTest(
     context: emptyContext,
     userMessage,
     stage: "active",
-    previousMessages: [],
+    previousMessages,
   });
 }
 

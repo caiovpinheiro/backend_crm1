@@ -85,6 +85,40 @@ function isFieldWritable(config: V2AgentConfig, entity: string, field: string): 
   return cfg.permissions.includes("write");
 }
 
+/** Aplica os campos configurados para atualizar no encerramento (closure.fieldUpdates). Respeita a permissão "write" do campo. */
+export async function applyV2ClosureFieldUpdates(
+  config: V2AgentConfig,
+  contactId: string | undefined,
+  dealId: string | undefined,
+): Promise<Array<{ entity: string; field: string; ok: boolean; error?: string }>> {
+  const updates = config.closure.fieldUpdates ?? [];
+  const results: Array<{ entity: string; field: string; ok: boolean; error?: string }> = [];
+  for (const update of updates) {
+    const { entity, key, value } = update;
+    if (!isFieldWritable(config, entity, key)) {
+      results.push({ entity, field: key, ok: false, error: "read-only" });
+      continue;
+    }
+    try {
+      if (entity === "deal" && dealId) {
+        await updateDeal(dealId, { [key]: value } as any);
+        results.push({ entity, field: key, ok: true });
+      } else if (entity === "contact" && contactId) {
+        await (prisma as unknown as { contact: { update: (args: unknown) => Promise<unknown> } }).contact.update({
+          where: { id: contactId },
+          data: { [key]: value },
+        });
+        results.push({ entity, field: key, ok: true });
+      } else {
+        results.push({ entity, field: key, ok: false, error: "target not available" });
+      }
+    } catch (err) {
+      results.push({ entity, field: key, ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return results;
+}
+
 async function executeUpdateField(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const entity = typeof action.entity === "string" ? action.entity : "";
   const field = typeof action.field === "string" ? action.field : "";
