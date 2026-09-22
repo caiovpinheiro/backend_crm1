@@ -7,6 +7,7 @@ import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { sseBus } from "@/lib/sse-bus";
 import { disableTelephony } from "@/services/api4com/provisioning";
 
 const MIN_PASSWORD_LENGTH = 6;
@@ -321,6 +322,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
       try {
         await prisma.user.delete({ where: { id: target.id } });
+        sseBus.revokeUser({
+          userId: target.id,
+          organizationId: target.organizationId,
+        });
         return NextResponse.json({ ok: true });
       } catch (delErr) {
         // Fallback: se ainda houver FK obscura, anonimiza e esconde da Equipe
@@ -363,6 +368,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
             "[users.delete] hard delete blocked by FK; soft-erased user",
             { userId: target.id, code },
           );
+          sseBus.revokeUser({
+            userId: target.id,
+            organizationId: target.organizationId,
+          });
           return NextResponse.json({ ok: true, softDeleted: true });
         }
         throw delErr;

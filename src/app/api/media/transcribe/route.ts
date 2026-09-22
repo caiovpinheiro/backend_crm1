@@ -3,7 +3,10 @@ import path from "path";
 
 import { auth } from "@/lib/auth";
 import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
-import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
+import {
+  fetchAuthorizedAudioBuffer,
+  MediaTooLargeError,
+} from "@/lib/fetch-authorized-audio";
 
 /**
  * Transcrição de áudio — Groq Whisper como provedor PRIMÁRIO.
@@ -34,7 +37,9 @@ import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
  *
  * Pipeline:
  *   1) Recebe `{ url }` no body — URL do áudio.
- *   2) Baixa o áudio (via /uploads, Meta proxy ou mesma origem).
+ *   2) Baixa o áudio (storage da org, uploads legado da org, ou CDN Meta
+ *      vinculada à org) com teto de 16 MB.
+
  *   3) Tenta enviar O ARQUIVO ORIGINAL pro Groq (multipart) — Groq
  *      aceita Opus/Vorbis/AAC/MP3/WAV/FLAC sem precisar transcodar.
  *   4) Se Groq rejeitar formato/codec, converte pra MP3 (libmp3lame
@@ -42,81 +47,6 @@ import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
  *      tenta de novo.
  *   5) Retorna `{ text, model, provider }` ou erro amigável.
  */
-
-async function fetchAudioBuffer(
-  rawUrl: string,
-  request: Request,
-): Promise<{ buffer: Buffer; contentType: string }> {
-  let decoded = decodeURIComponent(rawUrl);
-  if (!decoded.startsWith("/")) {
-    try {
-      const parsed = new URL(decoded);
-      if (
-        parsed.pathname.startsWith("/api/") ||
-        parsed.pathname.startsWith("/uploads/")
-      ) {
-        decoded = `${parsed.pathname}${parsed.search}`;
-      }
-    } catch {
-      /* URL absoluta que não é storage — segue o fluxo Meta/externo */
-    }
-  }
-
-  // PR 1.3: paths internos (`/uploads/...`, `/api/storage/...`) são
-  // resolvidos via fetch HTTP com cookies de sessão pra que o
-  // middleware/gateway aplique auth + checagem de tenant. NÃO ler do
-  // FS direto — bypassaria a validação multi-tenant.
-  if (isAllowedMetaMediaUrl(decoded)) {
-    const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
-    if (!token) throw new Error("Token Meta não configurado.");
-    const res = await fetch(decoded, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error(`Meta retornou ${res.status}.`);
-    return {
-      buffer: Buffer.from(await res.arrayBuffer()),
-      contentType: res.headers.get("content-type") || "audio/ogg",
-    };
-  }
-
-  if (decoded.startsWith("/")) {
-    const origin = new URL(request.url).origin;
-    const cookie = request.headers.get("cookie") ?? "";
-    const res = await fetch(`${origin}${decoded}`, {
-      headers: { cookie },
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error(`Origem retornou ${res.status}.`);
-    return {
-      buffer: Buffer.from(await res.arrayBuffer()),
-      contentType: res.headers.get("content-type") || "audio/ogg",
-    };
-  }
-
-  // Permite URL absoluta do próprio app (mesmo origin) — a UI às vezes
-  // passa `https://.../api/...` ou `https://.../uploads/...`.
-  try {
-    const origin = new URL(request.url).origin;
-    const u = new URL(decoded);
-    if (u.origin === origin && u.pathname.startsWith("/")) {
-      const cookie = request.headers.get("cookie") ?? "";
-      const res = await fetch(`${origin}${u.pathname}${u.search}`, {
-        headers: { cookie },
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`Origem retornou ${res.status}.`);
-      return {
-        buffer: Buffer.from(await res.arrayBuffer()),
-        contentType: res.headers.get("content-type") || "audio/ogg",
-      };
-    }
-  } catch {
-    // ignore parse errors; keep unauthorized below
-  }
-
-  throw new Error("URL não autorizada.");
-}
 
 const GROQ_MODEL =
   process.env.GROQ_TRANSCRIBE_MODEL?.trim() || "whisper-large-v3-turbo";
@@ -334,6 +264,10 @@ export async function POST(request: Request) {
   if (!session?.user) {
     return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
   }
+  const orgId = (session.user as { organizationId?: string | null }).organizationId ?? "";
+  if (!orgId) {
+    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  }
 
   let body: { url?: string };
   try {
@@ -352,7 +286,12 @@ export async function POST(request: Request) {
   let inputContentType: string;
 
   try {
-    const fetched = await fetchAudioBuffer(rawUrl, request);
+    const fetched = await fetchAuthorizedAudioBuffer(rawUrl, {
+      userId: session.user.id,
+      organizationId: orgId,
+      isSuperAdmin: Boolean(session.user.isSuperAdmin),
+      role: (session.user as { role?: string | null }).role ?? null,
+    });
     const baseMime = fetched.contentType.split(";")[0].trim();
     inputExt = guessInputExt(baseMime);
     inputContentType = baseMime;
@@ -368,6 +307,9 @@ export async function POST(request: Request) {
       }
     }
   } catch (err) {
+    if (err instanceof MediaTooLargeError) {
+      return NextResponse.json({ message: err.message }, { status: 413 });
+    }
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Falha ao baixar áudio." },
       { status: 502 },

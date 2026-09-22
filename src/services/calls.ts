@@ -28,6 +28,11 @@ import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import {
+  RECORDING_FETCH_MAX_BYTES,
+  readResponseBodyLimited,
+} from "@/lib/media-byte-limits";
+import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getContacts, createContact } from "@/services/contacts";
@@ -169,12 +174,16 @@ async function reHostRecording(
   providerUrl: string,
 ): Promise<string | null> {
   try {
-    const response = await fetch(providerUrl, { signal: AbortSignal.timeout(30_000) });
+    await assertSafeOutboundUrl(providerUrl);
+    const response = await fetch(providerUrl, {
+      signal: AbortSignal.timeout(30_000),
+      redirect: "error",
+    });
     if (!response.ok) {
       log.warn({ status: response.status, providerUrl }, "[calls] falha ao baixar gravação");
       return null;
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await readResponseBodyLimited(response, RECORDING_FETCH_MAX_BYTES);
     const ext = providerUrl.split(".").pop()?.split("?")[0]?.toLowerCase() ?? "wav";
     const fileName = generateFileName({ prefix: `call_${callId}`, ext });
     const { url } = await saveFile({ orgId, bucket: "recordings", fileName, buffer });
@@ -330,7 +339,10 @@ export async function processWebhookEvent(
         let resolvedExtensionId: string | null = null;
         if (crmMetadata.crmUserId) {
           const ext = await prisma.sipExtension.findFirst({
-            where: { userId: crmMetadata.crmUserId },
+            where: {
+              userId: crmMetadata.crmUserId,
+              organizationId,
+            },
             select: { id: true },
           });
           if (ext) resolvedExtensionId = ext.id;
