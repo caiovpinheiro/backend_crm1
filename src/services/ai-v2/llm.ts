@@ -263,14 +263,15 @@ export async function callV2LLMTest(
   config: V2AgentConfig,
   userMessage: string,
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
-): Promise<ReturnType<typeof callV2LLM>> {
+): Promise<ReturnType<typeof callV2LLM> & { systemPrompt: string }> {
   const emptyContext: V2CRMContext = {
     contact: null,
     deals: [],
     selectedDeal: null,
     fields: config.contextFields,
   };
-  return callV2LLM({
+  const systemPrompt = buildV2SystemPrompt(config, emptyContext, "active");
+  const result = await callV2LLM({
     agentId,
     config,
     context: emptyContext,
@@ -278,6 +279,34 @@ export async function callV2LLMTest(
     stage: "active",
     previousMessages,
   });
+  return { ...result, systemPrompt };
+}
+
+function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
+  // Rede de segurança com folga para a saída estruturada completa
+  // (reply + theme + reason + actions). O controle real de tamanho vem
+  // da instrução no system prompt.
+  switch (length) {
+    case "short":
+      return 600;
+    case "long":
+      return 2000;
+    case "medium":
+    default:
+      return 1000;
+  }
+}
+
+function responseLengthInstruction(length: V2AgentConfig["responseLength"]): string {
+  switch (length) {
+    case "short":
+      return "Mantenha as respostas curtas e diretas (ideal: até 2 parágrafos).";
+    case "long":
+      return "Pode responder com mais detalhes e explicações quando necessário.";
+    case "medium":
+    default:
+      return "Responda de forma equilibrada, nem muito curta nem muito longa.";
+  }
 }
 
 function buildV2SystemPrompt(
@@ -290,6 +319,7 @@ function buildV2SystemPrompt(
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
+  lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
 
   lines.push("# Dados do cliente (só cite o que está aqui)");
@@ -396,16 +426,36 @@ export async function callV2LLM(args: {
     inputTokens: number;
     outputTokens: number;
     toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+    wasExpanded?: boolean;
   }> {
-    const result = await generateWithTools({
+    let result = await generateWithTools({
       model: args.config.model,
       apiKey,
       system,
       messages: messages as any,
       tools,
       temperature: behaviorToTemperature(args.config.responseBehavior),
+      maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
       maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
     });
+
+    // Se o modelo cortou por limite de tokens, tenta novamente com a rede de
+    // segurança mais ampla (long) em vez de devolver JSON quebrado.
+    let wasExpanded = false;
+    if (result.finishReason === "length") {
+      wasExpanded = true;
+      console.warn("[ai-v2] LLM resposta cortada por length; expandindo maxOutputTokens");
+      result = await generateWithTools({
+        model: args.config.model,
+        apiKey,
+        system,
+        messages: messages as any,
+        tools,
+        temperature: behaviorToTemperature(args.config.responseBehavior),
+        maxOutputTokens: responseLengthToMaxTokens("long"),
+        maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
+      });
+    }
 
     const text = result.text.trim();
     const jsonText = text.replace(/^```json\s*/, "").replace(/```\s*$/, "");
@@ -431,6 +481,7 @@ export async function callV2LLM(args: {
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls,
+      wasExpanded,
     };
   }
 
