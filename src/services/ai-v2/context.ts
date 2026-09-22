@@ -16,6 +16,7 @@ export type V2LoadedContext = V2CRMContext & {
   exposure: CrmFieldExposure;
   contactId?: string;
   dealId?: string;
+  dealSelectionReason: string;
 };
 
 function buildExposure(config: V2AgentConfig): CrmFieldExposure {
@@ -185,11 +186,26 @@ export async function loadV2Context(args: {
       const d = await loadDealFields(row.id, exposure.readableKeys);
       if (d) deals.push(d);
     }
+
     if (deals.length > 0) {
-      selectedDeal = deals[0];
-      dealId = String(selectedDeal.id);
+      if (args.config.dealSelection === "ask" && deals.length > 1) {
+        // Não escolhe automaticamente; o motor vai perguntar qual.
+        selectedDeal = null;
+        dealId = undefined;
+      } else {
+        // latest (padrão) ou só existe um negócio aberto.
+        selectedDeal = deals[0];
+        dealId = String(selectedDeal.id);
+      }
     }
   }
+
+  const dealSelectionReason =
+    args.config.dealSelection === "ask" && deals.length > 1
+      ? "Modo 'perguntar': há vários negócios abertos; aguardando escolha do cliente."
+      : deals.length > 0
+        ? "Negócio mais recente selecionado automaticamente."
+        : "Nenhum negócio aberto encontrado.";
 
   // Campos permitidos com metadados do catálogo
   const catalog = await loadCrmFieldCatalog({
@@ -251,9 +267,11 @@ export async function loadV2Context(args: {
     deals,
     selectedDeal: selectedDeal ? visibleDeal : null,
     citableDeal: selectedDeal ? citableDeal : null,
+    deals,
     fields: args.config.contextFields,
     exposure,
     contactId,
     dealId,
+    dealSelectionReason,
   };
 }

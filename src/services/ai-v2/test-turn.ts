@@ -35,6 +35,7 @@ export type V2TestTurnResult = {
   systemPrompt: string;
   expandedByLength?: boolean;
   crmContext: V2CRMContext;
+  dealSelectionReason: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -62,6 +63,17 @@ function actionLabel(type: string): string {
   return ACTION_LABELS[type] ?? type;
 }
 
+function buildAskDealMessage(deals: Array<Record<string, unknown>>): string {
+  let msg = "Você tem mais de um negócio aberto. Qual deles você quer tratar?";
+  for (let i = 0; i < deals.length; i++) {
+    const d = deals[i];
+    const title = d.title ?? "Negócio sem título";
+    const stage = d.stageName ?? "";
+    msg += `\n${i + 1}. ${title}${stage ? ` — ${stage}` : ""}`;
+  }
+  return msg;
+}
+
 export async function simulateV2Turn(
   agentId: string,
   config: V2AgentConfig,
@@ -79,6 +91,36 @@ export async function simulateV2Turn(
     });
   } else {
     context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+  }
+
+  // Se há vários negócios abertos e o operador configurou "perguntar",
+  // o teste mostra a pergunta sem gastar chamada de modelo.
+  if (config.dealSelection === "ask" && context.deals && context.deals.length > 1 && !context.selectedDeal) {
+    const askMessage = buildAskDealMessage(context.deals);
+    return {
+      userMessage,
+      appliedRuleId: null,
+      appliedRuleName: null,
+      themeId: null,
+      themeName: null,
+      reply: askMessage,
+      reason: "Vários negócios abertos — perguntando qual tratar.",
+      handoff: false,
+      closed: false,
+      toolCalls: [],
+      ragChunks: [],
+      executedActions: [],
+      discardedActions: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      tone: config.tone,
+      responseLength: config.responseLength,
+      globalRules: config.globalRules,
+      systemPrompt: "",
+      crmContext: context,
+      dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+    };
   }
 
   const apiKey = await tryGetAgentApiKey(agentId);
@@ -181,5 +223,6 @@ export async function simulateV2Turn(
     systemPrompt: llmResult.systemPrompt,
     expandedByLength: llmResult.wasExpanded,
     crmContext: context,
+    dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
   };
 }

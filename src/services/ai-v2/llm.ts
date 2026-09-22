@@ -351,6 +351,16 @@ function buildV2SystemPrompt(
   }
   lines.push("Regra de citação: só escreva/repita para o cliente os campos listados em 'Dados que você pode citar na resposta'. Campos de 'Dados do cliente para consulta interna' servem apenas para você entender a situação.");
 
+  // Negócios abertos: listar quando há mais de um e o modo é perguntar.
+  if (context.deals && context.deals.length > 1 && !context.selectedDeal && config.dealSelection === "ask") {
+    lines.push("# Negócios abertos do cliente");
+    for (let i = 0; i < context.deals.length; i++) {
+      const d = context.deals[i];
+      lines.push(`${i + 1}. ${d.title ?? "Negócio sem título"} (${d.stageName ?? "sem etapa"})`);
+    }
+    lines.push("Pergunte ao cliente qual destes negócios ele quer tratar. Não responda sobre nenhum deles antes de saber a escolha.");
+  }
+
   if (config.variables.length > 0) {
     lines.push("# Informações fixas da empresa");
     for (const v of config.variables) lines.push(`${v.key}: ${v.value}`);
@@ -434,9 +444,13 @@ export async function callV2LLM(args: {
   });
   const hasTools = Object.keys(tools).length > 0;
 
+  const configVars: Record<string, unknown> = {};
+  for (const v of args.config.variables) configVars[v.key] = v.value;
+
   const renderVars = flattenForRender({
     contact: args.context.contact ?? {},
     deal: args.context.selectedDeal ?? {},
+    ...configVars,
     ...((args.collectedVariables as Record<string, unknown>) ?? {}),
   });
 

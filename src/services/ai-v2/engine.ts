@@ -41,6 +41,17 @@ function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS
   return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
 }
 
+function buildAskDealMessage(deals: Array<Record<string, unknown>>): string {
+  let msg = "Você tem mais de um negócio aberto. Qual deles você quer tratar?";
+  for (let i = 0; i < deals.length; i++) {
+    const d = deals[i];
+    const title = d.title ?? "Negócio sem título";
+    const stage = d.stageName ?? "";
+    msg += `\n${i + 1}. ${title}${stage ? ` — ${stage}` : ""}`;
+  }
+  return msg;
+}
+
 const QUERY_TOOL_NAMES = new Set([
   "search_products",
   "search_crm_records",
@@ -228,12 +239,51 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   const context: V2CRMContext = {
     contact: loadedContext.contact,
+    citableContact: loadedContext.citableContact,
     deals: loadedContext.deals,
     selectedDeal: loadedContext.selectedDeal,
+    citableDeal: loadedContext.citableDeal,
     fields: config.contextFields,
   };
 
   const vars = { ...messageVariables(config, context) };
+
+  // Se há vários negócios abertos e o operador configurou "perguntar",
+  // envia a pergunta antes de qualquer outra decisão.
+  if (
+    config.dealSelection === "ask" &&
+    loadedContext.deals.length > 1 &&
+    !loadedContext.selectedDeal &&
+    contactId
+  ) {
+    const askMessage = buildAskDealMessage(loadedContext.deals);
+    await sendV2TextMessage({
+      conversationId: input.conversationId,
+      contactId,
+      agentUserId: resolved!.userId,
+      text: askMessage,
+      channel: input.channel,
+      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+    });
+    await logV2Turn({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      agentId: resolved!.agentConfigId,
+      turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: context,
+      prompt: askMessage,
+      reply: askMessage,
+      executedActions: [],
+      discardedActions: [],
+      handoff: false,
+      closed: false,
+      latencyMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    return { handoff: false, closed: false, sentReply: askMessage };
+  }
 
   // Bridge automação
   const bridge = await loadV2AutomationBridge(contactId);

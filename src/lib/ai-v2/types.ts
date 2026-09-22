@@ -380,6 +380,8 @@ export interface V2AgentConfig {
     contact: V2FieldConfig[];
     deal: V2FieldConfig[];
   };
+  /** Como escolher o negócio quando há mais de um aberto. */
+  dealSelection: "latest" | "ask";
   entry: V2EntryConfig;
   themes: V2Theme[];
   rules: V2Rule[];
@@ -493,6 +495,7 @@ export interface V2CRMContext {
     contact: V2FieldConfig[];
     deal: V2FieldConfig[];
   };
+  dealSelectionReason?: string;
 }
 
 export interface V2PendingInteractiveOption {

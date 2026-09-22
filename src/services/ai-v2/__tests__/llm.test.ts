@@ -253,6 +253,48 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect(system).not.toContain("undefined");
   });
 
+  it("substitui variáveis de informações fixas (@Nome) na resposta final", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "Olá, aqui é @Nome da empresa." })),
+    );
+
+    const config = baseConfig({ variables: [{ key: "Nome da empresa", value: "EduIT" }] });
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+
+    expect(result.output.reply).toBe("Olá, aqui é EduIT.");
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("Nome da empresa: EduIT");
+  });
+
+  it("com vários negócios e modo ask, o prompt lista os negócios e pede para perguntar", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+
+    const config = baseConfig({ dealSelection: "ask" });
+    const context = {
+      contact: { Nome: "João" },
+      deals: [
+        { id: "d1", title: "Negócio A", stageName: "Proposta" },
+        { id: "d2", title: "Negócio B", stageName: "Negociação" },
+      ],
+      selectedDeal: null,
+      fields: config.contextFields,
+    };
+    await callV2LLM({ agentId: "agent-1", config, context: context as any, userMessage: "oi", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("# Negócios abertos do cliente");
+    expect(system).toContain("1. Negócio A (Proposta)");
+    expect(system).toContain("2. Negócio B (Negociação)");
+    expect(system).toContain("Pergunte ao cliente qual destes negócios");
+  });
+
   it("envia todas as regras globais na ordem cadastrada", async () => {
     const rules = ["Nunca informe prazos.", "Sempre peça confirmação.", "Não invente preço."];
     const config = baseConfig({ globalRules: rules });
