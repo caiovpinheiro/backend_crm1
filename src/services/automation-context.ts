@@ -76,6 +76,20 @@ export const PAUSING_STEP_TYPES = new Set([
   "closing_protocol",
 ]);
 
+/**
+ * Texto puro só pausa com `timeoutAt` (aresta "Sem resposta").
+ * RUNNING nesse passo sem timer = execução ainda no ar: o
+ * `ensureExecutionContext` aponta para o 1º passo e o inbound que
+ * disparou `conversation_created` não é resposta. Consumir aqui
+ * reenviava o menu (inicio-pipe duplicado, Cruzeiro EaD 22/set/26).
+ */
+export function isInFlightPlainSend(args: {
+  stepType?: string | null;
+  timeoutAt?: Date | null;
+}): boolean {
+  return args.stepType === "send_whatsapp_message" && args.timeoutAt == null;
+}
+
 /** Marcador de "fim de ramo" gravado pelo canvas em saídas não conectadas. */
 const NONE_STEP_ID = "__none__";
 
@@ -534,8 +548,10 @@ export async function closeStrandedContext(automationId: string, contactId: stri
     // contexto vazava RUNNING pra sempre e a trava de reentrada impedia a
     // automação de re-disparar pro contato (bug "Aguardando Resposta
     // parou de funcionar", ago/2026 — 869 contextos vazados).
-    const isStalePlainSend =
-      step?.type === "send_whatsapp_message" && ctx.timeoutAt === null;
+    const isStalePlainSend = isInFlightPlainSend({
+      stepType: step?.type,
+      timeoutAt: ctx.timeoutAt,
+    });
     if (
       step &&
       (PAUSING_STEP_TYPES.has(step.type) || isDelayWait) &&
@@ -812,6 +828,7 @@ export async function processIncomingMessage(
     `processIncomingMessage contactId=${contactId} contexts=${activeContexts.length} msg="${messageContent.slice(0, 40)}"`,
   );
 
+  let sawInFlightPlainSend = false;
   for (const ctx of activeContexts) {
     if (!ctx.currentStepId) {
       // Ponteiro morto: cliente falou e o robô não estava esperando nada.
@@ -831,6 +848,20 @@ export async function processIncomingMessage(
       // Step apagado da automação: limpa o contexto orfão pra não bloquear
       // futuras execuções (estado morto vivo era uma reclamação recorrente).
       await advanceContext(ctx.id, null, (ctx.variables as Record<string, unknown>) ?? {});
+      continue;
+    }
+    if (
+      isInFlightPlainSend({
+        stepType: currentStep.type,
+        timeoutAt: ctx.timeoutAt,
+      })
+    ) {
+      // Mesmo inbound que disparou a automação: não é resposta do texto.
+      // Cancelar aqui matava o inicio-pipe no ar; continuar reenviava o menu.
+      sawInFlightPlainSend = true;
+      log.info(
+        `processIncomingMessage skip — send_whatsapp_message in-flight (sem timeoutAt) ctx=${ctx.id} auto=${ctx.automation.name}`,
+      );
       continue;
     }
     if (!PAUSING_STEP_TYPES.has(currentStep.type)) {
@@ -1242,6 +1273,9 @@ export async function processIncomingMessage(
   }
 
   log.debug(`nenhum contexto interativo encontrado pra contato=${contactId}`);
+  if (sawInFlightPlainSend) {
+    return { handled: false, replied: false };
+  }
   // Qualquer RUNNING/PAUSED que o loop não consumiu (já cancelados no
   // corpo, ou recém-criados em corrida): garante saída de Automação.
   const leftover = await cancelActiveContextsForContact(contactId);
