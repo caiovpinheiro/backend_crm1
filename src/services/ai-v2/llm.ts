@@ -263,14 +263,15 @@ export async function callV2LLMTest(
   config: V2AgentConfig,
   userMessage: string,
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
-): Promise<ReturnType<typeof callV2LLM>> {
+): Promise<ReturnType<typeof callV2LLM> & { systemPrompt: string }> {
   const emptyContext: V2CRMContext = {
     contact: null,
     deals: [],
     selectedDeal: null,
     fields: config.contextFields,
   };
-  return callV2LLM({
+  const systemPrompt = buildV2SystemPrompt(config, emptyContext, "active");
+  const result = await callV2LLM({
     agentId,
     config,
     context: emptyContext,
@@ -278,6 +279,31 @@ export async function callV2LLMTest(
     stage: "active",
     previousMessages,
   });
+  return { ...result, systemPrompt };
+}
+
+function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
+  switch (length) {
+    case "short":
+      return 120;
+    case "long":
+      return 1200;
+    case "medium":
+    default:
+      return 400;
+  }
+}
+
+function responseLengthInstruction(length: V2AgentConfig["responseLength"]): string {
+  switch (length) {
+    case "short":
+      return "Mantenha as respostas curtas e diretas (até 120 tokens de saída).";
+    case "long":
+      return "Pode responder com mais detalhes e explicações (até 1200 tokens de saída).";
+    case "medium":
+    default:
+      return "Responda de forma equilibrada, nem muito curta nem muito longa (até 400 tokens de saída).";
+  }
 }
 
 function buildV2SystemPrompt(
@@ -290,6 +316,7 @@ function buildV2SystemPrompt(
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
+  lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
 
   lines.push("# Dados do cliente (só cite o que está aqui)");
@@ -404,6 +431,7 @@ export async function callV2LLM(args: {
       messages: messages as any,
       tools,
       temperature: behaviorToTemperature(args.config.responseBehavior),
+      maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
       maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
     });
 

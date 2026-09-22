@@ -28,6 +28,10 @@ export type V2TestTurnResult = {
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
+  tone: string;
+  responseLength: string;
+  globalRules: string[];
+  systemPrompt: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -157,5 +161,9 @@ export async function simulateV2Turn(
     inputTokens: llmResult.inputTokens,
     outputTokens: llmResult.outputTokens,
     latencyMs: llmResult.latencyMs,
+    tone: config.tone,
+    responseLength: config.responseLength,
+    globalRules: config.globalRules,
+    systemPrompt: llmResult.systemPrompt,
   };
 }

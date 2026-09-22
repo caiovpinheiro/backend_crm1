@@ -62,6 +62,7 @@ describe("simulateV2Turn", () => {
       outputTokens: 5,
       latencyMs: 100,
       toolCalls: [],
+      systemPrompt: "# Tom de voz\nObjetivo",
     });
     const { simulateV2Turn } = await import("../test-turn");
     const result = await simulateV2Turn("agent-1", baseConfig(), "oi");

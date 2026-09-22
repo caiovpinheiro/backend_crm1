@@ -361,9 +361,9 @@ function basePreset(): V2AgentConfig {
     tone: "Profissional, direto e educado.",
     globalRules: [
       "Só responda com base nos materiais, dados do cliente ou catálogo de produtos.",
-      "Nunca afirme que executou uma ação que não esteja no campo actions.",
+      "Não diga que fez algo que ainda não foi feito.",
       NO_RETURN_PROMISE,
-      "Se não souber a resposta, não invente: peça handoff.",
+      "Se não souber a resposta, não invente: peça para transferir para um atendente.",
     ],
     variables: [],
     contextFields: {
