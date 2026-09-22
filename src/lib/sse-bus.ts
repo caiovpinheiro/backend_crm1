@@ -13,7 +13,10 @@ import {
   scheduleTabCountsInvalidation,
   shouldInvalidateInboxTabCounts,
 } from "@/lib/cache/keys";
-import { withInboxSseCard } from "@/lib/inbox-sse-card";
+import {
+  shouldAttachInboxSseCard,
+  withInboxSseCard,
+} from "@/lib/inbox-sse-card";
 import { metrics, safeLabel } from "@/lib/metrics";
 import {
   isReplaySandboxActive,
@@ -88,6 +91,27 @@ async function inboxSseCardWithinBudget(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * `cardOmitted: "budget"` quando o evento devia levar `card` e saiu sem ele
+ * (timeout, erro ou linha não achada). O cliente distingue isto de
+ * `"hidden"` (gate de visibilidade, na rota SSE): aqui ele busca o card
+ * antes de decidir o alerta; lá o usuário não pode ver a conversa.
+ */
+export function markInboxCardOmittedByBudget(
+  event: string,
+  original: unknown,
+  payload: unknown,
+): unknown {
+  if (!shouldAttachInboxSseCard(event, original)) return payload;
+  if (!payload || typeof payload !== "object") return payload;
+  const rec = payload as Record<string, unknown>;
+  if (rec.card && typeof rec.card === "object") return payload;
+  if (event === "new_message" && rec.direction === "in") {
+    metrics.sse.inboundWithoutCard.inc({ reason: "budget" });
+  }
+  return { ...rec, cardOmitted: "budget" };
 }
 
 function sseRedisPubSubEnabled(): boolean {
@@ -315,6 +339,7 @@ class SseBus {
     } catch (e) {
       console.error("[sse-bus] inbox card snapshot:", e);
     }
+    payload = markInboxCardOmittedByBudget(event, data, payload);
 
     const envelope: SseEventEnvelope = {
       organizationId: orgId,
