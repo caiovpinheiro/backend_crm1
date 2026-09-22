@@ -19,17 +19,22 @@ export type V2LoadedContext = V2CRMContext & {
 };
 
 function buildExposure(config: V2AgentConfig): CrmFieldExposure {
-  const keys: string[] = [];
+  const readableKeys: string[] = [];
+  const citableKeys: string[] = [];
   const add = (fields: V2FieldConfig[], entity: string) => {
     for (const f of fields) {
+      const key = crmFieldKey(entity, f.key);
       if (f.permissions.includes("read") || f.permissions.includes("cite")) {
-        keys.push(crmFieldKey(entity, f.key));
+        readableKeys.push(key);
+      }
+      if (f.permissions.includes("cite")) {
+        citableKeys.push(key);
       }
     }
   };
   add(config.contextFields.contact, "contact");
   add(config.contextFields.deal, "deal");
-  return { readableKeys: keys, orgWide: false };
+  return { readableKeys, citableKeys, orgWide: false };
 }
 
 async function loadContactFields(
@@ -232,14 +237,20 @@ export async function loadV2Context(args: {
 
   const visibleContact: Record<string, unknown> = {};
   for (const v of contactPartition.visible) visibleContact[v.label] = v.value;
+  const citableContact: Record<string, unknown> = {};
+  for (const v of contactPartition.citable) citableContact[v.label] = v.value;
 
   const visibleDeal: Record<string, unknown> = {};
   for (const v of dealPartition.visible) visibleDeal[v.label] = v.value;
+  const citableDeal: Record<string, unknown> = {};
+  for (const v of dealPartition.citable) citableDeal[v.label] = v.value;
 
   return {
     contact: visibleContact,
+    citableContact,
     deals,
     selectedDeal: selectedDeal ? visibleDeal : null,
+    citableDeal: selectedDeal ? citableDeal : null,
     fields: args.config.contextFields,
     exposure,
     contactId,

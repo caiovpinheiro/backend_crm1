@@ -51,11 +51,12 @@ const values: CrmFieldValue[] = [
 
 describe("exposição de campo (default-deny)", () => {
   it("agente sem configuração não recebe nenhum valor", () => {
-    const { visible, hiddenLabels } = partitionFieldValues(
+    const { visible, citable, hiddenLabels } = partitionFieldValues(
       values,
       emptyCrmFieldExposure(),
     );
     expect(visible).toEqual([]);
+    expect(citable).toEqual([]);
     expect(hiddenLabels).toContain("CPF");
     expect(hiddenLabels).toContain("Curso");
   });
@@ -63,6 +64,7 @@ describe("exposição de campo (default-deny)", () => {
   it("nenhum valor sensível é serializado quando o campo não foi liberado", () => {
     const partition = partitionFieldValues(values, {
       readableKeys: ["deal.curso"],
+      citableKeys: [],
       orgWide: false,
     });
     const serialized = JSON.stringify(partition);
@@ -75,6 +77,7 @@ describe("exposição de campo (default-deny)", () => {
   it("o rótulo do campo retido chega ao modelo, o conteúdo não", () => {
     const { hiddenLabels } = partitionFieldValues(values, {
       readableKeys: ["deal.curso"],
+      citableKeys: [],
       orgWide: false,
     });
     // Saber que o dado EXISTE é o que permite encaminhar em vez de negar.
@@ -88,16 +91,28 @@ describe("exposição de campo (default-deny)", () => {
   });
 
   it("curinga por entidade e global são decisão explícita do operador", () => {
-    const exposure = { readableKeys: ["deal.*"], orgWide: false };
+    const exposure = { readableKeys: ["deal.*"], citableKeys: [], orgWide: false };
     expect(isFieldReadable(exposure, "deal.cpf")).toBe(true);
     expect(isFieldReadable(exposure, "contact.email")).toBe(false);
     expect(
-      isFieldReadable({ readableKeys: ["*"], orgWide: false }, "contact.email"),
+      isFieldReadable({ readableKeys: ["*"], citableKeys: [], orgWide: false }, "contact.email"),
     ).toBe(true);
   });
 
+  it("só campos com permissão cite vão para a lista citable", () => {
+    const exposure = {
+      readableKeys: ["deal.curso", "deal.cpf"],
+      citableKeys: ["deal.curso"],
+      orgWide: false,
+    };
+    const { visible, citable, hiddenLabels } = partitionFieldValues(values, exposure);
+    expect(visible.map((v) => v.label).sort()).toEqual(["CPF", "Curso"]);
+    expect(citable.map((v) => v.label)).toEqual(["Curso"]);
+    expect(hiddenLabels).not.toContain("Curso");
+  });
+
   it("a chave tolera acento e caixa", () => {
-    const exposure = { readableKeys: ["Deal.Curso"], orgWide: false };
+    const exposure = { readableKeys: ["Deal.Curso"], citableKeys: [], orgWide: false };
     expect(isFieldReadable(exposure, "deal.curso")).toBe(true);
   });
 
@@ -224,7 +239,7 @@ describe("aviso de sensibilidade", () => {
     expect(cpf.sensitiveHint).toBe(true);
     const { visible, hiddenLabels } = partitionFieldValues(
       [{ field: cpf, value: "12345678901" }],
-      { readableKeys: ["deal.cpf"], orgWide: false },
+      { readableKeys: ["deal.cpf"], citableKeys: [], orgWide: false },
     );
     // O operador liberou: o valor sai, apesar do aviso.
     expect(visible).toEqual([{ label: "CPF", value: "12345678901" }]);
@@ -280,7 +295,7 @@ describe("orientação e configuração", () => {
       "não liberou nenhum campo",
     );
     expect(
-      describeCrmExposure({ readableKeys: ["deal.curso"], orgWide: false }),
+      describeCrmExposure({ readableKeys: ["deal.curso"], citableKeys: [], orgWide: false }),
     ).toContain("deal.curso");
   });
 

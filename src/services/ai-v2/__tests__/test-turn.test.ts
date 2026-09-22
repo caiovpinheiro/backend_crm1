@@ -64,8 +64,10 @@ describe("simulateV2Turn", () => {
       toolCalls: [],
       systemPrompt: "# Tom de voz\nObjetivo",
     });
+    const cfg = baseConfig();
     const { simulateV2Turn } = await import("../test-turn");
-    const result = await simulateV2Turn("agent-1", baseConfig(), "oi");
+    const result = await simulateV2Turn("agent-1", cfg, "oi");
     expect(result.reply).toBe("Olá!");
+    expect(result.crmContext.contact).toBeNull();
   });
 });

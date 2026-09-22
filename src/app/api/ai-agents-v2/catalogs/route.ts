@@ -26,6 +26,7 @@ export async function GET() {
       customFields,
       products,
       whatsappTemplates,
+      contacts,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -75,6 +76,12 @@ export async function GET() {
         select: { id: true, metaTemplateName: true, label: true },
         orderBy: { metaTemplateName: "asc" },
       }),
+      p.contact.findMany({
+        where: { organizationId, isErased: false },
+        select: { id: true, name: true, phone: true, email: true },
+        orderBy: { name: "asc" },
+        take: 200,
+      }),
     ]);
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
@@ -97,6 +104,12 @@ export async function GET() {
       products,
       whatsappTemplates: whatsappTemplateCatalog,
       models: SUPPORTED_V2_MODELS.map((m) => ({ id: m.id, name: m.label })),
+      contacts: contacts.map((c: any) => ({
+        id: c.id,
+        name: c.name || c.phone || c.email || c.id,
+        phone: c.phone,
+        email: c.email,
+      })),
     });
   } catch (err) {
     console.error("[GET /api/ai-agents-v2/catalogs]", err);

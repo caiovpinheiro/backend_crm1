@@ -483,8 +483,12 @@ export interface V2TurnContext {
 
 export interface V2CRMContext {
   contact: Record<string, unknown> | null;
+  /// Campos do contato que o agente pode citar na resposta ao cliente.
+  citableContact?: Record<string, unknown> | null;
   deals: Array<Record<string, unknown>>;
   selectedDeal: Record<string, unknown> | null;
+  /// Campos do negócio selecionado que o agente pode citar na resposta.
+  citableDeal?: Record<string, unknown> | null;
   fields: {
     contact: V2FieldConfig[];
     deal: V2FieldConfig[];

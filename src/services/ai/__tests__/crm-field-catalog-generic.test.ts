@@ -160,6 +160,7 @@ describe("leitura numa organização não-acadêmica", () => {
     });
     const { visible, hiddenLabels } = partitionFieldValues(values, {
       readableKeys: ["deal.codigo_imovel", "deal.tipo_negocio"],
+      citableKeys: [],
       orgWide: false,
     });
     expect(visible).toEqual([

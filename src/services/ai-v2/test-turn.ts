@@ -7,6 +7,7 @@ import type { V2Action, V2AgentConfig, V2CRMContext } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { callV2LLMTest } from "./llm";
+import { loadV2Context } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
@@ -33,6 +34,7 @@ export type V2TestTurnResult = {
   globalRules: string[];
   systemPrompt: string;
   expandedByLength?: boolean;
+  crmContext: V2CRMContext;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -65,8 +67,19 @@ export async function simulateV2Turn(
   config: V2AgentConfig,
   userMessage: string,
   history: V2TestTurnHistoryItem[] = [],
+  organizationId?: string,
+  contactId?: string,
 ): Promise<V2TestTurnResult> {
-  const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+  let context: V2CRMContext;
+  if (organizationId) {
+    context = await loadV2Context({
+      organizationId,
+      config,
+      contactId,
+    });
+  } else {
+    context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+  }
 
   const apiKey = await tryGetAgentApiKey(agentId);
   if (!apiKey) {
@@ -82,7 +95,7 @@ export async function simulateV2Turn(
       contactTags: [],
       mediaKinds: ["text"],
     },
-    emptyContext,
+    context,
   );
   const appliedRuleId = rule?.id ?? null;
 
@@ -96,7 +109,7 @@ export async function simulateV2Turn(
     themeId = theme?.id ?? null;
   }
 
-  const llmResult = await callV2LLMTest(agentId, config, userMessage, history);
+  const llmResult = await callV2LLMTest(agentId, config, userMessage, history, context);
   const output = llmResult.output;
 
   // Se o LLM sugerir um tema, sobrescreve (ele tem a última palavra na simulação).
@@ -167,5 +180,6 @@ export async function simulateV2Turn(
     globalRules: config.globalRules,
     systemPrompt: llmResult.systemPrompt,
     expandedByLength: llmResult.wasExpanded,
+    crmContext: context,
   };
 }

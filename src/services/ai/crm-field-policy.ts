@@ -261,27 +261,40 @@ export async function loadCrmFieldCatalog(opts?: {
  */
 export type CrmFieldExposure = {
   readableKeys: string[];
+  /// Campos que o agente pode não apenas ler, mas também repetir/citar na resposta.
+  citableKeys: string[];
   /// Permite `scope: "organization"`, isto é, procurar registros de outras
   /// pessoas. Default false: o agente só lê o cadastro de quem está falando.
   orgWide: boolean;
 };
 
 export function emptyCrmFieldExposure(): CrmFieldExposure {
-  return { readableKeys: [], orgWide: false };
+  return { readableKeys: [], citableKeys: [], orgWide: false };
 }
 
 /** A chave exata, o curinga da entidade e o curinga global liberam o campo. */
+function isKeyAllowed(keys: string[], key: string): boolean {
+  if (keys.length === 0) return false;
+  const target = fold(key);
+  const [entity] = target.split(".");
+  return keys.some((raw) => {
+    const k = fold(raw);
+    return k === "*" || k === target || k === `${entity}.*`;
+  });
+}
+
 export function isFieldReadable(
   exposure: CrmFieldExposure,
   key: string,
 ): boolean {
-  if (exposure.readableKeys.length === 0) return false;
-  const target = fold(key);
-  const [entity] = target.split(".");
-  return exposure.readableKeys.some((raw) => {
-    const k = fold(raw);
-    return k === "*" || k === target || k === `${entity}.*`;
-  });
+  return isKeyAllowed(exposure.readableKeys, key);
+}
+
+export function isFieldCitable(
+  exposure: CrmFieldExposure,
+  key: string,
+): boolean {
+  return isKeyAllowed(exposure.citableKeys, key);
 }
 
 /**
@@ -387,8 +400,10 @@ export type CrmFieldValue = {
 };
 
 export type CrmFieldPartition = {
-  /// Campos liberados, com valor — é o que chega ao modelo.
+  /// Campos liberados para leitura, com valor — é o que chega ao modelo.
   visible: Array<{ label: string; value: string }>;
+  /// Campos liberados para leitura E citação na resposta ao cliente.
+  citable: Array<{ label: string; value: string }>;
   /// Rótulos dos campos que existem e têm valor mas não foram liberados.
   /// Só o rótulo: o modelo precisa saber que o dado existe (para encaminhar
   /// em vez de negar a existência) sem receber o conteúdo.
@@ -400,6 +415,7 @@ export function partitionFieldValues(
   exposure: CrmFieldExposure,
 ): CrmFieldPartition {
   const visible: Array<{ label: string; value: string }> = [];
+  const citable: Array<{ label: string; value: string }> = [];
   const hiddenLabels: string[] = [];
   for (const v of values) {
     if (!v.value || !v.value.trim()) continue;
@@ -408,11 +424,14 @@ export function partitionFieldValues(
     // é veto da fonte (chave de identificação), acima da allowlist.
     if (v.field.readable !== false && isFieldReadable(exposure, v.field.key)) {
       visible.push({ label: v.field.label, value: v.value.trim() });
+      if (isFieldCitable(exposure, v.field.key)) {
+        citable.push({ label: v.field.label, value: v.value.trim() });
+      }
     } else if (!hiddenLabels.includes(v.field.label)) {
       hiddenLabels.push(v.field.label);
     }
   }
-  return { visible, hiddenLabels };
+  return { visible, citable, hiddenLabels };
 }
 
 /**
@@ -492,5 +511,8 @@ export function describeCrmExposure(exposure: CrmFieldExposure): string {
   if (exposure.readableKeys.length === 0) {
     return "CONFIGURAÇÃO ATUAL: o operador ainda não liberou nenhum campo para leitura. A busca confirma se existe registro, mas nenhum valor será devolvido — nesses casos encaminhe para a equipe.";
   }
-  return `CONFIGURAÇÃO ATUAL: campos liberados para leitura — ${exposure.readableKeys.join(", ")}. Qualquer outro campo volta apenas como rótulo em \`hiddenFields\`.`;
+  const cite = exposure.citableKeys.length > 0
+    ? ` Pode citar na resposta — ${exposure.citableKeys.join(", ")}.`
+    : "";
+  return `CONFIGURAÇÃO ATUAL: campos liberados para leitura — ${exposure.readableKeys.join(", ")}.${cite} Qualquer outro campo volta apenas como rótulo em \`hiddenFields\`.`;
 }

@@ -225,6 +225,34 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect(calls[1][0].maxOutputTokens).toBe(2000);
   });
 
+  it("campo só com 'ler' não aparece na seção citável do prompt", async () => {
+    const config = baseConfig();
+    const context = {
+      contact: { Nome: "João", Telefone: "11999999999" },
+      citableContact: { Nome: "João" },
+      deals: [],
+      selectedDeal: { Etapa: "Negociação", Valor: "R$ 1.000" },
+      citableDeal: { Etapa: "Negociação" },
+      fields: config.contextFields,
+    };
+    await callV2LLM({ agentId: "agent-1", config, context: context as any, userMessage: "oi", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("# Dados do cliente para consulta interna");
+    expect(system).toContain("# Dados que você pode citar na resposta");
+    expect(system).toContain("Telefone");
+    expect(system).toContain("Valor");
+    expect(system).toContain("Regra de citação: só escreva/repita");
+  });
+
+  it("cliente não encontrado é declarado no prompt sem erro", async () => {
+    const config = baseConfig();
+    const context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+    await callV2LLM({ agentId: "agent-1", config, context, userMessage: "oi", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("Nenhum contato encontrado para esta conversa.");
+    expect(system).not.toContain("undefined");
+  });
+
   it("envia todas as regras globais na ordem cadastrada", async () => {
     const rules = ["Nunca informe prazos.", "Sempre peça confirmação.", "Não invente preço."];
     const config = baseConfig({ globalRules: rules });

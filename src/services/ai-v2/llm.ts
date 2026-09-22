@@ -263,18 +263,19 @@ export async function callV2LLMTest(
   config: V2AgentConfig,
   userMessage: string,
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
+  context?: V2CRMContext,
 ): Promise<ReturnType<typeof callV2LLM> & { systemPrompt: string }> {
-  const emptyContext: V2CRMContext = {
+  const ctx: V2CRMContext = context ?? {
     contact: null,
     deals: [],
     selectedDeal: null,
     fields: config.contextFields,
   };
-  const systemPrompt = buildV2SystemPrompt(config, emptyContext, "active");
+  const systemPrompt = buildV2SystemPrompt(config, ctx, "active");
   const result = await callV2LLM({
     agentId,
     config,
-    context: emptyContext,
+    context: ctx,
     userMessage,
     stage: "active",
     previousMessages,
@@ -322,15 +323,33 @@ function buildV2SystemPrompt(
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
 
-  lines.push("# Dados do cliente (só cite o que está aqui)");
-  if (context.contact && Object.keys(context.contact).length > 0) {
+  // Dados que o modelo pode usar para entender a situação.
+  lines.push("# Dados do cliente para consulta interna");
+  const hasReadableContact = context.contact && Object.keys(context.contact).length > 0;
+  const hasReadableDeal = context.selectedDeal && Object.keys(context.selectedDeal).length > 0;
+  if (hasReadableContact) {
     lines.push(`Contato: ${JSON.stringify(context.contact)}`);
   }
-  if (context.selectedDeal && Object.keys(context.selectedDeal).length > 0) {
+  if (hasReadableDeal) {
     lines.push(`Negócio: ${JSON.stringify(context.selectedDeal)}`);
   } else {
     lines.push("Negócio: nenhum encontrado.");
   }
+  if (!hasReadableContact && !hasReadableDeal) {
+    lines.push("Nenhum contato encontrado para esta conversa.");
+  }
+
+  // Dados que o modelo pode repetir/citar na resposta ao cliente.
+  const citableContact = context.citableContact ?? context.contact;
+  const citableDeal = context.citableDeal ?? context.selectedDeal;
+  const hasCitableContact = citableContact && Object.keys(citableContact).length > 0;
+  const hasCitableDeal = citableDeal && Object.keys(citableDeal).length > 0;
+  if (hasCitableContact || hasCitableDeal) {
+    lines.push("# Dados que você pode citar na resposta");
+    if (hasCitableContact) lines.push(`Contato: ${JSON.stringify(citableContact)}`);
+    if (hasCitableDeal) lines.push(`Negócio: ${JSON.stringify(citableDeal)}`);
+  }
+  lines.push("Regra de citação: só escreva/repita para o cliente os campos listados em 'Dados que você pode citar na resposta'. Campos de 'Dados do cliente para consulta interna' servem apenas para você entender a situação.");
 
   if (config.variables.length > 0) {
     lines.push("# Informações fixas da empresa");
