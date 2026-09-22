@@ -24,6 +24,7 @@ import {
   shouldCancelPausedAutomationForHumanAttendance,
   waitForReplyHijacksAiTurn,
   decideFlowStepInbound,
+  isInFlightPlainSend,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -792,5 +793,34 @@ describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
         awaitingFlow: awaiting,
       }),
     ).toBe("stay");
+  });
+});
+
+describe("isInFlightPlainSend — inicio-pipe não consome o inbound que o disparou", () => {
+  it("texto puro sem timeoutAt ainda está no ar", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_message",
+        timeoutAt: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("aresta Sem resposta (timeoutAt) é espera real", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_message",
+        timeoutAt: new Date(),
+      }),
+    ).toBe(false);
+  });
+
+  it("menu interativo não é texto in-flight", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_interactive",
+        timeoutAt: null,
+      }),
+    ).toBe(false);
   });
 });
