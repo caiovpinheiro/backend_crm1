@@ -23,6 +23,12 @@ import { generateFileName, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { cache } from "@/lib/cache";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
+import {
+  enrichWhatsappOrder,
+  formatWhatsappOrderText,
+  parseWhatsappOrder,
+  type WhatsappOrderSnapshot,
+} from "@/lib/whatsapp-catalog-order";
 
 /**
  * Scope multi-tenancy do webhook. Quando presente:
@@ -951,6 +957,8 @@ type ParsedMessage = {
   flowPayload: Record<string, unknown> | null;
   flowMetaName: string | null;
   flowToken: string | null;
+  /** Pedido do catálogo (`type=order`). Preço é o do payload, ainda sem nome do CRM. */
+  catalogOrder: WhatsappOrderSnapshot | null;
 };
 
 function fallbackUnknownInteractive(
@@ -1216,6 +1224,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
   let flowPayload: Record<string, unknown> | null = null;
   let flowMetaName: string | null = null;
   let flowToken: string | null = null;
+  let catalogOrder: WhatsappOrderSnapshot | null = null;
 
   switch (type) {
     case "text": {
@@ -1299,6 +1308,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
         flowPayload: null,
         flowMetaName: null,
         flowToken: null,
+        catalogOrder: null,
       };
     }
     case "interactive": {
@@ -1346,6 +1356,11 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       text = labelUnsupportedMessage(message);
       break;
     }
+    case "order": {
+      catalogOrder = parseWhatsappOrder(message);
+      text = catalogOrder ? formatWhatsappOrderText(catalogOrder) : "[order]";
+      break;
+    }
     default:
       text = `[${type}]`;
   }
@@ -1377,6 +1392,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
     flowPayload,
     flowMetaName,
     flowToken,
+    catalogOrder,
   };
 }
 
@@ -2847,11 +2863,21 @@ export async function processMetaWebhookPayload(
 
           const isSystemMessage = parsed.type === "system";
 
+          if (parsed.catalogOrder) {
+            parsed.catalogOrder = await enrichWhatsappOrder(
+              parsed.catalogOrder,
+              conversation.channelId,
+            );
+            parsed.text = formatWhatsappOrderText(parsed.catalogOrder);
+          }
+
           const inboundMsgType =
             isSystemMessage
               ? "system"
               : parsed.type === "unsupported"
                 ? "unsupported"
+                : parsed.type === "order"
+                  ? "order"
                 : parsed.mediaId
                   ? parsed.type
                   : parsed.type === "interactive" || parsed.type === "button"
@@ -2890,6 +2916,7 @@ export async function processMetaWebhookPayload(
                 senderName: isSystemMessage ? "WhatsApp" : (profileName || contact.name),
                 mediaUrl,
                 createdAt: parsed.timestamp,
+                ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
                 ...(replyLink
                   ? {
                       replyToId: replyLink.messageId,
@@ -3139,7 +3166,9 @@ export async function processMetaWebhookPayload(
                 direction: "in",
                 assignedToId: conversation.assignedToId ?? null,
                 content: parsed.text,
+                messageType: inboundMsgType,
                 timestamp: parsed.timestamp,
+                ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
               });
             } catch (err) {
               log.warn("Falha ao publicar SSE (não-fatal):", err);

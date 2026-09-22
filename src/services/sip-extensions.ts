@@ -10,6 +10,7 @@ import { Prisma, type SipExtensionStatus } from "@prisma/client";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/secrets";
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
@@ -79,6 +80,33 @@ const SELECT_PUBLIC = {
   updatedAt: true,
 } as const;
 
+function redactTurnServer(turn: unknown): unknown {
+  if (!turn || typeof turn !== "object" || Array.isArray(turn)) return turn;
+  const copy = { ...(turn as Record<string, unknown>) };
+  if ("credential" in copy) delete copy.credential;
+  if ("password" in copy) delete copy.password;
+  return copy;
+}
+
+function toPublicExtension(row: SipExtensionPublic): SipExtensionPublic {
+  return { ...row, turnServer: redactTurnServer(row.turnServer) };
+}
+
+/** User não é SCOPED_MODELS (login). Filtro manual — não é bypass de Call. */
+async function assertUserInCurrentOrg(userId: string): Promise<void> {
+  const organizationId = getOrgIdOrThrow();
+  const member = await prismaBase.user.findFirst({
+    where: { id: userId, organizationId },
+    select: { id: true },
+  });
+  if (!member) {
+    throw Object.assign(new Error("Usuário não encontrado nesta organização."), {
+      code: "USER_NOT_IN_ORG",
+      status: 400,
+    });
+  }
+}
+
 // ── Funções ───────────────────────────────────────────────────────────────
 
 /**
@@ -89,9 +117,11 @@ export async function createOrUpdateExtension(
   input: CreateOrUpdateExtensionInput,
 ): Promise<SipExtensionPublic> {
   const organizationId = getOrgIdOrThrow();
+  await assertUserInCurrentOrg(input.userId);
   const encryptedPassword = encryptSecret(input.authPassword);
 
-  return prisma.sipExtension.upsert({
+  return toPublicExtension(
+    await prisma.sipExtension.upsert({
     where: {
       organizationId_userId: { organizationId, userId: input.userId },
     },
@@ -140,23 +170,26 @@ export async function createOrUpdateExtension(
       status: input.status ?? "ACTIVE",
     },
     select: SELECT_PUBLIC,
-  });
+    }),
+  );
 }
 
 /** Lista todos os ramais da org corrente (sem senha). */
 export async function listExtensions(): Promise<SipExtensionPublic[]> {
-  return prisma.sipExtension.findMany({
+  const rows = await prisma.sipExtension.findMany({
     select: SELECT_PUBLIC,
     orderBy: { createdAt: "asc" },
   });
+  return rows.map(toPublicExtension);
 }
 
 /** Busca um ramal por id, filtrando pela org corrente. */
 export async function getExtension(id: string): Promise<SipExtensionPublic | null> {
-  return prisma.sipExtension.findUnique({
+  const row = await prisma.sipExtension.findUnique({
     where: { id },
     select: SELECT_PUBLIC,
   });
+  return row ? toPublicExtension(row) : null;
 }
 
 /** Remove um ramal da org corrente. */

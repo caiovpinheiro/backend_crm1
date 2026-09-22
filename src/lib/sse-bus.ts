@@ -1,6 +1,14 @@
 import IORedis from "ioredis";
 
 import {
+  parseSseRedisMessage,
+  serializeSseRedisBody,
+  shouldDeliverSseEvent,
+  SSE_ACCESS_REVOKED,
+  isPrivateTeamChatEvent,
+  type SseListenerCtx,
+} from "@/lib/sse-audience";
+import {
   scheduleBoardInvalidation,
   scheduleTabCountsInvalidation,
   shouldInvalidateInboxTabCounts,
@@ -22,10 +30,10 @@ import {
  * GETs subsequentes ja sao tenant-scoped, mas era um leak de METADADOS e
  * um side-channel de timing (da pra detectar atividade em outras orgs).
  *
- * Agora cada listener registra com `{ organizationId, isSuperAdmin }` e o
- * dispatcher so chama o listener se:
- *   - super-admin (vê tudo, pra debugger / painel /admin)
- *   - listener.organizationId === event.organizationId
+ * Agora cada listener registra com `{ organizationId, userId, isSuperAdmin }`.
+ * Atendimento: filtro por org (super-admin vê eventos de inbox da plataforma).
+ * Team-chat privado: só `audienceUserIds` resolvido no publisher pela
+ * membership da sala — `isSuperAdmin` não bypassa.
  *
  * Eventos sem organizationId no envelope (caminho legado) sao DROPADOS
  * com warning — fail-closed.
@@ -34,13 +42,16 @@ import {
 export type SseEventEnvelope = {
   organizationId: string | null;
   data: unknown;
+  audienceUserIds?: string[];
+};
+
+export type SsePublishOptions = {
+  audienceUserIds?: string[];
 };
 
 type Listener = (event: string, envelope: SseEventEnvelope) => void;
 
-type ListenerEntry = {
-  organizationId: string | null;
-  isSuperAdmin: boolean;
+type ListenerEntry = SseListenerCtx & {
   fn: Listener;
 };
 
@@ -113,22 +124,7 @@ class SseBus {
       this.redisPub = new IORedis(url, { maxRetriesPerRequest: null });
       await this.redisSub.subscribe(REDIS_CHANNEL);
       this.redisSub.on("message", (_ch, msg) => {
-        try {
-          const parsed = JSON.parse(msg) as {
-            event?: string;
-            organizationId?: string | null;
-            data?: unknown;
-          };
-          if (typeof parsed.event !== "string") return;
-          const envelope: SseEventEnvelope = {
-            organizationId:
-              typeof parsed.organizationId === "string" ? parsed.organizationId : null,
-            data: parsed.data,
-          };
-          this.dispatch(parsed.event, envelope);
-        } catch {
-          /* ignore malformed */
-        }
+        this.ingestRedisMessage(msg);
       });
       this.redisReady = true;
     })();
@@ -148,16 +144,15 @@ class SseBus {
   }
 
   /**
-   * Inscreve um listener com filtro por org. Chamada por
-   * /api/sse/messages com a sessao do usuario corrente.
-   *
-   * @param ctx.organizationId - tenant a filtrar. Se null + isSuperAdmin
-   *                              false, o listener nao recebe NADA
-   *                              (fail-closed para sessao sem org).
-   * @param ctx.isSuperAdmin   - true => recebe todos os eventos sem filtro.
+   * Inscreve um listener com filtro por org (atendimento) e por userId
+   * (team-chat privado / revogação).
    */
   subscribe(
-    ctx: { organizationId: string | null; isSuperAdmin: boolean },
+    ctx: {
+      organizationId: string | null;
+      userId: string | null;
+      isSuperAdmin: boolean;
+    },
     listener: Listener,
   ) {
     if (sseRedisPubSubEnabled()) {
@@ -167,6 +162,7 @@ class SseBus {
     }
     const entry: ListenerEntry = {
       organizationId: ctx.organizationId,
+      userId: ctx.userId,
       isSuperAdmin: ctx.isSuperAdmin,
       fn: listener,
     };
@@ -185,6 +181,48 @@ class SseBus {
   }
 
   /**
+   * Fecha conexões SSE deste usuário nesta instância e avisa as outras
+   * via Redis. Ordem: entregar `sse_access_revoked` → remover listeners
+   * locais → publicar no Redis (réplicas fazem o mesmo no dispatch).
+   */
+  revokeUser(args: { userId: string; organizationId: string | null }) {
+    const envelope: SseEventEnvelope = {
+      organizationId: args.organizationId,
+      data: { organizationId: args.organizationId, userId: args.userId },
+      audienceUserIds: [args.userId],
+    };
+    const targets = [...this.listeners].filter((e) => e.userId === args.userId);
+    for (const entry of targets) {
+      try {
+        entry.fn(SSE_ACCESS_REVOKED, envelope);
+      } catch {
+        /* ignore */
+      }
+      this.listeners.delete(entry);
+    }
+    void this.fanout(
+      SSE_ACCESS_REVOKED,
+      args.organizationId ?? "revoked",
+      envelope.data,
+      [args.userId],
+    );
+  }
+
+  /**
+   * Caminho da réplica: aplica o JSON já publicado em `crm:sse:events`.
+   * Testes usam isto para simular distribuição Redis sem broker.
+   */
+  ingestRedisMessage(raw: string) {
+    const parsed = parseSseRedisMessage(raw);
+    if (!parsed) return;
+    this.dispatch(parsed.event, {
+      organizationId: parsed.organizationId,
+      data: parsed.data,
+      audienceUserIds: parsed.audienceUserIds,
+    });
+  }
+
+  /**
    * Publica evento. `organizationId` eh OBRIGATORIO no envelope —
    * publishers que ainda nao foram migrados emitem warning e o evento
    * cai no chao (fail-closed pra evitar leak).
@@ -195,7 +233,7 @@ class SseBus {
    * inbox list get an extra `card` field (slim list DTO). See
    * `withInboxSseCard`. Old clients ignore it.
    */
-  publish(event: string, data: unknown) {
+  publish(event: string, data: unknown, opts?: SsePublishOptions) {
     const orgId =
       data && typeof data === "object" && "organizationId" in data
         ? ((data as Record<string, unknown>).organizationId as string | null | undefined) ?? null
@@ -220,6 +258,19 @@ class SseBus {
       console.error(
         `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
       );
+      return;
+    }
+
+    const audienceUserIds = opts?.audienceUserIds;
+    if (
+      isPrivateTeamChatEvent(event) &&
+      (!audienceUserIds || audienceUserIds.length === 0)
+    ) {
+      if (process.env.NODE_ENV !== "production") {
+        console.warn(
+          `[sse-bus] publish "${event}" SEM audienceUserIds — dropado (team-chat fail-closed).`,
+        );
+      }
       return;
     }
 
@@ -249,10 +300,15 @@ class SseBus {
       organization: safeLabel(orgId),
     });
 
-    void this.fanout(event, orgId, data);
+    void this.fanout(event, orgId, data, audienceUserIds);
   }
 
-  private async fanout(event: string, orgId: string, data: unknown) {
+  private async fanout(
+    event: string,
+    orgId: string,
+    data: unknown,
+    audienceUserIds?: string[],
+  ) {
     let payload = data;
     try {
       payload = await inboxSseCardWithinBudget(event, data);
@@ -260,16 +316,21 @@ class SseBus {
       console.error("[sse-bus] inbox card snapshot:", e);
     }
 
-    const envelope: SseEventEnvelope = { organizationId: orgId, data: payload };
+    const envelope: SseEventEnvelope = {
+      organizationId: orgId,
+      data: payload,
+      audienceUserIds,
+    };
 
     if (sseRedisPubSubEnabled()) {
       try {
         await this.ensureRedis();
         if (!this.redisPub) return;
-        const body = JSON.stringify({
+        const body = serializeSseRedisBody({
           event,
           organizationId: orgId,
           data: payload,
+          audienceUserIds,
         });
         await this.redisPub.publish(REDIS_CHANNEL, body);
       } catch (e) {
@@ -282,19 +343,17 @@ class SseBus {
   }
 
   private dispatch(event: string, envelope: SseEventEnvelope) {
-    for (const entry of this.listeners) {
-      // super-admin recebe tudo (debug/admin panel)
-      // demais listeners: filtro estrito por org
-      if (
-        !entry.isSuperAdmin &&
-        entry.organizationId !== envelope.organizationId
-      ) {
+    for (const entry of [...this.listeners]) {
+      if (!shouldDeliverSseEvent(entry, event, envelope)) {
         continue;
       }
       try {
         entry.fn(event, envelope);
       } catch {
         /* ignore */
+      }
+      if (event === SSE_ACCESS_REVOKED) {
+        this.listeners.delete(entry);
       }
     }
   }

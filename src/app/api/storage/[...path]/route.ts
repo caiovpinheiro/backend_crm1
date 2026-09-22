@@ -26,6 +26,7 @@ import {
   statStoredFile,
 } from "@/lib/storage/local";
 import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
+import { authorizeStorageObject } from "@/lib/storage-object-access";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
@@ -75,14 +76,29 @@ export async function GET(request: Request, context: RouteContext) {
   } else {
     // Multi-tenancy enforcement: só super-admin atravessa orgs.
     const sUser = session!.user as {
+      id: string;
       organizationId?: string | null;
       isSuperAdmin?: boolean;
+      role?: string | null;
     };
     const sessionOrgId = sUser.organizationId ?? null;
     const isSuperAdmin = Boolean(sUser.isSuperAdmin);
 
     if (!isSuperAdmin && sessionOrgId !== parsed.orgId) {
       // 404 (e não 403) pra não confirmar existência.
+      return withStorageCors(
+        request,
+        NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
+      );
+    }
+
+    const allowed = await authorizeStorageObject({
+      userId: sUser.id,
+      organizationId: sessionOrgId,
+      isSuperAdmin,
+      role: sUser.role ?? null,
+    }, parsed);
+    if (!allowed) {
       return withStorageCors(
         request,
         NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),

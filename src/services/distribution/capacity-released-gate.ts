@@ -1,6 +1,10 @@
 /**
- * Gate do worker em `capacity_released`: sem teto de fila, drena se
- * existir responsável participando. Sem COUNT da fila de espera.
+ * Gate do worker em `capacity_released`: só drena se houver vaga
+ * (Entrada + Aguardando < queueLimit). Sem COUNT da fila de espera.
+ *
+ * Volume = `DistributionResponsible.queueLimit` (teto por consultor).
+ * Carga = `getQueueCounts` (mesmas abas da inbox).
+ * A API só enfileira; esta checagem corre no `worker-distribution`.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -45,7 +49,7 @@ async function loadCapacitySnapshots(
   }
 
   const rows = await prisma.distributionResponsible.findMany({
-    where: { participates: true },
+    where: { participates: true, queueLimit: { gt: 0 } },
     select: { userId: true, queueLimit: true },
   });
   if (rows.length === 0) return [];

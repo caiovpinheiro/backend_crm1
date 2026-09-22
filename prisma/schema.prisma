@@ -58,6 +58,7 @@ model Organization {
   dealEvents               DealEvent[]
   activityEvents           ActivityEvent[]
   products                 Product[]
+  productMetaLinks         ProductMetaLink[]
   activities               Activity[]
   activityComments         ActivityComment[]
   activityCommentRevisions ActivityCommentRevision[]
@@ -1677,6 +1678,9 @@ model Product {
   /// @deprecated — ver `trackStock`. Quantidade só lida pelo step `consume_stock`
   /// legado. Pools novos não usam este campo.
   stock          Decimal      @default(0) @db.Decimal(12, 2)
+  imageUrl       String?
+  imageMime      String?
+  imageName      String?
 
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
   /// Nullable para zero regressão; backfill move produtos legados ao catálogo
@@ -1701,6 +1705,9 @@ model Product {
   discountQuotas     DiscountQuota[]
   /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
   discountCategories DiscountCategory[]
+  /// Vínculo com item do catálogo Commerce da Meta. Separado de `catalogId`
+  /// (catálogo interno Bwipo / capacidades).
+  metaLinks          ProductMetaLink[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1714,6 +1721,32 @@ model Product {
   @@index([organizationId, kind])
   @@index([organizationId, catalogId])
   @@map("products")
+}
+
+/// Vínculo Produto Bwipo ↔ item do catálogo Commerce da Meta (WhatsApp).
+/// Não reutiliza `Product.catalogId` — esse campo é o catálogo interno.
+model ProductMetaLink {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  channelId         String
+  channel           Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  metaCatalogId     String
+  productRetailerId String
+  /// MANUAL | SYNCED | ERROR
+  syncStatus        String       @default("MANUAL")
+  lastSyncedAt      DateTime?
+  lastSyncError     String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([productId, channelId])
+  @@index([organizationId])
+  @@index([channelId])
+  @@index([organizationId, metaCatalogId])
+  @@map("product_meta_links")
 }
 
 model ProductCustomFieldValue {
@@ -3125,6 +3158,8 @@ model Message {
   reactions        Json                    @default("[]")
   sendStatus       String                  @default("sent")
   sendError        String?
+  /// Pedido do catálogo WhatsApp (`type=order`). Preço e quantidade são os do payload da Meta.
+  catalogOrder     Json?                   @map("catalog_order")
   /// Token do botão Flow (Cloud API) por envio — correlaciona com webhook de retorno.
   flowToken        String?                 @map("flow_token")
   /// Template config usado no envio outbound (FK). Permite ao webhook
@@ -3459,6 +3494,7 @@ model Channel {
   baileysAuthKeys   BaileysAuthKey[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
+  productMetaLinks  ProductMetaLink[]
 
   @@unique([organizationId, number])
   @@index([organizationId])

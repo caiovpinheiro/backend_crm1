@@ -7,6 +7,7 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { teamChatAudience } from "@/lib/sse-audience";
 import { sseBus } from "@/lib/sse-bus";
 import { extractCrmRefsFromText, stripCrmUrls } from "@/lib/crm-internal-url";
 import { getSystemPresenceMap } from "@/services/system-presence";
@@ -191,7 +192,20 @@ export function isOwnedStorageUrl(url: string, organizationId: string) {
   return url.startsWith(`/api/storage/${organizationId}/attachments/`);
 }
 
-function publish(
+export async function loadRoomMemberUserIds(roomId: string): Promise<string[]> {
+  const rows = await prisma.teamChatMember.findMany({
+    where: { roomId },
+    select: { userId: true },
+  });
+  return rows.map((r) => r.userId);
+}
+
+/**
+ * Publica evento de team-chat com audiência = membership atual da sala.
+ * `memberIds` no payload é contrato FE (não usado como autorização).
+ * `extraAudience` só entra no envelope (ex.: quem acabou de sair).
+ */
+export async function publishTeamChatEvent(
   event:
     | "team_chat_message"
     | "team_chat_room_updated"
@@ -199,15 +213,24 @@ function publish(
     | "team_chat_work_item_updated"
     | "team_chat_forward_updated",
   organizationId: string,
-  data: Record<string, unknown>,
+  data: Record<string, unknown> & { roomId?: string | null },
+  extraAudience?: string[],
 ) {
-  sseBus.publish(event, { organizationId, ...data });
+  const roomId = typeof data.roomId === "string" ? data.roomId : null;
+  const memberIds = roomId ? await loadRoomMemberUserIds(roomId) : [];
+  const audienceUserIds = teamChatAudience(memberIds, extraAudience);
+  const payloadMemberIds = memberIds.length > 0 ? memberIds : audienceUserIds;
+  sseBus.publish(
+    event,
+    { organizationId, ...data, memberIds: payloadMemberIds },
+    { audienceUserIds },
+  );
 }
 
 export async function signalTyping(viewer: TeamChatViewer, roomId: string, name: string) {
   const member = await requireMember(viewer, roomId);
   if (!member) return { error: "Conversa não encontrada.", status: 404 as const };
-  publish("team_chat_typing", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_typing", viewer.organizationId, {
     roomId,
     userId: viewer.userId,
     name,
@@ -436,9 +459,8 @@ export async function createRoom(
       }
       throw err;
     }
-    publish("team_chat_room_updated", viewer.organizationId, {
+    await publishTeamChatEvent("team_chat_room_updated", viewer.organizationId, {
       roomId: created.id,
-      memberIds: created.members.map((m) => m.userId),
     });
     return { room: shapeRoom(created, viewer.userId, 0), created: true };
   }
@@ -480,9 +502,8 @@ export async function createRoom(
     data: { lastPreview: `${me?.name ?? "Alguém"} criou o canal` },
   });
 
-  publish("team_chat_room_updated", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_room_updated", viewer.organizationId, {
     roomId: created.id,
-    memberIds,
   });
   return { room: shapeRoom(created, viewer.userId, 0), created: true };
 }
@@ -537,9 +558,8 @@ export async function addMembers(
     }),
   });
 
-  publish("team_chat_room_updated", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_room_updated", viewer.organizationId, {
     roomId,
-    memberIds: [...already, ...toAdd],
   });
   return getRoom(viewer, roomId);
 }
@@ -582,9 +602,8 @@ export async function updateRoom(
     data,
   });
 
-  publish("team_chat_room_updated", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_room_updated", viewer.organizationId, {
     roomId,
-    memberIds: access.room.members.map((m) => m.id),
   });
   return getRoom(viewer, roomId);
 }
@@ -628,12 +647,15 @@ export async function leaveRoom(viewer: TeamChatViewer, roomId: string) {
       content: `${me?.name ?? "Alguém"} saiu do grupo`,
     }),
   });
-  const remaining = access.room.members.filter((m) => m.id !== viewer.userId).map((m) => m.id);
-  publish("team_chat_room_updated", viewer.organizationId, {
-    roomId,
-    memberIds: remaining,
-    leftUserId: viewer.userId,
-  });
+  await publishTeamChatEvent(
+    "team_chat_room_updated",
+    viewer.organizationId,
+    {
+      roomId,
+      leftUserId: viewer.userId,
+    },
+    [viewer.userId],
+  );
   return { ok: true as const, left: true };
 }
 
@@ -667,9 +689,8 @@ export async function deleteMessage(viewer: TeamChatViewer, roomId: string, mess
     },
     select: { members: { select: { userId: true } } },
   });
-  publish("team_chat_message", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_message", viewer.organizationId, {
     roomId,
-    memberIds: room.members.map((m) => m.userId),
     deleted: true,
     messageId,
   });
@@ -683,15 +704,19 @@ export async function deleteRoom(viewer: TeamChatViewer, roomId: string) {
     return { error: "Só grupos e canais podem ser excluídos.", status: 400 as const };
   }
 
-  const memberIds = access.room.members.map((m) => m.id);
+  const formerMembers = await loadRoomMemberUserIds(roomId);
   await prisma.teamChatMessageForward.deleteMany({ where: { destRoomId: roomId } });
   await prisma.teamChatRoom.delete({ where: { id: roomId } });
 
-  publish("team_chat_room_updated", viewer.organizationId, {
-    roomId,
-    memberIds,
-    deleted: true,
-  });
+  await publishTeamChatEvent(
+    "team_chat_room_updated",
+    viewer.organizationId,
+    {
+      roomId,
+      deleted: true,
+    },
+    formerMembers,
+  );
   return { ok: true as const };
 }
 
@@ -878,9 +903,8 @@ export async function sendMessage(
   );
   const payload = shapeMessage(message, viewer.userId, extra);
   const ssePayload = { ...payload, card: null };
-  publish("team_chat_message", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_message", viewer.organizationId, {
     roomId,
-    memberIds: room.members.map((m) => m.userId),
     message: ssePayload,
   });
   return { message: payload };
@@ -924,7 +948,7 @@ export async function sendSystemMessageThrottled(
       content: `${content}\u200b${throttleKey}`,
     }),
   });
-  publish("team_chat_room_updated", viewer.organizationId, { roomId });
+  await publishTeamChatEvent("team_chat_room_updated", viewer.organizationId, { roomId });
 }
 
 export async function unifiedTeamChatSearch(viewer: TeamChatViewer, q: string) {
@@ -1077,7 +1101,7 @@ export async function toggleReaction(
   });
   const extra = await extrasForMessage(viewer, messageId);
   const payload = shapeMessage(updated, viewer.userId, extra);
-  publish("team_chat_message", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_message", viewer.organizationId, {
     roomId,
     message: { ...payload, card: null },
   });
@@ -1103,7 +1127,7 @@ export async function togglePin(
   });
   const extra = await extrasForMessage(viewer, messageId);
   const payload = shapeMessage(updated, viewer.userId, extra);
-  publish("team_chat_message", viewer.organizationId, {
+  await publishTeamChatEvent("team_chat_message", viewer.organizationId, {
     roomId,
     message: { ...payload, card: null },
   });

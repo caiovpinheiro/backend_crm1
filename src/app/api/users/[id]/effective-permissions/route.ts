@@ -9,15 +9,19 @@
  *   { permissions, channelGrants, stageGrants, roles, groups }
  *
  * - ADMIN / super-admin recebem permissions = ["*"] (acesso total).
- * - Usuário pode consultar apenas as próprias permissões (ou ADMIN vê de outros).
+ * - Usuário consulta as próprias permissões; ADMIN da mesma org vê as de colegas.
+ * - Super-admin sem org ativa pode auditar outra org (plataforma). Com org
+ *   ativa, `userOrgFilter` restringe à sessão — igual às rotas de Equipe.
  */
 
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { agentPermissionWhere } from "@/lib/agent-permission-where";
+import { withOrgContext, userOrgFilter } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { getScopeGrants } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIdsForUser } from "@/lib/authz/scope-grants-shared";
+import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -38,8 +42,8 @@ export async function GET(_req: Request, ctx: Ctx) {
         return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
       }
 
-      const user = await prismaBase.user.findUnique({
-        where: { id },
+      const user = await prismaBase.user.findFirst({
+        where: { id, ...userOrgFilter(session) },
         select: {
           id: true,
           role: true,
@@ -104,10 +108,9 @@ export async function GET(_req: Request, ctx: Ctx) {
       }
 
       // Roles atribuídas ao usuário na organização.
-      const assignments = await prismaBase.userRoleAssignment.findMany({
+      const assignments = await prisma.userRoleAssignment.findMany({
         where: {
           userId: id,
-          organizationId: user.organizationId ?? undefined,
         },
         select: {
           role: { select: { id: true, name: true, systemPreset: true } },
@@ -121,12 +124,8 @@ export async function GET(_req: Request, ctx: Ctx) {
       }));
 
       // Canais efetivos: união dos grants (user + roles), com deny aplicado.
-      // Retorna nomes dos canais quando há restrição (array possivelmente
-      // vazio); `null` indicaria "sem restrição" — convertemos pra `[]` no
-      // payload pra simplificar consumo no client (UI exibe "Todos os canais"
-      // quando vazio + permissão de view geral). Lê grants da org do
-      // user-alvo (super-admin pode auditar user de outra org). Sem org →
-      // grants vazios.
+      // Lê grants da org do user-alvo. Super-admin sem org ativa pode auditar
+      // user de outra org; com org na sessão, o alvo já passou por userOrgFilter.
       const grants = await getScopeGrants(user.organizationId ?? null);
       const allowedIds = listAllowedChannelIdsForUser({
         grants,
@@ -136,29 +135,28 @@ export async function GET(_req: Request, ctx: Ctx) {
       });
       let channelGrants: { id: string; name: string }[] = [];
       if (allowedIds && allowedIds.length > 0) {
-        const chs = await prismaBase.channel.findMany({
+        const chs = await prisma.channel.findMany({
           where: {
             id: { in: allowedIds },
-            organizationId: user.organizationId ?? undefined,
           },
           select: { id: true, name: true },
         });
         channelGrants = chs.map((c) => ({ id: c.id, name: c.name }));
       }
 
-      // Bloco F: se o usuário tem canConfigureFieldVisibility no AgentPermission,
-      // adicionar settings:custom_fields às permissões efetivas (sem duplicar).
+      // Bloco F: AgentPermission.canConfigureFieldVisibility → settings:custom_fields.
+      // Sempre filtra pela org do usuário já validado (tabela NÃO é global).
       if (!permissions.includes("*") && !permissions.includes("settings:custom_fields")) {
         try {
-          const agentPerm = await prismaBase.$queryRaw<{ canConfigureFieldVisibility: boolean }[]>`
-            SELECT "canConfigureFieldVisibility" FROM "agent_permissions"
-            WHERE "userId" = ${id} LIMIT 1
-          `;
-          if (agentPerm?.[0]?.canConfigureFieldVisibility === true) {
+          const agentPerm = await prisma.agentPermission.findFirst({
+            where: agentPermissionWhere(id, user.organizationId),
+            select: { canConfigureFieldVisibility: true },
+          });
+          if (agentPerm?.canConfigureFieldVisibility === true) {
             permissions = [...permissions, "settings:custom_fields"];
           }
         } catch {
-          // Column might not exist yet — ignore.
+          // Tabela/coluna pode não existir ainda — ignore.
         }
       }
 
