@@ -184,9 +184,9 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
 
   it("cada tamanho gera o limite de saída esperado", async () => {
     const cases: Array<[NonNullable<V2AgentConfig["responseLength"]>, number, string]> = [
-      ["short", 120, "curtas"],
-      ["medium", 400, "equilibrada"],
-      ["long", 1200, "mais detalhes"],
+      ["short", 600, "curtas"],
+      ["medium", 1000, "equilibrada"],
+      ["long", 2000, "mais detalhes"],
     ];
     for (const [length, tokens, instruction] of cases) {
       vi.clearAllMocks();
@@ -199,6 +199,30 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
       expect(args.maxOutputTokens).toBe(tokens);
       expect(args.system).toContain(instruction);
     }
+  });
+
+  it("repete a chamada com mais tokens quando a resposta é cortada por length", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        text: "{\"reply\": \"incomplete",
+        inputTokens: 100,
+        outputTokens: 50,
+        finishReason: "length",
+        toolCalls: [],
+        steps: 1,
+      })
+      .mockResolvedValueOnce(
+        makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+      );
+
+    const config = baseConfig({ responseLength: "short" });
+    const result = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oi", stage: "active" });
+
+    expect(result.wasExpanded).toBe(true);
+    expect(result.output.reply).toBe("ok");
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0].maxOutputTokens).toBe(600);
+    expect(calls[1][0].maxOutputTokens).toBe(2000);
   });
 
   it("envia todas as regras globais na ordem cadastrada", async () => {

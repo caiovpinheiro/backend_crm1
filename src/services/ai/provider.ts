@@ -77,6 +77,7 @@ export type GenerateResult = {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  finishReason?: string;
   toolCalls: Array<{
     toolName: string;
     args: unknown;
@@ -137,6 +138,7 @@ export async function generateWithTools(
     text: result.text ?? "",
     inputTokens: result.usage?.inputTokens ?? 0,
     outputTokens: result.usage?.outputTokens ?? 0,
+    finishReason: result.finishReason,
     toolCalls,
     steps: result.steps.length,
   };

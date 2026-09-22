@@ -283,26 +283,29 @@ export async function callV2LLMTest(
 }
 
 function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
+  // Rede de segurança com folga para a saída estruturada completa
+  // (reply + theme + reason + actions). O controle real de tamanho vem
+  // da instrução no system prompt.
   switch (length) {
     case "short":
-      return 120;
+      return 600;
     case "long":
-      return 1200;
+      return 2000;
     case "medium":
     default:
-      return 400;
+      return 1000;
   }
 }
 
 function responseLengthInstruction(length: V2AgentConfig["responseLength"]): string {
   switch (length) {
     case "short":
-      return "Mantenha as respostas curtas e diretas (até 120 tokens de saída).";
+      return "Mantenha as respostas curtas e diretas (ideal: até 2 parágrafos).";
     case "long":
-      return "Pode responder com mais detalhes e explicações (até 1200 tokens de saída).";
+      return "Pode responder com mais detalhes e explicações quando necessário.";
     case "medium":
     default:
-      return "Responda de forma equilibrada, nem muito curta nem muito longa (até 400 tokens de saída).";
+      return "Responda de forma equilibrada, nem muito curta nem muito longa.";
   }
 }
 
@@ -423,8 +426,9 @@ export async function callV2LLM(args: {
     inputTokens: number;
     outputTokens: number;
     toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+    wasExpanded?: boolean;
   }> {
-    const result = await generateWithTools({
+    let result = await generateWithTools({
       model: args.config.model,
       apiKey,
       system,
@@ -434,6 +438,24 @@ export async function callV2LLM(args: {
       maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
       maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
     });
+
+    // Se o modelo cortou por limite de tokens, tenta novamente com a rede de
+    // segurança mais ampla (long) em vez de devolver JSON quebrado.
+    let wasExpanded = false;
+    if (result.finishReason === "length") {
+      wasExpanded = true;
+      console.warn("[ai-v2] LLM resposta cortada por length; expandindo maxOutputTokens");
+      result = await generateWithTools({
+        model: args.config.model,
+        apiKey,
+        system,
+        messages: messages as any,
+        tools,
+        temperature: behaviorToTemperature(args.config.responseBehavior),
+        maxOutputTokens: responseLengthToMaxTokens("long"),
+        maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
+      });
+    }
 
     const text = result.text.trim();
     const jsonText = text.replace(/^```json\s*/, "").replace(/```\s*$/, "");
@@ -459,6 +481,7 @@ export async function callV2LLM(args: {
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls,
+      wasExpanded,
     };
   }
 

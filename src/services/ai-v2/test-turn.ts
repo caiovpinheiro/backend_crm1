@@ -32,6 +32,7 @@ export type V2TestTurnResult = {
   responseLength: string;
   globalRules: string[];
   systemPrompt: string;
+  expandedByLength?: boolean;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -165,5 +166,6 @@ export async function simulateV2Turn(
     responseLength: config.responseLength,
     globalRules: config.globalRules,
     systemPrompt: llmResult.systemPrompt,
+    expandedByLength: llmResult.wasExpanded,
   };
 }
