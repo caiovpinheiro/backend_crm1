@@ -92,8 +92,22 @@ export function buildV2ToolSet(args: {
     : args.config.allowedMessageModelIds;
 
   const enabledToolNames = new Set(args.config.enabledTools ?? []);
-  if (enabledToolNames.size === 0 && !themeToolIds) {
-    return { tools: {}, governor: new ToolCallGovernor(normalizeToolCallLimits(undefined)) };
+
+  // Se nenhum tema nem lista global de tools foi configurada, infere
+  // ferramentas de consulta a partir dos dados disponíveis — senão um
+  // agente com materiais/produtos/modelos cadastrados fica sem ferramentas
+  // quando nenhum assunto casa com a mensagem.
+  const defaultToolNames = new Set<string>();
+  const docIds = allowedDocIds ?? [];
+  if (docIds.length > 0) defaultToolNames.add("knowledge_search");
+  const modelIds = allowedModelIds ?? [];
+  if (modelIds.length > 0) defaultToolNames.add("list_message_models");
+  if (args.config.productPolicy?.enabled) defaultToolNames.add("search_products");
+  if (
+    args.context.fields.contact.some((f) => f.permissions.includes("read") || f.permissions.includes("cite")) ||
+    args.context.fields.deal.some((f) => f.permissions.includes("read") || f.permissions.includes("cite"))
+  ) {
+    defaultToolNames.add("search_crm_records");
   }
 
   const limits = args.limits ?? normalizeToolCallLimits({
@@ -101,6 +115,12 @@ export function buildV2ToolSet(args: {
     maxRepeatsPerTool: args.config.toolGovernor?.maxRepeatsPerTool ?? 2,
   });
   const governor = new ToolCallGovernor(limits);
+
+  function isToolAllowed(toolName: string): boolean {
+    if (themeToolIds) return themeToolIds.has(toolName);
+    if (enabledToolNames.size > 0) return enabledToolNames.has(toolName);
+    return defaultToolNames.has(toolName);
+  }
 
   // Snapshot do RequestContext no momento em que o tool set é montado
   // (ainda dentro da mesma continuation síncrona do handler/job). O
@@ -119,8 +139,7 @@ export function buildV2ToolSet(args: {
     inputSchema: z.ZodTypeAny,
     execute: (input: any) => Promise<unknown>,
   ) {
-    if (themeToolIds && !themeToolIds.has(toolName)) return undefined;
-    if (!themeToolIds && !enabledToolNames.has(toolName)) return undefined;
+    if (!isToolAllowed(toolName)) return undefined;
     return tool({
       description,
       inputSchema,
@@ -293,7 +312,6 @@ export async function callV2LLMTest(
     selectedDeal: null,
     fields: config.contextFields,
   };
-  const systemPrompt = buildV2SystemPrompt(config, ctx, "active");
   const result = await callV2LLM({
     agentId,
     config,
@@ -302,7 +320,7 @@ export async function callV2LLMTest(
     stage: "active",
     previousMessages,
   });
-  return { ...result, systemPrompt };
+  return result;
 }
 
 function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
@@ -339,6 +357,7 @@ function buildV2SystemPrompt(
   themeId?: string,
   themeInstructions?: string,
   collectedVariables?: Record<string, unknown>,
+  allowedToolNames?: string[],
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
@@ -400,7 +419,16 @@ function buildV2SystemPrompt(
 
   lines.push(`# Etapa atual\n${stage}`);
   lines.push("# Tools de consulta disponíveis");
-  lines.push("Antes de responder, você pode chamar: search_products, search_crm_records, knowledge_search, list_message_models. Não chame a mesma tool com os mesmos argumentos mais de uma vez.");
+  const allQueryTools = ["search_products", "search_crm_records", "knowledge_search", "list_message_models"];
+  const availableTools = allQueryTools.filter((t) => (allowedToolNames ?? []).includes(t));
+  lines.push(`Antes de responder, você pode chamar: ${availableTools.join(", ") || "(nenhuma tool configurada)"}. Não chame a mesma tool com os mesmos argumentos mais de uma vez.`);
+  const promptTheme = activeTheme(config, themeId);
+  const promptDocIds = promptTheme?.knowledgeDocIds && promptTheme.knowledgeDocIds.length > 0
+    ? promptTheme.knowledgeDocIds
+    : (config.allowedKnowledgeDocIds ?? []);
+  if (availableTools.includes("knowledge_search") && promptDocIds.length > 0) {
+    lines.push("Há materiais de consulta disponíveis. Sempre que a pergunta do cliente puder ser respondida por esses materiais, chame knowledge_search primeiro. Se a busca retornar trechos relevantes, responda com base neles. Se não retornar nada, marque handoff=true em vez de inventar.");
+  }
   lines.push("# Saída obrigatória");
   lines.push("Responda com um JSON EXATAMENTE neste formato:");
   lines.push(JSON.stringify({
@@ -442,8 +470,17 @@ export async function callV2LLM(args: {
   governorStats: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
   toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
   wasExpanded: boolean;
+  systemPrompt: string;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
+  const { tools, governor } = buildV2ToolSet({
+    config: args.config,
+    context: args.context,
+    agentId: args.agentId,
+    apiKey,
+    themeId: args.themeId,
+  });
+  const allowedToolNames = Object.keys(tools);
   const system = buildV2SystemPrompt(
     args.config,
     args.context,
@@ -451,6 +488,7 @@ export async function callV2LLM(args: {
     args.themeId,
     args.themeInstructions,
     args.collectedVariables,
+    allowedToolNames,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -459,14 +497,7 @@ export async function callV2LLM(args: {
   ];
 
   const startedAt = Date.now();
-  const { tools, governor } = buildV2ToolSet({
-    config: args.config,
-    context: args.context,
-    agentId: args.agentId,
-    apiKey,
-    themeId: args.themeId,
-  });
-  const hasTools = Object.keys(tools).length > 0;
+  const hasTools = allowedToolNames.length > 0;
 
   const configVars: Record<string, unknown> = {};
   for (const v of args.config.variables) configVars[v.key] = v.value;
@@ -563,7 +594,7 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
-      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats() } as any;
+      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats(), systemPrompt: system } as any;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }

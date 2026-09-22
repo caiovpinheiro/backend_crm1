@@ -215,6 +215,40 @@ describe("buildV2ToolSet governor", () => {
     expect(governor.stats().totalCalls).toBe(2);
     expect(governor.stats().limitHit).toBe(true);
   });
+
+  it("disponibiliza knowledge_search mesmo sem tema quando há materiais permitidos", async () => {
+    const config = baseConfig({
+      enabledTools: [],
+      allowedKnowledgeDocIds: ["doc-1"],
+    });
+    const { tools } = buildV2ToolSet({
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      agentId: "agent-1",
+      apiKey: "key",
+    });
+    expect(Object.keys(tools)).toContain("knowledge_search");
+  });
+
+  it("lista knowledge_search no system prompt quando há materiais permitidos sem tema", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+    const config = baseConfig({
+      enabledTools: [],
+      allowedKnowledgeDocIds: ["doc-1"],
+    });
+    await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "quero cancelar",
+      stage: "active",
+    });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("knowledge_search");
+    expect(system).toContain("Há materiais de consulta disponíveis");
+  });
 });
 
 describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {

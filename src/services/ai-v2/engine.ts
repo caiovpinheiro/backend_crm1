@@ -536,7 +536,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
 
-  // Fluxo normal
+  // Fluxo de entrada (boas-vindas / confirmação / identificação)
   if (stage === "idle" || stage === "confirming" || stage === "identifying") {
     if (!loadedContext.selectedDeal) {
       const onDealNotFound = config.entry.onDealNotFound;
@@ -547,7 +547,12 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         await createInitialDeal(contactId);
         stage = "active";
       } else {
-        const identMsg = renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter());
+        const parts: string[] = [];
+        if (config.entry.openingEnabled && config.entry.openingMessage) {
+          parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+        }
+        parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+        const identMsg = parts.filter(Boolean).join("\n\n");
         await sendReply(identMsg);
         await upsertV2ConversationState({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
@@ -562,7 +567,12 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         return { handoff: false, closed: false, sentReply: identMsg };
       }
     } else if (config.entry.confirmContact && stage === "idle") {
-      const confirmMsg = renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter());
+      const parts: string[] = [];
+      if (config.entry.openingEnabled && config.entry.openingMessage) {
+        parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+      }
+      parts.push(renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter()));
+      const confirmMsg = parts.filter(Boolean).join("\n\n");
       await sendReply(confirmMsg);
       await upsertV2ConversationState({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,

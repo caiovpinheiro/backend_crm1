@@ -47,6 +47,7 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
 
 describe("simulateV2Turn", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.loadV2Context.mockResolvedValue({
       contact: null,
       citableContact: null,
@@ -159,5 +160,113 @@ describe("simulateV2Turn", () => {
     expect(result.handoff).toBe(false);
     expect(result.reply).toBe("Não encontrei isso nos materiais; um consultor vai te ajudar.");
     expect(result.reason).toContain("sem resultados");
+  });
+
+  it("na primeira mensagem, envia boas-vindas + confirmação sem chamar o modelo", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { Nome: "Marcelo" },
+      citableContact: { Nome: "Marcelo" },
+      deals: [],
+      selectedDeal: { id: "d1", Título: "Matrícula" },
+      citableDeal: { Título: "Matrícula" },
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Negócio mais recente selecionado automaticamente.",
+    });
+    const cfg = baseConfig({
+      entry: {
+        openingEnabled: true,
+        openingMessage: "Olá! Sou seu assistente virtual.",
+        confirmContact: true,
+        confirmationMessage: "Encontrei você na nossa base! Posso ajudar?",
+        onDealNotFound: "ask_identification",
+      } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
+    expect(result.reply).toContain("Olá! Sou seu assistente virtual.");
+    expect(result.reply).toContain("Encontrei você na nossa base! Posso ajudar?");
+    expect(result.reason).toContain("fluxo de entrada");
+    expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
+  });
+
+  it("na primeira mensagem sem negócio, envia boas-vindas + pedido de identificação", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { Nome: "Marcelo" },
+      citableContact: { Nome: "Marcelo" },
+      deals: [],
+      selectedDeal: null,
+      citableDeal: null,
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Nenhum negócio aberto encontrado.",
+    });
+    const cfg = baseConfig({
+      entry: {
+        openingEnabled: true,
+        openingMessage: "Olá! Sou seu assistente virtual.",
+        confirmContact: true,
+        onDealNotFound: "ask_identification",
+        identificationMessage: "Me confirme seu e-mail para prosseguir.",
+      } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
+    expect(result.reply).toContain("Olá! Sou seu assistente virtual.");
+    expect(result.reply).toContain("Me confirme seu e-mail para prosseguir.");
+  });
+
+  it("consulta materiais sobre cancelamento e retorna resposta com trechos usados", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { Nome: "Marcelo" },
+      citableContact: { Nome: "Marcelo" },
+      deals: [],
+      selectedDeal: null,
+      citableDeal: null,
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Nenhum negócio aberto encontrado.",
+    });
+    mocks.callV2LLMTest.mockResolvedValue({
+      output: {
+        reply: "Para cancelar, envie um e-mail para cancelamentos@empresa.com com seu CPF.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Resposta encontrada nos materiais.",
+        actions: [],
+      },
+      inputTokens: 100,
+      outputTokens: 50,
+      latencyMs: 200,
+      toolCalls: [
+        {
+          toolName: "knowledge_search",
+          args: { query: "cancelar" },
+          result: {
+            chunks: [
+              { docId: "doc-1", docTitle: "Cancelamento", content: "Para cancelar, envie um e-mail para cancelamentos@empresa.com", distance: 0.1 },
+            ],
+          },
+        },
+      ],
+      systemPrompt: "# Tom de voz\nObjetivo",
+    });
+    const cfg = baseConfig({
+      allowedKnowledgeDocIds: ["doc-1"],
+      entry: { openingEnabled: false, confirmContact: false, onDealNotFound: "handoff" } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "quero cancelar");
+    expect(result.reply).toContain("cancelamentos@empresa.com");
+    expect(result.ragChunks.length).toBe(1);
+    expect(result.ragChunks[0].docTitle).toBe("Cancelamento");
+    expect(result.toolCalls[0].toolName).toBe("knowledge_search");
   });
 });

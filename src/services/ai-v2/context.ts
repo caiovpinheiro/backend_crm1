@@ -19,6 +19,22 @@ export type V2LoadedContext = V2CRMContext & {
   dealSelectionReason: string;
 };
 
+function normalizeFieldValue(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return Number(value);
+  // Decimal do Prisma vira número; Date vira ISO string.
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const anyValue = value as { toNumber?: () => number; toString?: () => string };
+    if (typeof anyValue.toNumber === "function") {
+      return anyValue.toNumber();
+    }
+  }
+  // Arrays e objetos genéricos viram string JSON para não renderizar [object Object].
+  return JSON.stringify(value);
+}
+
 function buildExposure(config: V2AgentConfig): CrmFieldExposure {
   const readableKeys: string[] = [];
   const citableKeys: string[] = [];
@@ -66,7 +82,7 @@ async function loadContactFields(
   for (const key of allowedKeys) {
     if (key.startsWith("contact.")) {
       const fieldName = key.replace("contact.", "");
-      if (contact[fieldName] !== undefined) out[fieldName] = contact[fieldName];
+      if (contact[fieldName] !== undefined) out[fieldName] = normalizeFieldValue(contact[fieldName]);
     }
   }
   // Campos customizados vêm da relação ContactCustomFieldValue.
@@ -75,7 +91,7 @@ async function loadContactFields(
     : [];
   for (const cf of customFields) {
     if (allowedKeys.includes(`contact.${cf.customFieldId}`)) {
-      out[cf.customFieldId] = cf.value;
+      out[cf.customFieldId] = normalizeFieldValue(cf.value);
     }
   }
   out.id = contact.id;
@@ -86,6 +102,10 @@ async function loadContactFields(
     out.tags = (contact.tags as Array<{ tag?: { name?: string } }>)
       .map((t) => t.tag?.name)
       .filter((n): n is string => Boolean(n));
+  }
+  // Normaliza valores finais para não vazar objetos (ex.: Decimal, Date).
+  for (const k of Object.keys(out)) {
+    out[k] = normalizeFieldValue(out[k]);
   }
   return out;
 }
@@ -118,7 +138,7 @@ async function loadDealFields(
   for (const key of allowedKeys) {
     if (key.startsWith("deal.")) {
       const fieldName = key.replace("deal.", "");
-      if (deal[fieldName] !== undefined) out[fieldName] = deal[fieldName];
+      if (deal[fieldName] !== undefined) out[fieldName] = normalizeFieldValue(deal[fieldName]);
     }
   }
   const dealCustomFields = Array.isArray(deal.customFields)
@@ -126,7 +146,7 @@ async function loadDealFields(
     : [];
   for (const cf of dealCustomFields) {
     if (allowedKeys.includes(`deal.${cf.customFieldId}`)) {
-      out[cf.customFieldId] = cf.value;
+      out[cf.customFieldId] = normalizeFieldValue(cf.value);
     }
   }
   out.id = deal.id;
@@ -137,6 +157,10 @@ async function loadDealFields(
   }
   out.status = deal.status;
   out.value = deal.value;
+  // Normaliza valores finais para não vazar objetos (ex.: Decimal, Date).
+  for (const k of Object.keys(out)) {
+    out[k] = normalizeFieldValue(out[k]);
+  }
   return out;
 }
 

@@ -10,6 +10,7 @@ import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
+import { renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
 
@@ -117,6 +118,50 @@ export async function simulateV2Turn(
     });
   } else {
     context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+  }
+
+  // Fluxo de entrada na primeira mensagem da simulação.
+  // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
+  if (history.length === 0) {
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal);
+    const parts: string[] = [];
+    if (config.entry.openingEnabled && config.entry.openingMessage) {
+      parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+    }
+    if (!context.selectedDeal) {
+      if (config.entry.onDealNotFound === "ask_identification") {
+        parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+      }
+    } else if (config.entry.confirmContact) {
+      parts.push(renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter()));
+    }
+    const entryReply = parts.filter(Boolean).join("\n\n");
+    if (entryReply) {
+      return {
+        userMessage,
+        appliedRuleId: null,
+        appliedRuleName: null,
+        themeId: null,
+        themeName: null,
+        reply: entryReply,
+        reason: "Primeira mensagem: fluxo de entrada (boas-vindas / confirmação / identificação).",
+        handoff: false,
+        closed: false,
+        toolCalls: [],
+        ragChunks: [],
+        executedActions: [],
+        discardedActions: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        tone: config.tone ?? "",
+        responseLength: config.responseLength ?? "medium",
+        globalRules: config.globalRules,
+        systemPrompt: "",
+        crmContext: context,
+        dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+      };
+    }
   }
 
   // Se há vários negócios abertos e o operador configurou "perguntar",

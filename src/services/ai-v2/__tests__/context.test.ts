@@ -179,4 +179,50 @@ describe("loadV2Context", () => {
       Valor: "500",
     });
   });
+
+  it("normaliza objetos e retorna stageName como string", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({ contactId: "c1" });
+    mocks.contactFindUnique.mockResolvedValue({
+      id: "c1",
+      name: "Maria",
+      phone: null,
+      email: null,
+      tags: [],
+      customFields: [],
+    });
+    mocks.dealFindMany.mockResolvedValue([{ id: "d1" }]);
+    mocks.dealFindUnique.mockResolvedValue({
+      id: "d1",
+      title: "Venda",
+      status: "OPEN",
+      value: { toNumber: () => 1234.56 },
+      stage: { id: "s1", name: "Negociação" },
+      customFields: [{ customFieldId: "cf-json", value: { foo: "bar" } }],
+    });
+
+    const { loadV2Context } = await import("../context");
+    const ctx = await loadV2Context({
+      organizationId: "org-1",
+      conversationId: "conv-1",
+      config: baseConfig({
+        contextFields: {
+          contact: [],
+          deal: [
+            { key: "title", label: "Título", permissions: ["read"] },
+            { key: "stageName", label: "Etapa", permissions: ["cite"] },
+            { key: "value", label: "Valor", permissions: ["read"] },
+            { key: "cf-json", label: "JSON", permissions: ["read"] },
+          ],
+        },
+      }),
+    });
+
+    expect(ctx.selectedDeal).toMatchObject({
+      Título: "Venda",
+      Etapa: "Negociação",
+      Valor: "1234.56",
+      JSON: '{"foo":"bar"}',
+    });
+    expect(Object.values(ctx.selectedDeal!).some((v) => String(v) === "[object Object]")).toBe(false);
+  });
 });
