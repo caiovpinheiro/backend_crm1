@@ -1,9 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 
 const mocks = vi.hoisted(() => ({
   tryGetAgentApiKey: vi.fn(),
   callV2LLMTest: vi.fn(),
+  loadV2Context: vi.fn(),
+  buildAskDealMessage: vi.fn(),
 }));
 
 vi.mock("@/services/ai/agent-key", () => ({
@@ -12,6 +14,11 @@ vi.mock("@/services/ai/agent-key", () => ({
 
 vi.mock("../llm", () => ({
   callV2LLMTest: mocks.callV2LLMTest,
+}));
+
+vi.mock("../context", () => ({
+  loadV2Context: mocks.loadV2Context,
+  buildAskDealMessage: mocks.buildAskDealMessage,
 }));
 
 function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
@@ -39,6 +46,19 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
 }
 
 describe("simulateV2Turn", () => {
+  beforeEach(() => {
+    mocks.loadV2Context.mockResolvedValue({
+      contact: null,
+      citableContact: null,
+      deals: [],
+      selectedDeal: null,
+      citableDeal: null,
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Nenhum negócio carregado.",
+    });
+  });
+
   it("lança NO_OPENAI_KEY quando não há chave configurada (parte B, item 2)", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue(null);
     const { simulateV2Turn } = await import("../test-turn");
@@ -70,6 +90,45 @@ describe("simulateV2Turn", () => {
     const result = await simulateV2Turn("agent-1", cfg, "oi");
     expect(result.reply).toBe("Olá!");
     expect(result.crmContext.contact).toBeNull();
+  });
+
+  it("carrega contexto do contato real quando contactId é informado", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { Nome: "Marcelo", Telefone: "+5511999999999" },
+      citableContact: { Nome: "Marcelo" },
+      deals: [],
+      selectedDeal: null,
+      citableDeal: null,
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Nenhum negócio carregado.",
+    });
+    mocks.callV2LLMTest.mockResolvedValue({
+      output: {
+        reply: "Olá Marcelo!",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Saudação",
+        actions: [],
+      },
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [],
+      systemPrompt: "# Tom de voz\nObjetivo",
+    });
+    const cfg = baseConfig();
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "oi", [], "org-1", "contact-marcelo");
+    expect(mocks.loadV2Context).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: "org-1", contactId: "contact-marcelo" }),
+    );
+    expect(result.crmContext.contact).toMatchObject({ Nome: "Marcelo" });
   });
 
   it("aplica mensagem de 'sem material' quando busca volta vazia e não há dados do cliente", async () => {

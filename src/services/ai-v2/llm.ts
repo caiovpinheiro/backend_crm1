@@ -239,11 +239,24 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
     .transform((v) => (typeof v === "string" ? v : undefined)),
   messageModel: z
     .union([
-      z.object({ id: z.string(), adapt: z.boolean().optional().default(false) }),
+      z.object({
+        id: z.unknown().transform((v) => (typeof v === "string" && v.trim() ? v.trim() : null)),
+        adapt: z.boolean().optional().default(false),
+        variables: z.record(z.string(), z.string()).optional().default({}),
+      }),
       z.null(),
     ])
     .optional()
-    .transform((v) => (v && typeof v === "object" && "id" in v ? v : undefined)),
+    .transform((v) => {
+      if (!v || typeof v !== "object" || v === null) return undefined;
+      const id = (v as { id?: string | null }).id;
+      if (!id || typeof id !== "string") return undefined;
+      return {
+        id,
+        adapt: (v as { adapt?: boolean }).adapt ?? false,
+        variables: (v as { variables?: Record<string, string> }).variables ?? {},
+      };
+    }),
   handoff: z.boolean().optional().default(false),
   concluded: z.boolean().optional().default(false),
   confirmed: z.boolean().nullable().optional().default(null),
@@ -393,7 +406,7 @@ function buildV2SystemPrompt(
   lines.push(JSON.stringify({
     reply: "texto para o cliente",
     theme: "id do tema (opcional)",
-    messageModel: { id: "id do modelo interno", adapt: false },
+    messageModel: null,
     handoff: false,
     concluded: false,
     confirmed: null,
@@ -404,6 +417,7 @@ function buildV2SystemPrompt(
     reason: "por que respondeu assim",
     actions: [{ type: "handoff" }],
   }, null, 2));
+  lines.push("messageModel: pode ser null ou um objeto com { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca use um objeto vazio ou outro formato.");
   lines.push("Nunca afirme ao cliente que executou uma ação que não esteja em 'actions'.");
   lines.push("Nunca prometa verificar e retornar depois. Se depender de outra pessoa, marque handoff=true.");
 
@@ -515,6 +529,23 @@ export async function callV2LLM(args: {
     }
 
     const output = validated.data as V2LLMOutput;
+
+    // Alerta quando o LLM devolve messageModel com id inválido.
+    const rawMessageModel = (parsed as Record<string, unknown>)?.messageModel;
+    if (rawMessageModel && typeof rawMessageModel === "object" && rawMessageModel !== null) {
+      const rawId = (rawMessageModel as { id?: unknown }).id;
+      if (rawId !== undefined && rawId !== null && typeof rawId !== "string") {
+        console.warn("[ai-v2] LLM devolveu messageModel.id inválido; ignorado.", rawId);
+      }
+    }
+
+    // messageModel é uma forma curta de devolver a ação send_message_model.
+    if (output.messageModel?.id) {
+      output.actions = [
+        { type: "send_message_model", modelId: output.messageModel.id, variables: output.messageModel.variables },
+        ...output.actions,
+      ];
+    }
 
     // Aplica renderizador de mensagens em todas as respostas.
     output.reply = renderMessage(output.reply, renderVars) ?? output.reply;

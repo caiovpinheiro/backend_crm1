@@ -354,7 +354,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     });
     if (!template) return { action, ok: false, error: "Message model not found" };
 
-    const vars = { ...ctx.llmOutput?.collected, ...messageVars(ctx) };
+    const vars = { ...ctx.llmOutput?.collected, ...messageVars(ctx), ...((action.variables as Record<string, string> | undefined) ?? {}) };
     const text = renderMessage(template.content, vars, defaultFormatter());
     await sendV2TextMessage({
       conversationId: ctx.conversationId,

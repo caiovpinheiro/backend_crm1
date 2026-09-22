@@ -458,7 +458,11 @@ export interface V2Action {
 export interface V2LLMOutput {
   reply: string;
   theme?: string;
-  messageModel?: { id: string; adapt: boolean };
+  messageModel?: {
+    id: string;
+    adapt?: boolean;
+    variables?: Record<string, string>;
+  };
   handoff: boolean;
   concluded: boolean;
   confirmed: boolean | null;

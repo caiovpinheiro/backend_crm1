@@ -142,6 +142,56 @@ describe("callV2LLM function calling", () => {
 
     expect(result.output.reply).toBe("Olá Ana");
   });
+
+  it("aceita messageModel null e não gera ação", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", messageModel: null, actions: [] })),
+    );
+    const config = baseConfig();
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+    expect(result.output.messageModel).toBeUndefined();
+    expect(result.output.actions).toEqual([]);
+  });
+
+  it("converte messageModel válido em ação send_message_model", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(
+        JSON.stringify({ reply: "ok", messageModel: { id: "m1", adapt: true, variables: { nome: "Ana" } }, actions: [] }),
+      ),
+    );
+    const config = baseConfig();
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+    expect(result.output.messageModel).toEqual({ id: "m1", adapt: true, variables: { nome: "Ana" } });
+    expect(result.output.actions[0]).toMatchObject({ type: "send_message_model", modelId: "m1", variables: { nome: "Ana" } });
+  });
+
+  it("ignora messageModel.id inválido sem lançar erro de schema", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", messageModel: { id: { foo: "bar" } }, actions: [] })),
+    );
+    const config = baseConfig();
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+    expect(result.output.messageModel).toBeUndefined();
+    expect(result.output.actions).toEqual([]);
+  });
 });
 
 describe("buildV2ToolSet governor", () => {
