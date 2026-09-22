@@ -22,6 +22,7 @@ export type MobileModuleId =
   | "automations"
   | "distribution"
   | "team-chat"
+  | "bwipo-keeps"
   | "reports"
   | "monitor"
   | "settings"
@@ -131,6 +132,14 @@ export const MOBILE_MODULES: MobileModuleDescriptor[] = [
     category: "core",
   },
   {
+    id: "bwipo-keeps",
+    label: "Keeps",
+    href: "/bwipo-keeps",
+    iconName: "Lightbulb",
+    description: "Notas pessoais, listas e anexos",
+    category: "core",
+  },
+  {
     id: "reports",
     label: "Relatórios",
     href: "/reports",
@@ -191,13 +200,14 @@ export const DEFAULT_ENABLED: MobileModuleId[] = [
   "profile",
   "distribution",
   "team-chat",
+  "bwipo-keeps",
 ];
 
 /**
  * Módulos que entram em "Mais" mesmo em layouts já salvos sem eles
  * (onboard de feature — evita depender de re-salvar o Layout Builder).
  */
-export const MORE_SHEET_ENSURE: MobileModuleId[] = ["automations"];
+export const MORE_SHEET_ENSURE: MobileModuleId[] = ["automations", "bwipo-keeps"];
 
 /**
  * Módulos pinados na barra mesmo em layouts já salvos sem eles
