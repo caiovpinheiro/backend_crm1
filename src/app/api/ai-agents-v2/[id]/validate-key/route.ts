@@ -29,7 +29,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     await generateText({
       model,
       messages: [{ role: "user", content: "Hi" }],
-      maxOutputTokens: 5,
+      maxOutputTokens: 16,
       maxRetries: 0,
     });
 
