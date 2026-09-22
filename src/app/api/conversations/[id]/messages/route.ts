@@ -25,6 +25,7 @@ import {
   sendMessengerOrInstagramText,
 } from "@/lib/send-meta-messaging";
 import { sseBus } from "@/lib/sse-bus";
+import { logEvent } from "@/services/activity-log";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
