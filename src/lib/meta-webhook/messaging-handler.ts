@@ -330,7 +330,7 @@ async function processEvent(
   }
 
   const contact = await upsertContact(senderId, platform, hit);
-  const channelLabel = platform === "instagram" ? "Instagram" : "Messenger";
+  const channelLabel = platform === "instagram" ? "Instagram" : "Meta";
   const sourceName =
     platform === "instagram" ? "Instagram Direct" : "Messenger";
 

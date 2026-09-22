@@ -86,6 +86,7 @@ export async function recordInboxInterceptRun(args: {
         select: {
           archetype: true,
           model: true,
+          responseBehavior: true,
           temperature: true,
           maxTokens: true,
           systemPromptTemplate: true,

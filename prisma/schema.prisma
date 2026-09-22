@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
@@ -58,6 +59,7 @@ model Organization {
   dealEvents               DealEvent[]
   activityEvents           ActivityEvent[]
   products                 Product[]
+  productMetaLinks         ProductMetaLink[]
   activities               Activity[]
   activityComments         ActivityComment[]
   activityCommentRevisions ActivityCommentRevision[]
@@ -187,6 +189,10 @@ model Organization {
   keepNotes                KeepNote[]
   keepAttachments          KeepAttachment[]
   keepImports              KeepImport[]
+  keepCategories           KeepCategory[]
+  whatsAppGroups           WhatsAppGroup[]
+  whatsAppGroupMembers     WhatsAppGroupMember[]
+  whatsAppGroupMessages    WhatsAppGroupMessage[]
 
   @@index([status])
   @@map("organizations")
@@ -627,6 +633,7 @@ model User {
   keepNotes                    KeepNote[]
   keepAttachments              KeepAttachment[]
   keepImports                  KeepImport[]
+  keepCategories               KeepCategory[]
 
   @@index([type])
   @@index([organizationId])
@@ -1697,10 +1704,19 @@ model Product {
   capabilities       ProductCapability[]
   capacitySlots      CapacitySlot[]
   stakeholderRules   StakeholderRule[]
+  /// URL pública da imagem/capa do produto.
+  imageUrl           String?
+  /// MIME type da imagem/capa.
+  imageMime          String?
+  /// Nome original do arquivo da imagem/capa.
+  imageName          String?
+
   /// Cotas de desconto restritas a este produto (opcional: null = qualquer).
   discountQuotas     DiscountQuota[]
   /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
   discountCategories DiscountCategory[]
+  /// Vínculos com catálogos Meta/WhatsApp por canal.
+  metaLinks          ProductMetaLink[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1730,6 +1746,28 @@ model ProductCustomFieldValue {
   @@index([organizationId])
   @@index([productId])
   @@map("product_custom_field_values")
+}
+
+model ProductMetaLink {
+  id                String    @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  channelId         String
+  channel           Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  metaCatalogId     String?
+  productRetailerId String?
+  syncStatus        String    @default("PENDING")
+  lastSyncError     String?
+  lastSyncedAt      DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([productId, channelId])
+  @@index([organizationId])
+  @@index([channelId])
+  @@map("product_meta_links")
 }
 
 model DealProduct {
@@ -3033,6 +3071,14 @@ model Conversation {
   tabulation   Tabulation? @relation(fields: [tabulationId], references: [id], onDelete: SetNull)
   automationSessionExpiryClaims AutomationSessionExpiryClaim[]
 
+  /// Identidade confirmada pela IA: entidade (contact/deal/company...), id do registro,
+  /// referência amigável e campo/origem. Null enquanto não identificado.
+  aiIdentifiedEntity    String?
+  aiIdentifiedRecordId  String?
+  aiIdentifiedRef       String?
+  aiIdentifiedBy        String?
+  aiIdentifiedAt        DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3459,6 +3505,8 @@ model Channel {
   baileysAuthKeys   BaileysAuthKey[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
+  productMetaLinks  ProductMetaLink[]
+  whatsAppGroups    WhatsAppGroup[]
 
   @@unique([organizationId, number])
   @@index([organizationId])
@@ -6557,6 +6605,73 @@ model TeamChatMessageForward {
 }
 
 // ──────────────────────────────────────────────
+// WhatsApp Groups (QR/Baileys) — mensagens de grupo não viram inbox.
+// ──────────────────────────────────────────────
+
+model WhatsAppGroup {
+  id               String   @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channelId        String
+  channel          Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  jid              String
+  name             String
+  description      String?
+  ownerJid         String?
+  participantCount Int      @default(0)
+  syncedAt         DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  members          WhatsAppGroupMember[]
+  messages         WhatsAppGroupMessage[]
+
+  @@unique([channelId, jid])
+  @@index([organizationId])
+  @@index([channelId])
+  @@map("whatsapp_groups")
+}
+
+model WhatsAppGroupMember {
+  id           String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  groupId      String
+  group        WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  jid          String
+  phone        String?
+  name         String?
+  isAdmin      Boolean  @default(false)
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([groupId])
+  @@index([organizationId])
+  @@map("whatsapp_group_members")
+}
+
+model WhatsAppGroupMessage {
+  id           String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  groupId      String
+  group        WhatsAppGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  waMessageId  String?
+  fromJid      String
+  fromName     String?
+  fromPhone    String?
+  fromMe       Boolean  @default(false)
+  text         String   @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([groupId, createdAt])
+  @@index([organizationId])
+  @@map("whatsapp_group_messages")
+}
+
+// ──────────────────────────────────────────────
 // Bwipo Keeps (notas pessoais por usuário/tenant)
 // Não confundir com `Note` (timeline de contato/negócio).
 // ──────────────────────────────────────────────
@@ -6582,13 +6697,37 @@ model KeepNote {
   source         String    @default("manual")
   importBatchId  String?
   importBatch    KeepImport? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  /// Cor da nota (null = padrão).
+  color          String?
+  /// Categoria opcional da nota.
+  categoryId     String?
+  category       KeepCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   attachments    KeepAttachment[]
 
   @@index([organizationId, userId, trashed, archived, pinned, position], map: "keep_notes_owner_folder_idx")
   @@index([organizationId, importBatchId])
+  @@index([categoryId])
   @@map("keep_notes")
+}
+
+model KeepCategory {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  color          String    @default("#6366f1")
+  position       Float     @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  notes          KeepNote[]
+
+  @@index([organizationId, userId])
+  @@map("keep_categories")
 }
 
 model KeepAttachment {

@@ -984,6 +984,7 @@ async function findRecordsByIdentity(args: {
 function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
   const exposure: CrmFieldExposure = {
     readableKeys: policy.readableFields,
+    citableKeys: policy.readableFields,
     orgWide: policy.allowOrgWideSearch,
   };
   // Quais entidades existem para ESTE agente. Sai do registro de fontes

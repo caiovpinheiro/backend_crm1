@@ -810,7 +810,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // a IA depois de transferência explícita. Humano falando *durante* o
     // run continua abortando em `assertAiStillAuthorized({ since })`.
 
-    const cfg = assignee.aiAgentConfig as Record<string, unknown>;
+    const cfg = assignee.aiAgentConfig as Record<string, any>;
     if (cfg.engine === "simple") {
       logAi("blocked", {
         conversationId: args.conversationId,

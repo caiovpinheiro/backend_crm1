@@ -101,7 +101,7 @@ async function ensureRetailerInCatalog(
     productId: string;
     channelId: string;
   },
-): Promise<string> {
+): Promise<string | null> {
   try {
     const found = await client.findCatalogProductByRetailerId(
       args.catalogId,
@@ -117,7 +117,7 @@ async function ensureRetailerInCatalog(
       channelId: args.channelId,
       productRetailerId: args.retailerId,
     });
-    return link.productRetailerId;
+    return link.productRetailerId ?? null;
   } catch {
     return args.retailerId;
   }
@@ -307,7 +307,7 @@ export async function sendProductsToConversation(args: {
     };
   }
 
-  const catalogIds = new Set(links.map((l) => l!.metaCatalogId.trim()));
+  const catalogIds = new Set(links.map((l) => l!.metaCatalogId!.trim()));
   if (catalogIds.size !== 1) {
     console.warn("[conversation-products] fallback legacy: catálogos Meta misturados", {
       conversationId: conv.id,
@@ -323,8 +323,8 @@ export async function sendProductsToConversation(args: {
     };
   }
 
-  const catalogId = [...catalogIds][0];
-  const retailerIds = links.map((l) => l!.productRetailerId.trim());
+  const catalogId = [...catalogIds][0]!;
+  const retailerIds = links.map((l) => l!.productRetailerId!.trim() as string);
   const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
   const metaClient = metaClientFromConfig(channelConfig, { allowEnvFallback: false });
   if (!metaClient.configured) {

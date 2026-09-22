@@ -88,14 +88,14 @@ function createReplicaBase(): PrismaClient | null {
       // hangs until the proxy returns 502 HTML.
       connectionTimeoutMillis: 2_000,
     });
-    const adapter = new PrismaPg(pool);
+    const adapter = new PrismaPg(pool) as any;
     return new PrismaClient({
       adapter,
       log:
         process.env.NODE_ENV === "development"
           ? [{ emit: "stdout", level: "warn" }, { emit: "stdout", level: "error" }]
           : ["error"],
-    });
+    } as any);
   } catch (err) {
     // Sem replica = degrada graciosamente pro primary.
     console.warn("[prisma-replica] falha ao criar pool:", err);

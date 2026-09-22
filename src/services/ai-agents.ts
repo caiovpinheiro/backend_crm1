@@ -1073,7 +1073,7 @@ export async function toggleAIAgentActive(id: string) {
 export async function deleteAIAgent(id: string) {
   const existing = await prisma.aIAgentConfig.findUnique({
     where: { id },
-    select: { userId: true },
+    select: { userId: true, engine: true },
   });
   if (!existing || existing.engine === "simple") return;
 

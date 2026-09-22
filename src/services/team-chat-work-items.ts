@@ -27,6 +27,10 @@ export type WorkItemEntryInput = {
   dueAt?: string | null;
 };
 
+export type WorkItemCommandResult =
+  | { error: string; status: number }
+  | { workItem: ShapedWorkItem };
+
 export type ShapedWorkItem = {
   id: string;
   type: WorkItemType;
@@ -654,7 +658,7 @@ export async function addWorkItemEntry(
   viewer: TeamChatViewer,
   workItemId: string,
   input: WorkItemEntryInput,
-) {
+): Promise<WorkItemCommandResult> {
   const item = await prisma.teamChatWorkItem.findFirst({
     where: { id: workItemId },
     select: { id: true, roomId: true },
@@ -696,7 +700,7 @@ export async function updateWorkItemEntry(
     dueAt?: string | null;
     status?: "open" | "done";
   },
-) {
+): Promise<WorkItemCommandResult> {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
     select: {
@@ -773,7 +777,7 @@ export async function deleteWorkItemEntry(
   viewer: TeamChatViewer,
   workItemId: string,
   entryId: string,
-) {
+): Promise<WorkItemCommandResult> {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
     select: { id: true, workItem: { select: { roomId: true } } },

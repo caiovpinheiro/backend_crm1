@@ -271,11 +271,11 @@ function createPrismaClient() {
       ` application_name=${appName}`,
   );
 
-  const adapter = new PrismaPg(pool);
+  const adapter = new PrismaPg(pool) as any;
   return new PrismaClient({
     adapter,
     log: [...prismaLog],
-  });
+  } as any);
 }
 
 export const prismaBase =

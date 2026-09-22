@@ -65,11 +65,11 @@ export const prismaImportPool: Pool =
   globalForImport.prismaImportPool ?? createImportPool();
 
 function createImportClient(): PrismaClient {
-  const adapter = new PrismaPg(prismaImportPool);
+  const adapter = new PrismaPg(prismaImportPool) as any;
   return new PrismaClient({
     adapter,
     log: ["error"],
-  });
+  } as any);
 }
 
 export const prismaImport: PrismaClient =

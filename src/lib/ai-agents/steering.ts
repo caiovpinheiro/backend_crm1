@@ -663,6 +663,21 @@ export type InboxPolicy = {
   /// Lista de campos do Deal a mostrar. Ex: ["rgm", "curso", "email"]
   /// Vazio = mostra todos os campos configurados como identityKeys.
   identityConfirmationFields: string[];
+
+  /// Aviso de transferência entre agentes IA.
+  announceAiTransfer: boolean;
+  announceAiTransferMessage: string | null;
+  /// Escopo de roteamento entre agentes.
+  routingScope: string | null;
+  /// Texto de acompanhamento de fila.
+  queueFollowUpMessage: string | null;
+  /// Falar imediatamente após transferência IA→IA.
+  speakOnAiTransfer: boolean;
+  /// Mensagens de gate para nonsense.
+  nonsenseAskOnceMessage: string | null;
+  nonsenseStopMessage: string | null;
+  /// Pacote de primeiro acesso.
+  firstAccessPackMessage: string | null;
 };
 
 /** Teto default do lote de inbound (minutos). */
@@ -737,6 +752,14 @@ export function defaultInboxPolicy(): InboxPolicy {
     identityConfirmationEnabled: false,
     identityConfirmationTemplate: null,
     identityConfirmationFields: [],
+    announceAiTransfer: false,
+    announceAiTransferMessage: null,
+    routingScope: null,
+    queueFollowUpMessage: null,
+    speakOnAiTransfer: false,
+    nonsenseAskOnceMessage: null,
+    nonsenseStopMessage: null,
+    firstAccessPackMessage: null,
   };
 }
 
@@ -867,6 +890,14 @@ export function normalizeInboxPolicy(
     ),
     identityConfirmationTemplate: nullableText(r.identityConfirmationTemplate),
     identityConfirmationFields: strList(r.identityConfirmationFields),
+    announceAiTransfer: boolOr(r.announceAiTransfer, base.announceAiTransfer),
+    announceAiTransferMessage: nullableText(r.announceAiTransferMessage),
+    routingScope: nullableText(r.routingScope),
+    queueFollowUpMessage: nullableText(r.queueFollowUpMessage),
+    speakOnAiTransfer: boolOr(r.speakOnAiTransfer, base.speakOnAiTransfer),
+    nonsenseAskOnceMessage: nullableText(r.nonsenseAskOnceMessage),
+    nonsenseStopMessage: nullableText(r.nonsenseStopMessage),
+    firstAccessPackMessage: nullableText(r.firstAccessPackMessage),
   };
 }
 
