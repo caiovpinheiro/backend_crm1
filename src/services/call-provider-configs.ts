@@ -53,12 +53,15 @@ export type ProviderConfigPublic = {
   /** Indica se o secret está configurado (nunca retorna o valor). */
   hasWebhookSecret: boolean;
   signatureHeader: string | null;
-  webhookToken: string;
+  /**
+   * Token e URL só em detalhe/create/update administrativos
+   * (`sip_extension:manage`). Listagens omitem.
+   */
+  webhookToken?: string;
   recordingDelivery: RecordingDelivery;
   createContactsForCalls: boolean;
   isActive: boolean;
-  /** URL pública do webhook para colar no painel do provedor. */
-  webhookUrl: string;
+  webhookUrl?: string;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -79,6 +82,16 @@ const SELECT_DB = {
   updatedAt: true,
 } as const;
 
+function sanitizeFieldMappings(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key.startsWith("__")) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 function toPublic(
   row: {
     id: string;
@@ -95,22 +108,28 @@ function toPublic(
     createdAt: Date;
     updatedAt: Date;
   },
+  opts: { includeWebhookToken?: boolean } = {},
 ): ProviderConfigPublic {
+  const includeWebhookToken = opts.includeWebhookToken === true;
   return {
     id: row.id,
     organizationId: row.organizationId,
     providerKey: row.providerKey,
-    fieldMappings: row.fieldMappings,
+    fieldMappings: sanitizeFieldMappings(row.fieldMappings),
     authMode: row.authMode,
     hasWebhookSecret: Boolean(row.webhookSecretEncrypted),
     signatureHeader: row.signatureHeader,
-    webhookToken: row.webhookToken,
     recordingDelivery: row.recordingDelivery,
     createContactsForCalls: row.createContactsForCalls,
     isActive: row.isActive,
-    webhookUrl: buildWebhookUrl(row.providerKey, row.webhookToken),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    ...(includeWebhookToken
+      ? {
+          webhookToken: row.webhookToken,
+          webhookUrl: buildWebhookUrl(row.providerKey, row.webhookToken),
+        }
+      : {}),
   };
 }
 
@@ -158,7 +177,7 @@ export async function createProviderConfig(
     select: SELECT_DB,
   });
 
-  return toPublic(row);
+  return toPublic(row, { includeWebhookToken: true });
 }
 
 /** Lista todas as configs de provedor da org corrente. */
@@ -167,13 +186,13 @@ export async function listProviderConfigs(): Promise<ProviderConfigPublic[]> {
     select: SELECT_DB,
     orderBy: { createdAt: "asc" },
   });
-  return rows.map(toPublic);
+  return rows.map((row) => toPublic(row));
 }
 
 /** Busca uma config pelo id (org-scoped via extension). */
 export async function getProviderConfig(id: string): Promise<ProviderConfigPublic | null> {
   const row = await prisma.callProviderConfig.findUnique({ where: { id }, select: SELECT_DB });
-  return row ? toPublic(row) : null;
+  return row ? toPublic(row, { includeWebhookToken: true }) : null;
 }
 
 /** Atualiza campos de uma config existente. */
@@ -198,7 +217,7 @@ export async function updateProviderConfig(
     select: SELECT_DB,
   });
 
-  return toPublic(row);
+  return toPublic(row, { includeWebhookToken: true });
 }
 
 /** Remove uma config de provedor. */
@@ -263,19 +282,17 @@ export function decryptWebhookSecret(config: { webhookSecretEncrypted: string })
  * armazenamos cifrado por convenção do schema, mas a validação real no
  * `processWebhookEvent` é feita por `findConfigByWebhookToken`.
  */
-export async function getOrCreateApi4ComProviderConfig(
-  organizationId = getOrgIdOrThrow(),
-): Promise<ProviderConfigPublic> {
+async function loadOrCreateApi4ComDbRow(organizationId: string) {
   const existing = await prisma.callProviderConfig.findFirst({
     where: { organizationId, providerKey: "api4com" },
     select: SELECT_DB,
   });
-  if (existing) return toPublic(existing);
+  if (existing) return existing;
 
   const webhookToken = generateWebhookToken();
   const webhookSecretEncrypted = encryptSecret(webhookToken);
 
-  const row = await prisma.callProviderConfig.create({
+  return prisma.callProviderConfig.create({
     data: withOrg(
       {
         providerKey: "api4com",
@@ -292,8 +309,13 @@ export async function getOrCreateApi4ComProviderConfig(
     ),
     select: SELECT_DB,
   });
+}
 
-  return toPublic(row);
+export async function getOrCreateApi4ComProviderConfig(
+  organizationId = getOrgIdOrThrow(),
+): Promise<ProviderConfigPublic> {
+  const row = await loadOrCreateApi4ComDbRow(organizationId);
+  return toPublic(row, { includeWebhookToken: true });
 }
 
 const API4COM_TOKEN_KEY = "__api4comServiceTokenEncrypted";
@@ -359,19 +381,20 @@ export async function resolveApi4ComServiceToken(
 export async function getApi4ComIntegration(
   organizationId = getOrgIdOrThrow(),
 ): Promise<Api4ComIntegrationPublic> {
-  const config = await getOrCreateApi4ComProviderConfig(organizationId);
-  const mappings = readMappings(config.fieldMappings);
+  const row = await loadOrCreateApi4ComDbRow(organizationId);
+  const mappings = readMappings(row.fieldMappings);
   const gateway =
     typeof mappings[API4COM_GATEWAY_KEY] === "string" && String(mappings[API4COM_GATEWAY_KEY]).trim()
       ? String(mappings[API4COM_GATEWAY_KEY]).trim()
       : resolveApi4ComGateway(organizationId);
+  const publicConfig = toPublic(row, { includeWebhookToken: true });
 
   return {
-    webhookUrl: absoluteWebhookUrl(config.webhookUrl),
+    webhookUrl: absoluteWebhookUrl(publicConfig.webhookUrl ?? ""),
     hasServiceToken: Boolean(tokenFromMappings(mappings)),
     hasEnvToken: Boolean(process.env.API4COM_SERVICE_TOKEN?.trim()),
     gateway,
-    isActive: config.isActive,
+    isActive: row.isActive,
     webhookRegistered: null,
     webhookError: null,
   };
@@ -381,8 +404,8 @@ export async function updateApi4ComIntegration(
   input: { serviceToken?: string | null; gateway?: string },
   organizationId = getOrgIdOrThrow(),
 ): Promise<Api4ComIntegrationPublic> {
-  const config = await getOrCreateApi4ComProviderConfig(organizationId);
-  const mappings = readMappings(config.fieldMappings);
+  const row = await loadOrCreateApi4ComDbRow(organizationId);
+  const mappings = readMappings(row.fieldMappings);
 
   if (input.serviceToken !== undefined) {
     const trimmed = input.serviceToken?.trim() ?? "";
@@ -397,7 +420,7 @@ export async function updateApi4ComIntegration(
   }
 
   await prisma.callProviderConfig.update({
-    where: { id: config.id },
+    where: { id: row.id },
     data: { fieldMappings: mappings as Prisma.InputJsonValue },
   });
 

@@ -128,6 +128,13 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({ extension: ext }, { status: 201 });
     } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status === 400) {
+        return NextResponse.json(
+          { message: e instanceof Error ? e.message : "Requisição inválida." },
+          { status: 400 },
+        );
+      }
       console.error("[sip-extensions] POST:", e);
       return NextResponse.json(
         { message: "Erro ao criar/atualizar ramal." },

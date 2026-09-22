@@ -160,6 +160,10 @@ export async function POST(request: Request) {
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const status = (e as { status?: number }).status;
+      if (status === 400) {
+        return NextResponse.json({ message: msg }, { status: 400 });
+      }
       console.error("[sip-extensions/connect-api4com]:", msg);
 
       if (/sip_extensions/i.test(msg) && /does not exist/i.test(msg)) {

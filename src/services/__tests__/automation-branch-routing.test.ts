@@ -21,9 +21,12 @@ import {
   decideInteractiveMenuInbound,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  conversationResolvedBeforePause,
+  humanReplyDuringPauseCancels,
   shouldCancelPausedAutomationForHumanAttendance,
   waitForReplyHijacksAiTurn,
   decideFlowStepInbound,
+  isInFlightPlainSend,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -515,6 +518,56 @@ describe("shouldCancelPausedAutomationForHumanAttendance", () => {
   });
 });
 
+describe("humanReplyDuringPauseCancels", () => {
+  const pausedAt = new Date("2026-09-22T16:00:49Z");
+
+  it("fala do ciclo anterior não cancela a reativação", () => {
+    expect(
+      humanReplyDuringPauseCancels({
+        humanAttending: true,
+        hasHumanReply: true,
+        lastHumanReplyAt: new Date("2026-09-18T15:39:55Z"),
+        pausedAt,
+      }),
+    ).toBe(false);
+  });
+
+  it("consultor que falou depois da pausa cancela", () => {
+    expect(
+      humanReplyDuringPauseCancels({
+        humanAttending: true,
+        hasHumanReply: true,
+        lastHumanReplyAt: new Date("2026-09-22T16:05:00Z"),
+        pausedAt,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("conversationResolvedBeforePause", () => {
+  const pausedAt = new Date("2026-09-22T16:00:49Z");
+
+  it("ticket encerrado antes da espera não aborta o timeout", () => {
+    expect(
+      conversationResolvedBeforePause(
+        "RESOLVED",
+        new Date("2026-09-18T18:00:00Z"),
+        pausedAt,
+      ),
+    ).toBe(true);
+  });
+
+  it("encerrado durante a espera aborta", () => {
+    expect(
+      conversationResolvedBeforePause(
+        "RESOLVED",
+        new Date("2026-09-22T16:20:00Z"),
+        pausedAt,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("shouldResumePausedMenuDespiteHumanAttendance", () => {
   it("sem opts → false", () => {
     expect(shouldResumePausedMenuDespiteHumanAttendance()).toBe(false);
@@ -792,5 +845,34 @@ describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
         awaitingFlow: awaiting,
       }),
     ).toBe("stay");
+  });
+});
+
+describe("isInFlightPlainSend — inicio-pipe não consome o inbound que o disparou", () => {
+  it("texto puro sem timeoutAt ainda está no ar", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_message",
+        timeoutAt: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("aresta Sem resposta (timeoutAt) é espera real", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_message",
+        timeoutAt: new Date(),
+      }),
+    ).toBe(false);
+  });
+
+  it("menu interativo não é texto in-flight", () => {
+    expect(
+      isInFlightPlainSend({
+        stepType: "send_whatsapp_interactive",
+        timeoutAt: null,
+      }),
+    ).toBe(false);
   });
 });

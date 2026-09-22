@@ -50,6 +50,7 @@ import { DataRequestStatus, DataRequestType } from "@prisma/client";
 import crypto from "node:crypto";
 
 import { prismaBase } from "@/lib/prisma-base";
+import { sseBus } from "@/lib/sse-bus";
 import { logAudit } from "@/lib/audit/log";
 import { getLogger } from "@/lib/logger";
 
@@ -454,6 +455,8 @@ async function processErase(userId: string, _organizationId: string): Promise<vo
       data: { systemPromptOverride: null },
     });
   }
+
+  sseBus.revokeUser({ userId, organizationId: _organizationId });
 }
 
 export async function getDataRequest(id: string, userId: string) {

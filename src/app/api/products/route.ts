@@ -77,7 +77,7 @@ export async function GET(request: Request) {
       products = { rows, total };
     } catch (inner) {
       const raw = inner instanceof Error ? inner.message : "";
-      if (!raw.includes("product_meta_links")) throw inner;
+      if (!raw.includes("product_meta_links") && !raw.includes("metaLinks")) throw inner;
       const [rows, total] = await Promise.all([
         prisma.product.findMany({
           where,

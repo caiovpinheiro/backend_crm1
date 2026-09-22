@@ -7,7 +7,8 @@
  * de `queue.ts`, garantindo que tela, simulação e execução decidam igual.
  *
  * Seleção: entre os elegíveis, sorteio ponderado pelo `volume` (peso = nº de
- * bilhetes na urna). Tamanho da fila e `queueLimit` não entram na escolha.
+ * bilhetes na urna). Fila não pesa na escolha — só tira quem estourou o teto
+ * (`QUEUE_LIMIT_REACHED` em `eligibility.ts`).
  */
 
 import { Prisma } from "@prisma/client";
@@ -239,7 +240,7 @@ function ticketCount(volume: number): number {
 
 /**
  * Sorteio ponderado: peso 5 = 5 bilhetes, peso 1 = 1. Cada execução sorteia
- * de novo; fila, teto e `lastExecutionAt` não entram. Peso 0 = sem bilhete.
+ * de novo; `queueCount` e `lastExecutionAt` não entram. Peso 0 = sem bilhete.
  * Se ninguém tiver peso, cai para sorteio uniforme. `random` é injetável
  * (testes). Assume lista já filtrada por elegíveis e não vazia.
  */

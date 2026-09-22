@@ -7,20 +7,17 @@ import {
   stripHiddenInboxSseCard,
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
+import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
+import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
 import { sseBus } from "@/lib/sse-bus";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Stream SSE de eventos do CRM. Multi-tenant fail-closed: a inscricao no
- * bus passa o organizationId da sessao, e o bus so dispara eventos cuja
- * organizationId corresponde (super-admin ve tudo).
- *
- * Antes (24/abr/26) o subscriber recebia TODOS os eventos do bus sem
- * filtro — operador da org A via metadados de eventos da org B no stream.
- * Corrigido junto com a inclusao de organizationId obrigatorio no envelope
- * de cada publish.
+ * Stream SSE de eventos do CRM.
+ * Atendimento: filtro por organizationId da sessão (card por visibilidade).
+ * Team-chat privado: audiência = membership (userId), sem bypass de super-admin.
  */
 function sseError(request: Request, body: string, status: number): Response {
   const headers = new Headers();
@@ -40,18 +37,18 @@ export async function GET(request: Request) {
     organizationId?: string | null;
     isSuperAdmin?: boolean;
   };
+  const userId = sessionUser.id ?? null;
   const organizationId = sessionUser.organizationId ?? null;
   const isSuperAdmin = Boolean(sessionUser.isSuperAdmin);
 
-  // Sessao sem org E sem super-admin = nao tem nada pra escutar.
-  // Fail-closed: 403 explicito em vez de stream vazio silencioso.
+  if (!userId) {
+    return sseError(request, "Não autorizado", 401);
+  }
+
   if (!organizationId && !isSuperAdmin) {
     return sseError(request, "Sem organização vinculada à sessão", 403);
   }
 
-  // Snapshot da visibilidade do usuário, resolvido uma vez por conexão: o
-  // callback do bus é síncrono e não pode consultar o banco por evento.
-  // Mudança de permissão/visibilidade vale no próximo reconnect do stream.
   let cardGate: InboxSseCardGate = allowAllInboxSseCards;
   if (sessionUser.id && sessionUser.role && organizationId && !isSuperAdmin) {
     try {
@@ -66,8 +63,6 @@ export async function GET(request: Request) {
           }),
       );
     } catch (e) {
-      // Sem o gate, mantém o comportamento anterior (card para todos) em
-      // vez de derrubar o stream — a lista continua autoritativa no GET.
       console.error("[sse] falha ao montar o gate de card do inbox:", e);
     }
   }
@@ -75,49 +70,83 @@ export async function GET(request: Request) {
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let membershipWatch: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
 
-  // Idempotente: chamado pelo abort do request, pelo cancel() do stream e
-  // pelo enqueue que falha no heartbeat.
   function teardown() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
+    if (membershipWatch) clearInterval(membershipWatch);
+    membershipWatch = null;
     unsubscribe?.();
     unsubscribe = null;
+    closed = true;
   }
 
   const stream = new ReadableStream({
     start(controller) {
+      const closeStream = () => {
+        teardown();
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+
       controller.enqueue(encoder.encode(": connected\n\n"));
 
-      // 25s: proxy corta conexão ociosa antes disso e cada reconexão perde
-      // os eventos da janela — o stream não tem replay nem Last-Event-ID.
       heartbeat = setInterval(() => {
+        if (closed) return;
         try {
           controller.enqueue(encoder.encode(": heartbeat\n\n"));
         } catch {
-          teardown();
+          closeStream();
         }
       }, 25_000);
 
-      unsubscribe = sseBus.subscribe(
-        { organizationId, isSuperAdmin },
-        (event, envelope) => {
+      membershipWatch = setInterval(() => {
+        if (closed) return;
+        void (async () => {
           try {
-            // Repassa apenas `data` pro cliente (mantem compat com o
-            // formato anterior), mas o bus ja garantiu o filtro por org.
-            // O `card` ainda e por-usuario: sem acesso, sai do payload.
+            const row = await prismaBase.user.findFirst({
+              where: { id: userId },
+              select: { isErased: true, organizationId: true },
+            });
+            const lost =
+              !row ||
+              row.isErased ||
+              (organizationId != null &&
+                row.organizationId !== organizationId &&
+                !isSuperAdmin);
+            if (lost) {
+              sseBus.revokeUser({ userId, organizationId });
+            }
+          } catch {
+            /* ignore */
+          }
+        })();
+      }, 60_000);
+
+      unsubscribe = sseBus.subscribe(
+        { organizationId, userId, isSuperAdmin },
+        (event, envelope) => {
+          if (closed) return;
+          if (event === SSE_ACCESS_REVOKED) {
+            closeStream();
+            return;
+          }
+          try {
             const data = stripHiddenInboxSseCard(envelope.data, cardGate);
             const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
             controller.enqueue(encoder.encode(payload));
           } catch {
-            /* client disconnected */
+            closeStream();
           }
         },
       );
 
-      // Cliente que vai embora sem `cancel()`: sem isto o listener do bus
-      // ficaria preso até o próximo heartbeat falhar (até 25s).
-      request.signal.addEventListener("abort", teardown, { once: true });
+      request.signal.addEventListener("abort", closeStream, { once: true });
     },
     cancel() {
       teardown();

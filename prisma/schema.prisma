@@ -1,6 +1,5 @@
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -1684,6 +1683,9 @@ model Product {
   /// @deprecated — ver `trackStock`. Quantidade só lida pelo step `consume_stock`
   /// legado. Pools novos não usam este campo.
   stock          Decimal      @default(0) @db.Decimal(12, 2)
+  imageUrl       String?
+  imageMime      String?
+  imageName      String?
 
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
   /// Nullable para zero regressão; backfill move produtos legados ao catálogo
@@ -1704,18 +1706,10 @@ model Product {
   capabilities       ProductCapability[]
   capacitySlots      CapacitySlot[]
   stakeholderRules   StakeholderRule[]
-  /// URL pública da imagem/capa do produto.
-  imageUrl           String?
-  /// MIME type da imagem/capa.
-  imageMime          String?
-  /// Nome original do arquivo da imagem/capa.
-  imageName          String?
-
   /// Cotas de desconto restritas a este produto (opcional: null = qualquer).
   discountQuotas     DiscountQuota[]
   /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
   discountCategories DiscountCategory[]
-  /// Vínculos com catálogos Meta/WhatsApp por canal.
   metaLinks          ProductMetaLink[]
 
   createdAt DateTime @default(now())
@@ -3171,6 +3165,8 @@ model Message {
   reactions        Json                    @default("[]")
   sendStatus       String                  @default("sent")
   sendError        String?
+  /// Pedido do catálogo WhatsApp (`type=order`). Preço e quantidade são os do payload da Meta.
+  catalogOrder     Json?                   @map("catalog_order")
   /// Token do botão Flow (Cloud API) por envio — correlaciona com webhook de retorno.
   flowToken        String?                 @map("flow_token")
   /// Template config usado no envio outbound (FK). Permite ao webhook
