@@ -7,7 +7,8 @@ import type { V2Action, V2AgentConfig, V2CRMContext } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { callV2LLMTest } from "./llm";
-import { loadV2Context } from "./context";
+import { guardV2Output } from "./output-guard";
+import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
@@ -36,6 +37,7 @@ export type V2TestTurnResult = {
   expandedByLength?: boolean;
   crmContext: V2CRMContext;
   dealSelectionReason: string;
+  scrubbedFields?: string[];
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -63,17 +65,6 @@ function actionLabel(type: string): string {
   return ACTION_LABELS[type] ?? type;
 }
 
-function buildAskDealMessage(deals: Array<Record<string, unknown>>): string {
-  let msg = "Você tem mais de um negócio aberto. Qual deles você quer tratar?";
-  for (let i = 0; i < deals.length; i++) {
-    const d = deals[i];
-    const title = d.title ?? "Negócio sem título";
-    const stage = d.stageName ?? "";
-    msg += `\n${i + 1}. ${title}${stage ? ` — ${stage}` : ""}`;
-  }
-  return msg;
-}
-
 export async function simulateV2Turn(
   agentId: string,
   config: V2AgentConfig,
@@ -81,6 +72,7 @@ export async function simulateV2Turn(
   history: V2TestTurnHistoryItem[] = [],
   organizationId?: string,
   contactId?: string,
+  selectedDealId?: string,
 ): Promise<V2TestTurnResult> {
   let context: V2CRMContext;
   if (organizationId) {
@@ -88,6 +80,7 @@ export async function simulateV2Turn(
       organizationId,
       config,
       contactId,
+      selectedDealId,
     });
   } else {
     context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
@@ -96,7 +89,7 @@ export async function simulateV2Turn(
   // Se há vários negócios abertos e o operador configurou "perguntar",
   // o teste mostra a pergunta sem gastar chamada de modelo.
   if (config.dealSelection === "ask" && context.deals && context.deals.length > 1 && !context.selectedDeal) {
-    const askMessage = buildAskDealMessage(context.deals);
+    const askMessage = buildAskDealMessage(context.deals, config);
     return {
       userMessage,
       appliedRuleId: null,
@@ -152,7 +145,16 @@ export async function simulateV2Turn(
   }
 
   const llmResult = await callV2LLMTest(agentId, config, userMessage, history, context);
-  const output = llmResult.output;
+  let output = llmResult.output;
+
+  // Guarda de output: remove campos só "Ler" e URLs não autorizadas.
+  const guard = guardV2Output(output.reply, config.allowedDomains, {
+    contact: context.contact,
+    citableContact: context.citableContact ?? null,
+    selectedDeal: context.selectedDeal,
+    citableDeal: context.citableDeal ?? null,
+  });
+  output = { ...output, reply: guard.text };
 
   // Se o LLM sugerir um tema, sobrescreve (ele tem a última palavra na simulação).
   if (output.theme) {
@@ -224,5 +226,6 @@ export async function simulateV2Turn(
     expandedByLength: llmResult.wasExpanded,
     crmContext: context,
     dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+    scrubbedFields: guard.scrubbedFields,
   };
 }

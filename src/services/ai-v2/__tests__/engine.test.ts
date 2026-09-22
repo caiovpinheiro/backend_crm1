@@ -581,8 +581,10 @@ describe("processV2Turn", () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
     mocks.loadContext.mockResolvedValue({
       contact: { name: "João" },
+      citableContact: { name: "João" },
       deals: [{ id: "deal-1" }],
       selectedDeal: { id: "deal-1" },
+      citableDeal: { id: "deal-1" },
       dealId: "deal-1",
     });
     mocks.getState.mockResolvedValue(makeState("active"));

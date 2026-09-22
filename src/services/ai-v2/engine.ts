@@ -10,7 +10,7 @@ import type { V2ActionResult } from "./actions";
 import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
 import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
-import { loadV2Context, type V2LoadedContext } from "./context";
+import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
@@ -39,17 +39,6 @@ import {
 
 function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS" | "DRAFT" {
   return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
-}
-
-function buildAskDealMessage(deals: Array<Record<string, unknown>>): string {
-  let msg = "Você tem mais de um negócio aberto. Qual deles você quer tratar?";
-  for (let i = 0; i < deals.length; i++) {
-    const d = deals[i];
-    const title = d.title ?? "Negócio sem título";
-    const stage = d.stageName ?? "";
-    msg += `\n${i + 1}. ${title}${stage ? ` — ${stage}` : ""}`;
-  }
-  return msg;
 }
 
 const QUERY_TOOL_NAMES = new Set([
@@ -238,11 +227,12 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
 
   // Contexto CRM (necessário para regras e mídia)
-  const loadedContext = await loadV2Context({
+  let loadedContext = await loadV2Context({
     organizationId: orgId,
     conversationId: input.conversationId,
     contactId,
     config,
+    selectedDealId: stateRow?.selectedDealId ?? undefined,
   });
 
   const context: V2CRMContext = {
@@ -257,43 +247,65 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const vars = { ...messageVariables(config, context) };
 
   // Se há vários negócios abertos e o operador configurou "perguntar",
-  // envia a pergunta antes de qualquer outra decisão.
+  // tenta interpretar a resposta do cliente como escolha de negócio.
   if (
     config.dealSelection === "ask" &&
     loadedContext.deals.length > 1 &&
     !loadedContext.selectedDeal &&
     contactId
   ) {
-    const askMessage = buildAskDealMessage(loadedContext.deals);
-    await sendV2TextMessage({
-      conversationId: input.conversationId,
-      contactId,
-      agentUserId: resolved!.userId,
-      text: askMessage,
-      channel: input.channel,
-      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-    });
-    await logV2Turn({
-      organizationId: orgId,
-      conversationId: input.conversationId,
-      agentId: resolved!.agentConfigId,
-      turnId: input.turnId,
-      inboundText: input.userMessage,
-      crmContext: context,
-      prompt: askMessage,
-      reply: askMessage,
-      executedActions: [],
-      discardedActions: [],
-      handoff: false,
-      closed: false,
-      latencyMs: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      owner,
-      stage,
-      versionId,
-    });
-    return { handoff: false, closed: false, sentReply: askMessage };
+    const chosenDealId = tryParseDealChoice(input.userMessage, loadedContext.deals, config);
+    if (chosenDealId) {
+      await upsertV2ConversationState({
+        organizationId: orgId,
+        conversationId: input.conversationId,
+        agentId: resolved!.agentConfigId,
+        selectedDealId: chosenDealId,
+        versionId,
+      });
+      // Recarrega contexto com o negócio escolhido e continua o fluxo normal.
+      loadedContext = await loadV2Context({
+        organizationId: orgId,
+        conversationId: input.conversationId,
+        contactId,
+        config,
+        selectedDealId: chosenDealId,
+      });
+      context.selectedDeal = loadedContext.selectedDeal;
+      context.citableDeal = loadedContext.citableDeal;
+      Object.assign(vars, messageVariables(config, context));
+    } else {
+      const askMessage = buildAskDealMessage(loadedContext.deals, config);
+      await sendV2TextMessage({
+        conversationId: input.conversationId,
+        contactId,
+        agentUserId: resolved!.userId,
+        text: askMessage,
+        channel: input.channel,
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+      });
+      await logV2Turn({
+        organizationId: orgId,
+        conversationId: input.conversationId,
+        agentId: resolved!.agentConfigId,
+        turnId: input.turnId,
+        inboundText: input.userMessage,
+        crmContext: context,
+        prompt: askMessage,
+        reply: askMessage,
+        executedActions: [],
+        discardedActions: [],
+        handoff: false,
+        closed: false,
+        latencyMs: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        owner,
+        stage,
+        versionId,
+      });
+      return { handoff: false, closed: false, sentReply: askMessage };
+    }
   }
 
   // Bridge automação
@@ -667,7 +679,12 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Guarda de output
   let replyText = llmOutput.reply;
-  const guard = guardV2Output(replyText, config.allowedDomains);
+  const guard = guardV2Output(replyText, config.allowedDomains, {
+    contact: context.contact,
+    citableContact: context.citableContact ?? null,
+    selectedDeal: context.selectedDeal,
+    citableDeal: context.citableDeal ?? null,
+  });
   replyText = guard.text;
 
   // Executa ações

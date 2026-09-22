@@ -136,11 +136,86 @@ async function loadDealFields(
   return out;
 }
 
+export function buildDealDisplay(
+  deal: Record<string, unknown>,
+  config: V2AgentConfig,
+): string {
+  const citableKeys = new Set(
+    config.contextFields.deal.filter((f) => f.permissions.includes("cite")).map((f) => f.key),
+  );
+  const parts: string[] = [];
+  if (citableKeys.has("title") && deal.title) parts.push(String(deal.title));
+  if (citableKeys.has("stageName") && deal.stageName) parts.push(String(deal.stageName));
+  for (const f of config.contextFields.deal) {
+    if (f.key === "title" || f.key === "stageName") continue;
+    if (!f.permissions.includes("cite")) continue;
+    const v = deal[f.key];
+    if (v === null || v === undefined || v === "") continue;
+    parts.push(`${f.label ?? f.key}: ${v}`);
+  }
+  // Fallback mínimo se nada é citável.
+  if (parts.length === 0 && deal.title) parts.push(String(deal.title));
+  return parts.join(" — ");
+}
+
+export function tryParseDealChoice(
+  text: string,
+  deals: Array<Record<string, unknown>>,
+  config: V2AgentConfig,
+): string | null {
+  const normalized = text.toLowerCase().trim();
+  // Resposta por número da opção (1, 2, 3…)
+  let number = "";
+  let started = false;
+  for (const ch of normalized) {
+    if (ch >= "0" && ch <= "9") {
+      number += ch;
+      started = true;
+    } else if (started) {
+      break;
+    }
+  }
+  if (number) {
+    const idx = parseInt(number, 10) - 1;
+    if (idx >= 0 && idx < deals.length) return String(deals[idx].id);
+  }
+  // Resposta pelo nome/valor de campos marcados como "Citar".
+  const citableKeys = new Set(
+    config.contextFields.deal.filter((f) => f.permissions.includes("cite")).map((f) => f.key),
+  );
+  for (const deal of deals) {
+    const values: string[] = [];
+    for (const key of citableKeys) {
+      const v = deal[key];
+      if (v !== null && v !== undefined && String(v).trim()) {
+        values.push(String(v).toLowerCase());
+      }
+    }
+    for (const value of values) {
+      if (value.length >= 2 && normalized.includes(value)) return String(deal.id);
+    }
+  }
+  return null;
+}
+
+export function buildAskDealMessage(
+  deals: Array<Record<string, unknown>>,
+  config: V2AgentConfig,
+): string {
+  let msg = "Você tem mais de um negócio aberto. Qual deles você quer tratar?";
+  for (let i = 0; i < deals.length; i++) {
+    const display = buildDealDisplay(deals[i], config);
+    msg += `\n${i + 1}. ${display}`;
+  }
+  return msg;
+}
+
 export async function loadV2Context(args: {
   organizationId: string;
   conversationId?: string;
   contactId?: string;
   config: V2AgentConfig;
+  selectedDealId?: string;
 }): Promise<V2LoadedContext> {
   const exposure = buildExposure(args.config);
 
@@ -189,9 +264,17 @@ export async function loadV2Context(args: {
 
     if (deals.length > 0) {
       if (args.config.dealSelection === "ask" && deals.length > 1) {
-        // Não escolhe automaticamente; o motor vai perguntar qual.
-        selectedDeal = null;
-        dealId = undefined;
+        // Se a conversa já tem uma escolha salva, respeita.
+        const picked = args.selectedDealId
+          ? deals.find((d) => String(d.id) === args.selectedDealId)
+          : undefined;
+        if (picked) {
+          selectedDeal = picked;
+          dealId = String(picked.id);
+        } else {
+          selectedDeal = null;
+          dealId = undefined;
+        }
       } else {
         // latest (padrão) ou só existe um negócio aberto.
         selectedDeal = deals[0];
@@ -202,7 +285,9 @@ export async function loadV2Context(args: {
 
   const dealSelectionReason =
     args.config.dealSelection === "ask" && deals.length > 1
-      ? "Modo 'perguntar': há vários negócios abertos; aguardando escolha do cliente."
+      ? selectedDeal
+        ? "Negócio escolhido pelo cliente salvo na conversa."
+        : "Modo 'perguntar': há vários negócios abertos; aguardando escolha do cliente."
       : deals.length > 0
         ? "Negócio mais recente selecionado automaticamente."
         : "Nenhum negócio aberto encontrado.";

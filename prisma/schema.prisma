@@ -5320,6 +5320,7 @@ model AISimpleConversationState {
   postCloseWindowEndAt   DateTime?
   closeReason            String?
   versionId              String?
+  selectedDealId         String?
   identificationAttempts Int           @default(0)
   counters               Json          @default("{}")
   createdAt              DateTime      @default(now())
