@@ -17,21 +17,58 @@ function isKeyChar(char: string): boolean {
   return KEY_CHARS.test(char);
 }
 
-function readKey(template: string, start: number): { key: string; end: number } | null {
+function readKey(
+  template: string,
+  start: number,
+  variables: Record<string, unknown>,
+): { key: string; end: number } | null {
+  // Lê o maior bloco possível de caracteres válidos para uma chave
+  // (letras, números, underscore, ponto e espaço). Espaços são permitidos
+  // para chaves de variáveis multi-palavra, como "Nome da empresa".
   let i = start;
   while (i < template.length && isKeyChar(template[i])) {
     i++;
   }
-  let key = template.slice(start, i).trim();
-  // Trailing dot/colon/comma usado como pontuação não faz parte da chave
-  // (ex.: "@Email." => "Email"). Ponto interno vira caminho aninhado.
-  while (key.length > 0 && /[.:\\,;!?]$/.test(key)) {
-    if (i < template.length && isKeyChar(template[i])) break;
-    key = key.slice(0, -1).trim();
-    i--;
+
+  // Remove pontuação no final do bloco, que não faz parte da chave.
+  let end = i;
+  while (end > start && /[.:\\,;!?]$/.test(template[end - 1])) {
+    end--;
   }
-  if (!key) return null;
-  return { key, end: start + key.length };
+
+  let raw = template.slice(start, end).trimEnd();
+  if (!raw) return null;
+
+  // Tenta casar a chave mais longa conhecida. Se a chave completa não existe,
+  // volta removendo a última palavra até encontrar uma chave conhecida ou
+  // chegar em uma única palavra. Isso evita que "@name e depois @name" consuma
+  // o texto entre as duas variáveis como parte da primeira chave.
+  const known = (candidate: string) => {
+    if (candidate === "") return false;
+    if (Object.prototype.hasOwnProperty.call(variables, candidate)) return true;
+    if (candidate.includes(".")) {
+      const resolved = resolveVariable(variables, candidate);
+      return resolved !== undefined;
+    }
+    return false;
+  };
+
+  let candidate = raw;
+  while (candidate.length > 0 && !known(candidate)) {
+    const lastSpace = candidate.lastIndexOf(" ");
+    if (lastSpace <= 0) break;
+    candidate = candidate.slice(0, lastSpace).trimEnd();
+  }
+
+  if (candidate.length > 0 && known(candidate)) {
+    return { key: candidate, end: start + candidate.length };
+  }
+
+  // Nenhuma chave multi-palavra conhecida: usa a primeira palavra do bloco
+  // como chave, deixando o restante do texto intacto.
+  const firstToken = raw.split(" ")[0];
+  if (!firstToken) return null;
+  return { key: firstToken, end: start + firstToken.length };
 }
 
 function resolveVariable(variables: Record<string, unknown>, key: string): unknown {
@@ -92,7 +129,7 @@ export function renderMessage(
     const char = template[i];
 
     if (char === "@") {
-      const keyRead = readKey(template, i + 1);
+      const keyRead = readKey(template, i + 1, variables);
       if (!keyRead) {
         result += char;
         i++;

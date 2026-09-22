@@ -290,6 +290,58 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
   actions: z.array(v2ActionSchema).optional().default([]),
 }) as unknown as z.ZodType<V2LLMOutput>;
 
+function extractFirstJSONObject(text: string): string | undefined {
+  // Tenta isolar o primeiro objeto JSON válido do texto.
+  let firstBrace = text.indexOf("{");
+  while (firstBrace !== -1) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = firstBrace; i < text.length; i++) {
+      const char = text[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+      } else {
+        if (char === '"') {
+          inString = true;
+        } else if (char === "{") {
+          depth++;
+        } else if (char === "}") {
+          depth--;
+          if (depth === 0) {
+            return text.slice(firstBrace, i + 1);
+          }
+        }
+      }
+    }
+    firstBrace = text.indexOf("{", firstBrace + 1);
+  }
+  return undefined;
+}
+
+function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
+  const fallback = config.fallback?.error?.message ?? config.fallback?.noSource?.message;
+  const reply = fallback || "Não consegui processar sua mensagem. Vou transferir para um atendente.";
+  console.warn("[ai-v2] LLM não retornou JSON válido. Fallback de erro aplicado. Texto bruto:", rawText.slice(0, 500));
+  return {
+    reply,
+    handoff: true,
+    concluded: false,
+    confirmed: null,
+    outOfScope: false,
+    sentiment: "neutral",
+    collected: {},
+    reason: "LLM não retornou JSON válido — fallback de erro aplicado.",
+    actions: [{ type: "handoff" }],
+  };
+}
+
 export async function callV2LLMTest(
   agentId: string,
   config: V2AgentConfig,
@@ -548,18 +600,47 @@ export async function callV2LLM(args: {
       });
     }
 
-    const text = result.text.trim();
-    const jsonText = text.replace(/^```json\s*/, "").replace(/```\s*$/, "");
-    let parsed: unknown;
+    let text = result.text.trim();
+    // Remove fences de markdown e "json" solto no início/fim.
+    let jsonText = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    if (jsonText.toLowerCase().startsWith("json")) {
+      jsonText = jsonText.slice(4).trim();
+    }
+
+    let parsed: unknown | undefined;
     try {
       parsed = JSON.parse(jsonText);
     } catch {
-      throw new Error("LLM output is not valid JSON");
+      const extracted = extractFirstJSONObject(jsonText) ?? extractFirstJSONObject(text);
+      if (extracted) {
+        try {
+          parsed = JSON.parse(extracted);
+        } catch {
+          parsed = undefined;
+        }
+      }
+    }
+
+    if (parsed === undefined) {
+      return {
+        output: buildErrorFallbackOutput(args.config, text),
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        toolCalls: result.toolCalls,
+        wasExpanded,
+      };
     }
 
     const validated = v2LLMOutputSchema.safeParse(parsed);
     if (!validated.success) {
-      throw new Error(`Invalid LLM output schema: ${validated.error.message}`);
+      console.warn("[ai-v2] LLM devolveu JSON fora do schema:", validated.error.message, "texto:", text.slice(0, 500));
+      return {
+        output: buildErrorFallbackOutput(args.config, text),
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        toolCalls: result.toolCalls,
+        wasExpanded,
+      };
     }
 
     const output = validated.data as V2LLMOutput;

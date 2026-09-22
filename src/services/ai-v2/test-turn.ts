@@ -323,7 +323,33 @@ export async function simulateV2Turn(
     themeId = theme?.id ?? null;
   }
 
-  const llmResult = await callV2LLMTest(agentId, config, userMessage, history, context);
+  let llmResult: Awaited<ReturnType<typeof callV2LLMTest>>;
+  try {
+    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[simulateV2Turn] LLM failed:", msg);
+    llmResult = {
+      output: {
+        reply: config.fallback?.error?.message?.trim() || `Erro ao chamar o modelo: ${msg}`,
+        handoff: true,
+        concluded: false,
+        confirmed: null,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: `Falha na chamada LLM: ${msg}`,
+        actions: [{ type: "handoff" }],
+      },
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      governorStats: { totalCalls: 0, replays: 0, denials: 0, limitHit: false },
+      toolCalls: [],
+      wasExpanded: false,
+      systemPrompt: "",
+    };
+  }
   let output = llmResult.output;
 
   // Guarda de output: remove campos só "Ler" e URLs não autorizadas.
