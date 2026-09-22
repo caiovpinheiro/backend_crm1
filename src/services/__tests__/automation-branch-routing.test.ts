@@ -21,6 +21,8 @@ import {
   decideInteractiveMenuInbound,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
+  conversationResolvedBeforePause,
+  humanReplyDuringPauseCancels,
   shouldCancelPausedAutomationForHumanAttendance,
   waitForReplyHijacksAiTurn,
   decideFlowStepInbound,
@@ -512,6 +514,56 @@ describe("shouldCancelPausedAutomationForHumanAttendance", () => {
         hasHumanReply: true,
         interactiveId: "btn_0",
       }),
+    ).toBe(false);
+  });
+});
+
+describe("humanReplyDuringPauseCancels", () => {
+  const pausedAt = new Date("2026-09-22T16:00:49Z");
+
+  it("fala do ciclo anterior não cancela a reativação", () => {
+    expect(
+      humanReplyDuringPauseCancels({
+        humanAttending: true,
+        hasHumanReply: true,
+        lastHumanReplyAt: new Date("2026-09-18T15:39:55Z"),
+        pausedAt,
+      }),
+    ).toBe(false);
+  });
+
+  it("consultor que falou depois da pausa cancela", () => {
+    expect(
+      humanReplyDuringPauseCancels({
+        humanAttending: true,
+        hasHumanReply: true,
+        lastHumanReplyAt: new Date("2026-09-22T16:05:00Z"),
+        pausedAt,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("conversationResolvedBeforePause", () => {
+  const pausedAt = new Date("2026-09-22T16:00:49Z");
+
+  it("ticket encerrado antes da espera não aborta o timeout", () => {
+    expect(
+      conversationResolvedBeforePause(
+        "RESOLVED",
+        new Date("2026-09-18T18:00:00Z"),
+        pausedAt,
+      ),
+    ).toBe(true);
+  });
+
+  it("encerrado durante a espera aborta", () => {
+    expect(
+      conversationResolvedBeforePause(
+        "RESOLVED",
+        new Date("2026-09-22T16:20:00Z"),
+        pausedAt,
+      ),
     ).toBe(false);
   });
 });
