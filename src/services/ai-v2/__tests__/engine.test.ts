@@ -31,9 +31,13 @@ vi.mock("../agent-resolver", () => ({
   isSimpleEngineConversation: vi.fn().mockReturnValue(true),
 }));
 
-vi.mock("../context", () => ({
-  loadV2Context: mocks.loadContext,
-}));
+vi.mock("../context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../context")>();
+  return {
+    ...actual,
+    loadV2Context: mocks.loadContext,
+  };
+});
 
 vi.mock("../actions", () => ({
   sendV2TextMessage: mocks.sendText,
@@ -615,5 +619,69 @@ describe("processV2Turn", () => {
     const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0];
     expect(sent?.text).toBe("Oi, João!");
     expect(sent?.autonomyMode).toBe("DRAFT");
+  });
+
+  it("salva negócio escolhido pelo cliente e continua sem perguntar de novo (modo 'ask')", async () => {
+    const config = baseConfig({
+      dealSelection: "ask",
+      contextFields: {
+        contact: [],
+        deal: [{ key: "title", label: "Nome", permissions: ["cite"] }],
+      },
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockImplementation((args: { selectedDealId?: string }) => {
+      const deals = [
+        { id: "deal-a", title: "Curso A" },
+        { id: "deal-b", title: "Curso B" },
+      ];
+      if (args.selectedDealId === "deal-b") {
+        return Promise.resolve({
+          contact: null,
+          citableContact: null,
+          deals,
+          selectedDeal: { id: "deal-b", title: "Curso B" },
+          citableDeal: { id: "deal-b", title: "Curso B" },
+          dealId: "deal-b",
+        });
+      }
+      return Promise.resolve({
+        contact: null,
+        citableContact: null,
+        deals,
+        selectedDeal: null,
+        citableDeal: null,
+        dealId: undefined,
+      });
+    });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Entendi, vamos falar do Curso B.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Escolha de negócio",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "2",
+    });
+
+    expect(mocks.upsertState).toHaveBeenCalledWith(expect.objectContaining({ selectedDealId: "deal-b" }));
+    const askCall = mocks.sendText.mock.calls.find((c: any) => c[0].text?.includes("Você tem mais de um negócio"));
+    expect(askCall).toBeUndefined();
+    expect(mocks.callLLM).toHaveBeenCalled();
   });
 });
