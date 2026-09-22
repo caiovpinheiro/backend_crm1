@@ -65,6 +65,39 @@ function actionLabel(type: string): string {
   return ACTION_LABELS[type] ?? type;
 }
 
+const QUERY_TOOL_NAMES = new Set([
+  "search_products",
+  "search_crm_records",
+  "knowledge_search",
+  "list_message_models",
+]);
+
+function isEmptyQueryResult(result: unknown): boolean {
+  if (result === null || result === undefined) return true;
+  if (typeof result !== "object") return false;
+  const r = result as Record<string, unknown>;
+  if ("total" in r && typeof r.total === "number") return r.total === 0;
+  if ("products" in r && Array.isArray(r.products)) return r.products.length === 0;
+  if ("contacts" in r || "deals" in r) {
+    return (
+      (!Array.isArray(r.contacts) || r.contacts.length === 0) &&
+      (!Array.isArray(r.deals) || r.deals.length === 0)
+    );
+  }
+  if ("chunks" in r && Array.isArray(r.chunks)) return r.chunks.length === 0;
+  if ("models" in r && Array.isArray(r.models)) return r.models.length === 0;
+  return false;
+}
+
+function allQueryToolResultsEmpty(
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+): boolean {
+  if (!toolCalls || toolCalls.length === 0) return false;
+  const queryCalls = toolCalls.filter((c) => QUERY_TOOL_NAMES.has(c.toolName));
+  if (queryCalls.length === 0) return false;
+  return queryCalls.every((c) => isEmptyQueryResult(c.result));
+}
+
 export async function simulateV2Turn(
   agentId: string,
   config: V2AgentConfig,
@@ -155,6 +188,21 @@ export async function simulateV2Turn(
     citableDeal: context.citableDeal ?? null,
   });
   output = { ...output, reply: guard.text };
+
+  // Guarda de fonte: se usou tools de consulta, todas voltaram vazias e não tem
+  // dados do cliente, aplica a saída configurada em vez de responder de memória.
+  if (
+    !output.handoff &&
+    !output.concluded &&
+    allQueryToolResultsEmpty(llmResult.toolCalls) &&
+    !context.contact &&
+    !context.selectedDeal
+  ) {
+    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    output.handoff = false;
+    output.reply = noSourceMessage ?? "Não tenho essa informação nos materiais disponíveis.";
+    output.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
+  }
 
   // Se o LLM sugerir um tema, sobrescreve (ele tem a última palavra na simulação).
   if (output.theme) {

@@ -107,23 +107,44 @@ describe("searchV2Knowledge", () => {
     vi.clearAllMocks();
   });
 
-  it("filtra chunks apenas pelos documentos permitidos do tema", async () => {
+  it("passa a lista de documentos permitidos para a recuperação", async () => {
     (retrieveAgentKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue({
-      chunks: [
-        { docId: "doc-a", docTitle: "A", content: "trecho A", distance: 0.2 },
-        { docId: "doc-b", docTitle: "B", content: "trecho B", distance: 0.3 },
-      ],
+      chunks: [{ docId: "doc-a", docTitle: "A", content: "trecho A", distance: 0.2 }],
       expired: [],
     });
 
+    await searchV2Knowledge({
+      agentId: "agent-1",
+      apiKey: "key",
+      query: "pergunta",
+      allowedDocIds: ["doc-a"],
+    });
+    expect(retrieveAgentKnowledge).toHaveBeenCalledWith(
+      "agent-1",
+      "pergunta",
+      "key",
+      4,
+      expect.any(Date),
+      ["doc-a"],
+    );
+  });
+
+  it("retorna vazio quando a lista permitida é explicitamente vazia", async () => {
     const result = await searchV2Knowledge({
       agentId: "agent-1",
       apiKey: "key",
       query: "pergunta",
-      allowedDocIds: ["doc-b"],
+      allowedDocIds: [],
     });
-    expect(result.chunks.length).toBe(1);
-    expect(result.chunks[0].docId).toBe("doc-b");
+    expect(retrieveAgentKnowledge).toHaveBeenCalledWith(
+      "agent-1",
+      "pergunta",
+      "key",
+      4,
+      expect.any(Date),
+      [],
+    );
+    expect(result.chunks.length).toBe(0);
   });
 });
 

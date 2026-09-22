@@ -245,10 +245,14 @@ export async function searchV2Knowledge(args: {
     args.query,
     args.apiKey,
     args.limit ?? 4,
+    new Date(),
+    args.allowedDocIds,
   );
-  const allowed = args.allowedDocIds && args.allowedDocIds.length > 0 ? new Set(args.allowedDocIds) : null;
-  const filtered = allowed
-    ? chunks.filter((c) => allowed.has(c.docId))
+  const allowedSet = Array.isArray(args.allowedDocIds)
+    ? new Set(args.allowedDocIds)
+    : null;
+  const filtered = allowedSet
+    ? chunks.filter((c) => allowedSet.has(c.docId))
     : chunks;
   return {
     query: args.query.trim(),

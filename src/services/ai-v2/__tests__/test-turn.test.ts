@@ -14,7 +14,7 @@ vi.mock("../llm", () => ({
   callV2LLMTest: mocks.callV2LLMTest,
 }));
 
-function baseConfig(): V2AgentConfig {
+function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
   return {
     name: "Agente de teste",
     model: "gpt-4o-mini",
@@ -34,6 +34,7 @@ function baseConfig(): V2AgentConfig {
     themes: [],
     rules: [],
     autonomyMode: "auto",
+    ...overrides,
   } as unknown as V2AgentConfig;
 }
 
@@ -69,5 +70,35 @@ describe("simulateV2Turn", () => {
     const result = await simulateV2Turn("agent-1", cfg, "oi");
     expect(result.reply).toBe("Olá!");
     expect(result.crmContext.contact).toBeNull();
+  });
+
+  it("aplica mensagem de 'sem material' quando busca volta vazia e não há dados do cliente", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.callV2LLMTest.mockResolvedValue({
+      output: {
+        reply: "Acho que é isso.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Tentativa",
+        actions: [],
+      },
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [] } }],
+      systemPrompt: "# Tom de voz\nObjetivo",
+    });
+    const cfg = baseConfig({
+      fallback: { noSource: { message: "Não encontrei isso nos materiais; um consultor vai te ajudar." } } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "Como funciona x?");
+    expect(result.handoff).toBe(false);
+    expect(result.reply).toBe("Não encontrei isso nos materiais; um consultor vai te ajudar.");
+    expect(result.reason).toContain("sem resultados");
   });
 });

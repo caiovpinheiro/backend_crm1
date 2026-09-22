@@ -377,6 +377,60 @@ describe("processV2Turn", () => {
     expect(sent).toBe(config.handoff.message);
   });
 
+  it("consulta vazia e sem dados do cliente aplica mensagem de 'sem material' configurada", async () => {
+    const config = baseConfig({
+      fallback: { noSource: { message: "Não encontrei isso nos materiais; vou transferir para um consultor." } } as any,
+      themes: [
+        {
+          id: "suporte",
+          name: "Suporte",
+          instructions: "suporte",
+          when: [],
+          examples: [],
+          allowedTools: ["knowledge_search"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: null, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Aqui está a resposta.",
+        confirmed: null,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Tentativa",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [] } }],
+      governorStats: { totalCalls: 1, replays: 0, denials: 0, limitHit: false },
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Como funciona x?",
+    });
+
+    expect(result.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0].text ?? "";
+    expect(sent).toBe("Não encontrei isso nos materiais; vou transferir para um consultor.");
+  });
+
   it("regra contact_tag dispara ação terminal sem chamar LLM", async () => {
     const config = baseConfig({
       rules: [

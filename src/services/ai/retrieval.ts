@@ -44,17 +44,27 @@ const MIN_SIMILARITY = 0.6; // distance <= 0.4 ≈ bem relevante. Mantemos folga
 
 const EMPTY: KnowledgeRetrieval = { chunks: [], expired: [] };
 
+function buildAllowedIdsClause(allowedDocIds: string[] | undefined, startParam: number): { clause: string; values: string[] } {
+  if (!allowedDocIds || allowedDocIds.length === 0) return { clause: "", values: [] };
+  const placeholders = allowedDocIds.map((_, i) => `$${startParam + i}`).join(",");
+  return { clause: ` AND d.id IN (${placeholders})`, values: allowedDocIds };
+}
+
 export async function retrieveAgentKnowledge(
   agentId: string,
   query: string,
   apiKey: string,
   topK = 4,
   now: Date = new Date(),
+  allowedDocIds?: string[],
 ): Promise<KnowledgeRetrieval> {
   const text = query.trim();
   if (!text) return EMPTY;
 
   const orgId = getOrgIdOrThrow();
+
+  // Se a lista permitida é explicitamente vazia, não busca nada.
+  if (allowedDocIds !== undefined && allowedDocIds.length === 0) return EMPTY;
 
   // Checa rapidamente se o agente tem algo indexado antes de gastar
   // um embedding; evita chamadas à OpenAI quando não há docs. Como
@@ -64,8 +74,12 @@ export async function retrieveAgentKnowledge(
   // O `orderBy validUntil asc` aproveita a mesma ida ao banco para saber se
   // existe documento vencido: no Postgres ASC manda NULL para o fim, então
   // se a primeira linha não tem validade vencida, nenhuma tem.
+  const probeWhere: Record<string, unknown> = { agentId, status: "READY", chunkCount: { gt: 0 } };
+  if (allowedDocIds !== undefined && allowedDocIds.length > 0) {
+    probeWhere.id = { in: allowedDocIds };
+  }
   const probe = await prisma.aIAgentKnowledgeDoc.findFirst({
-    where: { agentId, status: "READY", chunkCount: { gt: 0 } },
+    where: probeWhere,
     orderBy: { validUntil: "asc" },
     select: { validUntil: true },
   });
@@ -87,6 +101,7 @@ export async function retrieveAgentKnowledge(
   // O corte por validade e parte do WHERE, nao um filtro posterior: doc
   // fora da janela nem disputa as `topK` vagas, senao um doc vencido
   // relevante roubaria o lugar de um doc valido.
+  const { clause: allowedClause, values: allowedValues } = buildAllowedIdsClause(allowedDocIds, 6);
   const rows = await prisma.$queryRawUnsafe<
     Array<{
       id: string;
@@ -106,7 +121,7 @@ export async function retrieveAgentKnowledge(
         AND d."organizationId" = $4
         AND c."organizationId" = $4
         AND (d."validFrom" IS NULL OR d."validFrom" <= $5)
-        AND (d."validUntil" IS NULL OR d."validUntil" >= $5)
+        AND (d."validUntil" IS NULL OR d."validUntil" >= $5)${allowedClause}
       ORDER BY c.embedding <=> $1::vector
       LIMIT $3`,
     vectorLiteral,
@@ -114,6 +129,7 @@ export async function retrieveAgentKnowledge(
     topK,
     orgId,
     now,
+    ...allowedValues,
   );
 
   const chunks = rows
@@ -131,6 +147,7 @@ export async function retrieveAgentKnowledge(
   // Segunda consulta, mesmo embedding: quais documentos VENCIDOS seriam
   // relevantes para esta pergunta. Só os que o operador marcou para
   // orientar o agente — `silent` apenas para de ser servido.
+  const { clause: expiredAllowedClause, values: expiredAllowedValues } = buildAllowedIdsClause(allowedDocIds, 6);
   const expiredRows = await prisma.$queryRawUnsafe<
     Array<{
       docId: string;
@@ -150,7 +167,7 @@ export async function retrieveAgentKnowledge(
         AND c."organizationId" = $4
         AND d."expiredBehavior" = 'instruct'
         AND d."validUntil" IS NOT NULL
-        AND d."validUntil" < $5
+        AND d."validUntil" < $5${expiredAllowedClause}
       GROUP BY d.id, d.title, d."expiredInstruction"
       ORDER BY MIN(c.embedding <=> $1::vector)
       LIMIT $3`,
@@ -159,6 +176,7 @@ export async function retrieveAgentKnowledge(
     topK,
     orgId,
     now,
+    ...expiredAllowedValues,
   );
 
   const expired = expiredRows

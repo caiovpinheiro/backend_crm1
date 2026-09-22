@@ -626,7 +626,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   // Guarda: se usou tools de consulta, todas voltaram vazias e não tem dados do
-  // cliente, não pode inventar resposta. Força handoff com a mensagem configurada.
+  // cliente, não pode inventar resposta. Aplica a saída configurada.
   if (
     llmOutput &&
     !llmOutput.handoff &&
@@ -635,9 +635,16 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     !context.contact &&
     !context.selectedDeal
   ) {
-    llmOutput.handoff = true;
-    llmOutput.reply = config.handoff.message;
-    llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
+    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    if (noSourceMessage) {
+      llmOutput.handoff = false;
+      llmOutput.reply = noSourceMessage;
+      llmOutput.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
+    } else {
+      llmOutput.handoff = true;
+      llmOutput.reply = config.handoff.message;
+      llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
+    }
   }
 
   // Governor: se estourou o limite de chamadas e não tem material nem dado do
@@ -651,9 +658,16 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     !context.contact &&
     !context.selectedDeal
   ) {
-    llmOutput.handoff = true;
-    llmOutput.reply = config.handoff.message;
-    llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados";
+    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    if (noSourceMessage) {
+      llmOutput.handoff = false;
+      llmOutput.reply = noSourceMessage;
+      llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados — saída 'sem material de consulta' configurada";
+    } else {
+      llmOutput.handoff = true;
+      llmOutput.reply = config.handoff.message;
+      llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados";
+    }
   }
 
   if (!llmOutput) {
