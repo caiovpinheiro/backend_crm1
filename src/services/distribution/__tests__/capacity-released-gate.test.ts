@@ -33,18 +33,19 @@ describe("capacity released gate (worker)", () => {
     getOrgIdOrNull.mockReset();
   });
 
-  it("sem teto: sempre tem vaga", () => {
-    expect(consultantHasFreeSlot(0, 0)).toBe(true);
-    expect(consultantHasFreeSlot(5, 5)).toBe(true);
-    expect(consultantHasFreeSlot(80, 1)).toBe(true);
+  it("queueLimit 0 never has a slot; load >= limit is full", () => {
+    expect(consultantHasFreeSlot(0, 0)).toBe(false);
+    expect(consultantHasFreeSlot(3, 5)).toBe(true);
+    expect(consultantHasFreeSlot(5, 5)).toBe(false);
+    expect(consultantHasFreeSlot(6, 5)).toBe(false);
   });
 
-  it("carga alta não barra a drenagem", () => {
+  it("at-capacity → skip drain; below volume → drain", () => {
     expect(
       decideCapacityReleasedDrain({
         snapshots: [{ userId: "u1", queueLimit: 5, queueCount: 5 }],
       }),
-    ).toBe("drain");
+    ).toBe("skip_at_capacity");
     expect(
       decideCapacityReleasedDrain({
         snapshots: [{ userId: "u1", queueLimit: 5, queueCount: 4 }],
@@ -63,7 +64,7 @@ describe("capacity released gate (worker)", () => {
     ).toBe("drain");
   });
 
-  it("evaluate: carga no teto antigo ainda drena", async () => {
+  it("evaluate: at-capacity does not proceed", async () => {
     getOrgIdOrNull.mockReturnValue("org1");
     findFirst.mockResolvedValue({ queueLimit: 4 });
     getQueueCounts.mockResolvedValue(new Map([["u1", 4]]));
@@ -73,8 +74,8 @@ describe("capacity released gate (worker)", () => {
     );
     const result = await evaluateCapacityReleasedDrain({ userId: "u1" });
     expect(result).toEqual({
-      proceed: true,
-      reason: "has_slot",
+      proceed: false,
+      reason: "at_capacity",
       load: 4,
       volume: 4,
     });
