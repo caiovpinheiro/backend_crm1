@@ -355,8 +355,9 @@ export function shouldResumePausedMenuDespiteHumanAttendance(opts?: {
 /**
  * Quando cancelar contextos pausados porque há humano no ticket.
  * Dono herdado no card (reativação de perdidos) NÃO cancela — o robô
- * ainda espera a resposta do cliente. Só cancela se o consultor já
- * falou nesta conversa (`hasHumanReply`), salvo clique/flow.
+ * ainda espera a resposta do cliente. `hasHumanReply` sticky do ciclo
+ * anterior também não cancela. Só cancela se o consultor falou DEPOIS
+ * da pausa (`humanReplyDuringPauseCancels`), salvo clique/flow.
  */
 export function shouldCancelPausedAutomationForHumanAttendance(input: {
   humanAttending: boolean;
@@ -367,6 +368,44 @@ export function shouldCancelPausedAutomationForHumanAttendance(input: {
   if (!input.humanAttending) return false;
   if (shouldResumePausedMenuDespiteHumanAttendance(input)) return false;
   return input.hasHumanReply;
+}
+
+/**
+ * `hasHumanReply` é sticky no ticket. Na reativação de perdidos o
+ * consultor falou no ciclo anterior; isso não pode cancelar o
+ * `wait_for_reply` quando o cliente responde ao template. Só cancela
+ * se o humano falou DEPOIS que o fluxo pausou.
+ */
+export function humanReplyDuringPauseCancels(input: {
+  humanAttending: boolean;
+  hasHumanReply: boolean;
+  interactiveId?: string | null;
+  flowReply?: boolean;
+  lastHumanReplyAt?: Date | null;
+  pausedAt?: Date | null;
+}): boolean {
+  if (!shouldCancelPausedAutomationForHumanAttendance(input)) return false;
+  const pausedAt = input.pausedAt;
+  if (!pausedAt) return true;
+  const spokeAt = input.lastHumanReplyAt;
+  if (!spokeAt) return false;
+  return spokeAt.getTime() > pausedAt.getTime();
+}
+
+/**
+ * Ticket já RESOLVED quando a espera começou (template de reativação
+ * gravado no ticket encerrado). O timeout do canvas ainda deve seguir
+ * — marcar perdido / mover etapa. Abortar só se o encerramento
+ * aconteceu durante a espera.
+ */
+export function conversationResolvedBeforePause(
+  status: string | null | undefined,
+  closedAt: Date | null | undefined,
+  pausedAt: Date,
+): boolean {
+  if (status !== "RESOLVED") return false;
+  if (!closedAt) return true;
+  return closedAt.getTime() <= pausedAt.getTime();
 }
 
 /**
@@ -777,29 +816,32 @@ export async function processIncomingMessage(
     messageType?: string | null;
   },
 ): Promise<SalesbotProcessResult> {
-  // Guard: consultor JÁ FALOU (`hasHumanReply`) — não deixar o robô
-  // falar em cima. Só ter dono no card (perdido reativado) não cancela
-  // wait_for_reply. Clique/flow retoma o menu mesmo com humano.
+  // Guard: consultor falou DEPOIS da pausa — não deixar o robô
+  // falar em cima. `hasHumanReply` sticky (ciclo anterior do perdido)
+  // não cancela. Clique/flow retoma o menu mesmo com humano.
   let assigneeType: string | null = null;
+  let humanAttending = false;
+  let hasHumanReplyFlag = false;
+  let lastHumanReplyAt: Date | null | undefined;
   try {
     const { getHumanAttendanceForContact } = await import(
       "@/services/attendance-guards"
     );
     const snap = await getHumanAttendanceForContact(contactId);
     assigneeType = snap?.assigneeType ?? null;
-    if (
-      shouldCancelPausedAutomationForHumanAttendance({
-        humanAttending: Boolean(snap?.humanAttending),
-        hasHumanReply: Boolean(snap?.hasHumanReply),
-        interactiveId: opts?.interactiveId,
-        flowReply: opts?.flowReply,
-      })
-    ) {
-      const cancelled = await cancelActiveContextsForContact(contactId);
-      log.info(
-        `processIncomingMessage skip — consultor já respondeu contact=${contactId} cancelled=${cancelled} assignee=${snap?.assignedToId ?? "-"}`,
-      );
-      return { handled: false, replied: false };
+    humanAttending = Boolean(snap?.humanAttending);
+    hasHumanReplyFlag = Boolean(snap?.hasHumanReply);
+    if (hasHumanReplyFlag) {
+      const lastHuman = await prisma.message.findFirst({
+        where: {
+          direction: "out",
+          authorType: "human",
+          conversation: { contactId },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true },
+      });
+      lastHumanReplyAt = lastHuman?.createdAt ?? null;
     }
     if (
       snap?.humanAttending &&
@@ -835,6 +877,23 @@ export async function processIncomingMessage(
       // Encerra para a conversa sair de Automação (handoff → Entrada).
       log.info(
         `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) sem currentStepId`,
+      );
+      await cancelContext(ctx.id);
+      continue;
+    }
+
+    if (
+      humanReplyDuringPauseCancels({
+        humanAttending,
+        hasHumanReply: hasHumanReplyFlag,
+        interactiveId: opts?.interactiveId,
+        flowReply: opts?.flowReply,
+        lastHumanReplyAt,
+        pausedAt: ctx.updatedAt,
+      })
+    ) {
+      log.info(
+        `processIncomingMessage skip — consultor falou durante a espera contact=${contactId} ctx=${ctx.id} auto=${ctx.automation.name}`,
       );
       await cancelContext(ctx.id);
       continue;
@@ -1377,9 +1436,16 @@ async function abortTimeoutIfAttendanceStarted(
         lastInboundAt: true,
         assignedToId: true,
         assignedTo: { select: { type: true } },
+        closedAt: true,
       },
     });
-    if (!target || target.status === "RESOLVED") return "already_resolved";
+    if (
+      !target ||
+      (target.status === "RESOLVED" &&
+        !conversationResolvedBeforePause(target.status, target.closedAt, pausedAt))
+    ) {
+      return "already_resolved";
+    }
     if (target.lastInboundAt && target.lastInboundAt > pausedAt) {
       return "stale_inbound";
     }

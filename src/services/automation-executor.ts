@@ -368,9 +368,17 @@ async function resolveAutomationSendConv(
   if (preferredId) {
     const pinned = await prisma.conversation.findFirst({
       where: { id: preferredId, contactId },
-      select: { id: true },
+      select: { id: true, status: true },
     });
-    if (pinned) return { id: pinned.id };
+    // Ticket encerrado não recebe o template de reativação: o timeout
+    // via `already_resolved` abortava o ramo (deal parado em Ativação —
+    // DNAWORK "ativação perdidos"). Cai no ensure, que abre ticket novo.
+    if (pinned && pinned.status !== "RESOLVED") return { id: pinned.id };
+    if (pinned) {
+      log.info(
+        `resolveAutomationSendConv: conversa ${pinned.id} encerrada — abrindo ticket novo`,
+      );
+    }
   }
   try {
     const ensured = await ensureWhatsAppConversationForContact(contactId, {
@@ -419,6 +427,35 @@ async function resolveAutomationSendConv(
     return { id: resolved.id };
   }
   return null;
+}
+
+/** O wait seguinte grava `variables.conversationId` a partir do runtime. */
+function bindRuntimeToSendConversation(
+  rt: RuntimeContext,
+  conversationId: string,
+): void {
+  rt.data = { ...rt.data, conversationId };
+  if (rt.conversation) {
+    rt.conversation = {
+      ...rt.conversation,
+      id: conversationId,
+      status: "OPEN",
+      isClosed: false,
+    };
+    return;
+  }
+  rt.conversation = {
+    id: conversationId,
+    status: "OPEN",
+    channel: "whatsapp",
+    channelId: rt.activeChannelId ?? null,
+    isClosed: false,
+    hasAgentReply: false,
+    hasError: false,
+    unreadCount: 0,
+    assignedToId: null,
+    departmentId: null,
+  };
 }
 
 /** Campanha AUTOMATION: não herdar dono do contato no ticket novo (ver ensure opts). */
@@ -3049,6 +3086,9 @@ async function executeStep(
           sendConvOptsFromRt(rt, tplChannelId),
         );
         tplConversationId = conv?.id;
+        if (tplConversationId) {
+          bindRuntimeToSendConversation(rt, tplConversationId);
+        }
       }
       const tplMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
