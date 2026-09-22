@@ -138,14 +138,14 @@ async function loadDealFields(
 
 export async function loadV2Context(args: {
   organizationId: string;
-  conversationId: string;
+  conversationId?: string;
   contactId?: string;
   config: V2AgentConfig;
 }): Promise<V2LoadedContext> {
   const exposure = buildExposure(args.config);
 
   let contactId = args.contactId;
-  if (!contactId) {
+  if (!contactId && args.conversationId) {
     const conv = await (prisma as unknown as {
       conversation: {
         findUnique: (args: { where: { id: string }; select: { contactId: boolean } }) => Promise<{ contactId: string | null } | null>;
@@ -267,7 +267,6 @@ export async function loadV2Context(args: {
     deals,
     selectedDeal: selectedDeal ? visibleDeal : null,
     citableDeal: selectedDeal ? citableDeal : null,
-    deals,
     fields: args.config.contextFields,
     exposure,
     contactId,

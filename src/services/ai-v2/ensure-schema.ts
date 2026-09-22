@@ -20,7 +20,11 @@ export async function ensureV2AgentSchema(): Promise<void> {
 
   const needs: string[] = [];
 
-  const columnResult = await (prismaBase as any).$queryRawUnsafe<
+  const db = prismaBase as unknown as {
+    $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
+  };
+
+  const columnResult = await db.$queryRawUnsafe<
     Array<{ exists: boolean }>
   >(
     `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_agent_configs' AND column_name = 'draft_config') AS exists`,
@@ -28,7 +32,7 @@ export async function ensureV2AgentSchema(): Promise<void> {
   const hasDraftColumn = columnResult[0]?.exists === true;
   if (!hasDraftColumn) needs.push("draft_config column");
 
-  const tableResult = await (prismaBase as any).$queryRawUnsafe<
+  const tableResult = await db.$queryRawUnsafe<
     Array<{ exists: boolean }>
   >(
     `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'ai_agent_config_versions') AS exists`,

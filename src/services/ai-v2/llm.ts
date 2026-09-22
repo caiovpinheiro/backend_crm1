@@ -264,7 +264,16 @@ export async function callV2LLMTest(
   userMessage: string,
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
   context?: V2CRMContext,
-): Promise<ReturnType<typeof callV2LLM> & { systemPrompt: string }> {
+): Promise<{
+  output: V2LLMOutput;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  governorStats: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
+  toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+  wasExpanded: boolean;
+  systemPrompt: string;
+}> {
   const ctx: V2CRMContext = context ?? {
     contact: null,
     deals: [],
@@ -418,6 +427,7 @@ export async function callV2LLM(args: {
   latencyMs: number;
   governorStats: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
   toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+  wasExpanded: boolean;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
   const system = buildV2SystemPrompt(
@@ -522,7 +532,7 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
-      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats() };
+      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats() } as any;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }

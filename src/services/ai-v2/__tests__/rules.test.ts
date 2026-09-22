@@ -22,7 +22,7 @@ function baseRulesConfig(rules: V2Rule[], businessHours?: V2AgentConfig["busines
   } as unknown as V2AgentConfig;
 }
 
-const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null };
+const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } };
 
 describe("isWithinV2BusinessHours", () => {
   it("retorna true quando desabilitado", () => {

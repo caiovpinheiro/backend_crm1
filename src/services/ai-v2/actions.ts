@@ -299,7 +299,7 @@ async function executeSendMessage(action: V2Action, ctx: V2ActionContext): Promi
     const rendered = renderMessage(text, messageVars(ctx), defaultFormatter());
     await sendV2TextMessage({
       conversationId: ctx.conversationId,
-      contactId: ctx.contactId,
+      contactId: ctx.contactId!,
       agentUserId: ctx.agentUserId,
       text: rendered,
       channel: ctx.channel,

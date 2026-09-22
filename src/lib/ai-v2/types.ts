@@ -447,7 +447,8 @@ export type V2ActionType =
   | "set_variable"
   | "record_knowledge_gap"
   | "start_survey"
-  | "send_message";
+  | "send_message"
+  | "no_reply";
 
 export interface V2Action {
   type: V2ActionType;

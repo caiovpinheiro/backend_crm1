@@ -229,6 +229,14 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   if (!convOrg) return { handoff: false, closed: false, error: "Conversation not found" };
   const orgId = convOrg.organizationId;
 
+  // Estado (necessário antes de ações que precisam de owner/stage/versionId)
+  let stateRow = await getV2ConversationState(input.conversationId);
+  let stage: V2Stage = (stateRow?.stage as V2Stage) ?? "idle";
+  let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
+  let counters = parseV2Counters(stateRow?.counters);
+  let themeId: string | undefined = stateRow?.themeId ?? undefined;
+  let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
+
   // Contexto CRM (necessário para regras e mídia)
   const loadedContext = await loadV2Context({
     organizationId: orgId,
@@ -281,6 +289,9 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       latencyMs: 0,
       inputTokens: 0,
       outputTokens: 0,
+      owner,
+      stage,
+      versionId,
     });
     return { handoff: false, closed: false, sentReply: askMessage };
   }
@@ -289,14 +300,6 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const bridge = await loadV2AutomationBridge(contactId);
   const automationVariables = mapAutomationVariables(bridge, config);
   for (const [k, v] of Object.entries(automationVariables)) vars[k] = v;
-
-  // Estado
-  let stateRow = await getV2ConversationState(input.conversationId);
-  let stage: V2Stage = (stateRow?.stage as V2Stage) ?? "idle";
-  let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
-  let counters = parseV2Counters(stateRow?.counters);
-  let themeId: string | undefined = stateRow?.themeId ?? undefined;
-  let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
 
   // Se dono é pessoa, só registra e não responde
   if (owner === "pessoa") {
