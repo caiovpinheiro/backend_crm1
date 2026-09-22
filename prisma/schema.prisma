@@ -5319,12 +5319,13 @@ model AISimpleConversationState {
   originStageId          String?
   postCloseWindowEndAt   DateTime?
   closeReason            String?
-  versionId              String?
-  selectedDealId         String?
-  identificationAttempts Int           @default(0)
-  counters               Json          @default("{}")
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
+  versionId                String?
+  selectedDealId           String?
+  entryConfirmationPending Boolean       @default(false)
+  identificationAttempts   Int           @default(0)
+  counters                 Json          @default("{}")
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
 
   @@index([organizationId])
   @@index([agentId])

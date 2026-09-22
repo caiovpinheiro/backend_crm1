@@ -162,6 +162,7 @@ const entryConfigSchema = z.object({
   onDealNotFound: z.enum(["ask_identification", "create_deal", "handoff"]).optional().default("ask_identification"),
   confirmContact: z.boolean().optional().default(true),
   confirmationFields: z.array(z.string()).optional().default([]),
+  confirmationMode: z.enum(["combined", "separate_turn"]).optional().default("combined"),
   automationVariablesMapping: z.record(z.string(), z.string()).optional().default({}),
   maxAttempts: z.number().int().min(1).optional().default(2),
 });
@@ -383,6 +384,7 @@ function basePreset(): V2AgentConfig {
       onDealNotFound: "ask_identification",
       confirmContact: true,
       confirmationFields: ["name", "email"],
+      confirmationMode: "combined",
     },
     themes: [],
     rules: [

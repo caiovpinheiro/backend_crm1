@@ -18,10 +18,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       userMessage?: string;
       history?: Array<{ role: "user" | "assistant"; content: string }>;
       contactId?: string;
+      stage?: "idle" | "confirming" | "identifying" | "active" | "closed";
     };
     const userMessage = body.userMessage?.trim() ?? "oi";
     const history = Array.isArray(body.history) ? body.history : [];
     const contactId = body.contactId?.trim();
+    const stage = body.stage ?? "active";
     const agent = await getV2Agent(id, r.session.user.organizationId!);
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
 
@@ -33,6 +35,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       history,
       r.session.user.organizationId!,
       contactId,
+      undefined,
+      stage,
     );
     return NextResponse.json(result);
   } catch (err) {

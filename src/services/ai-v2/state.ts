@@ -22,6 +22,7 @@ export type V2ConversationStateRow = {
   closeReason?: string | null;
   versionId?: string | null;
   selectedDealId?: string | null;
+  entryConfirmationPending?: boolean;
   identificationAttempts: number;
   counters: Record<string, unknown>;
 };
@@ -52,6 +53,7 @@ export async function upsertV2ConversationState(args: {
   closeReason?: string | null;
   versionId?: string | null;
   selectedDealId?: string | null;
+  entryConfirmationPending?: boolean;
   identificationAttempts?: number;
   counters?: V2Counters;
 }): Promise<V2ConversationStateRow> {
@@ -66,8 +68,9 @@ export async function upsertV2ConversationState(args: {
     closeReason: args.closeReason !== undefined ? args.closeReason : existing?.closeReason ?? null,
     versionId: args.versionId !== undefined ? args.versionId : existing?.versionId ?? null,
     selectedDealId: args.selectedDealId !== undefined ? args.selectedDealId : existing?.selectedDealId ?? null,
+    entryConfirmationPending: args.entryConfirmationPending !== undefined ? args.entryConfirmationPending : existing?.entryConfirmationPending ?? false,
     identificationAttempts: args.identificationAttempts ?? existing?.identificationAttempts ?? 0,
-      counters: args.counters ? (args.counters as unknown as Record<string, unknown>) : existing?.counters ?? {},
+    counters: args.counters ? (args.counters as unknown as Record<string, unknown>) : existing?.counters ?? {},
   };
 
   if (existing) {

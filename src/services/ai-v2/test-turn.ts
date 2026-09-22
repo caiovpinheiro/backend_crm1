@@ -3,7 +3,7 @@
  * Não persiste estado nem executa ações reais.
  */
 
-import type { V2Action, V2AgentConfig, V2CRMContext } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Stage } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { callV2LLMTest } from "./llm";
@@ -39,6 +39,8 @@ export type V2TestTurnResult = {
   crmContext: V2CRMContext;
   dealSelectionReason: string;
   scrubbedFields?: string[];
+  /** Estágio da conversa após este turno (para simulação multi-turno). */
+  stage?: V2Stage;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -107,6 +109,7 @@ export async function simulateV2Turn(
   organizationId?: string,
   contactId?: string,
   selectedDealId?: string,
+  stage: V2Stage = "active",
 ): Promise<V2TestTurnResult> {
   let context: V2CRMContext;
   if (organizationId) {
@@ -122,21 +125,82 @@ export async function simulateV2Turn(
 
   // Fluxo de entrada na primeira mensagem da simulação.
   // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
-  if (history.length === 0) {
+  const effectiveStage: V2Stage = history.length === 0 ? "idle" : stage;
+  if (effectiveStage === "idle") {
     const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal);
-    const parts: string[] = [];
-    if (config.entry.openingEnabled && config.entry.openingMessage) {
-      parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
-    }
     if (!context.selectedDeal) {
       if (config.entry.onDealNotFound === "ask_identification") {
+        const parts: string[] = [];
+        if (config.entry.openingEnabled && config.entry.openingMessage) {
+          parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+        }
         parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+        const identReply = parts.filter(Boolean).join("\n\n");
+        return {
+          userMessage,
+          appliedRuleId: null,
+          appliedRuleName: null,
+          themeId: null,
+          themeName: null,
+          reply: identReply,
+          reason: "Primeira mensagem: fluxo de entrada (identificação).",
+          handoff: false,
+          closed: false,
+          toolCalls: [],
+          ragChunks: [],
+          executedActions: [],
+          discardedActions: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 0,
+          tone: config.tone ?? "",
+          responseLength: config.responseLength ?? "medium",
+          globalRules: config.globalRules,
+          systemPrompt: "",
+          crmContext: context,
+          dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+          stage: "identifying",
+        };
       }
     } else if (config.entry.confirmContact) {
+      const mode = config.entry.confirmationMode ?? "combined";
+      if (mode === "separate_turn") {
+        const welcomeMsg = config.entry.openingEnabled && config.entry.openingMessage
+          ? renderMessage(config.entry.openingMessage, vars, defaultFormatter())
+          : "";
+        return {
+          userMessage,
+          appliedRuleId: null,
+          appliedRuleName: null,
+          themeId: null,
+          themeName: null,
+          reply: welcomeMsg,
+          reason: "Primeira mensagem: boas-vindas. A confirmação será perguntada no próximo turno.",
+          handoff: false,
+          closed: false,
+          toolCalls: [],
+          ragChunks: [],
+          executedActions: [],
+          discardedActions: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 0,
+          tone: config.tone ?? "",
+          responseLength: config.responseLength ?? "medium",
+          globalRules: config.globalRules,
+          systemPrompt: "",
+          crmContext: context,
+          dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+          stage: "confirming",
+        };
+      }
+
+      const parts: string[] = [];
+      if (config.entry.openingEnabled && config.entry.openingMessage) {
+        parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+      }
       parts.push(renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter()));
-    }
-    const entryReply = parts.filter(Boolean).join("\n\n");
-    if (entryReply) {
+      const entryReply = parts.filter(Boolean).join("\n\n");
       return {
         userMessage,
         appliedRuleId: null,
@@ -144,7 +208,7 @@ export async function simulateV2Turn(
         themeId: null,
         themeName: null,
         reply: entryReply,
-        reason: "Primeira mensagem: fluxo de entrada (boas-vindas / confirmação / identificação).",
+        reason: "Primeira mensagem: fluxo de entrada (boas-vindas / confirmação).",
         handoff: false,
         closed: false,
         toolCalls: [],
@@ -160,8 +224,44 @@ export async function simulateV2Turn(
         systemPrompt: "",
         crmContext: context,
         dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+        stage: "confirming",
       };
     }
+  }
+
+  // Turno seguinte às boas-vindas no modo separate_turn: envia a confirmação.
+  if (effectiveStage === "confirming" && config.entry.confirmContact && (config.entry.confirmationMode ?? "combined") === "separate_turn") {
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal);
+    const confirmMsg = renderMessage(
+      config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
+      vars,
+      defaultFormatter(),
+    );
+    return {
+      userMessage,
+      appliedRuleId: null,
+      appliedRuleName: null,
+      themeId: null,
+      themeName: null,
+      reply: confirmMsg,
+      reason: "Confirmação de identidade no turno seguinte.",
+      handoff: false,
+      closed: false,
+      toolCalls: [],
+      ragChunks: [],
+      executedActions: [],
+      discardedActions: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      tone: config.tone ?? "",
+      responseLength: config.responseLength ?? "medium",
+      globalRules: config.globalRules,
+      systemPrompt: "",
+      crmContext: context,
+      dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+      stage: "confirming",
+    };
   }
 
   // Se há vários negócios abertos e o operador configurou "perguntar",
@@ -191,6 +291,7 @@ export async function simulateV2Turn(
       systemPrompt: "",
       crmContext: context,
       dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+      stage: "active",
     };
   }
 
@@ -320,5 +421,6 @@ export async function simulateV2Turn(
     crmContext: context,
     dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
     scrubbedFields: guard.scrubbedFields,
+    stage: "active",
   };
 }

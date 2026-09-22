@@ -191,11 +191,13 @@ export function buildVariableMap(
     for (const [k, v] of Object.entries(contact)) {
       map[k] = v;
     }
+    map.contact = { ...contact };
   }
   if (deal) {
     for (const [k, v] of Object.entries(deal)) {
       map[k] = v;
     }
+    map.deal = { ...deal };
   }
   return map;
 }

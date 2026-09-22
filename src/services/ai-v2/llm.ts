@@ -418,6 +418,9 @@ function buildV2SystemPrompt(
   }
 
   lines.push(`# Etapa atual\n${stage}`);
+  if (stage === "confirming") {
+    lines.push("Você está confirmando a identidade do cliente. Se ele confirmar que é ele (sim/confirma), devolva confirmed: true. Se ele negar ou pedir para falar de outra pessoa, devolva confirmed: false. Se a resposta for irrelevante, devolva confirmed: null.");
+  }
   lines.push("# Tools de consulta disponíveis");
   const allQueryTools = ["search_products", "search_crm_records", "knowledge_search", "list_message_models"];
   const availableTools = allQueryTools.filter((t) => (allowedToolNames ?? []).includes(t));

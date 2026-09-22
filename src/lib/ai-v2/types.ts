@@ -203,6 +203,8 @@ export interface V2EntryConfig {
   confirmContact: boolean;
   /** Campos usados para confirmar o cadastro. */
   confirmationFields: string[];
+  /** Como entregar a confirmação em relação às boas-vindas. */
+  confirmationMode?: "combined" | "separate_turn";
   /** Mapeamento variável da automação → variável do agente. */
   automationVariablesMapping: Record<string, string>;
   /** Máximo de tentativas de identificação antes de transferir. */

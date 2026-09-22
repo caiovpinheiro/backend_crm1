@@ -182,6 +182,99 @@ describe("processV2Turn", () => {
     expect(upsert).toBeTruthy();
   });
 
+  it("confirmationMode separate_turn => envia só boas-vindas no 1º turno e marca entryConfirmationPending", async () => {
+    const config = baseConfig({
+      entry: {
+        confirmContact: true,
+        onDealNotFound: "ask_identification",
+        confirmationMode: "separate_turn",
+        openingEnabled: true,
+        openingMessage: "Oi, @name! Sou a consultora virtual da Cruzeiro do Sul.",
+        confirmationMessage: "Confirmo que estou falando com você. Como posso ajudar?",
+      } as any,
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Oi",
+    });
+
+    expect(result.handoff).toBe(false);
+    expect(result.closed).toBe(false);
+    const sent = mocks.sendText.mock.calls.find((c) => c[0].text)?.[0].text ?? "";
+    expect(sent).toContain("Oi, João!");
+    expect(sent).not.toContain("Confirmo");
+    const upsert = mocks.upsertState.mock.calls.find((c) => c[0].stage === "confirming");
+    expect(upsert?.[0].entryConfirmationPending).toBe(true);
+  });
+
+  it("confirmationMode separate_turn => envia confirmação no 2º turno e limpa pending", async () => {
+    const config = baseConfig({
+      entry: {
+        confirmContact: true,
+        onDealNotFound: "ask_identification",
+        confirmationMode: "separate_turn",
+        openingEnabled: true,
+        openingMessage: "Oi, {{contact.name}}!",
+        confirmationMessage: "Confirmo que estou falando com você, {{contact.name}}. Como posso ajudar?",
+      } as any,
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+    mocks.getState.mockResolvedValue({
+      ...makeState("confirming"),
+      entryConfirmationPending: true,
+    });
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Tudo bem, João! No que posso ajudar?",
+        confirmed: true,
+        handoff: false,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Confirmou identidade",
+        actions: [],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+      toolCalls: [],
+      governorStats: { totalCalls: 1, replays: 0, denials: 0, limitHit: false },
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "sim sou eu",
+    });
+
+    expect(result.handoff).toBe(false);
+    expect(result.closed).toBe(false);
+    const confirmationCall = mocks.sendText.mock.calls.find((c) =>
+      (c[0].text as string).includes("Confirmo"),
+    );
+    expect(confirmationCall).toBeTruthy();
+    const upsert = mocks.upsertState.mock.calls.find((c) => c[0].stage === "confirming");
+    expect(upsert?.[0].entryConfirmationPending).toBe(false);
+  });
+
   it("confirmação negativa => pergunta identificação e vai para identifying", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });

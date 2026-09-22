@@ -567,6 +567,27 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         return { handoff: false, closed: false, sentReply: identMsg };
       }
     } else if (config.entry.confirmContact && stage === "idle") {
+      const mode = config.entry.confirmationMode ?? "combined";
+      if (mode === "separate_turn") {
+        const welcomeMsg = config.entry.openingEnabled && config.entry.openingMessage
+          ? renderMessage(config.entry.openingMessage, vars, defaultFormatter())
+          : "";
+        if (welcomeMsg) {
+          await sendReply(welcomeMsg);
+        }
+        await upsertV2ConversationState({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+          stage: "confirming", versionId: versionId, entryConfirmationPending: true,
+        });
+        await logV2Turn({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+          inboundText: input.userMessage, crmContext: context, prompt: "welcome", reply: welcomeMsg,
+          executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
+          inputTokens: 0, outputTokens: 0, owner, stage: "confirming", versionId,
+        });
+        return { handoff: false, closed: false, sentReply: welcomeMsg };
+      }
+
       const parts: string[] = [];
       if (config.entry.openingEnabled && config.entry.openingMessage) {
         parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
@@ -576,7 +597,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       await sendReply(confirmMsg);
       await upsertV2ConversationState({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-        stage: "confirming", versionId: versionId,
+        stage: "confirming", versionId: versionId, entryConfirmationPending: false,
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -588,6 +609,46 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (stage === "idle") {
       stage = "active";
     }
+  }
+
+  // Confirmação adiada: no turno seguinte às boas-vindas, pergunta a confirmação.
+  if (stage === "confirming" && stateRow?.entryConfirmationPending && config.entry.confirmContact) {
+    const confirmMsg = renderMessage(
+      config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
+      vars,
+      defaultFormatter(),
+    );
+    if (confirmMsg.trim()) {
+      await sendReply(confirmMsg);
+    }
+    await upsertV2ConversationState({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      agentId: resolved!.agentConfigId,
+      stage: "confirming",
+      versionId: versionId,
+      entryConfirmationPending: false,
+    });
+    await logV2Turn({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      agentId: resolved!.agentConfigId,
+      turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: context,
+      prompt: "confirmation",
+      reply: confirmMsg,
+      executedActions: [],
+      discardedActions: [],
+      handoff: false,
+      latencyMs: Date.now() - startedAt,
+      inputTokens: 0,
+      outputTokens: 0,
+      owner,
+      stage: "confirming",
+      versionId,
+    });
+    return { handoff: false, closed: false, sentReply: confirmMsg };
   }
 
   // Onboarding

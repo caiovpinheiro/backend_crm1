@@ -218,6 +218,77 @@ describe("simulateV2Turn", () => {
     expect(result.reply).toContain("Me confirme seu e-mail para prosseguir.");
   });
 
+  it("separate_turn: primeiro turno só boas-vindas e stage confirming", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { name: "Marcelo" },
+      citableContact: { name: "Marcelo" },
+      deals: [{ id: "d1", title: "Matrícula" }],
+      selectedDeal: { id: "d1", title: "Matrícula" },
+      citableDeal: { title: "Matrícula" },
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Negócio mais recente.",
+    });
+    const cfg = baseConfig({
+      entry: {
+        openingEnabled: true,
+        openingMessage: "Oi @name! Sou a consultora virtual.",
+        confirmContact: true,
+        confirmationMode: "separate_turn",
+        confirmationMessage: "Confirmo que estou falando com você. Como posso ajudar?",
+        onDealNotFound: "ask_identification",
+      } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
+    expect(result.reply).toBe("Oi Marcelo! Sou a consultora virtual.");
+
+    expect(result.stage).toBe("confirming");
+    expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
+  });
+
+  it("separate_turn: segundo turno envia confirmação sem chamar LLM", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({
+      contact: { name: "Marcelo" },
+      citableContact: { name: "Marcelo" },
+      deals: [{ id: "d1", title: "Matrícula" }],
+      selectedDeal: { id: "d1", title: "Matrícula" },
+      citableDeal: { title: "Matrícula" },
+      fields: { contact: [], deal: [] },
+      exposure: { readableKeys: [], citableKeys: [], orgWide: false },
+      dealSelectionReason: "Negócio mais recente.",
+    });
+    const cfg = baseConfig({
+      entry: {
+        openingEnabled: true,
+        openingMessage: "Oi @name!",
+        confirmContact: true,
+        confirmationMode: "separate_turn",
+        confirmationMessage: "@name, confirmo que estou falando com você. Como posso ajudar?",
+        onDealNotFound: "ask_identification",
+      } as any,
+    });
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn(
+      "agent-1",
+      cfg,
+      "sim",
+      [
+        { role: "user", content: "Oi" },
+        { role: "assistant", content: "Oi Marcelo!" },
+      ],
+      "org-1",
+      "contact-marcelo",
+      undefined,
+      "confirming",
+    );
+    expect(result.reply).toBe("Marcelo, confirmo que estou falando com você. Como posso ajudar?");
+    expect(result.stage).toBe("confirming");
+    expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
+  });
+
   it("consulta materiais sobre cancelamento e retorna resposta com trechos usados", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
