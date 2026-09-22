@@ -99,8 +99,12 @@ export async function GET() {
       knowledgeDocs,
       channels,
       pipelines,
-      contactCustomFields: customFields.filter((f: any) => f.entity === "CONTACT"),
-      dealCustomFields: customFields.filter((f: any) => f.entity === "DEAL"),
+      contactCustomFields: customFields.filter(
+        (f: any) => typeof f.entity === "string" && f.entity.toLowerCase() === "contact",
+      ),
+      dealCustomFields: customFields.filter(
+        (f: any) => typeof f.entity === "string" && f.entity.toLowerCase() === "deal",
+      ),
       products,
       whatsappTemplates: whatsappTemplateCatalog,
       models: SUPPORTED_V2_MODELS.map((m) => ({ id: m.id, name: m.label })),
