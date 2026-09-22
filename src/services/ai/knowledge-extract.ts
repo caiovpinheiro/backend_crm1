@@ -6,11 +6,8 @@
  *  - texto puro (`.txt`, `.md`, `.markdown`, `.csv`, `.tsv`): decode utf-8;
  *  - `.docx`: o arquivo é um ZIP de XML — abrimos `word/document.xml` com
  *    `fflate` (puro JS, sem binário nativo) e concatenamos os nós `<w:t>`.
- *
- * `.pdf` NÃO é suportado: as libs de extração (pdfjs-dist e derivados)
- * pesam dezenas de MB no bundle e ainda assim não resolvem PDF escaneado,
- * que exigiria OCR. Rejeitamos com mensagem explícita em vez de indexar
- * lixo binário.
+ *  - `.pdf`: extraído com `pdf-parse` (texto selecionável; PDFs escaneados
+ *    ou baseados em imagem exigiriam OCR e ainda não são suportados).
  *
  * O custo de extração é O(tamanho do arquivo) em memória e sem I/O de
  * rede — com o limite de 10 MB por upload isso fica na casa de dezenas de
@@ -26,7 +23,7 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 /** Limite de caracteres do texto extraído — mesmo do POST JSON. */
 export const MAX_EXTRACTED_CHARS = 500_000;
 
-type SupportedExt = "txt" | "md" | "markdown" | "csv" | "tsv" | "docx";
+type SupportedExt = "txt" | "md" | "markdown" | "csv" | "tsv" | "docx" | "pdf";
 
 const PLAIN_TEXT_EXTS = new Set<SupportedExt>([
   "txt",
@@ -43,6 +40,7 @@ const MIME_BY_EXT: Record<SupportedExt, string> = {
   csv: "text/csv",
   tsv: "text/tab-separated-values",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pdf: "application/pdf",
 };
 
 export const SUPPORTED_EXTENSIONS = Object.keys(MIME_BY_EXT) as SupportedExt[];
@@ -140,6 +138,19 @@ function extractDocx(buffer: Buffer): string {
   return docxXmlToText(decodeText(Buffer.from(document)));
 }
 
+async function extractPdf(buffer: Buffer): Promise<string> {
+  const mod = (await import("pdf-parse")) as any;
+  const pdfParse = mod.default ?? mod;
+  try {
+    const result = await pdfParse(buffer);
+    return (result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n").trim();
+  } catch {
+    throw new KnowledgeExtractError(
+      "Não foi possível extrair texto do PDF. Verifique se o arquivo não está corrompido ou é uma imagem escaneada.",
+    );
+  }
+}
+
 export type ExtractedDocument = {
   text: string;
   mimeType: string;
@@ -151,10 +162,10 @@ export type ExtractedDocument = {
  * `KnowledgeExtractError` com mensagem pronta para o usuário — o handler
  * traduz em HTTP 400.
  */
-export function extractKnowledgeText(
+export async function extractKnowledgeText(
   fileName: string,
   buffer: Buffer,
-): ExtractedDocument {
+): Promise<ExtractedDocument> {
   if (buffer.byteLength === 0) {
     throw new KnowledgeExtractError("Arquivo vazio.");
   }
@@ -165,11 +176,6 @@ export function extractKnowledgeText(
   }
 
   const ext = extensionOf(fileName);
-  if (ext === "pdf") {
-    throw new KnowledgeExtractError(
-      "PDF ainda não é suportado. Converta para .docx, .md ou .txt e envie novamente.",
-    );
-  }
   if (!(ext in MIME_BY_EXT)) {
     throw new KnowledgeExtractError(
       `Formato não suportado. Aceitamos ${SUPPORTED_EXTENSIONS.map((e) => `.${e}`).join(", ")}.`,
@@ -177,9 +183,14 @@ export function extractKnowledgeText(
   }
   const supported = ext as SupportedExt;
 
-  const text = PLAIN_TEXT_EXTS.has(supported)
-    ? decodeText(buffer).trim()
-    : extractDocx(buffer);
+  let text: string;
+  if (PLAIN_TEXT_EXTS.has(supported)) {
+    text = decodeText(buffer).trim();
+  } else if (supported === "pdf") {
+    text = await extractPdf(buffer);
+  } else {
+    text = extractDocx(buffer);
+  }
 
   if (text.length < 10) {
     throw new KnowledgeExtractError(

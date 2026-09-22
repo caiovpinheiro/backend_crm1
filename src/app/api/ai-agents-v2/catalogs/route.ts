@@ -77,7 +77,7 @@ export async function GET() {
         orderBy: { metaTemplateName: "asc" },
       }),
       p.contact.findMany({
-        where: { organizationId, isErased: false },
+        where: { organizationId },
         select: { id: true, name: true, phone: true, email: true },
         orderBy: { name: "asc" },
         take: 200,
