@@ -14,7 +14,7 @@
  *  - `OUTSIDE_WORKING_HOURS`→ fora do expediente (AgentSchedule).
  *  - `PRE_LUNCH`            → pré-almoço / almoço (`lunchStart - N` até `lunchEnd`).
  *  - `PRE_END`              → pré-fim de expediente (`endTime - N` até `endTime`).
- *  - `QUEUE_LIMIT_REACHED`  → legado; o motor não aplica teto de fila.
+ *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`filaAtual >= queueLimit`; 0 = não recebe).
  *  - `TYPE_INCOMPATIBLE`    → tipo/segmento do responsável != tipo solicitado.
  *
  * Compatibilidade: a lógica de presença/expediente espelha o legado
@@ -256,6 +256,10 @@ export function evaluateResponsibleEligibility(
         reasons.push("OUTSIDE_WORKING_HOURS");
       }
     }
+  }
+
+  if (input.queueCount >= input.queueLimit) {
+    reasons.push("QUEUE_LIMIT_REACHED");
   }
 
   const requested = ctx.distributionType?.trim();

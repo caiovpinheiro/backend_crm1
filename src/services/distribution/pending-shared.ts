@@ -525,10 +525,12 @@ type ResponsibleCapacity = {
 
 /** Capacidade livre ao vivo de um consultor, descontando atribuições desta passagem. */
 export function liveFreeCapacityForUser(
-  _r: Pick<ResponsibleCapacity, "userId" | "queueLimit" | "queueCount">,
-  _assignedDeltaByUser: Map<string, number>,
+  r: Pick<ResponsibleCapacity, "userId" | "queueLimit" | "queueCount">,
+  assignedDeltaByUser: Map<string, number>,
 ): number {
-  return Number.MAX_SAFE_INTEGER;
+  const delta = assignedDeltaByUser.get(r.userId) ?? 0;
+  const loaded = r.queueCount + delta;
+  return Math.max(0, r.queueLimit - loaded);
 }
 
 export function eligibleInDeptScope(
