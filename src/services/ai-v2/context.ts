@@ -56,8 +56,8 @@ async function loadContactFields(
       name: true,
       phone: true,
       email: true,
-      customValues: true,
       tags: { select: { tag: { select: { name: true } } } },
+      customFields: { select: { customFieldId: true, value: true } },
     } as Record<string, unknown>,
   });
   if (!contact) return {};
@@ -69,11 +69,13 @@ async function loadContactFields(
       if (contact[fieldName] !== undefined) out[fieldName] = contact[fieldName];
     }
   }
-  // Campos customizados vêm em customValues (JSON)
-  if (contact.customValues && typeof contact.customValues === "object") {
-    const custom = contact.customValues as Record<string, unknown>;
-    for (const [k, v] of Object.entries(custom)) {
-      if (allowedKeys.includes(`contact.${k}`)) out[k] = v;
+  // Campos customizados vêm da relação ContactCustomFieldValue.
+  const customFields = Array.isArray(contact.customFields)
+    ? (contact.customFields as Array<{ customFieldId: string; value: unknown }>)
+    : [];
+  for (const cf of customFields) {
+    if (allowedKeys.includes(`contact.${cf.customFieldId}`)) {
+      out[cf.customFieldId] = cf.value;
     }
   }
   out.id = contact.id;
@@ -107,7 +109,7 @@ async function loadDealFields(
       stage: { select: { id: true, name: true } },
       status: true,
       value: true,
-      customValues: true,
+      customFields: { select: { customFieldId: true, value: true } },
     } as Record<string, unknown>,
   });
   if (!deal) return null;
@@ -119,10 +121,12 @@ async function loadDealFields(
       if (deal[fieldName] !== undefined) out[fieldName] = deal[fieldName];
     }
   }
-  if (deal.customValues && typeof deal.customValues === "object") {
-    const custom = deal.customValues as Record<string, unknown>;
-    for (const [k, v] of Object.entries(custom)) {
-      if (allowedKeys.includes(`deal.${k}`)) out[k] = v;
+  const dealCustomFields = Array.isArray(deal.customFields)
+    ? (deal.customFields as Array<{ customFieldId: string; value: unknown }>)
+    : [];
+  for (const cf of dealCustomFields) {
+    if (allowedKeys.includes(`deal.${cf.customFieldId}`)) {
+      out[cf.customFieldId] = cf.value;
     }
   }
   out.id = deal.id;
