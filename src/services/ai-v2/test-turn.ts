@@ -10,7 +10,8 @@ import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
-import { renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
+import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
+import { answerFromKnowledge } from "./ground-reply";
 import { getRequestContext, enterRequestContext } from "@/lib/request-context";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
@@ -100,6 +101,19 @@ function allQueryToolResultsEmpty(
   const queryCalls = toolCalls.filter((c) => QUERY_TOOL_NAMES.has(c.toolName));
   if (queryCalls.length === 0) return false;
   return queryCalls.every((c) => isEmptyQueryResult(c.result));
+}
+
+function renderConfirmationText(config: V2AgentConfig, context: V2CRMContext, vars: Record<string, unknown>): string {
+  const rendered = renderMessage(
+    config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
+    vars,
+    defaultFormatter(),
+  );
+  return applyConfirmationIdentity(rendered, confirmationIdentityValues({
+    fieldKeys: config.entry.confirmationFields ?? [],
+    fieldLabels: [...config.contextFields.contact, ...config.contextFields.deal],
+    sources: [context.contactRaw, context.selectedDealRaw, context.contact, context.selectedDeal],
+  }));
 }
 
 export async function simulateV2Turn(
@@ -210,7 +224,7 @@ export async function simulateV2Turn(
       if (config.entry.openingEnabled && config.entry.openingMessage) {
         parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
       }
-      parts.push(renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter()));
+      parts.push(renderConfirmationText(config, context, vars));
       const entryReply = parts.filter(Boolean).join("\n\n");
       return {
         userMessage,
@@ -243,11 +257,7 @@ export async function simulateV2Turn(
   // Turno seguinte às boas-vindas no modo separate_turn: envia a confirmação.
   if (effectiveStage === "confirming" && config.entry.confirmContact && (config.entry.confirmationMode ?? "combined") === "separate_turn") {
     const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
-    const confirmMsg = renderMessage(
-      config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
-      vars,
-      defaultFormatter(),
-    );
+    const confirmMsg = renderConfirmationText(config, context, vars);
     return {
       userMessage,
       appliedRuleId: null,
@@ -386,6 +396,18 @@ export async function simulateV2Turn(
     output.reply = noSourceMessage ?? "Não tenho essa informação nos materiais disponíveis.";
     output.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
   }
+
+  output = {
+    ...output,
+    reply: await answerFromKnowledge({
+      reply: output.reply,
+      toolCalls: llmResult.toolCalls,
+      config,
+      themeId: themeId ?? undefined,
+      userMessage,
+      agentId,
+    }),
+  };
 
   // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum casou.
   if (!themeId && output.theme) {

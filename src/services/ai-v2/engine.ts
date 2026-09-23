@@ -7,12 +7,13 @@ import { prisma } from "@/lib/prisma";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
-import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
+import { applyConfirmationIdentity, buildVariableMap, confirmationIdentityValues, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
 import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
 import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
+import { answerFromKnowledge } from "./ground-reply";
 import { selectV2Theme, getV2ThemeById } from "./themes";
 import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
@@ -257,14 +258,29 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   const context: V2CRMContext = {
     contact: loadedContext.contact,
+    contactRaw: loadedContext.contactRaw,
     citableContact: loadedContext.citableContact,
     deals: loadedContext.deals,
     selectedDeal: loadedContext.selectedDeal,
+    selectedDealRaw: loadedContext.selectedDealRaw,
     citableDeal: loadedContext.citableDeal,
     fields: config.contextFields,
   };
 
   const vars = { ...messageVariables(config, context) };
+
+  function renderConfirmationText(): string {
+    const rendered = renderMessage(
+      config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
+      vars,
+      defaultFormatter(),
+    );
+    return applyConfirmationIdentity(rendered, confirmationIdentityValues({
+      fieldKeys: config.entry.confirmationFields ?? [],
+      fieldLabels: [...config.contextFields.contact, ...config.contextFields.deal],
+      sources: [loadedContext.contactRaw, loadedContext.selectedDealRaw, loadedContext.contact, loadedContext.selectedDeal],
+    }));
+  }
 
   // Se há vários negócios abertos e o operador configurou "perguntar",
   // tenta interpretar a resposta do cliente como escolha de negócio.
@@ -616,7 +632,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       if (config.entry.openingEnabled && config.entry.openingMessage) {
         parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
       }
-      parts.push(renderMessage(config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?", vars, defaultFormatter()));
+      parts.push(renderConfirmationText());
       const confirmMsg = parts.filter(Boolean).join("\n\n");
       await sendReply(confirmMsg);
       await upsertV2ConversationState({
@@ -637,11 +653,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Confirmação adiada: no turno seguinte às boas-vindas, pergunta a confirmação.
   if (stage === "confirming" && stateRow?.entryConfirmationPending && config.entry.confirmContact) {
-    const confirmMsg = renderMessage(
-      config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
-      vars,
-      defaultFormatter(),
-    );
+    const confirmMsg = renderConfirmationText();
     if (confirmMsg.trim()) {
       await sendReply(confirmMsg);
     }
@@ -795,6 +807,14 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     citableDeal: context.citableDeal ?? null,
   });
   replyText = guard.text;
+  replyText = await answerFromKnowledge({
+    reply: replyText,
+    toolCalls,
+    config,
+    themeId,
+    userMessage: input.userMessage,
+    agentId: resolved.agentConfigId,
+  });
 
   // Executa ações
   const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });

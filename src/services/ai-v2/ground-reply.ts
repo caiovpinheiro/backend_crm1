@@ -1,0 +1,120 @@
+/**
+ * A resposta ao cliente acompanha o trecho recuperado da base.
+ * Nenhum assunto ou documento de cliente aqui.
+ */
+
+import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
+import { getAgentApiKey } from "@/services/ai/agent-key";
+import { getV2ThemeById } from "./themes";
+import { searchV2Knowledge } from "./tools";
+
+const GREETINGS = new Set([
+  "oi", "ola", "bom", "dia", "boa", "tarde", "noite",
+  "ok", "sim", "nao", "obrigado", "obrigada", "valeu",
+]);
+
+function normalize(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, " ");
+}
+
+export function hasSearchableQuestion(message: string): boolean {
+  return normalize(message)
+    .split(/\s+/)
+    .some((word) => word.length >= 4 && !GREETINGS.has(word));
+}
+
+export function knowledgeChunkTexts(
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+): string[] {
+  const texts: string[] = [];
+  for (const call of toolCalls ?? []) {
+    if (call.toolName !== "knowledge_search") continue;
+    const result = call.result as { chunks?: unknown } | undefined;
+    if (!result || !Array.isArray(result.chunks)) continue;
+    for (const chunk of result.chunks) {
+      if (!chunk || typeof chunk !== "object") continue;
+      const content = (chunk as { content?: unknown }).content;
+      if (typeof content === "string" && content.trim()) texts.push(content.trim());
+    }
+  }
+  return texts;
+}
+
+function allowedDocIds(config: V2AgentConfig, themeId?: string): string[] {
+  const theme = getV2ThemeById(config, themeId);
+  if (theme?.allowedKnowledgeDocIds && theme.allowedKnowledgeDocIds.length > 0) return theme.allowedKnowledgeDocIds;
+  if (theme?.knowledgeDocIds && theme.knowledgeDocIds.length > 0) return theme.knowledgeDocIds;
+  return config.allowedKnowledgeDocIds ?? [];
+}
+
+export function knowledgeQueries(message: string, theme: V2Theme | null): string[] {
+  const queries = [message.trim()].filter(Boolean);
+  if (!theme) return queries;
+  const messageWords = new Set(normalize(message).split(/\s+/).filter((word) => word.length >= 4));
+  const matched = (theme.when ?? [])
+    .map((phrase) => phrase.trim())
+    .filter((phrase) => {
+      const words = normalize(phrase).split(/\s+/).filter((word) => word.length >= 4);
+      return words.some((word) => messageWords.has(word));
+    });
+  if (matched.length > 0) queries.push(matched.join(" "));
+  return queries;
+}
+
+/** O texto livre só fica se repetir palavras do material. Senão, vale o trecho. */
+export function groundedReply(reply: string, chunks: string[]): string {
+  const unique = [...new Set(chunks.map((chunk) => chunk.trim()).filter(Boolean))].slice(0, 3);
+  if (unique.length === 0) return reply;
+  const replyNorm = normalize(reply);
+  const tokens = new Set<string>();
+  for (const chunk of unique) {
+    for (const word of normalize(chunk).split(/\s+/)) {
+      if (word.length >= 5) tokens.add(word);
+    }
+  }
+  if (tokens.size === 0) return unique.join("\n\n");
+  let hits = 0;
+  for (const word of tokens) {
+    if (replyNorm.includes(word)) hits += 1;
+  }
+  const enough = hits >= 3 && hits * 2 >= Math.min(tokens.size, 12);
+  return enough ? reply : unique.join("\n\n");
+}
+
+export async function answerFromKnowledge(args: {
+  reply: string;
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined;
+  config: V2AgentConfig;
+  themeId?: string;
+  userMessage: string;
+  agentId: string;
+}): Promise<string> {
+  const fromTools = knowledgeChunkTexts(args.toolCalls);
+  if (fromTools.length > 0) return groundedReply(args.reply, fromTools);
+
+  const docIds = allowedDocIds(args.config, args.themeId);
+  if (docIds.length === 0 || !hasSearchableQuestion(args.userMessage)) return args.reply;
+
+  try {
+    const apiKey = await getAgentApiKey(args.agentId);
+    const theme = getV2ThemeById(args.config, args.themeId);
+    for (const query of knowledgeQueries(args.userMessage, theme)) {
+      const found = await searchV2Knowledge({
+        agentId: args.agentId,
+        apiKey,
+        query,
+        allowedDocIds: docIds,
+        limit: 3,
+      });
+      const texts = found.chunks.map((chunk) => chunk.content).filter((content) => content.trim());
+      if (texts.length > 0) return groundedReply(args.reply, texts);
+    }
+  } catch {
+    return args.reply;
+  }
+  return args.reply;
+}

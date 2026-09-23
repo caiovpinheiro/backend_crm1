@@ -260,3 +260,45 @@ export function buildVariableMap(
   }
   return map;
 }
+
+function identityText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+/** Valores dos campos de confirmação que estão preenchidos. Sem lista, usa o nome do contato. */
+export function confirmationIdentityValues(args: {
+  fieldKeys: string[];
+  fieldLabels: Array<{ key: string; label?: string }>;
+  sources: Array<Record<string, unknown> | null | undefined>;
+}): string[] {
+  const keys = args.fieldKeys.length > 0 ? args.fieldKeys : ["name"];
+  const values: string[] = [];
+  for (const key of keys) {
+    const label = args.fieldLabels.find((field) => field.key === key)?.label;
+    let found = "";
+    for (const source of args.sources) {
+      if (!source) continue;
+      const raw = source[key] ?? (label ? source[label] : undefined);
+      const text = identityText(raw);
+      if (text) {
+        found = text;
+        break;
+      }
+    }
+    if (found && !values.some((value) => value.toLocaleLowerCase() === found.toLocaleLowerCase())) {
+      values.push(found);
+    }
+  }
+  return values;
+}
+
+/** Coloca os dados confirmados na frase. "você" vira o valor; senão o valor entra no fim. */
+export function applyConfirmationIdentity(message: string, values: string[]): string {
+  const missing = values.filter((value) => value && !message.toLocaleLowerCase().includes(value.toLocaleLowerCase()));
+  if (missing.length === 0 || !message.trim()) return message;
+  const identity = missing.join(", ");
+  if (message.includes("você")) return message.replace("você", identity);
+  return `${message.trim()}\n\n${identity}`;
+}
