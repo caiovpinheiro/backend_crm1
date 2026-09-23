@@ -103,7 +103,7 @@ export type PainelFunnel = {
   tooltip: string;
   stages: PainelFunnelStage[];
   empty: boolean;
-  /** Negócios criados no período (destaque +N NOVO). */
+  /** Negócios criados no período (`Deal.createdAt`), no funil filtrado. */
   novos: { count: number; value: number };
 };
 
@@ -523,11 +523,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     stock.byUser.set(ownerKey, user);
   }
 
-  const createdDeals = new Map<string, number>();
   for (const row of entered) {
-    if (row.eventType === "CREATED" && !createdDeals.has(row.dealId)) {
-      createdDeals.set(row.dealId, toNumber(row.value));
-    }
     const bucket = byStage.get(row.stageId);
     if (!bucket) continue;
     if (bucket.dealIds.has(row.dealId)) continue;
@@ -648,9 +644,18 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   });
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
+  // Mesma data do filtro "Criação" do pipeline. Evento CREATED deixa de fora
+  // lead que nasce sem esse registro (entrada automática).
+  const createdAgg = await db().deal.aggregate({
+    where: and(structural, {
+      createdAt: { gte: f.range.from, lte: f.range.to },
+    }),
+    _count: { _all: true },
+    _sum: { value: true },
+  });
   const novos = {
-    count: createdDeals.size,
-    value: round2([...createdDeals.values()].reduce((s, n) => s + n, 0)),
+    count: createdAgg._count._all,
+    value: round2(toNumber(createdAgg._sum.value)),
   };
 
   return {
