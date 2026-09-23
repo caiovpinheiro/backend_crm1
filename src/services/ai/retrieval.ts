@@ -42,6 +42,34 @@ export type KnowledgeRetrieval = {
 
 const MIN_SIMILARITY = 0.6; // distance <= 0.4 ≈ bem relevante. Mantemos folgado.
 
+const LEXICAL_STOP = new Set([
+  "para", "como", "sobre", "pelo", "pela", "pelos", "pelas",
+  "uma", "uns", "umas", "que", "com", "sem", "por",
+  "dos", "das", "nos", "nas", "num", "numa",
+  "ao", "aos", "de", "da", "do", "em", "no", "na",
+  "os", "as", "um", "ou", "se", "eu", "me",
+]);
+
+function normalizeKnowledgeText(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, " ");
+}
+
+/** Título ou conteúdo contém os termos da pergunta. Cobre o corte de distância. */
+function knowledgeTextMatches(title: string, content: string, query: string): boolean {
+  const tokens = normalizeKnowledgeText(query)
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && !LEXICAL_STOP.has(word));
+  if (tokens.length === 0) return false;
+  const haystack = normalizeKnowledgeText(`${title}\n${content}`);
+  const hits = tokens.filter((token) => haystack.includes(token));
+  if (tokens.length <= 2) return hits.length === tokens.length;
+  return hits.length >= 2 && hits.length * 2 >= tokens.length;
+}
+
 const EMPTY: KnowledgeRetrieval = { chunks: [], expired: [] };
 
 function buildAllowedIdsClause(allowedDocIds: string[] | undefined, startParam: number): { clause: string; values: string[] } {
@@ -132,15 +160,17 @@ export async function retrieveAgentKnowledge(
     ...allowedValues,
   );
 
-  const chunks = rows
-    .filter((r) => r.distance <= MIN_SIMILARITY)
-    .map((r) => ({
-      id: r.id,
-      docId: r.docId,
-      docTitle: r.title,
-      content: r.content,
-      distance: Number(r.distance),
-    }));
+  const byDistance = rows.filter((r) => r.distance <= MIN_SIMILARITY);
+  const picked = byDistance.length > 0
+    ? byDistance
+    : rows.filter((r) => knowledgeTextMatches(r.title, r.content, text));
+  const chunks = picked.map((r) => ({
+    id: r.id,
+    docId: r.docId,
+    docTitle: r.title,
+    content: r.content,
+    distance: Number(r.distance),
+  }));
 
   if (!hasExpired) return { chunks, expired: [] };
 

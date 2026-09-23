@@ -17,7 +17,7 @@ import { selectV2Theme, getV2ThemeById } from "./themes";
 import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
 import { guardV2Output } from "./output-guard";
-import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates } from "./actions";
+import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
@@ -228,9 +228,23 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   let stateRow = await getV2ConversationState(input.conversationId);
   let stage: V2Stage = (stateRow?.stage as V2Stage) ?? "idle";
   let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
+  const humanBehavior = v2HumanBehavior(config);
   let counters = parseV2Counters(stateRow?.counters);
   let themeId: string | undefined = stateRow?.themeId ?? undefined;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
+  // A conversa está atribuída a este agente v2. owner=pessoa aqui é estado
+  // antigo (humano anterior ou handoff que não trocou o responsável) e
+  // deixava o motor mudo mesmo com o agente como assignee.
+  if (owner === "pessoa") {
+    owner = "agente";
+    await upsertV2ConversationState({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      agentId: resolved.agentConfigId,
+      owner: "agente",
+      versionId,
+    });
+  }
 
   // Contexto CRM (necessário para regras e mídia)
   let loadedContext = await loadV2Context({
@@ -289,6 +303,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         text: askMessage,
         channel: input.channel,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+        humanBehavior,
       });
       await logV2Turn({
         organizationId: orgId,
@@ -382,6 +397,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         text: short,
         channel: input.channel,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+        humanBehavior,
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -400,6 +416,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         text: reply,
         channel: input.channel,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+        humanBehavior,
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -423,6 +440,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       text: handoffMessage,
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+      humanBehavior,
     });
     const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
     if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
@@ -905,6 +923,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       text,
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+      humanBehavior,
     });
   }
 }
@@ -1002,6 +1021,7 @@ async function handoffAndReply(
     text: message,
     channel: input.channel,
     autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+    humanBehavior: v2HumanBehavior(config),
   });
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;

@@ -336,7 +336,7 @@ export async function simulateV2Turn(
 
   let llmResult: Awaited<ReturnType<typeof callV2LLMTest>>;
   try {
-    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context);
+    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[simulateV2Turn] LLM failed:", msg);
@@ -387,8 +387,8 @@ export async function simulateV2Turn(
     output.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
   }
 
-  // Se o LLM sugerir um tema, sobrescreve (ele tem a última palavra na simulação).
-  if (output.theme) {
+  // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum casou.
+  if (!themeId && output.theme) {
     themeId = output.theme;
   }
 

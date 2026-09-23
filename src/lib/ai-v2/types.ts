@@ -399,6 +399,12 @@ export interface V2AgentConfig {
   /** Domínios cujos links podem aparecer nas respostas. */
   allowedDomains: string[];
   autonomyMode: V2AutonomyMode;
+  /** Mostra “digitando…” no WhatsApp antes de enviar. */
+  simulateTyping?: boolean;
+  /** Milissegundos por caractere no indicador de digitação. */
+  typingPerCharMs?: number;
+  /** Marca a mensagem recebida como lida (✔✔ azul) antes de responder. */
+  markMessagesRead?: boolean;
   costCap?: V2CostCap;
   dailyTokenCap?: number;
   /** Tools habilitadas globalmente (usadas quando o tema não restringe). */

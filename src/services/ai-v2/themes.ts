@@ -20,8 +20,9 @@ function scoreTheme(theme: V2Theme, message: string): number {
   for (const phrase of theme.when) {
     const np = normalize(phrase);
     if (!np) continue;
-    if (nm.includes(np)) score += 2;
-    else if (np.split(/\s+/).every((w) => words.some((hw) => hw.includes(w) || w.includes(hw)))) score += 1;
+    const phraseWords = np.split(/\s+/).filter(Boolean);
+    if (nm.includes(np)) score += 2 + phraseWords.length;
+    else if (phraseWords.every((w) => words.some((hw) => hw.includes(w) || w.includes(hw)))) score += 2 + phraseWords.length;
   }
   for (const example of theme.examples) {
     const ne = normalize(example);
@@ -42,9 +43,12 @@ export function selectV2Theme(
     const current = config.themes.find((t) => t.id === currentThemeId);
     if (current) {
       const currentScore = scoreTheme(current, message);
-      const bestScore = config.themes.reduce((max, t) => Math.max(max, scoreTheme(t, message)), 0);
-      // Só muda se outro tema tiver score maior com margem.
-      if (currentScore > 0 || bestScore < 2) return current;
+      const bestOther = config.themes.reduce((max, t) => {
+        if (t.id === current.id) return max;
+        return Math.max(max, scoreTheme(t, message));
+      }, 0);
+      // Mantém o assunto atual. Troca quando outro casa melhor e passa do mínimo.
+      if (bestOther < 2 || bestOther <= currentScore) return current;
     }
   }
 

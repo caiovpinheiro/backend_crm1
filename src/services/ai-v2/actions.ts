@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import type { V2Action, V2ActionType, V2AgentConfig, V2Destination, V2LLMOutput } from "@/lib/ai-v2/types";
-import { sendAgentMessage } from "@/services/ai/piloting-actions";
+import { sendAgentMessage, type HumanBehaviorConfig } from "@/services/ai/piloting-actions";
 import { applyExistingTagToContact } from "@/services/tags";
 import { createDeal, updateDeal } from "@/services/deals";
 import { createActivity } from "@/services/activities";
@@ -268,6 +268,7 @@ async function executeStartSurvey(action: V2Action, ctx: V2ActionContext): Promi
         text: renderMessage(question, messageVars(ctx), defaultFormatter()),
         channel: ctx.channel,
         autonomyMode: ctx.autonomyMode,
+        humanBehavior: v2HumanBehavior(ctx.config),
       });
       ctx.setSurveyPending?.(true);
       return { action, ok: true };
@@ -304,6 +305,7 @@ async function executeSendMessage(action: V2Action, ctx: V2ActionContext): Promi
       text: rendered,
       channel: ctx.channel,
       autonomyMode: ctx.autonomyMode,
+      humanBehavior: v2HumanBehavior(ctx.config),
     });
     return { action, ok: true };
   } catch (err) {
@@ -363,6 +365,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
       text,
       channel: ctx.channel,
       autonomyMode: ctx.autonomyMode,
+      humanBehavior: v2HumanBehavior(ctx.config),
     });
     return { action, ok: true, modelId, text };
   } catch (err) {
@@ -397,6 +400,7 @@ async function executeSendProduct(action: V2Action, ctx: V2ActionContext): Promi
       text,
       channel: ctx.channel,
       autonomyMode: ctx.autonomyMode,
+      humanBehavior: v2HumanBehavior(ctx.config),
     });
     return { action, ok: true, productId, text };
   } catch (err) {
@@ -553,6 +557,20 @@ export async function executeV2Actions(
   return { results, anyHandoff, anyClose, themeId, askOptions };
 }
 
+/** Defaults iguais à pilotagem v1: digitando + leitura ligados, 25 ms/char. */
+export function v2HumanBehavior(config: {
+  simulateTyping?: boolean;
+  typingPerCharMs?: number;
+  markMessagesRead?: boolean;
+}): HumanBehaviorConfig {
+  const pace = config.typingPerCharMs;
+  return {
+    simulateTyping: config.simulateTyping !== false,
+    typingPerCharMs: typeof pace === "number" && pace >= 0 ? pace : 25,
+    markMessagesRead: config.markMessagesRead !== false,
+  };
+}
+
 /** Envia mensagem de texto simples via sendAgentMessage. */
 export async function sendV2TextMessage(args: {
   conversationId: string;
@@ -561,6 +579,7 @@ export async function sendV2TextMessage(args: {
   text: string;
   channel?: string;
   autonomyMode: "AUTONOMOUS" | "DRAFT";
+  humanBehavior?: HumanBehaviorConfig;
 }): Promise<void> {
   if (!args.text.trim()) return;
   await sendAgentMessage({
@@ -571,5 +590,6 @@ export async function sendV2TextMessage(args: {
     text: args.text,
     channel: args.channel === "baileys" ? "baileys" : "meta",
     bypassAssigneeCheck: false,
+    humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
   });
 }

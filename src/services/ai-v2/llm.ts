@@ -75,6 +75,14 @@ function activeTheme(config: V2AgentConfig, themeId?: string) {
   return config.themes.find((t) => t.id === themeId) ?? null;
 }
 
+/** A tela grava os materiais do assunto em allowedKnowledgeDocIds. */
+function themeKnowledgeDocIds(theme: ReturnType<typeof activeTheme>): string[] | undefined {
+  if (!theme) return undefined;
+  if (theme.allowedKnowledgeDocIds.length > 0) return theme.allowedKnowledgeDocIds;
+  if (theme.knowledgeDocIds && theme.knowledgeDocIds.length > 0) return theme.knowledgeDocIds;
+  return undefined;
+}
+
 export function buildV2ToolSet(args: {
   config: V2AgentConfig;
   context: V2CRMContext;
@@ -85,9 +93,7 @@ export function buildV2ToolSet(args: {
 }): { tools: ToolSet; governor: ToolCallGovernor } {
   const theme = activeTheme(args.config, args.themeId);
   const themeToolIds = theme?.allowedTools ? new Set(theme.allowedTools) : null;
-  const allowedDocIds = theme?.knowledgeDocIds && theme.knowledgeDocIds.length > 0
-    ? theme.knowledgeDocIds
-    : args.config.allowedKnowledgeDocIds;
+  const allowedDocIds = themeKnowledgeDocIds(theme) ?? args.config.allowedKnowledgeDocIds;
   const allowedModelIds = theme?.messageModelIds && theme.messageModelIds.length > 0
     ? theme.messageModelIds
     : args.config.allowedMessageModelIds;
@@ -432,6 +438,7 @@ export async function callV2LLMTest(
   userMessage: string,
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
   context?: V2CRMContext,
+  themeId?: string | null,
 ): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -448,12 +455,17 @@ export async function callV2LLMTest(
     selectedDeal: null,
     fields: config.contextFields,
   };
+  const theme = themeId ? config.themes.find((t) => t.id === themeId) : undefined;
   const result = await callV2LLM({
     agentId,
     config,
     context: ctx,
     userMessage,
     stage: "active",
+    themeId: theme?.id,
+    themeInstructions: theme
+      ? `${theme.instructions}\nFerramentas permitidas: ${theme.allowedTools.join(", ")}`
+      : undefined,
     previousMessages,
   });
   return result;
@@ -563,9 +575,7 @@ function buildV2SystemPrompt(
   const availableTools = allQueryTools.filter((t) => (allowedToolNames ?? []).includes(t));
   lines.push(`Antes de responder, você pode chamar: ${availableTools.join(", ") || "(nenhuma tool configurada)"}. Não chame a mesma tool com os mesmos argumentos mais de uma vez.`);
   const promptTheme = activeTheme(config, themeId);
-  const promptDocIds = promptTheme?.knowledgeDocIds && promptTheme.knowledgeDocIds.length > 0
-    ? promptTheme.knowledgeDocIds
-    : (config.allowedKnowledgeDocIds ?? []);
+  const promptDocIds = themeKnowledgeDocIds(promptTheme) ?? (config.allowedKnowledgeDocIds ?? []);
   if (availableTools.includes("knowledge_search") && promptDocIds.length > 0) {
     lines.push("Há materiais de consulta disponíveis. Sempre que a pergunta do cliente puder ser respondida por esses materiais, chame knowledge_search primeiro. Se a busca retornar trechos relevantes, responda com base neles. Se não retornar nada, marque handoff=true em vez de inventar.");
     if (knowledgeDocTitles && knowledgeDocTitles.length > 0) {
@@ -630,9 +640,7 @@ export async function callV2LLM(args: {
   // Carrega os títulos dos materiais permitidos para ajudar o modelo a
   // decidir quando chamar knowledge_search e a contextualizar a resposta.
   const promptTheme = activeTheme(args.config, args.themeId);
-  const promptDocIds = promptTheme?.knowledgeDocIds && promptTheme.knowledgeDocIds.length > 0
-    ? promptTheme.knowledgeDocIds
-    : (args.config.allowedKnowledgeDocIds ?? []);
+  const promptDocIds = themeKnowledgeDocIds(promptTheme) ?? (args.config.allowedKnowledgeDocIds ?? []);
   let knowledgeDocTitles: string[] = [];
   if (promptDocIds.length > 0) {
     try {
