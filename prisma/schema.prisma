@@ -562,6 +562,7 @@ model User {
   activities                     Activity[]                @relation("ActivityAssignee")
   activitiesCreated              Activity[]                @relation("ActivityCreatedBy")
   activitiesStarted              Activity[]                @relation("ActivityStartedBy")
+  activitiesCompleted            Activity[]                @relation("ActivityCompletedBy")
   activityComments               ActivityComment[]
   activityCommentRevisions       ActivityCommentRevision[] @relation("ActivityCommentRevisionActor")
   activityAlertStates            ActivityAlertState[]
@@ -2838,10 +2839,13 @@ model Activity {
   createdById String?
   createdBy   User?   @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
-  /// Quem clicou em Executar. Some ao concluir. Sem FK: evita lock no boot.
+  /// Quem clicou em Executar. Permanece depois de concluir. Sem FK: evita lock no boot.
   startedAt   DateTime?
   startedById String?
   startedBy   User?     @relation("ActivityStartedBy", fields: [startedById], references: [id], onDelete: SetNull)
+  /// Quem clicou em Concluir. Sem FK: evita lock no boot.
+  completedById String?
+  completedBy   User?   @relation("ActivityCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
 
   comments    ActivityComment[]
   alertStates ActivityAlertState[]
