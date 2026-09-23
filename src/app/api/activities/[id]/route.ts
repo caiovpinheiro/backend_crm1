@@ -92,6 +92,22 @@ export async function PUT(request: Request, context: RouteContext) {
     if (b.completed !== undefined && typeof b.completed !== "boolean") {
       return NextResponse.json({ message: "completed inválido." }, { status: 400 });
     }
+    if (b.inProgress !== undefined && typeof b.inProgress !== "boolean") {
+      return NextResponse.json({ message: "inProgress inválido." }, { status: 400 });
+    }
+
+    if (b.inProgress === true) {
+      if (existing.completed) {
+        return NextResponse.json({ message: "Tarefa já concluída." }, { status: 400 });
+      }
+      if (existing.startedById && existing.startedById !== authResult.user.id) {
+        const name = existing.startedBy?.name ?? "Alguém";
+        return NextResponse.json(
+          { message: `${name} já está executando esta tarefa.` },
+          { status: 409 },
+        );
+      }
+    }
 
     let scheduledAt: Date | string | null | undefined;
     if (b.scheduledAt === null) {
@@ -146,6 +162,18 @@ export async function PUT(request: Request, context: RouteContext) {
           ? null
           : typeof b.departmentId === "string"
             ? b.departmentId
+            : undefined,
+      startedById:
+        b.inProgress === true
+          ? authResult.user.id
+          : b.completed === true && existing.startedById
+            ? null
+            : undefined,
+      startedAt:
+        b.inProgress === true
+          ? new Date()
+          : b.completed === true && existing.startedById
+            ? null
             : undefined,
     };
 

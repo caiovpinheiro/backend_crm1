@@ -37,6 +37,7 @@ export type GetActivitiesParams = {
 const listInclude = {
   user: { select: { id: true, name: true, email: true, avatarUrl: true } },
   createdBy: { select: { id: true, name: true, email: true, avatarUrl: true } },
+  startedBy: { select: { id: true, name: true, avatarUrl: true } },
   department: { select: { id: true, name: true, color: true, icon: true } },
   contact: { select: { id: true, name: true, email: true } },
   deal: { select: { id: true, title: true, stageId: true } },
@@ -157,6 +158,9 @@ export type UpdateActivityInput = {
   userId?: string | null;
   /** Reatribuir para um departamento (ou null p/ remover). */
   departmentId?: string | null;
+  /** Quem está executando. Null libera. O id vem da sessão, não do cliente. */
+  startedById?: string | null;
+  startedAt?: Date | string | null;
 };
 
 export async function updateActivity(id: string, data: UpdateActivityInput) {
@@ -191,6 +195,13 @@ export async function updateActivity(id: string, data: UpdateActivityInput) {
       data.departmentId === null
         ? { disconnect: true }
         : { connect: { id: data.departmentId } };
+  }
+  if (data.startedAt !== undefined) payload.startedAt = data.startedAt;
+  if (data.startedById !== undefined) {
+    payload.startedBy =
+      data.startedById === null
+        ? { disconnect: true }
+        : { connect: { id: data.startedById } };
   }
 
   if (Object.keys(payload).length === 0) {

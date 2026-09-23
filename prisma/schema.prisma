@@ -562,6 +562,7 @@ model User {
   deals                          Deal[]
   activities                     Activity[]                @relation("ActivityAssignee")
   activitiesCreated              Activity[]                @relation("ActivityCreatedBy")
+  activitiesStarted              Activity[]                @relation("ActivityStartedBy")
   activityComments               ActivityComment[]
   activityCommentRevisions       ActivityCommentRevision[] @relation("ActivityCommentRevisionActor")
   activityAlertStates            ActivityAlertState[]
@@ -2825,6 +2826,11 @@ model Activity {
   /// registros legados/automação sem ator identificável.
   createdById String?
   createdBy   User?   @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// Quem clicou em Executar. Some ao concluir. Sem FK: evita lock no boot.
+  startedAt   DateTime?
+  startedById String?
+  startedBy   User?     @relation("ActivityStartedBy", fields: [startedById], references: [id], onDelete: SetNull)
 
   comments    ActivityComment[]
   alertStates ActivityAlertState[]
