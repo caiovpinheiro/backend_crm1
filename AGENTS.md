@@ -103,6 +103,13 @@ API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com
 - Pool de DB por processo. Não apontar todos os workers para o pool da API.
 - Rate limit de sessão existe — debounce no FE; não desligar o limiter.
 - Super-admin (`isSuperAdmin`) é o único sem `organizationId`.
+- Migration em produção o operador roda no diretório do backend, depois que o código (pasta `prisma/migrations`) já está na máquina. Não usar `migrate dev` nem `npx prisma` daí. Comando:
+
+```bash
+node /opt/prisma-cli/node_modules/prisma/build/index.js migrate deploy --schema=prisma/schema.prisma
+```
+
+  Só aplica o que ainda não entrou em `_prisma_migrations`. Agent não executa isso no servidor de produção; avisa o operador quando a mudança inclui SQL novo.
 
 ## Atendimento IA — contrato
 
