@@ -103,7 +103,7 @@ export type PainelFunnel = {
   tooltip: string;
   stages: PainelFunnelStage[];
   empty: boolean;
-  /** Contatos criados hoje na org (WhatsApp, manual, importação). */
+  /** Contatos criados no período do filtro, na org (WhatsApp, manual, importação). */
   novos: { count: number; value: number };
 };
 
@@ -644,19 +644,15 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   });
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
-  // Sempre hoje, na org inteira. Não segue o período nem o funil do painel.
-  // createdAt cobre WhatsApp, cadastro manual e importação.
-  const todayKey = dayKeyFromDate(new Date());
-  const todayFrom = parseDay(todayKey, false)!;
-  const todayTo = parseDay(todayKey, true)!;
-  const createdToday = {
+  // Período do filtro, org inteira. createdAt cobre WhatsApp, manual e importação.
+  const createdInRange = {
     organizationId: orgId,
-    createdAt: { gte: todayFrom, lte: todayTo },
+    createdAt: { gte: f.range.from, lte: f.range.to },
   };
   const [createdCount, createdValue] = await Promise.all([
-    db().contact.count({ where: createdToday }),
+    db().contact.count({ where: createdInRange }),
     db().deal.aggregate({
-      where: { organizationId: orgId, contact: { is: createdToday } },
+      where: { organizationId: orgId, contact: { is: createdInRange } },
       _sum: { value: true },
     }),
   ]);
