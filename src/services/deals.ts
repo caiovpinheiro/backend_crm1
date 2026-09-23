@@ -1411,6 +1411,69 @@ async function resolveInsertionPosition(
   return pos;
 }
 
+function customFieldValueFilled(value: string | null | undefined, type: string): boolean {
+  if (value == null) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (type === "MULTI_SELECT") {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) return parsed.length > 0;
+    } catch {
+      /* texto solto conta como preenchido */
+    }
+  }
+  return true;
+}
+
+export class StageFieldsRequiredError extends Error {
+  readonly stageName: string;
+  readonly fields: { id: string; label: string }[];
+
+  constructor(stageName: string, fields: { id: string; label: string }[]) {
+    const names = fields.map((f) => f.label).join(", ");
+    super(`Para entrar em "${stageName}", preencha: ${names}.`);
+    this.name = "StageFieldsRequiredError";
+    this.stageName = stageName;
+    this.fields = fields;
+  }
+}
+
+/**
+ * Bloqueia a entrada na etapa quando ela exige campos do negócio vazios.
+ * Reordenar dentro da mesma etapa não passa por aqui.
+ */
+export async function assertStageEntryFields(dealId: string, targetStageId: string) {
+  const target = await prisma.stage.findUnique({
+    where: { id: targetStageId },
+    select: { id: true, name: true, requiredDealFieldIds: true },
+  });
+  const requiredIds = target?.requiredDealFieldIds ?? [];
+  if (!target || requiredIds.length === 0) return;
+
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: {
+      stageId: true,
+      customFields: {
+        where: { customFieldId: { in: requiredIds } },
+        select: { customFieldId: true, value: true },
+      },
+    },
+  });
+  if (!deal || deal.stageId === targetStageId) return;
+
+  const definitions = await prisma.customField.findMany({
+    where: { id: { in: requiredIds }, entity: "deal" },
+    select: { id: true, label: true, name: true, type: true },
+  });
+  const valueByField = new Map(deal.customFields.map((row) => [row.customFieldId, row.value]));
+  const missing = definitions
+    .filter((field) => !customFieldValueFilled(valueByField.get(field.id), field.type))
+    .map((field) => ({ id: field.id, label: field.label || field.name }));
+  if (missing.length > 0) throw new StageFieldsRequiredError(target.name, missing);
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
@@ -1437,6 +1500,9 @@ export async function moveDeal(
     select: { pipelineId: true },
   });
   if (!targetPeek) throw new Error("STAGE_NOT_FOUND");
+
+  // Campo obrigatório da etapa destino — antes da transação, igual ao motivo de perda.
+  await assertStageEntryFields(dealId, targetStageId);
 
   // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
   // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
