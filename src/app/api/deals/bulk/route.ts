@@ -10,7 +10,12 @@ import {
   requireStageScope,
 } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
-import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
+import {
+  LEADS_BULK_JOB_NAMES,
+  enqueueLeadsBulk,
+  type LeadsBulkJobName,
+  type LeadsBulkPayload,
+} from "@/lib/queue";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
@@ -30,7 +35,8 @@ const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "d
 type BulkAction = (typeof VALID_ACTIONS)[number];
 
 /**
- * Threshold acima do qual `move_stage` roda async via worker-leads.
+ * Threshold acima do qual `move_stage`, `change_owner`, `mark_won` e
+ * `mark_lost` rodam async via worker-leads.
  * 1–2 deals ficam no path síncrono histórico (`{ affected }`, 200).
  * 15 cards "jogar para perdido" NÃO podem encadear update+fireTrigger no HTTP.
  * O FE já trata 202 + `operationId` (modal de progresso).
@@ -131,6 +137,76 @@ async function resolveMoveDealIds(args: {
 }
 
 /**
+ * Cria a `BulkOperation` e enfileira o job no worker-leads. 202 com
+ * `operationId` (FE abre o modal de progresso) ou 503 se a fila caiu —
+ * nesse caso a operação fica FAILED para aparecer no modal.
+ */
+async function enqueueDealBulkOperation(args: {
+  type: "DEAL_BULK_MOVE_STAGE" | "DEAL_BULK_CHANGE_OWNER" | "DEAL_BULK_MARK_WON" | "DEAL_BULK_MARK_LOST";
+  jobName: LeadsBulkJobName;
+  organizationId: string;
+  uid: string;
+  dealIds: string[];
+  /** Parâmetros da ação — gravados no `payload` da operação e no job. */
+  params: Record<string, string | null>;
+  action: BulkAction;
+  capped?: boolean;
+}): Promise<NextResponse> {
+  const { dealIds, params } = args;
+  const operation = await prisma.bulkOperation.create({
+    data: {
+      type: args.type,
+      status: "PENDING",
+      total: dealIds.length,
+      payload: { dealIds, ...params },
+      createdById: args.uid,
+    },
+    select: { id: true },
+  });
+  const job = await enqueueLeadsBulk(args.jobName, {
+    operationId: operation.id,
+    organizationId: args.organizationId,
+    initiatedByUserId: args.uid,
+    dealIds,
+    ...params,
+  } as LeadsBulkPayload);
+  if (!job) {
+    await prisma.bulkOperation.update({
+      where: { id: operation.id },
+      data: {
+        status: "FAILED",
+        finishedAt: new Date(),
+        errors: [
+          {
+            itemId: "__operation__",
+            message: "Fila de jobs indisponível (Redis offline)",
+            attempt: 0,
+            at: new Date().toISOString(),
+          },
+        ],
+      },
+    });
+    return NextResponse.json(
+      {
+        message: "Fila de jobs indisponível.",
+        operationId: operation.id,
+      },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json(
+    {
+      message: "Operação enfileirada.",
+      operationId: operation.id,
+      total: dealIds.length,
+      action: args.action,
+      ...(args.capped !== undefined ? { capped: args.capped } : {}),
+    },
+    { status: 202 },
+  );
+}
+
+/**
  * Bug 23/mai/26: usavamos `auth()` direto. As chamadas a `createDealEvent`
  * dentro do for loop (no path sync de move_stage / mark_won / mark_lost)
  * invocam `withOrgFromCtx({...})` SINCRONICAMENTE no payload de
@@ -186,6 +262,12 @@ export async function POST(request: Request) {
 
       const uid = userLike.id;
       let affected = 0;
+      // Mesmo gate do move_stage: acima do threshold a ação vai pro
+      // worker-leads — cada deal é uma transação + propagação + gatilhos,
+      // e em série isso segurava a requisição por vários segundos.
+      const runAsync =
+        (body.async === true || dealIds.length > ASYNC_AUTO_THRESHOLD) &&
+        Boolean(userLike.organizationId);
 
       if (action === "move_stage") {
         const stageId = typeof body.stageId === "string" ? body.stageId : "";
@@ -254,58 +336,16 @@ export async function POST(request: Request) {
               { status: 403 },
             );
           }
-          const operation = await prisma.bulkOperation.create({
-            data: {
-              type: "DEAL_BULK_MOVE_STAGE",
-              status: "PENDING",
-              total: dealIds.length,
-              payload: { dealIds, targetStageId: stageId, lostReason: moveLostReason },
-              createdById: uid,
-            },
-            select: { id: true },
-          });
-          const job = await enqueueLeadsBulk(LEADS_BULK_JOB_NAMES.bulkMoveStage, {
-            operationId: operation.id,
+          return enqueueDealBulkOperation({
+            type: "DEAL_BULK_MOVE_STAGE",
+            jobName: LEADS_BULK_JOB_NAMES.bulkMoveStage,
             organizationId: userLike.organizationId,
-            initiatedByUserId: uid,
+            uid,
             dealIds,
-            targetStageId: stageId,
-            lostReason: moveLostReason,
+            params: { targetStageId: stageId, lostReason: moveLostReason },
+            action,
+            capped: resolved.capped,
           });
-          if (!job) {
-            await prisma.bulkOperation.update({
-              where: { id: operation.id },
-              data: {
-                status: "FAILED",
-                finishedAt: new Date(),
-                errors: [
-                  {
-                    itemId: "__operation__",
-                    message: "Fila de jobs indisponível (Redis offline)",
-                    attempt: 0,
-                    at: new Date().toISOString(),
-                  },
-                ],
-              },
-            });
-            return NextResponse.json(
-              {
-                message: "Fila de jobs indisponível.",
-                operationId: operation.id,
-              },
-              { status: 503 },
-            );
-          }
-          return NextResponse.json(
-            {
-              message: "Operação enfileirada.",
-              operationId: operation.id,
-              total: dealIds.length,
-              action,
-              capped: resolved.capped,
-            },
-            { status: 202 },
-          );
         }
 
         const targetFlags = await prisma.stage.findUnique({
@@ -410,6 +450,18 @@ export async function POST(request: Request) {
         const ownerId = body.ownerId === null ? null : typeof body.ownerId === "string" ? body.ownerId : undefined;
         if (ownerId === undefined) return NextResponse.json({ message: "ownerId é obrigatório." }, { status: 400 });
 
+        if (runAsync) {
+          return enqueueDealBulkOperation({
+            type: "DEAL_BULK_CHANGE_OWNER",
+            jobName: LEADS_BULK_JOB_NAMES.bulkChangeOwner,
+            organizationId: userLike.organizationId!,
+            uid,
+            dealIds,
+            params: { ownerId },
+            action,
+          });
+        }
+
         const ownerName = ownerId
           ? (await prisma.user.findUnique({ where: { id: ownerId }, select: { name: true } }))?.name ?? ownerId
           : null;
@@ -434,6 +486,17 @@ export async function POST(request: Request) {
       }
 
       if (action === "mark_won") {
+        if (runAsync) {
+          return enqueueDealBulkOperation({
+            type: "DEAL_BULK_MARK_WON",
+            jobName: LEADS_BULK_JOB_NAMES.bulkMarkStatus,
+            organizationId: userLike.organizationId!,
+            uid,
+            dealIds,
+            params: { status: "WON" },
+            action,
+          });
+        }
         // markDealWon move o deal pro estágio terminal Ganho do pipeline
         // e sincroniza status/closedAt — mesma semântica do single.
         const deals = await prisma.deal.findMany({
@@ -484,8 +547,8 @@ export async function POST(request: Request) {
         // de cada deal (falha o bulk inteiro antes do loop).
         if (lostReason) {
           try {
-            for (const d of deals) {
-              await assertLostReasonAllowed(lostReason, d.stage.pipelineId);
+            for (const pipelineId of new Set(deals.map((d) => d.stage.pipelineId))) {
+              await assertLostReasonAllowed(lostReason, pipelineId);
             }
           } catch (err) {
             if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
@@ -499,6 +562,17 @@ export async function POST(request: Request) {
             }
             throw err;
           }
+        }
+        if (runAsync && deals.length > 0) {
+          return enqueueDealBulkOperation({
+            type: "DEAL_BULK_MARK_LOST",
+            jobName: LEADS_BULK_JOB_NAMES.bulkMarkStatus,
+            organizationId: userLike.organizationId!,
+            uid,
+            dealIds: deals.map((d) => d.id),
+            params: { status: "LOST", lostReason: lostReason || null },
+            action,
+          });
         }
         for (const deal of deals) {
           const updated = await markDealLost(deal.id, lostReason);

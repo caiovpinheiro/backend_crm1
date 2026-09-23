@@ -62,6 +62,8 @@ const AUTOMATION_JOB_NAME = "run" as const;
 export const LEADS_BULK_JOB_NAMES = {
   bulkUpdateFields: "bulk-update-fields",
   bulkMoveStage: "bulk-move-stage",
+  bulkChangeOwner: "bulk-change-owner",
+  bulkMarkStatus: "bulk-mark-status",
   bulkResolveConversations: "bulk-resolve-conversations",
   bulkAssignConversations: "bulk-assign-conversations",
 } as const;
@@ -267,6 +269,21 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
   lostReason?: string | null;
 };
 
+/** Troca de responsável em massa (ação `change_owner` do board). */
+export type BulkChangeOwnerPayload = LeadsBulkBasePayload & {
+  dealIds: string[];
+  /** `null` remove o responsável. */
+  ownerId: string | null;
+};
+
+/** Ganho/Perdido em massa (ações `mark_won` / `mark_lost` do board). */
+export type BulkMarkStatusPayload = LeadsBulkBasePayload & {
+  dealIds: string[];
+  status: "WON" | "LOST";
+  /** Motivo da perda — já validado na rota contra o catálogo do funil. */
+  lostReason?: string | null;
+};
+
 /**
  * Encerramento (resolve) em massa de conversas do inbox.
  *
@@ -309,6 +326,8 @@ export type BulkAssignConversationsPayload = LeadsBulkBasePayload & {
 export type LeadsBulkPayload =
   | BulkUpdateFieldsPayload
   | BulkMoveStagePayload
+  | BulkChangeOwnerPayload
+  | BulkMarkStatusPayload
   | BulkResolveConversationsPayload
   | BulkAssignConversationsPayload;
 

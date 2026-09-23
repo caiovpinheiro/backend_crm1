@@ -10,6 +10,8 @@ import {
   LEADS_BULK_JOB_NAMES,
   LEADS_BULK_QUEUE_NAME,
   type BulkAssignConversationsPayload,
+  type BulkChangeOwnerPayload,
+  type BulkMarkStatusPayload,
   type BulkMoveStagePayload,
   type BulkResolveConversationsPayload,
   type BulkUpdateFieldsPayload,
@@ -18,6 +20,8 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 
 import { processBulkAssignConversations } from "@/jobs/leads/bulk-assign-conversations.job";
+import { processBulkChangeOwner } from "@/jobs/leads/bulk-change-owner.job";
+import { processBulkMarkStatus } from "@/jobs/leads/bulk-mark-status.job";
 import { processBulkMoveStage } from "@/jobs/leads/bulk-move-stage.job";
 import { processBulkResolveConversations } from "@/jobs/leads/bulk-resolve-conversations.job";
 import { processBulkUpdateFields } from "@/jobs/leads/bulk-update-fields.job";
@@ -157,6 +161,18 @@ async function dispatch(job: Job<LeadsBulkPayload>): Promise<void> {
       await processBulkMoveStage(
         job.data as BulkMoveStagePayload,
         job as Job<BulkMoveStagePayload>,
+      );
+      return;
+    case LEADS_BULK_JOB_NAMES.bulkChangeOwner:
+      await processBulkChangeOwner(
+        job.data as BulkChangeOwnerPayload,
+        job as Job<BulkChangeOwnerPayload>,
+      );
+      return;
+    case LEADS_BULK_JOB_NAMES.bulkMarkStatus:
+      await processBulkMarkStatus(
+        job.data as BulkMarkStatusPayload,
+        job as Job<BulkMarkStatusPayload>,
       );
       return;
     case LEADS_BULK_JOB_NAMES.bulkResolveConversations:
