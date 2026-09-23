@@ -14,7 +14,9 @@ import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedCo
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { answerFromKnowledge } from "./ground-reply";
-import { selectV2Theme, getV2ThemeById } from "./themes";
+import { getV2ThemeById } from "./themes";
+import { selectV2ThemeSemantic } from "./theme-semantic";
+import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -941,8 +943,14 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: true, closed: false };
     }
 
-    const theme = selectV2Theme(config, input.userMessage, themeId);
-    themeId = theme?.id ?? themeId;
+    // Gatilho > significado > assunto atual (ver theme-semantic).
+    const selection = await selectV2ThemeSemantic({
+      config,
+      message: input.userMessage,
+      currentThemeId: themeId,
+      apiKey: await tryGetAgentApiKey(resolved.agentConfigId),
+    });
+    themeId = selection.theme?.id ?? themeId;
     const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
     llmOutput = llmResult.llmOutput;
     prompt = llmResult.prompt;

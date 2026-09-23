@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { callV2LLM, buildV2ToolSet } from "../llm";
+import { callV2LLM, buildV2ToolSet, knowledgePrefetchQuery } from "../llm";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
@@ -195,6 +195,83 @@ describe("callV2LLM function calling", () => {
     });
     expect(result.output.messageModel).toBeUndefined();
     expect(result.output.actions).toEqual([]);
+  });
+});
+
+describe("callV2LLM — pré-busca na base", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+  });
+
+  const chunk = { docId: "doc-1", docTitle: "Como emitir o comprovante", content: "1. Abra a área do cliente\n2. Clique em Documentos", distance: 0.3 };
+
+  it("busca pelo significado antes do LLM e põe os trechos no prompt e no trace", async () => {
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [chunk] });
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"] } as Partial<V2AgentConfig>);
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "minha empresa está pedindo um comprovante de vínculo",
+      stage: "active",
+    });
+
+    expect(searchV2Knowledge).toHaveBeenCalledWith(expect.objectContaining({
+      query: "minha empresa está pedindo um comprovante de vínculo",
+      allowedDocIds: ["doc-1"],
+    }));
+    expect(result.systemPrompt).toContain("Trechos da base de conhecimento relacionados à mensagem");
+    expect(result.systemPrompt).toContain("Como emitir o comprovante");
+    expect(result.toolCalls[0]).toMatchObject({ toolName: "knowledge_search", args: { prefetch: true } });
+  });
+
+  it("sem materiais liberados não busca", async () => {
+    const config = baseConfig({ allowedKnowledgeDocIds: [] } as Partial<V2AgentConfig>);
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "minha empresa está pedindo um comprovante de vínculo",
+      stage: "active",
+    });
+
+    expect(searchV2Knowledge).not.toHaveBeenCalled();
+    expect(result.systemPrompt).not.toContain("Trechos da base de conhecimento relacionados");
+  });
+
+  it("pré-busca vazia não entra no trace (não conta como 'consultou e não achou')", async () => {
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"] } as Partial<V2AgentConfig>);
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "minha empresa está pedindo um comprovante de vínculo",
+      stage: "active",
+    });
+
+    expect(result.toolCalls).toEqual([]);
+  });
+});
+
+describe("knowledgePrefetchQuery", () => {
+  it("acompanhamento curto leva junto a pergunta anterior do cliente", () => {
+    expect(knowledgePrefetchQuery("consegue me enviar?", [
+      { role: "user", content: "preciso de um comprovante de vínculo" },
+      { role: "assistant", content: "Claro." },
+    ])).toBe("preciso de um comprovante de vínculo\nconsegue me enviar?");
+  });
+
+  it("mensagem com conteúdo vai sozinha", () => {
+    expect(knowledgePrefetchQuery("preciso de um comprovante de vínculo", [
+      { role: "user", content: "outra coisa antiga" },
+    ])).toBe("preciso de um comprovante de vínculo");
   });
 });
 

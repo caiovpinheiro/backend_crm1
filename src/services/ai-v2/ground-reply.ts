@@ -84,12 +84,19 @@ export function groundedReply(reply: string, chunks: string[]): string {
 
 export async function answerFromKnowledge(args: {
   reply: string;
-  toolCalls: Array<{ toolName: string; result: unknown }> | undefined;
+  toolCalls: Array<{ toolName: string; args?: unknown; result: unknown }> | undefined;
   config: V2AgentConfig;
   themeId?: string;
   userMessage: string;
   agentId: string;
 }): Promise<string> {
+  // O modelo já recebeu os trechos no prompt (pré-busca): a resposta dele
+  // é a leitura do material. Trocar por trecho cru aqui transformaria uma
+  // pergunta de esclarecimento, ou uma resposta que corretamente ignorou um
+  // trecho não pertinente, em despejo de material.
+  if (args.toolCalls?.some((c) => c.toolName === "knowledge_search" && (c as { args?: { prefetch?: boolean } }).args?.prefetch)) {
+    return args.reply;
+  }
   const fromTools = knowledgeChunkTexts(args.toolCalls);
   if (fromTools.length > 0) return groundedReply(args.reply, fromTools);
 

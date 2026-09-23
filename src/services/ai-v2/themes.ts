@@ -20,8 +20,13 @@ function normalize(s: string): string {
  * "cadastro" e o assunto não era escolhido.
  */
 function sameWordStem(a: string, b: string): boolean {
-  if (a.includes(b) || b.includes(a)) return true;
-  const shorter = Math.min(a.length, b.length);
+  if (a === b) return true;
+  // Plural/gênero: uma é a outra + até 3 letras. Só por prefixo — "estar
+  // dentro" fazia "um" casar "documento" e qualquer frase com "um" pegava
+  // o assunto.
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 3 && long.startsWith(short) && long.length - short.length <= 3) return true;
+  const shorter = short.length;
   if (shorter < 5) return false;
   let i = 0;
   while (i < shorter && a[i] === b[i]) i += 1;
@@ -36,8 +41,10 @@ function scoreTheme(theme: V2Theme, message: string): number {
     const np = normalize(phrase);
     if (!np) continue;
     const phraseWords = np.split(/\s+/).filter(Boolean);
-    if (nm.includes(np)) score += 2 + phraseWords.length;
-    else if (phraseWords.every((w) => words.some((hw) => sameWordStem(hw, w)))) score += 2 + phraseWords.length;
+    // Palavras de 1-2 letras ("de", "a") não identificam assunto.
+    const keyWords = phraseWords.filter((w) => w.length > 2);
+    if (` ${words.join(" ")} `.includes(` ${phraseWords.join(" ")} `)) score += 2 + phraseWords.length;
+    else if (keyWords.length > 0 && keyWords.every((w) => words.some((hw) => sameWordStem(hw, w)))) score += 2 + phraseWords.length;
   }
   for (const example of theme.examples) {
     const ne = normalize(example);

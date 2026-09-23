@@ -32,6 +32,70 @@ import {
 } from "./tools";
 import { listKnowledgeDocs } from "@/services/ai/knowledge-docs";
 import { knowledgeDocIdsFor } from "./themes";
+import { hasSearchableQuestion } from "./ground-reply";
+
+type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
+
+const PREFETCH_LIMIT = 3;
+const PREFETCH_CHUNK_CHARS = 1500;
+
+function contentWordCount(text: string): number {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 4).length;
+}
+
+/**
+ * Texto da busca: a mensagem do turno; se for um acompanhamento curto
+ * ("consegue me enviar?"), junta a pergunta anterior do cliente para a
+ * busca ter do que se tratar.
+ */
+export function knowledgePrefetchQuery(
+  userMessage: string,
+  previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
+): string {
+  const msg = userMessage.trim();
+  if (contentWordCount(msg) >= 3) return msg;
+  const lastUser = [...previousMessages].reverse().find((m) => m.role === "user" && m.content.trim());
+  return lastUser ? `${lastUser.content.trim()}\n${msg}` : msg;
+}
+
+/**
+ * Busca na base ANTES do LLM, pelo significado da mensagem (embeddings).
+ * Antes o material só entrava se o modelo decidisse chamar
+ * `knowledge_search` — e a escolha do que buscar dependia de gatilhos por
+ * palavra. Com a pré-busca, "preciso de um comprovante de X" já chega ao
+ * modelo junto do material que explica como emitir o documento de X,
+ * mesmo sem nenhum termo em comum cadastrado.
+ */
+async function prefetchKnowledge(args: {
+  agentId: string;
+  apiKey: string;
+  config: V2AgentConfig;
+  themeId?: string;
+  userMessage: string;
+  previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+}): Promise<{ query: string; chunks: PrefetchedChunk[] }> {
+  const docIds = knowledgeDocIdsFor(args.config, activeTheme(args.config, args.themeId));
+  const query = knowledgePrefetchQuery(args.userMessage, args.previousMessages);
+  if (docIds.length === 0 || !hasSearchableQuestion(query)) return { query, chunks: [] };
+  try {
+    const found = await searchV2Knowledge({
+      agentId: args.agentId,
+      apiKey: args.apiKey,
+      query,
+      allowedDocIds: docIds,
+      limit: PREFETCH_LIMIT,
+    });
+    return { query, chunks: found?.chunks ?? [] };
+  } catch (err) {
+    console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
+    return { query, chunks: [] };
+  }
+}
 
 const v2ActionSchema: z.ZodType<V2Action> = z.object({
   type: z.enum([
@@ -518,6 +582,7 @@ function buildV2SystemPrompt(
   collectedVariables?: Record<string, unknown>,
   allowedToolNames?: string[],
   knowledgeDocTitles?: string[],
+  prefetchedChunks: PrefetchedChunk[] = [],
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
@@ -593,6 +658,14 @@ function buildV2SystemPrompt(
       lines.push(`Materiais permitidos: ${knowledgeDocTitles.map((t) => `"${t}"`).join(", ")}. Use knowledge_search quando a pergunta se relacionar a um desses títulos.`);
     }
   }
+  if (prefetchedChunks.length > 0) {
+    lines.push("# Trechos da base de conhecimento relacionados à mensagem");
+    lines.push("Encontrados pelo significado da mensagem, mesmo que o cliente tenha usado outras palavras. Se algum trecho atende ao que o cliente pediu, responda com base nele. Se nenhum for pertinente, ignore-os e não os mencione.");
+    prefetchedChunks.forEach((c, i) => {
+      const body = c.content.length > PREFETCH_CHUNK_CHARS ? `${c.content.slice(0, PREFETCH_CHUNK_CHARS)}…` : c.content;
+      lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
+    });
+  }
   lines.push("# Formato da resposta");
   lines.push("Mantenha o tom configurado. Se usar trechos de materiais de consulta que contenham listas numeradas, marcadores, emojis ou passos técnicos, reescreva em linguagem natural do canal (frases curtas, sem enumerar). Nunca envie menus ou listas de departamentos.");
   lines.push("# Saída obrigatória");
@@ -666,6 +739,21 @@ export async function callV2LLM(args: {
     }
   }
 
+  const prefetch = await prefetchKnowledge({
+    agentId: args.agentId,
+    apiKey,
+    config: args.config,
+    themeId: args.themeId,
+    userMessage: args.userMessage,
+    previousMessages: args.previousMessages,
+  });
+  // Entra no trace como uma consulta à base: o aterramento da resposta e o
+  // log do turno enxergam os trechos. Só quando achou algo — pré-busca
+  // vazia não pode contar como "consultou e não achou".
+  const prefetchCalls = prefetch.chunks.length > 0
+    ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
+    : [];
+
   const system = buildV2SystemPrompt(
     args.config,
     args.context,
@@ -675,6 +763,7 @@ export async function callV2LLM(args: {
     args.collectedVariables,
     allowedToolNames,
     knowledgeDocTitles,
+    prefetch.chunks,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -822,7 +911,13 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
-      return { ...r, latencyMs: Date.now() - startedAt, governorStats: governor.stats(), systemPrompt: system } as any;
+      return {
+        ...r,
+        toolCalls: [...prefetchCalls, ...(r.toolCalls ?? [])],
+        latencyMs: Date.now() - startedAt,
+        governorStats: governor.stats(),
+        systemPrompt: system,
+      } as any;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }

@@ -27,6 +27,7 @@ import { guardV2Output } from "../output-guard";
 import { evaluateV2StopLimits, defaultV2Counters } from "../limits";
 import { classifyPostCloseMessage } from "../closure";
 import { knowledgeDocIdsFor, selectV2Theme } from "../themes";
+import { answerFromKnowledge } from "../ground-reply";
 
 describe("simpleHandoff — nunca deixa a conversa com a IA", () => {
   beforeEach(() => {
@@ -140,6 +141,13 @@ describe("selectV2Theme — flexões da mesma palavra", () => {
     expect(selectV2Theme(cfg, "estão pedindo um comprovante de que me cadastrei")?.id).toBe("comp");
   });
 
+  it("palavra curta dentro do gatilho não casa ('um' em 'documento')", () => {
+    const docs = { themes: [{ id: "d", name: "Docs", when: ["documento"], examples: [] }] } as unknown as V2AgentConfig;
+    expect(selectV2Theme(docs, "estão pedindo um comprovante")).toBeNull();
+    expect(selectV2Theme(docs, "preciso de um documento")?.id).toBe("d");
+    expect(selectV2Theme(docs, "preciso dos documentos")?.id).toBe("d");
+  });
+
   it("mensagem sem relação não casa", () => {
     expect(selectV2Theme(cfg, "quero saber o preço do serviço")).toBeNull();
   });
@@ -156,6 +164,20 @@ describe("knowledgeDocIdsFor — materiais do assunto somam aos globais", () => 
     const cfg = { allowedKnowledgeDocIds: ["a", "b"] } as unknown as V2AgentConfig;
     expect(knowledgeDocIdsFor(cfg, null)).toEqual(["a", "b"]);
     expect(knowledgeDocIdsFor(cfg, { allowedKnowledgeDocIds: ["b"], knowledgeDocIds: ["a"] } as any)).toEqual(["b", "a"]);
+  });
+});
+
+describe("answerFromKnowledge — modelo que já recebeu os trechos", () => {
+  it("mantém a resposta do modelo (não troca por trecho cru)", async () => {
+    const reply = "Você pode emitir pela área do cliente. Precisa de ajuda em algum passo?";
+    const out = await answerFromKnowledge({
+      reply,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "q", prefetch: true }, result: { chunks: [{ content: "Trecho totalmente diferente sobre outra coisa" }] } }],
+      config: { allowedKnowledgeDocIds: ["d1"], themes: [] } as unknown as V2AgentConfig,
+      userMessage: "como emito o comprovante",
+      agentId: "agent-1",
+    });
+    expect(out).toBe(reply);
   });
 });
 
