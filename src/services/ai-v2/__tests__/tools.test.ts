@@ -41,17 +41,17 @@ describe("searchV2Products", () => {
     (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         id: "p1",
-        name: "Curso de Administração",
+        name: "Plano Empresarial",
         sku: "ADM-001",
         type: "PRODUCT",
         unit: "un",
         price: 199.9,
-        description: "Graduação EAD",
-        customValues: [{ value: "EAD", customField: { name: "modalidade", label: "Modalidade" } }],
+        description: "Plano mensal",
+        customValues: [{ value: "Mensal", customField: { name: "periodicidade", label: "Periodicidade" } }],
       },
       {
         id: "p2",
-        name: "Curso de Direito",
+        name: "Plano Pessoal",
         sku: "DIR-001",
         type: "PRODUCT",
         unit: "un",
@@ -137,17 +137,17 @@ describe("searchV2CrmRecords", () => {
         phone: "119999",
         email: "ana@x.com",
         customFields: [
-          { customFieldId: "cf-curso", value: "ADM", customField: { name: "curso", label: "Curso" } },
+          { customFieldId: "cf-plano", value: "Básico", customField: { name: "plano", label: "Plano" } },
           { customFieldId: "cf-cpf", value: "123.456.789-00", customField: { name: "cpf", label: "CPF" } },
         ],
       },
     ]);
     (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
-    const r = await searchV2CrmRecords({ query: "curso", contactId: "c1", readableKeys: ["contact.cf-curso", "contact.email"] });
+    const r = await searchV2CrmRecords({ query: "plano", contactId: "c1", readableKeys: ["contact.cf-plano", "contact.email"] });
 
     const c = r.contacts[0] as Record<string, unknown>;
-    expect(c.customFields).toEqual([{ label: "Curso", value: "ADM" }]);
+    expect(c.customFields).toEqual([{ label: "Plano", value: "Básico" }]);
     expect(c.email).toBe("ana@x.com");
     expect(c).not.toHaveProperty("phone");
   });

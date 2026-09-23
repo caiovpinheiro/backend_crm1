@@ -27,8 +27,8 @@ function baseConfig(dealFields: V2AgentConfig["contextFields"]["deal"]): V2Agent
 
 describe("modo 'perguntar qual negócio'", () => {
   const deals = [
-    { id: "deal-a", title: "Matrícula Ensino Médio", stageName: "Proposta", value: 1200 },
-    { id: "deal-b", title: "Curso de Inglês", stageName: "Negociação", value: 800 },
+    { id: "deal-a", title: "Contrato Anual", stageName: "Proposta", value: 1200 },
+    { id: "deal-b", title: "Plano Premium", stageName: "Negociação", value: 800 },
   ];
 
   it("lista de negócios mostra apenas campos marcados como 'Citar'", () => {
@@ -38,7 +38,7 @@ describe("modo 'perguntar qual negócio'", () => {
       { key: "value", label: "Valor", permissions: ["read"] },
     ]);
     const msg = buildAskDealMessage(deals, cfg);
-    expect(msg).toContain("Matrícula Ensino Médio");
+    expect(msg).toContain("Contrato Anual");
     expect(msg).toContain("Proposta");
     expect(msg).not.toContain("1200");
     expect(msg).not.toContain("800");
@@ -57,7 +57,7 @@ describe("modo 'perguntar qual negócio'", () => {
       { key: "title", label: "Nome", permissions: ["cite"] },
       { key: "stageName", label: "Etapa", permissions: ["read"] },
     ]);
-    expect(tryParseDealChoice("vou querer o curso de inglês", deals, cfg)).toBe("deal-b");
+    expect(tryParseDealChoice("vou querer o plano premium", deals, cfg)).toBe("deal-b");
     // 'stageName' é só Ler, então não deve ser usado para escolha.
     expect(tryParseDealChoice("negociação", deals, cfg)).toBeNull();
   });

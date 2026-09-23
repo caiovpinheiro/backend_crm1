@@ -14,10 +14,10 @@ function normalize(s: string): string {
 }
 
 /**
- * Mesma palavra com outra flexão ("matrícula"/"matriculei",
- * "declaração"/"declarar"): prefixo comum de 5+ letras cobrindo 70% da
- * palavra menor. Só substring não bastava — "matriculei" não contém
- * "matricula" e o assunto não era escolhido.
+ * Mesma palavra com outra flexão ("cadastro"/"cadastrei",
+ * "renovação"/"renovar"): prefixo comum de 5+ letras cobrindo 70% da
+ * palavra menor. Só substring não bastava — "cadastrei" não contém
+ * "cadastro" e o assunto não era escolhido.
  */
 function sameWordStem(a: string, b: string): boolean {
   if (a.includes(b) || b.includes(a)) return true;
@@ -81,10 +81,10 @@ export function selectV2Theme(
 
 /**
  * Materiais consultáveis no turno: os do assunto ativo SOMADOS aos globais.
- * Antes a lista do assunto substituía a global — ao escolher o assunto
- * "Documentos" (lista própria com 1 material) o agente perdia justamente
- * "Emitir Declaração de Matrícula", que estava na lista global. A tela
- * descreve a global como válida "em qualquer assunto".
+ * Antes a lista do assunto substituía a global: ao escolher um assunto
+ * com lista própria, o agente perdia os materiais globais — muitas vezes
+ * justamente o que respondia a pergunta. A tela descreve a lista global
+ * como válida "em qualquer assunto".
  */
 export function knowledgeDocIdsFor(config: V2AgentConfig, theme: V2Theme | null | undefined): string[] {
   const ids = [

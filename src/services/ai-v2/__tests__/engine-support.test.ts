@@ -64,11 +64,11 @@ describe("guardV2Output", () => {
   });
 
   it("resposta normal não sinaliza handoff", () => {
-    expect(guardV2Output("Sua matrícula está ativa.", []).forceHandoff).toBe(false);
+    expect(guardV2Output("Sua assinatura está ativa.", []).forceHandoff).toBe(false);
   });
 
   it("remoção de campo interno só casa a palavra inteira", () => {
-    const r = guardV2Output("O polo de Anápolis atende você, Ana.", [], {
+    const r = guardV2Output("A unidade de Anápolis atende você, Ana.", [], {
       contact: { name: "Ana" },
       citableContact: {},
       selectedDeal: null,
@@ -133,15 +133,15 @@ describe("classifyPostCloseMessage — resposta à pergunta de opções", () => 
 
 describe("selectV2Theme — flexões da mesma palavra", () => {
   const cfg = {
-    themes: [{ id: "decl", name: "Declaração", when: ["declaração de matrícula"], examples: [] }],
+    themes: [{ id: "comp", name: "Comprovantes", when: ["comprovante de cadastro"], examples: [] }],
   } as unknown as V2AgentConfig;
 
-  it("'declaração que me matriculei' casa o assunto 'declaração de matrícula'", () => {
-    expect(selectV2Theme(cfg, "minha empresa está pedindo uma declaração que me matriculei")?.id).toBe("decl");
+  it("'comprovante de que me cadastrei' casa o assunto 'comprovante de cadastro'", () => {
+    expect(selectV2Theme(cfg, "estão pedindo um comprovante de que me cadastrei")?.id).toBe("comp");
   });
 
   it("mensagem sem relação não casa", () => {
-    expect(selectV2Theme(cfg, "quero saber o valor da mensalidade")).toBeNull();
+    expect(selectV2Theme(cfg, "quero saber o preço do serviço")).toBeNull();
   });
 });
 

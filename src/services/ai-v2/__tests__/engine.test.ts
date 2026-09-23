@@ -222,7 +222,7 @@ describe("processV2Turn", () => {
         onDealNotFound: "ask_identification",
         confirmationMode: "separate_turn",
         openingEnabled: true,
-        openingMessage: "Oi, @name! Sou a consultora virtual da Cruzeiro do Sul.",
+        openingMessage: "Oi, @name! Sou a assistente virtual da Empresa Exemplo.",
         confirmationMessage: "Confirmo que estou falando com você. Como posso ajudar?",
       } as any,
     });
@@ -815,16 +815,16 @@ describe("processV2Turn", () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
     mocks.loadContext.mockImplementation((args: { selectedDealId?: string }) => {
       const deals = [
-        { id: "deal-a", title: "Curso A" },
-        { id: "deal-b", title: "Curso B" },
+        { id: "deal-a", title: "Plano A" },
+        { id: "deal-b", title: "Plano B" },
       ];
       if (args.selectedDealId === "deal-b") {
         return Promise.resolve({
           contact: null,
           citableContact: null,
           deals,
-          selectedDeal: { id: "deal-b", title: "Curso B" },
-          citableDeal: { id: "deal-b", title: "Curso B" },
+          selectedDeal: { id: "deal-b", title: "Plano B" },
+          citableDeal: { id: "deal-b", title: "Plano B" },
           dealId: "deal-b",
         });
       }
@@ -840,7 +840,7 @@ describe("processV2Turn", () => {
     mocks.getState.mockResolvedValue(makeState("active"));
     mocks.callLLM.mockResolvedValue({
       output: {
-        reply: "Entendi, vamos falar do Curso B.",
+        reply: "Entendi, vamos falar do Plano B.",
         confirmed: null,
         handoff: false,
         concluded: false,
@@ -893,8 +893,8 @@ const CONTEXT_WITH_DEAL = {
   contact: { Nome: "João" },
   contactRaw: { id: "contact-1", name: "João" },
   deals: [{ id: "deal-1" }],
-  selectedDeal: { Negócio: "Matrícula" },
-  selectedDealRaw: { id: "deal-1", title: "Matrícula" },
+  selectedDeal: { Negócio: "Contrato" },
+  selectedDealRaw: { id: "deal-1", title: "Contrato" },
   dealId: "deal-1",
 };
 
@@ -1026,14 +1026,14 @@ describe("processV2Turn — correções do motor", () => {
   it("memória: variáveis salvas voltam no prompt e o que o LLM coleta é persistido", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
-    mocks.getState.mockResolvedValue({ ...makeState("active"), collectedVariables: { curso: "ADM" } });
+    mocks.getState.mockResolvedValue({ ...makeState("active"), collectedVariables: { plano: "Básico" } });
     mocks.callLLM.mockResolvedValue(llmOut({ collected: { turno: "noite" } }));
 
     await run("Prefiro à noite");
 
-    expect(mocks.callLLM.mock.calls[0][0].collectedVariables).toMatchObject({ curso: "ADM" });
+    expect(mocks.callLLM.mock.calls[0][0].collectedVariables).toMatchObject({ plano: "Básico" });
     const last = mocks.upsertState.mock.calls.at(-1)![0];
-    expect(last.collectedVariables).toMatchObject({ curso: "ADM", turno: "noite" });
+    expect(last.collectedVariables).toMatchObject({ plano: "Básico", turno: "noite" });
   });
 
   it("atendimento IA desligado na org: não responde e manda para a distribuição", async () => {
@@ -1071,7 +1071,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.callLLM.mockResolvedValue(llmOut());
     mocks.messageFindMany.mockResolvedValue([
       { direction: "in", authorType: "contact", content: "oi?" },
-      { direction: "in", authorType: "contact", content: "minha empresa está pedindo uma declaração" },
+      { direction: "in", authorType: "contact", content: "minha empresa está pedindo um comprovante" },
       { direction: "out", authorType: "bot", content: "Como posso ajudar?" },
     ]);
 
@@ -1079,7 +1079,7 @@ describe("processV2Turn — correções do motor", () => {
 
     expect(mocks.callLLM.mock.calls[0][0].previousMessages).toEqual([
       { role: "assistant", content: "Como posso ajudar?" },
-      { role: "user", content: "minha empresa está pedindo uma declaração" },
+      { role: "user", content: "minha empresa está pedindo um comprovante" },
     ]);
   });
 

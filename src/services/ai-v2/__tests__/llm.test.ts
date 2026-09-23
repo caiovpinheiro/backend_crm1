@@ -206,7 +206,7 @@ describe("callV2LLM — saída inválida", () => {
   it("JSON quebrado não vira mensagem para o cliente: aplica o fallback com handoff", async () => {
     // Resposta cortada + normalizador também sem JSON válido.
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeLLMResponse('{"reply": "Olá, sua matrícula está'),
+      makeLLMResponse('{"reply": "Olá, sua assinatura está'),
     );
     const config = baseConfig();
 
@@ -224,7 +224,7 @@ describe("callV2LLM — saída inválida", () => {
 
   it("texto livre de verdade continua sendo usado como resposta", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeLLMResponse("Olá! Sua matrícula está ativa."),
+      makeLLMResponse("Olá! Sua assinatura está ativa."),
     );
     const config = baseConfig();
 
@@ -237,7 +237,7 @@ describe("callV2LLM — saída inválida", () => {
     });
 
     expect(result.output.handoff).toBe(false);
-    expect(result.output.reply).toBe("Olá! Sua matrícula está ativa.");
+    expect(result.output.reply).toBe("Olá! Sua assinatura está ativa.");
   });
 
   it("o exemplo de saída do prompt não sugere handoff", async () => {
@@ -406,7 +406,7 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
       makeLLMResponse(JSON.stringify({ reply: "Olá, aqui é @Nome da empresa." })),
     );
 
-    const config = baseConfig({ variables: [{ key: "Nome da empresa", value: "EduIT" }] });
+    const config = baseConfig({ variables: [{ key: "Nome da empresa", value: "Empresa Exemplo" }] });
     const result = await callV2LLM({
       agentId: "agent-1",
       config,
@@ -415,9 +415,9 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
       stage: "active",
     });
 
-    expect(result.output.reply).toBe("Olá, aqui é EduIT.");
+    expect(result.output.reply).toBe("Olá, aqui é Empresa Exemplo.");
     const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
-    expect(system).toContain("Nome da empresa: EduIT");
+    expect(system).toContain("Nome da empresa: Empresa Exemplo");
   });
 
   it("com vários negócios e modo ask, o prompt lista os negócios e pede para perguntar", async () => {

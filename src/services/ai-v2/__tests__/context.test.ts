@@ -103,7 +103,7 @@ describe("loadV2Context", () => {
     mocks.dealFindMany.mockResolvedValue([{ id: "d1" }]);
     mocks.dealFindUnique.mockResolvedValue({
       id: "d1",
-      title: "Matrícula",
+      title: "Contrato",
       status: "OPEN",
       value: 1200,
       stage: { id: "s1", name: "Proposta" },
@@ -119,13 +119,13 @@ describe("loadV2Context", () => {
           contact: [],
           deal: [
             { key: "title", label: "Título", permissions: ["read", "cite"] },
-            { key: "cf-course", label: "Curso", permissions: ["read", "cite"] },
+            { key: "cf-course", label: "Plano", permissions: ["read", "cite"] },
           ],
         },
       }),
     });
 
-    expect(ctx.selectedDeal).toMatchObject({ Título: "Matrícula", Curso: "Engenharia" });
+    expect(ctx.selectedDeal).toMatchObject({ Título: "Contrato", Plano: "Engenharia" });
   });
 
   it("mantém campos nativos de contato e negócio", async () => {

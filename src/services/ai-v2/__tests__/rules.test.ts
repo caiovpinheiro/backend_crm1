@@ -124,10 +124,10 @@ describe("evaluateV2Rules — palavras-chave", () => {
 
   it("mensagens comuns com artigos/palavras curtas não disparam", () => {
     for (const m of [
-      "minha empresa está pedindo uma declaração que me matriculei",
-      "Comecei no emprego agora e preciso da declaração de matrícula",
-      "Tenho uma dp pra fazer",
-      "e o Duda?",
+      "minha empresa está pedindo uma segunda via do contrato",
+      "Comecei no emprego agora e preciso do comprovante",
+      "Tenho uma pendência pra resolver",
+      "e o aplicativo?",
       "tem o passo a passo?",
       "quero fazer uma consulta",
     ]) {
