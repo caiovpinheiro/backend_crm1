@@ -492,10 +492,14 @@ export interface V2TurnContext {
 
 export interface V2CRMContext {
   contact: Record<string, unknown> | null;
+  /// Campos do contato com chaves técnicas (para renderização de variáveis como @contact.name).
+  contactRaw?: Record<string, unknown> | null;
   /// Campos do contato que o agente pode citar na resposta ao cliente.
   citableContact?: Record<string, unknown> | null;
   deals: Array<Record<string, unknown>>;
   selectedDeal: Record<string, unknown> | null;
+  /// Campos do negócio selecionado com chaves técnicas (para variáveis como @deal.title).
+  selectedDealRaw?: Record<string, unknown> | null;
   /// Campos do negócio selecionado que o agente pode citar na resposta.
   citableDeal?: Record<string, unknown> | null;
   fields: {

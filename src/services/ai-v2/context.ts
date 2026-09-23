@@ -376,9 +376,11 @@ export async function loadV2Context(args: {
 
   return {
     contact: visibleContact,
+    contactRaw: contact,
     citableContact,
     deals,
     selectedDeal: selectedDeal ? visibleDeal : null,
+    selectedDealRaw: selectedDeal,
     citableDeal: selectedDeal ? citableDeal : null,
     fields: args.config.contextFields,
     exposure,

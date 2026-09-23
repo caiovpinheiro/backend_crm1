@@ -11,6 +11,7 @@ import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
+import { getRequestContext, enterRequestContext } from "@/lib/request-context";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
 
@@ -111,6 +112,16 @@ export async function simulateV2Turn(
   selectedDealId?: string,
   stage: V2Stage = "active",
 ): Promise<V2TestTurnResult> {
+  // Garante contexto de tenant para as tools do motor no ambiente de teste.
+  if (organizationId && !getRequestContext()) {
+    enterRequestContext({
+      organizationId,
+      userId: "test-simulation",
+      isSuperAdmin: false,
+      actor: { type: "AI", label: "Agente v2 (teste)", ref: agentId },
+    });
+  }
+
   let context: V2CRMContext;
   if (organizationId) {
     context = await loadV2Context({
@@ -127,7 +138,7 @@ export async function simulateV2Turn(
   // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
   const effectiveStage: V2Stage = history.length === 0 ? "idle" : stage;
   if (effectiveStage === "idle") {
-    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal);
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
     if (!context.selectedDeal) {
       if (config.entry.onDealNotFound === "ask_identification") {
         const parts: string[] = [];
@@ -231,7 +242,7 @@ export async function simulateV2Turn(
 
   // Turno seguinte às boas-vindas no modo separate_turn: envia a confirmação.
   if (effectiveStage === "confirming" && config.entry.confirmContact && (config.entry.confirmationMode ?? "combined") === "separate_turn") {
-    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal);
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
     const confirmMsg = renderMessage(
       config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
       vars,

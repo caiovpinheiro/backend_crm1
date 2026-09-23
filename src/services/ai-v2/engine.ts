@@ -175,7 +175,13 @@ function mergeCollectedVariables(
 }
 
 function messageVariables(config: V2AgentConfig, context: V2CRMContext): Record<string, unknown> {
-  return buildVariableMap(config.variables, context.contact, context.selectedDeal);
+  return buildVariableMap(
+    config.variables,
+    context.contact,
+    context.selectedDeal,
+    context.contactRaw,
+    context.selectedDealRaw,
+  );
 }
 
 export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {

@@ -229,27 +229,34 @@ export function defaultFormatter(locale = "pt-BR"): V2MessageFormatter {
   };
 }
 
-/** Wrapper que junta variáveis do agente com campos do contato/negócio. */
+/** Wrapper que junta variáveis do agente com campos do contato/negócio.
+ *  Usa os mapas `*Raw` (chaves técnicas) para variáveis como @contact.name;
+ *  se ausentes, fallback para os mapas com rótulos legíveis.
+ */
 export function buildVariableMap(
   agentVariables: Array<{ key: string; value: string }>,
   contact: Record<string, unknown> | null,
   deal: Record<string, unknown> | null,
+  contactRaw?: Record<string, unknown> | null,
+  dealRaw?: Record<string, unknown> | null,
 ): Record<string, unknown> {
   const map: Record<string, unknown> = {};
   for (const v of agentVariables) {
     map[v.key] = v.value;
   }
-  if (contact) {
-    for (const [k, v] of Object.entries(contact)) {
+  const rawContact = contactRaw ?? contact;
+  if (rawContact) {
+    for (const [k, v] of Object.entries(rawContact)) {
       map[k] = v;
     }
-    map.contact = { ...contact };
+    map.contact = { ...rawContact };
   }
-  if (deal) {
-    for (const [k, v] of Object.entries(deal)) {
+  const rawDeal = dealRaw ?? deal;
+  if (rawDeal) {
+    for (const [k, v] of Object.entries(rawDeal)) {
       map[k] = v;
     }
-    map.deal = { ...deal };
+    map.deal = { ...rawDeal };
   }
   return map;
 }
