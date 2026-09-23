@@ -8,7 +8,7 @@ import {
   requireStageScope,
 } from "@/lib/authz/resource-policy";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEvent, getDealById, moveDeal } from "@/services/deals";
+import { createDealEvent, getDealById, moveDeal, StageFieldsRequiredError } from "@/services/deals";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -162,6 +162,16 @@ export async function POST(request: Request, context: RouteContext) {
           }
           if (err.message === "INVALID_POSITION") {
             return NextResponse.json({ message: "position inválido." }, { status: 400 });
+          }
+          if (err instanceof StageFieldsRequiredError) {
+            return NextResponse.json(
+              {
+                message: err.message,
+                code: "STAGE_FIELDS_REQUIRED",
+                fields: err.fields,
+              },
+              { status: 400 },
+            );
           }
           if (err.message === "LOST_REASON_REQUIRED") {
             return NextResponse.json(

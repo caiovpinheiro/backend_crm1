@@ -3,7 +3,12 @@ import type { Job } from "bullmq";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { fireTrigger } from "@/services/automation-triggers";
-import { createDealEventsMany, type DealEventInput } from "@/services/deals";
+import {
+  assertStageEntryFields,
+  createDealEventsMany,
+  StageFieldsRequiredError,
+  type DealEventInput,
+} from "@/services/deals";
 import type { BulkMoveStagePayload } from "@/lib/queue";
 
 import {
@@ -169,7 +174,26 @@ export async function processBulkMoveStage(
         );
       }
 
-      const toMove = deals.filter((d) => d.stageId !== targetStageId);
+      const candidates = deals.filter((d) => d.stageId !== targetStageId);
+      const toMove: typeof candidates = [];
+      for (const deal of candidates) {
+        try {
+          await assertStageEntryFields(deal.id, targetStageId);
+          toMove.push(deal);
+        } catch (err) {
+          if (err instanceof StageFieldsRequiredError) {
+            chunkFailed += 1;
+            chunkErrors.push({
+              itemId: deal.id,
+              message: truncateErrorMessage(err.message),
+              attempt: job.attemptsMade + 1,
+              at: new Date().toISOString(),
+            });
+            continue;
+          }
+          throw err;
+        }
+      }
       const noOps = deals.filter((d) => d.stageId === targetStageId);
       chunkSucceeded += noOps.length; // noop conta como sucesso (idempotente).
 

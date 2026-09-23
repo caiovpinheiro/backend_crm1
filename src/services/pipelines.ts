@@ -265,6 +265,7 @@ const stageSelect = {
   isIncoming: true,
   isWon: true,
   isLost: true,
+  requiredDealFieldIds: true,
   pipelineId: true,
 } satisfies Prisma.StageSelect;
 
@@ -574,12 +575,29 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
   );
 }
 
+const MAX_STAGE_ENTRY_FIELDS = 20;
+
+/** Só campos personalizados do negócio desta org. Id desconhecido → erro. */
+async function resolveDealFieldIds(ids: string[]): Promise<string[]> {
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+  if (unique.length > MAX_STAGE_ENTRY_FIELDS) throw new Error("TOO_MANY_ENTRY_FIELDS");
+  if (unique.length === 0) return [];
+  const found = await prisma.customField.findMany({
+    where: { id: { in: unique }, entity: "deal" },
+    select: { id: true },
+  });
+  if (found.length !== unique.length) throw new Error("INVALID_DEAL_FIELD");
+  return unique;
+}
+
 export type UpdateStageInput = {
   name?: string;
   color?: string;
   winProbability?: number;
   rottingDays?: number;
   position?: number;
+  /** Ids de CustomField (entity=deal). Array vazio remove a exigência. */
+  requiredDealFieldIds?: string[];
 };
 
 export async function updateStage(id: string, data: UpdateStageInput) {
@@ -588,7 +606,8 @@ export async function updateStage(id: string, data: UpdateStageInput) {
     data.color !== undefined ||
     data.winProbability !== undefined ||
     data.rottingDays !== undefined ||
-    data.position !== undefined;
+    data.position !== undefined ||
+    data.requiredDealFieldIds !== undefined;
   if (!hasField) throw new Error("EMPTY_UPDATE");
 
   const stage = await prisma.stage.findUnique({ where: { id } });
@@ -625,6 +644,9 @@ export async function updateStage(id: string, data: UpdateStageInput) {
   if (data.color !== undefined) payload.color = data.color;
   if (data.winProbability !== undefined) payload.winProbability = data.winProbability;
   if (data.rottingDays !== undefined) payload.rottingDays = data.rottingDays;
+  if (data.requiredDealFieldIds !== undefined) {
+    payload.requiredDealFieldIds = await resolveDealFieldIds(data.requiredDealFieldIds);
+  }
 
   if (Object.keys(payload).length === 0) {
     return prisma.stage.findUniqueOrThrow({ where: { id } });

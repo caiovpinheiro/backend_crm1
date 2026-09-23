@@ -54,6 +54,7 @@ import type { AutomationJobPayload } from "@/lib/queue";
 import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
 import { sseBus } from "@/lib/sse-bus";
 import {
+  assertStageEntryFields,
   assignDealOwner,
   createDealEvent,
   markDealLost,
@@ -2025,6 +2026,7 @@ async function executeStep(
           : currentDeal?.status === "OPEN" || !currentDeal
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
+      await assertStageEntryFields(targetDealId, stageId);
       await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
       // Só sincroniza Deal.status. NÃO encerrar conversa: fila ≠ funil.
       // Loga STAGE_CHANGED na timeline do negócio (paridade com o move

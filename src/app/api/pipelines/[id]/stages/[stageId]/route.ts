@@ -118,13 +118,27 @@ export async function PUT(request: Request, context: RouteContext) {
           return NextResponse.json({ message: "position inválido." }, { status: 400 });
         }
       }
+      let requiredDealFieldIds: string[] | undefined;
+      if (b.requiredDealFieldIds !== undefined) {
+        if (
+          !Array.isArray(b.requiredDealFieldIds) ||
+          b.requiredDealFieldIds.some((id) => typeof id !== "string")
+        ) {
+          return NextResponse.json(
+            { message: "requiredDealFieldIds inválido." },
+            { status: 400 },
+          );
+        }
+        requiredDealFieldIds = b.requiredDealFieldIds;
+      }
 
       const hasField =
         b.name !== undefined ||
         b.color !== undefined ||
         b.winProbability !== undefined ||
         b.rottingDays !== undefined ||
-        b.position !== undefined;
+        b.position !== undefined ||
+        requiredDealFieldIds !== undefined;
       if (!hasField) {
         return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
       }
@@ -136,6 +150,7 @@ export async function PUT(request: Request, context: RouteContext) {
           winProbability: typeof b.winProbability === "number" ? b.winProbability : undefined,
           rottingDays: typeof b.rottingDays === "number" ? b.rottingDays : undefined,
           position: typeof b.position === "number" ? b.position : undefined,
+          requiredDealFieldIds,
         });
         return NextResponse.json(stage);
       } catch (err: unknown) {
@@ -159,6 +174,18 @@ export async function PUT(request: Request, context: RouteContext) {
             return NextResponse.json(
               { message: "Os estágios Ganho e Perdido são fixos no fim do funil." },
               { status: 409 }
+            );
+          }
+          if (err.message === "INVALID_DEAL_FIELD") {
+            return NextResponse.json(
+              { message: "Selecione apenas campos personalizados do negócio." },
+              { status: 400 },
+            );
+          }
+          if (err.message === "TOO_MANY_ENTRY_FIELDS") {
+            return NextResponse.json(
+              { message: "No máximo 20 campos obrigatórios por etapa." },
+              { status: 400 },
             );
           }
         }

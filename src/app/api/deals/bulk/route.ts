@@ -15,8 +15,10 @@ import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
   assertLostReasonAllowed,
+  assertStageEntryFields,
   assignDealOwner,
   createDealEvent,
+  StageFieldsRequiredError,
   isValidDealStatus,
   markDealLost,
   markDealWon,
@@ -327,6 +329,26 @@ export async function POST(request: Request) {
             },
           },
         });
+
+        try {
+          for (const deal of deals) {
+            if (deal.stageId !== stageId) {
+              await assertStageEntryFields(deal.id, stageId);
+            }
+          }
+        } catch (err) {
+          if (err instanceof StageFieldsRequiredError) {
+            return NextResponse.json(
+              {
+                message: err.message,
+                code: "STAGE_FIELDS_REQUIRED",
+                fields: err.fields,
+              },
+              { status: 400 },
+            );
+          }
+          throw err;
+        }
 
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
