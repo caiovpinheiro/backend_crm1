@@ -86,6 +86,11 @@ export type LogEventInput = {
 
   /// Override direto do enum quando o payload vem da outbox (sem `actor`).
   actorType?: ActorType;
+
+  /// Usuário humano quando o evento é gravado fora da sessão (outbox).
+  /// A projeção do dashboard usa este id; a sessão ao vivo continua em
+  /// `RequestContext.userId`.
+  actorUserId?: string | null;
 };
 
 /**

@@ -18,7 +18,7 @@ import {
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
-import { logEvent } from "@/services/activity-log";
+import { logEvent, userIdForFk } from "@/services/activity-log";
 import {
   insertActivityOutbox,
   type ActivityOutboxInput,
@@ -875,6 +875,10 @@ export async function POST(request: Request, context: RouteContext) {
         conv.status === "RESOLVED" &&
         tabulationId !== previousTabulationId;
 
+      const tabulatedByUserId = userIdForFk(
+        (session.user as { id?: string }).id,
+      );
+
       const { row: updated } = await prisma.$transaction(async (tx) => {
         const result = await updateConversationStatusInTx(tx, id, dbStatus, {
           tabulationId,
@@ -918,6 +922,7 @@ export async function POST(request: Request, context: RouteContext) {
             contactId: result.row.contact?.id ?? null,
             departmentId: resolvedDepartmentId,
             organizationId: result.row.organizationId,
+            actorUserId: tabulatedByUserId,
             meta:
               tabulationName != null && tabulationNumber != null
                 ? tabulationLogMeta(
