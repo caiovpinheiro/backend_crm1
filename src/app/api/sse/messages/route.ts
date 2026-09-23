@@ -1,5 +1,7 @@
 import type { AppUserRole } from "@/lib/auth-types";
 import { auth } from "@/lib/auth";
+import { loadAuthzContext, canViewPipeline, canViewStage } from "@/lib/authz";
+import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors";
 import {
   allowAllInboxSseCards,
@@ -7,10 +9,10 @@ import {
   stripHiddenInboxSseCard,
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
-import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
 import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
 import { sseBus } from "@/lib/sse-bus";
+import { watchSseMembership } from "@/lib/sse-membership-watch";
 
 export const dynamic = "force-dynamic";
 
@@ -70,14 +72,15 @@ export async function GET(request: Request) {
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
-  let membershipWatch: ReturnType<typeof setInterval> | null = null;
+  let unwatchMembership: (() => void) | null = null;
   let closed = false;
+  const convBlockCache = new Map<string, { at: number; blocked: boolean }>();
 
   function teardown() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
-    if (membershipWatch) clearInterval(membershipWatch);
-    membershipWatch = null;
+    unwatchMembership?.();
+    unwatchMembership = null;
     unsubscribe?.();
     unsubscribe = null;
     closed = true;
@@ -105,28 +108,9 @@ export async function GET(request: Request) {
         }
       }, 25_000);
 
-      membershipWatch = setInterval(() => {
-        if (closed) return;
-        void (async () => {
-          try {
-            const row = await prismaBase.user.findFirst({
-              where: { id: userId },
-              select: { isErased: true, organizationId: true },
-            });
-            const lost =
-              !row ||
-              row.isErased ||
-              (organizationId != null &&
-                row.organizationId !== organizationId &&
-                !isSuperAdmin);
-            if (lost) {
-              sseBus.revokeUser({ userId, organizationId });
-            }
-          } catch {
-            /* ignore */
-          }
-        })();
-      }, 60_000);
+      // Uma consulta por processo para todas as conexões (antes: uma por
+      // conexão por minuto). Perdeu o acesso → sseBus.revokeUser fecha.
+      unwatchMembership = watchSseMembership({ userId, organizationId, isSuperAdmin });
 
       unsubscribe = sseBus.subscribe(
         { organizationId, userId, isSuperAdmin },
@@ -136,13 +120,30 @@ export async function GET(request: Request) {
             closeStream();
             return;
           }
-          try {
-            const data = stripHiddenInboxSseCard(envelope.data, cardGate);
-            const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-            controller.enqueue(encoder.encode(payload));
-          } catch {
-            closeStream();
-          }
+          void (async () => {
+            try {
+              if (closed) return;
+              if (
+                await sseEventHiddenByFunnel(
+                  envelope.data,
+                  {
+                    userId: sessionUser.id ?? "",
+                    organizationId,
+                    isSuperAdmin,
+                  },
+                  convBlockCache,
+                )
+              ) {
+                return;
+              }
+              if (closed) return;
+              const data = stripHiddenInboxSseCard(envelope.data, cardGate, event);
+              const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+              controller.enqueue(encoder.encode(payload));
+            } catch {
+              closeStream();
+            }
+          })();
         },
       );
 
@@ -162,4 +163,44 @@ export async function GET(request: Request) {
   applyBrowserApiCors(request, { headers });
 
   return new Response(stream, { headers });
+}
+
+function readId(data: unknown, key: string): string | null {
+  if (!data || typeof data !== "object") return null;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Não entrega evento de funil/etapa/conversa bloqueados para o assinante. */
+async function sseEventHiddenByFunnel(
+  data: unknown,
+  user: { userId: string; organizationId: string | null; isSuperAdmin: boolean },
+  convCache: Map<string, { at: number; blocked: boolean }>,
+): Promise<boolean> {
+  if (!user.organizationId || !user.userId || user.isSuperAdmin) return false;
+  const pipelineId = readId(data, "pipelineId");
+  const stageId = readId(data, "stageId");
+  const conversationId = readId(data, "conversationId");
+  if (!pipelineId && !stageId && !conversationId) return false;
+
+  const ctx = await loadAuthzContext({
+    userId: user.userId,
+    organizationId: user.organizationId,
+    isSuperAdmin: false,
+  });
+  if (!funnelScopeOf(ctx)) return false;
+  if (pipelineId && !canViewPipeline(ctx, pipelineId)) return true;
+  if (stageId && !canViewStage(ctx, stageId)) return true;
+  if (!conversationId) return false;
+
+  const cached = convCache.get(conversationId);
+  const now = Date.now();
+  if (cached && now - cached.at < 15_000) return cached.blocked;
+  const blocked = await conversationBlockedByFunnel(
+    user.organizationId,
+    conversationId,
+    ctx,
+  );
+  convCache.set(conversationId, { at: now, blocked });
+  return blocked;
 }

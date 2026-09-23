@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import { loadAuthzContext } from "@/lib/authz";
+import {
+  andConversationWhere,
+  conversationFunnelWhere,
+  visibleStageIds,
+} from "@/lib/authz/funnel-visibility";
 import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
@@ -69,9 +74,16 @@ export async function GET(request: Request) {
         searchParams.get("withoutOwner") === "true";
       const stageId = searchParams.get("stageId") ?? undefined;
       const stageIdsRaw = searchParams.get("stageIds") ?? "";
-      const stageIds = stageIdsRaw
-        ? stageIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
-        : undefined;
+      const requestedStageIds = [
+        ...(stageIdsRaw
+          ? stageIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+          : []),
+        ...(stageId ? [stageId] : []),
+      ];
+      const narrowedStageIds = visibleStageIds(authz, requestedStageIds);
+      const stageFilterBlocked =
+        requestedStageIds.length > 0 && narrowedStageIds.length === 0;
+      const stageIds = stageFilterBlocked ? undefined : narrowedStageIds;
       const tagIdsRaw = searchParams.get("tagIds") ?? "";
       const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
       const sourcesRaw = searchParams.get("sources") ?? "";
@@ -135,7 +147,6 @@ export async function GET(request: Request) {
         ownerId,
         ownerIds,
         withoutOwner,
-        stageId,
         stageIds,
         tagIds,
         sources,
@@ -149,12 +160,17 @@ export async function GET(request: Request) {
 
       if (searchParams.get("counts") === "1") {
         const visibility = await getVisibilityFilter(user);
-        const conversationWhere = withInboxQueueVisibility(
-          visibility.conversationWhere,
-          {
-            permissions: inboxPerms,
-            includeUnassigned: visibility.includeUnassigned,
-          },
+        const conversationWhere = andConversationWhere(
+          withInboxQueueVisibility(
+            visibility.conversationWhere,
+            {
+              permissions: inboxPerms,
+              includeUnassigned: visibility.includeUnassigned,
+            },
+          ),
+          stageFilterBlocked
+            ? { id: { in: [] } }
+            : conversationFunnelWhere(authz),
         );
         const memberCategoryTabs: InboxCategoryTab[] | null =
           user.role === "MEMBER"
@@ -240,12 +256,17 @@ export async function GET(request: Request) {
         typeof searchRaw === "string" && searchRaw.trim().length > 0 ? searchRaw.trim() : undefined;
 
       const visibility = await getVisibilityFilter(user);
-      const conversationWhere = withInboxQueueVisibility(
-        visibility.conversationWhere,
-        {
-          permissions: inboxPerms,
-          includeUnassigned: visibility.includeUnassigned,
-        },
+      const conversationWhere = andConversationWhere(
+        withInboxQueueVisibility(
+          visibility.conversationWhere,
+          {
+            permissions: inboxPerms,
+            includeUnassigned: visibility.includeUnassigned,
+          },
+        ),
+        stageFilterBlocked
+          ? { id: { in: [] } }
+          : conversationFunnelWhere(authz),
       );
 
       const memberTodosCategories: InboxCategoryTab[] | undefined =
@@ -275,7 +296,6 @@ export async function GET(request: Request) {
         ownerId,
         ownerIds,
         withoutOwner,
-        stageId,
         stageIds,
         tagIds,
         sources,
