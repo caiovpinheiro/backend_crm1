@@ -42,6 +42,11 @@ vi.mock("../context", async (importOriginal) => {
 vi.mock("../actions", () => ({
   sendV2TextMessage: mocks.sendText,
   executeV2Actions: mocks.executeActions,
+  v2HumanBehavior: (config: { simulateTyping?: boolean; typingPerCharMs?: number; markMessagesRead?: boolean } = {}) => ({
+    simulateTyping: config.simulateTyping !== false,
+    typingPerCharMs: typeof config.typingPerCharMs === "number" && config.typingPerCharMs >= 0 ? config.typingPerCharMs : 25,
+    markMessagesRead: config.markMessagesRead !== false,
+  }),
 }));
 
 vi.mock("../handoff", () => ({
