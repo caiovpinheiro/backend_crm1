@@ -26,6 +26,7 @@ import { simpleHandoff } from "../handoff";
 import { guardV2Output } from "../output-guard";
 import { evaluateV2StopLimits, defaultV2Counters } from "../limits";
 import { classifyPostCloseMessage } from "../closure";
+import { selectV2Theme } from "../themes";
 
 describe("simpleHandoff — nunca deixa a conversa com a IA", () => {
   beforeEach(() => {
@@ -127,5 +128,19 @@ describe("classifyPostCloseMessage — resposta à pergunta de opções", () => 
     expect(classifyPostCloseMessage(cfg, "1")).toBe("new_demand");
     expect(classifyPostCloseMessage(cfg, "Sim")).toBe("new_demand");
     expect(classifyPostCloseMessage(cfg, "2")).toBe("courtesy");
+  });
+});
+
+describe("selectV2Theme — flexões da mesma palavra", () => {
+  const cfg = {
+    themes: [{ id: "decl", name: "Declaração", when: ["declaração de matrícula"], examples: [] }],
+  } as unknown as V2AgentConfig;
+
+  it("'declaração que me matriculei' casa o assunto 'declaração de matrícula'", () => {
+    expect(selectV2Theme(cfg, "minha empresa está pedindo uma declaração que me matriculei")?.id).toBe("decl");
+  });
+
+  it("mensagem sem relação não casa", () => {
+    expect(selectV2Theme(cfg, "quero saber o valor da mensalidade")).toBeNull();
   });
 });

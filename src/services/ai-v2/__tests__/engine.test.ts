@@ -1065,6 +1065,24 @@ describe("processV2Turn — correções do motor", () => {
     expect(executed.map((a) => a.modelId)).toEqual(["mm-ok"]);
   });
 
+  it("mensagem sem resposta de um turno anterior continua no histórico", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut());
+    mocks.messageFindMany.mockResolvedValue([
+      { direction: "in", authorType: "contact", content: "oi?" },
+      { direction: "in", authorType: "contact", content: "minha empresa está pedindo uma declaração" },
+      { direction: "out", authorType: "bot", content: "Como posso ajudar?" },
+    ]);
+
+    await run("oi?");
+
+    expect(mocks.callLLM.mock.calls[0][0].previousMessages).toEqual([
+      { role: "assistant", content: "Como posso ajudar?" },
+      { role: "user", content: "minha empresa está pedindo uma declaração" },
+    ]);
+  });
+
   it("histórico não repete as bolhas do turno atual", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

@@ -13,6 +13,21 @@ function normalize(s: string): string {
     .replace(/[^a-z0-9]/g, " ");
 }
 
+/**
+ * Mesma palavra com outra flexão ("matrícula"/"matriculei",
+ * "declaração"/"declarar"): prefixo comum de 5+ letras cobrindo 70% da
+ * palavra menor. Só substring não bastava — "matriculei" não contém
+ * "matricula" e o assunto não era escolhido.
+ */
+function sameWordStem(a: string, b: string): boolean {
+  if (a.includes(b) || b.includes(a)) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (shorter < 5) return false;
+  let i = 0;
+  while (i < shorter && a[i] === b[i]) i += 1;
+  return i >= 5 && i >= shorter * 0.7;
+}
+
 function scoreTheme(theme: V2Theme, message: string): number {
   const nm = normalize(message);
   const words = nm.split(/\s+/).filter(Boolean);
@@ -22,7 +37,7 @@ function scoreTheme(theme: V2Theme, message: string): number {
     if (!np) continue;
     const phraseWords = np.split(/\s+/).filter(Boolean);
     if (nm.includes(np)) score += 2 + phraseWords.length;
-    else if (phraseWords.every((w) => words.some((hw) => hw.includes(w) || w.includes(hw)))) score += 2 + phraseWords.length;
+    else if (phraseWords.every((w) => words.some((hw) => sameWordStem(hw, w)))) score += 2 + phraseWords.length;
   }
   for (const example of theme.examples) {
     const ne = normalize(example);

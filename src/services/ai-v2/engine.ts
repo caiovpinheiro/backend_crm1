@@ -1275,10 +1275,14 @@ async function callLLMWithTheme(
       const role = m.direction === "out" || m.authorType === "bot" ? "assistant" : "user";
       previousMessages.push({ role, content: m.content ?? "" });
     }
-    // As bolhas do cliente depois da última fala do agente são o turno atual,
-    // que já vai agregado em `userMessage`. Mantê-las duplicava a mensagem
-    // no prompt.
-    while (previousMessages.length > 0 && previousMessages[previousMessages.length - 1].role === "user") {
+    // Tira do histórico só as bolhas do turno atual (já vão agregadas em
+    // `userMessage`). Mensagem do cliente que ficou sem resposta num turno
+    // anterior NÃO é do turno atual e precisa continuar visível.
+    while (previousMessages.length > 0) {
+      const last = previousMessages[previousMessages.length - 1];
+      if (last.role !== "user") break;
+      const text = last.content.trim();
+      if (text && !input.userMessage.includes(text)) break;
       previousMessages.pop();
     }
   } catch { /* ignore */ }
