@@ -14,6 +14,7 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts } from "@/services/ai/provider";
+import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
 
 export type RetrievedChunk = {
   id: string;
@@ -168,7 +169,9 @@ export async function retrieveAgentKnowledge(
     id: r.id,
     docId: r.docId,
     docTitle: r.title,
-    content: r.content,
+    // Materiais já indexados no formato de payload do WhatsApp chegam aqui
+    // em JSON; o agente (e o cliente) precisam do texto.
+    content: unwrapMessagePayloadText(r.content),
     distance: Number(r.distance),
   }));
 

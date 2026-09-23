@@ -26,7 +26,7 @@ import { simpleHandoff } from "../handoff";
 import { guardV2Output } from "../output-guard";
 import { evaluateV2StopLimits, defaultV2Counters } from "../limits";
 import { classifyPostCloseMessage } from "../closure";
-import { selectV2Theme } from "../themes";
+import { knowledgeDocIdsFor, selectV2Theme } from "../themes";
 
 describe("simpleHandoff — nunca deixa a conversa com a IA", () => {
   beforeEach(() => {
@@ -144,3 +144,18 @@ describe("selectV2Theme — flexões da mesma palavra", () => {
     expect(selectV2Theme(cfg, "quero saber o valor da mensalidade")).toBeNull();
   });
 });
+
+describe("knowledgeDocIdsFor — materiais do assunto somam aos globais", () => {
+  it("assunto com lista própria não esconde os materiais globais", () => {
+    const cfg = { allowedKnowledgeDocIds: ["know_doc_001", "know_doc_002"] } as unknown as V2AgentConfig;
+    const theme = { allowedKnowledgeDocIds: ["cmud56v66"], knowledgeDocIds: [] } as any;
+    expect(knowledgeDocIdsFor(cfg, theme)).toEqual(["cmud56v66", "know_doc_001", "know_doc_002"]);
+  });
+
+  it("sem assunto vale a lista global; sem duplicatas", () => {
+    const cfg = { allowedKnowledgeDocIds: ["a", "b"] } as unknown as V2AgentConfig;
+    expect(knowledgeDocIdsFor(cfg, null)).toEqual(["a", "b"]);
+    expect(knowledgeDocIdsFor(cfg, { allowedKnowledgeDocIds: ["b"], knowledgeDocIds: ["a"] } as any)).toEqual(["b", "a"]);
+  });
+});
+

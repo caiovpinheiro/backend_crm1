@@ -20,6 +20,7 @@ import {
   humanQueueContextFromAgent,
   resolveAgentTimezone,
 } from "@/services/ai/human-queue-policy";
+import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
 
 export const MAX_CONTENT_CHARS = 500_000;
 export const MAX_TITLE_CHARS = 200;
@@ -203,9 +204,10 @@ export function normalizeTitle(input: unknown): string {
 }
 
 export function normalizeContent(input: unknown): string {
-  // `\0` derruba o insert no Postgres e `\r\n` bagunca o chunking.
+  // `\0` derruba o insert no Postgres e `\r\n` bagunca o chunking. Payload
+  // de modelo de mensagem (`{"type":"text","body":…}`) vira o texto do body.
   return typeof input === "string"
-    ? input.replace(/\u0000/g, "").replace(/\r\n/g, "\n").trim()
+    ? unwrapMessagePayloadText(input.replace(/\u0000/g, "").replace(/\r\n/g, "\n")).trim()
     : "";
 }
 
@@ -416,7 +418,9 @@ export async function updateKnowledgeDoc(
 /** Reindexa sem alterar o conteudo — usado para destravar doc FAILED. */
 export async function reindexKnowledgeDoc(agentId: string, docId: string) {
   const current = await getKnowledgeDoc(agentId, docId);
-  const content = current.content ?? "";
+  // Reindexar também limpa material antigo salvo como payload JSON.
+  const content = normalizeContent(current.content ?? "");
+  const contentCleaned = content !== (current.content ?? "");
   if (!content) {
     throw new KnowledgeDocError(
       "Documento sem texto para reindexar. Edite o conteúdo e salve.",
@@ -429,7 +433,9 @@ export async function reindexKnowledgeDoc(agentId: string, docId: string) {
       status: "PENDING" as const,
       errorMessage: null,
       // Doc antigo: aproveita a remontagem para gravar `content`.
-      ...(current.contentReconstructed ? { content } : {}),
+      ...(current.contentReconstructed || contentCleaned
+        ? { content, sizeBytes: Buffer.byteLength(content, "utf8") }
+        : {}),
     },
     select: DOC_LIST_SELECT,
   });

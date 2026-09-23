@@ -5,7 +5,7 @@
 
 import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { getAgentApiKey } from "@/services/ai/agent-key";
-import { getV2ThemeById } from "./themes";
+import { getV2ThemeById, knowledgeDocIdsFor } from "./themes";
 import { searchV2Knowledge } from "./tools";
 
 const GREETINGS = new Set([
@@ -45,10 +45,7 @@ export function knowledgeChunkTexts(
 }
 
 function allowedDocIds(config: V2AgentConfig, themeId?: string): string[] {
-  const theme = getV2ThemeById(config, themeId);
-  if (theme?.allowedKnowledgeDocIds && theme.allowedKnowledgeDocIds.length > 0) return theme.allowedKnowledgeDocIds;
-  if (theme?.knowledgeDocIds && theme.knowledgeDocIds.length > 0) return theme.knowledgeDocIds;
-  return config.allowedKnowledgeDocIds ?? [];
+  return knowledgeDocIdsFor(config, getV2ThemeById(config, themeId));
 }
 
 export function knowledgeQueries(message: string, theme: V2Theme | null): string[] {

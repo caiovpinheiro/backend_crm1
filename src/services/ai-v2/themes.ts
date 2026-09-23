@@ -79,6 +79,22 @@ export function selectV2Theme(
   return bestScore >= 1 ? best : null;
 }
 
+/**
+ * Materiais consultáveis no turno: os do assunto ativo SOMADOS aos globais.
+ * Antes a lista do assunto substituía a global — ao escolher o assunto
+ * "Documentos" (lista própria com 1 material) o agente perdia justamente
+ * "Emitir Declaração de Matrícula", que estava na lista global. A tela
+ * descreve a global como válida "em qualquer assunto".
+ */
+export function knowledgeDocIdsFor(config: V2AgentConfig, theme: V2Theme | null | undefined): string[] {
+  const ids = [
+    ...(theme?.allowedKnowledgeDocIds ?? []),
+    ...(theme?.knowledgeDocIds ?? []),
+    ...(config.allowedKnowledgeDocIds ?? []),
+  ];
+  return [...new Set(ids.filter(Boolean))];
+}
+
 export function getV2ThemeById(config: V2AgentConfig, themeId?: string): V2Theme | null {
   if (!themeId) return null;
   return config.themes.find((t) => t.id === themeId) ?? null;
