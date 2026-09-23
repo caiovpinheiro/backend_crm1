@@ -38,6 +38,7 @@ const listInclude = {
   user: { select: { id: true, name: true, email: true, avatarUrl: true } },
   createdBy: { select: { id: true, name: true, email: true, avatarUrl: true } },
   startedBy: { select: { id: true, name: true, avatarUrl: true } },
+  completedBy: { select: { id: true, name: true, avatarUrl: true } },
   department: { select: { id: true, name: true, color: true, icon: true } },
   contact: { select: { id: true, name: true, email: true } },
   deal: { select: { id: true, title: true, stageId: true } },
@@ -161,6 +162,8 @@ export type UpdateActivityInput = {
   /** Quem está executando. Null libera. O id vem da sessão, não do cliente. */
   startedById?: string | null;
   startedAt?: Date | string | null;
+  /** Quem concluiu. O id vem da sessão, não do cliente. */
+  completedById?: string | null;
 };
 
 export async function updateActivity(id: string, data: UpdateActivityInput) {
@@ -202,6 +205,12 @@ export async function updateActivity(id: string, data: UpdateActivityInput) {
       data.startedById === null
         ? { disconnect: true }
         : { connect: { id: data.startedById } };
+  }
+  if (data.completedById !== undefined) {
+    payload.completedBy =
+      data.completedById === null
+        ? { disconnect: true }
+        : { connect: { id: data.completedById } };
   }
 
   if (Object.keys(payload).length === 0) {

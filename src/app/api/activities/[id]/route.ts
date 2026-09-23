@@ -163,16 +163,12 @@ export async function PUT(request: Request, context: RouteContext) {
           : typeof b.departmentId === "string"
             ? b.departmentId
             : undefined,
-      startedById:
-        b.inProgress === true
+      startedById: b.inProgress === true ? authResult.user.id : undefined,
+      startedAt: b.inProgress === true ? new Date() : undefined,
+      completedById:
+        b.completed === true && !existing.completed
           ? authResult.user.id
-          : b.completed === true && existing.startedById
-            ? null
-            : undefined,
-      startedAt:
-        b.inProgress === true
-          ? new Date()
-          : b.completed === true && existing.startedById
+          : b.completed === false && existing.completedById
             ? null
             : undefined,
     };
@@ -232,6 +228,16 @@ export async function PUT(request: Request, context: RouteContext) {
         }
       };
 
+      const actorName = authResult.user.name?.trim() || "Alguém";
+      const justStarted =
+        b.inProgress === true && existing.startedById !== authResult.user.id;
+      if (justStarted) {
+        emitActivityEvent("ACTIVITY_STARTED", {
+          title: activity.title,
+          actorName,
+        });
+      }
+
       const justCompleted = b.completed === true && !existing.completed;
       if (justCompleted) {
         // "Resultado registrado na tarefa": no nosso modelo o resultado
@@ -240,6 +246,8 @@ export async function PUT(request: Request, context: RouteContext) {
           title: activity.title,
           activityType: activity.type,
           result: activity.description ?? null,
+          actorName,
+          startedByName: existing.startedBy?.name ?? null,
         });
       }
 
