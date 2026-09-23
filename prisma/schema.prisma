@@ -1549,6 +1549,9 @@ model Stage {
   /// negócio (Deal.status sincronizado); são protegidos contra delete/reorder.
   isWon          Boolean      @default(false)
   isLost         Boolean      @default(false)
+  /// Campos personalizados do negócio (CustomField entity=deal) que
+  /// precisam estar preenchidos para o deal ENTRAR nesta etapa.
+  requiredDealFieldIds String[] @default([]) @map("required_deal_field_ids")
 
   pipelineId String
   pipeline   Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
