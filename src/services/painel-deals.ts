@@ -103,7 +103,10 @@ export type PainelFunnel = {
   tooltip: string;
   stages: PainelFunnelStage[];
   empty: boolean;
-  /** Negócios criados no período do filtro, na org (WhatsApp, manual, importação). */
+  /**
+   * Chegadas no período, na org. Contato novo com deal conta 1.
+   * Só deal conta 1. Só contato conta 1.
+   */
   novos: { count: number; value: number };
 };
 
@@ -644,19 +647,38 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   });
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
-  // O que pingou de novo: negócio criado no período, na org inteira.
-  // Contato antigo com deal novo (WhatsApp, manual, importação) também entra.
-  const createdAgg = await db().deal.aggregate({
-    where: {
-      organizationId: orgId,
-      createdAt: { gte: f.range.from, lte: f.range.to },
-    },
-    _count: { _all: true },
-    _sum: { value: true },
-  });
+  // Contato novo + deal no período = 1. Só deal = 1. Só contato = 1.
+  const createdRows = await db().$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
+    SELECT
+      (
+        (SELECT COUNT(*)::bigint FROM contacts c
+          WHERE c."organizationId" = ${orgId}
+            AND c."createdAt" >= ${f.range.from}
+            AND c."createdAt" <= ${f.range.to})
+        +
+        (SELECT COUNT(*)::bigint FROM deals d
+          WHERE d."organizationId" = ${orgId}
+            AND d."createdAt" >= ${f.range.from}
+            AND d."createdAt" <= ${f.range.to}
+            AND NOT EXISTS (
+              SELECT 1 FROM contacts c
+              WHERE c.id = d."contactId"
+                AND c."createdAt" >= ${f.range.from}
+                AND c."createdAt" <= ${f.range.to}
+            ))
+      ) AS cnt,
+      (
+        SELECT COALESCE(SUM(CAST(d.value AS DECIMAL)), 0)
+        FROM deals d
+        WHERE d."organizationId" = ${orgId}
+          AND d."createdAt" >= ${f.range.from}
+          AND d."createdAt" <= ${f.range.to}
+      ) AS val
+  `);
+  const created = createdRows[0];
   const novos = {
-    count: createdAgg._count._all,
-    value: round2(toNumber(createdAgg._sum.value)),
+    count: created ? Number(created.cnt) : 0,
+    value: round2(toNumber(created?.val)),
   };
 
   return {
