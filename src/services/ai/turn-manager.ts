@@ -321,6 +321,23 @@ export async function onInboundMessageForAi(
   // Messenger/Instagram, e vale mesmo quando a conversa ainda não é da IA.
   // Telefone não autorizado devolve `false` e a mensagem segue o fluxo
   // normal: nada na resposta revela que o comando existe.
+  // `#reset` (motor v2): recomeça o atendimento para quem está testando.
+  // Mesmo sigilo dos comandos de teste: número não autorizado segue normal.
+  const { isV2ResetCommand } = await import("@/services/ai-v2/reset");
+  if (isV2ResetCommand(input.userMessage)) {
+    const { handleV2ResetCommand } = await import("@/services/ai-v2/reset");
+    const consumed = await handleV2ResetCommand({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      messageId: input.messageId,
+      channel: input.channel,
+    }).catch((err) => {
+      console.error("[ai-v2] #reset falhou", err);
+      return false;
+    });
+    if (consumed) return;
+  }
+
   const testCommand = parseAiTestCommand(input.userMessage);
   if (testCommand) {
     const consumed = await handleAiTestCommand({

@@ -48,6 +48,13 @@ export async function ensureV2AgentSchema(): Promise<void> {
   const hasVarsColumn = varsResult[0]?.exists === true;
   if (!hasVarsColumn) needs.push("collectedVariables column");
 
+  const feedbackResult = await db.$queryRawUnsafe<
+    Array<{ exists: boolean }>
+  >(
+    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_simple_turn_logs' AND column_name = 'feedback') AS exists`,
+  );
+  if (feedbackResult[0]?.exists !== true) needs.push("turn log feedback column");
+
   if (needs.length === 0) {
     checked = true;
     return;
@@ -82,6 +89,9 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   await (prismaBase as any).$executeRawUnsafe(
     `ALTER TABLE "ai_simple_conversation_states" ADD COLUMN IF NOT EXISTS "collectedVariables" JSONB NOT NULL DEFAULT '{}'`,
+  );
+  await (prismaBase as any).$executeRawUnsafe(
+    `ALTER TABLE "ai_simple_turn_logs" ADD COLUMN IF NOT EXISTS "feedback" JSONB`,
   );
 
   checked = true;

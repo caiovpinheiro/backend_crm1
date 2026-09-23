@@ -7,6 +7,8 @@ import { prisma } from "@/lib/prisma";
 import { estimateCost } from "@/lib/ai-agents/pricing";
 import type { V2Action, V2CRMContext, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
+import { takeV2TraceForLog } from "./trace";
+import { ensureV2AgentSchema } from "./ensure-schema";
 export async function logV2Turn(args: {
   organizationId: string;
   conversationId: string;
@@ -34,10 +36,14 @@ export async function logV2Turn(args: {
   governorStats?: Record<string, unknown>;
 }): Promise<void> {
   const model = "gpt-4o-mini"; // Simplificado; idealmente receber da config.
+  const trace = takeV2TraceForLog();
+  // DEV não aplica migrations: a coluna `feedback` pode ainda não existir e
+  // o create devolveria (RETURNING) todas as colunas do model.
+  await ensureV2AgentSchema().catch(() => undefined);
   const costUsd = estimateCost(model, args.inputTokens, args.outputTokens);
   await (prisma as unknown as {
     aISimpleTurnLog: {
-      create: (args: { data: Record<string, unknown> }) => Promise<void>;
+      create: (args: { data: Record<string, unknown>; select: { id: true } }) => Promise<unknown>;
     };
   }).aISimpleTurnLog.create({
     data: {
@@ -50,6 +56,12 @@ export async function logV2Turn(args: {
         ...(args.crmContext as unknown as Record<string, unknown>),
         ...(args.toolCalls ? { toolCalls: args.toolCalls } : {}),
         ...(args.governorStats ? { governorStats: args.governorStats } : {}),
+        ...(trace ? { trace } : {}),
+        stage: args.stage,
+        owner: args.owner,
+        ...(args.themeId ? { themeId: args.themeId } : {}),
+        ...(args.appliedRuleId ? { appliedRuleId: args.appliedRuleId } : {}),
+        ...(args.closed ? { closed: true } : {}),
       },
       prompt: args.prompt,
       llmOutput: (args.llmOutput ?? null) as Record<string, unknown> | null,
@@ -64,6 +76,7 @@ export async function logV2Turn(args: {
       // Extra fields não colunados; persistidos em JSON no contextSnapshot ou podemos usar coluna adicional.
       // Colocamos metadados em contextSnapshot para manter compatibilidade.
     },
+    select: { id: true },
   });
 }
 

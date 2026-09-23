@@ -33,6 +33,7 @@ import {
 import { listKnowledgeDocs } from "@/services/ai/knowledge-docs";
 import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion } from "./ground-reply";
+import { traceStep } from "./trace";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -81,7 +82,14 @@ async function prefetchKnowledge(args: {
 }): Promise<{ query: string; chunks: PrefetchedChunk[] }> {
   const docIds = knowledgeDocIdsFor(args.config, activeTheme(args.config, args.themeId));
   const query = knowledgePrefetchQuery(args.userMessage, args.previousMessages);
-  if (docIds.length === 0 || !hasSearchableQuestion(query)) return { query, chunks: [] };
+  if (docIds.length === 0) {
+    traceStep("base", "Sem materiais liberados para este agente/assunto — não buscou na base");
+    return { query, chunks: [] };
+  }
+  if (!hasSearchableQuestion(query)) {
+    traceStep("base", "Mensagem sem pergunta a buscar (saudação/curta) — não buscou na base");
+    return { query, chunks: [] };
+  }
   try {
     const found = await searchV2Knowledge({
       agentId: args.agentId,
@@ -90,8 +98,14 @@ async function prefetchKnowledge(args: {
       allowedDocIds: docIds,
       limit: PREFETCH_LIMIT,
     });
-    return { query, chunks: found?.chunks ?? [] };
+    const chunks = found?.chunks ?? [];
+    traceStep("base", chunks.length > 0
+      ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)})`).join(", ")}`
+      : `Nenhum trecho relevante em ${docIds.length} material(is)`,
+      { query });
+    return { query, chunks };
   } catch (err) {
+    traceStep("base", `Falha ao buscar na base: ${err instanceof Error ? err.message : String(err)}`);
     console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
     return { query, chunks: [] };
   }

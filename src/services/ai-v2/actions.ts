@@ -23,6 +23,7 @@ import { recordV2KnowledgeGap } from "./onboarding";
 import { buildSurveyMessage, recordSurveyResponse } from "./survey";
 import { simpleHandoff } from "./handoff";
 import type { V2LoadedContext } from "./context";
+import { traceStep } from "./trace";
 
 export type V2ActionResult = {
   action: V2Action;
@@ -586,7 +587,7 @@ export async function sendV2TextMessage(args: {
   humanBehavior?: HumanBehaviorConfig;
 }): Promise<void> {
   if (!args.text.trim()) return;
-  await sendAgentMessage({
+  const result = (await sendAgentMessage({
     conversationId: args.conversationId,
     contactId: args.contactId,
     agentUserId: args.agentUserId,
@@ -595,5 +596,13 @@ export async function sendV2TextMessage(args: {
     channel: args.channel === "baileys" ? "baileys" : "meta",
     bypassAssigneeCheck: false,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
-  });
+  })) as { status?: string; reason?: string } | undefined;
+  const preview = args.text.length > 90 ? `${args.text.slice(0, 90)}…` : args.text;
+  if (result?.status === "skipped") {
+    // Antes o motor não sabia que o envio foi barrado — o turno parecia ter
+    // respondido e o cliente não recebia nada.
+    traceStep("resposta", `NÃO enviada (${result.reason ?? "motivo desconhecido"}): "${preview}"`);
+  } else {
+    traceStep("resposta", `${result?.status === "draft" ? "Salva como rascunho (modo sugestão)" : "Enviada"}: "${preview}"`);
+  }
 }

@@ -924,6 +924,23 @@ describe("processV2Turn — correções do motor", () => {
     return processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage, ...extra });
   }
 
+  it("rastro: o log do turno recebe os passos de decisão", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reason: "Cliente pediu informação" }));
+    const { takeV2TraceForLog } = await import("../trace");
+    let trace: Array<{ step: string; detail: string }> | undefined;
+    mocks.logTurn.mockImplementation(async () => {
+      trace = takeV2TraceForLog();
+    });
+
+    await run("Preciso de uma informação sobre o serviço");
+
+    const steps = trace?.map((t) => t.step) ?? [];
+    expect(steps).toEqual(expect.arrayContaining(["entrada", "agente", "estado", "regra", "assunto", "llm"]));
+    expect(trace?.find((t) => t.step === "llm")?.detail).toContain("Cliente pediu informação");
+  });
+
   it("handoff pedido como AÇÃO: avisa o cliente antes e transfere uma vez só", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
