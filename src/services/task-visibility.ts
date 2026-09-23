@@ -79,6 +79,22 @@ export async function getTaskVisibility(viewer: TaskViewer): Promise<TaskVisibil
 }
 
 /**
+ * Aba "Departamento" da agenda.
+ * Quem vê todas as tarefas (admin/gestor) lista toda tarefa atribuída a
+ * um departamento. Os demais listam só as dos departamentos em que são
+ * membros. Sem vínculo, a aba fica vazia.
+ */
+export function departmentTasksWhere(
+  visibility: TaskVisibility,
+): Prisma.ActivityWhereInput {
+  if (visibility.canSeeAll) return { departmentId: { not: null } };
+  if (visibility.departmentIds.length) {
+    return { departmentId: { in: visibility.departmentIds } };
+  }
+  return { id: "__none__" };
+}
+
+/**
  * Pode o `viewer` acessar (ver/editar/concluir) esta tarefa específica?
  * ADMIN/MANAGER sempre; dono da tarefa sempre; membro do departamento da
  * tarefa sempre. Caso contrário, não.

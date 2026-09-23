@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { createActivity, getActivities, isValidActivityType } from "@/services/activities";
-import { getTaskVisibility } from "@/services/task-visibility";
+import { departmentTasksWhere, getTaskVisibility } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 
@@ -36,7 +36,8 @@ export async function GET(request: Request) {
     // Visibilidade por departamento: ADMIN/MANAGER veem tudo; demais veem
     // apenas suas tarefas + as dos seus departamentos. `scope` refina:
     //   mine        → só as minhas (userId = eu)
-    //   department  → só as dos meus departamentos
+    //   department  → tarefas atribuídas a departamento (admin/gestor: todas;
+    //                 demais: só os departamentos dos quais são membros)
     //   all/ausente → tudo que posso ver (own + departamentos)
     //
     // IMPORTANTE: só aplicamos a visibilidade de tarefa na LISTA GLOBAL
@@ -52,10 +53,7 @@ export async function GET(request: Request) {
       if (scope === "mine") {
         viewerWhere = { userId: authResult.user.id };
       } else if (scope === "department") {
-        viewerWhere = visibility.departmentIds.length
-          ? { departmentId: { in: visibility.departmentIds } }
-          : // Sem departamentos → não retorna nada nesse escopo.
-            { id: "__none__" };
+        viewerWhere = departmentTasksWhere(visibility);
       }
     }
 
