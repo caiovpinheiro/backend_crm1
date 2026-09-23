@@ -13,11 +13,15 @@
 import { randomUUID } from "node:crypto";
 
 import { metrics } from "@/lib/metrics";
-import { Prisma } from "@prisma/client";
+import { Prisma, type ActorType } from "@prisma/client";
 import { type ScopedTx } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { runLogEvent, type LogEventInput } from "@/services/activity-log";
+import {
+  runLogEvent,
+  userIdForFk,
+  type LogEventInput,
+} from "@/services/activity-log";
 
 export type ActivityOutboxInput = LogEventInput & {
   /**
@@ -232,4 +236,286 @@ export async function startActivityOutboxWorker(
     stopped = true;
     if (handle) clearTimeout(handle);
   };
+}
+
+const ACTOR_TYPES = new Set([
+  "HUMAN",
+  "AI",
+  "AUTOMATION",
+  "INTEGRATION",
+  "SYSTEM",
+]);
+
+type TabulationOutboxPayload = LogEventInput & {
+  departmentId?: string | null;
+};
+
+type TabulationOutboxClaim = {
+  id: string;
+  organizationId: string;
+  payload: Prisma.JsonValue;
+  createdAt: Date;
+  attempts: number;
+  maxAttempts: number;
+};
+
+function asPayload(value: Prisma.JsonValue): TabulationOutboxPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const payload = value as TabulationOutboxPayload;
+  if (payload.type !== "CONVERSATION_TABULATED") return null;
+  if (!payload.entityType || !payload.entityId) return null;
+  return payload;
+}
+
+function metaString(
+  meta: Record<string, unknown> | undefined,
+  key: string,
+): string | null {
+  const value = meta?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+async function postponeOutboxRow(
+  id: string,
+  attempts: number,
+  maxAttempts: number,
+  errorText: string,
+): Promise<void> {
+  const nextAttempt = attempts + 1;
+  const lastError = errorText.slice(0, 500);
+  if (nextAttempt >= maxAttempts) {
+    await prismaBase.activityOutbox.update({
+      where: { id },
+      data: { deadLetterAt: new Date(), lastError, attempts: nextAttempt },
+    });
+    return;
+  }
+  const backoff =
+    BACKOFF_MS[Math.min(nextAttempt, BACKOFF_MS.length) - 1] ??
+    BACKOFF_MS[BACKOFF_MS.length - 1];
+  await prismaBase.activityOutbox.update({
+    where: { id },
+    data: {
+      scheduledFor: new Date(Date.now() + backoff),
+      lastError,
+      attempts: nextAttempt,
+    },
+  });
+}
+
+async function actorUserIdFromDealClose(
+  tx: Prisma.TransactionClient,
+  row: { organizationId: string; createdAt: Date },
+  conversationId: string,
+): Promise<string | null> {
+  const from = new Date(row.createdAt.getTime() - 2 * 60_000);
+  const to = new Date(row.createdAt.getTime() + 5 * 60_000);
+  const found = await tx.dealEvent.findFirst({
+    where: {
+      organizationId: row.organizationId,
+      type: "CONVERSATION_CLOSED",
+      userId: { not: null },
+      createdAt: { gte: from, lte: to },
+      meta: { path: ["conversationId"], equals: conversationId },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { userId: true },
+  });
+  return userIdForFk(found?.userId);
+}
+
+async function actorUserIdNearClose(
+  tx: Prisma.TransactionClient,
+  row: { organizationId: string; createdAt: Date },
+  conversationId: string | null | undefined,
+): Promise<string | null> {
+  if (!conversationId) return null;
+  const from = new Date(row.createdAt.getTime() - 2 * 60_000);
+  const to = new Date(row.createdAt.getTime() + 2 * 60_000);
+  const found = await tx.activityEvent.findFirst({
+    where: {
+      organizationId: row.organizationId,
+      conversationId,
+      type: "ASSIGNEE_CHANGED",
+      actorUserId: { not: null },
+      occurredAt: { gte: from, lte: to },
+    },
+    orderBy: { occurredAt: "desc" },
+    select: { actorUserId: true },
+  });
+  return userIdForFk(found?.actorUserId);
+}
+
+/**
+ * Copia só `CONVERSATION_TABULATED` da outbox para `activity_events`.
+ * Não espelha no chat e não projeta os outros tipos da fila.
+ * `occurredAt` fica o `createdAt` da outbox, para o período do dashboard.
+ */
+export async function projectTabulationOutboxBatch(
+  batchSize = 40,
+): Promise<number> {
+  const candidates = await prismaBase.$queryRaw<{ id: string }[]>`
+    SELECT id
+    FROM "activity_outbox"
+    WHERE "processedAt" IS NULL
+      AND "deadLetterAt" IS NULL
+      AND "scheduledFor" <= CURRENT_TIMESTAMP
+      AND payload->>'type' = 'CONVERSATION_TABULATED'
+    ORDER BY "scheduledFor", id
+    LIMIT ${batchSize}
+  `;
+
+  let projected = 0;
+  for (const candidate of candidates) {
+    try {
+      const wrote = await prismaBase.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<TabulationOutboxClaim[]>`
+          SELECT id, "organizationId", payload, "createdAt", attempts, "maxAttempts"
+          FROM "activity_outbox"
+          WHERE id = ${candidate.id}
+            AND "processedAt" IS NULL
+            AND "deadLetterAt" IS NULL
+          FOR UPDATE SKIP LOCKED
+        `;
+        const row = locked[0];
+        if (!row) return null;
+
+        const payload = asPayload(row.payload);
+        if (!payload) {
+          await tx.activityOutbox.update({
+            where: { id: row.id },
+            data: {
+              deadLetterAt: new Date(),
+              lastError: "payload de tabulação inválido",
+              attempts: row.attempts + 1,
+            },
+          });
+          return null;
+        }
+
+        if (payload.idempotencyKey) {
+          const existing = await tx.activityEvent.findFirst({
+            where: {
+              organizationId: row.organizationId,
+              idempotencyKey: payload.idempotencyKey,
+            },
+            select: { id: true },
+          });
+          if (existing) {
+            await tx.activityOutbox.update({
+              where: { id: row.id },
+              data: { processedAt: new Date() },
+            });
+            return null;
+          }
+        }
+
+        const meta =
+          payload.meta && typeof payload.meta === "object"
+            ? payload.meta
+            : {};
+        const actorFromPayload = userIdForFk(payload.actorUserId);
+        const actorUserId =
+          actorFromPayload ??
+          (payload.conversationId
+            ? await actorUserIdFromDealClose(
+                tx,
+                row,
+                payload.conversationId,
+              )
+            : null) ??
+          (await actorUserIdNearClose(tx, row, payload.conversationId));
+        const rawActor = payload.actorType ?? "HUMAN";
+        const actorType: ActorType = ACTOR_TYPES.has(rawActor)
+          ? (rawActor as ActorType)
+          : "HUMAN";
+        const label =
+          typeof payload.actor?.label === "string" ? payload.actor.label : null;
+
+        await tx.activityEvent.create({
+          data: {
+            organizationId: row.organizationId,
+            occurredAt: row.createdAt,
+            type: "CONVERSATION_TABULATED",
+            entityType: payload.entityType,
+            entityId: payload.entityId,
+            entityLabel: payload.entityLabel ?? null,
+            dealId: payload.dealId ?? null,
+            contactId: payload.contactId ?? null,
+            conversationId: payload.conversationId ?? null,
+            departmentId:
+              payload.departmentId ?? metaString(meta, "departmentId"),
+            tabulationId: metaString(meta, "tabulationId"),
+            actorType,
+            actorUserId,
+            actorLabel: label,
+            field: payload.field ?? null,
+            oldValue: payload.oldValue ?? null,
+            newValue: payload.newValue ?? null,
+            meta: meta as Prisma.InputJsonValue,
+            ...(payload.idempotencyKey
+              ? { idempotencyKey: payload.idempotencyKey }
+              : {}),
+          },
+        });
+        await tx.activityOutbox.update({
+          where: { id: row.id },
+          data: { processedAt: new Date() },
+        });
+        return row.organizationId;
+      });
+      if (wrote) {
+        projected++;
+        metrics.activityOutbox.processed.inc(
+          { organization: wrote, status: "ok" },
+          1,
+        );
+      }
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        await prismaBase.activityOutbox.update({
+          where: { id: candidate.id },
+          data: { processedAt: new Date() },
+        });
+        continue;
+      }
+      const current = await prismaBase.activityOutbox.findUnique({
+        where: { id: candidate.id },
+        select: { attempts: true, maxAttempts: true, processedAt: true },
+      });
+      if (!current || current.processedAt) continue;
+      const errorText = err instanceof Error ? err.message : String(err);
+      await postponeOutboxRow(
+        candidate.id,
+        current.attempts,
+        current.maxAttempts,
+        errorText,
+      );
+    }
+  }
+
+  return projected;
+}
+
+let tabulationProjectorStarted = false;
+
+/** Timer à parte. Não consome fila de WhatsApp, campanha ou automação. */
+export function startTabulationOutboxProjector(intervalMs = 5_000): void {
+  if (tabulationProjectorStarted) return;
+  tabulationProjectorStarted = true;
+
+  const tick = () => {
+    void projectTabulationOutboxBatch()
+      .catch((err) => {
+        console.error("[activity-outbox] tabulation tick failed", err);
+      })
+      .finally(() => {
+        setTimeout(tick, intervalMs);
+      });
+  };
+
+  setTimeout(tick, 0);
 }
