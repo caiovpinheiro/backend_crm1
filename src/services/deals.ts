@@ -2359,6 +2359,8 @@ async function computeBoardData(
     msgDirection: string | null;
     msgSendStatus: string | null;
     msgSendError: string | null;
+    inContent: string | null;
+    inCreatedAt: Date | null;
   };
   /** Últimas inbound por contato (até 5) — preview “N aguardando” no card. */
   type BoardAwaitingMsgRow = {
@@ -2413,7 +2415,31 @@ async function computeBoardData(
               )
               AND m."messageType" NOT LIKE 'event%'
               AND m.direction IN ('in', 'out')
-            ORDER BY c."contactId", m."createdAt" DESC
+            -- Desempate no mesmo segundo (timestamp do WhatsApp em s).
+            ORDER BY c."contactId", m."createdAt" DESC, m.id DESC
+          ),
+          -- Última mensagem do CLIENTE: é o texto que o card exibe. O
+          -- last_msg (qualquer lado) segue para ordenação e "aguardando".
+          last_in AS (
+            SELECT DISTINCT ON (c."contactId")
+              c."contactId",
+              m.content AS "inContent",
+              m."createdAt" AS "inCreatedAt"
+            FROM conversations c
+            INNER JOIN messages m ON m."conversationId" = c.id
+            WHERE c."contactId" = ANY(${allContactIds})
+              AND c."organizationId" = ${orgIdForBoard}
+              AND m."organizationId" = ${orgIdForBoard}
+              AND m."isPrivate" = false
+              AND m.direction = 'in'
+              AND m."messageType" NOT IN (
+                'note',
+                'ai_draft',
+                'whatsapp_call',
+                'whatsapp_call_recording'
+              )
+              AND m."messageType" NOT LIKE 'event%'
+            ORDER BY c."contactId", m."createdAt" DESC, m.id DESC
           )
           SELECT
             cu."contactId",
@@ -2425,10 +2451,13 @@ async function computeBoardData(
             lm."msgCreatedAt",
             lm."msgDirection",
             lm."msgSendStatus",
-            lm."msgSendError"
+            lm."msgSendError",
+            li."inContent",
+            li."inCreatedAt"
           FROM contact_unread cu
           LEFT JOIN latest_channel lc ON lc."contactId" = cu."contactId"
           LEFT JOIN last_msg lm ON lm."contactId" = cu."contactId"
+          LEFT JOIN last_in li ON li."contactId" = cu."contactId"
         `
       : Promise.resolve([]);
 
@@ -2447,7 +2476,7 @@ async function computeBoardData(
               m."createdAt",
               ROW_NUMBER() OVER (
                 PARTITION BY c."contactId"
-                ORDER BY m."createdAt" DESC
+                ORDER BY m."createdAt" DESC, m.id DESC
               )::int AS rn
             FROM conversations c
             INNER JOIN messages m ON m."conversationId" = c.id
@@ -2504,6 +2533,7 @@ async function computeBoardData(
       sendError: string | null;
     }
   >();
+  const lastInMap = new Map<string, { content: string; createdAt: Date }>();
   const unreadMap = new Map<string, number>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
   for (const row of convs) {
@@ -2525,6 +2555,9 @@ async function computeBoardData(
         sendStatus: row.msgSendStatus ?? null,
         sendError: row.msgSendError ?? null,
       });
+    }
+    if (row.inContent != null && row.inCreatedAt != null) {
+      lastInMap.set(row.contactId, { content: row.inContent, createdAt: row.inCreatedAt });
     }
   }
 
@@ -2621,6 +2654,9 @@ async function computeBoardData(
                 }
               : null,
             awaitingMessages,
+            lastInboundMessage: deal.contactId
+              ? lastInMap.get(deal.contactId) ?? null
+              : null,
             channel: deal.contactId
               ? channelMap.get(deal.contactId)?.channel ?? null
               : null,

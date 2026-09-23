@@ -109,6 +109,12 @@ export type InboxSseCard = {
     sendStatus: string | null;
     sendError: string | null;
   } | null;
+  /** Só em mensagem do cliente: o texto/horário que o card exibe. */
+  lastInboundPreview?: {
+    content: string;
+    messageType: string;
+    createdAt: string;
+  } | null;
 };
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -242,6 +248,15 @@ function rowToCard(
     },
     ...(preview
       ? { lastMessageAt, lastMessagePreview: preview }
+      : {}),
+    ...(preview?.direction === "in" && lastMessageAt
+      ? {
+          lastInboundPreview: {
+            content: preview.content,
+            messageType: preview.messageType || "text",
+            createdAt: lastMessageAt,
+          },
+        }
       : {}),
   };
 }
