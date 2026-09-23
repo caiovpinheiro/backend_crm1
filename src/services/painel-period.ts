@@ -102,7 +102,7 @@ export function startOfZonedDay(date: Date, timeZone = PAINEL_TZ): Date {
 
 /**
  * Períodos inclusivos (hoje conta). last_30 = hoje e os 29 dias anteriores.
- * Default do Painel: 30 dias.
+ * Default do Painel: hoje.
  */
 export function computePainelRange(
   period: string | null,
@@ -154,12 +154,13 @@ export function computePainelRange(
       )!;
       return { from: firstPrev, to: lastPrev };
     }
-    case "last_30":
-    default: {
+    case "last_30": {
       const start = new Date(from);
       start.setDate(start.getDate() - 29);
       return { from: start, to };
     }
+    default:
+      return { from, to };
   }
 }
 
