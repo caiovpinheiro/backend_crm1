@@ -19,6 +19,7 @@
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { loadAuthzContext } from "@/lib/authz";
+import { metrics } from "@/lib/metrics";
 import {
   getDepartmentScopeForConversations,
   getVisibilityFilter,
@@ -94,7 +95,11 @@ export async function buildInboxSseCardGate(user: {
   };
 }
 
-/** Devolve `data` sem o `card` quando o gate recusa. */
+/**
+ * Devolve `data` sem o `card` quando o gate recusa, marcado com
+ * `cardOmitted: "hidden"`: o cliente não alerta (nem busca o card) — o
+ * usuário não pode listar a conversa. `"budget"` vem do bus.
+ */
 export function stripHiddenInboxSseCard(
   data: unknown,
   gate: InboxSseCardGate,
@@ -105,5 +110,8 @@ export function stripHiddenInboxSseCard(
   if (!card || typeof card !== "object") return data;
   if (gate(card as SseCardShape)) return data;
   const { card: _hidden, ...rest } = rec;
-  return rest;
+  if (rest.direction === "in") {
+    metrics.sse.inboundWithoutCard.inc({ reason: "hidden" });
+  }
+  return { ...rest, cardOmitted: "hidden" };
 }
