@@ -20,6 +20,7 @@
 import type { AppUserRole } from "@/lib/auth-types";
 import { loadAuthzContext } from "@/lib/authz";
 import { metrics } from "@/lib/metrics";
+import { redactNewMessageForUnlisted } from "@/lib/sse-redact";
 import {
   getDepartmentScopeForConversations,
   getVisibilityFilter,
@@ -98,11 +99,13 @@ export async function buildInboxSseCardGate(user: {
 /**
  * Devolve `data` sem o `card` quando o gate recusa, marcado com
  * `cardOmitted: "hidden"`: o cliente não alerta (nem busca o card) — o
- * usuário não pode listar a conversa. `"budget"` vem do bus.
+ * usuário não pode listar a conversa. Em `new_message` também sai o
+ * conteúdo (`redactNewMessageForUnlisted`). `"budget"` vem do bus.
  */
 export function stripHiddenInboxSseCard(
   data: unknown,
   gate: InboxSseCardGate,
+  event?: string,
 ): unknown {
   if (!data || typeof data !== "object") return data;
   const rec = data as Record<string, unknown>;
@@ -113,5 +116,6 @@ export function stripHiddenInboxSseCard(
   if (rest.direction === "in") {
     metrics.sse.inboundWithoutCard.inc({ reason: "hidden" });
   }
-  return { ...rest, cardOmitted: "hidden" };
+  const hidden = { ...rest, cardOmitted: "hidden" };
+  return event === "new_message" ? redactNewMessageForUnlisted(hidden) : hidden;
 }

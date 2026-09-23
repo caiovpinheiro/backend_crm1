@@ -17,6 +17,7 @@ import {
   shouldAttachInboxSseCard,
   withInboxSseCard,
 } from "@/lib/inbox-sse-card";
+import { redactNewMessageForUnlisted } from "@/lib/sse-redact";
 import { metrics, safeLabel } from "@/lib/metrics";
 import {
   isReplaySandboxActive,
@@ -111,7 +112,10 @@ export function markInboxCardOmittedByBudget(
   if (event === "new_message" && rec.direction === "in") {
     metrics.sse.inboundWithoutCard.inc({ reason: "budget" });
   }
-  return { ...rec, cardOmitted: "budget" };
+  const omitted = { ...rec, cardOmitted: "budget" };
+  // Sem card não há gate: ninguém sabe quem pode ver. Fail-closed no
+  // conteúdo — quem tem o thread aberto refaz o GET.
+  return event === "new_message" ? redactNewMessageForUnlisted(omitted) : omitted;
 }
 
 function sseRedisPubSubEnabled(): boolean {

@@ -7,10 +7,10 @@ import {
   stripHiddenInboxSseCard,
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
-import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
 import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
 import { sseBus } from "@/lib/sse-bus";
+import { watchSseMembership } from "@/lib/sse-membership-watch";
 
 export const dynamic = "force-dynamic";
 
@@ -70,14 +70,14 @@ export async function GET(request: Request) {
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
-  let membershipWatch: ReturnType<typeof setInterval> | null = null;
+  let unwatchMembership: (() => void) | null = null;
   let closed = false;
 
   function teardown() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
-    if (membershipWatch) clearInterval(membershipWatch);
-    membershipWatch = null;
+    unwatchMembership?.();
+    unwatchMembership = null;
     unsubscribe?.();
     unsubscribe = null;
     closed = true;
@@ -105,28 +105,9 @@ export async function GET(request: Request) {
         }
       }, 25_000);
 
-      membershipWatch = setInterval(() => {
-        if (closed) return;
-        void (async () => {
-          try {
-            const row = await prismaBase.user.findFirst({
-              where: { id: userId },
-              select: { isErased: true, organizationId: true },
-            });
-            const lost =
-              !row ||
-              row.isErased ||
-              (organizationId != null &&
-                row.organizationId !== organizationId &&
-                !isSuperAdmin);
-            if (lost) {
-              sseBus.revokeUser({ userId, organizationId });
-            }
-          } catch {
-            /* ignore */
-          }
-        })();
-      }, 60_000);
+      // Uma consulta por processo para todas as conexões (antes: uma por
+      // conexão por minuto). Perdeu o acesso → sseBus.revokeUser fecha.
+      unwatchMembership = watchSseMembership({ userId, organizationId, isSuperAdmin });
 
       unsubscribe = sseBus.subscribe(
         { organizationId, userId, isSuperAdmin },
@@ -137,7 +118,7 @@ export async function GET(request: Request) {
             return;
           }
           try {
-            const data = stripHiddenInboxSseCard(envelope.data, cardGate);
+            const data = stripHiddenInboxSseCard(envelope.data, cardGate, event);
             const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
             controller.enqueue(encoder.encode(payload));
           } catch {
