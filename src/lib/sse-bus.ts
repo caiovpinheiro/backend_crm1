@@ -361,6 +361,16 @@ export function startWhatsappOwnedSweepers() {
     .catch((e) =>
       console.error("[sse-bus] failed to start activity-alert push sweeper:", e),
     );
+
+  // Só lê activity_outbox de tabulação e grava activity_events.
+  // Não entra na fila de mídia/envio do worker-whatsapp.
+  import("@/services/activity-outbox")
+    .then(({ startTabulationOutboxProjector }) =>
+      startTabulationOutboxProjector(),
+    )
+    .catch((e) =>
+      console.error("[sse-bus] failed to start tabulation outbox projector:", e),
+    );
 }
 
 function startBackgroundSweepers() {
