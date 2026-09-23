@@ -25,6 +25,8 @@ export type V2ConversationStateRow = {
   entryConfirmationPending?: boolean;
   identificationAttempts: number;
   counters: Record<string, unknown>;
+  collectedVariables?: Record<string, unknown> | null;
+  updatedAt?: Date;
 };
 
 export async function getV2ConversationState(
@@ -56,6 +58,7 @@ export async function upsertV2ConversationState(args: {
   entryConfirmationPending?: boolean;
   identificationAttempts?: number;
   counters?: V2Counters;
+  collectedVariables?: Record<string, unknown>;
 }): Promise<V2ConversationStateRow> {
   const existing = await getV2ConversationState(args.conversationId);
   const data: Record<string, unknown> = {
@@ -71,6 +74,7 @@ export async function upsertV2ConversationState(args: {
     entryConfirmationPending: args.entryConfirmationPending !== undefined ? args.entryConfirmationPending : existing?.entryConfirmationPending ?? false,
     identificationAttempts: args.identificationAttempts ?? existing?.identificationAttempts ?? 0,
     counters: args.counters ? (args.counters as unknown as Record<string, unknown>) : existing?.counters ?? {},
+    collectedVariables: args.collectedVariables ?? existing?.collectedVariables ?? {},
   };
 
   if (existing) {
@@ -100,6 +104,45 @@ export async function upsertV2ConversationState(args: {
   return created;
 }
 
+/**
+ * Estado "encerrado" do ticket anterior do mesmo contato, ainda dentro da
+ * janela pós-encerramento. Encerrar (RESOLVED) faz a próxima mensagem do
+ * cliente abrir um ticket NOVO — sem herdar, a janela pós-encerramento
+ * (cortesia, nova demanda) nunca era vista: o "obrigado" virava um
+ * atendimento do zero, com boas-vindas e confirmação.
+ */
+export async function findInheritablePostCloseState(args: {
+  contactId: string;
+  conversationId: string;
+  agentId: string;
+  now?: Date;
+}): Promise<V2ConversationStateRow | null> {
+  const db = prisma as unknown as {
+    conversation: {
+      findMany: (args: unknown) => Promise<Array<{ id: string }>>;
+    };
+    aISimpleConversationState: {
+      findFirst: (args: unknown) => Promise<V2ConversationStateRow | null>;
+    };
+  };
+  const previous = await db.conversation.findMany({
+    where: { contactId: args.contactId, id: { not: args.conversationId }, status: "RESOLVED" },
+    orderBy: { updatedAt: "desc" },
+    take: 5,
+    select: { id: true },
+  });
+  if (previous.length === 0) return null;
+  return db.aISimpleConversationState.findFirst({
+    where: {
+      conversationId: { in: previous.map((c) => c.id) },
+      agentId: args.agentId,
+      stage: "closed",
+      postCloseWindowEndAt: { gt: args.now ?? new Date() },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
 export async function resetV2Counters(
   conversationId: string,
 ): Promise<void> {
@@ -125,11 +168,11 @@ export async function resetV2ConversationStateOwner(
     aISimpleConversationState: {
       updateMany: (args: {
         where: { conversationId: string };
-        data: { owner: string; stage: string; humanActive: boolean };
+        data: { owner: string; stage: string; humanActive: boolean; identificationAttempts: number };
       }) => Promise<{ count: number }>;
     };
   }).aISimpleConversationState.updateMany({
     where: { conversationId },
-    data: { owner: "agente", stage: "idle", humanActive: false },
+    data: { owner: "agente", stage: "idle", humanActive: false, identificationAttempts: 0 },
   });
 }

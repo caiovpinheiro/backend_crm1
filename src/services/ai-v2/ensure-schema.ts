@@ -27,10 +27,10 @@ export async function ensureV2AgentSchema(): Promise<void> {
   const columnResult = await db.$queryRawUnsafe<
     Array<{ exists: boolean }>
   >(
-    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_agent_configs' AND column_name = 'draft_config') AS exists`,
+    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_agent_configs' AND column_name = 'draftConfig') AS exists`,
   );
   const hasDraftColumn = columnResult[0]?.exists === true;
-  if (!hasDraftColumn) needs.push("draft_config column");
+  if (!hasDraftColumn) needs.push("draftConfig column");
 
   const tableResult = await db.$queryRawUnsafe<
     Array<{ exists: boolean }>
@@ -40,6 +40,14 @@ export async function ensureV2AgentSchema(): Promise<void> {
   const hasVersionsTable = tableResult[0]?.exists === true;
   if (!hasVersionsTable) needs.push("ai_agent_config_versions table");
 
+  const varsResult = await db.$queryRawUnsafe<
+    Array<{ exists: boolean }>
+  >(
+    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_simple_conversation_states' AND column_name = 'collectedVariables') AS exists`,
+  );
+  const hasVarsColumn = varsResult[0]?.exists === true;
+  if (!hasVarsColumn) needs.push("collectedVariables column");
+
   if (needs.length === 0) {
     checked = true;
     return;
@@ -47,21 +55,23 @@ export async function ensureV2AgentSchema(): Promise<void> {
 
   console.log("[ai-v2] schema guard: creating missing", needs.join(", "));
 
+  // Nomes iguais aos do schema.prisma (camelCase, sem @map). A versão
+  // anterior criava "draft_config"/"version_number", que o Prisma não lê.
   await (prismaBase as any).$executeRawUnsafe(
-    `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "draft_config" JSONB`,
+    `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "draftConfig" JSONB`,
   );
   await (prismaBase as any).$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "ai_agent_config_versions" (
       "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
       "organizationId" TEXT NOT NULL,
       "agentId" TEXT NOT NULL,
-      "version_number" INTEGER NOT NULL,
+      "versionNumber" INTEGER NOT NULL,
       "config" JSONB NOT NULL,
       "comment" TEXT,
-      "created_by_id" TEXT,
+      "createdById" TEXT,
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
       "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE ("agentId", "version_number")
+      UNIQUE ("agentId", "versionNumber")
     )
   `);
   await (prismaBase as any).$executeRawUnsafe(
@@ -69,6 +79,9 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   await (prismaBase as any).$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS idx_aiconfigversions_agent_created ON "ai_agent_config_versions"("agentId", "createdAt")`,
+  );
+  await (prismaBase as any).$executeRawUnsafe(
+    `ALTER TABLE "ai_simple_conversation_states" ADD COLUMN IF NOT EXISTS "collectedVariables" JSONB NOT NULL DEFAULT '{}'`,
   );
 
   checked = true;

@@ -5353,6 +5353,9 @@ model AISimpleConversationState {
   entryConfirmationPending Boolean       @default(false)
   identificationAttempts   Int           @default(0)
   counters                 Json          @default("{}")
+  /// Variáveis coletadas pelo agente (`collected`, `set_variable`) e estado
+  /// do onboarding. Persistem entre turnos da mesma conversa.
+  collectedVariables       Json          @default("{}")
   createdAt                DateTime      @default(now())
   updatedAt                DateTime      @updatedAt
 
