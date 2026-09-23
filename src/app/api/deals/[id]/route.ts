@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { canEditFieldForUser, requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
@@ -30,12 +31,23 @@ export async function GET(request: Request, context: RouteContext) {
     }
     const stageDenied = await requireStageScope(authResult.user, "view", deal.stage.id);
     if (stageDenied) return stageDenied;
+    const pipelineId = deal.stage.pipeline?.id ?? "";
     const pipelineDenied = await requirePipelineScope(
       authResult.user,
       "view",
-      (deal.stage as { pipelineId?: string }).pipelineId ?? "",
+      pipelineId,
     );
-    if (pipelineDenied && (deal.stage as { pipelineId?: string }).pipelineId) return pipelineDenied;
+    if (pipelineDenied && pipelineId) return pipelineDenied;
+    const authz = await loadAuthzContext({
+      userId: authResult.user.id,
+      organizationId: authResult.user.organizationId,
+      isSuperAdmin: authResult.user.isSuperAdmin,
+    });
+    if (deal.stage.pipeline?.stages) {
+      deal.stage.pipeline.stages = deal.stage.pipeline.stages.filter((s) =>
+        canViewStage(authz, s.id),
+      );
+    }
 
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);

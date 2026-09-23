@@ -71,14 +71,20 @@ export type ScopeLevel = "NONE" | "SELF" | "TEAM" | "ALL";
  * `rbac_granular_scope_v1`.
  *
  * Semantica:
- *   - stageView/stageEdit: `null` = sem restricao (ve/edita todas as etapas).
- *     Conjunto = allow-list (uniao entre papeis; mais permissivo vence).
+ *   - stageView: `null` = sem allow-list. Conjunto = allow-list legado
+ *     (uniao entre papeis; mais permissivo vence).
+ *   - stageDeny / pipelineDeny: bloqueios explicitos. Um id so fica
+ *     bloqueado se TODOS os papeis do usuario o negam. Vazio = sem bloqueio.
+ *     ADMIN ignora os dois. Sem linhas no papel = sem restricao.
+ *   - stageEdit: `null` = sem restricao de edicao. Conjunto = allow-list.
  *   - fieldDenyView/fieldDenyEdit: mascaramento por "entity.fieldKey".
  *     Deny vence: campo negado por QUALQUER papel fica oculto/somente-leitura.
  *   - sharedInbox/mediaAccess: OR entre papeis (default permissivo).
  */
 export interface RoleGrantContext {
   stageView: ReadonlySet<string> | null;
+  stageDeny: ReadonlySet<string>;
+  pipelineDeny: ReadonlySet<string>;
   stageEdit: ReadonlySet<string> | null;
   fieldDenyView: ReadonlySet<string>;
   fieldDenyEdit: ReadonlySet<string>;
@@ -102,6 +108,8 @@ interface CachedAuthzPayload {
   isAdmin: boolean;
   permissions: string[];
   stageView: string[] | null;
+  stageDeny: string[];
+  pipelineDeny: string[];
   stageEdit: string[] | null;
   fieldDenyView: string[];
   fieldDenyEdit: string[];
@@ -112,6 +120,8 @@ interface CachedAuthzPayload {
 /** Contexto de grants vazio/permissivo (super-admin, sem org, etc.). */
 const PERMISSIVE_GRANTS: RoleGrantContext = {
   stageView: null,
+  stageDeny: new Set(),
+  pipelineDeny: new Set(),
   stageEdit: null,
   fieldDenyView: new Set(),
   fieldDenyEdit: new Set(),
@@ -124,7 +134,7 @@ const PERMISSIVE_GRANTS: RoleGrantContext = {
 // ──────────────────────────────────────────────
 
 function cacheKey(organizationId: string, userId: string): string {
-  return `authz:${organizationId}:user:${userId}`;
+  return `authz:v2:${organizationId}:user:${userId}`;
 }
 
 /**
@@ -182,6 +192,98 @@ async function applyLegacyRoleFallback(
   return { permissions: merged, isAdmin };
 }
 
+type StageGrantRow = { stageId: string; canView: boolean; canEdit: boolean };
+type PipelineGrantRow = { pipelineId: string; canView: boolean };
+
+type StagePolicy =
+  | { mode: "all" }
+  | { mode: "allow"; view: Set<string>; edit: Set<string> }
+  | { mode: "deny"; deny: Set<string>; edit: Set<string> | null };
+
+type PipelinePolicy = { mode: "all" } | { mode: "deny"; ids: Set<string> };
+
+/** Sem linhas = vê tudo. Deny explícito (view e edit falsos) esconde a etapa.
+ *  Só grants positivos = allow-list legado. */
+function stagePolicyFromGrants(grants: StageGrantRow[] | null | undefined): StagePolicy {
+  if (!grants || grants.length === 0) return { mode: "all" };
+  const denyIds = grants.filter((g) => !g.canView && !g.canEdit).map((g) => g.stageId);
+  const editIds = grants.filter((g) => g.canEdit).map((g) => g.stageId);
+  if (denyIds.length > 0) {
+    return {
+      mode: "deny",
+      deny: new Set(denyIds),
+      edit: editIds.length > 0 ? new Set(editIds) : null,
+    };
+  }
+  const view = new Set<string>();
+  const edit = new Set<string>();
+  for (const g of grants) {
+    if (g.canView || g.canEdit) view.add(g.stageId);
+    if (g.canEdit) edit.add(g.stageId);
+  }
+  if (view.size === 0) return { mode: "all" };
+  return { mode: "allow", view, edit };
+}
+
+function pipelinePolicyFromGrants(
+  grants: PipelineGrantRow[] | null | undefined,
+): PipelinePolicy {
+  if (!grants || grants.length === 0) return { mode: "all" };
+  const ids = grants.filter((g) => !g.canView).map((g) => g.pipelineId);
+  if (ids.length === 0) return { mode: "all" };
+  return { mode: "deny", ids: new Set(ids) };
+}
+
+function unionStagePolicies(policies: StagePolicy[]): {
+  stageView: string[] | null;
+  stageDeny: string[];
+  stageEdit: string[] | null;
+} {
+  if (policies.length === 0 || policies.some((p) => p.mode === "all")) {
+    return { stageView: null, stageDeny: [], stageEdit: null };
+  }
+  const denies = policies.filter((p): p is Extract<StagePolicy, { mode: "deny" }> => p.mode === "deny");
+  const allows = policies.filter((p): p is Extract<StagePolicy, { mode: "allow" }> => p.mode === "allow");
+
+  let stageDeny: string[] = [];
+  let stageView: string[] | null = null;
+  if (denies.length > 0) {
+    let hidden = new Set(denies[0]!.deny);
+    for (const d of denies.slice(1)) {
+      hidden = new Set([...hidden].filter((id) => d.deny.has(id)));
+    }
+    for (const a of allows) {
+      for (const id of a.view) hidden.delete(id);
+    }
+    stageDeny = [...hidden];
+  } else {
+    const view = new Set<string>();
+    for (const a of allows) for (const id of a.view) view.add(id);
+    stageView = [...view];
+  }
+
+  const editSets: Array<Set<string> | null> = policies.map((p) =>
+    p.mode === "allow" ? p.edit : p.mode === "deny" ? p.edit : null,
+  );
+  if (editSets.some((s) => s === null)) {
+    return { stageView, stageDeny, stageEdit: null };
+  }
+  const edit = new Set<string>();
+  for (const s of editSets) for (const id of s!) edit.add(id);
+  return { stageView, stageDeny, stageEdit: [...edit] };
+}
+
+function unionPipelinePolicies(policies: PipelinePolicy[]): string[] {
+  if (policies.length === 0 || policies.some((p) => p.mode === "all")) return [];
+  const denies = policies.filter((p): p is Extract<PipelinePolicy, { mode: "deny" }> => p.mode === "deny");
+  if (denies.length === 0) return [];
+  let hidden = new Set(denies[0]!.ids);
+  for (const d of denies.slice(1)) {
+    hidden = new Set([...hidden].filter((id) => d.ids.has(id)));
+  }
+  return [...hidden];
+}
+
 async function loadFromDb(
   userId: string,
   organizationId: string,
@@ -196,6 +298,7 @@ async function loadFromDb(
           sharedInbox: true,
           mediaAccess: true,
           stageGrants: { select: { stageId: true, canView: true, canEdit: true } },
+          pipelineGrants: { select: { pipelineId: true, canView: true } },
           fieldGrants: {
             select: { entity: true, fieldKey: true, canView: true, canEdit: true },
           },
@@ -209,9 +312,8 @@ async function loadFromDb(
 
   // Grants por papel (uniao). Ver `RoleGrantContext` para a semantica.
   let sawAnyRole = false;
-  let anyRoleUnrestrictedStage = false;
-  const stageViewSet = new Set<string>();
-  const stageEditSet = new Set<string>();
+  const stagePolicies: StagePolicy[] = [];
+  const pipelinePolicies: PipelinePolicy[] = [];
   const fieldDenyView = new Set<string>();
   const fieldDenyEdit = new Set<string>();
   let sharedInbox = false;
@@ -228,15 +330,8 @@ async function loadFromDb(
     if (a.role.sharedInbox) sharedInbox = true;
     if (a.role.mediaAccess) mediaAccess = true;
 
-    // Etapas: papel sem NENHUM grant = irrestrito (ve todas). Editar implica ver.
-    if (!a.role.stageGrants || a.role.stageGrants.length === 0) {
-      anyRoleUnrestrictedStage = true;
-    } else {
-      for (const g of a.role.stageGrants) {
-        if (g.canView || g.canEdit) stageViewSet.add(g.stageId);
-        if (g.canEdit) stageEditSet.add(g.stageId);
-      }
-    }
+    stagePolicies.push(stagePolicyFromGrants(a.role.stageGrants));
+    pipelinePolicies.push(pipelinePolicyFromGrants(a.role.pipelineGrants));
 
     // Campos: deny vence. canView=false oculta (e portanto tambem impede editar).
     for (const g of a.role.fieldGrants ?? []) {
@@ -249,6 +344,11 @@ async function loadFromDb(
     }
   }
 
+  const stageResolved = sawAnyRole
+    ? unionStagePolicies(stagePolicies)
+    : { stageView: null, stageDeny: [] as string[], stageEdit: null };
+  const pipelineDeny = sawAnyRole ? unionPipelinePolicies(pipelinePolicies) : [];
+
   const fallback = await applyLegacyRoleFallback(
     userId,
     organizationId,
@@ -260,8 +360,10 @@ async function loadFromDb(
     organizationId,
     isAdmin: fallback.isAdmin,
     permissions: Array.from(fallback.permissions),
-    stageView: anyRoleUnrestrictedStage ? null : Array.from(stageViewSet),
-    stageEdit: anyRoleUnrestrictedStage ? null : Array.from(stageEditSet),
+    stageView: stageResolved.stageView,
+    stageDeny: stageResolved.stageDeny,
+    pipelineDeny,
+    stageEdit: stageResolved.stageEdit,
     fieldDenyView: Array.from(fieldDenyView),
     fieldDenyEdit: Array.from(fieldDenyEdit),
     // Sem papeis atribuidos → permissivo (fallback legado cuida das permissions).
@@ -325,6 +427,8 @@ export async function loadAuthzContext(input: {
     isAdmin: payload.isAdmin,
     permissions: new Set(payload.permissions),
     stageView: payload.stageView ? new Set(payload.stageView) : null,
+    stageDeny: new Set(payload.stageDeny ?? []),
+    pipelineDeny: new Set(payload.pipelineDeny ?? []),
     stageEdit: payload.stageEdit ? new Set(payload.stageEdit) : null,
     fieldDenyView: new Set(payload.fieldDenyView ?? []),
     fieldDenyEdit: new Set(payload.fieldDenyEdit ?? []),
@@ -337,15 +441,24 @@ export async function loadAuthzContext(input: {
 // Grants por papel (etapa/campo/extras) — enforcement de visibilidade
 // ──────────────────────────────────────────────
 
-/** Pode VER a etapa? `null` no contexto = sem restrição. ADMIN bypassa. */
+/** Pode VER a etapa? ADMIN bypassa. Deny explicito vence; allow-list legado restringe. */
 export function canViewStage(ctx: AuthzContext, stageId: string): boolean {
   if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  if (ctx.stageDeny?.has(stageId)) return false;
   if (ctx.stageView === null) return true;
   return ctx.stageView.has(stageId);
 }
 
-/** Pode EDITAR/MOVER a etapa? `null` = sem restrição. ADMIN bypassa. */
+/** Pode VER o funil? ADMIN bypassa. Sem deny = todos. */
+export function canViewPipeline(ctx: AuthzContext, pipelineId: string): boolean {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  if (!ctx.pipelineDeny || ctx.pipelineDeny.size === 0) return true;
+  return !ctx.pipelineDeny.has(pipelineId);
+}
+
+/** Pode EDITAR/MOVER a etapa? Etapa invisível não é editável. ADMIN bypassa. */
 export function canEditStage(ctx: AuthzContext, stageId: string): boolean {
+  if (!canViewStage(ctx, stageId)) return false;
   if (ctx.isSuperAdmin || ctx.isAdmin) return true;
   if (ctx.stageEdit === null) return true;
   return ctx.stageEdit.has(stageId);
@@ -491,7 +604,7 @@ export async function invalidateAuthzForUser(
  * multi-org no mesmo Redis, users de OUTRAS orgs nao sao afetados.
  */
 export async function invalidateAuthzForOrg(organizationId: string): Promise<void> {
-  await cache.delPattern(`authz:${organizationId}:user:*`);
+  await cache.delPattern(`authz:v2:${organizationId}:user:*`);
 }
 
 /**

@@ -5,6 +5,12 @@
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { can, checkPermission, loadAuthzContext } from "@/lib/authz";
+import {
+  andConversationWhere,
+  andDealWhere,
+  conversationFunnelWhere,
+  funnelDealWhere,
+} from "@/lib/authz/funnel-visibility";
 import { userHasConversationAccess } from "@/lib/conversation-access";
 import {
   hrefForAnchor,
@@ -350,11 +356,14 @@ export async function searchCrmRecords(
     organizationId: user.organizationId,
     isSuperAdmin: user.isSuperAdmin,
   };
-  const [canDeal, canConv, canContact] = await Promise.all([
+  const [canDeal, canConv, canContact, authz] = await Promise.all([
     checkPermission(authzUser, "deal:view"),
     checkPermission(authzUser, "conversation:view"),
     checkPermission(authzUser, "contact:view"),
+    loadAuthzContext(authzUser),
   ]);
+  const dealFunnel = funnelDealWhere(authz);
+  const convFunnel = conversationFunnelWhere(authz);
 
   const hits: RecordSearchHit[] = [];
 
@@ -362,7 +371,7 @@ export async function searchCrmRecords(
     const deals = await prisma.deal.findMany({
       where: {
         AND: [
-          vis.dealWhere,
+          andDealWhere(vis.dealWhere, dealFunnel) ?? {},
           !term
             ? {}
             : numeric != null
@@ -390,7 +399,7 @@ export async function searchCrmRecords(
     const convs = await prisma.conversation.findMany({
       where: {
         AND: [
-          vis.conversationWhere,
+          andConversationWhere(vis.conversationWhere, convFunnel) ?? {},
           !term
             ? {}
             : numeric != null

@@ -1001,9 +1001,10 @@ model Role {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  assignments UserRoleAssignment[]
-  stageGrants RoleStageGrant[]
-  fieldGrants RoleFieldGrant[]
+  assignments    UserRoleAssignment[]
+  stageGrants    RoleStageGrant[]
+  pipelineGrants RolePipelineGrant[]
+  fieldGrants    RoleFieldGrant[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, systemPreset])
@@ -1012,9 +1013,11 @@ model Role {
   @@map("roles")
 }
 
-/// Visibilidade por etapa do funil para um PAPEL (ver/editar deals do stage).
-/// Efetivo do user = uniao entre papeis (mais permissivo vence). Ausencia de
-/// QUALQUER linha para um papel = papel sem restricao de etapa (ve todas).
+/// Visibilidade por etapa do funil para um PAPEL.
+/// Efetivo do user = uniao entre papeis (mais permissivo vence).
+/// Ausencia de linhas = sem restricao (ve todas). Linha com canView=false
+/// e canEdit=false = bloqueio explicito (deny). So linhas positivas
+/// (canView/canEdit) = allow-list legado.
 model RoleStageGrant {
   id             String  @id @default(cuid())
   organizationId String
@@ -1028,6 +1031,23 @@ model RoleStageGrant {
   @@index([organizationId])
   @@index([roleId])
   @@map("role_stage_grants")
+}
+
+/// Visibilidade de um funil inteiro para um PAPEL. So persiste bloqueio
+/// (`canView=false`). Sem linhas = o papel ve todos os funis. Efetivo do
+/// user = uniao (um funil some so se todos os papeis o bloqueiam).
+model RolePipelineGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  roleId         String
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  pipelineId     String
+  canView        Boolean @default(false)
+
+  @@unique([roleId, pipelineId])
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("role_pipeline_grants")
 }
 
 /// Permissao por campo (Pro) de um PAPEL. `entity` = "deal"|"contact"|

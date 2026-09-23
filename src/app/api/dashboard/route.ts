@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { loadAuthzContext } from "@/lib/authz";
+import { funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { prisma } from "@/lib/prisma";
 import {
   getDashboard,
@@ -120,8 +122,21 @@ function emptyDashboard(pipelineId: string): DashboardResult {
 }
 
 export async function GET(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     try {
+      const authz = await loadAuthzContext({
+        userId: session.user.id,
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+      });
+      const funnel = funnelScopeOf(authz);
+      const funnelFilters = funnel
+        ? {
+            excludePipelineIds: funnel.denyPipelineIds,
+            excludeStageIds: funnel.denyStageIds,
+            allowStageIds: funnel.allowStageIds ?? undefined,
+          }
+        : {};
       const { searchParams } = new URL(request.url);
       const { from, to } = computeRange(
         searchParams.get("period"),
@@ -144,6 +159,7 @@ export async function GET(request: Request) {
           tagIds: csv(searchParams.get("tags")),
           ownerIds: csv(searchParams.get("owners")),
           sources: csv(searchParams.get("sources")),
+          ...funnelFilters,
         });
         return NextResponse.json(data);
       }
@@ -171,6 +187,9 @@ export async function GET(request: Request) {
       if (!pipelineId) {
         return NextResponse.json(emptyDashboard(""));
       }
+      if (funnel?.denyPipelineIds.includes(pipelineId)) {
+        return NextResponse.json(emptyDashboard(pipelineId));
+      }
 
       const data = await getDashboard({
         from,
@@ -180,6 +199,7 @@ export async function GET(request: Request) {
         tagIds: csv(searchParams.get("tags")),
         ownerIds: csv(searchParams.get("owners")),
         sources: csv(searchParams.get("sources")),
+        ...funnelFilters,
       });
 
       return NextResponse.json(data);

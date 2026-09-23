@@ -18,6 +18,10 @@ export type RoleStageGrantInput = {
   canView: boolean;
   canEdit: boolean;
 };
+export type RolePipelineGrantInput = {
+  pipelineId: string;
+  canView: boolean;
+};
 export type RoleFieldGrantInput = {
   entity: string;
   fieldKey: string;
@@ -53,12 +57,18 @@ const roleDetailSelect = {
   stageGrants: {
     select: { stageId: true, canView: true, canEdit: true },
   },
+  pipelineGrants: {
+    select: { pipelineId: true, canView: true },
+  },
   fieldGrants: {
     select: { entity: true, fieldKey: true, canView: true, canEdit: true },
   },
 } satisfies Prisma.RoleSelect;
 
-/** Filtra grants de etapa: mantem só os que concedem algo (view ou edit). */
+/**
+ * Mantém allow (view/edit) e bloqueio explícito (view e edit falsos).
+ * Editar implica ver. Array vazio = papel sem restrição de etapa.
+ */
 function sanitizeStageGrants(
   input: RoleStageGrantInput[] | undefined | null,
 ): RoleStageGrantInput[] {
@@ -67,15 +77,25 @@ function sanitizeStageGrants(
   for (const g of input) {
     const stageId = g.stageId?.trim();
     if (!stageId) continue;
-    if (!g.canView && !g.canEdit) continue;
-    byStage.set(stageId, {
-      stageId,
-      canView: !!g.canView,
-      // editar implica ver.
-      canEdit: !!g.canEdit,
-    });
+    const canEdit = !!g.canEdit;
+    const canView = canEdit ? true : !!g.canView;
+    byStage.set(stageId, { stageId, canView, canEdit });
   }
   return Array.from(byStage.values());
+}
+
+/** Só persiste bloqueio de funil. `canView: true` é o default e não vira linha. */
+function sanitizePipelineGrants(
+  input: RolePipelineGrantInput[] | undefined | null,
+): RolePipelineGrantInput[] {
+  if (!input) return [];
+  const byPipeline = new Map<string, RolePipelineGrantInput>();
+  for (const g of input) {
+    const pipelineId = g.pipelineId?.trim();
+    if (!pipelineId || g.canView) continue;
+    byPipeline.set(pipelineId, { pipelineId, canView: false });
+  }
+  return Array.from(byPipeline.values());
 }
 
 /** Filtra grants de campo: mantem só regras que restringem algo. */
@@ -145,6 +165,10 @@ function mapRoleDetail(
       canView: g.canView,
       canEdit: g.canEdit,
     })),
+    pipelineGrants: row.pipelineGrants.map((g) => ({
+      pipelineId: g.pipelineId,
+      canView: g.canView,
+    })),
     fieldGrants: row.fieldGrants.map((g) => ({
       entity: g.entity,
       fieldKey: g.fieldKey,
@@ -213,6 +237,7 @@ export async function createRole(input: {
   sharedInbox?: boolean;
   mediaAccess?: boolean;
   stageGrants?: RoleStageGrantInput[] | null;
+  pipelineGrants?: RolePipelineGrantInput[] | null;
   fieldGrants?: RoleFieldGrantInput[] | null;
 }) {
   const orgId = getOrgIdOrThrow();
@@ -222,6 +247,7 @@ export async function createRole(input: {
   const permissions = sanitizePermissions(input.permissions);
   const inheritsFrom = await resolveInheritsFrom(orgId, input.inheritsFrom);
   const stageGrants = sanitizeStageGrants(input.stageGrants);
+  const pipelineGrants = sanitizePipelineGrants(input.pipelineGrants);
   const fieldGrants = sanitizeFieldGrants(input.fieldGrants);
 
   // sidebarItems: undefined => nao salva override (usa catalogo padrao).
@@ -252,6 +278,9 @@ export async function createRole(input: {
       stageGrants: {
         create: stageGrants.map((g) => ({ organizationId: orgId, ...g })),
       },
+      pipelineGrants: {
+        create: pipelineGrants.map((g) => ({ organizationId: orgId, ...g })),
+      },
       fieldGrants: {
         create: fieldGrants.map((g) => ({ organizationId: orgId, ...g })),
       },
@@ -272,6 +301,7 @@ export async function updateRole(
     sharedInbox?: boolean;
     mediaAccess?: boolean;
     stageGrants?: RoleStageGrantInput[] | null;
+    pipelineGrants?: RolePipelineGrantInput[] | null;
     fieldGrants?: RoleFieldGrantInput[] | null;
   },
 ) {
@@ -333,6 +363,13 @@ export async function updateRole(
   if (input.stageGrants !== undefined) {
     const grants = sanitizeStageGrants(input.stageGrants);
     data.stageGrants = {
+      deleteMany: {},
+      create: grants.map((g) => ({ organizationId: orgId, ...g })),
+    };
+  }
+  if (input.pipelineGrants !== undefined) {
+    const grants = sanitizePipelineGrants(input.pipelineGrants);
+    data.pipelineGrants = {
       deleteMany: {},
       create: grants.map((g) => ({ organizationId: orgId, ...g })),
     };
