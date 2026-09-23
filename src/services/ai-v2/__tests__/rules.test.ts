@@ -106,3 +106,40 @@ describe("evaluateV2Rules conditions", () => {
     expect(matched?.id).toBe("r1");
   });
 });
+
+describe("evaluateV2Rules — palavras-chave", () => {
+  const cfg = {
+    rules: [
+      {
+        id: "human_request",
+        name: "Pedido de humano",
+        order: 0,
+        conditions: [{ type: "keywords", values: ["humano", "pessoa", "atendente", "consultor", "falar com alguém"] }],
+        actions: [{ type: "handoff" }],
+      },
+    ],
+  } as any;
+  const match = (m: string) =>
+    evaluateV2Rules(cfg, { userMessage: m, isFirstMessage: false, withinBusinessHours: true } as any, {} as any)?.id ?? null;
+
+  it("mensagens comuns com artigos/palavras curtas não disparam", () => {
+    for (const m of [
+      "minha empresa está pedindo uma declaração que me matriculei",
+      "Comecei no emprego agora e preciso da declaração de matrícula",
+      "Tenho uma dp pra fazer",
+      "e o Duda?",
+      "tem o passo a passo?",
+      "quero fazer uma consulta",
+    ]) {
+      expect(match(m), m).toBeNull();
+    }
+  });
+
+  it("pedido de humano continua disparando (com plural, acento e frase)", () => {
+    expect(match("quero falar com um atendente")).toBe("human_request");
+    expect(match("tem algum HUMANO aí?")).toBe("human_request");
+    expect(match("chama os atendentes")).toBe("human_request");
+    expect(match("preciso falar com alguém")).toBe("human_request");
+  });
+});
+

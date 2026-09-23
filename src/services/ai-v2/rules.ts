@@ -57,14 +57,25 @@ function normalize(s: string): string {
     .replace(/[^a-z0-9]/g, " ");
 }
 
+/**
+ * Palavra-chave casa com a palavra inteira ou com ela + até 3 letras no fim
+ * (plural/gênero: "atendentes", "humanos"). Frase casa com a sequência de
+ * palavras.
+ *
+ * Antes também valia "a palavra do cliente está DENTRO da palavra-chave":
+ * "uma" ⊂ "hUMAno", "e"/"o" ⊂ "atendente"/"humano". Qualquer mensagem com
+ * artigo disparava a regra "Pedido de humano" — o turno virava handoff sem
+ * chamar o LLM e o cliente ficava sem resposta.
+ */
 function containsKeywords(text: string, keywords: string[]): boolean {
-  const nt = normalize(text);
-  const words = nt.split(/\s+/).filter(Boolean);
+  const words = normalize(text).split(/\s+/).filter(Boolean);
+  const joined = ` ${words.join(" ")} `;
   return keywords.some((kw) => {
-    const nk = normalize(kw);
-    if (!nk) return false;
-    // Palavra exata ou substring de uma palavra? Usamos substring dentro de tokens.
-    return words.some((w) => w.includes(nk) || nk.includes(w));
+    const kwWords = normalize(kw).split(/\s+/).filter(Boolean);
+    if (kwWords.length === 0) return false;
+    if (kwWords.length > 1) return joined.includes(` ${kwWords.join(" ")} `);
+    const nk = kwWords[0];
+    return words.some((w) => w === nk || (w.startsWith(nk) && w.length - nk.length <= 3));
   });
 }
 
