@@ -103,7 +103,7 @@ export type PainelFunnel = {
   tooltip: string;
   stages: PainelFunnelStage[];
   empty: boolean;
-  /** Contatos criados no período do filtro, na org (WhatsApp, manual, importação). */
+  /** Negócios criados no período do filtro, na org (WhatsApp, manual, importação). */
   novos: { count: number; value: number };
 };
 
@@ -644,21 +644,19 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   });
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
-  // Período do filtro, org inteira. createdAt cobre WhatsApp, manual e importação.
-  const createdInRange = {
-    organizationId: orgId,
-    createdAt: { gte: f.range.from, lte: f.range.to },
-  };
-  const [createdCount, createdValue] = await Promise.all([
-    db().contact.count({ where: createdInRange }),
-    db().deal.aggregate({
-      where: { organizationId: orgId, contact: { is: createdInRange } },
-      _sum: { value: true },
-    }),
-  ]);
+  // O que pingou de novo: negócio criado no período, na org inteira.
+  // Contato antigo com deal novo (WhatsApp, manual, importação) também entra.
+  const createdAgg = await db().deal.aggregate({
+    where: {
+      organizationId: orgId,
+      createdAt: { gte: f.range.from, lte: f.range.to },
+    },
+    _count: { _all: true },
+    _sum: { value: true },
+  });
   const novos = {
-    count: createdCount,
-    value: round2(toNumber(createdValue._sum.value)),
+    count: createdAgg._count._all,
+    value: round2(toNumber(createdAgg._sum.value)),
   };
 
   return {
