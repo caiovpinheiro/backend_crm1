@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { canViewStage, loadAuthzContext } from "@/lib/authz";
+import { funnelDealWhere, andDealWhere } from "@/lib/authz/funnel-visibility";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
@@ -85,6 +87,11 @@ export async function GET(request: Request, context: RouteContext) {
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const url = new URL(request.url);
       const view = url.searchParams.get("view");
+      const authz = await loadAuthzContext({
+        userId: session.user.id,
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+      });
 
       // Meta + scope + (visibility só se for board completo) em paralelo —
       // antes eram awaits em série somando round-trips.
@@ -102,7 +109,9 @@ export async function GET(request: Request, context: RouteContext) {
       if (scopeDenied) return scopeDenied;
 
       if (view === "stages") {
-        const stages = await getBoardStagesOnly(pipelineId);
+        const stages = (await getBoardStagesOnly(pipelineId)).filter((s) =>
+          canViewStage(authz, s.id),
+        );
         return NextResponse.json(stages);
       }
 
@@ -117,12 +126,18 @@ export async function GET(request: Request, context: RouteContext) {
       const sortField = parseBoardSortField(url.searchParams.get("sort"));
       const sortDirection = parseBoardSortDirection(url.searchParams.get("direction"));
 
-      const board = await getBoardData(pipelineId, visibility!.dealWhere, statusFilter, undefined, {
-        perStage,
-        sortField,
-        sortDirection,
-      });
-      return NextResponse.json(board);
+      const board = await getBoardData(
+        pipelineId,
+        andDealWhere(visibility!.dealWhere, funnelDealWhere(authz)),
+        statusFilter,
+        undefined,
+        {
+          perStage,
+          sortField,
+          sortDirection,
+        },
+      );
+      return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
       console.error("[board GET] erro ao carregar quadro:", e);
       const message =
@@ -154,6 +169,11 @@ export async function POST(request: Request, context: RouteContext) {
       const pipelineId = resolved?.id ?? rawRef;
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+      const authz = await loadAuthzContext({
+        userId: session.user.id,
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+      });
 
       const [meta, scopeDenied, visibility] = await Promise.all([
         resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
@@ -198,12 +218,12 @@ export async function POST(request: Request, context: RouteContext) {
       };
       const board = await getBoardData(
         pipelineId,
-        visibility.dealWhere,
+        andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
         statusFilter,
         filters,
         limitOptions,
       );
-      return NextResponse.json(board);
+      return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
       console.error("[board POST] erro ao carregar quadro com filtros:", e);
       const message =

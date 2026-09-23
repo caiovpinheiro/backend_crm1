@@ -61,6 +61,12 @@ export interface DashboardFilters {
   ownerIds?: string[];
   /** Pode incluir `SOURCE_NONE` para "Sem origem". */
   sources?: string[];
+  /** Funis que o papel não pode ver. */
+  excludePipelineIds?: string[];
+  /** Etapas que o papel não pode ver. */
+  excludeStageIds?: string[];
+  /** Allow-list legado de etapas. Quando definido, só essas entram. */
+  allowStageIds?: string[];
 }
 
 export interface DashboardSummary {
@@ -260,6 +266,15 @@ function buildDealScopeSql(f: DashboardFilters, orgId: string): Prisma.Sql {
   if (f.stageIds && f.stageIds.length > 0) {
     parts.push(Prisma.sql`d."stageId" IN (${Prisma.join(f.stageIds)})`);
   }
+  if (f.excludePipelineIds && f.excludePipelineIds.length > 0) {
+    parts.push(Prisma.sql`s."pipelineId" NOT IN (${Prisma.join(f.excludePipelineIds)})`);
+  }
+  if (f.excludeStageIds && f.excludeStageIds.length > 0) {
+    parts.push(Prisma.sql`d."stageId" NOT IN (${Prisma.join(f.excludeStageIds)})`);
+  }
+  if (f.allowStageIds && f.allowStageIds.length > 0) {
+    parts.push(Prisma.sql`d."stageId" IN (${Prisma.join(f.allowStageIds)})`);
+  }
   const owners = (f.ownerIds ?? []).filter((id): id is string => !!id);
   if (owners.length > 0) {
     parts.push(Prisma.sql`d."ownerId" IN (${Prisma.join(owners)})`);
@@ -355,6 +370,15 @@ async function buildStructuralWhere(
   const conditions = await buildDealWhereFromFilters(adv);
   const sourceCond = buildDealSourceCondition(f.sources);
   if (sourceCond) conditions.push(sourceCond);
+  if (f.excludePipelineIds && f.excludePipelineIds.length > 0) {
+    conditions.push({ stage: { is: { pipelineId: { notIn: f.excludePipelineIds } } } });
+  }
+  if (f.excludeStageIds && f.excludeStageIds.length > 0) {
+    conditions.push({ stageId: { notIn: f.excludeStageIds } });
+  }
+  if (f.allowStageIds && f.allowStageIds.length > 0) {
+    conditions.push({ stageId: { in: f.allowStageIds } });
+  }
   return conditions;
 }
 
@@ -432,9 +456,22 @@ export async function getDashboard(
     stalledAgg,
   ] = await Promise.all([
     prisma.stage.findMany({
-      where: f.pipelineId
-        ? { pipelineId: f.pipelineId }
-        : { pipeline: { archivedAt: null } },
+      where: {
+        AND: [
+          f.pipelineId
+            ? { pipelineId: f.pipelineId }
+            : { pipeline: { archivedAt: null } },
+          ...(f.excludePipelineIds && f.excludePipelineIds.length > 0
+            ? [{ pipelineId: { notIn: f.excludePipelineIds } }]
+            : []),
+          ...(f.excludeStageIds && f.excludeStageIds.length > 0
+            ? [{ id: { notIn: f.excludeStageIds } }]
+            : []),
+          ...(f.allowStageIds && f.allowStageIds.length > 0
+            ? [{ id: { in: f.allowStageIds } }]
+            : []),
+        ],
+      },
       orderBy: f.pipelineId
         ? { position: "asc" }
         : [{ pipeline: { createdAt: "asc" } }, { position: "asc" }],

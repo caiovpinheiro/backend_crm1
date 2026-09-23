@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { loadAuthzContext } from "@/lib/authz";
+import { conversationFunnelWhere } from "@/lib/authz/funnel-visibility";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -46,19 +47,29 @@ export async function userHasConversationAccess(
   });
   if (!conv) return false;
 
+  const orgIdForFunnel = user.organizationId ?? getOrgIdOrThrow();
+  const authzEarly = await loadAuthzContext({
+    userId: user.id,
+    organizationId: orgIdForFunnel,
+    isSuperAdmin: Boolean(user.isSuperAdmin),
+  });
+  const funnelWhere = conversationFunnelWhere(authzEarly);
+  if (funnelWhere) {
+    const visible = await prisma.conversation.count({
+      where: { AND: [{ id: conversationId }, funnelWhere] },
+    });
+    if (visible === 0) return false;
+  }
+
   // Quem está atribuído precisa responder — mesmo se o recorte de canal
   // / fila compartilhada da listagem estiver mais estreito que o GET :id.
+  // Funil/etapa bloqueados continuam inacessíveis mesmo para o responsável.
   if (conv.assignedToId === user.id) return true;
 
   const { conversationWhere, includeUnassigned } = await getVisibilityFilter(user);
   let where = conversationWhere;
   try {
-    const orgId = user.organizationId ?? getOrgIdOrThrow();
-    const authz = await loadAuthzContext({
-      userId: user.id,
-      organizationId: orgId,
-      isSuperAdmin: Boolean(user.isSuperAdmin),
-    });
+    const authz = authzEarly;
     const perms: ReadonlySet<string> =
       authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
     where = withInboxQueueVisibility(conversationWhere, {

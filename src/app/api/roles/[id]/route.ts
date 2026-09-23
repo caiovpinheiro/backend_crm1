@@ -19,6 +19,11 @@ const stageGrantSchema = z.object({
   canEdit: z.boolean(),
 });
 
+const pipelineGrantSchema = z.object({
+  pipelineId: z.string().min(1),
+  canView: z.boolean(),
+});
+
 const fieldGrantSchema = z.object({
   entity: z.string().min(1).max(60),
   fieldKey: z.string().min(1).max(120),
@@ -37,6 +42,7 @@ const updateSchema = z
     sharedInbox: z.boolean().optional(),
     mediaAccess: z.boolean().optional(),
     stageGrants: z.array(stageGrantSchema).max(500).nullable().optional(),
+    pipelineGrants: z.array(pipelineGrantSchema).max(200).nullable().optional(),
     fieldGrants: z.array(fieldGrantSchema).max(500).nullable().optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {

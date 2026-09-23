@@ -1,4 +1,6 @@
 import { auth } from "@/lib/auth";
+import { loadAuthzContext, canViewPipeline, canViewStage } from "@/lib/authz";
+import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors";
 import { sseBus } from "@/lib/sse-bus";
 
@@ -42,6 +44,7 @@ export async function GET(request: Request) {
 
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
+  const convBlockCache = new Map<string, { at: number; blocked: boolean }>();
 
   const stream = new ReadableStream({
     start(controller) {
@@ -58,14 +61,29 @@ export async function GET(request: Request) {
       unsubscribe = sseBus.subscribe(
         { organizationId, isSuperAdmin },
         (event, envelope) => {
-          try {
-            // Repassa apenas `data` pro cliente (mantem compat com o
-            // formato anterior), mas o bus ja garantiu o filtro por org.
-            const payload = `event: ${event}\ndata: ${JSON.stringify(envelope.data)}\n\n`;
-            controller.enqueue(encoder.encode(payload));
-          } catch {
-            /* client disconnected */
-          }
+          void (async () => {
+            try {
+              if (
+                await sseEventHiddenByFunnel(
+                  envelope.data,
+                  {
+                    userId: sessionUser.id ?? "",
+                    organizationId,
+                    isSuperAdmin,
+                  },
+                  convBlockCache,
+                )
+              ) {
+                return;
+              }
+              // Repassa apenas `data` pro cliente (mantem compat com o
+              // formato anterior), mas o bus ja garantiu o filtro por org.
+              const payload = `event: ${event}\ndata: ${JSON.stringify(envelope.data)}\n\n`;
+              controller.enqueue(encoder.encode(payload));
+            } catch {
+              /* client disconnected */
+            }
+          })();
         },
       );
 
@@ -96,4 +114,44 @@ export async function GET(request: Request) {
   applyBrowserApiCors(request, { headers });
 
   return new Response(stream, { headers });
+}
+
+function readId(data: unknown, key: string): string | null {
+  if (!data || typeof data !== "object") return null;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Não entrega evento de funil/etapa/conversa bloqueados para o assinante. */
+async function sseEventHiddenByFunnel(
+  data: unknown,
+  user: { userId: string; organizationId: string | null; isSuperAdmin: boolean },
+  convCache: Map<string, { at: number; blocked: boolean }>,
+): Promise<boolean> {
+  if (!user.organizationId || !user.userId || user.isSuperAdmin) return false;
+  const pipelineId = readId(data, "pipelineId");
+  const stageId = readId(data, "stageId");
+  const conversationId = readId(data, "conversationId");
+  if (!pipelineId && !stageId && !conversationId) return false;
+
+  const ctx = await loadAuthzContext({
+    userId: user.userId,
+    organizationId: user.organizationId,
+    isSuperAdmin: false,
+  });
+  if (!funnelScopeOf(ctx)) return false;
+  if (pipelineId && !canViewPipeline(ctx, pipelineId)) return true;
+  if (stageId && !canViewStage(ctx, stageId)) return true;
+  if (!conversationId) return false;
+
+  const cached = convCache.get(conversationId);
+  const now = Date.now();
+  if (cached && now - cached.at < 15_000) return cached.blocked;
+  const blocked = await conversationBlockedByFunnel(
+    user.organizationId,
+    conversationId,
+    ctx,
+  );
+  convCache.set(conversationId, { at: now, blocked });
+  return blocked;
 }

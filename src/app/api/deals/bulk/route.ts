@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
+import { loadAuthzContext } from "@/lib/authz";
+import { filterDealIdsByFunnel, funnelDealWhere } from "@/lib/authz/funnel-visibility";
 import {
   requirePermissionForUser,
   requirePipelineScope,
+  requireStageScope,
 } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
@@ -92,19 +95,37 @@ async function resolveMoveDealIds(args: {
           ? args.scope.status
           : undefined;
 
+    const authz = await loadAuthzContext({
+      userId: args.user.id,
+      organizationId: args.user.organizationId,
+      isSuperAdmin: Boolean(args.user.isSuperAdmin),
+    });
+    if (args.scope.stageId) {
+      const stageDenied = await requireStageScope(args.user, "view", args.scope.stageId);
+      if (stageDenied) return { error: stageDenied };
+    }
     const resolved = await resolveBoardDealIds(args.scope.pipelineId, {
       visibilityOwnerId: visibility.canSeeAll ? null : args.user.id,
       statusFilter,
       filters: parseAdvancedDealFilters(args.scope.filters),
       stageId: args.scope.stageId,
       cap: MAX_BULK_IDS,
+      extraWhere: funnelDealWhere(authz),
     });
     return { dealIds: resolved.ids, capped: resolved.capped };
   }
 
-  const capped = args.dealIds.length > MAX_BULK_IDS;
+  const authz = await loadAuthzContext({
+    userId: args.user.id,
+    organizationId: args.user.organizationId,
+    isSuperAdmin: Boolean(args.user.isSuperAdmin),
+  });
+  const visibleIds = args.user.organizationId
+    ? await filterDealIdsByFunnel(args.user.organizationId, args.dealIds, authz)
+    : args.dealIds;
+  const capped = visibleIds.length > MAX_BULK_IDS;
   return {
-    dealIds: args.dealIds.slice(0, MAX_BULK_IDS),
+    dealIds: visibleIds.slice(0, MAX_BULK_IDS),
     capped,
   };
 }
@@ -151,12 +172,26 @@ export async function POST(request: Request) {
       const denied = await requirePermissionForUser(userLike, actionPermission[action]);
       if (denied) return denied;
 
+      if (dealIds.length > 0 && userLike.organizationId) {
+        const authz = await loadAuthzContext({
+          userId: userLike.id,
+          organizationId: userLike.organizationId,
+          isSuperAdmin: Boolean(userLike.isSuperAdmin),
+        });
+        dealIds = await filterDealIdsByFunnel(userLike.organizationId, dealIds, authz);
+      }
+      if (dealIds.length === 0 && !moveScope) {
+        return NextResponse.json({ message: "Acesso negado à etapa." }, { status: 403 });
+      }
+
       const uid = userLike.id;
       let affected = 0;
 
       if (action === "move_stage") {
         const stageId = typeof body.stageId === "string" ? body.stageId : "";
         if (!stageId) return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
+        const destDenied = await requireStageScope(userLike, "move", stageId);
+        if (destDenied) return destDenied;
         // Motivo da perda — usado quando o destino é o estágio Perdido.
         const moveLostReason =
           typeof body.lostReason === "string" ? body.lostReason.trim() || null : null;

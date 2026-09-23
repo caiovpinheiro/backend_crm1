@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { canViewPipeline, canViewStage, loadAuthzContext } from "@/lib/authz";
 import { listAllowedPipelineIds, requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { createPipeline, getPipelines } from "@/services/pipelines";
 
@@ -58,7 +59,19 @@ export async function GET(request: Request) {
     if (denied) return denied;
     const allowedPipelineIds = await listAllowedPipelineIds(authResult.user);
     const pipelines = await getPipelines({ allowedPipelineIds });
-    return NextResponse.json(pipelines);
+    const authz = await loadAuthzContext({
+      userId: authResult.user.id,
+      organizationId: authResult.user.organizationId,
+      isSuperAdmin: authResult.user.isSuperAdmin,
+    });
+    const visible = pipelines
+      .filter((p) => canViewPipeline(authz, p.id))
+      .map((p) => ({
+        ...p,
+        stages: p.stages.filter((s) => canViewStage(authz, s.id)),
+      }))
+      .filter((p) => p.stages.length > 0);
+    return NextResponse.json(visible);
     });
   } catch (e) {
     console.error(e);

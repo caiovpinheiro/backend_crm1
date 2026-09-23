@@ -2074,6 +2074,7 @@ export async function resolveBoardDealIds(
     filters?: AdvancedDealFilters;
     stageId?: string;
     cap?: number;
+    extraWhere?: Prisma.DealWhereInput | null;
   } = {},
 ): Promise<{ ids: string[]; capped: boolean }> {
   const cap = Math.max(1, Math.min(opts.cap ?? 5000, 5000));
@@ -2090,6 +2091,9 @@ export async function resolveBoardDealIds(
   if (opts.filters && Object.keys(opts.filters).length > 0) {
     const advConditions = await buildDealWhereFromFilters(opts.filters);
     for (const c of advConditions) conditions.push(c);
+  }
+  if (opts.extraWhere && Object.keys(opts.extraWhere).length > 0) {
+    conditions.push(opts.extraWhere);
   }
   // Escopo: etapa específica ou pipeline inteiro (via relação stage.pipelineId).
   if (opts.stageId) {

@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
+import { loadAuthzContext } from "@/lib/authz";
+import { funnelDealWhere } from "@/lib/authz/funnel-visibility";
 import {
   requirePermissionForUser,
   requirePipelineScope,
+  requireStageScope,
 } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { isValidDealStatus, resolveBoardDealIds } from "@/services/deals";
@@ -46,6 +49,12 @@ export async function POST(request: Request) {
       );
       if (scopeDenied) return scopeDenied;
 
+      const authz = await loadAuthzContext({
+        userId: session.user.id,
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+      });
+
       const stageId =
         typeof body?.stageId === "string" && body.stageId.trim()
           ? body.stageId.trim()
@@ -61,6 +70,10 @@ export async function POST(request: Request) {
       const visibility = await getVisibilityFilter(
         session.user as { id: string; role: AppUserRole },
       );
+      if (stageId) {
+        const stageDenied = await requireStageScope(session.user, "view", stageId);
+        if (stageDenied) return stageDenied;
+      }
 
       const resolved = await resolveBoardDealIds(pipelineId, {
         visibilityOwnerId: visibility.canSeeAll ? null : session.user.id,
@@ -68,6 +81,7 @@ export async function POST(request: Request) {
         filters: parseAdvancedDealFilters(body?.filters),
         stageId,
         cap: MAX_IDS,
+        extraWhere: funnelDealWhere(authz),
       });
 
       return NextResponse.json({
