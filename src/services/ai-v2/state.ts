@@ -112,3 +112,24 @@ export async function resetV2Counters(
     data: { counters: defaultV2Counters() as unknown as Record<string, unknown> },
   });
 }
+
+/**
+ * Reseta o estado v2 de uma conversa quando ela é atribuída a um agente IA
+ * (motor simples). Garante que o agente responda em vez de ficar mudo por
+ * causa do owner="pessoa" herdado de um atendimento humano anterior.
+ */
+export async function resetV2ConversationStateOwner(
+  conversationId: string,
+): Promise<void> {
+  await (prisma as unknown as {
+    aISimpleConversationState: {
+      updateMany: (args: {
+        where: { conversationId: string };
+        data: { owner: string; stage: string; humanActive: boolean };
+      }) => Promise<{ count: number }>;
+    };
+  }).aISimpleConversationState.updateMany({
+    where: { conversationId },
+    data: { owner: "agente", stage: "idle", humanActive: false },
+  });
+}
