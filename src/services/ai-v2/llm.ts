@@ -342,6 +342,25 @@ function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLM
   };
 }
 
+function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
+  const cleaned = rawText.trim();
+  if (!cleaned) {
+    return buildErrorFallbackOutput(config, rawText);
+  }
+  console.warn("[ai-v2] LLM não devolveu JSON válido. Usando texto livre como reply. Texto bruto:", cleaned.slice(0, 500));
+  return {
+    reply: cleaned.slice(0, 2000),
+    handoff: false,
+    concluded: false,
+    confirmed: null,
+    outOfScope: false,
+    sentiment: "neutral",
+    collected: {},
+    reason: "LLM devolveu texto livre — resposta usada como reply; schema ignorado.",
+    actions: [],
+  };
+}
+
 export async function callV2LLMTest(
   agentId: string,
   config: V2AgentConfig,
@@ -623,7 +642,7 @@ export async function callV2LLM(args: {
 
     if (parsed === undefined) {
       return {
-        output: buildErrorFallbackOutput(args.config, text),
+        output: buildInvalidJsonFallbackOutput(args.config, text),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         toolCalls: result.toolCalls,
@@ -635,7 +654,7 @@ export async function callV2LLM(args: {
     if (!validated.success) {
       console.warn("[ai-v2] LLM devolveu JSON fora do schema:", validated.error.message, "texto:", text.slice(0, 500));
       return {
-        output: buildErrorFallbackOutput(args.config, text),
+        output: buildInvalidJsonFallbackOutput(args.config, text),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         toolCalls: result.toolCalls,

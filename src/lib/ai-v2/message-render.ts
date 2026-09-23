@@ -17,6 +17,16 @@ function isKeyChar(char: string): boolean {
   return KEY_CHARS.test(char);
 }
 
+function stripTrailingPunctuation(input: string): { text: string; removed: number } {
+  let text = input;
+  let removed = 0;
+  while (text.length > 0 && /[.:\\,;!?]$/.test(text[text.length - 1])) {
+    text = text.slice(0, -1);
+    removed++;
+  }
+  return { text, removed };
+}
+
 function readKey(
   template: string,
   start: number,
@@ -41,34 +51,39 @@ function readKey(
 
   // Tenta casar a chave mais longa conhecida. Se a chave completa não existe,
   // volta removendo a última palavra até encontrar uma chave conhecida ou
-  // chegar em uma única palavra. Isso evita que "@name e depois @name" consuma
-  // o texto entre as duas variáveis como parte da primeira chave.
-  const known = (candidate: string) => {
-    if (candidate === "") return false;
-    if (Object.prototype.hasOwnProperty.call(variables, candidate)) return true;
-    if (candidate.includes(".")) {
-      const resolved = resolveVariable(variables, candidate);
+  // chegar em uma única palavra. Em cada candidato, descarta pontuação no
+  // final (ex.: "contact.name." → "contact.name") para que o ponto não seja
+  // consumido como parte da chave. Isso evita que "@name e depois @name"
+  // consuma o texto entre as duas variáveis como parte da primeira chave.
+  const isKnown = (candidate: string): boolean => {
+    const { text } = stripTrailingPunctuation(candidate);
+    if (text === "") return false;
+    if (Object.prototype.hasOwnProperty.call(variables, text)) return true;
+    if (text.includes(".")) {
+      const resolved = resolveVariable(variables, text);
       return resolved !== undefined;
     }
     return false;
   };
 
   let candidate = raw;
-  while (candidate.length > 0 && !known(candidate)) {
+  while (candidate.length > 0 && !isKnown(candidate)) {
     const lastSpace = candidate.lastIndexOf(" ");
     if (lastSpace <= 0) break;
     candidate = candidate.slice(0, lastSpace).trimEnd();
   }
 
-  if (candidate.length > 0 && known(candidate)) {
-    return { key: candidate, end: start + candidate.length };
+  if (candidate.length > 0 && isKnown(candidate)) {
+    const { text, removed } = stripTrailingPunctuation(candidate);
+    return { key: text, end: start + candidate.length - removed };
   }
 
   // Nenhuma chave multi-palavra conhecida: usa a primeira palavra do bloco
-  // como chave, deixando o restante do texto intacto.
+  // como chave, deixando o restante do texto intacto. Descarta pontuação final.
   const firstToken = raw.split(" ")[0];
-  if (!firstToken) return null;
-  return { key: firstToken, end: start + firstToken.length };
+  const { text, removed } = stripTrailingPunctuation(firstToken);
+  if (!text) return null;
+  return { key: text, end: start + firstToken.length - removed };
 }
 
 function resolveVariable(variables: Record<string, unknown>, key: string): unknown {
