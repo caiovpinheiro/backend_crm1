@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   loadAuthzContext,
   can,
+  canViewPipeline,
   canViewStage,
   canEditStage,
   canViewRoleField,
@@ -112,6 +113,16 @@ export async function requirePipelineScope(
   action: "view" | "edit",
   pipelineId: string,
 ): Promise<NextResponse | null> {
+  if (user.organizationId && pipelineId) {
+    const ctx = await loadAuthzContext({
+      userId: user.id,
+      organizationId: user.organizationId,
+      isSuperAdmin: Boolean(user.isSuperAdmin),
+    });
+    if (!canViewPipeline(ctx, pipelineId)) {
+      return NextResponse.json({ message: "Acesso negado ao funil." }, { status: 403 });
+    }
+  }
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
   // "view" considera o override por usuário (lista de funis); "edit"
@@ -248,17 +259,27 @@ export async function requireStageScope(
   stageId: string,
 ): Promise<NextResponse | null> {
   if (!user.organizationId) return null;
-  const enabled = await isFeatureEnabled("rbac_granular_scope_v1", user.organizationId);
-  if (!enabled) return null;
   const ctx = await loadAuthzContext({
     userId: user.id,
     organizationId: user.organizationId,
     isSuperAdmin: Boolean(user.isSuperAdmin),
   });
+  if (ctx.isSuperAdmin || ctx.isAdmin) return null;
   const allowed =
     action === "view" ? canViewStage(ctx, stageId) : canEditStage(ctx, stageId);
-  if (allowed) return null;
-  return NextResponse.json({ message: "Acesso negado à etapa." }, { status: 403 });
+  if (!allowed) {
+    return NextResponse.json({ message: "Acesso negado à etapa." }, { status: 403 });
+  }
+  if (ctx.pipelineDeny && ctx.pipelineDeny.size > 0) {
+    const stage = await prismaBase.stage.findFirst({
+      where: { id: stageId, organizationId: user.organizationId },
+      select: { pipelineId: true },
+    });
+    if (stage && !canViewPipeline(ctx, stage.pipelineId)) {
+      return NextResponse.json({ message: "Acesso negado ao funil." }, { status: 403 });
+    }
+  }
+  return null;
 }
 
 export async function canEditFieldForUser(
