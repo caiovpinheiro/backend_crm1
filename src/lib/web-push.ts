@@ -6,7 +6,9 @@
 // API routes e workers — nunca seria bundled em Client Component.
 import webpush from "web-push";
 
+import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 
 /**
  * Wrapper do `web-push` (RFC 8030) com:
@@ -186,9 +188,92 @@ export async function sendPushToUsers(
 }
 
 /**
- * Helper de alto nivel: quando uma mensagem inbound chega, notifica
- *  - o operador atribuido a conversa (se houver), OU
- *  - todos os admins/managers (fallback pra leads sem owner).
+ * Quem recebe o push de uma mensagem recebida: a coluna "Windows" da
+ * config de alertas do inbox (`inbox-alert-config.ts`) — responsável,
+ * fila do departamento e/ou outras visíveis, por usuário ou departamento.
+ * `queue`/`others` passam pelo gate de visibilidade do card do SSE.
+ */
+async function resolveInboundPushTargets(conversation: {
+  organizationId: string;
+  assignedToId: string | null;
+  departmentId: string | null;
+  assignedTo: { type: string | null } | null;
+}): Promise<string[]> {
+  const organizationId = conversation.organizationId;
+  const [{ loadOrgInboxAlertConfigs }, { inboxPushCandidates }] = await Promise.all([
+    import("@/lib/inbox-alert-config"),
+    import("@/lib/inbox-alert-push-targets"),
+  ]);
+  const [configs, users, members] = await Promise.all([
+    loadOrgInboxAlertConfigs(organizationId),
+    prismaBase.user.findMany({
+      where: { organizationId, type: "HUMAN", isErased: false },
+      select: { id: true, role: true },
+    }),
+    prismaBase.departmentMember.findMany({
+      where: { organizationId },
+      select: { userId: true, departmentId: true },
+    }),
+  ]);
+  const departmentsByUser = new Map<string, string[]>();
+  for (const m of members) {
+    const list = departmentsByUser.get(m.userId) ?? [];
+    list.push(m.departmentId);
+    departmentsByUser.set(m.userId, list);
+  }
+  const candidates = inboxPushCandidates({
+    conversation: {
+      assignedToId: conversation.assignedToId,
+      assignedToType: conversation.assignedTo?.type ?? null,
+      departmentId: conversation.departmentId,
+    },
+    userIds: users.map((u) => u.id),
+    departmentsByUser,
+    configs,
+  });
+  if (candidates.length === 0) return [];
+
+  const roleById = new Map(users.map((u) => [u.id, u.role]));
+  const card = {
+    assignedToId: conversation.assignedToId,
+    departmentId: conversation.departmentId,
+    assignedTo: conversation.assignedTo,
+  };
+  const [{ buildInboxSseCardGate }, { runWithContext }] = await Promise.all([
+    import("@/lib/inbox-sse-card-visibility"),
+    import("@/lib/request-context"),
+  ]);
+  const targets: string[] = [];
+  for (const c of candidates) {
+    if (!c.needsVisibility) {
+      targets.push(c.userId);
+      continue;
+    }
+    const role = roleById.get(c.userId);
+    if (!role) continue;
+    try {
+      const gate = await runWithContext(
+        { organizationId, userId: c.userId, isSuperAdmin: false },
+        () =>
+          buildInboxSseCardGate({
+            id: c.userId,
+            role: role as AppUserRole,
+            organizationId,
+            isSuperAdmin: false,
+          }),
+      );
+      if (gate(card)) targets.push(c.userId);
+    } catch (err) {
+      // Fail-closed: sem gate, sem push de conversa que não é dele.
+      console.error("[web-push] gate de visibilidade falhou:", err);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Helper de alto nivel: quando uma mensagem inbound chega, notifica quem
+ * a config de alertas do inbox manda (`resolveInboundPushTargets`).
  *
  * Tag = conversationId garante que mensagens consecutivas da mesma
  * conversa AGRUPAM na bandeja (substituem a anterior em vez de
@@ -213,44 +298,22 @@ export async function notifyInboundMessage(params: {
         assignedToId: true,
         organizationId: true,
         number: true,
-        contact: { select: { assignedToId: true } },
+        departmentId: true,
+        assignedTo: { select: { type: true } },
       },
     });
+    // CRITICO multi-tenant: sem a org da conversa ninguém é notificado.
+    if (!conversation?.organizationId) return;
 
-    // Quem notificar:
-    //  1. Owner da conversa (assignedToId direto na conversa)
-    //  2. Owner do contato (fallback)
-    //  3. Todos admins/managers (lead novo sem owner)
-    const targets = new Set<string>();
-    if (conversation?.assignedToId) targets.add(conversation.assignedToId);
-    if (conversation?.contact?.assignedToId)
-      targets.add(conversation.contact.assignedToId);
-
-    if (targets.size === 0) {
-      // CRITICO multi-tenant: filtrar pelos admins DA org da conversa.
-      // Sem esse filtro, leads novos sem owner notificavam supervisores
-      // de TODAS as orgs (vazamento alto-volume entre tenants).
-      const supervisors = await prisma.user.findMany({
-        where: {
-          role: { in: ["ADMIN", "MANAGER"] },
-          ...(conversation?.organizationId
-            ? { organizationId: conversation.organizationId }
-            : { id: "__none__" }),
-        },
-        select: { id: true },
-        take: 10,
-      });
-      supervisors.forEach((u) => targets.add(u.id));
-    }
-
-    if (targets.size === 0) return;
+    const targets = await resolveInboundPushTargets(conversation);
+    if (targets.length === 0) return;
 
     const channelLabel =
       params.channel && params.channel !== "WhatsApp"
         ? ` · ${params.channel}`
         : "";
 
-    await sendPushToUsers(Array.from(targets), {
+    await sendPushToUsers(targets, {
       title: `${params.contactName}${channelLabel}`,
       body: params.preview.slice(0, 140) || "Nova mensagem",
       url:
