@@ -207,6 +207,24 @@ function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string 
   return out.slice(0, 10);
 }
 
+/** Uma linha para o rastro: o que o modelo consultou e o que voltou. */
+function describeToolCall(call: { toolName: string; args: unknown; result: unknown }): string {
+  const args = (call.args ?? {}) as { query?: unknown };
+  const query = typeof args.query === "string" ? ` "${args.query}"` : "";
+  const r = (call.result ?? {}) as Record<string, unknown>;
+  if (r.ok === false) return `${call.toolName}${query} → erro: ${String(r.error ?? "")}`;
+  const names = (list: unknown, key: string) =>
+    Array.isArray(list) ? (list as Array<Record<string, unknown>>).map((i) => String(i[key] ?? "?")) : [];
+  let found: string[] = [];
+  if (call.toolName === "knowledge_search") found = [...new Set(names(r.chunks, "docTitle"))];
+  else if (call.toolName === "search_products") found = names(r.products, "name");
+  else if (call.toolName === "list_message_models") found = names(r.models, "name");
+  else if (call.toolName === "search_crm_records") {
+    found = [...names(r.contacts, "name"), ...names(r.deals, "title")];
+  }
+  return `${call.toolName}${query} → ${found.length ? found.join(", ") : "nada encontrado"}`;
+}
+
 /** Variáveis gravadas por ações `set_variable` bem-sucedidas. */
 function variablesFromActions(results: V2ActionResult[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -305,6 +323,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false, error: "Agent inactive" };
   }
   const config = agent.config;
+  void import("@/services/ai/knowledge-docs")
+    .then(({ healLegacyKnowledgeDocs }) => healLegacyKnowledgeDocs(resolved.agentConfigId))
+    .catch(() => undefined);
 
   const contactId = await getConversationContact(input.conversationId) ?? undefined;
   if (!contactId) {
@@ -1084,6 +1105,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
 
+  for (const call of toolCalls ?? []) {
+    if ((call as { args?: { prefetch?: boolean } }).args?.prefetch) continue;
+    traceStep("ferramenta", describeToolCall(call));
+  }
   if (llmOutput) {
     const modelTools = (toolCalls ?? [])
       .filter((c) => !(c as { args?: { prefetch?: boolean } }).args?.prefetch)

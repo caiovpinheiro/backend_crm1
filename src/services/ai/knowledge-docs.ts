@@ -415,6 +415,33 @@ export async function updateKnowledgeDoc(
   return withValidityView(doc, timezone);
 }
 
+// Agentes já verificados neste processo (a correção roda uma vez).
+const healedAgents = new Set<string>();
+
+/**
+ * Materiais antigos salvos como payload de modelo de mensagem
+ * (`{"type":"text","body":…}`) foram indexados sobre o JSON: a busca por
+ * significado quase não os encontra. Reindexar grava o texto limpo e refaz
+ * os vetores. Roda em segundo plano, uma vez por agente por processo;
+ * depois de reindexado o material não casa mais com o filtro.
+ */
+export async function healLegacyKnowledgeDocs(agentId: string): Promise<number> {
+  if (healedAgents.has(agentId)) return 0;
+  healedAgents.add(agentId);
+  const legacy = await prisma.aIAgentKnowledgeDoc.findMany({
+    where: { agentId, status: "READY", content: { startsWith: '{"type"' } },
+    select: { id: true },
+    take: 200,
+  });
+  for (const doc of legacy) {
+    await reindexKnowledgeDoc(agentId, doc.id).catch((err) => {
+      console.warn(`[ai] autocorreção de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+    });
+  }
+  if (legacy.length > 0) console.info(`[ai] ${legacy.length} material(is) em JSON reindexado(s) agent=${agentId}`);
+  return legacy.length;
+}
+
 /** Reindexa sem alterar o conteudo — usado para destravar doc FAILED. */
 export async function reindexKnowledgeDoc(agentId: string, docId: string) {
   const current = await getKnowledgeDoc(agentId, docId);

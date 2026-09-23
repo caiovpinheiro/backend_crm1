@@ -576,6 +576,21 @@ export function v2HumanBehavior(config: {
   };
 }
 
+/**
+ * Markdown do modelo → formatação do WhatsApp. O WhatsApp não tem link com
+ * texto: `[aqui](https://x)` chegava cru ao cliente. Negrito é `*x*`,
+ * itálico `_x_`; títulos `#` não existem.
+ */
+export function toWhatsAppText(raw: string): string {
+  return raw
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) =>
+      label.trim() === url || /^https?:\/\//.test(label.trim()) ? url : `${label.trim()}: ${url}`,
+    )
+    .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
+    .replace(/__([^_\n]+)__/g, "_$1_")
+    .replace(/^#{1,6}\s+/gm, "");
+}
+
 /** Envia mensagem de texto simples via sendAgentMessage. */
 export async function sendV2TextMessage(args: {
   conversationId: string;
@@ -587,17 +602,18 @@ export async function sendV2TextMessage(args: {
   humanBehavior?: HumanBehaviorConfig;
 }): Promise<void> {
   if (!args.text.trim()) return;
+  const text = toWhatsAppText(args.text);
   const result = (await sendAgentMessage({
     conversationId: args.conversationId,
     contactId: args.contactId,
     agentUserId: args.agentUserId,
     autonomyMode: args.autonomyMode,
-    text: args.text,
+    text,
     channel: args.channel === "baileys" ? "baileys" : "meta",
     bypassAssigneeCheck: false,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
   })) as { status?: string; reason?: string } | undefined;
-  const preview = args.text.length > 90 ? `${args.text.slice(0, 90)}…` : args.text;
+  const preview = text.length > 90 ? `${text.slice(0, 90)}…` : text;
   if (result?.status === "skipped") {
     // Antes o motor não sabia que o envio foi barrado — o turno parecia ter
     // respondido e o cliente não recebia nada.

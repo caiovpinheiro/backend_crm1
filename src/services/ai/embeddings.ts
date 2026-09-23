@@ -62,7 +62,7 @@ export async function indexKnowledgeDoc(docId: string, rawText: string) {
   try {
     const doc = await prisma.aIAgentKnowledgeDoc.findUnique({
       where: { id: docId },
-      select: { agentId: true },
+      select: { agentId: true, title: true },
     });
     if (!doc) throw new Error("Documento não encontrado.");
     // Embeddings usam a chave OpenAI do próprio agente (sem chave global).
@@ -82,8 +82,12 @@ export async function indexKnowledgeDoc(docId: string, rawText: string) {
     let totalTokens = 0;
     for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
       const batch = chunks.slice(i, i + EMBED_BATCH);
+      // O vetor leva o título junto do trecho: em material curto o título
+      // ("Como fazer X") é a melhor pista do assunto, e a pergunta do
+      // cliente costuma parecer mais com ele do que com o passo a passo.
+      // O texto gravado no trecho continua sendo só o conteúdo.
       const { embeddings, inputTokens } = await embedTexts(
-        batch.map((c) => c.content),
+        batch.map((c) => (doc.title ? `${doc.title}\n${c.content}` : c.content)),
         apiKey,
       );
       totalTokens += inputTokens;

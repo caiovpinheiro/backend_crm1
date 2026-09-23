@@ -941,6 +941,32 @@ describe("processV2Turn — correções do motor", () => {
     expect(trace?.find((t) => t.step === "llm")?.detail).toContain("Cliente pediu informação");
   });
 
+  it("rastro mostra o que o modelo buscou e o que achou", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue({
+      ...llmOut(),
+      toolCalls: [
+        { toolName: "knowledge_search", args: { query: "x", prefetch: true }, result: { chunks: [{ docTitle: "Pré" }] } },
+        { toolName: "knowledge_search", args: { query: "como emitir comprovante" }, result: { chunks: [{ docTitle: "Emitir comprovante" }, { docTitle: "Emitir comprovante" }] } },
+        { toolName: "knowledge_search", args: { query: "segunda via" }, result: { chunks: [] } },
+      ],
+    });
+    const { takeV2TraceForLog } = await import("../trace");
+    let trace: Array<{ step: string; detail: string }> | undefined;
+    mocks.logTurn.mockImplementation(async () => {
+      trace = takeV2TraceForLog();
+    });
+
+    await run("Preciso emitir um comprovante do meu cadastro");
+
+    const tools = trace?.filter((t) => t.step === "ferramenta").map((t) => t.detail);
+    expect(tools).toEqual([
+      'knowledge_search "como emitir comprovante" → Emitir comprovante',
+      'knowledge_search "segunda via" → nada encontrado',
+    ]);
+  });
+
   it("handoff pedido como AÇÃO: avisa o cliente antes e transfere uma vez só", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
