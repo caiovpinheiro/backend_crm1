@@ -103,7 +103,7 @@ export type PainelFunnel = {
   tooltip: string;
   stages: PainelFunnelStage[];
   empty: boolean;
-  /** Negócios criados no período (`Deal.createdAt`), no funil filtrado. */
+  /** Contatos criados hoje na org (WhatsApp, manual, importação). */
   novos: { count: number; value: number };
 };
 
@@ -644,18 +644,25 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   });
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
-  // Mesma data do filtro "Criação" do pipeline. Evento CREATED deixa de fora
-  // lead que nasce sem esse registro (entrada automática).
-  const createdAgg = await db().deal.aggregate({
-    where: and(structural, {
-      createdAt: { gte: f.range.from, lte: f.range.to },
+  // Sempre hoje, na org inteira. Não segue o período nem o funil do painel.
+  // createdAt cobre WhatsApp, cadastro manual e importação.
+  const todayKey = dayKeyFromDate(new Date());
+  const todayFrom = parseDay(todayKey, false)!;
+  const todayTo = parseDay(todayKey, true)!;
+  const createdToday = {
+    organizationId: orgId,
+    createdAt: { gte: todayFrom, lte: todayTo },
+  };
+  const [createdCount, createdValue] = await Promise.all([
+    db().contact.count({ where: createdToday }),
+    db().deal.aggregate({
+      where: { organizationId: orgId, contact: { is: createdToday } },
+      _sum: { value: true },
     }),
-    _count: { _all: true },
-    _sum: { value: true },
-  });
+  ]);
   const novos = {
-    count: createdAgg._count._all,
-    value: round2(toNumber(createdAgg._sum.value)),
+    count: createdCount,
+    value: round2(toNumber(createdValue._sum.value)),
   };
 
   return {
