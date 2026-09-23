@@ -242,6 +242,8 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   select: typeof listSelect;
 }> & {
   lastMessagePreview: ConversationLastMessagePreview | null;
+  /** Última mensagem do cliente — texto e horário exibidos no card. */
+  lastInboundPreview: ConversationLastInboundPreview | null;
   lastMessageAt: Date | null;
   tags: ConversationTag[];
   /** Fila Automação: contexto vivo ou atendimento só do robô. */
@@ -298,13 +300,37 @@ async function applyChannelSessionResetToInboundMap(
   }
 }
 
+/** Última mensagem do CLIENTE — é o que os cards exibem. */
+export type ConversationLastInboundPreview = {
+  content: string;
+  messageType: string;
+  createdAt: Date;
+};
+
+type PreviewBatchEntry = {
+  preview: ConversationLastMessagePreview;
+  createdAt: Date;
+  inbound: ConversationLastInboundPreview | null;
+};
+
+function clampPreview(text: string): string {
+  return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
+
+/**
+ * Por conversa: a última mensagem de chat de qualquer lado (`preview`,
+ * segue dirigindo ticks/erro/ordenação) e a última do cliente
+ * (`inbound`, o texto do card). Uma consulta só (UNION ALL de dois
+ * DISTINCT ON).
+ */
 async function lastMessagePreviewsBatch(
   conversationIds: string[]
-): Promise<Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>> {
+): Promise<Map<string, PreviewBatchEntry>> {
   if (conversationIds.length === 0) return new Map();
   const orgId = getOrgIdOrThrow();
 
   const rows = await prisma.$queryRaw<{
+    kind: "any" | "in";
     conversationId: string;
     content: string;
     messageType: string;
@@ -313,45 +339,84 @@ async function lastMessagePreviewsBatch(
     sendError: string | null;
     createdAt: Date;
   }[]>`
-    SELECT DISTINCT ON ("conversationId")
-      "conversationId", "content", "messageType", "direction",
-      "sendStatus", "sendError", "createdAt"
-    FROM "messages"
-    WHERE "conversationId" = ANY(${conversationIds})
-      AND "organizationId" = ${orgId}
-      -- Mesma regra do board: preview = chat real, não nota/sistema.
-      AND "isPrivate" = false
-      AND "messageType" NOT IN (
-        'note',
-        'ai_draft',
-        'whatsapp_call',
-        'whatsapp_call_recording'
-      )
-      AND "messageType" NOT LIKE 'event%'
-      AND direction IN ('in', 'out')
-    ORDER BY "conversationId", "createdAt" DESC
+    WITH chat AS (
+      SELECT id, "conversationId", "content", "messageType", "direction",
+        "sendStatus", "sendError", "createdAt"
+      FROM "messages"
+      WHERE "conversationId" = ANY(${conversationIds})
+        AND "organizationId" = ${orgId}
+        -- Mesma regra do board: preview = chat real, não nota/sistema.
+        AND "isPrivate" = false
+        AND "messageType" NOT IN (
+          'note',
+          'ai_draft',
+          'whatsapp_call',
+          'whatsapp_call_recording'
+        )
+        AND "messageType" NOT LIKE 'event%'
+        AND direction IN ('in', 'out')
+    )
+    -- Desempate no mesmo segundo: o WhatsApp manda timestamp em segundos
+    -- e 3 mensagens seguidas empatavam (o card mostrava qualquer uma).
+    -- id (cuid) cresce com a ordem de gravação.
+    (SELECT DISTINCT ON ("conversationId") 'any' AS kind, "conversationId",
+       "content", "messageType", "direction", "sendStatus", "sendError", "createdAt"
+     FROM chat
+     ORDER BY "conversationId", "createdAt" DESC, id DESC)
+    UNION ALL
+    (SELECT DISTINCT ON ("conversationId") 'in' AS kind, "conversationId",
+       "content", "messageType", "direction", "sendStatus", "sendError", "createdAt"
+     FROM chat
+     WHERE direction = 'in'
+     ORDER BY "conversationId", "createdAt" DESC, id DESC)
   `;
 
-  const map = new Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>();
+  const map = new Map<string, PreviewBatchEntry>();
+  const entryFor = (id: string): PreviewBatchEntry => {
+    let e = map.get(id);
+    if (!e) {
+      e = {
+        preview: {
+          content: "",
+          messageType: "text",
+          mediaUrl: null,
+          direction: "in",
+          sendStatus: null,
+          sendError: null,
+        },
+        createdAt: new Date(0),
+        inbound: null,
+      };
+      map.set(id, e);
+    }
+    return e;
+  };
   for (const r of rows) {
-    const text = prettifyChatMessageBody(r.content ?? "").trim();
-    map.set(r.conversationId, {
-      preview: {
-        content: text.length > 140 ? `${text.slice(0, 137)}…` : text,
+    const text = clampPreview(prettifyChatMessageBody(r.content ?? "").trim());
+    const e = entryFor(r.conversationId);
+    if (r.kind === "in") {
+      e.inbound = {
+        content: text,
         messageType: r.messageType || "text",
-        // Card da lista não renderiza mídia — URL S3/local inchava ~50×300B.
-        mediaUrl: null,
-        direction: r.direction || "in",
-        sendStatus: r.sendStatus ?? null,
-        sendError:
-          r.sendStatus === "failed" && r.sendError
-            ? r.sendError.length > 80
-              ? `${r.sendError.slice(0, 77)}…`
-              : r.sendError
-            : null,
-      },
-      createdAt: r.createdAt,
-    });
+        createdAt: r.createdAt,
+      };
+      continue;
+    }
+    e.preview = {
+      content: text,
+      messageType: r.messageType || "text",
+      // Card da lista não renderiza mídia — URL S3/local inchava ~50×300B.
+      mediaUrl: null,
+      direction: r.direction || "in",
+      sendStatus: r.sendStatus ?? null,
+      sendError:
+        r.sendStatus === "failed" && r.sendError
+          ? r.sendError.length > 80
+            ? `${r.sendError.slice(0, 77)}…`
+            : r.sendError
+          : null,
+    };
+    e.createdAt = r.createdAt;
   }
   return map;
 }
@@ -1274,13 +1339,13 @@ type ConversationListPage = {
 
 async function paintListRows(
   rows: Prisma.ConversationGetPayload<{ select: typeof listSelect }>[],
-  previewMapReady?: Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>,
+  previewMapReady?: Map<string, PreviewBatchEntry>,
 ): Promise<ConversationListItem[]> {
   const convIds = rows.map((r) => r.id);
   const previewMap =
     previewMapReady ??
     (convIds.length === 0
-      ? new Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>()
+      ? new Map<string, PreviewBatchEntry>()
       : await lastMessagePreviewsBatch(convIds));
   const lastInboundMap = new Map<string, Date>();
   for (const row of rows) {
@@ -1317,6 +1382,7 @@ async function paintListRows(
       ...row,
       lastInboundAt: lastInboundMap.get(row.id) ?? null,
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
+      lastInboundPreview: previewMap.get(row.id)?.inbound ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
       hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
@@ -2373,6 +2439,7 @@ export async function getConversationById(idOrNumber: string) {
     ...row,
     lastInboundAt: lastInboundMap.get(convId) ?? null,
     lastMessagePreview: previewMap.get(convId)?.preview ?? null,
+    lastInboundPreview: previewMap.get(convId)?.inbound ?? null,
     lastMessageAt: previewMap.get(convId)?.createdAt ?? null,
     tags: Array.from(tagMap.values()),
     hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),

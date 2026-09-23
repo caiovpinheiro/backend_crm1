@@ -234,7 +234,7 @@ type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
  */
 async function findMessagesSafe(args: {
   where: Prisma.MessageWhereInput;
-  orderBy: Prisma.MessageOrderByWithRelationInput;
+  orderBy: Prisma.MessageOrderByWithRelationInput | Prisma.MessageOrderByWithRelationInput[];
   take: number;
 }): Promise<MsgRow[]> {
   const select: Prisma.MessageSelect = { ...MSG_SELECT };
@@ -375,7 +375,8 @@ export async function GET(request: Request, context: RouteContext) {
                   ? { createdAt: { gt: new Date(after) } }
                   : {}),
             },
-            orderBy: { createdAt: "desc" },
+            // id desempata mensagens no mesmo segundo (timestamp do WhatsApp).
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: limit,
           }),
       olderTicketsProbe,
@@ -435,7 +436,7 @@ export async function GET(request: Request, context: RouteContext) {
             conversationId: pc.id,
             ...(beforeDate ? { createdAt: { lt: beforeDate } } : {}),
           },
-          orderBy: { createdAt: "desc" },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: remaining,
         });
         if (pRows.length === 0) continue;
