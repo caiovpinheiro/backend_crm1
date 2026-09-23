@@ -47,7 +47,7 @@ export async function GET() {
         }),
         prisma.tag.findMany({
           orderBy: { name: "asc" },
-          select: { id: true, name: true, color: true },
+          select: { id: true, name: true, color: true, number: true },
         }),
         prisma.customField.findMany({
           where: { entity: { in: ["deal", "contact"] } },
