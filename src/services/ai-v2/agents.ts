@@ -220,8 +220,11 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
   const data: Record<string, unknown> = {};
   if (input.active !== undefined) data.active = input.active;
   if (config) {
-    data.simpleConfig = config as unknown as Record<string, unknown>;
+    const cfgWithName = input.name !== undefined ? { ...config, name: input.name } : config;
+    data.simpleConfig = cfgWithName as unknown as Record<string, unknown>;
     data.autonomyMode = mapV2AutonomyToPrisma(config.autonomyMode);
+  } else if (input.name !== undefined) {
+    data.simpleConfig = { ...agent.simpleConfig, name: input.name };
   }
   const keyUpdate = openaiKeyFields(input.openaiApiKey);
   if (keyUpdate) {
