@@ -94,9 +94,14 @@ export function buildV2ToolSet(args: {
   const theme = activeTheme(args.config, args.themeId);
   const themeToolIds = theme?.allowedTools ? new Set(theme.allowedTools) : null;
   const allowedDocIds = themeKnowledgeDocIds(theme) ?? args.config.allowedKnowledgeDocIds;
-  const allowedModelIds = theme?.messageModelIds && theme.messageModelIds.length > 0
-    ? theme.messageModelIds
-    : args.config.allowedMessageModelIds;
+  // A tela grava os modelos do assunto em `allowedMessageModelIds`;
+  // `messageModelIds` é o nome legado. Lendo só o legado a restrição do
+  // assunto era ignorada e valia a lista global.
+  const allowedModelIds = theme?.allowedMessageModelIds && theme.allowedMessageModelIds.length > 0
+    ? theme.allowedMessageModelIds
+    : theme?.messageModelIds && theme.messageModelIds.length > 0
+      ? theme.messageModelIds
+      : args.config.allowedMessageModelIds;
 
   const enabledToolNames = new Set(args.config.enabledTools ?? []);
 
@@ -200,22 +205,30 @@ export function buildV2ToolSet(args: {
   );
   if (searchProducts) tools.search_products = searchProducts;
 
+  // Chaves que a config libera para leitura — a tool não devolve nada além.
+  const crmReadableKeys = [
+    ...args.context.fields.contact
+      .filter((f) => f.permissions.includes("read") || f.permissions.includes("cite"))
+      .map((f) => `contact.${f.key}`),
+    ...args.context.fields.deal
+      .filter((f) => f.permissions.includes("read") || f.permissions.includes("cite"))
+      .map((f) => `deal.${f.key}`),
+  ];
   const searchCrm = wrapTool(
     "search_crm_records",
-    "Busca dados de contatos e negócios no CRM. Use para localizar cadastro, histórico ou informações já registradas.",
+    "Consulta o cadastro do cliente desta conversa e os negócios dele. Não busca outras pessoas.",
     z.object({
       query: z.string().min(1).describe("Termo de busca livre."),
-      scope: z
-        .enum(["current_contact", "organization"])
-        .optional()
-        .describe("'current_contact' (padrão) restringe ao contato/negócio atual. 'organization' busca em todo o CRM."),
       limit: z.number().int().min(1).max(10).optional().describe("Máximo de resultados (1-10)."),
     }),
     async (input) =>
       searchV2CrmRecords({
-        ...input,
-        contactId: args.context.contact?.id as string | undefined,
-        dealId: args.context.selectedDeal?.id as string | undefined,
+        query: input.query,
+        limit: input.limit,
+        // `context.contact` é indexado pelo rótulo do campo — o id vem do bruto.
+        contactId: (args.context.contactRaw?.id ?? args.context.contact?.id) as string | undefined,
+        dealId: (args.context.selectedDealRaw?.id ?? args.context.selectedDeal?.id) as string | undefined,
+        readableKeys: crmReadableKeys,
       }),
   );
   if (searchCrm) tools.search_crm_records = searchCrm;
@@ -352,6 +365,11 @@ function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLM
 function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
   const cleaned = rawText.trim();
   if (!cleaned) {
+    return buildErrorFallbackOutput(config, rawText);
+  }
+  // JSON quebrado (cortado, fora do schema) não pode virar mensagem para o
+  // cliente — iria o `{"reply": ...` cru. Só texto livre de verdade vira reply.
+  if (/^[\s`]*(json)?[\s`]*[{[]/i.test(cleaned) || /"reply"\s*:/.test(cleaned)) {
     return buildErrorFallbackOutput(config, rawText);
   }
   console.warn("[ai-v2] LLM não devolveu JSON válido. Usando texto livre como reply. Texto bruto:", cleaned.slice(0, 500));
@@ -598,8 +616,11 @@ function buildV2SystemPrompt(
     tabulationId: "id da tabulação (opcional)",
     collected: { "campo": "valor" },
     reason: "por que respondeu assim",
-    actions: [{ type: "handoff" }],
+    actions: [],
   }, null, 2));
+  // O exemplo trazia `actions: [{ type: "handoff" }]`: o modelo copiava e
+  // pedia transferência sem motivo.
+  lines.push("actions: lista de ações a executar neste turno — vazia quando não há ação. Para transferir para um atendente use handoff: true (ou a ação { type: \"handoff\" }) apenas quando realmente precisar de um humano.");
   lines.push("messageModel: pode ser null ou um objeto com { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca use um objeto vazio ou outro formato.");
   lines.push("Nunca afirme ao cliente que executou uma ação que não esteja em 'actions'.");
   lines.push("Nunca prometa verificar e retornar depois. Se depender de outra pessoa, marque handoff=true.");

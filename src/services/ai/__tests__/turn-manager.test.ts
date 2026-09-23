@@ -292,6 +292,9 @@ vi.mock("@/lib/prisma-base", () => ({
     message: db.message,
     conversation: db.conversation,
     user: db.user,
+    // Resolver do v2 consulta o estado para não devolver à IA uma conversa
+    // já transferida para humano. Aqui nenhuma conversa tem estado v2.
+    aISimpleConversationState: { findUnique: async () => null },
   },
 }));
 
@@ -317,6 +320,13 @@ vi.mock("@/lib/org-settings", () => ({
 
 vi.mock("@/services/ai/phone-allowlist", () => ({
   isContactAllowedForAi: vi.fn(async () => true),
+  normalizePhoneDigits: (p: string) => p.replace(/\D/g, ""),
+  phoneMatchesAllowlist: (p: string, set: Set<string>) => set.has(p.replace(/\D/g, "")),
+}));
+
+const attendanceGate = vi.hoisted(() => ({ enabled: true }));
+vi.mock("@/services/ai/attendance-gate", () => ({
+  isAiAttendanceEnabled: vi.fn(async () => attendanceGate.enabled),
 }));
 
 const legacy = vi.hoisted(() => ({
@@ -846,6 +856,38 @@ describe("entrypoint de ingestão", () => {
 
     expect(scheduleAiReply).not.toHaveBeenCalled();
     expect(turns.size).toBe(1);
+  });
+
+  it("atendimento IA desligado na org: conversa nova não é atribuída ao agente simple", async () => {
+    process.env.AI_TURN_MANAGER = "0";
+    attendanceGate.enabled = false;
+    try {
+      setConversation(CONV, {
+        organizationId: ORG,
+        assignedToId: null,
+        assignedTo: null,
+      });
+      setUser("ai-user-1", {
+        organizationId: ORG,
+        type: "AI",
+        aiAgentConfig: { id: "agent-1", active: true, engine: "simple" },
+        createdAt: new Date(),
+      });
+      addMessage("m1", "Oi");
+
+      await onInboundMessageForAi({
+        conversationId: CONV,
+        contactId: CONTACT,
+        messageId: "m1",
+        userMessage: "Oi",
+        channel: "meta",
+      });
+
+      expect(scheduleAiReply).toHaveBeenCalled();
+      expect(turns.size).toBe(0);
+    } finally {
+      attendanceGate.enabled = true;
+    }
   });
 
   it("mensagem já reivindicada por outro processo não abre turno", async () => {

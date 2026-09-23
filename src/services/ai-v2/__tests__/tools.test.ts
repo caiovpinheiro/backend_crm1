@@ -82,7 +82,7 @@ describe("searchV2CrmRecords", () => {
 
   it("retorna contato e negócio atuais que casam com o termo", async () => {
     (prisma.contact.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { id: "c1", name: "Ana Silva", phone: "119999", email: "ana@x.com", customValues: [] },
+      { id: "c1", name: "Ana Silva", phone: "119999", email: "ana@x.com", customFields: [] },
     ]);
     (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
@@ -91,7 +91,7 @@ describe("searchV2CrmRecords", () => {
         status: "OPEN",
         value: 5000,
         stage: { id: "s1", name: "Proposta" },
-        customValues: [],
+        customFields: [],
       },
     ]);
 
@@ -99,6 +99,57 @@ describe("searchV2CrmRecords", () => {
     expect(result.contacts.length).toBe(1);
     expect(result.deals.length).toBe(1);
     expect(result.deals[0].title).toBe("Venda de Notebook");
+  });
+
+  it("usa a relação customFields (a única que existe em Contact/Deal)", async () => {
+    (prisma.contact.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await searchV2CrmRecords({ query: "x", contactId: "c1" });
+
+    const contactArgs = (prisma.contact.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const dealArgs = (prisma.deal.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(Object.keys(contactArgs.include)).toEqual(["customFields"]);
+    expect(Object.keys(dealArgs.include)).toContain("customFields");
+    expect(dealArgs.include).not.toHaveProperty("customValues");
+  });
+
+  it("nunca busca fora do contato da conversa", async () => {
+    (prisma.contact.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const withoutContact = await searchV2CrmRecords({ query: "Maria Souza" });
+    expect(withoutContact).toEqual({ query: "Maria Souza", contacts: [], deals: [] });
+    expect(prisma.contact.findMany).not.toHaveBeenCalled();
+
+    await searchV2CrmRecords({ query: "Maria Souza", contactId: "c1", scope: "organization" } as any);
+    const contactArgs = (prisma.contact.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(contactArgs.where).toMatchObject({ id: "c1" });
+    const dealArgs = (prisma.deal.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(dealArgs.where).toMatchObject({ contactId: "c1" });
+  });
+
+  it("só devolve campos liberados pela config do agente", async () => {
+    (prisma.contact.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: "c1",
+        name: "Ana",
+        phone: "119999",
+        email: "ana@x.com",
+        customFields: [
+          { customFieldId: "cf-curso", value: "ADM", customField: { name: "curso", label: "Curso" } },
+          { customFieldId: "cf-cpf", value: "123.456.789-00", customField: { name: "cpf", label: "CPF" } },
+        ],
+      },
+    ]);
+    (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const r = await searchV2CrmRecords({ query: "curso", contactId: "c1", readableKeys: ["contact.cf-curso", "contact.email"] });
+
+    const c = r.contacts[0] as Record<string, unknown>;
+    expect(c.customFields).toEqual([{ label: "Curso", value: "ADM" }]);
+    expect(c.email).toBe("ana@x.com");
+    expect(c).not.toHaveProperty("phone");
   });
 });
 

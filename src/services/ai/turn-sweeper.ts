@@ -191,9 +191,11 @@ let sweeping = false;
  * Sobe o tick no processo atual. Idempotente — pode ser chamado do boot
  * de vários módulos sem risco de dois loops.
  */
-export function startAiTurnSweeper(): void {
+export function startAiTurnSweeper(opts: { force?: boolean } = {}): void {
   if (sweeperTimer) return;
-  if (!isTurnManagerEnabled()) return;
+  // `force`: o motor v2 SEMPRE usa turnos, com ou sem AI_TURN_MANAGER. Sem o
+  // tick, um turno que falhava voltava para READY e ninguém reprocessava.
+  if (!opts.force && !isTurnManagerEnabled()) return;
   if ((process.env.AI_TURN_SWEEPER ?? "1").trim() === "0") return;
 
   const intervalMs = envInt("AI_TURN_SWEEP_INTERVAL_MS", 1000);

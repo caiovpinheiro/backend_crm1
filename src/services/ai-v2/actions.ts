@@ -190,21 +190,25 @@ async function executeCreateActivity(action: V2Action, ctx: V2ActionContext): Pr
   }
 }
 
+/**
+ * Só registra a tabulação. O encerramento em si é do motor (`closeState`),
+ * que roda quando esta ação vem no turno: aqui ele acontecia duas vezes e,
+ * sem tabulação na ação, apagava a que a conversa já tinha.
+ */
 async function executeCloseConversation(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const reason = typeof action.reason === "string" ? action.reason : "resolved";
   const tabulationId = typeof action.tabulationId === "string" ? action.tabulationId : undefined;
   try {
-    await (prisma as unknown as {
-      conversation: {
-        update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
-      };
-    }).conversation.update({
-      where: { id: ctx.conversationId },
-      data: {
-        status: "RESOLVED",
-        tabulationId: tabulationId ?? null,
-      },
-    });
+    if (tabulationId) {
+      await (prisma as unknown as {
+        conversation: {
+          update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
+        };
+      }).conversation.update({
+        where: { id: ctx.conversationId },
+        data: { tabulationId },
+      });
+    }
     return { action, ok: true, reason };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };

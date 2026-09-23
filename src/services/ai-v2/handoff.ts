@@ -8,12 +8,35 @@ import { executeDistribution } from "@/services/distribution";
 import { isAgentAvailable } from "@/services/lead-distribution";
 import type { V2Destination } from "@/lib/ai-v2/types";
 
-export async function simpleHandoff(args: {
+type HandoffArgs = {
   conversationId: string;
   contactId?: string | null;
   dealId?: string | null;
   destination: V2Destination;
-}): Promise<void> {
+};
+
+export async function simpleHandoff(args: HandoffArgs): Promise<void> {
+  await routeHandoff(args);
+  if (args.destination.type !== "ai_agent") {
+    await releaseFromAi(args.conversationId);
+  }
+}
+
+/**
+ * Handoff para humano/fila nunca pode deixar a conversa com um usuário IA.
+ * A distribuição não mexe no responsável quando está desligada
+ * (SMART_DISTRIBUTION_NOT_ENABLED / DISTRIBUTION_DISABLED): o agente dizia
+ * "vou transferir", continuava dono e voltava a responder no turno seguinte.
+ * Sem responsável, a conversa aparece na Entrada para a equipe.
+ */
+async function releaseFromAi(conversationId: string): Promise<void> {
+  await (prisma as any).conversation.updateMany({
+    where: { id: conversationId, assignedTo: { type: "AI" } },
+    data: { assignedToId: null },
+  });
+}
+
+async function routeHandoff(args: HandoffArgs): Promise<void> {
   const destination = args.destination;
 
   if (destination.type === "department") {

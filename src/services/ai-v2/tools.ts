@@ -133,12 +133,24 @@ export async function searchV2Products(args: {
   };
 }
 
+/**
+ * Busca no contato e no negócio DA CONVERSA — nunca no CRM inteiro.
+ *
+ * Antes aceitava `scope: "organization"` e devolvia nome, telefone, e-mail e
+ * todos os campos personalizados de até 200 contatos: qualquer cliente
+ * podia pedir ao agente os dados de outra pessoa. Também ignorava as
+ * permissões de campo do agente. Agora só volta o que a config libera
+ * (`readableKeys`, no formato "contact.<chave>" / "deal.<chave>").
+ *
+ * (A relação em Contact/Deal é `customFields`; o código usava
+ * `customValues`, que só existe em Product — toda chamada falhava.)
+ */
 export async function searchV2CrmRecords(args: {
   query: string;
-  scope?: "current_contact" | "organization";
   contactId?: string;
   dealId?: string;
   limit?: number;
+  readableKeys?: string[];
 }): Promise<{
   query: string;
   contacts: Array<Record<string, unknown>>;
@@ -147,62 +159,49 @@ export async function searchV2CrmRecords(args: {
   const orgId = getOrgIdOrThrow();
   const term = args.query.trim();
   const limit = Math.min(Math.max(args.limit ?? 5, 1), 10);
-  const scopeOrg = args.scope === "organization";
+  const readable = new Set(args.readableKeys ?? []);
+  if (!args.contactId && !args.dealId) return { query: term, contacts: [], deals: [] };
 
-  const contacts: any[] = await (prisma as any).contact.findMany({
-    where: {
-      organizationId: orgId,
-      ...(scopeOrg ? {} : args.contactId ? { id: args.contactId } : { id: "" }),
-    },
-    take: scopeOrg ? 200 : 1,
-    include: { customValues: { include: { customField: { select: { name: true, label: true } } } } },
+  const contacts: any[] = args.contactId
+    ? await (prisma as any).contact.findMany({
+        where: { organizationId: orgId, id: args.contactId },
+        take: 1,
+        include: { customFields: { include: { customField: { select: { name: true, label: true } } } } },
+      })
+    : [];
+
+  const matchedContacts = contacts.map((c: any) => {
+    const fields = (c.customFields ?? []).filter(
+      (v: any) => v.value && String(v.value).trim() && readable.has(`contact.${v.customFieldId}`),
+    );
+    return {
+      id: c.id,
+      name: c.name,
+      ...(readable.has("contact.phone") ? { phone: c.phone } : {}),
+      ...(readable.has("contact.email") ? { email: c.email } : {}),
+      customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
+    };
   });
-
-  const matchedContacts = contacts
-    .map((c: any) => {
-      const cfText = c.customValues.map((v: any) => `${v.customField.name} ${v.value}`).join(" ");
-      const score =
-        scoreTextMatch(c.name ?? "", term) +
-        scoreTextMatch(c.phone ?? "", term) +
-        scoreTextMatch(c.email ?? "", term) +
-        scoreTextMatch(cfText, term);
-      return {
-        id: c.id,
-        name: c.name,
-        phone: c.phone,
-        email: c.email,
-        customFields: c.customValues
-          .filter((v: any) => v.value && v.value.trim())
-          .map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
-        score,
-      };
-    })
-    .filter((c: any) => c.score > 0 || (!scopeOrg && args.contactId))
-    .sort((a: any, b: any) => b.score - a.score)
-    .slice(0, limit);
 
   const deals: any[] = await (prisma as any).deal.findMany({
     where: {
       organizationId: orgId,
       status: { not: "LOST" },
-      ...(scopeOrg
-        ? {}
-        : args.contactId
-          ? { contactId: args.contactId }
-          : args.dealId
-            ? { id: args.dealId }
-            : { id: "" }),
+      ...(args.contactId ? { contactId: args.contactId } : { id: args.dealId }),
     },
-    take: scopeOrg ? 200 : 5,
+    take: 5,
     include: {
       stage: { select: { id: true, name: true } },
-      customValues: { include: { customField: { select: { name: true, label: true } } } },
+      customFields: { include: { customField: { select: { name: true, label: true } } } },
     },
   });
 
   const matchedDeals = deals
     .map((d: any) => {
-      const cfText = d.customValues.map((v: any) => `${v.customField.name} ${v.value}`).join(" ");
+      const fields = (d.customFields ?? []).filter(
+        (v: any) => v.value && String(v.value).trim() && readable.has(`deal.${v.customFieldId}`),
+      );
+      const cfText = fields.map((v: any) => `${v.customField.name} ${v.value}`).join(" ");
       const score =
         scoreTextMatch(d.title, term) +
         scoreTextMatch(cfText, term) +
@@ -213,19 +212,17 @@ export async function searchV2CrmRecords(args: {
         status: d.status,
         value: d.value ? Number(d.value) : null,
         stage: d.stage,
-        customFields: d.customValues
-          .filter((v: any) => v.value && v.value.trim())
-          .map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
+        customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
         score,
       };
     })
-    .filter((d: any) => d.score > 0 || (!scopeOrg && (args.contactId || args.dealId)))
+    // Negócio da conversa entra sempre; entre vários, os que casam primeiro.
     .sort((a: any, b: any) => b.score - a.score)
     .slice(0, limit);
 
   return {
     query: term,
-    contacts: matchedContacts.map(({ score: _s, ...rest }: any) => rest),
+    contacts: matchedContacts,
     deals: matchedDeals.map(({ score: _s, ...rest }: any) => rest),
   };
 }

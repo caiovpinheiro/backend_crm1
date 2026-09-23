@@ -12,6 +12,12 @@ export function classifyPostCloseMessage(
   message: string,
 ): V2PostCloseCase {
   const m = message.toLowerCase();
+  // Resposta à pergunta do `ask_with_options` pós-encerramento
+  // ("1 para Sim ou 2 para Só agradecer"). Sem isto "1"/"2" caíam em
+  // "ambíguo" e a mesma pergunta era repetida.
+  const trimmed = m.trim().replace(/[.!]+$/, "");
+  if (trimmed === "1" || trimmed === "sim") return "new_demand";
+  if (trimmed === "2") return "courtesy";
   const courtesyWords = ["obrigado", "obrigada", "valeu", "vlw", "tchau", "até", "ate", "boa noite", "boa tarde", "bom dia", "ok"];
   const newDemandWords = ["preciso", "quero", "dúvida", "duvida", "problema", "ajuda", "solicitar", "comprar", "alterar", "mudar"];
 

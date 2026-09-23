@@ -77,7 +77,9 @@ export function scrubNonCitableFields(
   for (const value of values) {
     if (!result.includes(value)) continue;
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(escaped, "g");
+    // Só o valor inteiro: sem as bordas, o nome "Ana" virava
+    // "[informação interna não compartilhada]polis" dentro de "Anápolis".
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "gu");
     let found = false;
     result = result.replace(re, () => {
       found = true;
@@ -92,8 +94,9 @@ export function guardV2Output(
   text: string,
   allowedDomains: string[],
   ctx?: ScrubContext,
-): { text: string; warnings: string[]; scrubbedFields?: string[] } {
+): { text: string; warnings: string[]; scrubbedFields?: string[]; forceHandoff?: boolean } {
   const warnings: string[] = [];
+  let forceHandoff = false;
   let replyText = text;
   let scrubbedFields: string[] | undefined;
   if (ctx) {
@@ -109,8 +112,11 @@ export function guardV2Output(
     warnings.push(`URLs removidas por domínio não autorizado: ${urlResult.removed.join(", ")}`);
   }
   if (containsReturnPromise(urlResult.text)) {
+    // O texto dizia "vou passar para um atendente" mas ninguém transferia:
+    // o motor precisa do sinal para fazer o handoff de verdade.
     warnings.push("Promessa de retorno detectada. Substituída por handoff.");
     urlResult.text = "Preciso passar isso para um atendente da equipe que vai te ajudar agora.";
+    forceHandoff = true;
   }
-  return { text: urlResult.text, warnings, scrubbedFields };
+  return { text: urlResult.text, warnings, scrubbedFields, forceHandoff };
 }

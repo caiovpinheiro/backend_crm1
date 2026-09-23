@@ -198,6 +198,66 @@ describe("callV2LLM function calling", () => {
   });
 });
 
+describe("callV2LLM — saída inválida", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("JSON quebrado não vira mensagem para o cliente: aplica o fallback com handoff", async () => {
+    // Resposta cortada + normalizador também sem JSON válido.
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse('{"reply": "Olá, sua matrícula está'),
+    );
+    const config = baseConfig();
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "Oi",
+      stage: "active",
+    });
+
+    expect(result.output.handoff).toBe(true);
+    expect(result.output.reply).not.toContain('"reply"');
+  });
+
+  it("texto livre de verdade continua sendo usado como resposta", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse("Olá! Sua matrícula está ativa."),
+    );
+    const config = baseConfig();
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "Oi",
+      stage: "active",
+    });
+
+    expect(result.output.handoff).toBe(false);
+    expect(result.output.reply).toBe("Olá! Sua matrícula está ativa.");
+  });
+
+  it("o exemplo de saída do prompt não sugere handoff", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+    const config = baseConfig();
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "Oi",
+      stage: "active",
+    });
+
+    expect(result.systemPrompt).not.toMatch(/"actions":\s*\[\s*\{\s*"type":\s*"handoff"/);
+  });
+});
+
 describe("buildV2ToolSet governor", () => {
   beforeEach(() => {
     vi.clearAllMocks();

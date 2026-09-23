@@ -359,21 +359,13 @@ export async function onInboundMessageForAi(
     }
   }
 
-  const simpleAgent = await resolveV2AgentForConversation(
-    input.conversationId,
-  );
-  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
-
-  if (!useTurnManager) {
-    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
-    await scheduleAiReply(input);
-    return;
-  }
-
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
 
-  // Allowlist (defesa em profundidade — o inbox-handler checa de novo).
+  // Allowlist ANTES de resolver o agente v2: o resolver atribui a conversa
+  // à IA, e um contato fora da allowlist ficava preso num agente que nunca
+  // responde. Os dois caminhos (turno e debounce antigo) já descartavam
+  // esse contato, então sair aqui não muda o que a IA responde.
   try {
     const allowed = await isContactAllowedForAi(input.contactId);
     if (!allowed) {
@@ -385,6 +377,17 @@ export async function onInboundMessageForAi(
     }
   } catch (e) {
     console.error("[ai-turn] phone allowlist check failed — blocking", e);
+    return;
+  }
+
+  const simpleAgent = await resolveV2AgentForConversation(
+    input.conversationId,
+  );
+  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
+
+  if (!useTurnManager) {
+    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
+    await scheduleAiReply(input);
     return;
   }
 
@@ -403,7 +406,9 @@ export async function onInboundMessageForAi(
   // promova mesmo em ambiente que não sobe worker dedicado (DEV com só
   // `APP_MODE=api`). Import dinâmico: o sweeper importa este módulo.
   void import("@/services/ai/turn-sweeper")
-    .then(({ startAiTurnSweeper }) => startAiTurnSweeper())
+    .then(({ startAiTurnSweeper }) =>
+      startAiTurnSweeper({ force: Boolean(simpleAgent) }),
+    )
     .catch(() => {
       /* fast path + cron cobrem */
     });
@@ -583,6 +588,23 @@ export async function buildAggregatedText(
 }
 
 /**
+ * Tipo da última bolha do turno (texto, áudio, imagem…). O motor v2 decide
+ * a política de mídia por ele — sem isso "áudio → transferir" nunca disparava.
+ */
+async function lastMessageType(
+  organizationId: string,
+  messageIds: string[],
+): Promise<string | undefined> {
+  const lastId = messageIds[messageIds.length - 1];
+  if (!lastId) return undefined;
+  const row = await prismaBase.message.findFirst({
+    where: { organizationId, id: lastId },
+    select: { messageType: true },
+  });
+  return row?.messageType ?? undefined;
+}
+
+/**
  * Claim atômico READY → PROCESSING. `updateMany` + checagem de count é o
  * equivalente Prisma do `UPDATE ... WHERE status='READY' RETURNING *`:
  * o Postgres serializa os dois UPDATEs na mesma linha e o perdedor vê
@@ -675,6 +697,7 @@ export async function runTurn(turn: {
             conversationId: turn.conversationId,
             channel: turn.channel === "baileys" ? "baileys" : "meta",
             userMessage: text,
+            messageType: await lastMessageType(turn.organizationId, messageIds),
             turnId: turn.id,
           });
         } else {

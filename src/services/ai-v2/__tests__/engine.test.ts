@@ -17,12 +17,18 @@ const mocks = vi.hoisted(() => ({
   loadBridge: vi.fn(),
   mapBridgeVars: vi.fn(),
   createDeal: vi.fn(),
+  attendanceEnabled: vi.fn(),
+  messageFindMany: vi.fn(),
+  findInherited: vi.fn(),
+  resolveInline: vi.fn(),
+  distributeNewInbound: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     aIAgentConfig: { findUnique: mocks.prismaAIAgentFindUnique },
     conversation: { findUnique: mocks.prismaConversationFindUnique },
+    message: { findMany: mocks.messageFindMany },
   },
 }));
 
@@ -56,6 +62,7 @@ vi.mock("../handoff", () => ({
 vi.mock("../state", () => ({
   getV2ConversationState: mocks.getState,
   upsertV2ConversationState: mocks.upsertState,
+  findInheritablePostCloseState: mocks.findInherited,
   resetV2Counters: vi.fn(),
 }));
 
@@ -76,6 +83,22 @@ vi.mock("../automation-bridge", () => ({
 
 vi.mock("@/services/deals", () => ({
   createDeal: mocks.createDeal,
+}));
+
+vi.mock("@/services/ai/attendance-gate", () => ({
+  isAiAttendanceEnabled: mocks.attendanceEnabled,
+}));
+
+vi.mock("../ensure-schema", () => ({
+  ensureV2AgentSchema: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/services/conversations", () => ({
+  resolveConversationsInline: mocks.resolveInline,
+}));
+
+vi.mock("@/services/distribution", () => ({
+  maybeDistributeNewInboundTicket: mocks.distributeNewInbound,
 }));
 
 function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
@@ -138,6 +161,11 @@ describe("processV2Turn", () => {
     mocks.simpleHandoff.mockResolvedValue(undefined);
     mocks.upsertState.mockResolvedValue(undefined);
     mocks.logTurn.mockResolvedValue(undefined);
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.findInherited.mockResolvedValue(null);
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
+    mocks.distributeNewInbound.mockResolvedValue(undefined);
   });
 
   it("primeira mensagem sem deal e onDealNotFound=handoff => handoff", async () => {
@@ -542,7 +570,9 @@ describe("processV2Turn", () => {
       ],
     });
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
-    mocks.loadContext.mockResolvedValue({ contact: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    // Como o loadV2Context real devolve: `contact` indexado pelo rótulo dos
+    // campos configurados (sem tags); as tags ficam no `contactRaw`.
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
     mocks.getState.mockResolvedValue(makeState("active"));
 
     const { processV2Turn } = await import("../engine");
@@ -665,9 +695,9 @@ describe("processV2Turn", () => {
     expect(sent).toBe(config.handoff.message);
   });
 
-  it("send_message vindo de regra respeita limite de cortesia e não chama LLM", async () => {
+  it("send_message vindo de regra respeita limite de parada (loop) e não chama LLM", async () => {
     const config = baseConfig({
-      limits: { maxCourtesyReplies: 1 } as any,
+      limits: { maxLoopCount: 3, nonsenseAction: "warn_and_silence" } as any,
       rules: [
         {
           id: "vip",
@@ -679,8 +709,9 @@ describe("processV2Turn", () => {
       ],
     });
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
-    mocks.loadContext.mockResolvedValue({ contact: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
-    mocks.getState.mockResolvedValue(makeState("active", "agente", { courtesyReplies: 1 }));
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    // Cliente mandou "oi" pela 3ª vez seguida.
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { loopCount: 2, lastLoopMessage: "oi" }));
 
     const { processV2Turn } = await import("../engine");
     const result = await processV2Turn({
@@ -837,3 +868,221 @@ describe("processV2Turn", () => {
     expect(mocks.callLLM).toHaveBeenCalled();
   });
 });
+
+function llmOut(overrides: Partial<V2LLMOutput> = {}): { output: V2LLMOutput; inputTokens: number; outputTokens: number; latencyMs: number } {
+  return {
+    output: {
+      reply: "Resposta do agente.",
+      confirmed: null,
+      handoff: false,
+      concluded: false,
+      outOfScope: false,
+      sentiment: "neutral",
+      collected: {},
+      reason: "",
+      actions: [],
+      ...overrides,
+    } as V2LLMOutput,
+    inputTokens: 10,
+    outputTokens: 5,
+    latencyMs: 100,
+  };
+}
+
+const CONTEXT_WITH_DEAL = {
+  contact: { Nome: "João" },
+  contactRaw: { id: "contact-1", name: "João" },
+  deals: [{ id: "deal-1" }],
+  selectedDeal: { Negócio: "Matrícula" },
+  selectedDealRaw: { id: "deal-1", title: "Matrícula" },
+  dealId: "deal-1",
+};
+
+describe("processV2Turn — correções do motor", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false });
+    mocks.prismaConversationFindUnique.mockResolvedValue({ contactId: "contact-1", organizationId: "org-1", contact: { phone: "5511999999999" } });
+    mocks.loadBridge.mockResolvedValue({ variables: {} });
+    mocks.mapBridgeVars.mockReturnValue({});
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
+    mocks.sendText.mockResolvedValue(undefined);
+    mocks.simpleHandoff.mockResolvedValue(undefined);
+    mocks.upsertState.mockResolvedValue(undefined);
+    mocks.logTurn.mockResolvedValue(undefined);
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.findInherited.mockResolvedValue(null);
+    mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
+    mocks.distributeNewInbound.mockResolvedValue(undefined);
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.loadContext.mockResolvedValue(CONTEXT_WITH_DEAL);
+  });
+
+  async function run(userMessage: string, extra: Record<string, unknown> = {}) {
+    const { processV2Turn } = await import("../engine");
+    return processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage, ...extra });
+  }
+
+  it("handoff pedido como AÇÃO: avisa o cliente antes e transfere uma vez só", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ actions: [{ type: "handoff" }] as any }));
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async () => { order.push("send"); });
+    mocks.simpleHandoff.mockImplementation(async () => { order.push("handoff"); });
+
+    const result = await run("Quero falar com alguém");
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["send", "handoff"]);
+    expect(mocks.sendText.mock.calls[0][0].text).toBe("Vou transferir.");
+    // O executor genérico não recebe o handoff (não transfere por conta própria).
+    const executed = mocks.executeActions.mock.calls.flatMap((c) => c[0] as Array<{ type: string }>);
+    expect(executed.some((a) => a.type === "handoff")).toBe(false);
+  });
+
+  it("destino pedido na ação de handoff é respeitado", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ actions: [{ type: "handoff", destination: { type: "user", id: "u-9" } }] as any }));
+
+    await run("Me passa pro financeiro");
+
+    expect(mocks.simpleHandoff.mock.calls[0][0].destination).toEqual({ type: "user", id: "u-9" });
+  });
+
+  it("promessa de retorno na resposta vira handoff de verdade", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Vou verificar e te retorno em breve." }));
+
+    const result = await run("Meu boleto venceu");
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("identificação: 2ª tentativa com outro texto e depois transfere", async () => {
+    const config = baseConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", maxAttempts: 2 } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1" }, deals: [], selectedDeal: null, dealId: undefined });
+
+    // 1º turno: pergunta.
+    mocks.getState.mockResolvedValue(null);
+    await run("Oi");
+    const first = mocks.sendText.mock.calls.at(-1)![0].text as string;
+    expect(mocks.upsertState.mock.calls.at(-1)![0]).toMatchObject({ stage: "identifying", identificationAttempts: 1 });
+
+    // 2º turno: cliente respondeu, ainda sem negócio → pergunta diferente.
+    mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 1 });
+    await run("123.456.789-00");
+    const second = mocks.sendText.mock.calls.at(-1)![0].text as string;
+    expect(second).not.toBe(first);
+    expect(mocks.upsertState.mock.calls.at(-1)![0]).toMatchObject({ stage: "identifying", identificationAttempts: 2 });
+
+    // 3º turno: esgotou → transfere, sem chamar o LLM.
+    mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 2 });
+    const result = await run("ana@x.com");
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("pós-encerramento no_reply (padrão para cortesia): não responde, salva contador e reencerra o ticket", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({
+      ...makeState("closed", "ninguem"),
+      postCloseWindowEndAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    const result = await run("Obrigado!");
+
+    expect(result.closed).toBe(true);
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.upsertState.mock.calls.some((c) => c[0].counters?.courtesyReplies === 1)).toBe(true);
+    expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ ids: ["conv-1"], keepAgent: true }));
+  });
+
+  it("ticket novo aberto pelo 'obrigado' herda a janela pós-encerramento do anterior", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const windowEnd = new Date(Date.now() + 60 * 60 * 1000);
+    mocks.getState.mockResolvedValue(null);
+    mocks.findInherited.mockResolvedValue({ ...makeState("closed", "ninguem"), conversationId: "conv-old", postCloseWindowEndAt: windowEnd });
+    mocks.upsertState.mockImplementation(async (args: any) => ({ ...makeState(args.stage ?? "closed", args.owner ?? "ninguem"), postCloseWindowEndAt: args.postCloseWindowEndAt ?? null }));
+
+    const result = await run("valeu");
+
+    expect(mocks.upsertState.mock.calls[0][0]).toMatchObject({ conversationId: "conv-1", stage: "closed", postCloseWindowEndAt: windowEnd });
+    expect(result.closed).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+  });
+
+  it("memória: variáveis salvas voltam no prompt e o que o LLM coleta é persistido", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active"), collectedVariables: { curso: "ADM" } });
+    mocks.callLLM.mockResolvedValue(llmOut({ collected: { turno: "noite" } }));
+
+    await run("Prefiro à noite");
+
+    expect(mocks.callLLM.mock.calls[0][0].collectedVariables).toMatchObject({ curso: "ADM" });
+    const last = mocks.upsertState.mock.calls.at(-1)![0];
+    expect(last.collectedVariables).toMatchObject({ curso: "ADM", turno: "noite" });
+  });
+
+  it("atendimento IA desligado na org: não responde e manda para a distribuição", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.attendanceEnabled.mockResolvedValue(false);
+
+    const result = await run("Oi");
+
+    expect(result.error).toBe("AI attendance disabled");
+    expect(mocks.distributeNewInbound).toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("send_message_model com modelo fora da lista liberada é descartado", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-ok"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      actions: [
+        { type: "send_message_model", modelId: "mm-ok" },
+        { type: "send_message_model", modelId: "mm-inventado" },
+      ] as any,
+    }));
+
+    await run("Me manda o procedimento");
+
+    const executed = mocks.executeActions.mock.calls.at(-1)![0] as Array<{ modelId?: string }>;
+    expect(executed.map((a) => a.modelId)).toEqual(["mm-ok"]);
+  });
+
+  it("histórico não repete as bolhas do turno atual", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut());
+    // findMany vem em ordem decrescente (mais nova primeiro).
+    mocks.messageFindMany.mockResolvedValue([
+      { direction: "in", authorType: "contact", content: "de ajuda" },
+      { direction: "in", authorType: "contact", content: "preciso" },
+      { direction: "out", authorType: "bot", content: "Como posso ajudar?" },
+      { direction: "in", authorType: "contact", content: "Oi" },
+    ]);
+
+    await run("preciso\nde ajuda");
+
+    expect(mocks.callLLM.mock.calls[0][0].previousMessages).toEqual([
+      { role: "user", content: "Oi" },
+      { role: "assistant", content: "Como posso ajudar?" },
+    ]);
+  });
+});
+

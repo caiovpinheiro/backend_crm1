@@ -19,7 +19,7 @@ import { evaluateV2Media } from "./media";
 import { callV2LLM } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
-import { getV2ConversationState, upsertV2ConversationState } from "./state";
+import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior } from "./closure";
@@ -37,6 +37,9 @@ import {
   normalizePhoneDigits,
   phoneMatchesAllowlist,
 } from "@/services/ai/phone-allowlist";
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
+import { ensureV2AgentSchema } from "./ensure-schema";
+import { checkV2CostCap } from "./cost-guard";
 
 function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS" | "DRAFT" {
   return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
@@ -175,6 +178,43 @@ function mergeCollectedVariables(
   return { ...existing, ...collected };
 }
 
+/**
+ * Modelos de mensagem liberados no turno. A tela grava os do assunto em
+ * `allowedMessageModelIds`; `messageModelIds` é o nome legado.
+ */
+function allowedMessageModelIdsFor(config: V2AgentConfig, theme: ReturnType<typeof getV2ThemeById>): string[] {
+  if (theme?.allowedMessageModelIds?.length) return theme.allowedMessageModelIds;
+  if (theme?.messageModelIds?.length) return theme.messageModelIds;
+  return config.allowedMessageModelIds ?? [];
+}
+
+/** Aceita opções como string ou `{ label }` (formato livre do LLM). */
+function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ label: string }> = [];
+  for (const opt of raw) {
+    const label =
+      typeof opt === "string"
+        ? opt
+        : opt && typeof opt === "object" && typeof (opt as { label?: unknown }).label === "string"
+          ? (opt as { label: string }).label
+          : "";
+    if (label.trim()) out.push({ label: label.trim() });
+  }
+  return out.slice(0, 10);
+}
+
+/** Variáveis gravadas por ações `set_variable` bem-sucedidas. */
+function variablesFromActions(results: V2ActionResult[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const r of results) {
+    if (r.action.type !== "set_variable" || !r.ok) continue;
+    const key = typeof r.key === "string" ? r.key.trim() : "";
+    if (key) out[key] = r.value;
+  }
+  return out;
+}
+
 function messageVariables(config: V2AgentConfig, context: V2CRMContext): Record<string, unknown> {
   return buildVariableMap(
     config.variables,
@@ -187,6 +227,13 @@ function messageVariables(config: V2AgentConfig, context: V2CRMContext): Record<
 
 export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const startedAt = Date.now();
+  // DEV não aplica migrations no deploy: garante draftConfig e
+  // collectedVariables antes de tocar no estado da conversa.
+  try {
+    await ensureV2AgentSchema();
+  } catch (err) {
+    console.error("[ai-v2] ensureV2AgentSchema falhou", err);
+  }
   const resolved = await resolveV2AgentForConversation(input.conversationId);
   if (!resolved) {
     return { handoff: false, closed: false, error: "No v2 agent assigned" };
@@ -204,6 +251,18 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   const contactId = await getConversationContact(input.conversationId) ?? undefined;
   if (!contactId) {
     return { handoff: false, closed: false, error: "Conversation without contact" };
+  }
+
+  // Kill-switch da org: mesmo comportamento do v1 (inbox-handler) — não
+  // responde e manda o ticket para a distribuição humana.
+  if (!(await isAiAttendanceEnabled())) {
+    const { maybeDistributeNewInboundTicket } = await import("@/services/distribution");
+    await maybeDistributeNewInboundTicket({
+      conversationId: input.conversationId,
+      contactId,
+      assignedToId: resolved.userId,
+    });
+    return { handoff: false, closed: false, error: "AI attendance disabled" };
   }
 
   // Filtro de números de teste: se a config restringe telefones, ignora
@@ -227,6 +286,28 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Estado (necessário antes de ações que precisam de owner/stage/versionId)
   let stateRow = await getV2ConversationState(input.conversationId);
+  if (!stateRow) {
+    const inherited = await findInheritablePostCloseState({
+      contactId,
+      conversationId: input.conversationId,
+      agentId: resolved.agentConfigId,
+    }).catch(() => null);
+    if (inherited) {
+      stateRow = await upsertV2ConversationState({
+        organizationId: orgId,
+        conversationId: input.conversationId,
+        agentId: resolved.agentConfigId,
+        stage: "closed",
+        owner: "ninguem",
+        postCloseWindowEndAt: inherited.postCloseWindowEndAt ?? null,
+        closeReason: inherited.closeReason ?? null,
+        selectedDealId: inherited.selectedDealId ?? null,
+        counters: parseV2Counters(inherited.counters),
+        collectedVariables: (inherited.collectedVariables as Record<string, unknown> | null) ?? {},
+        versionId: inherited.versionId ?? agent.versionId ?? null,
+      });
+    }
+  }
   let stage: V2Stage = (stateRow?.stage as V2Stage) ?? "idle";
   let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
   const humanBehavior = v2HumanBehavior(config);
@@ -378,9 +459,34 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     const caseType = classifyPostCloseMessage(config, input.userMessage);
     const behavior = getPostCloseBehavior(config, caseType);
 
+    // O contador de cortesia só vale dentro da janela e precisa ser salvo em
+    // todo ramo que encerra o turno aqui — antes nunca era, e o limite de
+    // respostas de cortesia não disparava ("Por nada!" em loop).
+    const persistPostCloseCounters = () =>
+      upsertV2ConversationState({
+        organizationId: orgId,
+        conversationId: input.conversationId,
+        agentId: resolved!.agentConfigId,
+        counters,
+        versionId,
+      });
+    // Cortesia sem nova demanda: o ticket aberto pelo "obrigado" não fica
+    // pendurado aberto com a IA na Entrada.
+    const reResolveCourtesyTicket = async () => {
+      const { resolveConversationsInline } = await import("@/services/conversations");
+      await resolveConversationsInline({
+        ids: [input.conversationId],
+        keepAgent: true,
+        keepDepartment: true,
+        tabulation: null,
+      });
+    };
+
     if (caseType === "courtesy") {
       counters.courtesyReplies += 1;
       if (counters.courtesyReplies > config.limits.maxCourtesyReplies) {
+        await persistPostCloseCounters();
+        await reResolveCourtesyTicket();
         await logV2Turn({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
           inboundText: input.userMessage,
@@ -392,9 +498,24 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       }
     }
 
-    if (behavior === "reopen_and_route") {
+    if (behavior === "no_reply") {
+      // Padrão para cortesia pós-encerramento ("obrigado", "valeu"). Não
+      // tinha ramo: caía no fluxo normal e o LLM respondia de novo.
+      await persistPostCloseCounters();
+      await reResolveCourtesyTicket();
+      await logV2Turn({
+        organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+        inboundText: input.userMessage,
+        crmContext: context,
+        prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "post-close no_reply" } as any],
+        handoff: false, closed: true, latencyMs: Date.now() - startedAt,
+        inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+      });
+      return { handoff: false, closed: true };
+    } else if (behavior === "reopen_and_route") {
       stage = "active";
       owner = "agente";
+      counters.courtesyReplies = 0;
       await upsertV2ConversationState({
         organizationId: orgId,
         conversationId: input.conversationId,
@@ -402,6 +523,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         stage,
         owner,
         postCloseWindowEndAt: null,
+        counters,
         versionId: versionId,
       });
     } else if (behavior === "short_reply") {
@@ -415,6 +537,8 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         humanBehavior,
       });
+      await persistPostCloseCounters();
+      await reResolveCourtesyTicket();
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
         inboundText: input.userMessage,
@@ -434,6 +558,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         humanBehavior,
       });
+      await persistPostCloseCounters();
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
         inboundText: input.userMessage,
@@ -444,6 +569,10 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: false, closed: true, sentReply: reply };
     }
   }
+
+  // Fora da janela pós-encerramento o limite de cortesia não se aplica —
+  // sem zerar, uma cortesia antiga bloquearia toda resposta futura.
+  counters.courtesyReplies = 0;
 
   // Mídia recebida
   const media = evaluateV2Media(config, input.messageType);
@@ -485,18 +614,30 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Regras determinísticas
   const withinBusinessHours = isWithinV2BusinessHours(config);
+  // As condições comparam pela CHAVE do campo (tags, stageName,
+  // field_equals). O contexto do prompt é indexado pelo rótulo exibido,
+  // então com ele essas regras nunca casavam — usa o dado bruto.
+  const ruleContext: V2CRMContext = {
+    ...context,
+    contact: loadedContext.contactRaw ?? null,
+    selectedDeal: loadedContext.selectedDealRaw ?? null,
+  };
   const rule = evaluateV2Rules(config, {
     userMessage: input.userMessage,
     messageType: input.messageType,
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
-    contactTags: (context.contact?.tags as string[]) ?? [],
-    dealStageName: loadedContext.selectedDeal?.stageName as string,
+    contactTags: (loadedContext.contactRaw?.tags as string[] | undefined) ?? [],
+    dealStageName: loadedContext.selectedDealRaw?.stageName as string | undefined,
     withinBusinessHours,
     mediaKinds: media ? [media.kind] : [],
     surveyReceived: counters.surveyPending,
-  }, context);
+  }, ruleContext);
 
   let appliedRuleId = rule?.id;
+
+  // Limites de parada: avaliados UMA vez por turno (a detecção de loop soma
+  // a cada chamada; antes contava duas vezes quando uma regra casava).
+  const stop = evaluateV2StopLimits(config, counters, input.userMessage);
 
   // Fluxo de entrada / onboarding
   let prompt = "";
@@ -511,13 +652,17 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   let discardedActions: V2Action[] = [];
   let anyHandoff = false;
   let anyClose = false;
-  let collectedVariables: Record<string, unknown> = { ...automationVariables };
+  // Memória da conversa: o que já foi coletado em turnos anteriores +
+  // variáveis da automação de origem (estas têm precedência).
+  let collectedVariables: Record<string, unknown> = {
+    ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
+    ...automationVariables,
+  };
 
   // Regra determinística: executa ações; se for terminal (handoff/close/mensagem),
   // encerra o turno; se for set_theme/set_variable, segue para o LLM com estado atualizado.
   if (rule) {
-    const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, "AUTONOMOUS", (v) => { counters.surveyPending = v; });
-    const stop = evaluateV2StopLimits(config, counters, input.userMessage);
+    const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });
 
     let ruleActions = rule.actions as unknown as V2Action[];
     const replyActionTypes = new Set(["send_message", "send_message_model", "send_whatsapp_template"]);
@@ -537,17 +682,30 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         } as any);
         await upsertV2ConversationState({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-          owner, counters: counters as V2Counters, versionId: versionId,
+          owner, counters: counters as V2Counters, versionId: versionId, collectedVariables,
         });
         return { handoff: false, closed: false };
       }
     }
 
-    const res = await executeV2Actions(ruleActions, actionCtx);
+    // Handoff da regra sai do executor genérico: primeiro roda o resto,
+    // depois avisa o cliente e só então transfere. Transferir antes fazia a
+    // mensagem de transferência morrer na checagem de responsável.
+    const ruleHandoff = ruleActions.find((a) => a.type === "handoff");
+    const otherRuleActions = ruleActions.filter((a) => a.type !== "handoff");
+    const res = await executeV2Actions(otherRuleActions, actionCtx);
     executedActions = res.results;
-    anyHandoff = res.anyHandoff;
     anyClose = res.anyClose;
     if (res.themeId) themeId = res.themeId;
+    Object.assign(collectedVariables, variablesFromActions(res.results));
+
+    let ruleReply: string | undefined;
+    if (ruleHandoff) {
+      const ruleAlreadyReplied = otherRuleActions.some((a) => replyActionTypes.has(a.type));
+      ruleReply = await performHandoff(ruleHandoff.destination as V2Destination | undefined, { skipMessage: ruleAlreadyReplied });
+      executedActions.push({ action: ruleHandoff, ok: true });
+      anyHandoff = true;
+    }
 
     const terminalTypes = new Set(["handoff", "close_conversation", "no_reply", "send_message", "send_message_model", "send_whatsapp_template"]);
     const isTerminal = ruleActions.some((a) => terminalTypes.has(a.type as string));
@@ -555,7 +713,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     // Logs e saída
     await logV2Turn({
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
-      inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: res.anyHandoff ? config.handoff.message : undefined,
+      inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: ruleReply,
       executedActions, discardedActions: [], handoff: anyHandoff, closed: anyClose, latencyMs: Date.now() - startedAt,
       inputTokens: 0, outputTokens: 0, owner, stage, appliedRuleId, versionId,
     });
@@ -563,15 +721,19 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     if (anyHandoff) {
       await upsertV2ConversationState({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-        owner: "pessoa", counters: counters as V2Counters, versionId: versionId,
+        owner: "pessoa", counters: counters as V2Counters, versionId: versionId, collectedVariables,
       });
-      return { handoff: true, closed: false };
+      return { handoff: true, closed: false, sentReply: ruleReply };
     }
     if (anyClose) {
       await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables);
       return { handoff: false, closed: true };
     }
     if (isTerminal) {
+      await upsertV2ConversationState({
+        organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+        counters: counters as V2Counters, versionId: versionId, collectedVariables,
+      });
       return { handoff: false, closed: false };
     }
   }
@@ -584,19 +746,56 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
         await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, "Não encontrei seu cadastro. Vou transferir para um atendente.", counters);
         return { handoff: true, closed: false };
       } else if (onDealNotFound === "create_deal") {
-        await createInitialDeal(contactId);
+        const created = await createInitialDeal(contactId);
+        if (!created) {
+          // Sem funil/etapa para criar o negócio: melhor um humano do que um
+          // turno que falha e é reprocessado até virar FAILED sem resposta.
+          await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
+          return { handoff: true, closed: false };
+        }
+        // Recarrega: o resto do turno (prompt, ações) precisa enxergar o
+        // negócio recém-criado.
+        loadedContext = await loadV2Context({
+          organizationId: orgId,
+          conversationId: input.conversationId,
+          contactId,
+          config,
+          selectedDealId: created,
+        });
+        context.contact = loadedContext.contact;
+        context.contactRaw = loadedContext.contactRaw;
+        context.citableContact = loadedContext.citableContact;
+        context.deals = loadedContext.deals;
+        context.selectedDeal = loadedContext.selectedDeal;
+        context.selectedDealRaw = loadedContext.selectedDealRaw;
+        context.citableDeal = loadedContext.citableDeal;
+        Object.assign(vars, messageVariables(config, context));
         stage = "active";
       } else {
-        const parts: string[] = [];
-        if (config.entry.openingEnabled && config.entry.openingMessage) {
-          parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+        // O motor não identifica pela resposta do cliente (não há busca por
+        // e-mail/CPF). Antes repetia a mesma pergunta para sempre e, da 2ª
+        // vez em diante, a trava anti-repetição engolia o envio: o cliente
+        // ficava sem resposta. Agora pergunta até `entry.maxAttempts` vezes
+        // (a 2ª com outro texto) e depois transfere para humano.
+        const asked = stage === "identifying" ? Math.max(1, stateRow?.identificationAttempts ?? 1) : 0;
+        if (asked >= (config.entry.maxAttempts ?? 2)) {
+          await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
+          return { handoff: true, closed: false };
         }
-        parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+        const parts: string[] = [];
+        if (asked === 0) {
+          if (config.entry.openingEnabled && config.entry.openingMessage) {
+            parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+          }
+          parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+        } else {
+          parts.push("Ainda não localizei seu cadastro com essa informação. Pode me enviar outro dado, como o e-mail ou o telefone usado no cadastro?");
+        }
         const identMsg = parts.filter(Boolean).join("\n\n");
         await sendReply(identMsg);
         await upsertV2ConversationState({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-          stage: "identifying", versionId: versionId,
+          stage: "identifying", versionId: versionId, identificationAttempts: asked + 1,
         });
         await logV2Turn({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -690,36 +889,58 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   // Onboarding
   let onboardingActive = false;
   if (config.flow === "onboarding" && config.onboarding && stage === "active") {
-    onboardingActive = true;
-    const step = currentV2OnboardingStep(config.onboarding, parseV2OnboardingState(collectedVariables.onboarding_state));
+    const prevState = parseV2OnboardingState(collectedVariables.onboarding_state);
+    const step = currentV2OnboardingStep(config.onboarding, prevState);
+    // Sem passo pendente o onboarding acabou: segue para o LLM normal. Antes
+    // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
-      const prevState = parseV2OnboardingState(collectedVariables.onboarding_state);
+      onboardingActive = true;
       const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
       outputTokens = llmForStep.outputTokens;
       latencyMs = llmForStep.latencyMs;
+      toolCalls = llmForStep.toolCalls;
+      governorStats = llmForStep.governorStats;
 
       if (llmOutput && isV2OnboardingStepCompleted(step, context, llmOutput)) {
         const nextState = advanceV2OnboardingState(config.onboarding, prevState, step.id);
         collectedVariables.onboarding_state = nextState as unknown as Record<string, unknown>;
       } else {
         const nextState = incrementStepAttempt(prevState, step.id);
-        if (shouldHandoffOnboardingStep(step, nextState)) {
-          const onboardingDestination = resolveHandoffDestination(config, step.handoffOnStuck, counters);
-          if (onboardingDestination.type === "ai_agent") counters.aiTransferCount += 1;
-          await simpleHandoff({ conversationId: input.conversationId, contactId, dealId: loadedContext.dealId, destination: onboardingDestination });
-          await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", counters: counters as V2Counters, versionId: versionId });
-          return { handoff: true, closed: false };
-        }
         collectedVariables.onboarding_state = nextState as unknown as Record<string, unknown>;
+        if (shouldHandoffOnboardingStep(step, nextState)) {
+          const sent = await performHandoff(step.handoffOnStuck);
+          await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", counters: counters as V2Counters, versionId: versionId, collectedVariables });
+          await logV2Turn({
+            organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+            inboundText: input.userMessage, crmContext: context, prompt, llmOutput, reply: sent,
+            executedActions: [{ action: { type: "handoff" }, ok: true }], discardedActions: [], handoff: true,
+            latencyMs, inputTokens, outputTokens, owner: "pessoa", stage, themeId, appliedRuleId, versionId, toolCalls, governorStats,
+          });
+          return { handoff: true, closed: false, sentReply: sent };
+        }
       }
     }
   }
 
   // LLM normal
   if (!onboardingActive) {
+    // Teto diário de tokens do agente. Existia na tela/schema mas o
+    // cost-guard nunca era chamado.
+    const cap = await checkV2CostCap({
+      config,
+      agentId: resolved.agentConfigId,
+      organizationId: orgId,
+      inputTokens: 0,
+      outputTokens: 0,
+    }).catch(() => ({ allowed: true as const }));
+    if (!cap.allowed) {
+      await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
+      return { handoff: true, closed: false };
+    }
+
     const theme = selectV2Theme(config, input.userMessage, themeId);
     themeId = theme?.id ?? themeId;
     const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
@@ -783,23 +1004,65 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: true, closed: false, sentReply: fallback };
   }
 
-  // Validar actions contra allowlist do tema
+  // Memória: o que o LLM coletou neste turno fica para os próximos.
+  Object.assign(collectedVariables, llmOutput.collected ?? {});
+
+  // Ações permitidas. Sem assunto ativo valem as ferramentas habilitadas na
+  // config (antes só handoff/close/tema/variável passavam e até o
+  // `messageModel` do próprio LLM era descartado sem aviso).
   const activeTheme = getV2ThemeById(config, themeId);
-  const allowedTools = new Set([...(activeTheme?.allowedTools ?? []), "handoff", "close_conversation", "set_theme", "set_variable"]);
+  const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  const allowedTools = new Set<string>([
+    ...(activeTheme ? activeTheme.allowedTools : (config.enabledTools ?? [])),
+    "close_conversation",
+    "set_theme",
+    "set_variable",
+  ]);
+  if (!activeTheme && allowedModelIds.length > 0) allowedTools.add("send_message_model");
+
+  // Handoff não passa pelo executor: vira sinal e roda uma vez só, depois
+  // do aviso ao cliente (ver `performHandoff`).
+  let wantsHandoff = llmOutput.handoff;
+  let requestedDestination: V2Destination | undefined;
   const allowedActions: V2Action[] = [];
   for (const a of llmOutput.actions) {
-    if (allowedTools.has(a.type)) allowedActions.push(a);
-    else discardedActions.push(a);
+    if (a.type === "handoff") {
+      wantsHandoff = true;
+      const dest = (a as { destination?: V2Destination }).destination;
+      if (dest && typeof dest === "object" && typeof dest.type === "string") requestedDestination = dest;
+      continue;
+    }
+    if (!allowedTools.has(a.type)) {
+      discardedActions.push(a);
+      continue;
+    }
+    // Modelo fora da lista liberada = o LLM inventou/escolheu um modelo que
+    // o operador não autorizou para este agente/assunto.
+    if (a.type === "send_message_model" && !allowedModelIds.includes(String((a as { modelId?: unknown }).modelId ?? ""))) {
+      discardedActions.push(a);
+      continue;
+    }
+    allowedActions.push(a);
   }
 
   // Sentimento
   const sentiment = detectV2Sentiment(config, input.userMessage);
-  if (shouldActOnSentiment(config, sentiment) && !anyHandoff) {
-    allowedActions.push({ type: "handoff" });
-  }
+  if (shouldActOnSentiment(config, sentiment)) wantsHandoff = true;
 
-  // Guarda de output
-  let replyText = llmOutput.reply;
+  // Mensagens sem sentido/fora de escopo seguidas (limite `nonsenseLimit`).
+  counters.nonsenseMessages = llmOutput.outOfScope ? counters.nonsenseMessages + 1 : 0;
+
+  // Aterramento na base ANTES da guarda de saída: o trecho da base pode
+  // substituir a resposta, e precisa passar pelo filtro de domínios e de
+  // campos internos como qualquer outro texto enviado ao cliente.
+  let replyText = await answerFromKnowledge({
+    reply: llmOutput.reply,
+    toolCalls,
+    config,
+    themeId,
+    userMessage: input.userMessage,
+    agentId: resolved.agentConfigId,
+  });
   const guard = guardV2Output(replyText, config.allowedDomains, {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
@@ -807,22 +1070,24 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     citableDeal: context.citableDeal ?? null,
   });
   replyText = guard.text;
-  replyText = await answerFromKnowledge({
-    reply: replyText,
-    toolCalls,
-    config,
-    themeId,
-    userMessage: input.userMessage,
-    agentId: resolved.agentConfigId,
-  });
+  if (guard.forceHandoff) wantsHandoff = true;
 
   // Executa ações
   const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });
+  actionCtx.llmOutput = llmOutput;
   const actionRes = await executeV2Actions(allowedActions, actionCtx);
   executedActions = actionRes.results;
-  anyHandoff = actionRes.anyHandoff || llmOutput.handoff;
+  Object.assign(collectedVariables, variablesFromActions(actionRes.results));
+  anyHandoff = wantsHandoff;
   anyClose = actionRes.anyClose || llmOutput.concluded;
   if (actionRes.themeId) themeId = actionRes.themeId;
+
+  // ask_with_options: o executor só devolve as opções. Sem isto elas nunca
+  // chegavam ao cliente. Vai como lista numerada junto da resposta.
+  const askOptions = normalizeAskOptions(actionRes.askOptions);
+  if (askOptions.length > 0) {
+    replyText = [replyText.trim(), askOptions.map((o, i) => `${i + 1}. ${o.label}`).join("\n")].filter(Boolean).join("\n\n");
+  }
 
   // Confirmação negativa
   if ((stage as V2Stage) === "confirming" && llmOutput.confirmed === false) {
@@ -830,7 +1095,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     await sendReply(identMsg);
     await upsertV2ConversationState({
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
-      stage: "identifying", themeId, versionId: versionId,
+      stage: "identifying", themeId, versionId: versionId, identificationAttempts: 1, collectedVariables,
     });
     await logV2Turn({
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -842,8 +1107,9 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false, sentReply: identMsg };
   }
 
-  // Limites de parada: se a resposta estiver bloqueada, descarta o texto e aplica a ação configurada
-  const stopLimits = evaluateV2StopLimits(config, counters, input.userMessage);
+  // Limites de parada (a detecção de loop já contou este turno lá em cima;
+  // aqui entra o contador de mensagens sem sentido atualizado agora).
+  const stopLimits = stop.blocksReply ? stop : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
   if (stopLimits.blocksReply) {
     replyText = "";
     if (stopLimits.action === "handoff") {
@@ -852,8 +1118,6 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (stopLimits.action === "close") {
       anyClose = true;
       llmOutput.concluded = true;
-    } else if (stopLimits.action === "silence") {
-      replyText = "";
     }
   }
 
@@ -863,21 +1127,11 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
     sentReply = replyText;
   }
 
-  // Handoff via LLM
+  // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >
+  // o do assunto ativo > o padrão da config.
   if (anyHandoff && !anyClose) {
-    const handoffMsg = renderMessage(config.handoff.message, vars, defaultFormatter());
-    if (handoffMsg.trim() && sentReply !== handoffMsg) {
-      await sendReply(handoffMsg);
-      sentReply = sentReply ? `${sentReply}\n${handoffMsg}`.trim() : handoffMsg;
-    }
-    const handoffDestination = resolveHandoffDestination(config, activeTheme?.handoffDestination ?? config.handoff.defaultDestination, counters);
-    if (handoffDestination.type === "ai_agent") counters.aiTransferCount += 1;
-    await simpleHandoff({
-      conversationId: input.conversationId,
-      contactId,
-      dealId: loadedContext.dealId,
-      destination: handoffDestination,
-    });
+    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination);
+    if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
   }
 
@@ -901,6 +1155,7 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
       owner,
       counters: counters as V2Counters,
       versionId: versionId,
+      collectedVariables,
     });
   }
 
@@ -933,6 +1188,37 @@ export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   return { handoff: anyHandoff, closed: anyClose, sentReply };
 
   // --- helpers internos ---
+
+  /**
+   * Único caminho de handoff do turno: avisa o cliente, depois transfere
+   * (uma vez só). A ordem importa: `sendV2TextMessage` exige que a IA ainda
+   * seja a responsável, então transferir antes descartava o aviso. Antes o
+   * handoff vindo como ação do LLM/sentimento rodava no executor E de novo
+   * aqui — duas distribuições seguidas, possivelmente para atendentes
+   * diferentes.
+   */
+  async function performHandoff(
+    requested: V2Destination | undefined,
+    opts: { skipMessage?: boolean } = {},
+  ): Promise<string | undefined> {
+    let sent: string | undefined;
+    if (!opts.skipMessage) {
+      const handoffMsg = renderMessage(config.handoff.message, vars, defaultFormatter());
+      if (handoffMsg.trim()) {
+        await sendReply(handoffMsg);
+        sent = handoffMsg;
+      }
+    }
+    const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters);
+    if (destination.type === "ai_agent") counters.aiTransferCount += 1;
+    await simpleHandoff({
+      conversationId: input.conversationId,
+      contactId,
+      dealId: loadedContext.dealId,
+      destination,
+    });
+    return sent;
+  }
 
   async function sendReply(text: string) {
     if (!text.trim()) return;
@@ -988,6 +1274,12 @@ async function callLLMWithTheme(
     for (const m of rows.reverse()) {
       const role = m.direction === "out" || m.authorType === "bot" ? "assistant" : "user";
       previousMessages.push({ role, content: m.content ?? "" });
+    }
+    // As bolhas do cliente depois da última fala do agente são o turno atual,
+    // que já vai agregado em `userMessage`. Mantê-las duplicava a mensagem
+    // no prompt.
+    while (previousMessages.length > 0 && previousMessages[previousMessages.length - 1].role === "user") {
+      previousMessages.pop();
     }
   } catch { /* ignore */ }
 
@@ -1080,15 +1372,16 @@ async function handoffAndReply(
   });
 }
 
-async function createInitialDeal(contactId: string): Promise<void> {
-  const firstPipeline = await (prisma as unknown as {
+/** Cria o negócio inicial no funil padrão (ou no mais antigo). null = não deu. */
+async function createInitialDeal(contactId: string): Promise<string | null> {
+  const pipelines = prisma as unknown as {
     pipeline: {
       findFirst: (args: { where: Record<string, unknown>; orderBy: { createdAt: "asc" } }) => Promise<{ id: string } | null>;
     };
-  }).pipeline.findFirst({
-    where: { isDefault: true },
-    orderBy: { createdAt: "asc" },
-  });
+  };
+  const firstPipeline =
+    (await pipelines.pipeline.findFirst({ where: { isDefault: true }, orderBy: { createdAt: "asc" } })) ??
+    (await pipelines.pipeline.findFirst({ where: {}, orderBy: { createdAt: "asc" } }));
   const stage = firstPipeline
     ? await (prisma as unknown as {
         stage: {
@@ -1099,12 +1392,19 @@ async function createInitialDeal(contactId: string): Promise<void> {
         orderBy: { position: "asc" },
       })
     : null;
-  await createDeal({
-    title: "Novo atendimento",
-    contactId,
-    stageId: stage?.id,
-    status: "OPEN",
-  } as any);
+  if (!stage) return null;
+  try {
+    const deal = await createDeal({
+      title: "Novo atendimento",
+      contactId,
+      stageId: stage.id,
+      status: "OPEN",
+    } as any);
+    return (deal as { id?: string } | null)?.id ?? null;
+  } catch (err) {
+    console.error("[ai-v2] createInitialDeal falhou", err);
+    return null;
+  }
 }
 
 async function closeState(
@@ -1126,18 +1426,17 @@ async function closeState(
   }
   const windowHours = config.closure.postCloseWindowHours;
   const postCloseWindowEndAt = new Date(Date.now() + windowHours * 60 * 60 * 1000);
-  await (prisma as unknown as {
-    conversation: {
-      update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
-    };
-  }).conversation.update({
-    where: { id: conversationId },
-    data: { status: "RESOLVED" },
+  // Mesmo caminho do encerramento pelo inbox: status + closedAt, restauração
+  // do negócio, eventos e automações. Antes era um update só de status —
+  // sem closedAt a conversa continuava contando como aberta no inbox.
+  // keepAgent: o agente segue dono durante a janela pós-encerramento.
+  const { resolveConversationsInline } = await import("@/services/conversations");
+  await resolveConversationsInline({
+    ids: [conversationId],
+    keepAgent: true,
+    keepDepartment: true,
+    tabulation: null,
   });
-  if (dealId && config.closure.returnToOriginStage) {
-    // Devolver à etapa de origem exigiria guardar originStageId ao iniciar atendimento.
-    // Aqui movemos para a primeira etapa do funil como placeholder.
-  }
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId,
@@ -1147,6 +1446,7 @@ async function closeState(
     postCloseWindowEndAt,
     closeReason: reason,
     versionId,
+    collectedVariables: collectedVariables ?? {},
   });
 }
 

@@ -43,20 +43,22 @@ export function parseV2Counters(raw: unknown): V2Counters {
   };
 }
 
+// Os limites só valem depois que o contador andou: com limite 0 (aceito
+// pela config) `0 >= 0` bloqueava toda resposta do agente desde o 1º turno.
 export function shouldStopCourtesy(config: V2AgentConfig, counters: V2Counters): boolean {
-  return counters.courtesyReplies >= config.limits.maxCourtesyReplies;
+  return counters.courtesyReplies > 0 && counters.courtesyReplies >= config.limits.maxCourtesyReplies;
 }
 
 export function shouldStopHelpOffer(config: V2AgentConfig, counters: V2Counters): boolean {
-  return counters.helpOffers >= config.limits.maxHelpOffers;
+  return counters.helpOffers > 0 && counters.helpOffers >= config.limits.maxHelpOffers;
 }
 
 export function shouldStopStalled(config: V2AgentConfig, counters: V2Counters): boolean {
-  return counters.stalledExchanges >= config.limits.maxStalledExchanges;
+  return counters.stalledExchanges > 0 && counters.stalledExchanges >= config.limits.maxStalledExchanges;
 }
 
 export function shouldStopNonsense(config: V2AgentConfig, counters: V2Counters): boolean {
-  return counters.nonsenseMessages >= config.limits.nonsenseLimit;
+  return counters.nonsenseMessages > 0 && counters.nonsenseMessages >= config.limits.nonsenseLimit;
 }
 
 export function detectLoop(
@@ -86,8 +88,12 @@ export function evaluateV2StopLimits(
   config: V2AgentConfig,
   counters: V2Counters,
   message: string,
+  opts: { countLoop?: boolean } = {},
 ): V2StopResult {
-  detectLoop(config, counters, message);
+  // A detecção de loop soma 1 a cada chamada. O motor avalia os limites em
+  // mais de um ponto do turno; só a primeira chamada pode contar, senão a
+  // mesma mensagem conta como repetida dentro do próprio turno.
+  if (opts.countLoop !== false) detectLoop(config, counters, message);
   if (counters.loopCount >= config.limits.maxLoopCount) {
     return {
       blocksReply: true,
