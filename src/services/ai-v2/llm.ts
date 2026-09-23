@@ -30,6 +30,7 @@ import {
   searchV2Knowledge,
   listV2MessageModels,
 } from "./tools";
+import { listKnowledgeDocs } from "@/services/ai/knowledge-docs";
 
 const v2ActionSchema: z.ZodType<V2Action> = z.object({
   type: z.enum([
@@ -361,6 +362,70 @@ function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string):
   };
 }
 
+/**
+ * Última tentativa de normalizar texto livre do LLM em JSON válido.
+ * Roda um passo extra sem tools, pedindo apenas para reformatar o rascunho
+ * no schema obrigatório. Usado como rede de segurança genérica.
+ */
+async function coerceV2OutputFromRawText(args: {
+  system: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  rawText: string;
+  model: string;
+  apiKey: string;
+  responseBehavior: V2AgentConfig["responseBehavior"];
+  maxOutputTokens?: number;
+}): Promise<{
+  output?: V2LLMOutput;
+  inputTokens: number;
+  outputTokens: number;
+}> {
+  const correctorSystem = [
+    args.system,
+    "",
+    "# NORMALIZAÇÃO FINAL",
+    "A resposta acima foi gerada em texto livre. Reescreva-a como um ÚNICO objeto JSON válido no formato exigido. Preserve o conteúdo do 'reply', ajustando apenas para o tom e formato do canal se necessário. Preencha os campos obrigatórios: handoff, concluded, confirmed, outOfScope, sentiment, collected, reason, actions. Não inclua texto fora do JSON.",
+  ].join("\n\n");
+
+  const correctorMessages = [...args.messages, { role: "assistant" as const, content: args.rawText }];
+  try {
+    const result = await generateWithTools({
+      model: args.model,
+      apiKey: args.apiKey,
+      system: correctorSystem,
+      messages: correctorMessages as any,
+      temperature: behaviorToTemperature(args.responseBehavior),
+      maxOutputTokens: args.maxOutputTokens ?? responseLengthToMaxTokens("medium"),
+      maxSteps: 1,
+    });
+
+    const text = result.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    let parsed: unknown | undefined;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      const extracted = extractFirstJSONObject(text) ?? extractFirstJSONObject(result.text);
+      if (extracted) {
+        try {
+          parsed = JSON.parse(extracted);
+        } catch {
+          parsed = undefined;
+        }
+      }
+    }
+
+    const validated = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
+    if (validated?.success) {
+      return { output: validated.data as V2LLMOutput, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+    }
+    return { inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[ai-v2] Falha na normalização de JSON:", msg);
+    return { inputTokens: 0, outputTokens: 0 };
+  }
+}
+
 export async function callV2LLMTest(
   agentId: string,
   config: V2AgentConfig,
@@ -429,6 +494,7 @@ function buildV2SystemPrompt(
   themeInstructions?: string,
   collectedVariables?: Record<string, unknown>,
   allowedToolNames?: string[],
+  knowledgeDocTitles?: string[],
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
@@ -502,9 +568,14 @@ function buildV2SystemPrompt(
     : (config.allowedKnowledgeDocIds ?? []);
   if (availableTools.includes("knowledge_search") && promptDocIds.length > 0) {
     lines.push("Há materiais de consulta disponíveis. Sempre que a pergunta do cliente puder ser respondida por esses materiais, chame knowledge_search primeiro. Se a busca retornar trechos relevantes, responda com base neles. Se não retornar nada, marque handoff=true em vez de inventar.");
+    if (knowledgeDocTitles && knowledgeDocTitles.length > 0) {
+      lines.push(`Materiais permitidos: ${knowledgeDocTitles.map((t) => `"${t}"`).join(", ")}. Use knowledge_search quando a pergunta se relacionar a um desses títulos.`);
+    }
   }
+  lines.push("# Formato da resposta");
+  lines.push("Mantenha o tom configurado. Se usar trechos de materiais de consulta que contenham listas numeradas, marcadores, emojis ou passos técnicos, reescreva em linguagem natural do canal (frases curtas, sem enumerar). Nunca envie menus ou listas de departamentos.");
   lines.push("# Saída obrigatória");
-  lines.push("Responda com um JSON EXATAMENTE neste formato:");
+  lines.push("Sua resposta final deve ser APENAS um objeto JSON válido no formato abaixo. Não inclua markdown, explicações, saudações ou qualquer texto fora do JSON.");
   lines.push(JSON.stringify({
     reply: "texto para o cliente",
     theme: "id do tema (opcional)",
@@ -555,6 +626,24 @@ export async function callV2LLM(args: {
     themeId: args.themeId,
   });
   const allowedToolNames = Object.keys(tools);
+
+  // Carrega os títulos dos materiais permitidos para ajudar o modelo a
+  // decidir quando chamar knowledge_search e a contextualizar a resposta.
+  const promptTheme = activeTheme(args.config, args.themeId);
+  const promptDocIds = promptTheme?.knowledgeDocIds && promptTheme.knowledgeDocIds.length > 0
+    ? promptTheme.knowledgeDocIds
+    : (args.config.allowedKnowledgeDocIds ?? []);
+  let knowledgeDocTitles: string[] = [];
+  if (promptDocIds.length > 0) {
+    try {
+      const docs = await listKnowledgeDocs({ agentId: args.agentId });
+      const allowedSet = new Set(promptDocIds);
+      knowledgeDocTitles = docs.items.filter((d) => allowedSet.has(d.id)).map((d) => d.title);
+    } catch (err) {
+      console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
+    }
+  }
+
   const system = buildV2SystemPrompt(
     args.config,
     args.context,
@@ -563,6 +652,7 @@ export async function callV2LLM(args: {
     args.themeInstructions,
     args.collectedVariables,
     allowedToolNames,
+    knowledgeDocTitles,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -640,23 +730,36 @@ export async function callV2LLM(args: {
       }
     }
 
-    if (parsed === undefined) {
-      return {
-        output: buildInvalidJsonFallbackOutput(args.config, text),
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        toolCalls: result.toolCalls,
-        wasExpanded,
-      };
+    let validated = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
+    let correctorTokens = { input: 0, output: 0 };
+
+    if (!validated?.success && text.trim()) {
+      const coerced = await coerceV2OutputFromRawText({
+        system,
+        messages,
+        rawText: text,
+        model: args.config.model,
+        apiKey,
+        responseBehavior: args.config.responseBehavior,
+        maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+      });
+      correctorTokens = { input: coerced.inputTokens, output: coerced.outputTokens };
+      if (coerced.output) {
+        parsed = coerced.output;
+        validated = v2LLMOutputSchema.safeParse(parsed);
+      }
     }
 
-    const validated = v2LLMOutputSchema.safeParse(parsed);
-    if (!validated.success) {
-      console.warn("[ai-v2] LLM devolveu JSON fora do schema:", validated.error.message, "texto:", text.slice(0, 500));
+    if (!validated?.success) {
+      if (!validated) {
+        console.warn("[ai-v2] LLM não devolveu JSON válido; normalizador também falhou. Texto:", text.slice(0, 500));
+      } else {
+        console.warn("[ai-v2] LLM devolveu JSON fora do schema:", validated.error.message, "texto:", text.slice(0, 500));
+      }
       return {
         output: buildInvalidJsonFallbackOutput(args.config, text),
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
+        inputTokens: result.inputTokens + correctorTokens.input,
+        outputTokens: result.outputTokens + correctorTokens.output,
         toolCalls: result.toolCalls,
         wasExpanded,
       };
@@ -686,8 +789,8 @@ export async function callV2LLM(args: {
 
     return {
       output,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
+      inputTokens: result.inputTokens + correctorTokens.input,
+      outputTokens: result.outputTokens + correctorTokens.output,
       toolCalls: result.toolCalls,
       wasExpanded,
     };

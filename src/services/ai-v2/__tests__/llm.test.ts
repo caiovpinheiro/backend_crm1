@@ -19,6 +19,10 @@ vi.mock("@/services/ai/agent-key", () => ({
   getAgentApiKey: vi.fn().mockResolvedValue("api-key"),
 }));
 
+vi.mock("@/services/ai/knowledge-docs", () => ({
+  listKnowledgeDocs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, perPage: 25 }),
+}));
+
 vi.mock("../tools", () => ({
   searchV2Products: vi.fn(),
   searchV2CrmRecords: vi.fn(),
