@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 
 import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
-import { checkPermission } from "@/lib/authz";
+import { canViewStage, checkPermission, loadAuthzContext, type AuthzContext } from "@/lib/authz";
+import {
+  andConversationWhere,
+  conversationFunnelWhere,
+} from "@/lib/authz/funnel-visibility";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -73,7 +77,16 @@ export async function POST(request: Request) {
         role: "ADMIN" | "MANAGER" | "MEMBER";
         organizationId?: string | null;
       };
-      const { conversationWhere } = await getVisibilityFilter(user);
+      const { conversationWhere: visibilityWhere } = await getVisibilityFilter(user);
+      const authz = await loadAuthzContext({
+        userId: user.id,
+        organizationId: user.organizationId ?? null,
+        isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+      });
+      const conversationWhere = andConversationWhere(
+        visibilityWhere,
+        conversationFunnelWhere(authz),
+      );
       const scopedWhere = (ids: string[], extra: Prisma.ConversationWhereInput) => {
         const idIn: Prisma.ConversationWhereInput = { id: { in: ids } };
         if (!conversationWhere || Object.keys(conversationWhere).length === 0) {
@@ -182,19 +195,21 @@ export async function POST(request: Request) {
               organizationId: user.organizationId,
             });
             const f = body.filters ?? {};
+            const stagePick = pickVisibleStages(authz, f);
             const resolved = await getResolvableConversationIds(
               {
                 tab,
                 search: body.search,
-                visibilityWhere: conversationWhere ?? undefined,
+                visibilityWhere: stagePick.blocked
+                  ? { id: { in: [] } }
+                  : conversationWhere ?? undefined,
                 allowedChannelIds,
                 ownerId: f.ownerId,
                 ownerIds: f.ownerIds,
                 withoutOwner: f.withoutOwner,
                 channel: f.channel,
                 channelIds: f.channelIds,
-                stageId: f.stageId,
-                stageIds: f.stageIds,
+                stageIds: stagePick.stageIds,
                 tagIds: f.tagIds,
                 sources: f.sources,
                 withoutSource: f.withoutSource,
@@ -421,18 +436,20 @@ export async function POST(request: Request) {
               organizationId: user.organizationId,
             });
             const f = body.filters ?? {};
+            const stagePick = pickVisibleStages(authz, f);
             targetIds = await getFilteredConversationIds({
               tab,
               search: body.search,
-              visibilityWhere: conversationWhere ?? undefined,
+              visibilityWhere: stagePick.blocked
+                ? { id: { in: [] } }
+                : conversationWhere ?? undefined,
               allowedChannelIds,
               ownerId: f.ownerId,
               ownerIds: f.ownerIds,
               withoutOwner: f.withoutOwner,
               channel: f.channel,
               channelIds: f.channelIds,
-              stageId: f.stageId,
-              stageIds: f.stageIds,
+              stageIds: stagePick.stageIds,
               tagIds: f.tagIds,
               sources: f.sources,
               withoutSource: f.withoutSource,
@@ -549,4 +566,19 @@ export async function POST(request: Request) {
       );
     }
   });
+}
+
+function pickVisibleStages(
+  authz: AuthzContext,
+  filters: { stageId?: string; stageIds?: string[] },
+): { stageIds?: string[]; blocked: boolean } {
+  const requested = [
+    ...(filters.stageIds ?? []),
+    ...(filters.stageId ? [filters.stageId] : []),
+  ];
+  const stageIds = requested.filter((id) => canViewStage(authz, id));
+  return {
+    stageIds: stageIds.length > 0 ? stageIds : undefined,
+    blocked: requested.length > 0 && stageIds.length === 0,
+  };
 }

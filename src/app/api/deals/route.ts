@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } from "@/lib/authz/resource-policy";
+import { loadAuthzContext } from "@/lib/authz";
+import { andDealWhere, funnelDealWhere } from "@/lib/authz/funnel-visibility";
+import { listAllowedPipelineIds, requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import {
@@ -83,9 +85,22 @@ export async function GET(request: Request) {
 
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);
+    const authz = await loadAuthzContext({
+      userId: authResult.user.id,
+      organizationId: authResult.user.organizationId,
+      isSuperAdmin: authResult.user.isSuperAdmin,
+    });
+    if (pipelineId) {
+      const pipelineDenied = await requirePipelineScope(authResult.user, "view", pipelineId);
+      if (pipelineDenied) return pipelineDenied;
+    }
+    if (stageId) {
+      const stageDenied = await requireStageScope(authResult.user, "view", stageId);
+      if (stageDenied) return stageDenied;
+    }
 
     // Escopo de funis por usuário aplicado no WHERE (eficiente e correto
-    // com paginação). Escopo de etapa segue como pós-filtro por item.
+    // com paginação). Restrição de papel (funil/etapa) entra no mesmo WHERE.
     const allowedPipelineIds = await listAllowedPipelineIds(authResult.user);
 
     const result = await getDeals({
@@ -99,20 +114,16 @@ export async function GET(request: Request) {
       contactPhone,
       page,
       perPage,
-      visibilityWhere: visibility.dealWhere,
+      visibilityWhere: andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
       allowedPipelineIds,
       advancedFilters: Object.keys(advancedFilters).length > 0 ? advancedFilters : undefined,
       updatedSince,
     });
 
-    const items = await Promise.all(
-      result.items.map(async (deal) => {
-        const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
-        if (stageDenied) return null;
-        return flattenDealListItem(deal);
-      }),
-    );
-    return NextResponse.json({ ...result, items: items.filter(Boolean) });
+    return NextResponse.json({
+      ...result,
+      items: result.items.map((deal) => flattenDealListItem(deal)),
+    });
     });
   } catch (e) {
     console.error(e);
