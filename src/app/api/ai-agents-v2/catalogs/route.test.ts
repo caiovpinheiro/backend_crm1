@@ -66,7 +66,7 @@ describe("GET /api/ai-agents-v2/catalogs", () => {
   it("classifica campos personalizados com entity em minúsculas", async () => {
     mocks.customFieldFindMany.mockResolvedValue([
       { id: "cf-contact", name: "Cidade", entity: "contact" },
-      { id: "cf-deal", name: "Curso", entity: "deal" },
+      { id: "cf-deal", name: "Plano", entity: "deal" },
       { id: "cf-upper", name: "Segmento", entity: "DEAL" },
     ]);
     const { GET } = await import("./route");
@@ -76,7 +76,7 @@ describe("GET /api/ai-agents-v2/catalogs", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.contactCustomFields).toEqual([{ id: "cf-contact", name: "Cidade", entity: "contact" }]);
     expect(body.dealCustomFields).toEqual([
-      { id: "cf-deal", name: "Curso", entity: "deal" },
+      { id: "cf-deal", name: "Plano", entity: "deal" },
       { id: "cf-upper", name: "Segmento", entity: "DEAL" },
     ]);
   });
