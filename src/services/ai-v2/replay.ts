@@ -41,15 +41,21 @@ export const replayVerdictSchema = z.object({
   tom: z.enum(["adequado", "inadequado"]).catch("adequado"),
   assunto: z.string().optional().default(""),
   explicacao: z.string().optional().default(""),
+  comparavel: z.boolean().catch(true).default(true),
+  motivoNaoComparavel: z.enum(["sem_conteudo", "fora_de_contexto", "teste", "outro"]).catch("outro").optional(),
 });
 export type ReplayVerdict = z.infer<typeof replayVerdictSchema>;
 
 const EVALUATOR_SYSTEM = `Você avalia um agente de atendimento. Recebe um ponto de um atendimento real: o histórico, a mensagem do cliente, a resposta que uma pessoa da equipe deu e a resposta que o agente daria no mesmo ponto (com os trechos da base que ele leu).
 
-Critérios:
+Primeiro decida se o ponto é comparável:
+- comparavel: false quando a resposta da pessoa não responde à mensagem do cliente. motivoNaoComparavel: "sem_conteudo" (só confirmação, saudação ou despedida), "fora_de_contexto" (a pessoa fala de outra coisa, retoma algo combinado fora da conversa ou responde a uma mensagem que não está aqui), "teste" (conversa de teste: texto sem sentido, "teste", a própria equipe testando), "outro".
+- Se não for comparável, preencha só comparavel, motivoNaoComparavel, assunto e explicacao; o resto fica no padrão.
+
+Critérios (ponto comparável):
 - desfecho: "igual" se o agente leva o cliente ao mesmo resultado ou próximo passo que a pessoa; "parcial" se cobre só parte; "diferente" se leva a outro caminho ou não resolve.
 - humanoConsultouSistema: true se a resposta da pessoa traz informação específica deste cliente que só viria de um sistema interno (situação de solicitação, datas/valores/notas dele, acesso/credencial, documento gerado para ele). Nesse caso o esperado do agente é transferir.
-- inventou: true se o agente afirma fato (prazo, data, valor, regra, link, canal, etapa) que não está nos trechos nem no histórico. Em "invencao", cite o trecho inventado.
+- inventou: true só se o agente afirma um fato verificável (número, prazo, data, valor, regra, link, nome de sistema/canal, etapa) que não está nos trechos nem no histórico. NÃO é invenção: cumprimentar ou chamar o cliente pelo nome (vem do cadastro), frases de cortesia, frases genéricas sem dado ("é só seguir estes passos"), perguntas, e qualquer informação presente nos trechos. Em "invencao", cite só o fato inventado.
 - correto: "sim" se o que o agente diz bate com a pessoa e os trechos; "nao" se contradiz; "nao_verificavel" se não dá para saber.
 - causa (a principal razão da diferença): "ok" se não há diferença relevante; "material" se faltou ou está errada a informação nos trechos; "comportamento" se tinha a informação mas respondeu mal (não perguntou o necessário, repetiu, fugiu do pedido, tom, não transferiu quando pediram); "integracao" se precisava consultar dados do cliente num sistema; "midia" se dependia de ver/ouvir mídia.
 - tom: "inadequado" se ríspido, prolixo demais ou robótico para o contexto.
@@ -57,7 +63,14 @@ Critérios:
 - explicacao: 1 ou 2 frases, objetivas.
 
 A pessoa é a referência do que a empresa faz, mas pode errar: se o agente estiver certo pelos trechos e a pessoa errada, diga isso na explicação.
-Responda só com JSON: {"desfecho","correto","inventou","invencao","humanoConsultouSistema","causa","tom","assunto","explicacao"}.`;
+Responda só com JSON: {"comparavel","motivoNaoComparavel","desfecho","correto","inventou","invencao","humanoConsultouSistema","causa","tom","assunto","explicacao"}.`;
+
+export const NOT_COMPARABLE_LABEL: Record<NonNullable<ReplayVerdict["motivoNaoComparavel"]>, string> = {
+  sem_conteudo: "Resposta da pessoa sem conteúdo (só confirmação ou saudação)",
+  fora_de_contexto: "Resposta da pessoa não corresponde à mensagem do cliente",
+  teste: "Conversa de teste",
+  outro: "Avaliador considerou o ponto não comparável",
+};
 
 function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
@@ -130,6 +143,7 @@ export type ReplayItemRow = {
   verdict: ReplayVerdict | null;
   skipReason: string | null;
   error: string | null;
+  history?: ReplayPoint["history"];
 };
 
 type Metrics = {
@@ -286,6 +300,7 @@ async function ensureReplaySchema(): Promise<void> {
       "error" TEXT,
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "history" JSONB`);
   await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ai_simple_replay_items_run_idx" ON "ai_simple_replay_items" ("runId")`);
   schemaReady = true;
 }
@@ -357,9 +372,10 @@ export async function getReplayRun(organizationId: string, agentId: string, runI
     verdict: r.verdict ?? null,
     skipReason: r.skipReason,
     error: r.error,
+    history: Array.isArray(r.history) ? r.history : [],
   }));
   const run = toRun(runs[0]);
-  return { run, items: items.map((i) => ({ ...i, outcome: pointOutcome(i) })), summary: summarizeReplay(items) };
+  return { run, items: items.map((i) => ({ ...i, outcome: i.skipReason ? null : pointOutcome(i) })), summary: summarizeReplay(items) };
 }
 
 /** Interrompe uma comparação em andamento; os pontos já feitos ficam. */
@@ -533,7 +549,8 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
     let sources: V2TurnSource[] = [];
     let verdict: ReplayVerdict | null = null;
     let error: string | null = null;
-    if (!point.skipReason) {
+    let skipReason = point.skipReason;
+    if (!skipReason) {
       try {
         const sim = await withTimeout(
           simulateV2Turn(
@@ -560,6 +577,7 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
         tokensOut += ev.outputTokens;
         cost += estimateCost(args.config.model, ev.inputTokens, ev.outputTokens);
         if (!verdict) error = "O avaliador não devolveu um resultado válido.";
+        else if (!verdict.comparavel) skipReason = NOT_COMPARABLE_LABEL[verdict.motivoNaoComparavel ?? "outro"];
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg === "NO_OPENAI_KEY") fatal = new Error("NO_OPENAI_KEY");
@@ -567,11 +585,11 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
       }
     }
     await db.$executeRawUnsafe(
-      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15)`,
+      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error","history")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb)`,
       randomUUID(), args.runId, args.organizationId, w.conversationId, point.index, new Date(point.at),
       point.clientText, point.humanText, agentText, agentHandoff, themeName,
-      JSON.stringify(sources), verdict ? JSON.stringify(verdict) : null, point.skipReason, error,
+      JSON.stringify(sources), verdict ? JSON.stringify(verdict) : null, skipReason, error, JSON.stringify(point.history),
     );
     await db.$executeRawUnsafe(
       `UPDATE "ai_simple_replay_runs" SET "done"="done"+1, "inputTokens"=$2, "outputTokens"=$3, "costUsd"=$4, "updatedAt"=now() WHERE "id"=$1`,

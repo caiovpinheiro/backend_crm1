@@ -51,6 +51,22 @@ function textOf(row: ReplayMessageRow): { text: string; isMedia: boolean } {
   return { text: caption ? `[${media}] ${caption}` : `[${media}]`, isMedia: !caption };
 }
 
+// A resposta da pessoa a um ponto são as mensagens dela até este tempo
+// depois da primeira. O que vier depois (outro assunto, retorno horas
+// depois) fica só no histórico.
+const ANSWER_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Resposta sem conteúdo para comparar: só confirmação ou saudação curta
+ * ("ok", "opa", emoji). Critério de forma, não de vocabulário: menos de 3
+ * palavras com 3+ letras e menos de 15 letras no total.
+ */
+export function isContentless(text: string): boolean {
+  const words = text.replace(/\[[^\]]*\]/g, " ").match(/\p{L}+/gu) ?? [];
+  const letters = words.join("").length;
+  return words.filter((w) => w.length >= 3).length < 3 && letters < 15;
+}
+
 type Kind = "client" | "human" | "other";
 
 function kindOf(row: ReplayMessageRow): Kind {
@@ -87,19 +103,24 @@ export function extractReplayPoints(
     // ponto só se uma pessoa respondeu (resposta só de robô não compara).
     const answer: typeof items = [];
     while (i < items.length && items[i].kind !== "client") answer.push(items[i++]);
-    const human = answer.filter((a) => a.kind === "human");
+    const firstHuman = answer.find((a) => a.kind === "human");
+    const human = firstHuman
+      ? answer.filter((a) => a.kind === "human" && a.at.getTime() - firstHuman.at.getTime() <= ANSWER_WINDOW_MS)
+      : [];
 
     const clientText = maskSensitive(client.map((c) => c.text).join("\n")).text;
     const answerText = maskSensitive(answer.map((a) => a.text).join("\n")).text;
 
     if (human.length > 0) {
+      const humanText = maskSensitive(human.map((h) => h.text).join("\n")).text;
       let skipReason: string | null = null;
       if (client.every((c) => c.isMedia)) skipReason = "Cliente mandou só mídia (sem transcrição/leitura ainda)";
       else if (human.every((h) => h.isMedia)) skipReason = "Resposta da pessoa só em mídia (áudio/arquivo)";
+      else if (isContentless(humanText)) skipReason = "Resposta da pessoa sem conteúdo (só confirmação ou saudação)";
       points.push({
         index: points.length,
         clientText,
-        humanText: maskSensitive(human.map((h) => h.text).join("\n")).text,
+        humanText,
         history: history.slice(-historyLimit),
         skipReason,
         at: client[0].at.toISOString(),

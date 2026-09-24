@@ -52,3 +52,32 @@ describe("extractReplayPoints", () => {
     expect(pts[0].clientText).toBe("p0");
   });
 });
+
+describe("extractReplayPoints — resposta da pessoa", () => {
+  it("pega só as mensagens da pessoa perto da primeira; o resto vai para o histórico", () => {
+    const base = 1_900_000_000_000;
+    const at = (min: number) => new Date(base + min * 60_000);
+    const pts = extractReplayPoints([
+      { direction: "in", authorType: "contact", messageType: "text", content: "como emito a segunda via?", createdAt: at(0) },
+      { direction: "out", authorType: "human", messageType: "text", content: "Você emite pela área do cliente, no menu de pagamentos", createdAt: at(2) },
+      { direction: "out", authorType: "human", messageType: "text", content: "Conseguiu resolver aquela outra questão de ontem?", createdAt: at(300) },
+    ]);
+    expect(pts).toHaveLength(1);
+    expect(pts[0].humanText).toBe("Você emite pela área do cliente, no menu de pagamentos");
+  });
+
+  it("resposta só de confirmação fica fora da conta", () => {
+    const pts = extractReplayPoints([m("in", "pode verificar pra mim?"), m("out", "ok"), m("out", "opa")]);
+    expect(pts[0].skipReason).toContain("sem conteúdo");
+  });
+});
+
+describe("isContentless", () => {
+  it("separa confirmação curta de resposta com conteúdo", async () => {
+    const { isContentless } = await import("../replay-extract");
+    for (const t of ["ok", "ok\nok", "opa blz", "👍", "Bom dia!", "certo, obrigado"]) expect(isContentless(t), t).toBe(true);
+    for (const t of ["Por qual motivo?", "Segue o passo a passo para emitir", "Combinado, está tudo certo com seu caso"]) {
+      expect(isContentless(t), t).toBe(false);
+    }
+  });
+});

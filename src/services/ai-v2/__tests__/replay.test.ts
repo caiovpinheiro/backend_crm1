@@ -23,6 +23,12 @@ describe("parseVerdict", () => {
     expect(r?.desfecho).toBe("igual");
     expect(r?.causa).toBe("comportamento");
   });
+  it("ponto é comparável por padrão e lê o motivo quando não é", () => {
+    expect(parseVerdict('{"desfecho":"igual"}')?.comparavel).toBe(true);
+    const r = parseVerdict('{"comparavel":false,"motivoNaoComparavel":"teste"}');
+    expect(r?.comparavel).toBe(false);
+    expect(r?.motivoNaoComparavel).toBe("teste");
+  });
   it("devolve null sem JSON", () => {
     expect(parseVerdict("não sei")).toBeNull();
   });
