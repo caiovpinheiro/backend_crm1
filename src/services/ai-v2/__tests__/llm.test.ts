@@ -554,6 +554,83 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].jsonMode).toBe(true);
   });
 
+  it("nome entre aspas fora do material: pede reescrita e usa a versão corrigida", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Vá em "Fale Conosco".', actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho esse caminho no material.", handoff: true, actions: [] })));
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "como falo com a coordenação?",
+      stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][0].system).toContain('"Fale Conosco"');
+    expect(r.output.reply).toBe("Não tenho esse caminho no material.");
+    expect(r.output.handoff).toBe(true);
+  });
+
+  it("reescrita que continua inventando vira transferência", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', actions: [] })),
+    );
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "onde clico?",
+      stage: "active",
+    });
+    expect(r.output.handoff).toBe(true);
+    expect(r.output.reply).toBe("Vou transferir.");
+    expect(r.output.reason).toContain("Menu Secreto");
+  });
+
+  it("nome entre aspas que veio da conversa não é invenção", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: 'Entendi, a opção "Relatório anual" não aparece para você.', actions: [] })),
+    );
+    await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "a opção relatório anual não aparece",
+      stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("campo fora do formato não derruba a resposta nem transfere", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(
+        JSON.stringify({
+          reply: "Oi! Como posso ajudar?",
+          sentiment: "positive",
+          confirmed: "talvez",
+          collected: { nome: null, idade: 30, obs: "ok", lista: ["a"] },
+          actions: [{ type: "nenhuma" }, { type: "add_tag", tag: "x" }],
+          theme: 42,
+        }),
+      ),
+    );
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ structuredOutput: true }),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "oie",
+      stage: "active",
+    });
+    expect(r.output.reply).toBe("Oi! Como posso ajudar?");
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.sentiment).toBe("neutral");
+    expect(r.output.confirmed).toBeNull();
+    expect(r.output.collected).toEqual({ idade: "30", obs: "ok" });
+    expect(r.output.actions).toEqual([{ type: "add_tag", tag: "x" }]);
+    expect(r.output.theme).toBeUndefined();
+  });
+
   it("modo JSON recusado pelo modelo (400): repete sem ele e responde", async () => {
     const refused = Object.assign(new Error("response_format not supported"), { statusCode: 400 });
     (generateWithTools as ReturnType<typeof vi.fn>)

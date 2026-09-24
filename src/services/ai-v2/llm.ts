@@ -33,7 +33,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { hasSearchableQuestion } from "./ground-reply";
+import { hasSearchableQuestion, knowledgeChunkTexts, unsupportedQuotedTerms } from "./ground-reply";
 import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 
@@ -451,6 +451,7 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
   theme: z
     .union([z.string(), z.null()])
     .optional()
+    .catch(undefined)
     .transform((v) => (typeof v === "string" ? v : undefined)),
   messageModel: z
     .union([
@@ -472,19 +473,40 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
         variables: (v as { variables?: Record<string, string> }).variables ?? {},
       };
     }),
-  handoff: z.boolean().optional().default(false),
-  concluded: z.boolean().optional().default(false),
-  confirmed: z.boolean().nullable().optional().default(null),
-  outOfScope: z.boolean().optional().default(false),
-  sentiment: z.enum(["neutral", "dissatisfied", "angry"]).optional().default("neutral"),
+  // Campo fora do formato vira o padrão em vez de invalidar a resposta
+  // inteira: antes, um `"nome": null` em collected ou um sentimento fora da
+  // lista mandava o turno para o fallback de erro (transferência).
+  handoff: z.boolean().optional().default(false).catch(false),
+  concluded: z.boolean().optional().default(false).catch(false),
+  confirmed: z.boolean().nullable().optional().default(null).catch(null),
+  outOfScope: z.boolean().optional().default(false).catch(false),
+  sentiment: z.enum(["neutral", "dissatisfied", "angry"]).optional().default("neutral").catch("neutral"),
   tabulationId: z
     .union([z.string(), z.null()])
     .optional()
+    .catch(undefined)
     .transform((v) => (typeof v === "string" ? v : undefined)),
-  collected: z.record(z.string(), z.string()).optional().default({}),
-  reason: z.string().optional().default(""),
-  actions: z.array(v2ActionSchema).optional().default([]),
+  collected: z.preprocess(sanitizeCollected, z.record(z.string(), z.string())).optional().default({}),
+  reason: z.string().optional().default("").catch(""),
+  actions: z.preprocess(sanitizeActions, z.array(v2ActionSchema)).optional().default([]),
 }) as unknown as z.ZodType<V2LLMOutput>;
+
+/** Valores simples viram texto; vazio, lista ou objeto são descartados. */
+function sanitizeCollected(v: unknown): Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === "string") out[k] = val;
+    else if (typeof val === "number" || typeof val === "boolean") out[k] = String(val);
+  }
+  return out;
+}
+
+/** Descarta ações sem tipo conhecido em vez de invalidar a resposta. */
+function sanitizeActions(v: unknown): unknown[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((a) => v2ActionSchema.safeParse(a).success);
+}
 
 function extractFirstJSONObject(text: string): string | undefined {
   // Tenta isolar o primeiro objeto JSON válido do texto.
@@ -1092,10 +1114,65 @@ export async function callV2LLM(args: {
     };
   }
 
+  /**
+   * Nome de menu/botão/tela entre aspas que não está em nenhuma fonte:
+   * pede uma reescrita só com o material. Se ainda inventar, transfere.
+   */
+  async function checkQuotedTerms(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
+    const sources = [system, userMessage, ...previousMessages.map((m) => m.content), ...knowledgeChunkTexts(r.toolCalls)];
+    const unsupported = unsupportedQuotedTerms(r.output.reply, sources);
+    if (unsupported.length === 0) return;
+    const list = unsupported.map((t) => `"${t}"`).join(", ");
+    traceStep("verificação", `Resposta cita ${list}, que não está no material nem na conversa — pedindo reescrita`);
+    const reviewSystem = [
+      system,
+      "# REVISÃO",
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+    ].join("\n\n");
+    try {
+      const res = await generateWithTools({
+        model: args.config.model,
+        apiKey,
+        system: reviewSystem,
+        messages: [...messages, { role: "assistant", content: JSON.stringify(r.output) }] as any,
+        temperature: 0,
+        maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+        maxSteps: 1,
+        jsonMode,
+      });
+      r.inputTokens += res.inputTokens;
+      r.outputTokens += res.outputTokens;
+      const raw = res.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const json = extractFirstJSONObject(raw);
+      const parsed = json ? v2LLMOutputSchema.safeParse(JSON.parse(json)) : undefined;
+      if (parsed?.success) {
+        const fixed = parsed.data as V2LLMOutput;
+        fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
+        const still = unsupportedQuotedTerms(fixed.reply, sources);
+        if (still.length === 0) {
+          traceStep("verificação", "Reescrita só com o material");
+          r.output = fixed;
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("[ai-v2] revisão de termos falhou:", err instanceof Error ? err.message : err);
+    }
+    traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
+    r.output = {
+      ...r.output,
+      reply: args.config.fallback?.noSource?.message || args.config.handoff?.message || "Vou chamar uma pessoa da equipe para te ajudar com isso.",
+      handoff: true,
+      actions: [...r.output.actions.filter((a) => a.type !== "handoff"), { type: "handoff" }],
+      reason: `Citava ${list}, que não está no material.`,
+    };
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
+      await checkQuotedTerms(r);
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
         r.output.actions = vault.restoreDeep(r.output.actions);

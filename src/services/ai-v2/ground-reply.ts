@@ -62,6 +62,23 @@ export function knowledgeQueries(message: string, theme: V2Theme | null): string
   return queries;
 }
 
+/**
+ * Nomes citados entre aspas na resposta (menu, botão, tela, opção) que não
+ * aparecem em nenhuma fonte (material, instruções, conversa). É onde o
+ * modelo mais inventa ao completar um passo a passo: "vá em \"Fale Conosco\"".
+ */
+export function unsupportedQuotedTerms(reply: string, sources: string[]): string[] {
+  const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
+  const out = new Set<string>();
+  for (const m of reply.matchAll(/["“”]([^"“”\n]{2,60})["“”]/g)) {
+    const term = m[1].trim();
+    const norm = normalize(term).replace(/\s+/g, " ").trim();
+    if (!norm || !/[a-z]/.test(norm)) continue;
+    if (!haystack.includes(` ${norm} `)) out.add(term);
+  }
+  return [...out];
+}
+
 /** O texto livre só fica se repetir palavras do material. Senão, vale o trecho. */
 export function groundedReply(reply: string, chunks: string[]): string {
   const unique = [...new Set(chunks.map((chunk) => chunk.trim()).filter(Boolean))].slice(0, 3);

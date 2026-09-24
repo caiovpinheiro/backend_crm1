@@ -61,6 +61,26 @@ describe("selectV2ThemeSemantic", () => {
     expect(r).toMatchObject({ method: "kept", theme: { id: "pay" } });
   });
 
+  it("para sair do assunto atual, o outro precisa de folga sobre ele", async () => {
+    const base = { config: cfg, message: "ainda não apareceu nada aqui para mim", currentThemeId: "pay", apiKey: "k" };
+    embedWith([0.52, 0.5]); // documentos 0,72 x pagamentos 0,69: quase empate
+    expect(await selectV2ThemeSemantic(base)).toMatchObject({ method: "kept", theme: { id: "pay" } });
+    clearThemeVectorCache();
+    embedWith([0.6, 0.3]); // documentos 0,89 x pagamentos 0,45: troca clara
+    expect(await selectV2ThemeSemantic(base)).toMatchObject({ method: "semantic", theme: { id: "docs" } });
+  });
+
+  it("similaridade baixa troca sem assunto atual, mas não tira do assunto atual", async () => {
+    embedWith([0.45, -0.9]); // documentos 0,45
+    const msg = "ainda não apareceu nada aqui para mim";
+    expect((await selectV2ThemeSemantic({ config: cfg, message: msg, apiKey: "k" })).theme?.id).toBe("docs");
+    clearThemeVectorCache();
+    expect(await selectV2ThemeSemantic({ config: cfg, message: msg, currentThemeId: "pay", apiKey: "k" })).toMatchObject({
+      method: "kept",
+      theme: { id: "pay" },
+    });
+  });
+
   it("acompanhamento curto não troca de assunto nem gasta embedding", async () => {
     const r = await selectV2ThemeSemantic({ config: cfg, message: "consegue me enviar?", currentThemeId: "pay", apiKey: "k" });
     expect(r).toMatchObject({ method: "kept", theme: { id: "pay" } });

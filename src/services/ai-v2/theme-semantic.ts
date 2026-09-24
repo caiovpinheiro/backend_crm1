@@ -18,6 +18,18 @@ import { embedTexts } from "@/services/ai/provider";
 import { selectV2Theme } from "./themes";
 
 /** Mesma régua da busca na base: similaridade de cosseno >= 0,4. */
+/**
+ * Para TROCAR o assunto atual da conversa por outro, pelo significado: o
+ * outro precisa passar deste mínimo e ficar SWITCH_MARGIN acima do atual.
+ * Um acompanhamento ("a nota não apareceu") empatava com outro assunto e a
+ * conversa pulava de assunto por 0,05 de diferença.
+ */
+function switchSimilarity(): number {
+  const raw = Number.parseFloat(process.env.AI_V2_THEME_SWITCH_SIMILARITY ?? "");
+  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : 0.5;
+}
+const SWITCH_MARGIN = 0.05;
+
 function minSimilarity(): number {
   const raw = Number.parseFloat(process.env.AI_V2_THEME_MIN_SIMILARITY ?? "");
   return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : 0.4;
@@ -111,13 +123,19 @@ export async function selectV2ThemeSemantic(args: {
     const messageVector = embeddings[0] ?? [];
     let best: V2Theme | null = null;
     let bestSim = -1;
+    let currentSim = -1;
     themes.forEach((theme, i) => {
       const sim = cosine(messageVector, vectors[i] ?? []);
+      if (current && theme.id === current.id) currentSim = sim;
       if (sim > bestSim) {
         bestSim = sim;
         best = theme;
       }
     });
+    const switching = !!current && best !== null && (best as V2Theme).id !== current.id;
+    if (switching && (bestSim < switchSimilarity() || bestSim < currentSim + SWITCH_MARGIN)) {
+      return fallback(bestSim);
+    }
     if (best && bestSim >= minSimilarity()) {
       return { theme: best, method: "semantic", similarity: bestSim };
     }
