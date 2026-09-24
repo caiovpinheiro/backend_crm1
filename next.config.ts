@@ -28,6 +28,12 @@ function securityHeaders(): { key: string; value: string }[] {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // O pdf.js carrega o worker (pdf.worker.mjs) por import dinâmico e o
+  // rastreio do standalone não o segue: sem isto, ler PDF dos materiais
+  // falha em produção ("Setting up fake worker failed").
+  outputFileTracingIncludes: {
+    "/api/ai-agents/[id]/knowledge": ["./node_modules/pdfjs-dist/legacy/build/*.mjs"],
+  },
   // NOTA: NÃO listar `NEXTAUTH_URL` em `env` aqui. Isso inlinearia o valor
   // em build time e impediria trocar a URL via env var no Easypanel sem
   // rebuild. Este backend é só API (sem `next-auth/react` no client),
