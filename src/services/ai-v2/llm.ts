@@ -678,7 +678,7 @@ function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): num
 function responseLengthInstruction(length: V2AgentConfig["responseLength"]): string {
   switch (length) {
     case "short":
-      return "Mantenha as respostas curtas e diretas (ideal: até 2 parágrafos).";
+      return "Mantenha as respostas curtas e diretas (ideal: até 2 parágrafos). Um passo a passo completo não conta para esse limite.";
     case "long":
       return "Pode responder com mais detalhes e explicações quando necessário.";
     case "medium":
@@ -781,7 +781,9 @@ function buildV2SystemPrompt(
     });
   }
   lines.push("# Formato da resposta");
-  lines.push("Mantenha o tom configurado. Se usar trechos de materiais de consulta que contenham listas numeradas, marcadores, emojis ou passos técnicos, reescreva em linguagem natural do canal (frases curtas, sem enumerar). Nunca envie menus ou listas de departamentos.");
+  // Antes pedia "reescreva sem enumerar": o modelo resumia um procedimento
+  // de vários passos numa frase e o cliente ficava sem saber o que fazer.
+  lines.push("Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. Tire só emojis e marcadores decorativos do material. Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.");
   lines.push("# Saída obrigatória");
   lines.push("Sua resposta final deve ser APENAS um objeto JSON válido no formato abaixo. Não inclua markdown, explicações, saudações ou qualquer texto fora do JSON.");
   lines.push(JSON.stringify({

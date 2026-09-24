@@ -346,6 +346,30 @@ describe("callV2LLM — reformulação da busca", () => {
   });
 });
 
+describe("buildV2SystemPrompt — procedimentos", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+  });
+
+  it("pede passo a passo numerado completo (não resumir procedimento)", async () => {
+    const config = baseConfig({ responseLength: "short" } as Partial<V2AgentConfig>);
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "como faço para incluir o item",
+      stage: "active",
+    });
+    expect(result.systemPrompt).toContain("passo a passo numerado");
+    expect(result.systemPrompt).toContain("com todos os passos do material, na ordem");
+    expect(result.systemPrompt).not.toContain("sem enumerar");
+    expect(result.systemPrompt).toContain("Um passo a passo completo não conta para esse limite");
+  });
+});
+
 describe("knowledgePrefetchQuery", () => {
   it("acompanhamento curto leva junto a pergunta anterior do cliente", () => {
     expect(knowledgePrefetchQuery("consegue me enviar?", [
