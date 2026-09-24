@@ -105,4 +105,8 @@ describe("parseConversationRefs", () => {
     );
     expect(ids).toEqual(["cmabc12345xyz", "cmdef67890uvw"]);
   });
+  it("aceita o número do atendimento (link ?c=1234 e #1234)", async () => {
+    const { parseConversationRefs } = await import("../replay");
+    expect(parseConversationRefs("https://crm.exemplo.com/inbox?c=1234 #987 55")).toEqual(["1234", "987", "55"]);
+  });
 });

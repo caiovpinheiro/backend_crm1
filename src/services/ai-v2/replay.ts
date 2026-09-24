@@ -528,24 +528,34 @@ async function transcribeAudios(
   }
 }
 
-/** Ids de conversa a partir de links (…?c=ID, …/conversations/ID) ou ids soltos. */
+/**
+ * Referências de conversa: link da caixa de entrada (…/inbox?c=1234 usa o
+ * número do atendimento; …?c=<id> o id), …/conversations/<id>, "#1234",
+ * número ou id soltos.
+ */
 export function parseConversationRefs(text: string): string[] {
-  const ids = new Set<string>();
+  const refs = new Set<string>();
   for (const token of text.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean)) {
-    const fromQuery = /[?&](?:c|conversation|conversationId)=([A-Za-z0-9_-]{8,})/.exec(token)?.[1];
+    const fromQuery = /[?&](?:c|conversation|conversationId)=([A-Za-z0-9_-]+)/.exec(token)?.[1];
     const fromPath = /\/conversations?\/([A-Za-z0-9_-]{8,})/.exec(token)?.[1];
+    const number = /^#?(\d{1,9})$/.exec(token)?.[1];
     const bare = /^[A-Za-z0-9_-]{8,}$/.test(token) ? token : undefined;
-    const id = fromQuery ?? fromPath ?? bare;
-    if (id) ids.add(id);
+    const ref = fromQuery ?? fromPath ?? number ?? bare;
+    if (ref) refs.add(ref);
   }
-  return [...ids].slice(0, REPLAY_LIMITS.maxConversations);
+  return [...refs].slice(0, REPLAY_LIMITS.maxConversations);
 }
 
-async function conversationsByIds(organizationId: string, ids: string[]): Promise<Array<{ id: string; contactId: string | null }>> {
-  if (ids.length === 0) return [];
-  return db.$queryRawUnsafe<Array<{ id: string; contactId: string | null }>>(
-    `SELECT "id", "contactId" FROM "conversations" WHERE "organizationId" = $1 AND "id" = ANY($2::text[])`,
-    organizationId, ids,
+async function conversationsByIds(
+  organizationId: string,
+  refs: string[],
+): Promise<Array<{ id: string; contactId: string | null; number: number }>> {
+  if (refs.length === 0) return [];
+  const numbers = refs.filter((r) => /^\d{1,9}$/.test(r)).map(Number);
+  return db.$queryRawUnsafe<Array<{ id: string; contactId: string | null; number: number }>>(
+    `SELECT "id", "contactId", "number" FROM "conversations"
+      WHERE "organizationId" = $1 AND ("id" = ANY($2::text[]) OR "number" = ANY($3::int[]))`,
+    organizationId, refs, numbers,
   );
 }
 
@@ -575,7 +585,7 @@ export async function estimateChosenReplay(args: {
   return {
     availableConversations: found.length,
     conversations: found.length,
-    notFound: args.conversationIds.filter((id) => !found.some((f) => f.id === id)),
+    notFound: args.conversationIds.filter((ref) => !found.some((f) => f.id === ref || String(f.number) === ref)),
     estimatedPoints: points,
     audioPoints: audioOnly,
     transcription: !!process.env.GROQ_API_KEY?.trim(),
