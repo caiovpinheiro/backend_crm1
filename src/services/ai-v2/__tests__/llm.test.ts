@@ -543,6 +543,14 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     );
   });
 
+  it("inclui o guia de escrita natural em qualquer tamanho", async () => {
+    const config = baseConfig({ responseLength: "short" });
+    await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oi", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("# Como escrever");
+    expect(system).toContain("recomece do primeiro passo");
+  });
+
   it("muda o tom no texto montado para o modelo", async () => {
     const config = baseConfig({ tone: "Formal e respeitoso" });
     await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oi", stage: "active" });
