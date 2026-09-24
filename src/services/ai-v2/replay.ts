@@ -21,7 +21,13 @@ import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./
 import { maskSensitive } from "./sensitive";
 
 export const REPLAY_LIMITS = { maxConversations: 100, maxPoints: 300, pointsPerConversation: 6, concurrency: 2 };
-const STALE_MS = 15 * 60 * 1000;
+// A execução renova "updatedAt" a cada HEARTBEAT_MS. Sem renovação por
+// STALE_MS, o processo morreu (reinício/deploy) e a execução é dada como parada.
+const HEARTBEAT_MS = 30 * 1000;
+const STALE_MS = 3 * 60 * 1000;
+// Tempo máximo de um ponto (simulação + avaliação). Passou disso, o ponto
+// fica com erro e a fila segue.
+const POINT_TIMEOUT_MS = 150 * 1000;
 
 // ─── Avaliador ──────────────────────────────────────────────────────────
 
@@ -134,6 +140,7 @@ type Metrics = {
   inventou: number;
   transferenciaCorreta: number;
   resolveuComoHumano: number;
+  resultados: Partial<Record<ReplayOutcome, number>>;
 };
 
 export type ReplaySummary = {
@@ -147,7 +154,7 @@ export type ReplaySummary = {
 };
 
 function emptyMetrics(): Metrics {
-  return { avaliados: 0, igual: 0, parcial: 0, diferente: 0, inventou: 0, transferenciaCorreta: 0, resolveuComoHumano: 0 };
+  return { avaliados: 0, igual: 0, parcial: 0, diferente: 0, inventou: 0, transferenciaCorreta: 0, resolveuComoHumano: 0, resultados: {} };
 }
 
 /** Transferiu quando a pessoa precisou do sistema, e só então. */
@@ -155,12 +162,37 @@ export function handoffWasRight(item: Pick<ReplayItemRow, "agentHandoff" | "verd
   return item.agentHandoff === (item.verdict?.humanoConsultouSistema ?? false);
 }
 
+/** Acerto: mesmo desfecho (ou parcial) sem inventar, ou transferir quando a pessoa consultou o sistema. */
 export function resolvedLikeHuman(item: Pick<ReplayItemRow, "agentHandoff" | "verdict">): boolean {
+  const o = pointOutcome(item);
+  return o !== null && REPLAY_HITS.has(o);
+}
+
+/**
+ * Um único resultado por ponto (as categorias somam 100% dos avaliados).
+ * A ordem das regras é a prioridade: invenção e erro pesam mais que o resto.
+ */
+export const REPLAY_OUTCOMES = [
+  "igual",
+  "parcial",
+  "transferiu_certo",
+  "inventou",
+  "incorreto",
+  "deveria_transferir",
+  "transferiu_sem_precisar",
+  "diferente",
+] as const;
+export type ReplayOutcome = (typeof REPLAY_OUTCOMES)[number];
+export const REPLAY_HITS: ReadonlySet<ReplayOutcome> = new Set(["igual", "parcial", "transferiu_certo"]);
+
+export function pointOutcome(item: Pick<ReplayItemRow, "agentHandoff" | "verdict">): ReplayOutcome | null {
   const v = item.verdict;
-  if (!v) return false;
-  // Transferir quando a pessoa consultou o sistema conta como acerto.
-  if (v.humanoConsultouSistema) return item.agentHandoff && !v.inventou;
-  return v.desfecho !== "diferente" && !v.inventou && v.correto !== "nao" && !item.agentHandoff;
+  if (!v) return null;
+  if (v.inventou) return "inventou";
+  if (v.humanoConsultouSistema) return item.agentHandoff ? "transferiu_certo" : "deveria_transferir";
+  if (v.correto === "nao") return "incorreto";
+  if (item.agentHandoff) return "transferiu_sem_precisar";
+  return v.desfecho;
 }
 
 export function summarizeReplay(items: ReplayItemRow[]): ReplaySummary {
@@ -182,12 +214,14 @@ export function summarizeReplay(items: ReplayItemRow[]): ReplaySummary {
     }
     const assunto = it.themeName || it.verdict.assunto || "Sem assunto";
     const m = byTheme.get(assunto) ?? emptyMetrics();
+    const outcome = pointOutcome(it)!;
     for (const target of [geral, m]) {
+      target.resultados[outcome] = (target.resultados[outcome] ?? 0) + 1;
       target.avaliados++;
       target[it.verdict.desfecho]++;
       if (it.verdict.inventou) target.inventou++;
       if (handoffWasRight(it)) target.transferenciaCorreta++;
-      if (resolvedLikeHuman(it)) target.resolveuComoHumano++;
+      if (REPLAY_HITS.has(outcome)) target.resolveuComoHumano++;
     }
     byTheme.set(assunto, m);
     causas[it.verdict.causa] = (causas[it.verdict.causa] ?? 0) + 1;
@@ -259,7 +293,7 @@ async function ensureReplaySchema(): Promise<void> {
 export type ReplayRun = {
   id: string;
   agentId: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "canceled";
   params: ReplayParams;
   total: number;
   done: number;
@@ -282,7 +316,7 @@ function toRun(r: Record<string, any>): ReplayRun {
     total: r.total,
     done: r.done,
     summary: r.summary ?? null,
-    error: stale ? "A execução parou (o servidor reiniciou?). Rode de novo." : r.error ?? null,
+    error: stale ? "A execução parou no meio (o servidor reiniciou). Os pontos já comparados estão abaixo; rode de novo para o resto." : r.error ?? null,
     costUsd: Number(r.costUsd ?? 0),
     createdAt: new Date(r.createdAt).toISOString(),
     finishedAt: r.finishedAt ? new Date(r.finishedAt).toISOString() : null,
@@ -325,7 +359,33 @@ export async function getReplayRun(organizationId: string, agentId: string, runI
     error: r.error,
   }));
   const run = toRun(runs[0]);
-  return { run, items, summary: run.summary ?? summarizeReplay(items) };
+  return { run, items: items.map((i) => ({ ...i, outcome: pointOutcome(i) })), summary: summarizeReplay(items) };
+}
+
+/** Interrompe uma comparação em andamento; os pontos já feitos ficam. */
+export async function cancelReplay(organizationId: string, agentId: string, runId: string): Promise<boolean> {
+  await ensureReplaySchema();
+  const n = await db.$executeRawUnsafe(
+    `UPDATE "ai_simple_replay_runs" SET "status"='canceled', "updatedAt"=now(), "finishedAt"=now()
+      WHERE "id"=$1 AND "organizationId"=$2 AND "agentId"=$3 AND "status"='running'`,
+    runId, organizationId, agentId,
+  );
+  return n > 0;
+}
+
+async function runStatus(runId: string): Promise<string | null> {
+  const rows = await db.$queryRawUnsafe<Array<{ status: string }>>(`SELECT "status" FROM "ai_simple_replay_runs" WHERE "id"=$1`, runId);
+  return rows[0]?.status ?? null;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 // ─── Seleção das conversas ──────────────────────────────────────────────
@@ -417,7 +477,7 @@ export async function startReplay(args: {
   ).catch(async (err) => {
     console.error("[ai-v2 replay] falhou:", err);
     await db.$executeRawUnsafe(
-      `UPDATE "ai_simple_replay_runs" SET "status"='error', "error"=$2, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1`,
+      `UPDATE "ai_simple_replay_runs" SET "status"='error', "error"=$2, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
       runId, err instanceof Error ? err.message : String(err),
     ).catch(() => undefined);
   });
@@ -432,6 +492,17 @@ async function executeReplay(args: {
   apiKey: string;
   params: ReplayParams;
 }): Promise<void> {
+  const heartbeat = setInterval(() => {
+    void db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "updatedAt"=now() WHERE "id"=$1 AND "status"='running'`, args.runId).catch(() => undefined);
+  }, HEARTBEAT_MS);
+  try {
+    await executeReplayPoints(args);
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): Promise<void> {
   const since = new Date(Date.now() - args.params.days * 24 * 60 * 60 * 1000);
   const n = Math.min(args.params.conversations, REPLAY_LIMITS.maxConversations);
   const { picked } = await pickConversations(args.organizationId, args.params.days, n);
@@ -464,9 +535,13 @@ async function executeReplay(args: {
     let error: string | null = null;
     if (!point.skipReason) {
       try {
-        const sim = await simulateV2Turn(
-          args.agentId, args.config, point.clientText, point.history,
-          args.organizationId, w.contactId ?? undefined, undefined, "active",
+        const sim = await withTimeout(
+          simulateV2Turn(
+            args.agentId, args.config, point.clientText, point.history,
+            args.organizationId, w.contactId ?? undefined, undefined, "active",
+          ),
+          POINT_TIMEOUT_MS,
+          "O agente demorou demais para responder neste ponto.",
         );
         agentText = maskSensitive(sim.reply ?? "").text;
         agentHandoff = sim.handoff;
@@ -475,7 +550,11 @@ async function executeReplay(args: {
         tokensIn += sim.inputTokens;
         tokensOut += sim.outputTokens;
         cost += estimateCost(args.config.model, sim.inputTokens, sim.outputTokens);
-        const ev = await evaluate({ model: args.config.model, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources });
+        const ev = await withTimeout(
+          evaluate({ model: args.config.model, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources }),
+          POINT_TIMEOUT_MS,
+          "O avaliador demorou demais neste ponto.",
+        );
         verdict = ev.verdict;
         tokensIn += ev.inputTokens;
         tokensOut += ev.outputTokens;
@@ -501,8 +580,13 @@ async function executeReplay(args: {
   };
 
   let next = 0;
+  let canceled = false;
   const workers = Array.from({ length: REPLAY_LIMITS.concurrency }, async () => {
-    while (next < queue.length && !fatal) {
+    while (next < queue.length && !fatal && !canceled) {
+      if ((await runStatus(args.runId)) !== "running") {
+        canceled = true;
+        break;
+      }
       const w = queue[next++];
       await processOne(w);
     }
@@ -511,9 +595,9 @@ async function executeReplay(args: {
   if (fatal) throw fatal;
 
   const full = await getReplayRun(args.organizationId, args.agentId, args.runId);
-  const summary = full ? summarizeReplay(full.items) : null;
+  const summary = full ? full.summary : null;
   await db.$executeRawUnsafe(
-    `UPDATE "ai_simple_replay_runs" SET "status"='done', "summary"=$2::jsonb, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1`,
+    `UPDATE "ai_simple_replay_runs" SET "status"='done', "summary"=$2::jsonb, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
     args.runId, summary ? JSON.stringify(summary) : null,
   );
 }

@@ -6,7 +6,7 @@ vi.mock("../agents", () => ({ getV2Agent: vi.fn() }));
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 vi.mock("@/services/ai/agent-key", () => ({ getAgentApiKey: vi.fn() }));
 
-import { buildEvaluatorInput, parseVerdict, resolvedLikeHuman, summarizeReplay, type ReplayItemRow } from "../replay";
+import { buildEvaluatorInput, parseVerdict, pointOutcome, resolvedLikeHuman, summarizeReplay, type ReplayItemRow } from "../replay";
 
 function item(over: Partial<ReplayItemRow>): ReplayItemRow {
   return {
@@ -42,6 +42,18 @@ describe("resolvedLikeHuman", () => {
   });
 });
 
+describe("pointOutcome", () => {
+  it("dá um único resultado por ponto, com prioridade para invenção e erro", () => {
+    expect(pointOutcome({ agentHandoff: false, verdict: v({ desfecho: "igual" }) })).toBe("igual");
+    expect(pointOutcome({ agentHandoff: false, verdict: v({ desfecho: "igual", inventou: true }) })).toBe("inventou");
+    expect(pointOutcome({ agentHandoff: false, verdict: v({ desfecho: "igual", correto: "nao" }) })).toBe("incorreto");
+    expect(pointOutcome({ agentHandoff: true, verdict: v({ desfecho: "igual" }) })).toBe("transferiu_sem_precisar");
+    expect(pointOutcome({ agentHandoff: true, verdict: v({ desfecho: "diferente", humanoConsultouSistema: true }) })).toBe("transferiu_certo");
+    expect(pointOutcome({ agentHandoff: false, verdict: v({ desfecho: "parcial", humanoConsultouSistema: true }) })).toBe("deveria_transferir");
+    expect(pointOutcome({ agentHandoff: false, verdict: null })).toBeNull();
+  });
+});
+
 describe("summarizeReplay", () => {
   it("separa não avaliáveis, erros e agrupa por assunto", () => {
     const s = summarizeReplay([
@@ -58,6 +70,9 @@ describe("summarizeReplay", () => {
     expect(s.geral.resolveuComoHumano).toBe(2);
     expect(s.porAssunto.map((a) => a.assunto)).toEqual(["Cancelamento", "Boleto"]);
     expect(s.causas).toEqual({ ok: 1, material: 1, integracao: 1 });
+    expect(s.geral.resultados).toEqual({ igual: 1, diferente: 1, transferiu_certo: 1 });
+    const soma = Object.values(s.geral.resultados).reduce((a, b) => a + (b ?? 0), 0);
+    expect(soma).toBe(s.geral.avaliados);
   });
 });
 
