@@ -136,7 +136,11 @@ function logRow(over: Record<string, unknown>) {
     error: null,
     llmOutput: { reason: "saudação" },
     discardedActions: [],
-    contextSnapshot: { stage: "active", trace: [{ step: "regra", detail: "Nenhuma regra", at: 1 }] },
+    contextSnapshot: {
+      stage: "active",
+      trace: [{ step: "regra", detail: "Nenhuma regra", at: 1 }],
+      toolCalls: [{ toolName: "knowledge_search", result: { chunks: [{ docTitle: "Material X", content: "conteúdo X", distance: 0.3 }] } }],
+    },
     latencyMs: 100,
     inputTokens: 10,
     outputTokens: 5,
@@ -166,7 +170,11 @@ describe("conversas de teste", () => {
 
     expect(r.contacts).toHaveLength(1);
     expect(r.contacts[0].sessions.map((s) => s.turns.map((t) => t.id))).toEqual([["r", "b"], ["a"]]);
-    expect(r.contacts[0].sessions[1].turns[0]).toMatchObject({ llmReason: "saudação", trace: [{ step: "regra" }] });
+    expect(r.contacts[0].sessions[1].turns[0]).toMatchObject({
+      llmReason: "saudação",
+      trace: [{ step: "regra" }],
+      sources: [{ title: "Material X", content: "conteúdo X", similarity: 0.7 }],
+    });
   });
 
   it("sem números de teste configurados não lista nada", async () => {
@@ -200,6 +208,7 @@ describe("diagnóstico de erro", () => {
     expect(sentPayload.comentarioDeQuemTestou).toBe("não era para transferir");
     expect(sentPayload.turnoMarcado.rastro).toEqual([{ step: "regra", detail: "Nenhuma regra", at: 1 }]);
     expect(sentPayload.materiaisExistentes).toEqual(["Como emitir comprovante"]);
+    expect(sentPayload.turnoMarcado.trechosQueOModeloLeu).toEqual([{ title: "Material X", content: "conteúdo X", similarity: 0.7 }]);
   });
 
   it("falha do modelo grava o comentário com o erro (não perde o feedback)", async () => {

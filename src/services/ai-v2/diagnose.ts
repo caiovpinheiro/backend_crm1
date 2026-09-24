@@ -19,6 +19,7 @@ import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import { ensureV2AgentSchema } from "./ensure-schema";
+import { sourcesFromToolCalls } from "./sources";
 
 /** Como o motor decide cada turno — é o que permite apontar a etapa certa. */
 export const V2_ENGINE_GUIDE = `
@@ -43,6 +44,7 @@ export const V2_ENGINE_GUIDE = `
 - "modelo": configuração e material estavam certos e o LLM ainda assim errou; sugira instrução mais explícita no assunto ou nas regras globais.
 - "motor": o motor fez algo que contradiz a própria regra descrita acima (ex.: rastro mostra decisão incoerente com a configuração, passo esperado ausente, resposta barrada sem motivo válido). Escreva em "pedidoParaDev" o pedido ao desenvolvedor com a evidência do rastro.
 Baseie-se no rastro: ele mostra, passo a passo, o que o motor decidiu e por quê. Não invente passos que não estão no rastro.
+Compare a resposta enviada com "trechosQueOModeloLeu": informação da resposta que não está em nenhum trecho nem nos dados do cliente é invenção do modelo (categoria "modelo" — sugira instrução explícita). Informação errada que está no trecho é problema do material (categoria "material" — diga o que corrigir no texto).
 `.trim();
 
 const diagnosisSchema = z.object({
@@ -147,10 +149,13 @@ export function summarizeConfigForDiagnosis(
   };
 }
 
-function compactTurn(row: TurnLogRow): Record<string, unknown> {
+function compactTurn(row: TurnLogRow, withSources = false): Record<string, unknown> {
   const snap = (row.contextSnapshot ?? {}) as Record<string, unknown>;
   const out = (row.llmOutput ?? null) as Record<string, unknown> | null;
   return {
+    // Só no turno marcado: é o que permite dizer "isto não está nos
+    // trechos" (invenção) em vez de culpar o material.
+    ...(withSources ? { trechosQueOModeloLeu: sourcesFromToolCalls(snap.toolCalls) } : {}),
     quando: row.createdAt,
     cliente: row.inboundText,
     respostaEnviada: row.reply,
@@ -224,7 +229,7 @@ export async function diagnoseV2Turn(args: {
 
   const payload = {
     comentarioDeQuemTestou: comment,
-    turnoMarcado: compactTurn(row),
+    turnoMarcado: compactTurn(row, true),
     turnosAnteriores: previous.reverse().map(compactTurn),
     configuracaoDoAgente: summarizeConfigForDiagnosis(config, docTitles),
     materiaisExistentes: docs.map((d) => d.title),

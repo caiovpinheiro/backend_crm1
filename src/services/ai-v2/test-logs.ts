@@ -11,6 +11,7 @@ import { normalizePhoneDigits, phoneMatchesAllowlist } from "@/services/ai/phone
 import { ensureV2AgentSchema } from "./ensure-schema";
 import type { V2TraceStep } from "./trace";
 import type { V2TurnFeedback } from "./diagnose";
+import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 
 export type V2TestTurn = {
   id: string;
@@ -27,6 +28,8 @@ export type V2TestTurn = {
   rule: string | null;
   llmReason: string | null;
   trace: V2TraceStep[];
+  /** Texto dos trechos da base que o modelo leu no turno. */
+  sources: V2TurnSource[];
   discardedActions: string[];
   latencyMs: number | null;
   tokens: number;
@@ -163,6 +166,7 @@ export async function listV2TestConversations(args: {
       rule: typeof snap.appliedRuleId === "string" ? ruleNames.get(snap.appliedRuleId) ?? snap.appliedRuleId : null,
       llmReason: out?.reason?.trim() || null,
       trace: Array.isArray(snap.trace) ? (snap.trace as V2TraceStep[]) : [],
+      sources: sourcesFromToolCalls(snap.toolCalls),
       discardedActions: Array.isArray(row.discardedActions)
         ? (row.discardedActions as Array<{ type?: string }>).map((a) => a.type ?? "?")
         : [],

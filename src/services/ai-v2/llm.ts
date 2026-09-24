@@ -802,6 +802,9 @@ function buildV2SystemPrompt(
   // pedia transferência sem motivo.
   lines.push("actions: lista de ações a executar neste turno — vazia quando não há ação. Para transferir para um atendente use handoff: true (ou a ação { type: \"handoff\" }) apenas quando realmente precisar de um humano.");
   lines.push("messageModel: pode ser null ou um objeto com { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca use um objeto vazio ou outro formato.");
+  // O modelo completava o material com "conhecimento geral" plausível
+  // (um período, um prazo, uma condição) que não estava em trecho nenhum.
+  lines.push("Use apenas o que está nos trechos da base, nos dados do cliente e nas informações fixas da empresa. Não acrescente prazos, datas, períodos, valores, condições, canais ou etapas que não apareçam neles, mesmo que pareçam óbvios. Se a informação necessária não estiver ali, diga que não tem essa informação ou marque handoff=true.");
   lines.push("Nunca afirme ao cliente que executou uma ação que não esteja em 'actions'.");
   lines.push("Nunca prometa verificar e retornar depois. Se depender de outra pessoa, marque handoff=true.");
 
