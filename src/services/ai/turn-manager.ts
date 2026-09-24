@@ -716,6 +716,7 @@ export async function runTurn(turn: {
             userMessage: text,
             messageType: await lastMessageType(turn.organizationId, messageIds),
             turnId: turn.id,
+            messageIds,
           });
         } else {
           const { maybeReplyAsAIAgent } = await import(

@@ -846,3 +846,16 @@ describe("currentDateLine", () => {
     expect(currentDateLine("Fuso/Invalido", new Date("2026-09-24T20:02:00Z"))).toContain("2026-09-24");
   });
 });
+
+describe("mediaUnderstandingNote", () => {
+  it("só aparece quando a mensagem veio de mídia; confirma se ligado", async () => {
+    const { mediaUnderstandingNote } = await import("../llm");
+    const on = { media: { confirmUnderstanding: true } } as unknown as V2AgentConfig;
+    const off = { media: { confirmUnderstanding: false } } as unknown as V2AgentConfig;
+    expect(mediaUnderstandingNote(on, "quero cancelar")).toBe("");
+    expect(mediaUnderstandingNote(on, "[Áudio do cliente, transcrito]: quero cancelar")).toContain("confirme em uma frase");
+    const n = mediaUnderstandingNote(off, "[Imagem enviada pelo cliente]: tela de erro");
+    expect(n).toContain("# Mídia do cliente");
+    expect(n).not.toContain("confirme");
+  });
+});

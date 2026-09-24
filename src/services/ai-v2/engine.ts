@@ -18,6 +18,8 @@ import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { evaluateV2Media } from "./media";
+import { enrichTurnWithMedia } from "./media-turn";
+import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
@@ -98,6 +100,8 @@ export type V2TurnInput = {
   userMessage: string;
   messageType?: string;
   turnId?: string;
+  /** Mensagens do cliente neste turno (áudio/imagem viram texto a partir delas). */
+  messageIds?: string[];
 };
 
 export type V2TurnResult = {
@@ -108,6 +112,17 @@ export type V2TurnResult = {
 };
 
 const STAGES_ORDERED: V2Stage[] = ["idle", "confirming", "identifying", "active", "closed"];
+
+const MEDIA_ASK_TEXT_DEFAULT: Record<string, string> = {
+  audio: "Não consigo ouvir áudios por aqui. Pode me escrever o que precisa?",
+  image: "Não consigo ver imagens por aqui. Pode me escrever o que aparece nela?",
+  document: "Não consigo abrir arquivos por aqui. Pode me escrever o que precisa?",
+};
+const MEDIA_NOT_UNDERSTOOD_DEFAULT: Record<string, string> = {
+  audio: "Não consegui entender o seu áudio. Pode me escrever o que precisa?",
+  image: "Não consegui ler a sua imagem. Pode me escrever o que aparece nela?",
+  document: "Não consegui abrir o seu arquivo. Pode me escrever o que precisa?",
+};
 
 function ownerToPrisma(owner: V2Owner): string {
   return owner === "automation" ? "automation" : owner;
@@ -661,6 +676,48 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Mídia recebida
   const media = evaluateV2Media(config, input.messageType);
   if (media) traceStep("mídia", `Recebeu ${media.kind} → política "${media.action}"`);
+
+  // "Pedir para escrever" e "não entendi": responde e espera o cliente, sem
+  // transferir e sem chamar o modelo.
+  const replyAndWait = async (text: string, reason: string): Promise<V2TurnResult> => {
+    const reply = renderMessage(text, vars, defaultFormatter());
+    await sendV2TextMessage({
+      conversationId: input.conversationId,
+      contactId,
+      agentUserId: resolved!.userId,
+      text: reply,
+      channel: input.channel,
+      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+      humanBehavior,
+    });
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context, prompt: reason, reply,
+      executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false, sentReply: reply };
+  };
+
+  if (media && media.action === "ask_text") {
+    return replyAndWait(media.message || MEDIA_ASK_TEXT_DEFAULT[media.kind], "media ask_text");
+  }
+  if (media && (media.action === "transcribe" || media.action === "describe")) {
+    const enriched = await enrichTurnWithMedia({
+      organizationId: orgId,
+      agentUserId: resolved!.userId,
+      agentConfigId: resolved!.agentConfigId,
+      config,
+      userMessage: input.userMessage,
+      messageIds: input.messageIds ?? [],
+    });
+    if (enriched.understood > 0) {
+      input = { ...input, userMessage: enriched.userMessage };
+    } else if (enriched.failed > 0) {
+      const kindCfg = media.kind === "audio" ? config.media.audio : media.kind === "image" ? config.media.image : config.media.document;
+      return replyAndWait(kindCfg.notUnderstoodMessage || MEDIA_NOT_UNDERSTOOD_DEFAULT[media.kind], "media not understood");
+    }
+  }
   if (media && media.action === "handoff") {
     const handoffMessage = renderMessage(media.message ?? config.handoff.message, vars, defaultFormatter());
     await sendV2TextMessage({
@@ -1421,17 +1478,22 @@ async function callLLMWithTheme(
   try {
     const rows = await (prisma as unknown as {
       message: {
-        findMany: (args: { where: Record<string, unknown>; orderBy: { createdAt: "desc" }; take: number; select: { direction: boolean; content: boolean; authorType: boolean } }) => Promise<Array<{ direction: string; content: string; authorType: string }>>;
+        findMany: (args: { where: Record<string, unknown>; orderBy: { createdAt: "desc" }; take: number; select: { id: boolean; direction: boolean; content: boolean; authorType: boolean; messageType: boolean; organizationId: boolean } }) => Promise<Array<{ id: string; direction: string; content: string; authorType: string; messageType: string; organizationId: string }>>;
       };
     }).message.findMany({
       where: { conversationId: input.conversationId, messageType: { not: "note" }, isPrivate: false },
       orderBy: { createdAt: "desc" },
       take: 10,
-      select: { direction: true, content: true, authorType: true },
+      select: { id: true, direction: true, content: true, authorType: true, messageType: true, organizationId: true },
     });
+    // Áudio/imagem já entendidos entram com o conteúdo, não com "[Áudio]".
+    const mediaRows = rows.filter((m) => m.direction === "in" && understoodKindOf(m.messageType));
+    const mediaTexts = mediaRows.length > 0 ? await getMediaTexts(mediaRows[0].organizationId, mediaRows.map((m) => m.id)) : new Map<string, string>();
     for (const m of rows.reverse()) {
       const role = m.direction === "out" || m.authorType === "bot" ? "assistant" : "user";
-      previousMessages.push({ role, content: m.content ?? "" });
+      const kind = understoodKindOf(m.messageType);
+      const understood = kind ? mediaTexts.get(m.id) : undefined;
+      previousMessages.push({ role, content: understood && kind ? mediaTextLine(kind, understood, m.content) : m.content ?? "" });
     }
     // Tira do histórico só as bolhas do turno atual (já vão agregadas em
     // `userMessage`). Mensagem do cliente que ficou sem resposta num turno

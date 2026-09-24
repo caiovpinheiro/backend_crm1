@@ -712,6 +712,26 @@ function isBadRequest(err: unknown): boolean {
 }
 
 /**
+ * Mensagem que veio de áudio transcrito ou imagem lida automaticamente: a
+ * transcrição pode errar. Com "confirmar entendimento" ligado, o agente
+ * confirma o pedido quando ele está ambíguo; claro, responde direto.
+ */
+export function mediaUnderstandingNote(config: V2AgentConfig, userMessage: string): string {
+  const fromMedia = /\[(Áudio do cliente, transcrito|Imagem enviada pelo cliente)/.test(userMessage);
+  if (!fromMedia) return "";
+  const confirm = config.media?.confirmUnderstanding !== false;
+  return [
+    "",
+    "",
+    "# Mídia do cliente",
+    "Parte da mensagem do cliente veio de áudio transcrito ou de imagem lida automaticamente (marcada entre colchetes). Trate o conteúdo como o que o cliente disse ou mostrou.",
+    confirm
+      ? "A transcrição pode ter erros: se o pedido estiver ambíguo ou parecer cortado, confirme em uma frase o que entendeu antes de agir; se estiver claro, responda direto."
+      : "",
+  ].filter((l, i) => i < 2 || l).join("\n");
+}
+
+/**
  * Data e hora atuais no fuso do agente. Sem isto o modelo não sabe o que é
  * "próximas provas", "este mês" ou "ainda dá tempo" e, com as datas nos
  * trechos, mandava o cliente olhar o calendário.
@@ -998,7 +1018,7 @@ export async function callV2LLM(args: {
     knowledgeDocTitles,
     prefetch.chunks,
     messageModels,
-  );
+  ) + mediaUnderstandingNote(args.config, userMessage);
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     ...previousMessages,

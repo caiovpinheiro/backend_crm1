@@ -20,9 +20,8 @@ import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./replay-extract";
 import { maskSensitive } from "./sensitive";
 import { IMPORT_LIMITS, parseTranscript, transcriptToRows } from "./replay-import";
-import { fetchAuthorizedAudioBuffer } from "@/lib/fetch-authorized-audio";
-import { guessInputExt } from "@/lib/audio-convert";
-import { transcribeWithGroq } from "@/lib/groq-transcribe";
+import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
+import { understandMedia, understoodKindOf } from "./media-understanding";
 
 export const REPLAY_LIMITS = { maxConversations: 100, maxPoints: 300, pointsPerConversation: 6, concurrency: 2 };
 // A execução renova "updatedAt" a cada HEARTBEAT_MS. Sem renovação por
@@ -495,36 +494,38 @@ async function loadMessages(organizationId: string, conversationId: string, sinc
 /** Quem pediu a comparação: o download de áudio confere o acesso dele. */
 export type ReplayRequester = { userId: string; role: string | null; isSuperAdmin: boolean };
 
-const AUDIO_TYPES = new Set(["audio", "ptt", "voice"]);
 const AUDIO_PER_RUN = 60;
 
 /**
- * Troca áudio sem texto pela transcrição (mesmo serviço da tela de
- * conversa). Sem GROQ_API_KEY, ou se falhar, o áudio segue como mídia e o
- * ponto fica fora da conta, como antes.
+ * Áudio e imagem sem texto viram conteúdo (mesmo módulo do atendimento, com
+ * o mesmo cache): áudio transcrito, imagem lida pelo modelo do agente. Se
+ * falhar, a mídia segue como mídia e o ponto fica fora da conta, como antes.
  */
 async function transcribeAudios(
   rows: ReplayMessageRow[],
   organizationId: string,
   requester: ReplayRequester | undefined,
   budget: { left: number },
+  model: { model: string; apiKey: string },
 ): Promise<void> {
-  if (!requester || !process.env.GROQ_API_KEY?.trim()) return;
+  if (!requester) return;
   for (const row of rows) {
     if (budget.left <= 0) return;
-    const type = (row.messageType ?? "").toLowerCase();
-    if (!AUDIO_TYPES.has(type) || !row.mediaUrl) continue;
+    const kind = understoodKindOf(row.messageType);
+    if (!kind || !row.mediaUrl || !row.id) continue;
     const text = (row.content ?? "").trim();
-    if (text && !/^\s*(\[(áudio|audio)\]|📎.*)\s*$/i.test(text)) continue;
+    if (kind === "audio" && text && !isMediaPlaceholderText(text)) continue;
     budget.left--;
-    try {
-      const audio = await fetchAuthorizedAudioBuffer(row.mediaUrl, { organizationId, ...requester });
-      const ext = guessInputExt(audio.contentType.split(";")[0].trim());
-      const r = await transcribeWithGroq(audio.buffer, ext === "bin" ? "ogg" : ext);
-      if ("text" in r) row.content = r.text;
-    } catch (err) {
-      console.warn("[ai-v2 replay] transcrição falhou:", err instanceof Error ? err.message : err);
-    }
+    const r = await understandMedia({
+      organizationId,
+      userId: requester.userId,
+      message: { id: row.id, messageType: row.messageType, mediaUrl: row.mediaUrl, content: row.content },
+      kind,
+      model: model.model,
+      apiKey: model.apiKey,
+    });
+    if (r.text) row.content = kind === "image" && text && !isMediaPlaceholderText(text) ? `${text}\n${r.text}` : r.text;
+    else console.warn("[ai-v2 replay] mídia não entendida:", r.error);
   }
 }
 
@@ -697,7 +698,7 @@ async function pointsFromCrm(args: Parameters<typeof executeReplay>[0]) {
   for (const conv of picked) {
     if (work.length >= REPLAY_LIMITS.maxPoints) break;
     const rows = await loadMessages(args.organizationId, conv.id, historySince);
-    await transcribeAudios(rows.filter((r) => r.createdAt >= since), args.organizationId, args.requester, budget);
+    await transcribeAudios(rows.filter((r) => r.createdAt >= since), args.organizationId, args.requester, budget, { model: args.config.model, apiKey: args.apiKey });
     const points = extractReplayPoints(rows, { maxPoints: REPLAY_LIMITS.pointsPerConversation })
       .filter((p) => new Date(p.at) >= since);
     for (const p of points) work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
@@ -713,7 +714,7 @@ async function pointsFromChosen(args: Parameters<typeof executeReplay>[0]) {
   for (const conv of found) {
     if (work.length >= REPLAY_LIMITS.maxPoints) break;
     const rows = await loadMessages(args.organizationId, conv.id, new Date(0));
-    await transcribeAudios(rows, args.organizationId, args.requester, budget);
+    await transcribeAudios(rows, args.organizationId, args.requester, budget, { model: args.config.model, apiKey: args.apiKey });
     for (const p of extractReplayPoints(rows, { maxPoints: IMPORT_LIMITS.pointsPerTranscript })) {
       work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
     }
