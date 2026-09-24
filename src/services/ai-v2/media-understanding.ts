@@ -1,6 +1,6 @@
 /**
- * Áudio e imagem do cliente viram texto para o agente: áudio é transcrito
- * (mesmo serviço da tela de conversa) e imagem é lida pelo modelo do agente
+ * Áudio e imagem do cliente viram texto para o agente, com a chave do
+ * próprio agente: áudio é transcrito e imagem é lida pelo modelo dele
  * (descrição + texto visível, como print de erro ou documento).
  *
  * O resultado fica guardado por mensagem: não repete o custo, e o histórico
@@ -13,7 +13,7 @@ import { fetchAuthorizedAudioBuffer } from "@/lib/fetch-authorized-audio";
 import { guessInputExt } from "@/lib/audio-convert";
 import { transcribeWithGroq } from "@/lib/groq-transcribe";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
-import { generateWithTools } from "@/services/ai/provider";
+import { generateWithTools, transcribeWithOpenAI } from "@/services/ai/provider";
 
 export type UnderstoodKind = "audio" | "image";
 
@@ -110,7 +110,7 @@ export type UnderstandArgs = {
   userId: string;
   message: MediaMessage;
   kind: UnderstoodKind;
-  /** Para imagem: modelo e chave do agente. */
+  /** Modelo e chave do agente: leitura de imagem e transcrição de áudio. */
   model: string;
   apiKey: string | null;
 };
@@ -132,10 +132,20 @@ export async function understandMedia(args: UnderstandArgs): Promise<{ text: str
     const mime = media.contentType.split(";")[0].trim();
     let text: string | null = null;
     if (args.kind === "audio") {
-      const ext = guessInputExt(mime);
-      const r = await transcribeWithGroq(media.buffer, ext === "bin" ? "ogg" : ext);
-      if ("error" in r) return { text: null, error: r.error, cached: false };
-      text = r.text.trim();
+      // Chave do próprio agente primeiro (a mesma conta que ele já usa); o
+      // serviço de transcrição do servidor só quando o agente não tem chave.
+      if (args.apiKey) {
+        try {
+          text = await transcribeWithOpenAI(args.apiKey, new Uint8Array(media.buffer));
+        } catch (err) {
+          return { text: null, error: `transcrição pela chave do agente falhou: ${err instanceof Error ? err.message : String(err)}`, cached: false };
+        }
+      } else {
+        const ext = guessInputExt(mime);
+        const r = await transcribeWithGroq(media.buffer, ext === "bin" ? "ogg" : ext);
+        if ("error" in r) return { text: null, error: `agente sem chave do modelo; ${r.error}`, cached: false };
+        text = r.text.trim();
+      }
     } else {
       if (!args.apiKey) return { text: null, error: "sem chave do modelo", cached: false };
       const r = await generateWithTools({

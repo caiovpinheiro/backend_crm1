@@ -60,7 +60,8 @@ export async function enrichTurnWithMedia(args: {
     .filter((x): x is { m: MediaMessage & { createdAt: Date }; kind: UnderstoodKind } => !!x.kind && shouldUnderstand(args.config, x.kind));
   if (targets.length === 0) return { userMessage: args.userMessage, understood: 0, failed: 0 };
 
-  const apiKey = targets.some((t) => t.kind === "image") ? await tryGetAgentApiKey(args.agentConfigId).catch(() => null) : null;
+  // Áudio e imagem usam a chave do próprio agente.
+  const apiKey = await tryGetAgentApiKey(args.agentConfigId).catch(() => null);
   const items: Array<{ kind: UnderstoodKind; text: string; content: string | null }> = [];
   let failed = 0;
   for (const { m, kind } of targets) {

@@ -10,6 +10,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import {
   embedMany,
+  experimental_transcribe as transcribe,
   generateText,
   stepCountIs,
   wrapLanguageModel,
@@ -161,6 +162,21 @@ export async function generateWithTools(
     toolCalls,
     steps: result.steps.length,
   };
+}
+
+/**
+ * Transcrição de áudio com a chave OpenAI do agente (a mesma conta que ele
+ * já usa para responder).
+ */
+export async function transcribeWithOpenAI(apiKey: string, audio: Uint8Array): Promise<string> {
+  const openai = getOpenAI(apiKey);
+  const result = await transcribe({
+    model: openai.transcription(process.env.AI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe"),
+    audio,
+    providerOptions: { openai: { language: "pt" } },
+    abortSignal: AbortSignal.timeout(90_000),
+  });
+  return (result.text ?? "").trim();
 }
 
 export async function embedTexts(
