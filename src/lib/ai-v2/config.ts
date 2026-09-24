@@ -315,17 +315,25 @@ export const v2AgentConfigSchema = z.object({
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
   calendar: z
     .object({
-      events: z
-        .array(
+      // Linha incompleta (recém-adicionada na tela, sem descrição ou data)
+      // é descartada em vez de recusar o rascunho inteiro.
+      events: z.preprocess(
+        (v) =>
+          Array.isArray(v)
+            ? v
+                .filter((e) => e && typeof e === "object" && typeof e.title === "string" && e.title.trim() && /^\d{4}-\d{2}-\d{2}$/.test(String(e.start)))
+                .map((e) => ({ ...e, title: e.title.trim(), end: /^\d{4}-\d{2}-\d{2}$/.test(String(e.end ?? "")) && e.end >= e.start ? e.end : undefined }))
+                .slice(0, 500)
+            : [],
+        z.array(
           z.object({
             id: z.string(),
             start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
             end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
             title: z.string().min(1),
           }),
-        )
-        .max(500)
-        .default([]),
+        ),
+      ),
     })
     .optional(),
   structuredOutput: z.boolean().optional().default(false),

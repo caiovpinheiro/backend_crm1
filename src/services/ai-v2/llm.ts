@@ -804,7 +804,7 @@ const WRITING_GUIDE = [
   "Quando o cliente disser que não entendeu, que está perdido ou perguntar por onde começar, recomece do primeiro passo com mais detalhe (onde entrar, o que vai aparecer) em vez de mandá-lo voltar às mensagens anteriores.",
   "Se um procedimento aparece dividido em mais de um trecho, junte-os na ordem certa, começando pelo primeiro passo (como e onde acessar).",
   "Responda primeiro exatamente o que o cliente perguntou. Se os trechos trazem a informação (data, prazo, valor, regra), dê a informação; não acrescente onde ele pode encontrá-la, a menos que peça ou que a informação não esteja nos trechos.",
-  "Passo a passo sempre com um passo por linha.",
+  "Passo a passo e listas (datas, opções, documentos) sempre com um item por linha; nunca junte vários itens no mesmo parágrafo.",
   "Não peça desculpas sem motivo.",
   "Termine com uma próxima ação concreta ligada ao assunto (por exemplo, pedir que avise em qual passo travou) em vez de frases genéricas como \"qualquer dúvida estou aqui\".",
 ].join("\n");
