@@ -36,10 +36,11 @@ import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion, knowledgeChunkTexts, unsupportedQuotedTerms } from "./ground-reply";
 import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
+import { breakInlineSteps } from "./reply-format";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
-const PREFETCH_LIMIT = 3;
+const PREFETCH_LIMIT = 5;
 const PREFETCH_CHUNK_CHARS = 1500;
 
 function contentWordCount(text: string): number {
@@ -137,16 +138,32 @@ export async function rewriteKnowledgeQueries(args: {
 }
 
 /** Junta os trechos de várias buscas: um por trecho, o mais próximo primeiro. */
-function mergeChunks(lists: PrefetchedChunk[][], limit: number): PrefetchedChunk[] {
+/**
+ * Junta os resultados das consultas (frase do cliente + reformulações).
+ * O melhor trecho de CADA consulta entra primeiro; o resto completa por
+ * distância. Só por distância, uma consulta genérica que casa bem com um
+ * material ("como acessar o calendário", 0,76) tirava o trecho que
+ * responde a consulta específica ("datas das avaliações finais", 0,66).
+ */
+export function mergeChunks(lists: PrefetchedChunk[][], limit: number): PrefetchedChunk[] {
+  const keyOf = (c: PrefetchedChunk) => `${c.docId}\u0000${c.content}`;
   const best = new Map<string, PrefetchedChunk>();
   for (const list of lists) {
     for (const c of list) {
-      const key = `${c.docId}\u0000${c.content}`;
-      const prev = best.get(key);
-      if (!prev || c.distance < prev.distance) best.set(key, c);
+      const prev = best.get(keyOf(c));
+      if (!prev || c.distance < prev.distance) best.set(keyOf(c), c);
     }
   }
-  return [...best.values()].sort((a, b) => a.distance - b.distance).slice(0, limit);
+  const picked = new Map<string, PrefetchedChunk>();
+  for (const list of lists) {
+    const top = [...list].sort((a, b) => a.distance - b.distance)[0];
+    if (top && picked.size < limit) picked.set(keyOf(top), best.get(keyOf(top)) ?? top);
+  }
+  for (const c of [...best.values()].sort((a, b) => a.distance - b.distance)) {
+    if (picked.size >= limit) break;
+    if (!picked.has(keyOf(c))) picked.set(keyOf(c), c);
+  }
+  return [...picked.values()].sort((a, b) => a.distance - b.distance);
 }
 
 async function prefetchKnowledge(args: {
@@ -730,6 +747,8 @@ const WRITING_GUIDE = [
   "Comece respondendo ao que o cliente acabou de dizer. Cumprimente pelo nome só no início da conversa; depois vá direto ao ponto.",
   "Quando o cliente disser que não entendeu, que está perdido ou perguntar por onde começar, recomece do primeiro passo com mais detalhe (onde entrar, o que vai aparecer) em vez de mandá-lo voltar às mensagens anteriores.",
   "Se um procedimento aparece dividido em mais de um trecho, junte-os na ordem certa, começando pelo primeiro passo (como e onde acessar).",
+  "Responda primeiro exatamente o que o cliente perguntou. Se os trechos trazem a informação (data, prazo, valor, regra), dê a informação; não acrescente onde ele pode encontrá-la, a menos que peça ou que a informação não esteja nos trechos.",
+  "Passo a passo sempre com um passo por linha.",
   "Não peça desculpas sem motivo.",
   "Termine com uma próxima ação concreta ligada ao assunto (por exemplo, pedir que avise em qual passo travou) em vez de frases genéricas como \"qualquer dúvida estou aqui\".",
 ].join("\n");
@@ -1103,7 +1122,7 @@ export async function callV2LLM(args: {
     }
 
     // Aplica renderizador de mensagens em todas as respostas.
-    output.reply = renderMessage(output.reply, renderVars) ?? output.reply;
+    output.reply = breakInlineSteps(renderMessage(output.reply, renderVars) ?? output.reply);
 
     return {
       output,

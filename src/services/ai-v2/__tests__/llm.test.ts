@@ -819,3 +819,16 @@ describe("callV2LLM — dados sensíveis", () => {
     expect(result.output.reply).toBe("Achei o CPF ***25.");
   });
 });
+
+describe("mergeChunks — resultado das consultas da pré-busca", () => {
+  const c = (docId: string, content: string, distance: number) => ({ docId, docTitle: docId, content, distance });
+  it("o melhor trecho de cada consulta entra, mesmo com distância pior que o de outra", async () => {
+    const { mergeChunks } = await import("../llm");
+    const generic = [c("como-acessar", "a", 0.24), c("como-acessar", "b", 0.25), c("outro", "c", 0.26), c("outro", "d", 0.27)];
+    const specific = [c("calendario", "datas AF", 0.34)];
+    const r = mergeChunks([generic, specific], 3);
+    expect(r.map((x) => x.content)).toContain("datas AF");
+    expect(r).toHaveLength(3);
+    expect(r[0].content).toBe("a");
+  });
+});
