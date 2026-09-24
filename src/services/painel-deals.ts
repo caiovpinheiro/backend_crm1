@@ -104,8 +104,8 @@ export type PainelFunnel = {
   stages: PainelFunnelStage[];
   empty: boolean;
   /**
-   * Chegadas no período, na org. Contato novo com deal conta 1.
-   * Só deal conta 1. Só contato conta 1.
+   * Chegadas no período, no funil selecionado.
+   * Contato novo com deal nesse funil conta 1. Só deal conta 1. Só contato conta 1.
    */
   novos: { count: number; value: number };
 };
@@ -648,18 +648,36 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
 
   const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
   // Contato novo + deal no período = 1. Só deal = 1. Só contato = 1.
+  // Escopo = funil selecionado (etapa atual do negócio).
+  const pipeIds = f.pipelineIds.length
+    ? f.pipelineIds
+    : [...new Set(stages.map((s) => s.pipelineId))];
+  const inPipe = pipeIds.length
+    ? Prisma.sql`AND s."pipelineId" IN (${Prisma.join(pipeIds)})`
+    : Prisma.sql`AND FALSE`;
   const createdRows = await db().$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
     SELECT
       (
         (SELECT COUNT(*)::bigint FROM contacts c
           WHERE c."organizationId" = ${orgId}
             AND c."createdAt" >= ${f.range.from}
-            AND c."createdAt" <= ${f.range.to})
+            AND c."createdAt" <= ${f.range.to}
+            AND EXISTS (
+              SELECT 1 FROM deals d
+              INNER JOIN stages s ON s.id = d."stageId"
+              WHERE d."contactId" = c.id
+                AND d."organizationId" = ${orgId}
+                AND d."createdAt" >= ${f.range.from}
+                AND d."createdAt" <= ${f.range.to}
+                ${inPipe}
+            ))
         +
         (SELECT COUNT(*)::bigint FROM deals d
+          INNER JOIN stages s ON s.id = d."stageId"
           WHERE d."organizationId" = ${orgId}
             AND d."createdAt" >= ${f.range.from}
             AND d."createdAt" <= ${f.range.to}
+            ${inPipe}
             AND NOT EXISTS (
               SELECT 1 FROM contacts c
               WHERE c.id = d."contactId"
@@ -670,9 +688,11 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       (
         SELECT COALESCE(SUM(CAST(d.value AS DECIMAL)), 0)
         FROM deals d
+        INNER JOIN stages s ON s.id = d."stageId"
         WHERE d."organizationId" = ${orgId}
           AND d."createdAt" >= ${f.range.from}
           AND d."createdAt" <= ${f.range.to}
+          ${inPipe}
       ) AS val
   `);
   const created = createdRows[0];
