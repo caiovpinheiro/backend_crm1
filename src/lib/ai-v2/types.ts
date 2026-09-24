@@ -421,6 +421,8 @@ export interface V2AgentConfig {
   allowedPhoneNumbers?: string[];
   /** Tamanho preferido das respostas. */
   responseLength?: "short" | "medium" | "long";
+  /** Pede à API resposta sempre em JSON (modo JSON), em vez de só pedir no prompt. */
+  structuredOutput?: boolean;
   /** Saídas quando o agente não soube, pediu pessoa, sem material ou deu erro. */
   fallback?: V2FallbackConfig;
   /** Fora do escopo / assuntos proibidos. */

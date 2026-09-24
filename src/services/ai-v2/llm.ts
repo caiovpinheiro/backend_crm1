@@ -575,6 +575,7 @@ async function coerceV2OutputFromRawText(args: {
   apiKey: string;
   responseBehavior: V2AgentConfig["responseBehavior"];
   maxOutputTokens?: number;
+  jsonMode?: boolean;
 }): Promise<{
   output?: V2LLMOutput;
   inputTokens: number;
@@ -597,6 +598,7 @@ async function coerceV2OutputFromRawText(args: {
       temperature: behaviorToTemperature(args.responseBehavior),
       maxOutputTokens: args.maxOutputTokens ?? responseLengthToMaxTokens("medium"),
       maxSteps: 1,
+      jsonMode: args.jsonMode,
     });
 
     const text = result.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
@@ -663,6 +665,11 @@ export async function callV2LLMTest(
     previousMessages,
   });
   return result;
+}
+
+function isBadRequest(err: unknown): boolean {
+  const e = (err && typeof err === "object" ? err : {}) as { statusCode?: unknown; status?: unknown };
+  return e.statusCode === 400 || e.status === 400;
 }
 
 function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
@@ -951,6 +958,8 @@ export async function callV2LLM(args: {
     ...((args.collectedVariables as Record<string, unknown>) ?? {}),
   });
 
+  let jsonMode = args.config.structuredOutput === true;
+
   async function attempt(): Promise<{
     output: V2LLMOutput;
     inputTokens: number;
@@ -958,16 +967,33 @@ export async function callV2LLM(args: {
     toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
     wasExpanded?: boolean;
   }> {
-    let result = await generateWithTools({
-      model: args.config.model,
-      apiKey,
-      system,
-      messages: messages as any,
-      tools,
-      temperature: behaviorToTemperature(args.config.responseBehavior),
-      maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
-      maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
-    });
+    const generate = async (maxOutputTokens: number) => {
+      const call = (json: boolean) =>
+        generateWithTools({
+          model: args.config.model,
+          apiKey,
+          system,
+          messages: messages as any,
+          tools,
+          temperature: behaviorToTemperature(args.config.responseBehavior),
+          maxOutputTokens,
+          maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
+          jsonMode: json,
+        });
+      if (!jsonMode) return call(false);
+      try {
+        return await call(true);
+      } catch (err) {
+        // Modelo sem suporte ao modo JSON: segue pelo caminho de antes
+        // (formato pedido só no prompt) em vez de deixar o cliente sem resposta.
+        if (!isBadRequest(err)) throw err;
+        jsonMode = false;
+        traceStep("llm", `Modo JSON recusado pelo modelo ${args.config.model} — seguindo sem ele`);
+        return call(false);
+      }
+    };
+
+    let result = await generate(responseLengthToMaxTokens(args.config.responseLength));
 
     // Se o modelo cortou por limite de tokens, tenta novamente com a rede de
     // segurança mais ampla (long) em vez de devolver JSON quebrado.
@@ -975,16 +1001,7 @@ export async function callV2LLM(args: {
     if (result.finishReason === "length") {
       wasExpanded = true;
       console.warn("[ai-v2] LLM resposta cortada por length; expandindo maxOutputTokens");
-      result = await generateWithTools({
-        model: args.config.model,
-        apiKey,
-        system,
-        messages: messages as any,
-        tools,
-        temperature: behaviorToTemperature(args.config.responseBehavior),
-        maxOutputTokens: responseLengthToMaxTokens("long"),
-        maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
-      });
+      result = await generate(responseLengthToMaxTokens("long"));
     }
 
     let text = result.text.trim();
@@ -1020,6 +1037,7 @@ export async function callV2LLM(args: {
         apiKey,
         responseBehavior: args.config.responseBehavior,
         maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+        jsonMode,
       });
       correctorTokens = { input: coerced.inputTokens, output: coerced.outputTokens };
       if (coerced.output) {

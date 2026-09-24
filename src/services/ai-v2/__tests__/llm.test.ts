@@ -543,6 +543,35 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     );
   });
 
+  it("modo JSON: desligado por padrão e ligado pela configuração do agente", async () => {
+    const ctx = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };
+    await callV2LLM({ agentId: "agent-1", config: baseConfig(), context: ctx, userMessage: "oi", stage: "active" });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].jsonMode).toBe(false);
+
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    await callV2LLM({ agentId: "agent-1", config: baseConfig({ structuredOutput: true }), context: ctx, userMessage: "oi", stage: "active" });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].jsonMode).toBe(true);
+  });
+
+  it("modo JSON recusado pelo modelo (400): repete sem ele e responde", async () => {
+    const refused = Object.assign(new Error("response_format not supported"), { statusCode: 400 });
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(refused)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Olá!", actions: [] })));
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ structuredOutput: true }),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0].jsonMode).toBe(true);
+    expect(calls[1][0].jsonMode).toBe(false);
+    expect(r.output.reply).toBe("Olá!");
+  });
+
   it("inclui o guia de escrita natural em qualquer tamanho", async () => {
     const config = baseConfig({ responseLength: "short" });
     await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oi", stage: "active" });

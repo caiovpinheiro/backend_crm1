@@ -12,6 +12,7 @@ import {
   embedMany,
   generateText,
   stepCountIs,
+  wrapLanguageModel,
   type LanguageModel,
   type ModelMessage,
   type ToolSet,
@@ -71,6 +72,9 @@ export type GenerateArgs = {
   /// Limite de passos (tool loop). Default 8.
   maxSteps?: number;
   toolChoice?: "auto" | "required" | "none" | { type: "tool"; toolName: string };
+  /// Modo JSON da API: a resposta final é sempre um objeto JSON válido
+  /// (o formato dos campos continua validado por quem chama).
+  jsonMode?: boolean;
 };
 
 export type GenerateResult = {
@@ -86,10 +90,25 @@ export type GenerateResult = {
   steps: number;
 };
 
+/**
+ * Pede à API resposta em JSON sem usar o `output` do SDK: ele valida o
+ * texto por conta própria e lança erro antes de quem chama poder tratar.
+ */
+function withJsonMode(model: LanguageModel): LanguageModel {
+  return wrapLanguageModel({
+    model: model as Parameters<typeof wrapLanguageModel>[0]["model"],
+    middleware: {
+      specificationVersion: "v3",
+      transformParams: async ({ params }) => ({ ...params, responseFormat: { type: "json" } }),
+    },
+  });
+}
+
 export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
-  const model = getModel(args.model, args.apiKey);
+  const base = getModel(args.model, args.apiKey);
+  const model = args.jsonMode ? withJsonMode(base) : base;
   // `maxRetries: 0` desliga o retry interno do SDK de propósito: ele não
   // conhece o nosso timeout (retentaria por dentro de uma tentativa que já
   // deveria ter sido abortada) e não loga nada. Quem retenta é
