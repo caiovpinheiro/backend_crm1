@@ -96,3 +96,13 @@ describe("buildEvaluatorInput", () => {
     expect(t).toContain("[1] Cancelamento: Passo a passo");
   });
 });
+
+describe("parseConversationRefs", () => {
+  it("aceita link da caixa de entrada, caminho e id solto, sem repetir", async () => {
+    const { parseConversationRefs } = await import("../replay");
+    const ids = parseConversationRefs(
+      "https://crm.exemplo.com/inbox?c=cmabc12345xyz\nhttps://crm.exemplo.com/conversations/cmdef67890uvw, cmabc12345xyz  curto",
+    );
+    expect(ids).toEqual(["cmabc12345xyz", "cmdef67890uvw"]);
+  });
+});

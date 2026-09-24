@@ -9,6 +9,8 @@
 import { maskSensitive } from "./sensitive";
 
 export type ReplayMessageRow = {
+  id?: string;
+  mediaUrl?: string | null;
   direction: string;
   authorType: string | null;
   messageType: string | null;

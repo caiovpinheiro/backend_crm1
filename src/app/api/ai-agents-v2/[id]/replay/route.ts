@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import {
+  estimateChosenReplay,
   estimateImportedReplay,
+  parseConversationRefs,
   estimateReplay,
   listReplayRuns,
   REPLAY_LIMITS,
@@ -67,6 +69,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
     const p = parseParams(body);
     const organizationId = r.session.user.organizationId!;
+    const requester = {
+      userId: r.session.user.id,
+      role: (r.session.user as { role?: string | null }).role ?? null,
+      isSuperAdmin: Boolean((r.session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    };
+    if (body.source === "crm_ids") {
+      const ids = parseConversationRefs(typeof body.conversationRefs === "string" ? body.conversationRefs : "");
+      if (ids.length === 0) return NextResponse.json({ message: "Cole o link ou o id de ao menos uma conversa." }, { status: 400 });
+      if (body.estimate === true) {
+        return NextResponse.json(await estimateChosenReplay({ organizationId, agentId: id, config: p.config, conversationIds: ids }));
+      }
+      const params: ReplayParams = { ...p, source: "crm_ids", conversationIds: ids, conversations: ids.length };
+      const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, requester });
+      return NextResponse.json(result, { status: 202 });
+    }
     if (body.source === "import") {
       const transcripts = parseTranscripts(body);
       if (transcripts.length === 0) return NextResponse.json({ message: "Anexe ao menos uma conversa." }, { status: 400 });
@@ -83,7 +100,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (body.estimate === true) {
       return NextResponse.json(await estimateReplay({ organizationId, agentId: id, params: p }));
     }
-    const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params: { ...p, source: "crm" } });
+    const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params: { ...p, source: "crm" }, requester });
     return NextResponse.json(result, { status: 202 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -20,6 +20,9 @@ import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./replay-extract";
 import { maskSensitive } from "./sensitive";
 import { IMPORT_LIMITS, parseTranscript, transcriptToRows } from "./replay-import";
+import { fetchAuthorizedAudioBuffer } from "@/lib/fetch-authorized-audio";
+import { guessInputExt } from "@/lib/audio-convert";
+import { transcribeWithGroq } from "@/lib/groq-transcribe";
 
 export const REPLAY_LIMITS = { maxConversations: 100, maxPoints: 300, pointsPerConversation: 6, concurrency: 2 };
 // A execução renova "updatedAt" a cada HEARTBEAT_MS. Sem renovação por
@@ -324,8 +327,10 @@ export type ReplayParams = {
   days: number;
   conversations: number;
   config: "draft" | "published";
-  /** "crm": conversas do período; "import": conversas anexadas na tela. */
-  source?: "crm" | "import";
+  /** "crm": conversas do período; "crm_ids": conversas escolhidas; "import": anexadas. */
+  source?: "crm" | "crm_ids" | "import";
+  /** Conversas escolhidas pelo link/id (source "crm_ids"). */
+  conversationIds?: string[];
   /** Nomes das conversas anexadas (só para mostrar). */
   files?: string[];
 };
@@ -478,13 +483,106 @@ async function pickConversations(organizationId: string, days: number, n: number
 
 async function loadMessages(organizationId: string, conversationId: string, since: Date): Promise<ReplayMessageRow[]> {
   return db.$queryRawUnsafe<ReplayMessageRow[]>(
-    `SELECT "direction", "authorType"::text AS "authorType", "messageType"::text AS "messageType", "content", "createdAt"
+    `SELECT "id", "mediaUrl", "direction", "authorType"::text AS "authorType", "messageType"::text AS "messageType", "content", "createdAt"
        FROM "messages"
       WHERE "organizationId" = $1 AND "conversationId" = $2 AND "isPrivate" = false AND "createdAt" >= $3
       ORDER BY "createdAt" ASC
       LIMIT 400`,
     organizationId, conversationId, since,
   );
+}
+
+/** Quem pediu a comparação: o download de áudio confere o acesso dele. */
+export type ReplayRequester = { userId: string; role: string | null; isSuperAdmin: boolean };
+
+const AUDIO_TYPES = new Set(["audio", "ptt", "voice"]);
+const AUDIO_PER_RUN = 60;
+
+/**
+ * Troca áudio sem texto pela transcrição (mesmo serviço da tela de
+ * conversa). Sem GROQ_API_KEY, ou se falhar, o áudio segue como mídia e o
+ * ponto fica fora da conta, como antes.
+ */
+async function transcribeAudios(
+  rows: ReplayMessageRow[],
+  organizationId: string,
+  requester: ReplayRequester | undefined,
+  budget: { left: number },
+): Promise<void> {
+  if (!requester || !process.env.GROQ_API_KEY?.trim()) return;
+  for (const row of rows) {
+    if (budget.left <= 0) return;
+    const type = (row.messageType ?? "").toLowerCase();
+    if (!AUDIO_TYPES.has(type) || !row.mediaUrl) continue;
+    const text = (row.content ?? "").trim();
+    if (text && !/^\s*(\[(áudio|audio)\]|📎.*)\s*$/i.test(text)) continue;
+    budget.left--;
+    try {
+      const audio = await fetchAuthorizedAudioBuffer(row.mediaUrl, { organizationId, ...requester });
+      const ext = guessInputExt(audio.contentType.split(";")[0].trim());
+      const r = await transcribeWithGroq(audio.buffer, ext === "bin" ? "ogg" : ext);
+      if ("text" in r) row.content = r.text;
+    } catch (err) {
+      console.warn("[ai-v2 replay] transcrição falhou:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+/** Ids de conversa a partir de links (…?c=ID, …/conversations/ID) ou ids soltos. */
+export function parseConversationRefs(text: string): string[] {
+  const ids = new Set<string>();
+  for (const token of text.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean)) {
+    const fromQuery = /[?&](?:c|conversation|conversationId)=([A-Za-z0-9_-]{8,})/.exec(token)?.[1];
+    const fromPath = /\/conversations?\/([A-Za-z0-9_-]{8,})/.exec(token)?.[1];
+    const bare = /^[A-Za-z0-9_-]{8,}$/.test(token) ? token : undefined;
+    const id = fromQuery ?? fromPath ?? bare;
+    if (id) ids.add(id);
+  }
+  return [...ids].slice(0, REPLAY_LIMITS.maxConversations);
+}
+
+async function conversationsByIds(organizationId: string, ids: string[]): Promise<Array<{ id: string; contactId: string | null }>> {
+  if (ids.length === 0) return [];
+  return db.$queryRawUnsafe<Array<{ id: string; contactId: string | null }>>(
+    `SELECT "id", "contactId" FROM "conversations" WHERE "organizationId" = $1 AND "id" = ANY($2::text[])`,
+    organizationId, ids,
+  );
+}
+
+/** Estimativa exata para conversas escolhidas (sem transcrever: áudio conta como fora). */
+export async function estimateChosenReplay(args: {
+  organizationId: string;
+  agentId: string;
+  config: "draft" | "published";
+  conversationIds: string[];
+}) {
+  const agent = await getV2Agent(args.agentId, args.organizationId);
+  if (!agent) throw new Error("Agente não encontrado.");
+  const config = (args.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const found = await conversationsByIds(args.organizationId, args.conversationIds);
+  let points = 0;
+  let audioOnly = 0;
+  for (const conv of found) {
+    const rows = await loadMessages(args.organizationId, conv.id, new Date(0));
+    const pts = extractReplayPoints(rows, { maxPoints: IMPORT_LIMITS.pointsPerTranscript });
+    points += pts.length;
+    audioOnly += pts.filter((p) => p.skipReason?.includes("mídia")).length;
+  }
+  const cost = points * (
+    estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
+    estimateCost(config.model, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+  );
+  return {
+    availableConversations: found.length,
+    conversations: found.length,
+    notFound: args.conversationIds.filter((id) => !found.some((f) => f.id === id)),
+    estimatedPoints: points,
+    audioPoints: audioOnly,
+    transcription: !!process.env.GROQ_API_KEY?.trim(),
+    estimatedCalls: points * 2,
+    estimatedCostUsd: Number(cost.toFixed(4)),
+    model: config.model,
+  };
 }
 
 // Custo por ponto: simulação (prompt do agente + trechos) e avaliador.
@@ -513,6 +611,7 @@ export async function startReplay(args: {
   userId: string;
   params: ReplayParams;
   transcripts?: ReplayTranscript[];
+  requester?: ReplayRequester;
 }): Promise<{ runId: string }> {
   await ensureReplaySchema();
   const agent = await getV2Agent(args.agentId, args.organizationId);
@@ -541,7 +640,10 @@ export async function startReplay(args: {
   // Roda em segundo plano: a requisição devolve o id e a tela acompanha.
   void Promise.resolve(
     runWithContext(ctx, () =>
-      executeReplay({ runId, organizationId: args.organizationId, agentId: args.agentId, config, apiKey, params: args.params, transcripts: args.transcripts }),
+      executeReplay({
+        runId, organizationId: args.organizationId, agentId: args.agentId, config, apiKey,
+        params: args.params, transcripts: args.transcripts, requester: args.requester,
+      }),
     ),
   ).catch(async (err) => {
     console.error("[ai-v2 replay] falhou:", err);
@@ -561,6 +663,7 @@ async function executeReplay(args: {
   apiKey: string;
   params: ReplayParams;
   transcripts?: ReplayTranscript[];
+  requester?: ReplayRequester;
 }): Promise<void> {
   const heartbeat = setInterval(() => {
     void db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "updatedAt"=now() WHERE "id"=$1 AND "status"='running'`, args.runId).catch(() => undefined);
@@ -580,9 +683,11 @@ async function pointsFromCrm(args: Parameters<typeof executeReplay>[0]) {
   // Contexto anterior ao período ajuda o agente a entender a conversa.
   const historySince = new Date(since.getTime() - 2 * 24 * 60 * 60 * 1000);
   const work: Array<{ conversationId: string; contactId: string | null; point: ReplayPoint }> = [];
+  const budget = { left: AUDIO_PER_RUN };
   for (const conv of picked) {
     if (work.length >= REPLAY_LIMITS.maxPoints) break;
     const rows = await loadMessages(args.organizationId, conv.id, historySince);
+    await transcribeAudios(rows.filter((r) => r.createdAt >= since), args.organizationId, args.requester, budget);
     const points = extractReplayPoints(rows, { maxPoints: REPLAY_LIMITS.pointsPerConversation })
       .filter((p) => new Date(p.at) >= since);
     for (const p of points) work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
@@ -590,8 +695,27 @@ async function pointsFromCrm(args: Parameters<typeof executeReplay>[0]) {
   return work.slice(0, REPLAY_LIMITS.maxPoints);
 }
 
+/** Conversas escolhidas: a conversa inteira, com os áudios transcritos. */
+async function pointsFromChosen(args: Parameters<typeof executeReplay>[0]) {
+  const found = await conversationsByIds(args.organizationId, args.params.conversationIds ?? []);
+  const work: Array<{ conversationId: string; contactId: string | null; point: ReplayPoint }> = [];
+  const budget = { left: AUDIO_PER_RUN };
+  for (const conv of found) {
+    if (work.length >= REPLAY_LIMITS.maxPoints) break;
+    const rows = await loadMessages(args.organizationId, conv.id, new Date(0));
+    await transcribeAudios(rows, args.organizationId, args.requester, budget);
+    for (const p of extractReplayPoints(rows, { maxPoints: IMPORT_LIMITS.pointsPerTranscript })) {
+      work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
+    }
+  }
+  return work.slice(0, REPLAY_LIMITS.maxPoints);
+}
+
 async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): Promise<void> {
-  const queue = args.params.source === "import" ? pointsFromTranscripts(args.transcripts ?? []) : await pointsFromCrm(args);
+  const queue =
+    args.params.source === "import" ? pointsFromTranscripts(args.transcripts ?? [])
+    : args.params.source === "crm_ids" ? await pointsFromChosen(args)
+    : await pointsFromCrm(args);
   await db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "total"=$2, "updatedAt"=now() WHERE "id"=$1`, args.runId, queue.length);
 
   let tokensIn = 0;

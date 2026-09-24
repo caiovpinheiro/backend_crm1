@@ -3,6 +3,7 @@ import path from "path";
 
 import { auth } from "@/lib/auth";
 import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
+import { GROQ_MODEL, mimeForGroq, transcribeGroq } from "@/lib/groq-transcribe";
 import {
   fetchAuthorizedAudioBuffer,
   MediaTooLargeError,
@@ -48,135 +49,12 @@ import {
  *   5) Retorna `{ text, model, provider }` ou erro amigável.
  */
 
-const GROQ_MODEL =
-  process.env.GROQ_TRANSCRIBE_MODEL?.trim() || "whisper-large-v3-turbo";
-
-const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
-
 const HF_MODEL =
   process.env.HUGGINGFACE_TRANSCRIBE_MODEL?.trim() || "openai/whisper-base";
 
 const HF_ENDPOINT = `https://api-inference.huggingface.co/models/${HF_MODEL}`;
 
-/** Mapeia extensão pra MIME type aceito pelo Groq/Whisper.
- *  Groq aceita: mp3, mp4, mpeg, mpga, m4a, wav, webm, flac, ogg, opus. */
-function mimeForGroq(ext: string): string {
-  switch (ext.toLowerCase()) {
-    case "mp3":
-    case "mpeg":
-    case "mpga":
-      return "audio/mpeg";
-    case "mp4":
-    case "m4a":
-      return "audio/mp4";
-    case "wav":
-      return "audio/wav";
-    case "webm":
-      return "audio/webm";
-    case "flac":
-      return "audio/flac";
-    case "ogg":
-    case "opus":
-      return "audio/ogg";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-/** Extensão "amigável pro Groq" — converte aliases (`opus` → `ogg`,
- *  `mpga`/`mpeg` → `mp3`) pro nome de arquivo que o servidor espera. */
-function groqFilename(ext: string): string {
-  const norm = ext.toLowerCase();
-  const final = norm === "opus" ? "ogg" : norm === "mpga" || norm === "mpeg" ? "mp3" : norm;
-  return `audio.${final || "webm"}`;
-}
-
-type GroqResponse = { text?: string; error?: { message?: string } };
 type HfTextResponse = { text?: string; error?: string; estimated_time?: number };
-
-/** Tenta transcrever via Groq. Retorna `{ text }` em sucesso,
- *  `{ retryWithMp3: true }` se Groq rejeitou o formato (caller deve
- *  converter pra MP3 e tentar de novo) ou `{ error }` em falha
- *  definitiva. */
-async function transcribeGroq(
-  apiKey: string,
-  audio: Buffer,
-  ext: string,
-): Promise<{ text: string } | { retryWithMp3: true } | { error: string; status?: number }> {
-  const form = new FormData();
-  const blob = new Blob([new Uint8Array(audio)], { type: mimeForGroq(ext) });
-  form.append("file", blob, groqFilename(ext));
-  form.append("model", GROQ_MODEL);
-  // `response_format: json` retorna `{ text }` puro — verbose_json
-  // traria timestamps mas é mais lento e desnecessário pro caso de
-  // uso (operador só precisa ler o conteúdo do áudio).
-  form.append("response_format", "json");
-  // `language: pt` força transcrição em português (Whisper detecta
-  // automaticamente, mas explicitar evita falsos positivos quando o
-  // áudio começa com pausa longa ou tem música de fundo).
-  form.append("language", "pt");
-  // `temperature: 0` = saída determinística — duas chamadas no mesmo
-  // áudio retornam o mesmo texto.
-  form.append("temperature", "0");
-
-  let res: Response;
-  try {
-    res = await fetch(GROQ_ENDPOINT, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: form,
-    });
-  } catch (err) {
-    return {
-      error: err instanceof Error ? `Erro de rede ao chamar Groq: ${err.message}` : "Erro de rede.",
-    };
-  }
-
-  const ctype = res.headers.get("content-type") || "";
-
-  if (res.ok) {
-    if (!ctype.includes("application/json")) {
-      return { error: "Resposta inesperada do Groq (não-JSON)." };
-    }
-    const json = (await res.json()) as GroqResponse;
-    const text = (json.text ?? "").trim();
-    if (!text) {
-      return { error: "Transcrição vazia (áudio sem fala detectável?)." };
-    }
-    return { text };
-  }
-
-  // Groq retorna 400 com `error.message` quando o formato não bate.
-  // Sinalizamos pro caller tentar de novo com MP3 (transcoded).
-  let msg = `HTTP ${res.status}`;
-  try {
-    if (ctype.includes("application/json")) {
-      const j = (await res.json()) as GroqResponse;
-      msg = j.error?.message ?? msg;
-    } else {
-      msg = (await res.text()).slice(0, 200);
-    }
-  } catch { /* ignora parse error */ }
-
-  console.warn(`[transcribe/groq] ${res.status}: ${msg}`);
-
-  if (res.status === 400 && /file|format|decode|invalid/i.test(msg)) {
-    return { retryWithMp3: true };
-  }
-
-  if (res.status === 401 || res.status === 403) {
-    return { error: "Chave Groq inválida (GROQ_API_KEY).", status: 401 };
-  }
-
-  if (res.status === 429) {
-    return {
-      error: "Limite de requisições do Groq atingido. Tente em alguns minutos.",
-      status: 429,
-    };
-  }
-
-  return { error: `Groq retornou ${res.status}: ${msg}`, status: 502 };
-}
 
 /** Fallback antigo via Hugging Face (caso `GROQ_API_KEY` não exista).
  *  Mantido apenas para retrocompatibilidade — Groq é nitidamente
