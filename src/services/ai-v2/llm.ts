@@ -711,6 +711,24 @@ function isBadRequest(err: unknown): boolean {
   return e.statusCode === 400 || e.status === 400;
 }
 
+/**
+ * Data e hora atuais no fuso do agente. Sem isto o modelo não sabe o que é
+ * "próximas provas", "este mês" ou "ainda dá tempo" e, com as datas nos
+ * trechos, mandava o cliente olhar o calendário.
+ */
+export function currentDateLine(timezone: string | undefined, now: Date = new Date()): string {
+  const tz = timezone || "America/Sao_Paulo";
+  let text: string;
+  try {
+    text = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: tz, weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+    }).format(now);
+  } catch {
+    text = now.toISOString();
+  }
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos, e para escolher nos trechos as datas que ainda vão acontecer.`;
+}
+
 function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
   // Rede de segurança com folga para a saída estruturada completa
   // (reply + theme + reason + actions). O controle real de tamanho vem
@@ -766,6 +784,7 @@ function buildV2SystemPrompt(
   messageModels: V2MessageModelSummary[] = [],
 ): string {
   const lines: string[] = [];
+  lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
   lines.push(`# Tom de voz\n${config.tone}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);

@@ -832,3 +832,17 @@ describe("mergeChunks — resultado das consultas da pré-busca", () => {
     expect(r[0].content).toBe("a");
   });
 });
+
+describe("currentDateLine", () => {
+  it("dá a data e a hora no fuso do agente", async () => {
+    const { currentDateLine } = await import("../llm");
+    const line = currentDateLine("America/Sao_Paulo", new Date("2026-09-24T20:02:00Z"));
+    expect(line).toContain("24/09/2026");
+    expect(line).toContain("17:02");
+    expect(line).toContain("quinta-feira");
+  });
+  it("fuso inválido não derruba o prompt", async () => {
+    const { currentDateLine } = await import("../llm");
+    expect(currentDateLine("Fuso/Invalido", new Date("2026-09-24T20:02:00Z"))).toContain("2026-09-24");
+  });
+});
