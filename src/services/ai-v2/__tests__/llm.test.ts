@@ -21,6 +21,7 @@ vi.mock("@/services/ai/agent-key", () => ({
 
 vi.mock("@/services/ai/knowledge-docs", () => ({
   listKnowledgeDocs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, perPage: 25 }),
+  knowledgeDocTitlesByIds: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../tools", () => ({
@@ -260,6 +261,91 @@ describe("callV2LLM — pré-busca na base", () => {
   });
 });
 
+describe("callV2LLM — reformulação da busca", () => {
+  const chunkA = { docId: "doc-a", docTitle: "Como emitir o comprovante", content: "passo a passo", distance: 0.35 };
+  const chunkB = { docId: "doc-b", docTitle: "Outro assunto", content: "outra coisa", distance: 0.55 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.AI_V2_QUERY_REWRITE;
+  });
+
+  function mockModel(rewriteText: string) {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (args: { tools?: unknown }) =>
+      args.tools === undefined
+        ? makeLLMResponse(rewriteText)
+        : makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+  }
+
+  async function run(config: V2AgentConfig) {
+    return callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "minha empresa está pedindo uma comprovação de que sou cliente",
+      stage: "active",
+    });
+  }
+
+  it("busca com a mensagem e com as consultas reformuladas; fica o trecho mais próximo", async () => {
+    mockModel('{"queries": ["como emitir comprovante"]}');
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockImplementation(async ({ query }: { query: string }) =>
+      query === "como emitir comprovante" ? { query, chunks: [chunkA] } : { query, chunks: [chunkB] },
+    );
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-a", "doc-b"] } as Partial<V2AgentConfig>);
+
+    const result = await run(config);
+
+    const queries = (searchV2Knowledge as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].query);
+    expect(queries).toEqual([
+      "minha empresa está pedindo uma comprovação de que sou cliente",
+      "como emitir comprovante",
+    ]);
+    const prefetch = result.toolCalls[0] as { result: { chunks: Array<{ docId: string }> } };
+    expect(prefetch.result.chunks.map((c) => c.docId)).toEqual(["doc-a", "doc-b"]);
+  });
+
+  it("a reformulação recebe os títulos dos materiais liberados", async () => {
+    const { knowledgeDocTitlesByIds } = await import("@/services/ai/knowledge-docs");
+    (knowledgeDocTitlesByIds as ReturnType<typeof vi.fn>).mockResolvedValue(["Como emitir o comprovante"]);
+    mockModel('{"queries": []}');
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-a"] } as Partial<V2AgentConfig>);
+
+    await run(config);
+
+    const rewriteCall = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0].tools === undefined);
+    expect(rewriteCall?.[0].system).toContain("- Como emitir o comprovante");
+  });
+
+  it("falha na reformulação: busca segue só com a mensagem", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (args: { tools?: unknown }) => {
+      if (args.tools === undefined) throw new Error("timeout");
+      return makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] }));
+    });
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [chunkA] });
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-a"] } as Partial<V2AgentConfig>);
+
+    const result = await run(config);
+
+    expect(searchV2Knowledge).toHaveBeenCalledTimes(1);
+    expect(result.output.reply).toBe("ok");
+  });
+
+  it("AI_V2_QUERY_REWRITE=0 desliga a reformulação", async () => {
+    process.env.AI_V2_QUERY_REWRITE = "0";
+    mockModel('{"queries": ["x"]}');
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-a"] } as Partial<V2AgentConfig>);
+
+    await run(config);
+
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls.every((c) => c[0].tools !== undefined)).toBe(true);
+    delete process.env.AI_V2_QUERY_REWRITE;
+  });
+});
+
 describe("knowledgePrefetchQuery", () => {
   it("acompanhamento curto leva junto a pergunta anterior do cliente", () => {
     expect(knowledgePrefetchQuery("consegue me enviar?", [
@@ -386,7 +472,8 @@ describe("buildV2ToolSet governor", () => {
       userMessage: "quero cancelar",
       stage: "active",
     });
-    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    // A última chamada é a resposta; antes dela pode vir a reformulação da busca.
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].system as string;
     expect(system).toContain("knowledge_search");
     expect(system).toContain("Há materiais de consulta disponíveis");
   });

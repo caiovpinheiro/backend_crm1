@@ -30,7 +30,7 @@ import {
   searchV2Knowledge,
   listV2MessageModels,
 } from "./tools";
-import { listKnowledgeDocs } from "@/services/ai/knowledge-docs";
+import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion } from "./ground-reply";
 import { traceStep } from "./trace";
@@ -72,11 +72,87 @@ export function knowledgePrefetchQuery(
  * modelo junto do material que explica como emitir o documento de X,
  * mesmo sem nenhum termo em comum cadastrado.
  */
+/** Liga/desliga a reformulação (AI_V2_QUERY_REWRITE=0 desliga). */
+function queryRewriteEnabled(): boolean {
+  return (process.env.AI_V2_QUERY_REWRITE ?? "1").trim() !== "0";
+}
+
+const MAX_REWRITES = 3;
+const MAX_TITLES_IN_REWRITE = 150;
+
+/**
+ * Reformula o pedido do cliente em consultas curtas de busca.
+ *
+ * A busca por significado com a frase crua do cliente ("estão pedindo uma
+ * comprovação de que eu sou cliente de vocês") compete com todo o resto da
+ * frase; o material que resolve costuma ter um título formal ("Como emitir
+ * X"). O modelo recebe os títulos dos materiais liberados e devolve até 3
+ * consultas no vocabulário da base. Falha, demora ou JSON inválido → segue
+ * só com a frase original.
+ */
+export async function rewriteKnowledgeQueries(args: {
+  model: string;
+  apiKey: string;
+  userMessage: string;
+  previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+  materialTitles?: string[];
+}): Promise<string[]> {
+  const recent = (args.previousMessages ?? []).slice(-4)
+    .map((m) => `${m.role === "user" ? "Cliente" : "Atendente"}: ${m.content.slice(0, 300)}`)
+    .join("\n");
+  const titles = (args.materialTitles ?? []).slice(0, MAX_TITLES_IN_REWRITE);
+  const system = [
+    "Você transforma a mensagem de um cliente em consultas de busca para uma base de conhecimento de atendimento.",
+    "Identifique o que o cliente precisa (um documento, um procedimento, uma informação, um problema) e escreva consultas curtas (2 a 8 palavras), no vocabulário que um material de atendimento usaria — termos formais e sinônimos do que o cliente disse com palavras informais.",
+    titles.length > 0
+      ? `Títulos dos materiais disponíveis (use o vocabulário deles quando algum corresponder ao pedido):\n${titles.map((t) => `- ${t}`).join("\n")}`
+      : "",
+    `Responda APENAS um JSON: {"queries": ["...", "..."]} com no máximo ${MAX_REWRITES} consultas. Se a mensagem não pede nada que se busque numa base (saudação, agradecimento), responda {"queries": []}.`,
+  ].filter(Boolean).join("\n\n");
+  const user = recent ? `Conversa recente:\n${recent}\n\nMensagem atual do cliente:\n${args.userMessage}` : args.userMessage;
+
+  const result = await generateWithTools({
+    model: args.model,
+    apiKey: args.apiKey,
+    system,
+    messages: [{ role: "user", content: user }] as any,
+    temperature: 0,
+    maxOutputTokens: 200,
+    maxSteps: 1,
+  });
+  const text = result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    const extracted = extractFirstJSONObject(text);
+    parsed = extracted ? JSON.parse(extracted) : undefined;
+  }
+  const queries = (parsed as { queries?: unknown } | undefined)?.queries;
+  if (!Array.isArray(queries)) return [];
+  return [...new Set(queries.filter((q): q is string => typeof q === "string").map((q) => q.trim()).filter(Boolean))]
+    .slice(0, MAX_REWRITES);
+}
+
+/** Junta os trechos de várias buscas: um por trecho, o mais próximo primeiro. */
+function mergeChunks(lists: PrefetchedChunk[][], limit: number): PrefetchedChunk[] {
+  const best = new Map<string, PrefetchedChunk>();
+  for (const list of lists) {
+    for (const c of list) {
+      const key = `${c.docId}\u0000${c.content}`;
+      const prev = best.get(key);
+      if (!prev || c.distance < prev.distance) best.set(key, c);
+    }
+  }
+  return [...best.values()].sort((a, b) => a.distance - b.distance).slice(0, limit);
+}
+
 async function prefetchKnowledge(args: {
   agentId: string;
   apiKey: string;
   config: V2AgentConfig;
   themeId?: string;
+  materialTitles?: string[];
   userMessage: string;
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }): Promise<{ query: string; chunks: PrefetchedChunk[] }> {
@@ -90,20 +166,44 @@ async function prefetchKnowledge(args: {
     traceStep("base", "Mensagem sem pergunta a buscar (saudação/curta) — não buscou na base");
     return { query, chunks: [] };
   }
+  let rewrites: string[] = [];
+  if (queryRewriteEnabled()) {
+    try {
+      rewrites = await rewriteKnowledgeQueries({
+        model: args.config.model,
+        apiKey: args.apiKey,
+        userMessage: args.userMessage,
+        previousMessages: args.previousMessages,
+        materialTitles: args.materialTitles,
+      });
+      traceStep("base", rewrites.length > 0
+        ? `Busca reformulada: ${rewrites.map((q) => `"${q}"`).join(", ")}`
+        : "Reformulação não gerou consultas — busca só com a mensagem");
+    } catch (err) {
+      traceStep("base", `Reformulação da busca falhou (${err instanceof Error ? err.message : String(err)}) — busca só com a mensagem`);
+    }
+  }
+
   try {
-    const found = await searchV2Knowledge({
-      agentId: args.agentId,
-      apiKey: args.apiKey,
-      query,
-      allowedDocIds: docIds,
-      limit: PREFETCH_LIMIT,
-    });
-    const chunks = found?.chunks ?? [];
+    // Frase original + reformulações, em paralelo; fica o melhor de cada trecho.
+    const queries = [query, ...rewrites.filter((q) => q.toLowerCase() !== query.toLowerCase())];
+    const results = await Promise.all(
+      queries.map((q) =>
+        searchV2Knowledge({
+          agentId: args.agentId,
+          apiKey: args.apiKey,
+          query: q,
+          allowedDocIds: docIds,
+          limit: PREFETCH_LIMIT,
+        }).catch(() => undefined),
+      ),
+    );
+    const chunks = mergeChunks(results.map((r) => r?.chunks ?? []), PREFETCH_LIMIT);
     traceStep("base", chunks.length > 0
       ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)})`).join(", ")}`
       : `Nenhum trecho relevante em ${docIds.length} material(is)`,
-      { query });
-    return { query, chunks };
+      { queries });
+    return { query: queries.join(" | "), chunks };
   } catch (err) {
     traceStep("base", `Falha ao buscar na base: ${err instanceof Error ? err.message : String(err)}`);
     console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
@@ -745,9 +845,7 @@ export async function callV2LLM(args: {
   let knowledgeDocTitles: string[] = [];
   if (promptDocIds.length > 0) {
     try {
-      const docs = await listKnowledgeDocs({ agentId: args.agentId });
-      const allowedSet = new Set(promptDocIds);
-      knowledgeDocTitles = docs.items.filter((d) => allowedSet.has(d.id)).map((d) => d.title);
+      knowledgeDocTitles = await knowledgeDocTitlesByIds(args.agentId, promptDocIds);
     } catch (err) {
       console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
     }
@@ -758,6 +856,7 @@ export async function callV2LLM(args: {
     apiKey,
     config: args.config,
     themeId: args.themeId,
+    materialTitles: knowledgeDocTitles,
     userMessage: args.userMessage,
     previousMessages: args.previousMessages,
   });
