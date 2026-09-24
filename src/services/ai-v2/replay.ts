@@ -583,11 +583,13 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
   let canceled = false;
   const workers = Array.from({ length: REPLAY_LIMITS.concurrency }, async () => {
     while (next < queue.length && !fatal && !canceled) {
+      // Reserva o ponto antes de qualquer await: o outro processamento
+      // paralelo não pode pegar o mesmo nem passar do fim da fila.
+      const w = queue[next++];
       if ((await runStatus(args.runId)) !== "running") {
         canceled = true;
         break;
       }
-      const w = queue[next++];
       await processOne(w);
     }
   });
