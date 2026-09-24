@@ -38,6 +38,7 @@ import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
+import { calendarPromptSection } from "./calendar";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -822,6 +823,8 @@ function buildV2SystemPrompt(
 ): string {
   const lines: string[] = [];
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
+  const calendar = calendarPromptSection(config.calendar?.events, new Date(), config.businessHours?.timezone || "America/Sao_Paulo");
+  if (calendar) lines.push(calendar);
   lines.push(`# Tom de voz\n${config.tone}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);

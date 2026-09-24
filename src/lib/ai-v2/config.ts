@@ -313,6 +313,21 @@ export const v2AgentConfigSchema = z.object({
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
+  calendar: z
+    .object({
+      events: z
+        .array(
+          z.object({
+            id: z.string(),
+            start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+            title: z.string().min(1),
+          }),
+        )
+        .max(500)
+        .default([]),
+    })
+    .optional(),
   structuredOutput: z.boolean().optional().default(false),
   fallback: fallbackSchema,
   scope: scopeSchema,

@@ -293,6 +293,19 @@ export interface V2MediaKindConfig {
   notUnderstoodMessage?: string;
 }
 
+/** Evento do calendário do agente. Datas em AAAA-MM-DD. */
+export interface V2CalendarEvent {
+  id: string;
+  start: string;
+  /** Só em período (data final). */
+  end?: string;
+  title: string;
+}
+
+export interface V2CalendarConfig {
+  events: V2CalendarEvent[];
+}
+
 export interface V2MediaConfig {
   audio: V2MediaKindConfig;
   image: V2MediaKindConfig;
@@ -423,6 +436,8 @@ export interface V2AgentConfig {
   responseLength?: "short" | "medium" | "long";
   /** Quanto emoji o agente usa nas respostas. */
   emojis?: "none" | "light" | "moderate";
+  /** Datas e prazos oficiais (fora dos materiais). */
+  calendar?: V2CalendarConfig;
   /** Pede à API resposta sempre em JSON (modo JSON), em vez de só pedir no prompt. */
   structuredOutput?: boolean;
   /** Saídas quando o agente não soube, pediu pessoa, sem material ou deu erro. */
