@@ -9,6 +9,7 @@ import type { V2Action, V2CRMContext, V2LLMOutput, V2Owner, V2Stage } from "@/li
 import type { V2ActionResult } from "./actions";
 import { takeV2TraceForLog } from "./trace";
 import { ensureV2AgentSchema } from "./ensure-schema";
+import { maskSensitive, maskSensitiveDeep } from "./sensitive";
 export async function logV2Turn(args: {
   organizationId: string;
   conversationId: string;
@@ -51,8 +52,10 @@ export async function logV2Turn(args: {
       conversationId: args.conversationId,
       agentId: args.agentId,
       turnId: args.turnId ?? null,
-      inboundText: args.inboundText,
-      contextSnapshot: {
+      // Log e telas de teste guardam só a versão mascarada: documento,
+      // e-mail, senha e cartão do cliente não ficam gravados aqui.
+      inboundText: maskSensitive(args.inboundText).text,
+      contextSnapshot: maskSensitiveDeep({
         ...(args.crmContext as unknown as Record<string, unknown>),
         ...(args.toolCalls ? { toolCalls: args.toolCalls } : {}),
         ...(args.governorStats ? { governorStats: args.governorStats } : {}),
@@ -62,14 +65,14 @@ export async function logV2Turn(args: {
         ...(args.themeId ? { themeId: args.themeId } : {}),
         ...(args.appliedRuleId ? { appliedRuleId: args.appliedRuleId } : {}),
         ...(args.closed ? { closed: true } : {}),
-      },
-      prompt: args.prompt,
-      llmOutput: (args.llmOutput ?? null) as Record<string, unknown> | null,
-      executedActions: args.executedActions as unknown as Record<string, unknown>,
-      discardedActions: args.discardedActions as unknown as Record<string, unknown>,
-      reply: args.reply ?? null,
+      }),
+      prompt: maskSensitive(args.prompt).text,
+      llmOutput: maskSensitiveDeep(args.llmOutput ?? null) as Record<string, unknown> | null,
+      executedActions: maskSensitiveDeep(args.executedActions) as unknown as Record<string, unknown>,
+      discardedActions: maskSensitiveDeep(args.discardedActions) as unknown as Record<string, unknown>,
+      reply: args.reply ? maskSensitive(args.reply).text : null,
       handoff: args.handoff,
-      error: args.error ?? null,
+      error: args.error ? maskSensitive(args.error).text : null,
       latencyMs: args.latencyMs,
       inputTokens: args.inputTokens,
       outputTokens: args.outputTokens,

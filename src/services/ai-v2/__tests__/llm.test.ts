@@ -675,3 +675,33 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect(block.indexOf("Sempre peça confirmação.")).toBeLessThan(block.indexOf("Não invente preço."));
   });
 });
+
+describe("callV2LLM — dados sensíveis", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("modelo recebe marcador; ferramenta e variável recebem o valor; resposta sai mascarada; senha some", async () => {
+    (searchV2Products as ReturnType<typeof vi.fn>).mockResolvedValue({ total: 0, products: [] });
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (req: any) => {
+      const sent = JSON.stringify(req.messages);
+      expect(sent).toContain("[CPF 1]");
+      expect(sent).not.toContain("529.982.247-25");
+      expect(sent).not.toContain("Abc@1234");
+      await req.tools.search_products.execute({ query: "[CPF 1]" }, {} as any);
+      return makeLLMResponse(JSON.stringify({ reply: "Achei o CPF [CPF 1].", collected: { cpf: "[CPF 1]" }, actions: [] }));
+    });
+
+    const config = baseConfig();
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "meu cpf é 529.982.247-25 e a senha: Abc@1234",
+      previousMessages: [{ role: "user", content: "oi, 529.982.247-25" }],
+      stage: "active",
+    });
+
+    expect((searchV2Products as ReturnType<typeof vi.fn>).mock.calls[0][0].query).toBe("529.982.247-25");
+    expect(result.output.collected.cpf).toBe("529.982.247-25");
+    expect(result.output.reply).toBe("Achei o CPF ***25.");
+  });
+});

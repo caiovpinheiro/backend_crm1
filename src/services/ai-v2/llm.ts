@@ -35,6 +35,7 @@ import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion } from "./ground-reply";
 import { traceStep } from "./trace";
+import { SensitiveVault } from "./sensitive";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -262,6 +263,8 @@ export function buildV2ToolSet(args: {
   apiKey: string;
   themeId?: string;
   limits?: ToolCallLimits;
+  /** Troca marcadores de dado sensível pelo valor real antes de executar. */
+  restoreInput?: (input: unknown) => unknown;
 }): { tools: ToolSet; governor: ToolCallGovernor } {
   const theme = activeTheme(args.config, args.themeId);
   const themeToolIds = theme?.allowedTools ? new Set(theme.allowedTools) : null;
@@ -336,9 +339,10 @@ export function buildV2ToolSet(args: {
           return replayPayload(toolName, decision.previousResult);
         }
         try {
+          const realInput = args.restoreInput ? args.restoreInput(input) : input;
           const result = capturedCtx
-            ? await runWithContext(capturedCtx, () => execute(input))
-            : await execute(input);
+            ? await runWithContext(capturedCtx, () => execute(realInput))
+            : await execute(realInput);
           governor.record(toolName, input, result);
           return result;
         } catch (err) {
@@ -843,12 +847,22 @@ export async function callV2LLM(args: {
   systemPrompt: string;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
+  // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
+  // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
+  // precisa (ferramenta, variável coletada, ação).
+  const vault = new SensitiveVault();
+  const userMessage = vault.tokenize(args.userMessage);
+  const previousMessages = (args.previousMessages ?? []).map((m) => ({ ...m, content: vault.tokenize(m.content) }));
+  if (vault.kinds.size > 0) {
+    traceStep("dados sensíveis", `Mascarado antes do modelo: ${[...vault.kinds].join(", ")}`);
+  }
   const { tools, governor } = buildV2ToolSet({
     config: args.config,
     context: args.context,
     agentId: args.agentId,
     apiKey,
     themeId: args.themeId,
+    restoreInput: vault.size > 0 ? (input) => vault.restoreDeep(input) : undefined,
   });
   const allowedToolNames = Object.keys(tools);
 
@@ -882,8 +896,8 @@ export async function callV2LLM(args: {
     config: args.config,
     themeId: args.themeId,
     materialTitles: knowledgeDocTitles,
-    userMessage: args.userMessage,
-    previousMessages: args.previousMessages,
+    userMessage,
+    previousMessages,
   });
   // Entra no trace como uma consulta à base: o aterramento da resposta e o
   // log do turno enxergam os trechos. Só quando achou algo — pré-busca
@@ -906,8 +920,8 @@ export async function callV2LLM(args: {
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
-    ...(args.previousMessages ?? []),
-    { role: "user", content: args.userMessage },
+    ...previousMessages,
+    { role: "user", content: userMessage },
   ];
 
   const startedAt = Date.now();
@@ -1050,6 +1064,11 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
+      if (vault.size > 0) {
+        r.output.collected = vault.restoreDeep(r.output.collected);
+        r.output.actions = vault.restoreDeep(r.output.actions);
+        r.output.reply = vault.display(r.output.reply);
+      }
       return {
         ...r,
         toolCalls: [...prefetchCalls, ...(r.toolCalls ?? [])],

@@ -3,6 +3,8 @@
  * Nenhum domínio de cliente.
  */
 
+import { maskOutgoing } from "./sensitive";
+
 const URL_RE = /https?:\/\/[^\s)\]>,;!?]+/gi;
 
 const RETURN_PROMISE_PATTERNS = [
@@ -106,6 +108,13 @@ export function guardV2Output(
       scrubbedFields = scrub.scrubbedFields;
       warnings.push("Campos marcados apenas como 'Ler' foram removidos da resposta enviada ao cliente.");
     }
+  }
+  // Senha/código e cartão não saem; documento sai mascarado — mesmo que
+  // venha do material, de uma ferramenta ou do próprio modelo.
+  const sensitive = maskOutgoing(replyText);
+  if (sensitive.kinds.length > 0) {
+    replyText = sensitive.text;
+    warnings.push(`Dado sensível removido/mascarado da resposta: ${sensitive.kinds.join(", ")}.`);
   }
   const urlResult = removeUnauthorizedUrls(replyText, allowedDomains);
   if (urlResult.removed.length > 0) {
