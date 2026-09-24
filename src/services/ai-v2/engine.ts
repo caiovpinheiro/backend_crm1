@@ -1141,7 +1141,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     "set_theme",
     "set_variable",
   ]);
-  if (!activeTheme && allowedModelIds.length > 0) allowedTools.add("send_message_model");
+  // A lista de mensagens prontas liberadas é a permissão: com ela, enviar
+  // uma mensagem pronta vale mesmo que o assunto não liste a ação.
+  if (allowedModelIds.length > 0) allowedTools.add("send_message_model");
 
   // Handoff não passa pelo executor: vira sinal e roda uma vez só, depois
   // do aviso ao cliente (ver `performHandoff`).
@@ -1209,7 +1211,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Executa ações
   const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });
   actionCtx.llmOutput = llmOutput;
-  const actionRes = await executeV2Actions(allowedActions, actionCtx);
+  // Ações que mandam mensagem ao cliente saem DEPOIS da reply (a reply
+  // apresenta, a mensagem pronta/produto/modelo vem em seguida). As demais
+  // (tag, campo, nota…) rodam agora.
+  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message"]);
+  const outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
+  const actionRes = await executeV2Actions(allowedActions.filter((a) => !OUTBOUND_ACTIONS.has(a.type)), actionCtx);
   if (actionRes.results.length > 0) {
     traceStep("ações", actionRes.results
       .map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`)
@@ -1265,6 +1272,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (!anyHandoff && !anyClose && replyText.trim()) {
     await sendReply(replyText);
     sentReply = replyText;
+  }
+
+  // Mensagens prontas/produtos/modelos: depois da reply. Não saem quando o
+  // turno transfere ou quando um limite de parada bloqueou a resposta.
+  if (outboundActions.length > 0 && !anyHandoff && !stopLimits.blocksReply) {
+    const outRes = await executeV2Actions(outboundActions, actionCtx);
+    traceStep("ações", outRes.results
+      .map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`)
+      .join(", "));
+    executedActions = [...executedActions, ...outRes.results];
   }
 
   // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >

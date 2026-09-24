@@ -289,7 +289,7 @@ export function pickFollowUpMedia(
   return best.media.slice(0, 2);
 }
 
-function mediaFromTemplateRow(row: {
+export function mediaFromTemplateRow(row: {
   mediaUrl: string | null;
   mediaType: string | null;
   mediaName: string | null;

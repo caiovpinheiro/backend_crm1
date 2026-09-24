@@ -29,6 +29,7 @@ vi.mock("../tools", () => ({
   searchV2CrmRecords: vi.fn(),
   searchV2Knowledge: vi.fn(),
   listV2MessageModels: vi.fn(),
+  describeV2MessageModels: vi.fn().mockResolvedValue([]),
 }));
 
 function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
@@ -367,6 +368,37 @@ describe("buildV2SystemPrompt — procedimentos", () => {
     expect(result.systemPrompt).toContain("com todos os passos do material, na ordem");
     expect(result.systemPrompt).not.toContain("sem enumerar");
     expect(result.systemPrompt).toContain("Um passo a passo completo não conta para esse limite");
+  });
+});
+
+describe("buildV2SystemPrompt — mensagens prontas", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),
+    );
+  });
+
+  it("lista as mensagens prontas liberadas com o tipo de mídia", async () => {
+    const { describeV2MessageModels } = await import("../tools");
+    (describeV2MessageModels as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: "mm-1", name: "Tutorial de acesso", mediaKinds: ["vídeo"] },
+      { id: "mm-2", name: "Horários", mediaKinds: [] },
+    ]);
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1", "mm-2"] } as Partial<V2AgentConfig>);
+
+    const result = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "como faço o acesso",
+      stage: "active",
+    });
+
+    expect(describeV2MessageModels).toHaveBeenCalledWith(["mm-1", "mm-2"]);
+    expect(result.systemPrompt).toContain("# Mensagens prontas que você pode enviar");
+    expect(result.systemPrompt).toContain("- mm-1: Tutorial de acesso (inclui vídeo)");
+    expect(result.systemPrompt).toContain("- mm-2: Horários");
   });
 });
 

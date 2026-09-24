@@ -1126,6 +1126,34 @@ describe("processV2Turn — correções do motor", () => {
     ]);
   });
 
+  it("mensagem pronta sai depois da reply; não sai quando o turno transfere", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"], enabledTools: ["add_tag"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Vou te mandar o tutorial:",
+      actions: [{ type: "send_message_model", modelId: "mm-1" }, { type: "add_tag", tag: "x" }] as any,
+    }));
+
+    await run("Como faço o acesso?");
+
+    expect(order).toEqual(["ações:add_tag", "texto:Vou te mandar o tutorial:", "ações:send_message_model"]);
+
+    order.length = 0;
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "x",
+      handoff: true,
+      actions: [{ type: "send_message_model", modelId: "mm-1" }] as any,
+    }));
+    await run("Quero falar com alguém sobre o acesso");
+    expect(order.some((o) => o.includes("send_message_model"))).toBe(false);
+  });
+
   it("histórico não repete as bolhas do turno atual", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

@@ -230,7 +230,7 @@ export async function diagnoseV2Turn(args: {
   const payload = {
     comentarioDeQuemTestou: comment,
     turnoMarcado: compactTurn(row, true),
-    turnosAnteriores: previous.reverse().map(compactTurn),
+    turnosAnteriores: previous.reverse().map((r) => compactTurn(r)),
     configuracaoDoAgente: summarizeConfigForDiagnosis(config, docTitles),
     materiaisExistentes: docs.map((d) => d.title),
   };

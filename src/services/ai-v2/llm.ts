@@ -31,6 +31,7 @@ import {
   listV2MessageModels,
 } from "./tools";
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
+import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion } from "./ground-reply";
 import { traceStep } from "./trace";
@@ -697,6 +698,7 @@ function buildV2SystemPrompt(
   allowedToolNames?: string[],
   knowledgeDocTitles?: string[],
   prefetchedChunks: PrefetchedChunk[] = [],
+  messageModels: V2MessageModelSummary[] = [],
 ): string {
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
@@ -780,6 +782,13 @@ function buildV2SystemPrompt(
       lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
     });
   }
+  if (messageModels.length > 0) {
+    lines.push("# Mensagens prontas que você pode enviar");
+    lines.push("Para enviar uma, devolva messageModel: { \"id\": \"<id>\" }. Ela chega ao cliente depois da sua reply, com os anexos (imagem, vídeo, áudio, documento). Use quando a mensagem pronta atende ao que o cliente pediu — principalmente quando ele precisa ver algo. Ao usar, a reply deve ser só uma frase curta de introdução: não repita o conteúdo da mensagem pronta nem descreva o anexo.");
+    for (const m of messageModels) {
+      lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
+    }
+  }
   lines.push("# Formato da resposta");
   // Antes pedia "reescreva sem enumerar": o modelo resumia um procedimento
   // de vários passos numa frase e o cliente ficava sem saber o que fazer.
@@ -856,6 +865,17 @@ export async function callV2LLM(args: {
     }
   }
 
+  // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
+  const modelIds = (promptTheme?.allowedMessageModelIds?.length
+    ? promptTheme.allowedMessageModelIds
+    : promptTheme?.messageModelIds?.length
+      ? promptTheme.messageModelIds
+      : args.config.allowedMessageModelIds) ?? [];
+  const messageModels = await describeV2MessageModels(modelIds).catch((err) => {
+    console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
+    return [] as V2MessageModelSummary[];
+  });
+
   const prefetch = await prefetchKnowledge({
     agentId: args.agentId,
     apiKey,
@@ -882,6 +902,7 @@ export async function callV2LLM(args: {
     allowedToolNames,
     knowledgeDocTitles,
     prefetch.chunks,
+    messageModels,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [

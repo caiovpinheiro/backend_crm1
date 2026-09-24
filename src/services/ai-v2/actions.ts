@@ -357,22 +357,49 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     const orgId = getOrgIdOrNull() ?? ctx.organizationId;
     const template = await prisma.messageTemplate.findFirst({
       where: { id: modelId, organizationId: orgId },
-      select: { id: true, name: true, content: true, mediaUrl: true, mediaType: true },
+      select: { id: true, name: true, content: true, mediaUrl: true, mediaType: true, mediaName: true, attachments: true },
     });
     if (!template) return { action, ok: false, error: "Message model not found" };
 
     const vars = { ...ctx.llmOutput?.collected, ...messageVars(ctx), ...((action.variables as Record<string, string> | undefined) ?? {}) };
-    const text = renderMessage(template.content, vars, defaultFormatter());
-    await sendV2TextMessage({
-      conversationId: ctx.conversationId,
-      contactId: ctx.contactId,
-      agentUserId: ctx.agentUserId,
-      text,
-      channel: ctx.channel,
-      autonomyMode: ctx.autonomyMode,
-      humanBehavior: v2HumanBehavior(ctx.config),
-    });
-    return { action, ok: true, modelId, text };
+    const text = renderMessage(template.content ?? "", vars, defaultFormatter());
+    // Mensagem pronta só com anexo (sem texto) é válida.
+    if (text.trim()) {
+      await sendV2TextMessage({
+        conversationId: ctx.conversationId,
+        contactId: ctx.contactId,
+        agentUserId: ctx.agentUserId,
+        text,
+        channel: ctx.channel,
+        autonomyMode: ctx.autonomyMode,
+        humanBehavior: v2HumanBehavior(ctx.config),
+      });
+    }
+
+    // Anexos (imagem, vídeo, áudio, documento): antes o v2 mandava só o
+    // texto do modelo e descartava a mídia. Mesmo envio do agente v1 e do
+    // inbox humano: só arquivo do armazenamento da org, até 2 por vez,
+    // sem repetir o mesmo arquivo na conversa em 7 dias.
+    const { mediaFromTemplateRow } = await import("@/services/ai/message-models-retrieval");
+    const media = mediaFromTemplateRow(template);
+    let mediaSent = 0;
+    if (media.length > 0) {
+      if (ctx.autonomyMode === "DRAFT") {
+        traceStep("mídia", `Anexos de "${template.name}" não enviados (modo sugestão)`);
+      } else {
+        const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
+        mediaSent = await sendAgentFollowUpMedia({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          agentUserId: ctx.agentUserId,
+          attachments: media,
+        });
+        traceStep("mídia", mediaSent > 0
+          ? `Enviou ${mediaSent} anexo(s) de "${template.name}": ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")}`
+          : `Anexos de "${template.name}" não enviados (já enviados nesta conversa nos últimos 7 dias, ou canal indisponível)`);
+      }
+    }
+    return { action, ok: true, modelId, text, mediaSent };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }

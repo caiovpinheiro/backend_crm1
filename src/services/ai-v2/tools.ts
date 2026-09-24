@@ -262,6 +262,36 @@ export async function searchV2Knowledge(args: {
   };
 }
 
+export type V2MessageModelSummary = { id: string; name: string; mediaKinds: string[] };
+
+function mediaKindOf(mime: string | null, name: string | null): string {
+  const t = (mime ?? "").toLowerCase();
+  const n = (name ?? "").toLowerCase();
+  if (t.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/.test(n)) return "imagem";
+  if (t.startsWith("video/") || /\.(mp4|mov|3gp)$/.test(n)) return "vídeo";
+  if (t.startsWith("audio/") || /\.(mp3|ogg|opus|m4a|aac)$/.test(n)) return "áudio";
+  return "documento";
+}
+
+/**
+ * Mensagens prontas liberadas para o agente/assunto, com o tipo de mídia
+ * anexada. Vai para o prompt: sem isso o modelo só descobria que uma
+ * mensagem pronta existia (e tinha vídeo/imagem) se chamasse a busca.
+ */
+export async function describeV2MessageModels(ids: string[]): Promise<V2MessageModelSummary[]> {
+  if (ids.length === 0) return [];
+  const { mediaFromTemplateRow } = await import("@/services/ai/message-models-retrieval");
+  const rows = await (prisma as any).messageTemplate.findMany({
+    where: { organizationId: getOrgIdOrThrow(), id: { in: ids.slice(0, 50) } },
+    select: { id: true, name: true, mediaUrl: true, mediaType: true, mediaName: true, attachments: true },
+  });
+  return (rows as Array<{ id: string; name: string; mediaUrl: string | null; mediaType: string | null; mediaName: string | null; attachments: unknown }>).map((r) => ({
+    id: r.id,
+    name: r.name,
+    mediaKinds: mediaFromTemplateRow(r).map((m) => mediaKindOf(m.mimeType, m.name)),
+  }));
+}
+
 export async function listV2MessageModels(args: {
   query: string;
   allowedIds?: string[];
