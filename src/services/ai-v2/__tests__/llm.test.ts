@@ -552,7 +552,7 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
 
   it("cada tamanho gera o limite de saída esperado", async () => {
     const cases: Array<[NonNullable<V2AgentConfig["responseLength"]>, number, string]> = [
-      ["short", 600, "curtas"],
+      ["short", 600, "enxutas"],
       ["medium", 1000, "equilibrada"],
       ["long", 2000, "mais detalhes"],
     ];

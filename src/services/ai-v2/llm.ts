@@ -680,17 +680,30 @@ function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): num
   }
 }
 
+// "Curta" antes dizia "curtas e diretas": o modelo cortava contexto e
+// soava seco ("siga os passos que passei"). Tamanho é quanto explicar,
+// nunca deixar de responder o que o cliente precisa.
 function responseLengthInstruction(length: V2AgentConfig["responseLength"]): string {
   switch (length) {
     case "short":
-      return "Mantenha as respostas curtas e diretas (ideal: até 2 parágrafos). Um passo a passo completo não conta para esse limite.";
+      return "Respostas enxutas, mas completas: o que o cliente precisa saber ou fazer, sem rodeios, em frases naturais (ideal: até 2 parágrafos). Um passo a passo completo não conta para esse limite.";
     case "long":
-      return "Pode responder com mais detalhes e explicações quando necessário.";
+      return "Pode responder com mais detalhes e explicações quando ajudarem o cliente: o porquê de cada passo, o que ele vai ver na tela, o que fazer se algo der diferente.";
     case "medium":
     default:
-      return "Responda de forma equilibrada, nem muito curta nem muito longa.";
+      return "Responda de forma equilibrada: a informação ou o passo a passo completo, com uma ou duas frases de contexto quando ajudarem o cliente a entender o que fazer.";
   }
 }
+
+/** Como uma pessoa da equipe escreve numa conversa. Vale para qualquer produto. */
+const WRITING_GUIDE = [
+  "Escreva como uma pessoa experiente da equipe conversando por mensagem, não como um manual: frases completas e naturais, em primeira pessoa.",
+  "Comece respondendo ao que o cliente acabou de dizer. Cumprimente pelo nome só no início da conversa; depois vá direto ao ponto.",
+  "Quando o cliente disser que não entendeu, que está perdido ou perguntar por onde começar, recomece do primeiro passo com mais detalhe (onde entrar, o que vai aparecer) em vez de mandá-lo voltar às mensagens anteriores.",
+  "Se um procedimento aparece dividido em mais de um trecho, junte-os na ordem certa, começando pelo primeiro passo (como e onde acessar).",
+  "Não peça desculpas sem motivo.",
+  "Termine com uma próxima ação concreta ligada ao assunto (por exemplo, pedir que avise em qual passo travou) em vez de frases genéricas como \"qualquer dúvida estou aqui\".",
+].join("\n");
 
 function buildV2SystemPrompt(
   config: V2AgentConfig,
@@ -707,6 +720,7 @@ function buildV2SystemPrompt(
   const lines: string[] = [];
   lines.push(`# Tom de voz\n${config.tone}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
+  lines.push(`# Como escrever\n${WRITING_GUIDE}`);
   lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
 
   // Dados que o modelo pode usar para entender a situação.
