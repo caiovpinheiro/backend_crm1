@@ -77,6 +77,15 @@ export async function getPainelInsights(input: {
               AND m.direction = 'in'
               AND m."createdAt" >= ${input.range.from}
               AND m."createdAt" <= ${input.range.to}
+              AND NOT EXISTS (
+                SELECT 1 FROM messages reply
+                WHERE reply."conversationId" = m."conversationId"
+                  AND reply."organizationId" = ${orgId}
+                  AND reply.direction = 'out'
+                  AND reply."isPrivate" = false
+                  AND reply."authorType" = 'human'::"MessageAuthorType"
+                  AND reply."createdAt" > m."createdAt"
+              )
           )
         GROUP BY 1, 2, 3
       `)
