@@ -77,6 +77,10 @@ const nextConfig: NextConfig = {
     "@opentelemetry/semantic-conventions",
     "@opentelemetry/instrumentation-pino",
     "prom-client",
+    // pdf.js carrega o worker por import dinâmico relativo ao próprio
+    // arquivo: empacotado, o caminho quebra. Fica em node_modules.
+    "pdf-parse",
+    "pdfjs-dist",
   ],
   webpack: (config, { isServer, nextRuntime }) => {
     // 1) Bundle do Node server (route handlers, server components).

@@ -55,6 +55,10 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+# Leitura de PDF dos materiais: o rastreio do standalone não segue o import
+# dinâmico do worker do pdf.js; copia os pacotes inteiros.
+COPY --from=builder /app/node_modules/pdf-parse ./node_modules/pdf-parse
+COPY --from=builder /app/node_modules/pdfjs-dist ./node_modules/pdfjs-dist
 # Workers compilados (campaign-worker.js, …, baileys/index.js).
 # Executados com `node dist/workers/<name>.js` conforme APP_MODE.
 COPY --from=builder /app/dist/workers ./dist/workers

@@ -138,16 +138,38 @@ function extractDocx(buffer: Buffer): string {
   return docxXmlToText(decodeText(Buffer.from(document)));
 }
 
+/**
+ * O pdf.js (dentro do pdf-parse 2.x) referencia DOMMatrix, ImageData e
+ * Path2D ao carregar, e só os tem no Node com o binário nativo do
+ * @napi-rs/canvas. Sem ele o import quebrava ("DOMMatrix is not defined")
+ * e a rota devolvia 500. Extrair texto não desenha nada: classes vazias
+ * bastam, e só entram quando o ambiente não tem as de verdade.
+ */
+function ensurePdfGlobals(): void {
+  const g = globalThis as Record<string, unknown>;
+  for (const name of ["DOMMatrix", "ImageData", "Path2D"]) {
+    if (typeof g[name] === "undefined") g[name] = class {};
+  }
+}
+
 async function extractPdf(buffer: Buffer): Promise<string> {
-  const mod = (await import("pdf-parse")) as any;
-  const pdfParse = mod.default ?? mod;
+  let parser: { getText: (p?: object) => Promise<{ text?: string }>; destroy: () => Promise<void> } | undefined;
   try {
-    const result = await pdfParse(buffer);
+    ensurePdfGlobals();
+    const { PDFParse } = (await import("pdf-parse")) as unknown as {
+      PDFParse: new (opts: { data: Uint8Array }) => NonNullable<typeof parser>;
+    };
+    parser = new PDFParse({ data: new Uint8Array(buffer) });
+    // pageJoiner vazio: sem o marcador "-- 1 of N --" entre as páginas.
+    const result = await parser.getText({ pageJoiner: "" });
     return (result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n").trim();
-  } catch {
+  } catch (err) {
+    console.error("[knowledge] falha ao ler PDF:", err instanceof Error ? err.message : err);
     throw new KnowledgeExtractError(
       "Não foi possível extrair texto do PDF. Verifique se o arquivo não está corrompido ou é uma imagem escaneada.",
     );
+  } finally {
+    await parser?.destroy().catch(() => undefined);
   }
 }
 
