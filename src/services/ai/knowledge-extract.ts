@@ -152,6 +152,41 @@ function ensurePdfGlobals(): void {
   }
 }
 
+/**
+ * PDF com mini-calendário ao lado de uma lista (calendário, escala, agenda):
+ * a extração junta as duas colunas e a linha vira "25 26 27 28 29 30 31 19
+ * Evento". O leitor tomava o 25 como a data do evento. Tira o cabeçalho de
+ * dias da semana ("D S T Q Q S S") e a sequência de dias consecutivos no
+ * começo da linha; sobra a linha do evento.
+ */
+export function stripCalendarGrid(text: string): string {
+  const WEEK_HEADER = /^\s*(?:[DSTQ]\s+){6}[DSTQ](?=\s|$)\s*/;
+  return text
+    .split("\n")
+    .map((line) => {
+      let l = line.replace(WEEK_HEADER, "");
+      // Linha só de números: sobra da grade, sem evento ao lado.
+      if (/^\s*(?:\d{1,2}\s*)+$/.test(l)) return "";
+      const m = /^\s*((?:\d{1,2}\s+){3,})/.exec(l);
+      if (m) {
+        const tokens = m[1].trim().split(/\s+/);
+        const nums = tokens.map(Number);
+        // Sequência de dias (n, n+1…) de uma semana: no máximo 7. O número
+        // seguinte, mesmo consecutivo, é o dia do evento.
+        let run = 1;
+        while (run < nums.length && run < 7 && nums[run] === nums[run - 1] + 1 && nums[run] <= 31) run++;
+        if (run >= 3) {
+          // Tokens originais: "07" continua "07".
+          const leftover = tokens.slice(run).join(" ");
+          l = [leftover, l.slice(m[0].length)].filter(Boolean).join(" ");
+        }
+      }
+      return l.trimEnd();
+    })
+    .filter((line) => line.trim() !== "")
+    .join("\n");
+}
+
 async function extractPdf(buffer: Buffer): Promise<string> {
   let parser: { getText: (p?: object) => Promise<{ text?: string }>; destroy: () => Promise<void> } | undefined;
   try {
@@ -162,7 +197,7 @@ async function extractPdf(buffer: Buffer): Promise<string> {
     parser = new PDFParse({ data: new Uint8Array(buffer) });
     // pageJoiner vazio: sem o marcador "-- 1 of N --" entre as páginas.
     const result = await parser.getText({ pageJoiner: "" });
-    return (result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n").trim();
+    return stripCalendarGrid((result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n")).trim();
   } catch (err) {
     console.error("[knowledge] falha ao ler PDF:", err instanceof Error ? err.message : err);
     throw new KnowledgeExtractError(

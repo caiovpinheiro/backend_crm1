@@ -37,6 +37,7 @@ import { hasSearchableQuestion, knowledgeChunkTexts, unsupportedQuotedTerms } fr
 import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
+import { markPastDates } from "./dates";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -433,14 +434,17 @@ export function buildV2ToolSet(args: {
       query: z.string().min(1).describe("Pergunta ou termo de busca na base."),
       limit: z.number().int().min(1).max(5).optional().describe("Máximo de trechos (1-5)."),
     }),
-    async (input) =>
-      searchV2Knowledge({
+    async (input) => {
+      const found = await searchV2Knowledge({
         agentId: args.agentId,
         apiKey: args.apiKey,
         query: input.query,
         allowedDocIds,
         limit: input.limit,
-      }),
+      });
+      const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
+      return { ...found, chunks: found.chunks.map((c) => ({ ...c, content: markPastDates(c.content, new Date(), tz) })) };
+    },
   );
   if (knowledge) tools.knowledge_search = knowledge;
 
@@ -746,7 +750,20 @@ export function currentDateLine(timezone: string | undefined, now: Date = new Da
   } catch {
     text = now.toISOString();
   }
-  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos, e para escolher nos trechos as datas que ainda vão acontecer.`;
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos, e para escolher nos trechos as datas que ainda vão acontecer. Datas marcadas com "(já passou)" nos trechos já aconteceram: nunca as apresente como próximas; só cite se o cliente perguntar por elas.`;
+}
+
+/** Quanto emoji usar. Padrão "nenhum": era o comportamento antes do parâmetro. */
+export function emojiInstruction(level: V2AgentConfig["emojis"]): string {
+  switch (level) {
+    case "light":
+      return "Use poucos emojis (1 ou 2 por mensagem) para acolher ou destacar o principal, como 😊 ao cumprimentar, 📅 em datas, ✅ em confirmações e 👉 no próximo passo. Não use em reclamação, cobrança ou assunto delicado.";
+    case "moderate":
+      return "Use emojis para deixar a mensagem calorosa e fácil de ler, inclusive como marcadores de tópicos (📅 datas, 💰 valores, ✅ confirmações, 👉 próximo passo, ⚠️ atenção), até uns 4 por mensagem. Não use em reclamação, cobrança ou assunto delicado.";
+    case "none":
+    default:
+      return "Não use emojis; tire emojis e marcadores decorativos do material.";
+  }
 }
 
 function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): number {
@@ -883,7 +900,8 @@ function buildV2SystemPrompt(
     lines.push("# Trechos da base de conhecimento relacionados à mensagem");
     lines.push("Encontrados pelo significado da mensagem, mesmo que o cliente tenha usado outras palavras. Se algum trecho atende ao que o cliente pediu, responda com base nele. Se nenhum for pertinente, ignore-os e não os mencione.");
     prefetchedChunks.forEach((c, i) => {
-      const body = c.content.length > PREFETCH_CHUNK_CHARS ? `${c.content.slice(0, PREFETCH_CHUNK_CHARS)}…` : c.content;
+      const raw = c.content.length > PREFETCH_CHUNK_CHARS ? `${c.content.slice(0, PREFETCH_CHUNK_CHARS)}…` : c.content;
+      const body = markPastDates(raw, new Date(), config.businessHours?.timezone || "America/Sao_Paulo");
       lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
     });
   }
@@ -897,7 +915,7 @@ function buildV2SystemPrompt(
   lines.push("# Formato da resposta");
   // Antes pedia "reescreva sem enumerar": o modelo resumia um procedimento
   // de vários passos numa frase e o cliente ficava sem saber o que fazer.
-  lines.push("Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. Tire só emojis e marcadores decorativos do material. Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.");
+  lines.push("Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. ${emojiInstruction(config.emojis)} Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.");
   lines.push("# Saída obrigatória");
   lines.push("Sua resposta final deve ser APENAS um objeto JSON válido no formato abaixo. Não inclua markdown, explicações, saudações ou qualquer texto fora do JSON.");
   lines.push(JSON.stringify({

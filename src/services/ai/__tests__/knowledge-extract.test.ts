@@ -106,3 +106,36 @@ describe("extractKnowledgeText", () => {
     expect(SUPPORTED_EXTENSIONS).toContain("pdf");
   });
 });
+
+describe("stripCalendarGrid", () => {
+  it("tira a grade do mês grudada na linha do evento", async () => {
+    const { stripCalendarGrid } = await import("@/services/ai/knowledge-extract");
+    const text = [
+      "DIA/PERÍODO ATIVIDADE",
+      "D S T Q Q S S 01 Início das aulas do mês",
+      "1 2 3 02 a 05 Realização da prova",
+      "4 5 6 7 8 9 10 06 Solicitação de recursos",
+      "11 12 13 14 15 16 17 18 Evento no dia seguinte da grade",
+      "25 26 27 28 29 30 31 19 Liberação de notas",
+      "30 31",
+      "21 Evento sem grade",
+    ].join("\n");
+    expect(stripCalendarGrid(text)).toBe(
+      [
+        "DIA/PERÍODO ATIVIDADE",
+        "01 Início das aulas do mês",
+        "02 a 05 Realização da prova",
+        "06 Solicitação de recursos",
+        "18 Evento no dia seguinte da grade",
+        "19 Liberação de notas",
+        "21 Evento sem grade",
+      ].join("\n"),
+    );
+  });
+
+  it("não mexe em lista numerada nem em texto comum", async () => {
+    const { stripCalendarGrid } = await import("@/services/ai/knowledge-extract");
+    const t = "1. Acesse o portal\n2. Clique em Documentos\nO prazo é de 10 dias.";
+    expect(stripCalendarGrid(t)).toBe(t);
+  });
+});

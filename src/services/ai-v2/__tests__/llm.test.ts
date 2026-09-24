@@ -859,3 +859,12 @@ describe("mediaUnderstandingNote", () => {
     expect(n).not.toContain("confirme");
   });
 });
+
+describe("emojiInstruction", () => {
+  it("padrão sem emoji; poucos e à vontade liberam com limite", async () => {
+    const { emojiInstruction } = await import("../llm");
+    expect(emojiInstruction(undefined)).toContain("Não use emojis");
+    expect(emojiInstruction("light")).toContain("1 ou 2 por mensagem");
+    expect(emojiInstruction("moderate")).toContain("marcadores de tópicos");
+  });
+});

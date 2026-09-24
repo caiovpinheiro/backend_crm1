@@ -312,6 +312,7 @@ export const v2AgentConfigSchema = z.object({
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
+  emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
   structuredOutput: z.boolean().optional().default(false),
   fallback: fallbackSchema,
   scope: scopeSchema,
