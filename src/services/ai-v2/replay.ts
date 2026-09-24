@@ -19,6 +19,7 @@ import { simulateV2Turn } from "./test-turn";
 import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./replay-extract";
 import { maskSensitive } from "./sensitive";
+import { IMPORT_LIMITS, parseTranscript, transcriptToRows } from "./replay-import";
 
 export const REPLAY_LIMITS = { maxConversations: 100, maxPoints: 300, pointsPerConversation: 6, concurrency: 2 };
 // A execução renova "updatedAt" a cada HEARTBEAT_MS. Sem renovação por
@@ -319,7 +320,56 @@ export type ReplayRun = {
   finishedAt: string | null;
 };
 
-export type ReplayParams = { days: number; conversations: number; config: "draft" | "published" };
+export type ReplayParams = {
+  days: number;
+  conversations: number;
+  config: "draft" | "published";
+  /** "crm": conversas do período; "import": conversas anexadas na tela. */
+  source?: "crm" | "import";
+  /** Nomes das conversas anexadas (só para mostrar). */
+  files?: string[];
+};
+
+/** Conversa anexada: texto da exportação/colado e quem é da equipe. */
+export type ReplayTranscript = { name: string; text: string; teamAuthors: string[] };
+
+function pointsFromTranscripts(transcripts: ReplayTranscript[]): Array<{ conversationId: string; contactId: string | null; point: ReplayPoint }> {
+  const work: Array<{ conversationId: string; contactId: string | null; point: ReplayPoint }> = [];
+  transcripts.slice(0, IMPORT_LIMITS.maxTranscripts).forEach((t, i) => {
+    const rows = transcriptToRows(parseTranscript(t.text.slice(0, IMPORT_LIMITS.maxChars)), t.teamAuthors);
+    const points = extractReplayPoints(rows, { maxPoints: IMPORT_LIMITS.pointsPerTranscript });
+    const conversationId = `anexo ${i + 1}: ${t.name}`.slice(0, 120);
+    for (const p of points) work.push({ conversationId, contactId: null, point: p });
+  });
+  return work.slice(0, REPLAY_LIMITS.maxPoints);
+}
+
+/** Estimativa exata para conversas anexadas (conta os pontos de verdade). */
+export async function estimateImportedReplay(args: {
+  organizationId: string;
+  agentId: string;
+  config: "draft" | "published";
+  transcripts: ReplayTranscript[];
+}) {
+  const agent = await getV2Agent(args.agentId, args.organizationId);
+  if (!agent) throw new Error("Agente não encontrado.");
+  const config = (args.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const work = pointsFromTranscripts(args.transcripts);
+  const evaluable = work.filter((w) => !w.point.skipReason).length;
+  const cost = evaluable * (
+    estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
+    estimateCost(config.model, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+  );
+  return {
+    availableConversations: args.transcripts.length,
+    conversations: args.transcripts.length,
+    estimatedPoints: work.length,
+    evaluablePoints: evaluable,
+    estimatedCalls: evaluable * 2,
+    estimatedCostUsd: Number(cost.toFixed(4)),
+    model: config.model,
+  };
+}
 
 function toRun(r: Record<string, any>): ReplayRun {
   const stale = r.status === "running" && Date.now() - new Date(r.updatedAt).getTime() > STALE_MS;
@@ -462,6 +512,7 @@ export async function startReplay(args: {
   agentId: string;
   userId: string;
   params: ReplayParams;
+  transcripts?: ReplayTranscript[];
 }): Promise<{ runId: string }> {
   await ensureReplaySchema();
   const agent = await getV2Agent(args.agentId, args.organizationId);
@@ -489,7 +540,9 @@ export async function startReplay(args: {
 
   // Roda em segundo plano: a requisição devolve o id e a tela acompanha.
   void Promise.resolve(
-    runWithContext(ctx, () => executeReplay({ runId, organizationId: args.organizationId, agentId: args.agentId, config, apiKey, params: args.params })),
+    runWithContext(ctx, () =>
+      executeReplay({ runId, organizationId: args.organizationId, agentId: args.agentId, config, apiKey, params: args.params, transcripts: args.transcripts }),
+    ),
   ).catch(async (err) => {
     console.error("[ai-v2 replay] falhou:", err);
     await db.$executeRawUnsafe(
@@ -507,6 +560,7 @@ async function executeReplay(args: {
   config: V2AgentConfig;
   apiKey: string;
   params: ReplayParams;
+  transcripts?: ReplayTranscript[];
 }): Promise<void> {
   const heartbeat = setInterval(() => {
     void db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "updatedAt"=now() WHERE "id"=$1 AND "status"='running'`, args.runId).catch(() => undefined);
@@ -518,7 +572,7 @@ async function executeReplay(args: {
   }
 }
 
-async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): Promise<void> {
+async function pointsFromCrm(args: Parameters<typeof executeReplay>[0]) {
   const since = new Date(Date.now() - args.params.days * 24 * 60 * 60 * 1000);
   const n = Math.min(args.params.conversations, REPLAY_LIMITS.maxConversations);
   const { picked } = await pickConversations(args.organizationId, args.params.days, n);
@@ -533,7 +587,11 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
       .filter((p) => new Date(p.at) >= since);
     for (const p of points) work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
   }
-  const queue = work.slice(0, REPLAY_LIMITS.maxPoints);
+  return work.slice(0, REPLAY_LIMITS.maxPoints);
+}
+
+async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): Promise<void> {
+  const queue = args.params.source === "import" ? pointsFromTranscripts(args.transcripts ?? []) : await pointsFromCrm(args);
   await db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "total"=$2, "updatedAt"=now() WHERE "id"=$1`, args.runId, queue.length);
 
   let tokensIn = 0;
