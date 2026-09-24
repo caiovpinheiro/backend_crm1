@@ -53,7 +53,7 @@ export async function GET(request: Request) {
       const to = parseDate(searchParams.get("to")) ?? now;
       const actorUserIds = parseIdList(searchParams, "actorUserIds", "actorUserId");
       const departmentIds = parseIdList(searchParams, "departmentIds", "departmentId");
-      const tabulationId = searchParams.get("tabulationId");
+      const tabulationIds = parseIdList(searchParams, "tabulationIds", "tabulationId");
       const page = Number(searchParams.get("page") ?? "1");
       const perPage = Number(searchParams.get("perPage") ?? "25");
 
@@ -64,7 +64,8 @@ export async function GET(request: Request) {
         departmentIds,
         actorUserId: actorUserIds[0] ?? null,
         departmentId: departmentIds[0] ?? null,
-        tabulationId: tabulationId || null,
+        tabulationIds,
+        tabulationId: tabulationIds[0] ?? null,
         page: Number.isFinite(page) ? page : 1,
         perPage: Number.isFinite(perPage) ? perPage : 25,
       });

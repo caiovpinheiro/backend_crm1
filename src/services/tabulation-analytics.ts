@@ -11,6 +11,7 @@ export type TabulationAnalyticsFilters = {
   departmentId?: string | null;
   departmentIds?: string[] | null;
   tabulationId?: string | null;
+  tabulationIds?: string[] | null;
   page?: number;
   perPage?: number;
 };
@@ -195,6 +196,7 @@ export async function getTabulationAnalytics(
   const perPage = Math.min(100, Math.max(1, filters.perPage ?? 25));
   const actorUserIds = uniqueIds(filters.actorUserIds, filters.actorUserId);
   const departmentIds = uniqueIds(filters.departmentIds, filters.departmentId);
+  const tabulationIds = uniqueIds(filters.tabulationIds, filters.tabulationId);
 
   // Agregação no Postgres. A versão anterior puxava até 5000 eventos e
   // contava em memória: acima disso o "total" simplesmente parava de crescer,
@@ -215,8 +217,10 @@ export async function getTabulationAnalytics(
   } else if (departmentIds.length > 1) {
     conds.push(Prisma.sql`meta->>'departmentId' IN (${Prisma.join(departmentIds)})`);
   }
-  if (filters.tabulationId) {
-    conds.push(Prisma.sql`meta->>'tabulationId' = ${filters.tabulationId}`);
+  if (tabulationIds.length === 1) {
+    conds.push(Prisma.sql`meta->>'tabulationId' = ${tabulationIds[0]}`);
+  } else if (tabulationIds.length > 1) {
+    conds.push(Prisma.sql`meta->>'tabulationId' IN (${Prisma.join(tabulationIds)})`);
   }
   const whereSql = Prisma.join(conds, " AND ");
 
@@ -232,9 +236,15 @@ export async function getTabulationAnalytics(
       })),
     });
   }
-  if (filters.tabulationId) {
+  if (tabulationIds.length === 1) {
     metaAnd.push({
-      meta: { path: ["tabulationId"], equals: filters.tabulationId },
+      meta: { path: ["tabulationId"], equals: tabulationIds[0] },
+    });
+  } else if (tabulationIds.length > 1) {
+    metaAnd.push({
+      OR: tabulationIds.map((id) => ({
+        meta: { path: ["tabulationId"], equals: id },
+      })),
     });
   }
 
