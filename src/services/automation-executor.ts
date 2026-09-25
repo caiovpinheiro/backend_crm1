@@ -3311,10 +3311,10 @@ async function executeStep(
         return pauseAwaitingReply(cfg, rt, tplTimeoutMs);
       }
 
-      // Campanha AUTOMATION sem pausa (sem botão/timeout): fecha ticket se o
-      // aluno não respondeu — mesmo modelo do campaign-worker TEMPLATE/TEXT.
-      // Com pausa, o contexto PAUSED mantém a conversa na aba Automação.
-      if (rt.event === "campaign_trigger" && tplConversationId) {
+      // O próximo passo é a espera do botão/resposta. Fechar aqui fazia o
+      // clique abrir ticket novo e cair no inicio-pipe em vez de seguir
+      // o ramo desta automação.
+      if (rt.event === "campaign_trigger" && tplConversationId && !nextOwnsWait) {
         await maybeResolveUnansweredOutboundTicket(tplConversationId).catch(
           () => {},
         );

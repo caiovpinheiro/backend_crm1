@@ -22,6 +22,23 @@ export async function contactHasPausedAutomation(contactId: string): Promise<boo
   return row != null;
 }
 
+/** Conversa em que a automação da campanha ficou esperando o botão. */
+export async function pausedAutomationConversationId(
+  contactId: string,
+): Promise<string | null> {
+  const row = await prisma.automationContext.findFirst({
+    where: { contactId, status: "PAUSED" },
+    orderBy: { updatedAt: "desc" },
+    select: { variables: true },
+  });
+  const vars =
+    row?.variables && typeof row.variables === "object"
+      ? (row.variables as Record<string, unknown>)
+      : null;
+  const id = typeof vars?.conversationId === "string" ? vars.conversationId.trim() : "";
+  return id || null;
+}
+
 /**
  * Notifica o inbox (SSE `automation_state`) que o conjunto de automações
  * ativas de um contato mudou — o frontend invalida o cache do chip
