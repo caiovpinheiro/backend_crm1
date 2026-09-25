@@ -71,7 +71,7 @@ void META_WEBHOOK_BUILD_MARKER;
 
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
-import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
+import { processIncomingMessage as processSalesbotMessage, contactHasPausedAutomation } from "@/services/automation-context";
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -842,13 +842,16 @@ async function findOrCreateConversation(
     });
 
   const existing = await findOnAccount(targetChannelId);
+  const deferDistribution = await contactHasPausedAutomation(contactId);
   if (existing) {
-    await maybeDistributeNewInboundTicket({
-      conversationId: existing.id,
-      contactId,
-      assignedToId: existing.assignedToId ?? null,
-    });
-    return existing;
+    if (!deferDistribution) {
+      await maybeDistributeNewInboundTicket({
+        conversationId: existing.id,
+        contactId,
+        assignedToId: existing.assignedToId ?? null,
+      });
+    }
+    return { ...existing, deferDistribution };
   }
 
   if (targetChannelId) {
@@ -858,12 +861,14 @@ async function findOrCreateConversation(
         where: { id: orphan.id },
         data: { channelId: targetChannelId },
       });
-      await maybeDistributeNewInboundTicket({
-        conversationId: orphan.id,
-        contactId,
-        assignedToId: orphan.assignedToId ?? null,
-      });
-      return { ...orphan, channelId: targetChannelId };
+      if (!deferDistribution) {
+        await maybeDistributeNewInboundTicket({
+          conversationId: orphan.id,
+          contactId,
+          assignedToId: orphan.assignedToId ?? null,
+        });
+      }
+      return { ...orphan, channelId: targetChannelId, deferDistribution };
     }
   }
 
@@ -884,30 +889,34 @@ async function findOrCreateConversation(
       }),
     );
     // Novo ticket após RESOLVED: redistribui se ainda sem responsável.
-    await maybeDistributeNewInboundTicket({
-      conversationId: created.id,
-      contactId,
-      assignedToId: inheritAssignee,
-    });
-    emitConversationCreated({
-      contactId,
-      channel: "whatsapp",
-      channelId: targetChannel?.id,
-      conversationId: created.id,
-      source: "inbound_meta",
-      extra: openingMessageTriggerExtra({
-        content: opening?.content,
-        messageType: opening?.messageType,
-      }),
-    });
-    return created;
+    if (!deferDistribution) {
+      await maybeDistributeNewInboundTicket({
+        conversationId: created.id,
+        contactId,
+        assignedToId: inheritAssignee,
+      });
+    }
+    if (!deferDistribution) {
+      emitConversationCreated({
+        contactId,
+        channel: "whatsapp",
+        channelId: targetChannel?.id,
+        conversationId: created.id,
+        source: "inbound_meta",
+        extra: openingMessageTriggerExtra({
+          content: opening?.content,
+          messageType: opening?.messageType,
+        }),
+      });
+    }
+    return { ...created, deferDistribution };
   } catch (err) {
     // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
     // indice unico parcial rejeita o 2o create com P2002 — reusa o
     // ticket vencedor em vez de duplicar.
     if (isActiveConversationUniqueViolation(err)) {
       const won = await findOnAccount(targetChannelId);
-      if (won) return won;
+      if (won) return { ...won, deferDistribution };
     }
     throw err;
   }
@@ -3199,6 +3208,7 @@ export async function processMetaWebhookPayload(
             }
 
             let salesbotReplied = false;
+            let salesbotHandled = false;
             try {
               const isFlowReply =
                 parsed.interactiveKind === "nfm_reply" ||
@@ -3214,10 +3224,25 @@ export async function processMetaWebhookPayload(
                 messageType: inboundMsgType,
               });
               salesbotReplied = Boolean(salesbotResult?.replied);
+              salesbotHandled = Boolean(salesbotResult?.handled);
             } catch (err) {
               log.error("Falha no salesbot:", err);
             }
 
+            const automationOwnsReply = salesbotHandled || salesbotReplied;
+            if (
+              "deferDistribution" in conversation &&
+              conversation.deferDistribution &&
+              !automationOwnsReply
+            ) {
+              await maybeDistributeNewInboundTicket({
+                conversationId: conversation.id,
+                contactId: contact.id,
+                assignedToId: conversation.assignedToId ?? null,
+              }).catch((err) => log.warn("Falha ao distribuir após automação:", err));
+            }
+
+            if (!automationOwnsReply) {
             try {
               await fireTrigger("message_received", {
                 contactId: contact.id,
@@ -3242,6 +3267,7 @@ export async function processMetaWebhookPayload(
               });
             } catch (err) {
               log.error("Falha ao disparar gatilho message_received:", err);
+            }
             }
 
             // Agente de IA: agenda resposta com debounce (agrupa msgs consecutivas).

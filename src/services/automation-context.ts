@@ -13,6 +13,15 @@ import { withSystemContext } from "@/lib/webhook-context";
 
 const log = getLogger("automation-context");
 
+/** Campanha/fluxo pausado no contato: o inbound é resposta do bot, não chamado novo. */
+export async function contactHasPausedAutomation(contactId: string): Promise<boolean> {
+  const row = await prisma.automationContext.findFirst({
+    where: { contactId, status: "PAUSED" },
+    select: { id: true },
+  });
+  return row != null;
+}
+
 /**
  * Notifica o inbox (SSE `automation_state`) que o conjunto de automações
  * ativas de um contato mudou — o frontend invalida o cache do chip

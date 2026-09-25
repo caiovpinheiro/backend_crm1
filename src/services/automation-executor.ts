@@ -361,6 +361,7 @@ async function resolveAutomationSendConv(
     inheritAssignee?: boolean;
     conversationId?: string | null;
     channelId?: string | null;
+    skipTriggers?: boolean;
   },
 ): Promise<{ id: string } | null> {
   if (!contactId) return null;
@@ -385,6 +386,7 @@ async function resolveAutomationSendConv(
     const ensured = await ensureWhatsAppConversationForContact(contactId, {
       inheritAssignee: opts?.inheritAssignee,
       channelId: opts?.channelId,
+      skipTriggers: opts?.skipTriggers,
     });
     if ("conversationId" in ensured) return { id: ensured.conversationId };
   } catch (err) {
@@ -462,8 +464,11 @@ function bindRuntimeToSendConversation(
 /** Campanha AUTOMATION: não herdar dono do contato no ticket novo (ver ensure opts). */
 function sendConvOptsForRuntime(rt: { event?: string | null }): {
   inheritAssignee?: boolean;
+  skipTriggers?: boolean;
 } {
-  return rt.event === "campaign_trigger" ? { inheritAssignee: false } : {};
+  return rt.event === "campaign_trigger"
+    ? { inheritAssignee: false, skipTriggers: true }
+    : {};
 }
 
 /**
@@ -933,6 +938,7 @@ function sendConvOptsFromRt(
   inheritAssignee?: boolean;
   conversationId?: string | null;
   channelId?: string | null;
+  skipTriggers?: boolean;
 } {
   return {
     ...sendConvOptsForRuntime(rt),
