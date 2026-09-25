@@ -16,9 +16,6 @@
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 
-/** Telefone usado nos testes (só se allowlist restricted for ligada). */
-export const AI_TEST_PHONE_DIGITS = "11970617878";
-
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
     "[ai-attend]",

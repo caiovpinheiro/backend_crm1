@@ -267,6 +267,13 @@ const db = vi.hoisted(() => {
       );
       return rows[0] ? { ...rows[0] } : null;
     },
+    findMany: async ({
+      where,
+      orderBy,
+    }: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, "asc" | "desc">;
+    }) => sortRows([...users.values()].filter((r) => matches(r, where)), orderBy).map((r) => ({ ...r })),
   };
 
   return { turns, messages, state, conversationTurn, message, conversation, user, conversations, users, setConversation: (id: string, data: Record<string, unknown>) => conversations.set(id, { ...data, id }), setUser: (id: string, data: Record<string, unknown>) => users.set(id, { ...data, id }) };

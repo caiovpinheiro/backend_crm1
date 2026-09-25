@@ -264,7 +264,7 @@ export async function sendAgentMessage(args: {
   const isBaileys = args.channel === "baileys";
 
   // Resolve cliente Meta DESTE canal (token/phoneId do tenant). Sem isso,
-  // o agente IA da DNA enviava via numero da Eduit (singleton global env).
+  // o agente IA de uma org enviava pelo número de outra (singleton global env).
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
     select: {

@@ -106,7 +106,7 @@ describe("guarda de saída com dado sensível", () => {
 
 describe("senha: frases que não são senha", () => {
   it("palavra seguida de dois-pontos e marcador já aplicado não viram senha", () => {
-    expect(maskSensitive("Para redefinir sua senha acadêmica: acesse o portal").text).toBe("Para redefinir sua senha acadêmica: acesse o portal");
+    expect(maskSensitive("Para redefinir sua senha do portal: acesse o portal").text).toBe("Para redefinir sua senha do portal: acesse o portal");
     const once = maskSensitive("Senha: Abc@1234").text;
     expect(maskSensitive(once).text).toBe(once);
     expect(once).not.toContain("removida] removida]");

@@ -1455,7 +1455,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   ): Promise<string | undefined> {
     let sent: string | undefined;
     if (!opts.skipMessage) {
-      const handoffMsg = renderMessage(config.handoff.message, vars, defaultFormatter());
+      // Mensagem do destino (assunto/regra) quando configurada; a tela já
+      // tinha o campo, mas valia sempre a mensagem padrão.
+      const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
+      const handoffMsg = renderMessage(destinationMessage || config.handoff.message, vars, defaultFormatter());
       if (handoffMsg.trim() && (await sendReply(handoffMsg)).sent) {
         sent = handoffMsg;
       }
