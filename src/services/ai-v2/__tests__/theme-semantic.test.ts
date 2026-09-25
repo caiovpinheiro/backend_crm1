@@ -106,3 +106,22 @@ describe("selectV2ThemeSemantic", () => {
     expect(themeCalls).toHaveLength(1);
   });
 });
+
+describe("gatilho x sentido", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearThemeVectorCache();
+  });
+
+  it("frase longa: sentido claramente de outro assunto vence o gatilho", async () => {
+    embedWith([0.1, 0.99]); // pagamentos ~0,99; documentos ~0,10
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "preciso do documento para pagar o boleto atrasado deste mês", apiKey: "k" });
+    expect(r.theme?.id).toBe("pay");
+  });
+
+  it("frase curta: gatilho vence sem gastar embedding", async () => {
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "segunda via", apiKey: "k" });
+    expect(r).toMatchObject({ method: "trigger", theme: { id: "docs" } });
+    expect(mocks.embedTexts).not.toHaveBeenCalled();
+  });
+});

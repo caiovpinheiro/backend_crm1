@@ -33,7 +33,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { hasSearchableQuestion, knowledgeChunkTexts, unsupportedQuotedTerms } from "./ground-reply";
+import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedQuotedTerms } from "./ground-reply";
 import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
@@ -717,6 +717,23 @@ function isBadRequest(err: unknown): boolean {
 }
 
 /**
+ * O que o agente não responde. Antes o escopo configurado nem chegava ao
+ * prompt: o agente fazia conta e explicava programação no atendimento.
+ */
+export function scopeInstruction(config: V2AgentConfig): string {
+  const lines = [
+    "Você só atende o que é do atendimento desta empresa: os assuntos, materiais, calendário e dados do cliente acima.",
+    "Não responda o que é de fora — contas e cálculos, conhecimentos gerais, programação, tarefas escolares, opiniões, dados internos da empresa (como número de clientes ou faturamento). Diga em uma frase, com gentileza, que aqui só pode ajudar com o atendimento e volte ao que o cliente precisa.",
+    "Se a mensagem mistura as duas coisas, responda só a parte do atendimento e diga em meia frase que o resto não é com você. Mensagem só de fora: outOfScope=true.",
+  ];
+  const custom = config.scope?.message?.trim();
+  if (custom) lines.push(`Para recusar, use esta mensagem: "${custom}"`);
+  const forbidden = (config.scope?.forbidden ?? []).map((f) => f.subject).filter(Boolean);
+  if (forbidden.length > 0) lines.push(`Assuntos que você não trata (transfira): ${forbidden.join("; ")}.`);
+  return lines.join("\n");
+}
+
+/**
  * Mensagem que veio de áudio transcrito ou imagem lida automaticamente: a
  * transcrição pode errar. Com "confirmar entendimento" ligado, o agente
  * confirma o pedido quando ele está ambíguo; claro, responde direto.
@@ -829,6 +846,7 @@ function buildV2SystemPrompt(
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
   lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
+  lines.push(`# Escopo\n${scopeInstruction(config)}`);
 
   // Dados que o modelo pode usar para entender a situação.
   lines.push("# Dados do cliente para consulta interna");
@@ -1199,9 +1217,9 @@ export async function callV2LLM(args: {
    */
   async function checkQuotedTerms(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
     const sources = [system, userMessage, ...previousMessages.map((m) => m.content), ...knowledgeChunkTexts(r.toolCalls)];
-    const unsupported = unsupportedQuotedTerms(r.output.reply, sources);
+    const unsupported = [...unsupportedQuotedTerms(r.output.reply, sources).map((t) => `"${t}"`), ...unsupportedFigures(r.output.reply, sources)];
     if (unsupported.length === 0) return;
-    const list = unsupported.map((t) => `"${t}"`).join(", ");
+    const list = unsupported.join(", ");
     traceStep("verificação", `Resposta cita ${list}, que não está no material nem na conversa — pedindo reescrita`);
     const reviewSystem = [
       system,
@@ -1227,7 +1245,7 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
-        const still = unsupportedQuotedTerms(fixed.reply, sources);
+        const still = [...unsupportedQuotedTerms(fixed.reply, sources), ...unsupportedFigures(fixed.reply, sources)];
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
           r.output = fixed;
@@ -1247,11 +1265,53 @@ export async function callV2LLM(args: {
     };
   }
 
+  /**
+   * Resposta quase igual à anterior: o envio a barraria e o cliente, que
+   * mandou "?" ou insistiu, ficava sem nada. Reescreve de outro jeito.
+   */
+  async function avoidRepeat(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
+    const last = [...previousMessages].reverse().find((m) => m.role === "assistant")?.content;
+    if (!last || r.output.handoff || !isNearDuplicateReply(r.output.reply, last)) return;
+    traceStep("verificação", "Resposta repetiria a anterior — pedindo outra forma");
+    const reviewSystem = [
+      system,
+      "# REVISÃO",
+      "Sua resposta repete quase igual a mensagem anterior, e o cliente não deve receber a mesma mensagem de novo. Se ele mostrou dúvida (\"?\", \"não entendi\"), explique de outro jeito, mais simples, ou pergunte o que ficou confuso. Se só confirmou ou agradeceu, responda curto. Não copie o texto anterior. Devolva o JSON completo no formato exigido.",
+    ].join("\n\n");
+    try {
+      const res = await generateWithTools({
+        model: args.config.model,
+        apiKey,
+        system: reviewSystem,
+        messages: messages as any,
+        temperature: 0.7,
+        maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+        maxSteps: 1,
+        jsonMode,
+      });
+      r.inputTokens += res.inputTokens;
+      r.outputTokens += res.outputTokens;
+      const raw = res.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const json = extractFirstJSONObject(raw);
+      const parsed = json ? v2LLMOutputSchema.safeParse(JSON.parse(json)) : undefined;
+      if (parsed?.success && !isNearDuplicateReply(parsed.data.reply, last)) {
+        const fixed = parsed.data as V2LLMOutput;
+        fixed.reply = breakInlineSteps(renderMessage(fixed.reply, renderVars) ?? fixed.reply);
+        r.output = fixed;
+        return;
+      }
+    } catch (err) {
+      console.warn("[ai-v2] reescrita de repetição falhou:", err instanceof Error ? err.message : err);
+    }
+    r.output = { ...r.output, reply: "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito." };
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
       await checkQuotedTerms(r);
+      await avoidRepeat(r);
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
         r.output.actions = vault.restoreDeep(r.output.actions);

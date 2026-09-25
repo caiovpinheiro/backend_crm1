@@ -102,9 +102,35 @@ export async function selectV2ThemeSemantic(args: {
   // Sem o assunto atual: `selectV2Theme` o mantém sempre que nenhum outro
   // gatilho casa, o que impediria o significado de trocar de assunto.
   const byTrigger = selectV2Theme(args.config, args.message);
-  if (byTrigger) return { theme: byTrigger, method: "trigger" };
-
   const themes = args.config.themes ?? [];
+  if (byTrigger) {
+    // Palavra solta da lista ("empresa") levava "a empresa pediu comprovante
+    // de matrícula" para o assunto de estágio. Com frase de verdade, confere
+    // o sentido: se outro assunto é claramente mais próximo, ele vence.
+    if (!args.apiKey || contentWordCount(args.message) < 4) return { theme: byTrigger, method: "trigger" };
+    try {
+      const [{ embeddings }, vectors] = await Promise.all([embedTexts([args.message.trim()], args.apiKey), themeVectors(themes, args.apiKey)]);
+      const mv = embeddings[0] ?? [];
+      let best: V2Theme | null = null;
+      let bestSim = -1;
+      let triggerSim = -1;
+      themes.forEach((t, i) => {
+        const sim = cosine(mv, vectors[i] ?? []);
+        if (t.id === byTrigger.id) triggerSim = sim;
+        if (sim > bestSim) {
+          bestSim = sim;
+          best = t;
+        }
+      });
+      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= switchSimilarity() && bestSim >= triggerSim + 0.08) {
+        return { theme: best, method: "semantic", similarity: bestSim };
+      }
+    } catch (err) {
+      console.warn("[ai-v2] conferência semântica do gatilho falhou:", err instanceof Error ? err.message : err);
+    }
+    return { theme: byTrigger, method: "trigger" };
+  }
+
   const current = args.currentThemeId ? themes.find((t) => t.id === args.currentThemeId) ?? null : null;
   const fallback = (similarity?: number): V2ThemeSelection =>
     current ? { theme: current, method: "kept", similarity } : { theme: null, method: "none", similarity };

@@ -868,3 +868,46 @@ describe("emojiInstruction", () => {
     expect(emojiInstruction("moderate")).toContain("marcadores de tópicos");
   });
 });
+
+describe("escopo e repetição", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("o prompt sempre traz o escopo, com a mensagem e os assuntos proibidos configurados", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    const config = baseConfig({ scope: { message: "Aqui eu só ajudo com o seu curso.", forbidden: [{ subject: "Assuntos jurídicos" }] } } as never);
+    await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quanto é 2+2?", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
+    expect(system).toContain("# Escopo");
+    expect(system).toContain("contas e cálculos");
+    expect(system).toContain("Aqui eu só ajudo com o seu curso.");
+    expect(system).toContain("Assuntos jurídicos");
+  });
+
+  it("resposta igual à anterior é reescrita em vez de ficar sem envio", async () => {
+    const same = "As aulas de outubro começam no dia 01/10/2026.";
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: same, actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Isso: começam em 01/10. Ficou alguma dúvida sobre essa data?", actions: [] })));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "?", stage: "active",
+      previousMessages: [{ role: "user", content: "quando começam as aulas de outubro?" }, { role: "assistant", content: same }],
+    });
+    expect(r.output.reply).toContain("Ficou alguma dúvida");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("repete quase igual");
+  });
+
+  it("número sem fonte pede reescrita", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Atrasou? Juros de 1% ao mês.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho a regra de juros aqui; vou te passar para a equipe.", handoff: true, actions: [] })));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "e se eu atrasar?", stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("1%");
+    expect(r.output.handoff).toBe(true);
+  });
+});

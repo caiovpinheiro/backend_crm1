@@ -79,6 +79,41 @@ export function unsupportedQuotedTerms(reply: string, sources: string[]): string
   return [...out];
 }
 
+/**
+ * Percentual e valor em dinheiro na resposta que não aparecem em nenhuma
+ * fonte. O modelo completava com "juros de 1% ao mês", "R$ 50 de taxa".
+ */
+export function unsupportedFigures(reply: string, sources: string[]): string[] {
+  const squash = (s: string) => s.replace(/\s+/g, "").replace(/\.(?=\d{3}\b)/g, "").toLowerCase();
+  const haystack = squash(sources.join(" "));
+  const out = new Set<string>();
+  const patterns = [/\d+(?:[.,]\d+)?\s?%/g, /R\$\s?\d[\d.]*(?:,\d{1,2})?/gi];
+  for (const re of patterns) {
+    for (const m of reply.matchAll(re)) {
+      const token = m[0].trim();
+      if (!haystack.includes(squash(token))) out.add(token);
+    }
+  }
+  return [...out];
+}
+
+function tokensOf(s: string): string[] {
+  return normalize(s).split(/\s+/).filter((w) => w.length > 1);
+}
+
+/** Resposta quase igual à anterior (o envio a barraria e o cliente ficaria sem nada). */
+export function isNearDuplicateReply(a: string, b: string): boolean {
+  const ta = tokensOf(a);
+  const tb = tokensOf(b);
+  if (ta.length === 0 || tb.length === 0) return false;
+  if (ta.join(" ") === tb.join(" ")) return true;
+  const sa = new Set(ta);
+  const sb = new Set(tb);
+  let inter = 0;
+  for (const w of sa) if (sb.has(w)) inter++;
+  return inter / (sa.size + sb.size - inter) >= 0.85;
+}
+
 /** O texto livre só fica se repetir palavras do material. Senão, vale o trecho. */
 export function groundedReply(reply: string, chunks: string[]): string {
   const unique = [...new Set(chunks.map((chunk) => chunk.trim()).filter(Boolean))].slice(0, 3);

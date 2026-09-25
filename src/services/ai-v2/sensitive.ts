@@ -105,9 +105,12 @@ function scan(text: string, replace: Replacer): { text: string; kinds: Set<Sensi
   let out = text;
 
   out = out.replace(SECRET_RE, (full, word: string, quals: string, sep: string | undefined, value: string) => {
-    // "senha incorreta" não é senha: sem separador, só vale valor com
-    // dígito ou símbolo.
-    if (!sep && !/[\d_]|[^\p{L}\p{N}]/u.test(value.replace(/[.,!?]$/, ""))) return full;
+    // Marcador já aplicado ("[senha removida]") não é senha: sem isso a
+    // segunda passada virava "[senha removida] removida]".
+    if (value.startsWith("[")) return full;
+    // "senha incorreta", "senha acadêmica:" não são senha: sem separador, só
+    // vale valor com dígito ou símbolo (pontuação no fim não conta).
+    if (!sep && !/[\d_]|[^\p{L}\p{N}]/u.test(value.replace(/[.,!?:;)]+$/, ""))) return full;
     return `${word}${quals}${sep ? ` ${sep.trim()} ` : " "}${hit("senha", value)}`;
   });
 
