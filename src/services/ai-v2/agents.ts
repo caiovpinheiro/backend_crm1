@@ -318,7 +318,9 @@ export async function publishV2AgentVersion(
       data: {
         simpleConfig: config as unknown as Record<string, unknown>,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-        active: true,
+        // Só a primeira publicação liga o agente. Antes toda publicação
+        // religava um agente que alguém tinha desligado de propósito.
+        ...(nextVersion === 1 ? { active: true } : {}),
       },
     });
 
@@ -329,13 +331,37 @@ export async function publishV2AgentVersion(
 export async function listV2AgentVersions(
   id: string,
   organizationId: string,
-): Promise<{ versionNumber: number; comment?: string | null; createdAt: Date; createdById?: string | null }[]> {
-  const rows = await (prisma as any).aIAgentConfigVersion.findMany({
-    where: { agentId: id, organizationId },
-    orderBy: { versionNumber: "desc" },
-    select: { versionNumber: true, comment: true, createdAt: true, createdById: true },
+): Promise<{ versionNumber: number; comment?: string | null; createdAt: Date; createdById?: string | null; createdByName?: string | null }[]> {
+  const rows: Array<{ versionNumber: number; comment: string | null; createdAt: Date; createdById: string | null }> =
+    await (prisma as any).aIAgentConfigVersion.findMany({
+      where: { agentId: id, organizationId },
+      orderBy: { versionNumber: "desc" },
+      take: 50,
+      select: { versionNumber: true, comment: true, createdAt: true, createdById: true },
+    });
+  const authorIds = [...new Set(rows.map((r) => r.createdById).filter((v): v is string => Boolean(v)))];
+  const authors: Array<{ id: string; name: string | null }> = authorIds.length
+    ? await (prisma as any).user.findMany({ where: { id: { in: authorIds }, organizationId }, select: { id: true, name: true } })
+    : [];
+  const nameOf = new Map(authors.map((a) => [a.id, a.name]));
+  return rows.map((r) => ({ ...r, createdByName: r.createdById ? nameOf.get(r.createdById) ?? null : null }));
+}
+
+/**
+ * Traz uma versão publicada de volta para o rascunho. Não publica: a pessoa
+ * testa e publica de novo se quiser voltar a ela no WhatsApp.
+ */
+export async function restoreV2AgentVersionToDraft(
+  id: string,
+  organizationId: string,
+  versionNumber: number,
+): Promise<{ id: string; config: V2AgentConfig }> {
+  const version = await (prisma as any).aIAgentConfigVersion.findFirst({
+    where: { agentId: id, organizationId, versionNumber },
+    select: { config: true },
   });
-  return rows;
+  if (!version) throw new Error("Versão não encontrada.");
+  return saveV2AgentDraft(id, organizationId, { config: version.config });
 }
 
 export async function deleteV2Agent(id: string, organizationId: string): Promise<void> {
