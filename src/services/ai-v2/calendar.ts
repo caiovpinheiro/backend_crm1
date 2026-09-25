@@ -45,8 +45,8 @@ export function parseCalendarText(text: string, defaultYear: number): { events: 
   const unparsed: string[] = [];
   const sep = String.raw`\s*(?:[–—:-]\s*|\s)`;
   const patterns: Array<{ re: RegExp; build: (m: RegExpExecArray) => { start: string; end?: string } | null }> = [
-    { // 02/10/2026 a 05/10/2026
-      re: new RegExp(String.raw`^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*(?:a|até|-|–)\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?${sep}(.+)$`, "i"),
+    { // 02/10/2026 a 05/10/2026, 11/12/2026 e 12/12/2026
+      re: new RegExp(String.raw`^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*(?:a|e|até|-|–)\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?${sep}(.+)$`, "i"),
       build: (m) => {
         const y2 = fullYear(m[6], defaultYear);
         const y1 = m[3] ? fullYear(m[3], defaultYear) : Number(m[2]) > Number(m[5]) ? y2 - 1 : y2;

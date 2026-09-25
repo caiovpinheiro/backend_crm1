@@ -32,6 +32,11 @@ describe("parseCalendarText", () => {
     expect(unparsed).toEqual(["Linha de abertura sem data"]);
   });
 
+  it("período com \"e\" entre datas completas", () => {
+    const { events } = parseCalendarText("11/12/2026 e 12/12/2026 – Realização da Prova AF", 2026);
+    expect(events).toEqual([{ id: expect.any(String), start: "2026-12-11", end: "2026-12-12", title: "Realização da Prova AF" }]);
+  });
+
   it("recusa data que não existe", () => {
     expect(parseCalendarText("31/02/2026 – Evento", 2026).events).toHaveLength(0);
   });
