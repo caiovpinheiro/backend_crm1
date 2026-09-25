@@ -71,7 +71,7 @@ void META_WEBHOOK_BUILD_MARKER;
 
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
-import { processIncomingMessage as processSalesbotMessage, contactHasPausedAutomation } from "@/services/automation-context";
+import { processIncomingMessage as processSalesbotMessage, contactHasPausedAutomation, pausedAutomationConversationId } from "@/services/automation-context";
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -809,6 +809,33 @@ async function resolveWebhookContact(
 // novo quanto quando um contato pré-existente volta a falar — assim
 // contatos importados/manuais sem deal passam a ter um ao primeiro
 // inbound.
+
+/**
+ * A automação da campanha está pausada neste contato. A resposta volta
+ * para o mesmo ticket, para o ramo do botão, sem abrir conversa nova.
+ */
+async function reopenPausedAutomationConversation(contactId: string) {
+  const conversationId = await pausedAutomationConversationId(contactId);
+  if (!conversationId) return null;
+  const row = await prisma.conversation.findFirst({
+    where: { id: conversationId, contactId },
+    select: {
+      id: true,
+      status: true,
+      channelId: true,
+      organizationId: true,
+      assignedToId: true,
+    },
+  });
+  if (!row) return null;
+  if (row.status === "RESOLVED") {
+    await prisma.conversation.update({
+      where: { id: row.id },
+      data: { status: "OPEN", closedAt: null, updatedAt: new Date() },
+    });
+  }
+  return { ...row, status: "OPEN" as const };
+}
 
 /**
  * Resposta a um template de campanha (botão ou citação). Reabre o mesmo
@@ -2927,12 +2954,21 @@ export async function processMetaWebhookPayload(
           } catch (err) {
             log.warn("Falha ao salvar referral de anúncio (não-fatal):", err);
           }
-          const campaignReply = await reopenCampaignReplyConversation(
-            contact.id,
-            parsed.replyToWaMessageId,
-            parsed.type,
-          );
-          const conversation = campaignReply
+          const pausedReply = await reopenPausedAutomationConversation(contact.id);
+          const campaignReply = pausedReply
+            ? null
+            : await reopenCampaignReplyConversation(
+                contact.id,
+                parsed.replyToWaMessageId,
+                parsed.type,
+              );
+          const conversation = pausedReply
+            ? {
+                ...pausedReply,
+                deferDistribution: true as const,
+                suppressInboundAutomations: true as const,
+              }
+            : campaignReply
             ? {
                 ...campaignReply,
                 deferDistribution: true as const,
