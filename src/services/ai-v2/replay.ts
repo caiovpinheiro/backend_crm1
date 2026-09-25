@@ -34,16 +34,21 @@ const POINT_TIMEOUT_MS = 150 * 1000;
 
 // ─── Avaliador ──────────────────────────────────────────────────────────
 
+// Texto opcional tolerante: em ponto não comparável o avaliador devolve
+// `null` nos campos "no padrão", e `z.string()` recusava o veredito inteiro
+// ("O avaliador não devolveu um resultado válido").
+const lenientText = z.string().nullish().transform((v) => v ?? "").catch("");
+
 export const replayVerdictSchema = z.object({
   desfecho: z.enum(["igual", "parcial", "diferente"]).catch("diferente"),
   correto: z.enum(["sim", "nao", "nao_verificavel"]).catch("nao_verificavel"),
   inventou: z.boolean().catch(false),
-  invencao: z.string().optional().default(""),
+  invencao: lenientText,
   humanoConsultouSistema: z.boolean().catch(false),
   causa: z.enum(["ok", "material", "comportamento", "integracao", "midia"]).catch("comportamento"),
   tom: z.enum(["adequado", "inadequado"]).catch("adequado"),
-  assunto: z.string().optional().default(""),
-  explicacao: z.string().optional().default(""),
+  assunto: lenientText,
+  explicacao: lenientText,
   comparavel: z.boolean().catch(true).default(true),
   motivoNaoComparavel: z.enum(["sem_conteudo", "fora_de_contexto", "teste", "outro"]).catch("outro").optional(),
 });
@@ -103,8 +108,10 @@ export function parseVerdict(text: string): ReplayVerdict | null {
   if (start < 0 || end <= start) return null;
   try {
     const r = replayVerdictSchema.safeParse(JSON.parse(cleaned.slice(start, end + 1)));
+    if (!r.success) console.warn("[replay] veredito fora do formato:", r.error.message, cleaned.slice(0, 300));
     return r.success ? r.data : null;
   } catch {
+    console.warn("[replay] veredito não é JSON:", cleaned.slice(0, 300));
     return null;
   }
 }

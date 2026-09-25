@@ -23,6 +23,13 @@ describe("parseVerdict", () => {
     expect(r?.desfecho).toBe("igual");
     expect(r?.causa).toBe("comportamento");
   });
+  it("ponto não comparável com campos nulos não vira falha técnica", () => {
+    const r = parseVerdict('{"comparavel":false,"motivoNaoComparavel":"sem_conteudo","desfecho":null,"correto":null,"inventou":null,"invencao":null,"humanoConsultouSistema":null,"causa":null,"tom":null,"assunto":"Saudação","explicacao":null}');
+    expect(r).not.toBeNull();
+    expect(r?.comparavel).toBe(false);
+    expect(r?.invencao).toBe("");
+    expect(r?.explicacao).toBe("");
+  });
   it("ponto é comparável por padrão e lê o motivo quando não é", () => {
     expect(parseVerdict('{"desfecho":"igual"}')?.comparavel).toBe(true);
     const r = parseVerdict('{"comparavel":false,"motivoNaoComparavel":"teste"}');
