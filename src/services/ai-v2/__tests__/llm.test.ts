@@ -988,3 +988,24 @@ describe("saída ilegível do modelo", () => {
     expect(r.output.handoff).toBe(true);
   });
 });
+
+describe("checagem de nomes inventados", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("título de material que não veio na busca não conta como fonte", async () => {
+    const { knowledgeDocTitlesByIds } = await import("@/services/ai/knowledge-docs");
+    (knowledgeDocTitlesByIds as ReturnType<typeof vi.fn>).mockResolvedValue(["Solicitações Gerais"]);
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      // 1ª chamada: reformulação da busca (sem resultado útil).
+      .mockResolvedValueOnce(makeLLMResponse('{"queries": []}'))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Vá em "Solicitações" e envie.', actions: [] })))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Não tenho o passo a passo de envio de documentos aqui.", actions: [] })));
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"] } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "como envio meus documentos?", stage: "active" });
+    const systems = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].system as string);
+    expect(systems.some((s) => s.includes("# REVISÃO"))).toBe(true);
+    expect(r.output.reply).toBe("Não tenho o passo a passo de envio de documentos aqui.");
+    expect(r.output.handoff).toBe(false);
+  });
+});

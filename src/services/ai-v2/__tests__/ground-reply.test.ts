@@ -11,6 +11,22 @@ describe("unsupportedQuotedTerms", () => {
     expect(unsupportedQuotedTerms("Clique em “Falar com Tutor” na “área do cliente”.", sources)).toEqual([]);
     expect(unsupportedQuotedTerms('Sem aspas e "123" não conta.', sources)).toEqual([]);
   });
+
+  it("aceita o mesmo nome escrito de outro jeito, na mesma linha da fonte", async () => {
+    const { unsupportedQuotedTerms } = await import("../ground-reply");
+    const sources = ["3. Na tela de entrada, clique em Esqueci minha senha\n4. Informe o e-mail"];
+    expect(unsupportedQuotedTerms('Clique em "Esqueci a senha".', sources)).toEqual([]);
+    // Palavras em linhas diferentes não formam um nome.
+    expect(unsupportedQuotedTerms('Clique em "Informe senha".', sources)).toEqual(["Informe senha"]);
+  });
+});
+
+describe("unsupportedHedges", () => {
+  it("palpite sem fonte é apontado; quando a fonte usa a palavra, passa", async () => {
+    const { unsupportedHedges } = await import("../ground-reply");
+    expect(unsupportedHedges('Geralmente é pela opção "Solicitações".', ["1. Acesse a área do cliente"])).toEqual(["geralmente"]);
+    expect(unsupportedHedges("Normalmente sai em 2 dias.", ["O documento normalmente sai em 2 dias úteis."])).toEqual([]);
+  });
 });
 
 describe("unsupportedFigures e isNearDuplicateReply", () => {

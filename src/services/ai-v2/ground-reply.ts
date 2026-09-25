@@ -69,14 +69,51 @@ export function knowledgeQueries(message: string, theme: V2Theme | null): string
  */
 export function unsupportedQuotedTerms(reply: string, sources: string[]): string[] {
   const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
+  const lines = sourceLines(sources);
   const out = new Set<string>();
   for (const m of reply.matchAll(/["“”]([^"“”\n]{2,60})["“”]/g)) {
     const term = m[1].trim();
     const norm = normalize(term).replace(/\s+/g, " ").trim();
     if (!norm || !/[a-z]/.test(norm)) continue;
-    if (!haystack.includes(` ${norm} `)) out.add(term);
+    if (haystack.includes(` ${norm} `)) continue;
+    if (sameLineVariant(norm, lines)) continue;
+    out.add(term);
   }
   return [...out];
+}
+
+const FILLER = new Set(["para", "como", "com", "uma", "que", "sua", "seu", "minha", "meu", "pelo", "pela", "esta", "este", "voce", "aqui"]);
+
+function sourceLines(sources: string[]): string[][] {
+  return sources
+    .flatMap((s) => s.split(/\n+/))
+    .map((line) => normalize(line).split(/\s+/).filter(Boolean))
+    .filter((words) => words.length > 0);
+}
+
+/**
+ * Mesmo nome escrito de outro jeito: todas as palavras principais do termo
+ * (radical de 5 letras) numa mesma linha da fonte. Exigir o texto idêntico
+ * transferia o cliente por "Esqueci a senha" quando o material diz
+ * "Esqueci minha senha".
+ */
+function sameLineVariant(norm: string, lines: string[][]): boolean {
+  const stems = norm.split(" ").filter((w) => w.length >= 4 && !FILLER.has(w)).map((w) => w.slice(0, 5));
+  if (stems.length === 0) return false;
+  return lines.some((words) => stems.every((stem) => words.some((w) => w.startsWith(stem))));
+}
+
+const HEDGES = ["geralmente", "normalmente", "costuma", "costumam", "em geral", "provavelmente", "possivelmente"];
+
+/**
+ * Palpite: "geralmente é pela opção X", "normalmente no valor da
+ * mensalidade". Quando a palavra não vem da fonte, o modelo está
+ * completando o que não sabe.
+ */
+export function unsupportedHedges(reply: string, sources: string[]): string[] {
+  const text = ` ${normalize(reply).replace(/\s+/g, " ")} `;
+  const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
+  return HEDGES.filter((h) => text.includes(` ${h} `) && !haystack.includes(` ${h} `));
 }
 
 /**

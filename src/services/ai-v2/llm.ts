@@ -33,7 +33,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedQuotedTerms } from "./ground-reply";
+import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
 import { traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
@@ -821,7 +821,7 @@ function responseLengthInstruction(length: V2AgentConfig["responseLength"]): str
  * o que fazer sem fonte (transferir, ignorar ou dizer que não tem).
  */
 const SOURCES_GUIDE =
-  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
+  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Não adivinhe com \"geralmente\" ou \"normalmente\": ou a fonte diz, ou você não sabe. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
 
 /** Como uma pessoa da equipe escreve numa conversa. Vale para qualquer produto. */
 const WRITING_GUIDE = [
@@ -1241,8 +1241,27 @@ export async function callV2LLM(args: {
    * pede uma reescrita só com o material. Se ainda inventar, transfere.
    */
   async function checkQuotedTerms(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
-    const sources = [system, userMessage, ...previousMessages.map((m) => m.content), ...knowledgeChunkTexts(r.toolCalls)];
-    const unsupported = [...unsupportedQuotedTerms(r.output.reply, sources).map((t) => `"${t}"`), ...unsupportedFigures(r.output.reply, sources)];
+    // Só o que é fonte de verdade. Com o prompt inteiro (guias, lista de
+    // títulos de todos os materiais) qualquer palavra comum, como
+    // "Documentos" ou "Solicitações", passava como se tivesse fonte.
+    const sources = [
+      userMessage,
+      ...previousMessages.map((m) => m.content),
+      ...prefetch.chunks.flatMap((c) => [c.docTitle, c.content]),
+      ...knowledgeChunkTexts(r.toolCalls),
+      args.themeInstructions ?? "",
+      ...args.config.globalRules,
+      ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
+      ...(args.config.calendar?.events ?? []).map((e) => e.title),
+      ...messageModels.map((m) => m.name),
+      JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
+    ];
+    const unsupportedOf = (reply: string) => [
+      ...unsupportedQuotedTerms(reply, sources).map((t) => `"${t}"`),
+      ...unsupportedFigures(reply, sources),
+      ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
+    ];
+    const unsupported = unsupportedOf(r.output.reply);
     if (unsupported.length === 0) return;
     const list = unsupported.join(", ");
     traceStep("verificação", `Resposta cita ${list}, que não está no material nem na conversa — pedindo reescrita`);
@@ -1270,7 +1289,7 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
-        const still = [...unsupportedQuotedTerms(fixed.reply, sources), ...unsupportedFigures(fixed.reply, sources)];
+        const still = unsupportedOf(fixed.reply);
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
           r.output = fixed;
