@@ -116,6 +116,12 @@ export type EnsureWhatsAppConversationOptions = {
    * A conversa, o `fireTrigger` e a mensagem real do disparo continuam iguais.
    */
   skipActivityLog?: boolean;
+  /**
+   * Não dispara `conversation_created`. Campanha AUTOMATION abre o ticket
+   * só para o template — esse gatilho ligava o inicio-pipe e a distribuição
+   * mesmo sem inbound do aluno.
+   */
+  skipTriggers?: boolean;
 };
 
 /**
@@ -271,14 +277,16 @@ export async function ensureWhatsAppConversationForContact(
     });
   }
 
-  emitConversationCreated({
-    contactId: contact.id,
-    channel: "whatsapp",
-    channelId: defaultChannel.id,
-    conversationId: created.id,
-    source: "auto_ensure",
-    extra: { inboxName: defaultChannel.name, openedWithoutMessage: true },
-  });
+  if (!opts?.skipTriggers) {
+    emitConversationCreated({
+      contactId: contact.id,
+      channel: "whatsapp",
+      channelId: defaultChannel.id,
+      conversationId: created.id,
+      source: "auto_ensure",
+      extra: { inboxName: defaultChannel.name, openedWithoutMessage: true },
+    });
+  }
 
   return {
     status: "created",
