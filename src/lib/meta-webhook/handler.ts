@@ -810,6 +810,80 @@ async function resolveWebhookContact(
 // contatos importados/manuais sem deal passam a ter um ao primeiro
 // inbound.
 
+/**
+ * Resposta a um template de campanha (botão ou citação). Reabre o mesmo
+ * ticket em vez de criar outro — o ticket novo disparava o inicio-pipe
+ * e a distribuição.
+ */
+async function reopenCampaignReplyConversation(
+  contactId: string,
+  replyToWaMessageId: string | null,
+  messageType: string,
+): Promise<{
+  id: string;
+  status: string;
+  channelId: string | null;
+  organizationId: string;
+  assignedToId: string | null;
+} | null> {
+  const select = {
+    id: true,
+    status: true,
+    channelId: true,
+    organizationId: true,
+    assignedToId: true,
+    contactId: true,
+  } as const;
+
+  let conversationId: string | null = null;
+  if (replyToWaMessageId) {
+    const quoted = await prisma.message.findFirst({
+      where: { externalId: replyToWaMessageId, direction: "out" },
+      select: { senderName: true, conversationId: true, conversation: { select } },
+    });
+    if (
+      quoted?.conversation?.contactId === contactId &&
+      /^Campanha:/i.test(quoted.senderName ?? "")
+    ) {
+      conversationId = quoted.conversationId;
+    }
+  }
+  if (!conversationId && messageType === "button") {
+    const latest = await prisma.message.findFirst({
+      where: {
+        direction: "out",
+        senderName: { startsWith: "Campanha:" },
+        conversation: { contactId },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true, conversationId: true },
+    });
+    if (latest && Date.now() - latest.createdAt.getTime() < 7 * 24 * 60 * 60 * 1000) {
+      conversationId = latest.conversationId;
+    }
+  }
+  if (!conversationId) return null;
+
+  const row = await prisma.conversation.findFirst({
+    where: { id: conversationId, contactId },
+    select,
+  });
+  if (!row) return null;
+  if (row.status === "RESOLVED") {
+    await prisma.conversation.update({
+      where: { id: row.id },
+      data: { status: "OPEN", closedAt: null, updatedAt: new Date() },
+    });
+  }
+  return {
+    id: row.id,
+    status: "OPEN",
+    channelId: row.channelId,
+    organizationId: row.organizationId,
+    assignedToId: row.assignedToId,
+  };
+}
+
 async function findOrCreateConversation(
   contactId: string,
   phoneNumberId?: string,
@@ -2853,11 +2927,22 @@ export async function processMetaWebhookPayload(
           } catch (err) {
             log.warn("Falha ao salvar referral de anúncio (não-fatal):", err);
           }
-          const conversation = await findOrCreateConversation(
+          const campaignReply = await reopenCampaignReplyConversation(
             contact.id,
-            phoneNumberId || undefined,
-            { content: parsed.text, messageType: parsed.type },
+            parsed.replyToWaMessageId,
+            parsed.type,
           );
+          const conversation = campaignReply
+            ? {
+                ...campaignReply,
+                deferDistribution: true as const,
+                suppressInboundAutomations: true as const,
+              }
+            : await findOrCreateConversation(
+                contact.id,
+                phoneNumberId || undefined,
+                { content: parsed.text, messageType: parsed.type },
+              );
 
           let mediaUrl = parsed.mediaUrl;
           if (!mediaUrl && parsed.mediaId) {
@@ -3196,6 +3281,9 @@ export async function processMetaWebhookPayload(
               log.debug("Falha ao enviar push (não-fatal):", err),
             );
 
+            if (
+              !("suppressInboundAutomations" in conversation && conversation.suppressInboundAutomations)
+            ) {
             // 1º atendimento IA ANTES do salesbot/INICIO-PIPE (allowlist).
             try {
               await ensureInboundAiAttendance({
@@ -3205,6 +3293,7 @@ export async function processMetaWebhookPayload(
               });
             } catch (err) {
               log.error("Falha no ensureInboundAiAttendance:", err);
+            }
             }
 
             let salesbotReplied = false;
@@ -3229,7 +3318,11 @@ export async function processMetaWebhookPayload(
               log.error("Falha no salesbot:", err);
             }
 
-            const automationOwnsReply = salesbotHandled || salesbotReplied;
+            const automationOwnsReply =
+              salesbotHandled ||
+              salesbotReplied ||
+              ("suppressInboundAutomations" in conversation &&
+                conversation.suppressInboundAutomations);
             if (
               "deferDistribution" in conversation &&
               conversation.deferDistribution &&
