@@ -867,6 +867,15 @@ describe("emojiInstruction", () => {
     expect(emojiInstruction("light")).toContain("1 ou 2 por mensagem");
     expect(emojiInstruction("moderate")).toContain("marcadores de tópicos");
   });
+
+  it("a escolha de emojis chega ao prompt (e não o texto do código)", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    const config = baseConfig({ emojis: "light" } as never);
+    await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oi", stage: "active" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.lastCall![0].system as string;
+    expect(system).toContain("1 ou 2 por mensagem");
+    expect(system).not.toContain("${");
+  });
 });
 
 describe("escopo e repetição", () => {

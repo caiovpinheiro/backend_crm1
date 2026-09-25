@@ -936,7 +936,7 @@ function buildV2SystemPrompt(
   lines.push("# Formato da resposta");
   // Antes pedia "reescreva sem enumerar": o modelo resumia um procedimento
   // de vários passos numa frase e o cliente ficava sem saber o que fazer.
-  lines.push("Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. ${emojiInstruction(config.emojis)} Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.");
+  lines.push(`Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. ${emojiInstruction(config.emojis)} Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.`);
   lines.push("# Saída obrigatória");
   lines.push("Sua resposta final deve ser APENAS um objeto JSON válido no formato abaixo. Não inclua markdown, explicações, saudações ou qualquer texto fora do JSON.");
   lines.push(JSON.stringify({
