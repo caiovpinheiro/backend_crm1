@@ -19,6 +19,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       history?: Array<{ role: "user" | "assistant"; content: string }>;
       contactId?: string;
       stage?: "idle" | "confirming" | "identifying" | "active" | "closed";
+      themeId?: string | null;
     };
     const userMessage = body.userMessage?.trim() ?? "oi";
     const history = Array.isArray(body.history) ? body.history : [];
@@ -37,6 +38,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       contactId,
       undefined,
       stage,
+      typeof body.themeId === "string" ? body.themeId : null,
     );
     return NextResponse.json(result);
   } catch (err) {

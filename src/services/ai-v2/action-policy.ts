@@ -42,3 +42,19 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   if (allowedMessageModelIdsFor(config, theme).length > 0) allowed.add("send_message_model");
   return allowed;
 }
+
+/** Aceita opções como string ou `{ label }` (formato livre do LLM). */
+export function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ label: string }> = [];
+  for (const opt of raw) {
+    const label =
+      typeof opt === "string"
+        ? opt
+        : opt && typeof opt === "object" && typeof (opt as { label?: unknown }).label === "string"
+          ? (opt as { label: string }).label
+          : "";
+    if (label.trim()) out.push({ label: label.trim() });
+  }
+  return out.slice(0, 10);
+}

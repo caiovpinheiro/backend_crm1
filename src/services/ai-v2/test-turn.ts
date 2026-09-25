@@ -1,11 +1,16 @@
 /**
- * Simulação de turno v2 para a aba Testar.
- * Não persiste estado nem executa ações reais.
+ * Simulação de turno v2 para a aba Testar (e o comparador).
+ * Não persiste estado nem executa ações reais, mas decide como a produção:
+ * mesma escolha de assunto, regras terminais, política de ações, guarda de
+ * fonte e o que o cliente receberia ao transferir.
  */
 
-import type { V2Action, V2AgentConfig, V2CRMContext, V2Stage } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Rule, V2Stage } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
-import { selectV2Theme, getV2ThemeById } from "./themes";
+import { getV2ThemeById } from "./themes";
+import { selectV2ThemeSemantic } from "./theme-semantic";
+import { allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
+import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
@@ -125,6 +130,8 @@ export async function simulateV2Turn(
   contactId?: string,
   selectedDealId?: string,
   stage: V2Stage = "active",
+  /** Assunto do turno anterior, para manter o assunto como em produção. */
+  currentThemeId?: string | null,
 ): Promise<V2TestTurnResult> {
   // Garante contexto de tenant para as tools do motor no ambiente de teste.
   if (organizationId && !getRequestContext()) {
@@ -333,26 +340,82 @@ export async function simulateV2Turn(
     context,
   );
   const appliedRuleId = rule?.id ?? null;
+  const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
 
-  // Tema escolhido pela regra ou pelo selector.
+  const quickResult = (partial: Partial<V2TestTurnResult> & { reply: string; reason: string }): V2TestTurnResult => ({
+    userMessage,
+    appliedRuleId,
+    appliedRuleName: rule?.name ?? null,
+    themeId: null,
+    themeName: null,
+    handoff: false,
+    closed: false,
+    toolCalls: [],
+    ragChunks: [],
+    executedActions: [],
+    discardedActions: [],
+    inputTokens: 0,
+    outputTokens: 0,
+    latencyMs: 0,
+    tone: config.tone ?? "",
+    responseLength: config.responseLength ?? "medium",
+    globalRules: config.globalRules,
+    systemPrompt: "",
+    crmContext: context,
+    dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+    stage: "active",
+    ...partial,
+  });
+
+  // Regra com ação terminal: em produção o turno acaba ali, sem modelo.
+  // Antes o teste seguia para o modelo e mostrava outra resposta.
+  const ruleTurn = rule ? simulateTerminalRule(config, rule, vars) : null;
+  if (ruleTurn) {
+    return quickResult({
+      reply: ruleTurn.reply,
+      reason: `Regra "${rule!.name}" respondeu sem chamar o modelo.`,
+      handoff: ruleTurn.handoff,
+      closed: ruleTurn.closed,
+      executedActions: ruleTurn.executed,
+    });
+  }
+
+  // Tema escolhido pela regra ou, como em produção: gatilho > significado >
+  // assunto atual da conversa. Antes o teste usava só gatilhos e não
+  // lembrava o assunto entre mensagens.
   let themeId: string | null = null;
   if (rule?.actions.some((a) => a.type === "set_theme" && a.themeId)) {
     themeId = rule.actions.find((a) => a.type === "set_theme")?.themeId ?? null;
   }
   if (!themeId) {
-    const theme = selectV2Theme(config, userMessage, undefined);
-    themeId = theme?.id ?? null;
+    const selection = await selectV2ThemeSemantic({
+      config,
+      message: userMessage,
+      currentThemeId: currentThemeId ?? undefined,
+      apiKey,
+    });
+    themeId = selection.theme?.id ?? currentThemeId ?? null;
+  }
+  const selectedTheme = getV2ThemeById(config, themeId ?? undefined);
+  if (selectedTheme?.directHandoff) {
+    return quickResult({
+      reply: config.handoff.message,
+      reason: `Assunto "${selectedTheme.name}" vai direto para o destino, sem resposta do agente.`,
+      handoff: true,
+      themeId: selectedTheme.id,
+      themeName: selectedTheme.name,
+    });
   }
 
   let llmResult: Awaited<ReturnType<typeof callV2LLMTest>>;
   try {
-    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId);
+    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId, effectiveStage === "idle" ? "active" : effectiveStage);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[simulateV2Turn] LLM failed:", msg);
     llmResult = {
       output: {
-        reply: config.fallback?.error?.message?.trim() || `Erro ao chamar o modelo: ${msg}`,
+        reply: config.fallback?.error?.message?.trim() || config.handoff.message,
         handoff: true,
         concluded: false,
         confirmed: null,
@@ -373,70 +436,103 @@ export async function simulateV2Turn(
   }
   let output = llmResult.output;
 
-  // Guarda de output: remove campos só "Ler" e URLs não autorizadas.
-  const guard = guardV2Output(output.reply, config.allowedDomains, {
+  // Guarda de fonte, igual à produção: consulta sem resultado e sem dados do
+  // cliente usa a saída configurada; sem ela, transfere.
+  const noClientData = !context.contact && !context.selectedDeal;
+  const emptyQueries = allQueryToolResultsEmpty(llmResult.toolCalls);
+  const governorBlind = llmResult.governorStats?.limitHit && (!llmResult.toolCalls?.length || emptyQueries);
+  if (!output.handoff && !output.concluded && noClientData && (emptyQueries || governorBlind)) {
+    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    output = noSourceMessage
+      ? { ...output, handoff: false, reply: noSourceMessage, reason: "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada" }
+      : { ...output, handoff: true, reply: config.handoff.message, reason: "Consulta sem resultados e sem dados do cliente" };
+  }
+
+  // Aterramento antes da guarda, como em produção: o trecho da base também
+  // passa pelo filtro de domínios e de campos internos.
+  const grounded = await answerFromKnowledge({
+    reply: output.reply,
+    toolCalls: llmResult.toolCalls,
+    config,
+    themeId: themeId ?? undefined,
+    userMessage,
+    agentId,
+  });
+  const guard = guardV2Output(grounded, config.allowedDomains, {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
   });
   output = { ...output, reply: guard.text };
-
-  // Guarda de fonte: se usou tools de consulta, todas voltaram vazias e não tem
-  // dados do cliente, aplica a saída configurada em vez de responder de memória.
-  if (
-    !output.handoff &&
-    !output.concluded &&
-    allQueryToolResultsEmpty(llmResult.toolCalls) &&
-    !context.contact &&
-    !context.selectedDeal
-  ) {
-    const noSourceMessage = config.fallback?.noSource?.message?.trim();
-    output.handoff = false;
-    output.reply = noSourceMessage ?? "Não tenho essa informação nos materiais disponíveis.";
-    output.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
-  }
-
-  output = {
-    ...output,
-    reply: await answerFromKnowledge({
-      reply: output.reply,
-      toolCalls: llmResult.toolCalls,
-      config,
-      themeId: themeId ?? undefined,
-      userMessage,
-      agentId,
-    }),
-  };
+  let handoff = output.handoff || !!guard.forceHandoff;
+  let closed = output.concluded;
 
   // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum casou.
   if (!themeId && output.theme) {
     themeId = output.theme;
   }
 
-  // Filtra ações pela allowlist do tema ativo.
+  // Mesma política de ações da produção (action-policy).
   const activeTheme = getV2ThemeById(config, themeId ?? undefined);
-  const allowedToolSet = new Set([
-    ...(activeTheme?.allowedTools ?? []),
-    "handoff",
-    "close_conversation",
-    "set_theme",
-    "set_variable",
-  ]);
+  const allowedTools = allowedActionTypes(config, activeTheme);
+  const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
   const executedActions: V2TestTurnResult["executedActions"] = [];
   const discardedActions: V2TestTurnResult["discardedActions"] = [];
   for (const action of output.actions) {
-    if (allowedToolSet.has(action.type)) {
+    if (action.type === "handoff") {
+      handoff = true;
+      executedActions.push({ action, label: actionLabel(action.type) });
+      continue;
+    }
+    const modelNotAllowed = action.type === "send_message_model" && !allowedModelIds.includes(String((action as { modelId?: unknown }).modelId ?? ""));
+    if (allowedTools.has(action.type) && !modelNotAllowed) {
       executedActions.push({ action, label: actionLabel(action.type) });
     } else {
       discardedActions.push({
         action,
         label: actionLabel(action.type),
-        reason: activeTheme
-          ? `"${activeTheme.name}" não permite esta ação — libere em Assuntos › ${activeTheme.name} › O que ele pode fazer.`
-          : "Nenhum assunto ativo libera esta ação.",
+        reason: modelNotAllowed
+          ? "Esta mensagem pronta não está liberada para o agente/assunto."
+          : "A configuração do agente não libera esta ação.",
       });
     }
+  }
+  if (output.actions.some((a) => a.type === "close_conversation") && allowedTools.has("close_conversation")) closed = true;
+
+  // Sentimento, igual à produção.
+  if (shouldActOnSentiment(config, detectV2Sentiment(config, userMessage)) && config.sentiment.action === "handoff") {
+    handoff = true;
+  }
+  // Mensagem pronta anunciada e não liberada: produção transfere.
+  if (
+    discardedActions.some((d) => d.action.type === "send_message_model") &&
+    !executedActions.some((e) => e.action.type === "send_message_model")
+  ) {
+    handoff = true;
+  }
+  if (handoff && closed) closed = false;
+
+  // Em produção, ao transferir o cliente recebe a mensagem de transferência,
+  // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
+  let reply = output.reply;
+  if (handoff) {
+    reply = renderMessage(config.handoff.message, vars, defaultFormatter());
+  } else if (closed && config.closure.goodbyeMessage) {
+    reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
+  } else {
+    const askAction = executedActions.find((e) => e.action.type === "ask_with_options");
+    const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
+    if (options.length > 0) {
+      reply = [reply.trim(), options.map((o, i) => `${i + 1}. ${o.label}`).join("\n")].filter(Boolean).join("\n\n");
+    }
+  }
+
+  // Confirmação negativa: produção volta a pedir identificação.
+  let nextStage: V2Stage = "active";
+  if (effectiveStage === "confirming" && output.confirmed === false && !handoff) {
+    reply = renderMessage(config.entry.identificationMessage ?? "Entendi. Vou precisar confirmar seus dados. Qual o e-mail ou CPF?", vars, defaultFormatter());
+    nextStage = "identifying";
   }
 
   // Extrai chunks do RAG dos toolCalls.
@@ -461,10 +557,10 @@ export async function simulateV2Turn(
     appliedRuleName: rule?.name ?? null,
     themeId,
     themeName: activeTheme?.name ?? null,
-    reply: output.reply,
+    reply,
     reason: output.reason,
-    handoff: output.handoff,
-    closed: output.concluded,
+    handoff,
+    closed,
     toolCalls: llmResult.toolCalls ?? [],
     ragChunks,
     executedActions,
@@ -480,6 +576,41 @@ export async function simulateV2Turn(
     crmContext: context,
     dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
     scrubbedFields: guard.scrubbedFields,
-    stage: "active",
+    stage: nextStage,
   };
+}
+
+/**
+ * Ações terminais da regra, simuladas. Como em produção, só encerram o
+ * turno quando dariam certo: ação salva sem o parâmetro segue para o modelo.
+ */
+function simulateTerminalRule(
+  config: V2AgentConfig,
+  rule: V2Rule,
+  vars: Record<string, unknown>,
+): { reply: string; handoff: boolean; closed: boolean; executed: V2TestTurnResult["executedActions"] } | null {
+  const executed: V2TestTurnResult["executedActions"] = [];
+  const replies: string[] = [];
+  let handoff = false;
+  let closed = false;
+  let terminal = false;
+  for (const a of rule.actions) {
+    const action = a as unknown as V2Action;
+    if (a.type === "send_message" && a.message?.trim()) {
+      replies.push(renderMessage(a.message, vars, defaultFormatter()));
+    } else if ((a.type === "send_message_model" || a.type === "send_whatsapp_template") && a.modelId) {
+      replies.push(`(${actionLabel(a.type)}: ${a.modelId})`);
+    } else if (a.type === "handoff") {
+      handoff = true;
+    } else if (a.type === "close_conversation") {
+      closed = true;
+    } else if (a.type !== "no_reply") {
+      continue;
+    }
+    terminal = true;
+    executed.push({ action, label: actionLabel(a.type) });
+  }
+  if (!terminal) return null;
+  if (handoff && replies.length === 0) replies.push(renderMessage(config.handoff.message, vars, defaultFormatter()));
+  return { reply: replies.join("\n\n"), handoff, closed: closed && !handoff, executed };
 }

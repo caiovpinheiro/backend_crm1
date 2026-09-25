@@ -679,6 +679,7 @@ export async function callV2LLMTest(
   previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
   context?: V2CRMContext,
   themeId?: string | null,
+  stage = "active",
 ): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -701,7 +702,7 @@ export async function callV2LLMTest(
     config,
     context: ctx,
     userMessage,
-    stage: "active",
+    stage,
     themeId: theme?.id,
     themeInstructions: theme
       ? themePromptText(theme)

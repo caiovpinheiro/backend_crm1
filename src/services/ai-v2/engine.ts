@@ -22,7 +22,7 @@ import { enrichTurnWithMedia } from "./media-turn";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { allowedActionTypes, allowedMessageModelIdsFor } from "./action-policy";
+import { allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -198,28 +198,12 @@ function mergeCollectedVariables(
   return { ...existing, ...collected };
 }
 
-/** Aceita opções como string ou `{ label }` (formato livre do LLM). */
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
 function stopWarning(config: V2AgentConfig, reason: string): string {
   if (reason === "loop detectado") {
     return "Recebi a mesma mensagem algumas vezes. Se precisar de algo diferente, me conta com outras palavras.";
   }
   return config.scope?.message || "Aqui eu só consigo ajudar com o atendimento. Quando precisar de algo sobre isso, é só me chamar.";
-}
-
-function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string }> {
-  if (!Array.isArray(raw)) return [];
-  const out: Array<{ label: string }> = [];
-  for (const opt of raw) {
-    const label =
-      typeof opt === "string"
-        ? opt
-        : opt && typeof opt === "object" && typeof (opt as { label?: unknown }).label === "string"
-          ? (opt as { label: string }).label
-          : "";
-    if (label.trim()) out.push({ label: label.trim() });
-  }
-  return out.slice(0, 10);
 }
 
 /** Uma linha para o rastro: o que o modelo consultou e o que voltou. */

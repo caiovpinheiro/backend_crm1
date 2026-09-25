@@ -16,6 +16,11 @@ vi.mock("../llm", () => ({
   callV2LLMTest: mocks.callV2LLMTest,
 }));
 
+// Sem rede: embedding falha e a escolha de assunto cai em gatilho/atual.
+vi.mock("@/services/ai/provider", () => ({
+  embedTexts: vi.fn().mockRejectedValue(new Error("sem rede no teste")),
+}));
+
 vi.mock("../context", () => ({
   loadV2Context: mocks.loadV2Context,
   buildAskDealMessage: mocks.buildAskDealMessage,
@@ -339,5 +344,63 @@ describe("simulateV2Turn", () => {
     expect(result.ragChunks.length).toBe(1);
     expect(result.ragChunks[0].docTitle).toBe("Cancelamento");
     expect(result.toolCalls[0].toolName).toBe("knowledge_search");
+  });
+});
+
+describe("simulateV2Turn — igual à produção", () => {
+  const llm = (over: Record<string, unknown> = {}) => ({
+    output: { reply: "Resposta do modelo.", confirmed: null, handoff: false, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "ok", actions: [], ...over },
+    inputTokens: 1, outputTokens: 1, latencyMs: 1, toolCalls: [], systemPrompt: "",
+  });
+  const history = [{ role: "user" as const, content: "oi" }, { role: "assistant" as const, content: "Olá!" }];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.loadV2Context.mockResolvedValue({ contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } });
+  });
+
+  it("regra com ação terminal responde sem chamar o modelo", async () => {
+    const cfg = baseConfig({ rules: [{ id: "r", name: "Fixa", order: 0, conditions: [{ type: "keywords", values: ["horário"] }], actions: [{ type: "send_message", message: "Atendemos das 8h às 18h." }] }] } as never);
+    const { simulateV2Turn } = await import("../test-turn");
+    const r = await simulateV2Turn("agent-1", cfg, "qual o horário?", history);
+    expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
+    expect(r.reply).toBe("Atendemos das 8h às 18h.");
+  });
+
+  it("regra com mensagem vazia segue para o modelo", async () => {
+    mocks.callV2LLMTest.mockResolvedValue(llm());
+    const cfg = baseConfig({ rules: [{ id: "r", name: "Vazia", order: 0, conditions: [{ type: "keywords", values: ["horário"] }], actions: [{ type: "send_message", message: "" }] }] } as never);
+    const { simulateV2Turn } = await import("../test-turn");
+    const r = await simulateV2Turn("agent-1", cfg, "qual o horário?", history);
+    expect(r.reply).toBe("Resposta do modelo.");
+  });
+
+  it("ao transferir mostra a mensagem de transferência, como o cliente receberia", async () => {
+    mocks.callV2LLMTest.mockResolvedValue(llm({ handoff: true, reply: "Texto que não seria enviado." }));
+    const { simulateV2Turn } = await import("../test-turn");
+    const r = await simulateV2Turn("agent-1", baseConfig(), "quero falar com alguém", history);
+    expect(r.handoff).toBe(true);
+    expect(r.reply).toBe("Vou transferir.");
+  });
+
+  it("assunto criado sem lista de ações não bloqueia as ações liberadas no agente", async () => {
+    mocks.callV2LLMTest.mockResolvedValue(llm({ reply: "Qual opção?", actions: [{ type: "ask_with_options", options: ["Boleto", "Cartão"] }] }));
+    const cfg = baseConfig({
+      enabledTools: ["ask_with_options"],
+      themes: [{ id: "pag", name: "Pagamento", when: ["pagamento"], examples: [], instructions: "", allowedTools: [] }],
+    } as never);
+    const { simulateV2Turn } = await import("../test-turn");
+    const r = await simulateV2Turn("agent-1", cfg, "dúvida sobre pagamento", history);
+    expect(r.discardedActions).toHaveLength(0);
+    expect(r.reply).toBe(["Qual opção?", "1. Boleto\n2. Cartão"].join("\n\n"));
+  });
+
+  it("mantém o assunto da mensagem anterior", async () => {
+    mocks.callV2LLMTest.mockResolvedValue(llm());
+    const cfg = baseConfig({ themes: [{ id: "pag", name: "Pagamento", when: ["pagamento"], examples: [], instructions: "", allowedTools: [] }] } as never);
+    const { simulateV2Turn } = await import("../test-turn");
+    const r = await simulateV2Turn("agent-1", cfg, "e agora?", history, undefined, undefined, undefined, "active", "pag");
+    expect(r.themeId).toBe("pag");
   });
 });
