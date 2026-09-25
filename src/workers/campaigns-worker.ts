@@ -1021,13 +1021,11 @@ async function persistCampaignOutboundMessage(input: {
   }
 
   const ensured = await ensureWhatsAppConversationForContact(input.contactId, {
-    // Campanha TEMPLATE/TEXT: ticket novo só pra histórico do disparo — sem
-    // herdar dono (Entrada). Auto-resolve abaixo fecha o ticket em seguida.
     inheritAssignee: false,
-    // Mesma razão do "NÃO publicar SSE" no fim desta função: o
-    // CONVERSATION_CREATED espelhava uma bolha "Conversa #N aberta" (4 queries
-    // + 1 Message) e um publish Redis por destinatário.
     skipActivityLog: true,
+    // O disparo não é um aluno chamando. Sem isso o inicio-pipe entra
+    // no ticket da campanha.
+    skipTriggers: true,
   });
   if (
     ensured.status === "skipped_contact_missing" ||
