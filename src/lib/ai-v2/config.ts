@@ -15,10 +15,20 @@ import type {
   V2SurveyType,
 } from "./types";
 
+/**
+ * Texto que a tela grava vazio ("") quando a pessoa apaga o campo. Vazio
+ * vale como "não preenchido": sem isto, `mensagem ?? padrão` mandava
+ * mensagem em branco e o cliente era transferido ou questionado sem texto.
+ */
+const optionalText = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+  z.string().optional(),
+);
+
 const destinationSchema = z.object({
   type: z.enum(["department", "distribution_rule", "user", "ai_agent", "automation"]),
   id: z.string().optional(),
-  message: z.string().optional(),
+  message: optionalText,
 });
 
 const productPolicySchema = z.object({
@@ -63,6 +73,8 @@ const themeSchema = z.object({
     actions: [],
   } as any),
   handoffDestination: destinationSchema.optional(),
+  // A tela tinha o botão, mas o schema descartava o valor ao salvar.
+  directHandoff: z.boolean().optional().default(false),
   tabulationId: z.string().optional(),
   maxTurns: z.number().int().min(0).optional(),
   answerBy: z.enum(["self"]).or(z.string()).optional().default("self"),
@@ -100,7 +112,7 @@ const ruleActionSchema = z.object({
     "set_variable",
     "record_knowledge_gap",
   ]),
-  message: z.string().optional(),
+  message: optionalText,
   themeId: z.string().optional(),
   destination: destinationSchema.optional(),
   tag: z.string().optional(),
@@ -114,23 +126,26 @@ const ruleSchema = z.object({
   id: z.string(),
   name: z.string(),
   order: z.number().int().min(0).optional().default(0),
+  // A tela liga/desliga a regra; sem o campo no schema o valor sumia ao
+  // salvar e a regra desligada continuava rodando.
+  enabled: z.boolean().optional().default(true),
   conditions: z.array(ruleConditionSchema).optional().default([]),
   actions: z.array(ruleActionSchema).optional().default([]),
 });
 
 const fallbackSchema = z.object({
   unknown: z.object({
-    message: z.string().optional(),
+    message: optionalText,
     action: z.enum(["handoff", "silence"]).optional(),
     retries: z.number().int().min(0).optional(),
   }).optional(),
-  humanRequest: z.object({ message: z.string().optional() }).optional(),
-  noSource: z.object({ message: z.string().optional() }).optional(),
-  error: z.object({ message: z.string().optional() }).optional(),
+  humanRequest: z.object({ message: optionalText }).optional(),
+  noSource: z.object({ message: optionalText }).optional(),
+  error: z.object({ message: optionalText }).optional(),
 }).optional();
 
 const scopeSchema = z.object({
-  message: z.string().optional(),
+  message: optionalText,
   onInsist: z.enum(["handoff", "close"]).optional(),
   forbidden: z.array(z.object({
     subject: z.string(),
@@ -141,7 +156,7 @@ const scopeSchema = z.object({
 const inactivitySchema = z.object({
   enabled: z.boolean().optional().default(false),
   nudgeAfter: z.number().int().min(0).optional().default(30),
-  nudgeMessage: z.string().optional(),
+  nudgeMessage: optionalText,
   closeAfter: z.number().int().min(0).optional().default(1440),
 }).optional();
 
@@ -156,9 +171,9 @@ const tabulationSchema = z.object({
 
 const entryConfigSchema = z.object({
   openingEnabled: z.boolean().optional().default(true),
-  openingMessage: z.string().optional(),
-  confirmationMessage: z.string().optional(),
-  identificationMessage: z.string().optional(),
+  openingMessage: optionalText,
+  confirmationMessage: optionalText,
+  identificationMessage: optionalText,
   onDealNotFound: z.enum(["ask_identification", "create_deal", "handoff"]).optional().default("ask_identification"),
   confirmContact: z.boolean().optional().default(true),
   confirmationFields: z.array(z.string()).optional().default([]),
@@ -172,7 +187,7 @@ const closureConfigSchema = z.object({
   courtesyBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("no_reply"),
   newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("reopen_and_route"),
   ambiguousBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("ask_with_options"),
-  goodbyeMessage: z.string().optional(),
+  goodbyeMessage: optionalText,
   returnToOriginStage: z.boolean().optional().default(true),
   nextAutomationStepId: z.string().optional(),
   fieldUpdates: z
@@ -196,9 +211,9 @@ const limitsConfigSchema = z.object({
 
 const mediaKindConfigSchema = z.object({
   action: z.enum(["transcribe", "ask_text", "handoff", "describe"]),
-  askTextMessage: z.string().optional(),
-  handoffMessage: z.string().optional(),
-  notUnderstoodMessage: z.string().optional(),
+  askTextMessage: optionalText,
+  handoffMessage: optionalText,
+  notUnderstoodMessage: optionalText,
 });
 
 const mediaConfigSchema = z.object({
@@ -230,7 +245,7 @@ const onboardingStepSchema = z.object({
   id: z.string(),
   name: z.string(),
   goal: z.string(),
-  openingMessage: z.string().optional(),
+  openingMessage: optionalText,
   collectFields: z.array(z.string()).optional().default([]),
   completionCriteria: z.object({
     type: z.enum(["field_filled", "client_reply", "stage", "action"]),
@@ -279,7 +294,7 @@ export const v2AgentConfigSchema = z.object({
   rules: z.array(ruleSchema).optional().default([]),
   handoff: z.object({
     defaultDestination: destinationSchema,
-    message: z.string().optional().default("Vou transferir para um atendente."),
+    message: optionalText.default("Vou transferir para um atendente."),
     humanRequestKeywords: z.array(z.string()).optional().default(["humano", "pessoa", "atendente", "consultor"]),
   }).optional().default({
     defaultDestination: { type: "department" } as V2Destination,
@@ -355,7 +370,7 @@ export const v2AgentConfigSchema = z.object({
         )
         .optional()
         .default([]),
-      offHoursMessage: z.string().optional(),
+      offHoursMessage: optionalText,
       outsideAction: z.enum(["message", "handoff", "silence"]).optional().default("message"),
     })
     .optional()

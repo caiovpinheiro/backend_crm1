@@ -966,3 +966,25 @@ describe("themePromptText", () => {
     expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search"] })).toBe("Ajude.");
   });
 });
+
+describe("saída ilegível do modelo", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("tenta de novo antes de transferir", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse('{"reply": "Oi, tudo'))
+      .mockResolvedValueOnce(makeLLMResponse('{"reply": "Oi, tudo'))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Oi! Como posso ajudar?", actions: [] })));
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oie", stage: "active" });
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toBe("Oi! Como posso ajudar?");
+  });
+
+  it("se a segunda também vier ilegível, cai no fallback", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse('{"reply": "Oi, tudo'));
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "oie", stage: "active" });
+    expect(r.output.handoff).toBe(true);
+  });
+});

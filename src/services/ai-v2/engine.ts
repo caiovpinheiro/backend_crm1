@@ -22,6 +22,7 @@ import { enrichTurnWithMedia } from "./media-turn";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
+import { allowedActionTypes, allowedMessageModelIdsFor } from "./action-policy";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -197,17 +198,15 @@ function mergeCollectedVariables(
   return { ...existing, ...collected };
 }
 
-/**
- * Modelos de mensagem liberados no turno. A tela grava os do assunto em
- * `allowedMessageModelIds`; `messageModelIds` é o nome legado.
- */
-function allowedMessageModelIdsFor(config: V2AgentConfig, theme: ReturnType<typeof getV2ThemeById>): string[] {
-  if (theme?.allowedMessageModelIds?.length) return theme.allowedMessageModelIds;
-  if (theme?.messageModelIds?.length) return theme.messageModelIds;
-  return config.allowedMessageModelIds ?? [];
+/** Aceita opções como string ou `{ label }` (formato livre do LLM). */
+/** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
+function stopWarning(config: V2AgentConfig, reason: string): string {
+  if (reason === "loop detectado") {
+    return "Recebi a mesma mensagem algumas vezes. Se precisar de algo diferente, me conta com outras palavras.";
+  }
+  return config.scope?.message || "Aqui eu só consigo ajudar com o atendimento. Quando precisar de algo sobre isso, é só me chamar.";
 }
 
-/** Aceita opções como string ou `{ label }` (formato livre do LLM). */
 function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string }> {
   if (!Array.isArray(raw)) return [];
   const out: Array<{ label: string }> = [];
@@ -855,7 +854,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
 
     const terminalTypes = new Set(["handoff", "close_conversation", "no_reply", "send_message", "send_message_model", "send_whatsapp_template"]);
-    const isTerminal = ruleActions.some((a) => terminalTypes.has(a.type as string));
+    // Só encerra o turno a ação terminal que deu certo. Uma ação salva sem
+    // parâmetro (mensagem vazia, modelo não escolhido) falhava e o cliente
+    // ficava sem resposta; agora o turno segue para o agente.
+    const isTerminal = executedActions.some((r) => r.ok && terminalTypes.has(r.action.type as string));
+    const failedTerminal = executedActions.filter((r) => !r.ok && terminalTypes.has(r.action.type as string));
+    if (failedTerminal.length > 0) {
+      traceStep("regra", `Ação da regra falhou (${failedTerminal.map((r) => `${r.action.type}${r.error ? `: ${r.error}` : ""}`).join("; ")}) → segue para o agente`);
+    }
 
     // Logs e saída
     await logV2Turn({
@@ -1108,14 +1114,31 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         }`
       : `Nenhum assunto${selection.similarity !== undefined ? ` (mais próximo teve similaridade ${selection.similarity.toFixed(2)}, abaixo do mínimo)` : ""}`,
       { method: selection.method, themeId: selection.theme?.id ?? null });
-    const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
-    llmOutput = llmResult.llmOutput;
-    prompt = llmResult.prompt;
-    inputTokens = llmResult.inputTokens;
-    outputTokens = llmResult.outputTokens;
-    latencyMs = llmResult.latencyMs;
-    toolCalls = llmResult.toolCalls;
-    governorStats = llmResult.governorStats;
+    if (selection.theme?.directHandoff) {
+      // "Passar direto para o destino sem responder": transfere para o
+      // destino do assunto sem chamar o modelo.
+      traceStep("assunto", `"${selection.theme.name}" vai direto para o destino, sem resposta do agente`);
+      llmOutput = {
+        reply: "",
+        handoff: true,
+        concluded: false,
+        confirmed: null,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Assunto com transferência direta.",
+        actions: [],
+      };
+    } else {
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
+      llmOutput = llmResult.llmOutput;
+      prompt = llmResult.prompt;
+      inputTokens = llmResult.inputTokens;
+      outputTokens = llmResult.outputTokens;
+      latencyMs = llmResult.latencyMs;
+      toolCalls = llmResult.toolCalls;
+      governorStats = llmResult.governorStats;
+    }
   }
 
   // Guarda: se usou tools de consulta, todas voltaram vazias e não tem dados do
@@ -1180,7 +1203,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   if (!llmOutput) {
-    const fallback = config.handoff.message;
+    // "Erro técnico" configurado na tela só valia no modo de teste.
+    const fallback = config.fallback?.error?.message || config.handoff.message;
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters);
     return { handoff: true, closed: false, sentReply: fallback };
   }
@@ -1193,15 +1217,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // `messageModel` do próprio LLM era descartado sem aviso).
   const activeTheme = getV2ThemeById(config, themeId);
   const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
-  const allowedTools = new Set<string>([
-    ...(activeTheme ? activeTheme.allowedTools : (config.enabledTools ?? [])),
-    "close_conversation",
-    "set_theme",
-    "set_variable",
-  ]);
-  // A lista de mensagens prontas liberadas é a permissão: com ela, enviar
-  // uma mensagem pronta vale mesmo que o assunto não liste a ação.
-  if (allowedModelIds.length > 0) allowedTools.add("send_message_model");
+  const allowedTools = allowedActionTypes(config, activeTheme);
 
   // Handoff não passa pelo executor: vira sinal e roda uma vez só, depois
   // do aviso ao cliente (ver `performHandoff`).
@@ -1235,8 +1251,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Sentimento
   const sentiment = detectV2Sentiment(config, input.userMessage);
   if (shouldActOnSentiment(config, sentiment)) {
-    wantsHandoff = true;
-    traceStep("sentimento", `Cliente classificado como "${sentiment}" → transferência`);
+    // "Notificar e continuar" e "Apenas registrar" também transferiam.
+    if (config.sentiment.action === "handoff") {
+      wantsHandoff = true;
+      traceStep("sentimento", `Cliente classificado como "${sentiment}" → transferência`);
+    } else {
+      traceStep("sentimento", `Cliente classificado como "${sentiment}" → registrado, atendimento continua`);
+    }
   }
 
   // Mensagens sem sentido/fora de escopo seguidas (limite `nonsenseLimit`).
@@ -1316,7 +1337,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const stopLimits = stop.blocksReply ? stop : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
   if (stopLimits.blocksReply) {
     if (stopLimits !== stop) traceStep("limites", `Limite de parada atingido: ${stopLimits.reason} → ${stopLimits.action}`);
-    replyText = "";
+    replyText = stopLimits.warn ? stopWarning(config, stopLimits.reason) : "";
+    if (stopLimits.warn) traceStep("limites", "Aviso enviado; nas próximas mensagens iguais o agente fica em silêncio");
     if (stopLimits.action === "handoff") {
       anyHandoff = true;
       llmOutput.handoff = true;
@@ -1324,6 +1346,25 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       anyClose = true;
       llmOutput.concluded = true;
     }
+  }
+
+  // Transferir e encerrar no mesmo turno: encerrar vencia, a transferência
+  // não acontecia e o cliente ficava sem resposta e sem atendente.
+  if (anyHandoff && anyClose) {
+    traceStep("encerramento", "Transferência e encerramento no mesmo turno → transfere");
+    anyClose = false;
+    llmOutput.concluded = false;
+  }
+
+  // Mensagem pronta pedida e descartada: a reply seria só a introdução
+  // ("segue o material") e nada chegaria. Uma pessoa envia.
+  if (
+    !anyHandoff &&
+    discardedActions.some((a) => a.type === "send_message_model") &&
+    !allowedActions.some((a) => a.type === "send_message_model")
+  ) {
+    traceStep("ações", "Mensagem pronta pedida não está liberada → transferência para enviar o material");
+    anyHandoff = true;
   }
 
   // Envia reply se houver e não for handoff/close
@@ -1340,6 +1381,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`)
       .join(", "));
     executedActions = [...executedActions, ...outRes.results];
+    // A reply já anunciou o material; se ele não saiu, uma pessoa envia.
+    if (outRes.results.some((r) => !r.ok && r.action.type === "send_message_model")) {
+      traceStep("ações", "A mensagem pronta anunciada não foi enviada → transferência");
+      anyHandoff = true;
+      anyClose = false;
+    }
   }
 
   // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >

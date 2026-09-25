@@ -82,6 +82,11 @@ export interface V2StopResult {
   blocksReply: boolean;
   action: V2StopAction;
   reason: string;
+  /**
+   * "Avisar e silenciar": no turno em que o limite é atingido o cliente
+   * recebe um aviso; nos seguintes, silêncio. Antes só silenciava.
+   */
+  warn?: boolean;
 }
 
 export function evaluateV2StopLimits(
@@ -99,6 +104,7 @@ export function evaluateV2StopLimits(
       blocksReply: true,
       action: config.limits.nonsenseAction === "handoff" ? "handoff" : "silence",
       reason: "loop detectado",
+      warn: config.limits.nonsenseAction !== "handoff" && counters.loopCount === config.limits.maxLoopCount,
     };
   }
   if (shouldStopCourtesy(config, counters)) {
@@ -112,6 +118,7 @@ export function evaluateV2StopLimits(
       blocksReply: true,
       action: config.limits.nonsenseAction === "handoff" ? "handoff" : "silence",
       reason: "limite de mensagens sem sentido",
+      warn: config.limits.nonsenseAction !== "handoff" && counters.nonsenseMessages === config.limits.nonsenseLimit,
     };
   }
   if (shouldStopStalled(config, counters)) {

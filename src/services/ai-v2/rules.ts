@@ -136,7 +136,7 @@ export function evaluateV2Rules(
   input: V2RuleEvaluationInput,
   context: V2CRMContext,
 ): V2Rule | null {
-  const sorted = [...config.rules].sort((a, b) => a.order - b.order);
+  const sorted = config.rules.filter((r) => r.enabled !== false).sort((a, b) => a.order - b.order);
   for (const rule of sorted) {
     if (evaluateRule(rule, input, context)) return rule;
   }

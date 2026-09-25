@@ -40,6 +40,7 @@ import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
+import { allowedMessageModelIdsFor, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -287,16 +288,12 @@ export function buildV2ToolSet(args: {
   restoreInput?: (input: unknown) => unknown;
 }): { tools: ToolSet; governor: ToolCallGovernor } {
   const theme = activeTheme(args.config, args.themeId);
-  const themeToolIds = theme?.allowedTools ? new Set(theme.allowedTools) : null;
+  const themeToolIds = themeToolRestriction(theme);
   const allowedDocIds = knowledgeDocIdsFor(args.config, theme);
   // A tela grava os modelos do assunto em `allowedMessageModelIds`;
   // `messageModelIds` é o nome legado. Lendo só o legado a restrição do
   // assunto era ignorada e valia a lista global.
-  const allowedModelIds = theme?.allowedMessageModelIds && theme.allowedMessageModelIds.length > 0
-    ? theme.allowedMessageModelIds
-    : theme?.messageModelIds && theme.messageModelIds.length > 0
-      ? theme.messageModelIds
-      : args.config.allowedMessageModelIds;
+  const allowedModelIds = allowedMessageModelIdsFor(args.config, theme);
 
   const enabledToolNames = new Set(args.config.enabledTools ?? []);
 
@@ -566,6 +563,8 @@ function extractFirstJSONObject(text: string): string | undefined {
   return undefined;
 }
 
+const MALFORMED_REASON = "LLM não retornou JSON válido — fallback de erro aplicado.";
+
 function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
   const fallback = config.fallback?.error?.message ?? config.fallback?.noSource?.message;
   const reply = fallback || "Não consegui processar sua mensagem. Vou transferir para um atendente.";
@@ -578,7 +577,7 @@ function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLM
     outOfScope: false,
     sentiment: "neutral",
     collected: {},
-    reason: "LLM não retornou JSON válido — fallback de erro aplicado.",
+    reason: MALFORMED_REASON,
     actions: [{ type: "handoff" }],
   };
 }
@@ -1048,11 +1047,7 @@ export async function callV2LLM(args: {
   }
 
   // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
-  const modelIds = (promptTheme?.allowedMessageModelIds?.length
-    ? promptTheme.allowedMessageModelIds
-    : promptTheme?.messageModelIds?.length
-      ? promptTheme.messageModelIds
-      : args.config.allowedMessageModelIds) ?? [];
+  const modelIds = allowedMessageModelIdsFor(args.config, promptTheme);
   const messageModels = await describeV2MessageModels(modelIds).catch((err) => {
     console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
     return [] as V2MessageModelSummary[];
@@ -1339,6 +1334,12 @@ export async function callV2LLM(args: {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await attempt();
+      // Saída ilegível virava transferência na primeira vez (um "oi" chegou
+      // a transferir). Tenta de novo antes de cair no fallback.
+      if (r.output.reason === MALFORMED_REASON && i === 0) {
+        traceStep("verificação", "O modelo devolveu um formato ilegível — tentando de novo");
+        continue;
+      }
       await checkQuotedTerms(r);
       await avoidRepeat(r);
       if (vault.size > 0) {

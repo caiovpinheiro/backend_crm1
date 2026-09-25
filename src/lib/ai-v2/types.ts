@@ -119,6 +119,8 @@ export interface V2Theme {
   productPolicy: V2ProductPolicy;
   /** Destino de handoff padrão deste tema. */
   handoffDestination?: V2Destination;
+  /** Assunto que vai direto para o destino, sem resposta do agente. */
+  directHandoff?: boolean;
   /** Tabulação sugerida ao encerrar/transferir por este tema. */
   tabulationId?: string;
   /** Máximo de turnos neste tema antes de handoff (0 = sem limite). */
@@ -184,6 +186,8 @@ export interface V2Rule {
   name: string;
   /** Ordem de avaliação. */
   order: number;
+  /** Desligada na tela: não é avaliada. Ausente = ligada. */
+  enabled?: boolean;
   conditions: V2RuleCondition[];
   actions: V2RuleAction[];
 }

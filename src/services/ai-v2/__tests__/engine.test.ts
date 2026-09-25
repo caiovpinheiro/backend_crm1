@@ -574,6 +574,9 @@ describe("processV2Turn", () => {
     // campos configurados (sem tags); as tags ficam no `contactRaw`.
     mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
     mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false,
+    }));
 
     const { processV2Turn } = await import("../engine");
     await processV2Turn({
@@ -583,6 +586,39 @@ describe("processV2Turn", () => {
     });
 
     expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("ação terminal da regra que falha (sem parâmetro) segue para o agente", async () => {
+    const config = baseConfig({
+      rules: [{ id: "r1", name: "Sem texto", order: 1, conditions: [{ type: "contact_tag", values: ["VIP"] }], actions: [{ type: "send_message" }] } as any],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: false, error: "Missing message" })), anyHandoff: false, anyClose: false,
+    }));
+    mocks.callLLM.mockResolvedValue(llmOut());
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Oi" });
+
+    expect(mocks.callLLM).toHaveBeenCalled();
+  });
+
+  it("regra desligada não é avaliada", async () => {
+    const config = baseConfig({
+      rules: [{ id: "r1", name: "Off", order: 1, enabled: false, conditions: [{ type: "contact_tag", values: ["VIP"] }], actions: [{ type: "send_message", message: "x" }] } as any],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue(llmOut());
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Oi" });
+
+    expect(mocks.callLLM).toHaveBeenCalled();
   });
 
   it("excedido limite de transferências IA força handoff para destino padrão", async () => {
@@ -1173,5 +1209,59 @@ describe("processV2Turn — correções do motor", () => {
       { role: "assistant", content: "Como posso ajudar?" },
     ]);
   });
-});
 
+  const sentTexts = () => mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
+
+  it("sentimento com \"apenas registrar\" não transfere", async () => {
+    const config = baseConfig({ sentiment: { enabled: true, threshold: "any", action: "log_only" } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut());
+    await run("isso está péssimo");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Resposta do agente.");
+  });
+
+  it("transferir e encerrar no mesmo turno: transfere", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, concluded: true }));
+    await run("quero falar com alguém");
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("assunto com transferência direta não chama o modelo", async () => {
+    const config = baseConfig({
+      themes: [{ id: "fin", name: "Financeiro", when: ["segunda via"], examples: [], instructions: "", allowedTools: [], directHandoff: true }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    await run("preciso da segunda via");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("avisar e silenciar: no limite o cliente recebe o aviso", async () => {
+    const config = baseConfig({ limits: { ...baseConfig().limits, nonsenseLimit: 1, nonsenseAction: "warn_and_silence" } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ outOfScope: true, reply: "Isso não é comigo." }));
+    await run("quanto é 2+2");
+    expect(sentTexts().some((t) => t.includes("só consigo ajudar com o atendimento"))).toBe(true);
+    expect(sentTexts()).not.toContain("Isso não é comigo.");
+  });
+
+  it("mensagem pronta pedida e não liberada: transfere em vez de anunciar o que não vai chegar", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-ok"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Segue o material:", actions: [{ type: "send_message_model", modelId: "mm-inventado" }] as any }));
+    await run("me manda o material");
+    expect(sentTexts()).not.toContain("Segue o material:");
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("erro do modelo usa a mensagem de erro técnico configurada", async () => {
+    const config = baseConfig({ fallback: { error: { message: "Tive um problema técnico, já chamo alguém." } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockRejectedValue(new Error("timeout"));
+    await run("oi");
+    expect(sentTexts()).toContain("Tive um problema técnico, já chamo alguém.");
+  });
+});
