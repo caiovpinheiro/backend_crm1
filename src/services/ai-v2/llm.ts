@@ -40,7 +40,7 @@ import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
-import { allowedMessageModelIdsFor, themeToolRestriction } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -320,9 +320,13 @@ export function buildV2ToolSet(args: {
   });
   const governor = new ToolCallGovernor(limits);
 
+  // Só as consultas de cada lista contam aqui: liberar uma ação (etiqueta,
+  // tarefa) não pode desligar a busca nos materiais.
+  const themeQueries = queryToolRestriction(themeToolIds);
+  const globalQueries = queryToolRestriction(enabledToolNames);
   function isToolAllowed(toolName: string): boolean {
-    if (themeToolIds) return themeToolIds.has(toolName);
-    if (enabledToolNames.size > 0) return enabledToolNames.has(toolName);
+    if (themeQueries) return themeQueries.has(toolName);
+    if (globalQueries) return globalQueries.has(toolName);
     return defaultToolNames.has(toolName);
   }
 
@@ -852,6 +856,7 @@ function buildV2SystemPrompt(
   prefetchedChunks: PrefetchedChunk[] = [],
   messageModels: V2MessageModelSummary[] = [],
   mediaNote = "",
+  actionStages: Array<{ id: string; name: string }> = [],
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -964,6 +969,12 @@ function buildV2SystemPrompt(
     }
   }
 
+  const actions = actionsGuide(allowedActionTypes(config, activeTheme(config, themeId)), {
+    tags: config.actionOptions?.tags ?? [],
+    stages: actionStages,
+  });
+  if (actions) lines.push(actions);
+
   lines.push("# Saída");
   lines.push("Responda só com um objeto JSON válido neste formato, sem texto fora dele:");
   // Sem placeholders: o modelo copiava "id do tema (opcional)" e
@@ -992,6 +1003,24 @@ function buildV2SystemPrompt(
   ].join("\n"));
 
   return lines.join("\n\n");
+}
+
+/** Nome das etapas liberadas para "mover etapa" (funil › etapa). */
+async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof activeTheme>): Promise<Array<{ id: string; name: string }>> {
+  const ids = config.actionOptions?.stageIds ?? [];
+  if (ids.length === 0 || !allowedActionTypes(config, theme).has("move_stage")) return [];
+  try {
+    // Import tardio: o prompt não precisa do banco quando não há etapas.
+    const { prisma } = await import("@/lib/prisma");
+    const rows: Array<{ id: string; name: string; pipeline?: { name: string } | null }> = await (prisma as any).stage.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true, pipeline: { select: { name: true } } },
+    });
+    return rows.map((r) => ({ id: r.id, name: r.pipeline?.name ? `${r.pipeline.name} › ${r.name}` : r.name }));
+  } catch (err) {
+    console.warn("[ai-v2] Erro ao carregar as etapas das ações:", err instanceof Error ? err.message : err);
+    return [];
+  }
 }
 
 export async function callV2LLM(args: {
@@ -1054,6 +1083,8 @@ export async function callV2LLM(args: {
     return [] as V2MessageModelSummary[];
   });
 
+  const actionStages = await actionStageNames(args.config, promptTheme);
+
   const prefetch = await prefetchKnowledge({
     agentId: args.agentId,
     apiKey,
@@ -1082,6 +1113,7 @@ export async function callV2LLM(args: {
     prefetch.chunks,
     messageModels,
     mediaUnderstandingNote(args.config, userMessage),
+    actionStages,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [

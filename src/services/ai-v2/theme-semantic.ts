@@ -15,7 +15,7 @@
 
 import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { embedTexts } from "@/services/ai/provider";
-import { selectV2Theme } from "./themes";
+import { matchV2Theme, selectV2Theme } from "./themes";
 
 /** Mesma régua da busca na base: similaridade de cosseno >= 0,4. */
 /**
@@ -170,6 +170,48 @@ export async function selectV2ThemeSemantic(args: {
     console.warn("[ai-v2] seleção semântica de assunto falhou:", err instanceof Error ? err.message : err);
     return fallback();
   }
+}
+
+export type V2ThemeRecognition = {
+  selection: V2ThemeSelection;
+  /** Todos os assuntos, do mais provável ao menos. */
+  ranking: Array<{ id: string; name: string; matched: string[]; similarity: number | null }>;
+  minSimilarity: number;
+};
+
+/**
+ * "Testar reconhecimento": qual assunto uma primeira mensagem pegaria, e por
+ * quê (palavras que casaram e proximidade de sentido de cada assunto).
+ * Usa a mesma escolha do atendimento, sem assunto anterior.
+ */
+export async function explainV2ThemeRecognition(args: {
+  config: V2AgentConfig;
+  message: string;
+  apiKey: string | null;
+}): Promise<V2ThemeRecognition> {
+  const themes = args.config.themes ?? [];
+  const selection = await selectV2ThemeSemantic({ config: args.config, message: args.message, apiKey: args.apiKey });
+  let sims: number[] | null = null;
+  if (args.apiKey && themes.length > 0 && args.message.trim()) {
+    try {
+      const [{ embeddings }, vectors] = await Promise.all([embedTexts([args.message.trim()], args.apiKey), themeVectors(themes, args.apiKey)]);
+      sims = themes.map((_, i) => cosine(embeddings[0] ?? [], vectors[i] ?? []));
+    } catch (err) {
+      console.warn("[ai-v2] similaridade dos assuntos falhou:", err instanceof Error ? err.message : err);
+    }
+  }
+  const ranking = themes
+    .map((t, i) => {
+      const m = matchV2Theme(t, args.message);
+      return { id: t.id, name: t.name, matched: m.matched, score: m.score, similarity: sims ? sims[i] : null };
+    })
+    .sort((a, b) => {
+      if (a.id === selection.theme?.id) return -1;
+      if (b.id === selection.theme?.id) return 1;
+      return b.score - a.score || (b.similarity ?? 0) - (a.similarity ?? 0);
+    })
+    .map(({ score: _score, ...rest }) => rest);
+  return { selection, ranking, minSimilarity: minSimilarity() };
 }
 
 /** Limpa o cache (testes). */

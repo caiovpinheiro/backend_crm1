@@ -9,7 +9,7 @@ import type { V2Action, V2AgentConfig, V2CRMContext, V2Rule, V2Stage } from "@/l
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
-import { allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -476,7 +476,8 @@ export async function simulateV2Turn(
       continue;
     }
     const modelNotAllowed = action.type === "send_message_model" && !allowedModelIds.includes(String((action as { modelId?: unknown }).modelId ?? ""));
-    if (allowedTools.has(action.type) && !modelNotAllowed) {
+    const valueNotAllowed = !actionValueAllowed(config, action);
+    if (allowedTools.has(action.type) && !modelNotAllowed && !valueNotAllowed) {
       executedActions.push({ action, label: actionLabel(action.type) });
     } else {
       discardedActions.push({
@@ -484,7 +485,9 @@ export async function simulateV2Turn(
         label: actionLabel(action.type),
         reason: modelNotAllowed
           ? "Esta mensagem pronta não está liberada para o agente/assunto."
-          : "A configuração do agente não libera esta ação.",
+          : valueNotAllowed
+            ? "Etiqueta ou etapa fora das escolhidas em “O que ele pode fazer”."
+            : "A configuração do agente não libera esta ação.",
       });
     }
   }

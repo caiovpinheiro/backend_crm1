@@ -27,6 +27,7 @@ export async function GET() {
       products,
       whatsappTemplates,
       contacts,
+      tags,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -82,6 +83,11 @@ export async function GET() {
         orderBy: { name: "asc" },
         take: 200,
       }),
+      p.tag.findMany({
+        where: { organizationId },
+        select: { id: true, name: true },
+        orderBy: { name: "asc" },
+      }),
     ]);
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
@@ -99,6 +105,7 @@ export async function GET() {
       knowledgeDocs,
       channels,
       pipelines,
+      tags,
       contactCustomFields: customFields.filter(
         (f: any) => typeof f.entity === "string" && f.entity.toLowerCase() === "contact",
       ),

@@ -22,7 +22,7 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -1224,7 +1224,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       if (dest && typeof dest === "object" && typeof dest.type === "string") requestedDestination = dest;
       continue;
     }
-    if (!allowedTools.has(a.type)) {
+    if (!allowedTools.has(a.type) || !actionValueAllowed(config, a)) {
       discardedActions.push(a);
       continue;
     }

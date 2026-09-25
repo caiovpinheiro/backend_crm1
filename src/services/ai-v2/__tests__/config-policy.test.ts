@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
-import { allowedActionTypes, themeToolRestriction } from "../action-policy";
+import { actionValueAllowed, actionsGuide, allowedActionTypes, themeToolRestriction } from "../action-policy";
+import { matchV2Theme } from "../themes";
 import { defaultV2Counters, evaluateV2StopLimits } from "../limits";
 
 const base = { name: "A", tone: "t" };
@@ -50,6 +51,46 @@ describe("action-policy", () => {
     const allowed = allowedActionTypes(config, theme);
     expect(allowed.has("add_tag")).toBe(true);
     expect(allowed.has("ask_with_options")).toBe(false);
+  });
+});
+
+describe("O que ele pode fazer", () => {
+  const config = normalizeV2Config({
+    ...base,
+    enabledTools: ["add_tag", "move_stage"],
+    actionOptions: { tags: ["Retorno"], stageIds: ["s1"] },
+  } as never);
+
+  it("etiqueta e etapa só das listas escolhidas", () => {
+    expect(actionValueAllowed(config, { type: "add_tag", tag: "retorno" } as never)).toBe(true);
+    expect(actionValueAllowed(config, { type: "add_tag", tag: "Inventada" } as never)).toBe(false);
+    expect(actionValueAllowed(config, { type: "move_stage", stageId: "s1" } as never)).toBe(true);
+    expect(actionValueAllowed(config, { type: "move_stage", stageId: "s2" } as never)).toBe(false);
+    expect(actionValueAllowed(config, { type: "add_note", content: "x" } as never)).toBe(true);
+  });
+
+  it("sem lista escolhida, não restringe (agentes antigos continuam iguais)", () => {
+    const old = normalizeV2Config({ ...base, enabledTools: ["add_tag"] } as never);
+    expect(actionValueAllowed(old, { type: "add_tag", tag: "Qualquer" } as never)).toBe(true);
+  });
+
+  it("guia só mostra etiqueta/etapa quando há o que escolher", () => {
+    const allowed = new Set(["add_tag", "move_stage", "add_note"]);
+    const none = actionsGuide(allowed, { tags: [], stages: [] });
+    expect(none).toContain('"type":"add_note"');
+    expect(none).toContain("Só com etiquetas citadas nas instruções");
+    expect(none).not.toContain("move_stage");
+    const full = actionsGuide(allowed, { tags: ["Retorno"], stages: [{ id: "s1", name: "Funil › Novo" }] });
+    expect(full).toContain("s1 (Funil › Novo)");
+    expect(actionsGuide(new Set(["close_conversation"]), { tags: [], stages: [] })).toBe("");
+  });
+});
+
+describe("testar reconhecimento", () => {
+  it("mostra as palavras que casaram", () => {
+    const theme = { id: "t", name: "T", instructions: "", when: ["segunda via", "boleto"], examples: [] } as never;
+    expect(matchV2Theme(theme, "preciso da segunda via do boleto").matched).toEqual(["segunda via", "boleto"]);
+    expect(matchV2Theme(theme, "bom dia").score).toBe(0);
   });
 });
 

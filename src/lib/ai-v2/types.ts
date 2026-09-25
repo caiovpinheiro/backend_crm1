@@ -426,6 +426,8 @@ export interface V2AgentConfig {
   dailyTokenCap?: number;
   /** Tools habilitadas globalmente (usadas quando o tema não restringe). */
   enabledTools?: string[];
+  /** O que as ações liberadas podem usar: etiquetas e etapas escolhidas na tela. */
+  actionOptions?: { tags: string[]; stageIds: string[] };
   /** Limites de chamadas de ferramenta por turno. */
   toolGovernor?: V2ToolGovernorConfig;
   /** Horário de atendimento do agente. */

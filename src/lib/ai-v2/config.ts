@@ -316,6 +316,14 @@ export const v2AgentConfigSchema = z.object({
   costCap: costCapSchema.optional(),
   dailyTokenCap: z.number().int().min(0).optional(),
   enabledTools: z.array(z.string()).optional().default([]),
+  // Etiquetas e etapas que as ações liberadas podem usar. Sem lista, o
+  // modelo inventava o nome da etiqueta e o id da etapa.
+  actionOptions: z
+    .object({
+      tags: z.array(z.string()).optional().default([]),
+      stageIds: z.array(z.string()).optional().default([]),
+    })
+    .optional(),
   toolGovernor: z
     .object({
       maxCallsPerTurn: z.number().int().min(1).optional().default(6),

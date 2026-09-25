@@ -959,11 +959,42 @@ describe("ordem e forma do prompt", () => {
 });
 
 describe("themePromptText", () => {
-  it("lista só as ações do assunto; tools de consulta ficam de fora", async () => {
+  it("só as instruções: as ações vão na seção de ações, com o formato", async () => {
     const { themePromptText } = await import("../theme-prompt");
-    expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search", "handoff", "ask_with_options"] }))
-      .toBe("Ajude.\nAções que você pode devolver em actions neste assunto: handoff, ask_with_options.");
-    expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search"] })).toBe("Ajude.");
+    expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search", "handoff", "ask_with_options"] })).toBe("Ajude.");
+  });
+});
+
+describe("ações liberadas", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("liberar só uma ação não desliga a busca nos materiais", () => {
+    const config = baseConfig({ enabledTools: ["add_tag"], allowedKnowledgeDocIds: ["doc-1"] });
+    const { tools } = buildV2ToolSet({
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      agentId: "agent-1",
+      apiKey: "key",
+    });
+    expect(Object.keys(tools)).toContain("knowledge_search");
+  });
+
+  it("o prompt traz o formato de cada ação liberada, com as etiquetas escolhidas", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    const config = baseConfig({ enabledTools: ["add_tag", "ask_with_options"], actionOptions: { tags: ["Retorno"], stageIds: [] } });
+    await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+    });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].system as string;
+    expect(system).toContain("# Ações que você pode fazer");
+    expect(system).toContain('"type":"add_tag"');
+    expect(system).toContain("Só estas etiquetas: Retorno");
+    expect(system).toContain('"type":"ask_with_options"');
+    expect(system).not.toContain('"type":"move_stage"');
   });
 });
 

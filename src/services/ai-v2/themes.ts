@@ -33,24 +33,38 @@ function sameWordStem(a: string, b: string): boolean {
   return i >= 5 && i >= shorter * 0.7;
 }
 
-function scoreTheme(theme: V2Theme, message: string): number {
+/** Pontos do assunto para a mensagem e o que casou (palavras e exemplos). */
+export function matchV2Theme(theme: V2Theme, message: string): { score: number; matched: string[] } {
   const nm = normalize(message);
   const words = nm.split(/\s+/).filter(Boolean);
   let score = 0;
+  const matched: string[] = [];
   for (const phrase of theme.when) {
     const np = normalize(phrase);
     if (!np) continue;
     const phraseWords = np.split(/\s+/).filter(Boolean);
     // Palavras de 1-2 letras ("de", "a") não identificam assunto.
     const keyWords = phraseWords.filter((w) => w.length > 2);
-    if (` ${words.join(" ")} `.includes(` ${phraseWords.join(" ")} `)) score += 2 + phraseWords.length;
-    else if (keyWords.length > 0 && keyWords.every((w) => words.some((hw) => sameWordStem(hw, w)))) score += 2 + phraseWords.length;
+    if (
+      ` ${words.join(" ")} `.includes(` ${phraseWords.join(" ")} `) ||
+      (keyWords.length > 0 && keyWords.every((w) => words.some((hw) => sameWordStem(hw, w))))
+    ) {
+      score += 2 + phraseWords.length;
+      matched.push(phrase);
+    }
   }
   for (const example of theme.examples) {
     const ne = normalize(example);
-    if (ne && nm.includes(ne)) score += 1;
+    if (ne && nm.includes(ne)) {
+      score += 1;
+      matched.push(example);
+    }
   }
-  return score;
+  return { score, matched };
+}
+
+function scoreTheme(theme: V2Theme, message: string): number {
+  return matchV2Theme(theme, message).score;
 }
 
 export function selectV2Theme(
