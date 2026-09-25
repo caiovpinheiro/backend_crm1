@@ -16,7 +16,6 @@ import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
-import { answerFromKnowledge } from "./ground-reply";
 import { getRequestContext, enterRequestContext } from "@/lib/request-context";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
@@ -448,17 +447,8 @@ export async function simulateV2Turn(
       : { ...output, handoff: true, reply: config.handoff.message, reason: "Consulta sem resultados e sem dados do cliente" };
   }
 
-  // Aterramento antes da guarda, como em produção: o trecho da base também
-  // passa pelo filtro de domínios e de campos internos.
-  const grounded = await answerFromKnowledge({
-    reply: output.reply,
-    toolCalls: llmResult.toolCalls,
-    config,
-    themeId: themeId ?? undefined,
-    userMessage,
-    agentId,
-  });
-  const guard = guardV2Output(grounded, config.allowedDomains, {
+  // Guarda de saída, como em produção.
+  const guard = guardV2Output(output.reply, config.allowedDomains, {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,

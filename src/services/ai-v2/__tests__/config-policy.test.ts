@@ -68,3 +68,12 @@ describe("avisar e silenciar", () => {
     expect(r).toMatchObject({ action: "handoff", warn: false });
   });
 });
+
+describe("guarda de saída", () => {
+  it("remover link não autorizado mantém as linhas do passo a passo", async () => {
+    const { guardV2Output } = await import("../output-guard");
+    const text = ["1. Acesse https://fora.com/x", "2. Clique em Entrar", "3. Pronto"].join(String.fromCharCode(10));
+    const r = guardV2Output(text, ["permitido.com"]);
+    expect(r.text.split(String.fromCharCode(10))).toEqual(["1. Acesse", "2. Clique em Entrar", "3. Pronto"]);
+  });
+});

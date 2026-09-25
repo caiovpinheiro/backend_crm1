@@ -1009,3 +1009,16 @@ describe("checagem de nomes inventados", () => {
     expect(r.output.handoff).toBe(false);
   });
 });
+
+describe("confirmação de identidade", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("pede para responder o pedido que ficou pendente antes da confirmação", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", confirmed: true, actions: [] })));
+    const config = baseConfig();
+    await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "sim", stage: "confirming" });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.lastCall![0].system as string;
+    expect(system).toContain("# Confirmação de identidade");
+    expect(system).toContain("pedido que ficou sem resposta");
+  });
+});

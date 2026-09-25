@@ -39,7 +39,9 @@ export function removeUnauthorizedUrls(text: string, allowedDomains: string[]): 
     }
     return url;
   });
-  return { text: cleaned.replace(/\s+/g, " ").trim(), removed };
+  // Só espaços em sequência: juntar tudo com \s+ colava as linhas e
+  // desmontava passo a passo e listas quando havia domínio liberado.
+  return { text: cleaned.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim(), removed };
 }
 
 export function containsReturnPromise(text: string): boolean {

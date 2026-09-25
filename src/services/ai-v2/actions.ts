@@ -627,8 +627,8 @@ export async function sendV2TextMessage(args: {
   channel?: string;
   autonomyMode: "AUTONOMOUS" | "DRAFT";
   humanBehavior?: HumanBehaviorConfig;
-}): Promise<void> {
-  if (!args.text.trim()) return;
+}): Promise<{ sent: boolean; reason?: string }> {
+  if (!args.text.trim()) return { sent: false, reason: "empty" };
   const text = toWhatsAppText(args.text);
   const result = (await sendAgentMessage({
     conversationId: args.conversationId,
@@ -645,7 +645,8 @@ export async function sendV2TextMessage(args: {
     // Antes o motor não sabia que o envio foi barrado — o turno parecia ter
     // respondido e o cliente não recebia nada.
     traceStep("resposta", `NÃO enviada (${result.reason ?? "motivo desconhecido"}): "${preview}"`);
-  } else {
-    traceStep("resposta", `${result?.status === "draft" ? "Salva como rascunho (modo sugestão)" : "Enviada"}: "${preview}"`);
+    return { sent: false, reason: result.reason };
   }
+  traceStep("resposta", `${result?.status === "draft" ? "Salva como rascunho (modo sugestão)" : "Enviada"}: "${preview}"`);
+  return { sent: true };
 }

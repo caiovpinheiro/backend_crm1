@@ -157,7 +157,7 @@ describe("processV2Turn", () => {
     mocks.mapBridgeVars.mockReturnValue({});
     mocks.getState.mockResolvedValue(null);
     mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
-    mocks.sendText.mockResolvedValue(undefined);
+    mocks.sendText.mockResolvedValue({ sent: true });
     mocks.simpleHandoff.mockResolvedValue(undefined);
     mocks.upsertState.mockResolvedValue(undefined);
     mocks.logTurn.mockResolvedValue(undefined);
@@ -943,7 +943,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.mapBridgeVars.mockReturnValue({});
     mocks.getState.mockResolvedValue(makeState("active"));
     mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
-    mocks.sendText.mockResolvedValue(undefined);
+    mocks.sendText.mockResolvedValue({ sent: true });
     mocks.simpleHandoff.mockResolvedValue(undefined);
     mocks.upsertState.mockResolvedValue(undefined);
     mocks.logTurn.mockResolvedValue(undefined);
@@ -1008,7 +1008,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     mocks.callLLM.mockResolvedValue(llmOut({ actions: [{ type: "handoff" }] as any }));
     const order: string[] = [];
-    mocks.sendText.mockImplementation(async () => { order.push("send"); });
+    mocks.sendText.mockImplementation(async () => { order.push("send"); return { sent: true }; });
     mocks.simpleHandoff.mockImplementation(async () => { order.push("handoff"); });
 
     const result = await run("Quero falar com alguém");
@@ -1166,7 +1166,7 @@ describe("processV2Turn — correções do motor", () => {
     const config = baseConfig({ allowedMessageModelIds: ["mm-1"], enabledTools: ["add_tag"] } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     const order: string[] = [];
-    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); });
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
     mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
       order.push(`ações:${actions.map((a) => a.type).join(",")}`);
       return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
@@ -1263,5 +1263,45 @@ describe("processV2Turn — correções do motor", () => {
     mocks.callLLM.mockRejectedValue(new Error("timeout"));
     await run("oi");
     expect(sentTexts()).toContain("Tive um problema técnico, já chamo alguém.");
+  });
+
+  it("texto + áudio com \"pedir texto\": responde o texto em vez de pedir para escrever", async () => {
+    const config = baseConfig({ media: { ...baseConfig().media, audio: { action: "ask_text", askTextMessage: "Pode escrever?" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut());
+    await run(["tenho uma dúvida sobre o boleto", "[Áudio]"].join("\n"), { messageType: "audio" });
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(sentTexts()).not.toContain("Pode escrever?");
+  });
+
+  it("só áudio com \"pedir texto\": pede para escrever", async () => {
+    const config = baseConfig({ media: { ...baseConfig().media, audio: { action: "ask_text", askTextMessage: "Pode escrever?" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    await run("[Áudio]", { messageType: "audio" });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Pode escrever?");
+  });
+
+  it("resposta barrada pela trava anti-repetição: manda outra e o log não finge que enviou", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Mesma resposta de antes." }));
+    mocks.sendText
+      .mockResolvedValueOnce({ sent: false, reason: "near_duplicate" })
+      .mockResolvedValue({ sent: true });
+    await run("?");
+    expect(sentTexts()[1]).toContain("Ficou alguma dúvida");
+    const logged = mocks.logTurn.mock.lastCall![0] as { reply?: string };
+    expect(logged.reply).toContain("Ficou alguma dúvida");
+  });
+
+  it("resposta barrada por outro motivo não entra no log como enviada", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Resposta." }));
+    mocks.sendText.mockResolvedValue({ sent: false, reason: "human_last_outbound" });
+    await run("oi");
+    const logged = mocks.logTurn.mock.lastCall![0] as { reply?: string };
+    expect(logged.reply).toBeUndefined();
   });
 });

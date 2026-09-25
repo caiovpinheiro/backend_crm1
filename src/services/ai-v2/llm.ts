@@ -866,7 +866,7 @@ function buildV2SystemPrompt(
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
   if (mediaNote) lines.push(mediaNote);
   if (stage === "confirming") {
-    lines.push("# Confirmação de identidade\nVocê está confirmando a identidade do cliente. Se ele confirmar que é ele, devolva confirmed: true. Se negar ou pedir para falar de outra pessoa, confirmed: false. Se a resposta for irrelevante, confirmed: null.");
+    lines.push("# Confirmação de identidade\nVocê está confirmando a identidade do cliente. Se ele confirmar que é ele, devolva confirmed: true. Se negar ou pedir para falar de outra pessoa, confirmed: false. Se a resposta for irrelevante, confirmed: null. Se ele confirmar e, antes da confirmação, já tinha feito um pedido que ficou sem resposta (veja as mensagens anteriores), responda esse pedido agora, na mesma mensagem, em vez de perguntar como pode ajudar.");
   }
 
   // Dados que o modelo pode usar para entender a situação.

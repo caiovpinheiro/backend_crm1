@@ -22,6 +22,7 @@ type ConversationForResolve = {
   organizationId: string;
   assignedToId: string | null;
   closedAt?: Date | null;
+  channelId?: string | null;
   contact?: { phone: string | null } | null;
   assignedTo?: {
     id: string;
@@ -62,6 +63,31 @@ function phoneAllowedForAgent(simpleConfig: unknown, phone: string | null | unde
   return phoneMatchesAllowlist(phone, set);
 }
 
+/**
+ * Qual agente v2 assume a conversa nova. Antes era sempre o mais antigo da
+ * org: com dois agentes, os "Canais vinculados" do outro não valiam. Agora
+ * vence o agente vinculado ao canal da conversa; sem vínculo, o primeiro
+ * agente sem canais (atende qualquer canal). A lista de números de teste
+ * de cada agente continua valendo.
+ */
+export function pickAgentForConversation<T extends { aiAgentConfig?: { simpleConfig?: unknown } | null }>(
+  agents: T[],
+  channelId: string | null,
+  phone: string | null | undefined,
+): T | null {
+  const channelsOf = (a: T) => {
+    const raw = (a.aiAgentConfig?.simpleConfig as { channelIds?: unknown } | null | undefined)?.channelIds;
+    return Array.isArray(raw) ? raw.filter((c): c is string => typeof c === "string" && c.length > 0) : [];
+  };
+  const eligible = agents.filter((a) => a.aiAgentConfig && phoneAllowedForAgent(a.aiAgentConfig.simpleConfig, phone));
+  if (!channelId) return eligible[0] ?? null;
+  return (
+    eligible.find((a) => channelsOf(a).includes(channelId)) ??
+    eligible.find((a) => channelsOf(a).length === 0) ??
+    null
+  );
+}
+
 export async function resolveV2AgentForConversation(
   conversationId: string,
 ): Promise<ResolvedV2Agent | null> {
@@ -76,6 +102,7 @@ export async function resolveV2AgentForConversation(
       organizationId: true,
       assignedToId: true,
       closedAt: true,
+      channelId: true,
       contact: { select: { phone: true } },
       assignedTo: {
         select: {
@@ -103,14 +130,14 @@ export async function resolveV2AgentForConversation(
   if (!(await isAiAttendanceEnabled())) return null;
   if (await wasHandedOffToHuman(conv)) return null;
 
-  const agent = await (prismaBase as unknown as {
+  const agents = await (prismaBase as unknown as {
     user: {
-      findFirst: (args: unknown) => Promise<{
+      findMany: (args: unknown) => Promise<Array<{
         id: string;
         aiAgentConfig?: { id: string; simpleConfig?: unknown } | null;
-      } | null>;
+      }>>;
     };
-  }).user.findFirst({
+  }).user.findMany({
     where: {
       organizationId: conv.organizationId,
       type: "AI",
@@ -128,13 +155,10 @@ export async function resolveV2AgentForConversation(
     orderBy: { createdAt: "asc" },
   });
 
-  if (!agent?.aiAgentConfig) return null;
-
+  const agent = pickAgentForConversation(agents, conv.channelId ?? null, conv.contact?.phone);
   // Fora da lista de números de teste a conversa segue o fluxo normal, em
   // vez de ficar presa num agente que nunca vai responder.
-  if (!phoneAllowedForAgent(agent.aiAgentConfig.simpleConfig, conv.contact?.phone)) {
-    return null;
-  }
+  if (!agent?.aiAgentConfig) return null;
 
   const updated = await (prismaBase as unknown as {
     conversation: {

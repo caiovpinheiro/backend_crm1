@@ -11,7 +11,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma-base", () => ({
   prismaBase: {
     conversation: { findUnique: mocks.conversationFindUnique, updateMany: mocks.conversationUpdateMany },
-    user: { findFirst: mocks.userFindFirst },
+    user: {
+      findFirst: mocks.userFindFirst,
+      findMany: async (args: unknown) => {
+        const r = await mocks.userFindFirst(args);
+        return Array.isArray(r) ? r : r ? [r] : [];
+      },
+    },
     aISimpleConversationState: { findUnique: mocks.stateFindUnique },
   },
 }));
@@ -123,5 +129,28 @@ describe("resolveV2AgentForConversation — atribuição automática", () => {
     const r = await resolveV2AgentForConversation("conv-1");
 
     expect(r).toMatchObject({ userId: "ai-user-1", wasAssigned: false });
+  });
+});
+
+describe("pickAgentForConversation", () => {
+  const ag = (id: string, cfg: Record<string, unknown> = {}) => ({ id, aiAgentConfig: { id: `cfg-${id}`, simpleConfig: cfg } });
+
+  it("vence o agente vinculado ao canal da conversa, mesmo não sendo o mais antigo", async () => {
+    const { pickAgentForConversation } = await import("../agent-resolver");
+    const agents = [ag("antigo", { channelIds: ["ch-a"] }), ag("novo", { channelIds: ["ch-b"] })];
+    expect(pickAgentForConversation(agents, "ch-b", "5511999999999")?.id).toBe("novo");
+  });
+
+  it("sem agente do canal, fica com o primeiro que atende qualquer canal", async () => {
+    const { pickAgentForConversation } = await import("../agent-resolver");
+    const agents = [ag("a", { channelIds: ["ch-a"] }), ag("geral")];
+    expect(pickAgentForConversation(agents, "ch-x", "5511999999999")?.id).toBe("geral");
+    expect(pickAgentForConversation([ag("a", { channelIds: ["ch-a"] })], "ch-x", "5511999999999")).toBeNull();
+  });
+
+  it("lista de números de teste de cada agente continua valendo", async () => {
+    const { pickAgentForConversation } = await import("../agent-resolver");
+    const agents = [ag("teste", { allowedPhoneNumbers: ["5511911112222"] }), ag("geral")];
+    expect(pickAgentForConversation(agents, null, "5511999999999")?.id).toBe("geral");
   });
 });

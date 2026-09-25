@@ -13,12 +13,12 @@ import { resolveV2AgentForConversation } from "./agent-resolver";
 import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
-import { answerFromKnowledge } from "./ground-reply";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
+import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
@@ -197,6 +197,8 @@ function mergeCollectedVariables(
 ): Record<string, unknown> {
   return { ...existing, ...collected };
 }
+
+const REPEAT_FALLBACK = "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito.";
 
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
 function stopWarning(config: V2AgentConfig, reason: string): string {
@@ -683,10 +685,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false, sentReply: reply };
   };
 
+  // O turno junta as bolhas seguidas; só o tipo da última decidia. Texto +
+  // áudio com "pedir texto" respondia "não consigo ouvir" ignorando o texto,
+  // e áudio + texto nem transcrevia o áudio.
+  const turnLines = input.userMessage.split(/\r?\n/).filter((l) => l.trim());
+  const turnHasText = turnLines.some((l) => !isMediaPlaceholderText(l));
+  const turnHasMedia = turnLines.some((l) => isMediaPlaceholderText(l));
   if (media && media.action === "ask_text") {
-    return replyAndWait(media.message || MEDIA_ASK_TEXT_DEFAULT[media.kind], "media ask_text");
+    if (!turnHasText) return replyAndWait(media.message || MEDIA_ASK_TEXT_DEFAULT[media.kind], "media ask_text");
+    traceStep("mídia", "Mídia veio junto com texto → responde o texto");
   }
-  if (media && (media.action === "transcribe" || media.action === "describe")) {
+  if (turnHasMedia && (input.messageIds?.length ?? 0) > 0) {
     const enriched = await enrichTurnWithMedia({
       organizationId: orgId,
       agentUserId: resolved!.userId,
@@ -697,7 +706,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     });
     if (enriched.understood > 0) {
       input = { ...input, userMessage: enriched.userMessage };
-    } else if (enriched.failed > 0) {
+    } else if (enriched.failed > 0 && !turnHasText && media) {
       const kindCfg = media.kind === "audio" ? config.media.audio : media.kind === "image" ? config.media.image : config.media.document;
       return replyAndWait(kindCfg.notUnderstoodMessage || MEDIA_NOT_UNDERSTOOD_DEFAULT[media.kind], "media not understood");
     }
@@ -1247,27 +1256,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Mensagens sem sentido/fora de escopo seguidas (limite `nonsenseLimit`).
   counters.nonsenseMessages = llmOutput.outOfScope ? counters.nonsenseMessages + 1 : 0;
 
-  // Aterramento na base ANTES da guarda de saída: o trecho da base pode
-  // substituir a resposta, e precisa passar pelo filtro de domínios e de
-  // campos internos como qualquer outro texto enviado ao cliente.
-  let replyText = await answerFromKnowledge({
-    reply: llmOutput.reply,
-    toolCalls,
-    config,
-    themeId,
-    userMessage: input.userMessage,
-    agentId: resolved.agentConfigId,
-  });
-  const guard = guardV2Output(replyText, config.allowedDomains, {
+  // A resposta do modelo não é mais trocada por trecho cru da base quando
+  // "não cita o material": isso mandava ao cliente o material bruto em vez
+  // da resposta. Invenção é tratada na checagem de nomes/valores/palpites.
+  const guard = guardV2Output(llmOutput.reply, config.allowedDomains, {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
   });
-  if (replyText !== llmOutput.reply) {
-    traceStep("base", "A resposta do modelo foi trocada pelo trecho da base (não citava o material)");
-  }
-  replyText = guard.text;
+  let replyText = guard.text;
   if (guard.warnings.length > 0) traceStep("guarda", guard.warnings.join("; "));
   if (guard.forceHandoff) wantsHandoff = true;
 
@@ -1353,8 +1351,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
-    await sendReply(replyText);
-    sentReply = replyText;
+    const res = await sendReply(replyText);
+    if (res.sent) {
+      sentReply = replyText;
+    } else if (res.reason === "near_duplicate") {
+      // A trava anti-repetição do envio olha as últimas mensagens do agente;
+      // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
+      const alt = await sendReply(REPEAT_FALLBACK);
+      if (alt.sent) sentReply = REPEAT_FALLBACK;
+    }
+    // Não enviada fica fora do log do turno: antes o log dizia que o agente
+    // respondeu e o cliente não tinha recebido nada.
   }
 
   // Mensagens prontas/produtos/modelos: depois da reply. Não saem quando o
@@ -1386,8 +1393,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const goodbye = config.closure.goodbyeMessage;
     if (goodbye && !anyHandoff) {
       const goodbyeRendered = renderMessage(goodbye, vars, defaultFormatter());
-      await sendReply(goodbyeRendered);
-      sentReply = goodbyeRendered;
+      if ((await sendReply(goodbyeRendered)).sent) sentReply = goodbyeRendered;
     }
     await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables);
   } else {
@@ -1450,8 +1456,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     let sent: string | undefined;
     if (!opts.skipMessage) {
       const handoffMsg = renderMessage(config.handoff.message, vars, defaultFormatter());
-      if (handoffMsg.trim()) {
-        await sendReply(handoffMsg);
+      if (handoffMsg.trim() && (await sendReply(handoffMsg)).sent) {
         sent = handoffMsg;
       }
     }
@@ -1467,9 +1472,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return sent;
   }
 
-  async function sendReply(text: string) {
-    if (!text.trim()) return;
-    await sendV2TextMessage({
+  async function sendReply(text: string): Promise<{ sent: boolean; reason?: string }> {
+    if (!text.trim()) return { sent: false, reason: "empty" };
+    return sendV2TextMessage({
       conversationId: input.conversationId,
       contactId: contactId!,
       agentUserId: resolved!.userId,
