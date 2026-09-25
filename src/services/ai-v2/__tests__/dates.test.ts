@@ -7,9 +7,9 @@ const NOW = new Date("2026-09-24T20:00:00Z");
 
 describe("markPastDates", () => {
   it("marca intervalo que já acabou e deixa o futuro como está", () => {
-    const t = "Prova A1 - Ref. Agosto: de 11 a 14 de setembro de 2026.\nProva A1 - Ref. Setembro: de 02 a 05 de outubro de 2026.";
+    const t = "Evento A - Ref. Agosto: de 11 a 14 de setembro de 2026.\nEvento A - Ref. Setembro: de 02 a 05 de outubro de 2026.";
     expect(markPastDates(t, NOW)).toBe(
-      "Prova A1 - Ref. Agosto: de 11 a 14 de setembro de 2026 (já passou).\nProva A1 - Ref. Setembro: de 02 a 05 de outubro de 2026.",
+      "Evento A - Ref. Agosto: de 11 a 14 de setembro de 2026 (já passou).\nEvento A - Ref. Setembro: de 02 a 05 de outubro de 2026.",
     );
   });
 
@@ -19,8 +19,8 @@ describe("markPastDates", () => {
   });
 
   it("datas numéricas e intervalo entre meses", () => {
-    expect(markPastDates("Entrega até 15/09/2026; rematrícula 01/10/2026", NOW)).toBe(
-      "Entrega até 15/09/2026 (já passou); rematrícula 01/10/2026",
+    expect(markPastDates("Entrega até 15/09/2026; renovação 01/10/2026", NOW)).toBe(
+      "Entrega até 15/09/2026 (já passou); renovação 01/10/2026",
     );
     expect(markPastDates("de 30 de agosto a 2 de setembro de 2026", NOW)).toBe("de 30 de agosto a 2 de setembro de 2026 (já passou)");
   });
@@ -33,7 +33,7 @@ describe("markPastDates", () => {
   it("não marca duas vezes nem mexe em texto sem data", () => {
     const once = markPastDates("10 de agosto de 2026", NOW);
     expect(markPastDates(once, NOW)).toBe(once);
-    expect(markPastDates("Acesse a Área do Aluno.", NOW)).toBe("Acesse a Área do Aluno.");
+    expect(markPastDates("Acesse a Área do Cliente.", NOW)).toBe("Acesse a Área do Cliente.");
     expect(markPastDates("Atendimento 24/7 pelo app", NOW)).toBe("Atendimento 24/7 pelo app");
   });
 });

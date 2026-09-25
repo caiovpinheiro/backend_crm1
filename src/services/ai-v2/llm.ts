@@ -39,6 +39,7 @@ import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
+import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
 
@@ -144,8 +145,8 @@ export async function rewriteKnowledgeQueries(args: {
  * Junta os resultados das consultas (frase do cliente + reformulações).
  * O melhor trecho de CADA consulta entra primeiro; o resto completa por
  * distância. Só por distância, uma consulta genérica que casa bem com um
- * material ("como acessar o calendário", 0,76) tirava o trecho que
- * responde a consulta específica ("datas das avaliações finais", 0,66).
+ * material (0,76) tirava o trecho que responde a consulta específica
+ * (0,66).
  */
 export function mergeChunks(lists: PrefetchedChunk[][], limit: number): PrefetchedChunk[] {
   const keyOf = (c: PrefetchedChunk) => `${c.docId}\u0000${c.content}`;
@@ -629,7 +630,7 @@ async function coerceV2OutputFromRawText(args: {
     args.system,
     "",
     "# NORMALIZAÇÃO FINAL",
-    "A resposta acima foi gerada em texto livre. Reescreva-a como um ÚNICO objeto JSON válido no formato exigido. Preserve o conteúdo do 'reply', ajustando apenas para o tom e formato do canal se necessário. Preencha os campos obrigatórios: handoff, concluded, confirmed, outOfScope, sentiment, collected, reason, actions. Não inclua texto fora do JSON.",
+    "A resposta acima foi gerada em texto livre. Reescreva-a como um objeto JSON válido no formato exigido, sem alterar o conteúdo do 'reply'. Preencha os campos: handoff, concluded, confirmed, outOfScope, collected, reason, actions. Não inclua texto fora do JSON.",
   ].join("\n\n");
 
   const correctorMessages = [...args.messages, { role: "assistant" as const, content: args.rawText }];
@@ -704,7 +705,7 @@ export async function callV2LLMTest(
     stage: "active",
     themeId: theme?.id,
     themeInstructions: theme
-      ? `${theme.instructions}\nFerramentas permitidas: ${theme.allowedTools.join(", ")}`
+      ? themePromptText(theme)
       : undefined,
     previousMessages,
   });
@@ -722,8 +723,8 @@ function isBadRequest(err: unknown): boolean {
  */
 export function scopeInstruction(config: V2AgentConfig): string {
   const lines = [
-    "Você só atende o que é do atendimento desta empresa: os assuntos, materiais, calendário e dados do cliente acima.",
-    "Não responda o que é de fora — contas e cálculos, conhecimentos gerais, programação, tarefas escolares, opiniões, dados internos da empresa (como número de clientes ou faturamento). Diga em uma frase, com gentileza, que aqui só pode ajudar com o atendimento e volte ao que o cliente precisa.",
+    "Você só atende o que é do atendimento desta empresa: os assuntos, materiais, calendário e dados do cliente listados abaixo.",
+    "Não responda o que é de fora — contas e cálculos, conhecimentos gerais, programação, opiniões, dados internos da empresa (como número de clientes ou faturamento). Diga em uma frase, com gentileza, que aqui só pode ajudar com o atendimento e volte ao que o cliente precisa.",
     "Se a mensagem mistura as duas coisas, responda só a parte do atendimento e diga em meia frase que o resto não é com você. Mensagem só de fora: outOfScope=true.",
   ];
   const custom = config.scope?.message?.trim();
@@ -743,20 +744,18 @@ export function mediaUnderstandingNote(config: V2AgentConfig, userMessage: strin
   if (!fromMedia) return "";
   const confirm = config.media?.confirmUnderstanding !== false;
   return [
-    "",
-    "",
     "# Mídia do cliente",
     "Parte da mensagem do cliente veio de áudio transcrito ou de imagem lida automaticamente (marcada entre colchetes). Trate o conteúdo como o que o cliente disse ou mostrou.",
     confirm
       ? "A transcrição pode ter erros: se o pedido estiver ambíguo ou parecer cortado, confirme em uma frase o que entendeu antes de agir; se estiver claro, responda direto."
       : "",
-  ].filter((l, i) => i < 2 || l).join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 /**
  * Data e hora atuais no fuso do agente. Sem isto o modelo não sabe o que é
- * "próximas provas", "este mês" ou "ainda dá tempo" e, com as datas nos
- * trechos, mandava o cliente olhar o calendário.
+ * "o próximo", "este mês" ou "ainda dá tempo" e, com as datas nos trechos,
+ * mandava o cliente procurar a data sozinho.
  */
 export function currentDateLine(timezone: string | undefined, now: Date = new Date()): string {
   const tz = timezone || "America/Sao_Paulo";
@@ -768,16 +767,16 @@ export function currentDateLine(timezone: string | undefined, now: Date = new Da
   } catch {
     text = now.toISOString();
   }
-  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos, e para escolher nos trechos as datas que ainda vão acontecer. Datas marcadas com "(já passou)" nos trechos já aconteceram: nunca as apresente como próximas; só cite se o cliente perguntar por elas.`;
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
 }
 
 /** Quanto emoji usar. Padrão "nenhum": era o comportamento antes do parâmetro. */
 export function emojiInstruction(level: V2AgentConfig["emojis"]): string {
   switch (level) {
     case "light":
-      return "Use poucos emojis (1 ou 2 por mensagem) para acolher ou destacar o principal, como 😊 ao cumprimentar, 📅 em datas, ✅ em confirmações e 👉 no próximo passo. Não use em reclamação, cobrança ou assunto delicado.";
+      return "Use poucos emojis (1 ou 2 por mensagem) para acolher ou destacar o principal, escolhidos conforme o conteúdo. Não use em reclamação, cobrança ou assunto delicado.";
     case "moderate":
-      return "Use emojis para deixar a mensagem calorosa e fácil de ler, inclusive como marcadores de tópicos (📅 datas, 💰 valores, ✅ confirmações, 👉 próximo passo, ⚠️ atenção), até uns 4 por mensagem. Não use em reclamação, cobrança ou assunto delicado.";
+      return "Use emojis para deixar a mensagem calorosa e fácil de ler, inclusive como marcadores de tópicos (por exemplo 📅 datas, 💰 valores, ✅ confirmações, 👉 próximo passo), até uns 4 por mensagem, variando conforme o conteúdo. Não use em reclamação, cobrança ou assunto delicado.";
     case "none":
     default:
       return "Não use emojis; tire emojis e marcadores decorativos do material.";
@@ -789,8 +788,10 @@ function responseLengthToMaxTokens(length: V2AgentConfig["responseLength"]): num
   // (reply + theme + reason + actions). O controle real de tamanho vem
   // da instrução no system prompt.
   switch (length) {
+    // 600 cortava por length um passo a passo completo (que não conta para
+    // o limite de "curta") e a chamada era refeita com 2000.
     case "short":
-      return 600;
+      return 900;
     case "long":
       return 2000;
     case "medium":
@@ -807,25 +808,38 @@ function responseLengthInstruction(length: V2AgentConfig["responseLength"]): str
     case "short":
       return "Respostas enxutas, mas completas: o que o cliente precisa saber ou fazer, sem rodeios, em frases naturais (ideal: até 2 parágrafos). Um passo a passo completo não conta para esse limite.";
     case "long":
-      return "Pode responder com mais detalhes e explicações quando ajudarem o cliente: o porquê de cada passo, o que ele vai ver na tela, o que fazer se algo der diferente.";
+      return "Pode responder com mais detalhes e explicações quando ajudarem o cliente: o porquê de cada passo, o que ele vai ver, o que fazer se algo der diferente.";
     case "medium":
     default:
       return "Responda de forma equilibrada: a informação ou o passo a passo completo, com uma ou duas frases de contexto quando ajudarem o cliente a entender o que fazer.";
   }
 }
 
+/**
+ * Regras fixas de comportamento, uma vez cada. Antes estavam espalhadas em
+ * sete lugares, algumas depois do exemplo de JSON, e se contradiziam sobre
+ * o que fazer sem fonte (transferir, ignorar ou dizer que não tem).
+ */
+const SOURCES_GUIDE =
+  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
+
 /** Como uma pessoa da equipe escreve numa conversa. Vale para qualquer produto. */
 const WRITING_GUIDE = [
-  "Escreva como uma pessoa experiente da equipe conversando por mensagem, não como um manual: frases completas e naturais, em primeira pessoa.",
-  "Comece respondendo ao que o cliente acabou de dizer. Cumprimente pelo nome só no início da conversa; depois vá direto ao ponto.",
-  "Quando o cliente disser que não entendeu, que está perdido ou perguntar por onde começar, recomece do primeiro passo com mais detalhe (onde entrar, o que vai aparecer) em vez de mandá-lo voltar às mensagens anteriores.",
-  "Se um procedimento aparece dividido em mais de um trecho, junte-os na ordem certa, começando pelo primeiro passo (como e onde acessar).",
-  "Responda primeiro exatamente o que o cliente perguntou. Se os trechos trazem a informação (data, prazo, valor, regra), dê a informação; não acrescente onde ele pode encontrá-la, a menos que peça ou que a informação não esteja nos trechos.",
-  "Passo a passo e listas (datas, opções, documentos) sempre com um item por linha; nunca junte vários itens no mesmo parágrafo.",
-  "Não peça desculpas sem motivo.",
-  "Termine com uma próxima ação concreta ligada ao assunto (por exemplo, pedir que avise em qual passo travou) em vez de frases genéricas como \"qualquer dúvida estou aqui\".",
+  "Escreva como uma pessoa experiente da equipe conversando por mensagem, não como um manual: frases completas e naturais, em primeira pessoa. Comece pelo que o cliente acabou de dizer; cumprimente pelo nome só no início da conversa.",
+  "Responda primeiro exatamente o que foi perguntado. Se a fonte traz a informação (data, prazo, valor, regra), dê a informação em vez de dizer onde encontrá-la. Não peça desculpas sem motivo.",
+  // O exemplo "peça que avise em qual passo travou" era copiado como fecho
+  // até em resposta sem passo nenhum.
+  "Termine com o próximo passo quando houver um: uma pergunta concreta ou o que fazer a seguir. Se já respondeu tudo, encerre sem fórmula de despedida.",
 ].join("\n");
 
+const PROCEDURE_GUIDE =
+  "Quando o cliente precisa fazer algo e a fonte traz um procedimento, entregue o passo a passo numerado, um passo por linha, com todos os passos na ordem da fonte, começando por como e onde acessar; se o procedimento está em mais de um trecho, junte na ordem certa. Listas (datas, opções, documentos) também vão um item por linha. Se o cliente diz que não entendeu, que está perdido ou pergunta por onde começar, recomece do primeiro passo com mais detalhe em vez de mandá-lo reler as mensagens anteriores.";
+
+/**
+ * Ordem: quem é o agente e como responde no topo, dados no meio, formato
+ * de saída por último. Antes as regras de fonte vinham depois do exemplo
+ * de JSON e o modelo as lia como nota de rodapé.
+ */
 function buildV2SystemPrompt(
   config: V2AgentConfig,
   context: V2CRMContext,
@@ -837,16 +851,23 @@ function buildV2SystemPrompt(
   knowledgeDocTitles?: string[],
   prefetchedChunks: PrefetchedChunk[] = [],
   messageModels: V2MessageModelSummary[] = [],
+  mediaNote = "",
 ): string {
+  const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
-  lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
-  const calendar = calendarPromptSection(config.calendar?.events, new Date(), config.businessHours?.timezone || "America/Sao_Paulo");
-  if (calendar) lines.push(calendar);
   lines.push(`# Tom de voz\n${config.tone}`);
-  lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
-  lines.push(`# Como escrever\n${WRITING_GUIDE}`);
-  lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
+  if (config.globalRules.length > 0) lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
   lines.push(`# Escopo\n${scopeInstruction(config)}`);
+  lines.push(`# Fontes\n${SOURCES_GUIDE}`);
+  lines.push(`# Como escrever\n${WRITING_GUIDE}`);
+  lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
+  lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
+  lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);
+  lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
+  if (mediaNote) lines.push(mediaNote);
+  if (stage === "confirming") {
+    lines.push("# Confirmação de identidade\nVocê está confirmando a identidade do cliente. Se ele confirmar que é ele, devolva confirmed: true. Se negar ou pedir para falar de outra pessoa, confirmed: false. Se a resposta for irrelevante, confirmed: null.");
+  }
 
   // Dados que o modelo pode usar para entender a situação.
   lines.push("# Dados do cliente para consulta interna");
@@ -857,11 +878,11 @@ function buildV2SystemPrompt(
   }
   if (hasReadableDeal) {
     lines.push(`Negócio: ${JSON.stringify(context.selectedDeal)}`);
-  } else {
+  } else if (hasReadableContact) {
     lines.push("Negócio: nenhum encontrado.");
   }
   if (!hasReadableContact && !hasReadableDeal) {
-    lines.push("Nenhum contato encontrado para esta conversa.");
+    lines.push("Nenhum contato encontrado para esta conversa. Não comente isso com o cliente.");
   }
 
   // Dados que o modelo pode repetir/citar na resposta ao cliente.
@@ -874,7 +895,12 @@ function buildV2SystemPrompt(
     if (hasCitableContact) lines.push(`Contato: ${JSON.stringify(citableContact)}`);
     if (hasCitableDeal) lines.push(`Negócio: ${JSON.stringify(citableDeal)}`);
   }
-  lines.push("Regra de citação: só escreva/repita para o cliente os campos listados em 'Dados que você pode citar na resposta'. Campos de 'Dados do cliente para consulta interna' servem apenas para você entender a situação.");
+  // A regra só faz sentido quando há campo de consulta que não é citável.
+  const hiddenFields = (full: Record<string, unknown> | null | undefined, cite: Record<string, unknown> | null | undefined) =>
+    Object.keys(full ?? {}).some((k) => !(k in (cite ?? {})));
+  if (hiddenFields(context.contact, citableContact) || hiddenFields(context.selectedDeal, citableDeal)) {
+    lines.push("Regra de citação: só escreva/repita para o cliente os campos listados em 'Dados que você pode citar na resposta'. Os demais servem apenas para você entender a situação.");
+  }
 
   // Negócios abertos: listar quando há mais de um e o modo é perguntar.
   if (context.deals && context.deals.length > 1 && !context.selectedDeal && config.dealSelection === "ask") {
@@ -892,7 +918,7 @@ function buildV2SystemPrompt(
   }
 
   if (themeInstructions) {
-    lines.push(`# Tema ativo: ${themeId}`);
+    lines.push(`# Assunto ativo: ${themeId}`);
     lines.push(themeInstructions);
   }
 
@@ -901,28 +927,15 @@ function buildV2SystemPrompt(
     lines.push(JSON.stringify(collectedVariables));
   }
 
-  lines.push(`# Etapa atual\n${stage}`);
-  if (stage === "confirming") {
-    lines.push("Você está confirmando a identidade do cliente. Se ele confirmar que é ele (sim/confirma), devolva confirmed: true. Se ele negar ou pedir para falar de outra pessoa, devolva confirmed: false. Se a resposta for irrelevante, devolva confirmed: null.");
-  }
-  lines.push("# Tools de consulta disponíveis");
-  const allQueryTools = ["search_products", "search_crm_records", "knowledge_search", "list_message_models"];
-  const availableTools = allQueryTools.filter((t) => (allowedToolNames ?? []).includes(t));
-  lines.push(`Antes de responder, você pode chamar: ${availableTools.join(", ") || "(nenhuma tool configurada)"}. Não chame a mesma tool com os mesmos argumentos mais de uma vez.`);
-  const promptTheme = activeTheme(config, themeId);
-  const promptDocIds = knowledgeDocIdsFor(config, promptTheme);
-  if (availableTools.includes("knowledge_search") && promptDocIds.length > 0) {
-    lines.push("Há materiais de consulta disponíveis. Sempre que a pergunta do cliente puder ser respondida por esses materiais, chame knowledge_search primeiro. Se a busca retornar trechos relevantes, responda com base neles. Se não retornar nada, marque handoff=true em vez de inventar.");
-    if (knowledgeDocTitles && knowledgeDocTitles.length > 0) {
-      lines.push(`Materiais permitidos: ${knowledgeDocTitles.map((t) => `"${t}"`).join(", ")}. Use knowledge_search quando a pergunta se relacionar a um desses títulos.`);
-    }
-  }
+  const calendar = calendarPromptSection(config.calendar?.events, new Date(), timezone);
+  if (calendar) lines.push(calendar);
+
   if (prefetchedChunks.length > 0) {
     lines.push("# Trechos da base de conhecimento relacionados à mensagem");
-    lines.push("Encontrados pelo significado da mensagem, mesmo que o cliente tenha usado outras palavras. Se algum trecho atende ao que o cliente pediu, responda com base nele. Se nenhum for pertinente, ignore-os e não os mencione.");
+    lines.push("Já buscados pelo significado da mensagem. Use os que atendem ao pedido; ignore os outros sem mencioná-los.");
     prefetchedChunks.forEach((c, i) => {
       const raw = c.content.length > PREFETCH_CHUNK_CHARS ? `${c.content.slice(0, PREFETCH_CHUNK_CHARS)}…` : c.content;
-      const body = markPastDates(raw, new Date(), config.businessHours?.timezone || "America/Sao_Paulo");
+      const body = markPastDates(raw, new Date(), timezone);
       lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
     });
   }
@@ -933,35 +946,50 @@ function buildV2SystemPrompt(
       lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
     }
   }
-  lines.push("# Formato da resposta");
-  // Antes pedia "reescreva sem enumerar": o modelo resumia um procedimento
-  // de vários passos numa frase e o cliente ficava sem saber o que fazer.
-  lines.push(`Mantenha o tom configurado. Quando o cliente precisa FAZER algo e o material traz um procedimento (passos), responda com o passo a passo numerado (1., 2., 3.…), com todos os passos do material, na ordem, sem pular nem juntar passos. ${emojiInstruction(config.emojis)} Explicações e regras (o que não é passo) vão em frases curtas. Nunca envie menus ou listas de departamentos.`);
-  lines.push("# Saída obrigatória");
-  lines.push("Sua resposta final deve ser APENAS um objeto JSON válido no formato abaixo. Não inclua markdown, explicações, saudações ou qualquer texto fora do JSON.");
+
+  const availableTools = QUERY_TOOL_NAMES.filter((t) => (allowedToolNames ?? []).includes(t));
+  if (availableTools.length > 0) {
+    lines.push("# Ferramentas de consulta");
+    lines.push(`Antes de responder, você pode chamar: ${availableTools.join(", ")}. Não chame a mesma ferramenta com os mesmos argumentos mais de uma vez.`);
+    const promptDocIds = knowledgeDocIdsFor(config, activeTheme(config, themeId));
+    if (availableTools.includes("knowledge_search") && promptDocIds.length > 0) {
+      // Com a pré-busca, "chame knowledge_search primeiro" gerava uma
+      // segunda busca igual a cada turno.
+      lines.push(prefetchedChunks.length > 0
+        ? "Os trechos acima já vieram da base; chame knowledge_search só para buscar outra informação que eles não trazem."
+        : "Quando a pergunta puder ser respondida pelos materiais, chame knowledge_search antes de responder.");
+      if (knowledgeDocTitles && knowledgeDocTitles.length > 0) {
+        lines.push(`Materiais disponíveis: ${knowledgeDocTitles.join("; ")}.`);
+      }
+    }
+  }
+
+  lines.push("# Saída");
+  lines.push("Responda só com um objeto JSON válido neste formato, sem texto fora dele:");
+  // Sem placeholders: o modelo copiava "id do tema (opcional)" e
+  // { "campo": "valor" } para a saída. Antes, `actions: [{ type: "handoff" }]`
+  // no exemplo fazia pedir transferência sem motivo.
+  const offerTheme = !themeId && config.themes.length > 0;
   lines.push(JSON.stringify({
     reply: "texto para o cliente",
-    theme: "id do tema (opcional)",
+    ...(offerTheme ? { theme: null } : {}),
     messageModel: null,
     handoff: false,
     concluded: false,
     confirmed: null,
     outOfScope: false,
-    sentiment: "neutral",
-    tabulationId: "id da tabulação (opcional)",
-    collected: { "campo": "valor" },
-    reason: "por que respondeu assim",
+    collected: {},
+    reason: "uma frase sobre a decisão",
     actions: [],
-  }, null, 2));
-  // O exemplo trazia `actions: [{ type: "handoff" }]`: o modelo copiava e
-  // pedia transferência sem motivo.
-  lines.push("actions: lista de ações a executar neste turno — vazia quando não há ação. Para transferir para um atendente use handoff: true (ou a ação { type: \"handoff\" }) apenas quando realmente precisar de um humano.");
-  lines.push("messageModel: pode ser null ou um objeto com { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca use um objeto vazio ou outro formato.");
-  // O modelo completava o material com "conhecimento geral" plausível
-  // (um período, um prazo, uma condição) que não estava em trecho nenhum.
-  lines.push("Use apenas o que está nos trechos da base, nos dados do cliente e nas informações fixas da empresa. Não acrescente prazos, datas, períodos, valores, condições, canais ou etapas que não apareçam neles, mesmo que pareçam óbvios. Se a informação necessária não estiver ali, diga que não tem essa informação ou marque handoff=true.");
-  lines.push("Nunca afirme ao cliente que executou uma ação que não esteja em 'actions'.");
-  lines.push("Nunca prometa verificar e retornar depois. Se depender de outra pessoa, marque handoff=true.");
+  }));
+  lines.push([
+    "- handoff: true só quando precisa de uma pessoa (ver Fontes).",
+    "- actions: ações deste turno; vazia quando não há.",
+    "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
+    "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
+    "- concluded: true quando o atendimento terminou.",
+    ...(offerTheme ? [`- theme: id do assunto que melhor descreve o pedido (${config.themes.map((t) => t.id).join(", ")}) ou null.`] : []),
+  ].join("\n"));
 
   return lines.join("\n\n");
 }
@@ -1057,7 +1085,8 @@ export async function callV2LLM(args: {
     knowledgeDocTitles,
     prefetch.chunks,
     messageModels,
-  ) + mediaUnderstandingNote(args.config, userMessage);
+    mediaUnderstandingNote(args.config, userMessage),
+  );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     ...previousMessages,

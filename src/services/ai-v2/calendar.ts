@@ -2,8 +2,8 @@
  * Calendário do agente: datas e prazos como dado estruturado, fora dos
  * materiais. O motor calcula a situação de cada evento em relação a hoje
  * (já passou / hoje / em andamento / próximo) e entrega pronto ao modelo,
- * que não precisa comparar datas. Serve para qualquer agenda (calendário
- * letivo, prazos, eventos, escala). Nenhum domínio de cliente.
+ * que não precisa comparar datas. Serve para qualquer agenda (prazos,
+ * eventos, escala). Nenhum domínio de cliente.
  */
 
 import type { V2CalendarEvent } from "@/lib/ai-v2/types";
@@ -164,11 +164,13 @@ export function calendarPromptSection(
   const rest = inWindow.filter((e) => eventStatus(e, today) !== "past").slice(0, CALENDAR_LIMITS.maxInPrompt - past.length);
   const lines = [...past, ...rest].map((e) => {
     const when = e.end ? `${formatBr(e.start)} a ${formatBr(e.end)}` : formatBr(e.start);
-    return `- ${when} — ${e.title} [${STATUS_LABEL[eventStatus(e, today)]}]`;
+    return `- ${when} — ${e.title} (${STATUS_LABEL[eventStatus(e, today)]})`;
   });
   return [
     "# Calendário (datas e prazos)",
-    "Datas oficiais cadastradas pela empresa. A situação entre colchetes já foi calculada em relação a hoje: use-a. Para \"próximo\", \"quando é\", \"ainda dá tempo\", responda com a data daqui. Nunca apresente como próximo o que está [já passou]. Se a data pedida não estiver aqui nem nos trechos, diga que não tem essa data; não deduza.",
+    // As regras de uso das datas ficam em "# Data de hoje", junto com as
+    // datas marcadas nos trechos: um marcador e uma regra só.
+    "Datas oficiais cadastradas pela empresa; a situação entre parênteses já está calculada em relação a hoje. Para \"próximo\", \"quando é\" ou \"ainda dá tempo\", responda com a data daqui.",
     ...lines,
   ].join("\n");
 }

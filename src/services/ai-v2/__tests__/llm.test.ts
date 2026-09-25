@@ -229,6 +229,9 @@ describe("callV2LLM — pré-busca na base", () => {
     expect(result.systemPrompt).toContain("Trechos da base de conhecimento relacionados à mensagem");
     expect(result.systemPrompt).toContain("Como emitir o comprovante");
     expect(result.toolCalls[0]).toMatchObject({ toolName: "knowledge_search", args: { prefetch: true } });
+    // Com trechos já no prompt, não manda buscar de novo a mesma coisa.
+    expect(result.systemPrompt).toContain("já vieram da base");
+    expect(result.systemPrompt).not.toContain("chame knowledge_search antes de responder");
   });
 
   it("sem materiais liberados não busca", async () => {
@@ -365,7 +368,7 @@ describe("buildV2SystemPrompt — procedimentos", () => {
       stage: "active",
     });
     expect(result.systemPrompt).toContain("passo a passo numerado");
-    expect(result.systemPrompt).toContain("com todos os passos do material, na ordem");
+    expect(result.systemPrompt).toContain("com todos os passos na ordem da fonte");
     expect(result.systemPrompt).not.toContain("sem enumerar");
     expect(result.systemPrompt).toContain("Um passo a passo completo não conta para esse limite");
   });
@@ -531,7 +534,7 @@ describe("buildV2ToolSet governor", () => {
     // A última chamada é a resposta; antes dela pode vir a reformulação da busca.
     const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].system as string;
     expect(system).toContain("knowledge_search");
-    expect(system).toContain("Há materiais de consulta disponíveis");
+    expect(system).toMatch(/chame knowledge_search/);
   });
 });
 
@@ -666,7 +669,7 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
 
   it("cada tamanho gera o limite de saída esperado", async () => {
     const cases: Array<[NonNullable<V2AgentConfig["responseLength"]>, number, string]> = [
-      ["short", 600, "enxutas"],
+      ["short", 900, "enxutas"],
       ["medium", 1000, "equilibrada"],
       ["long", 2000, "mais detalhes"],
     ];
@@ -703,7 +706,7 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect(result.wasExpanded).toBe(true);
     expect(result.output.reply).toBe("ok");
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls[0][0].maxOutputTokens).toBe(600);
+    expect(calls[0][0].maxOutputTokens).toBe(900);
     expect(calls[1][0].maxOutputTokens).toBe(2000);
   });
 
@@ -825,9 +828,9 @@ describe("mergeChunks — resultado das consultas da pré-busca", () => {
   it("o melhor trecho de cada consulta entra, mesmo com distância pior que o de outra", async () => {
     const { mergeChunks } = await import("../llm");
     const generic = [c("como-acessar", "a", 0.24), c("como-acessar", "b", 0.25), c("outro", "c", 0.26), c("outro", "d", 0.27)];
-    const specific = [c("calendario", "datas AF", 0.34)];
+    const specific = [c("agenda", "datas do evento B", 0.34)];
     const r = mergeChunks([generic, specific], 3);
-    expect(r.map((x) => x.content)).toContain("datas AF");
+    expect(r.map((x) => x.content)).toContain("datas do evento B");
     expect(r).toHaveLength(3);
     expect(r[0].content).toBe("a");
   });
@@ -883,17 +886,17 @@ describe("escopo e repetição", () => {
 
   it("o prompt sempre traz o escopo, com a mensagem e os assuntos proibidos configurados", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
-    const config = baseConfig({ scope: { message: "Aqui eu só ajudo com o seu curso.", forbidden: [{ subject: "Assuntos jurídicos" }] } } as never);
+    const config = baseConfig({ scope: { message: "Aqui eu só ajudo com o seu pedido.", forbidden: [{ subject: "Assuntos jurídicos" }] } } as never);
     await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quanto é 2+2?", stage: "active" });
     const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].system as string;
     expect(system).toContain("# Escopo");
     expect(system).toContain("contas e cálculos");
-    expect(system).toContain("Aqui eu só ajudo com o seu curso.");
+    expect(system).toContain("Aqui eu só ajudo com o seu pedido.");
     expect(system).toContain("Assuntos jurídicos");
   });
 
   it("resposta igual à anterior é reescrita em vez de ficar sem envio", async () => {
-    const same = "As aulas de outubro começam no dia 01/10/2026.";
+    const same = "Os plantões de outubro começam no dia 01/10/2026.";
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: same, actions: [] })))
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Isso: começam em 01/10. Ficou alguma dúvida sobre essa data?", actions: [] })));
@@ -901,7 +904,7 @@ describe("escopo e repetição", () => {
       agentId: "agent-1", config: baseConfig(),
       context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
       userMessage: "?", stage: "active",
-      previousMessages: [{ role: "user", content: "quando começam as aulas de outubro?" }, { role: "assistant", content: same }],
+      previousMessages: [{ role: "user", content: "quando começam os plantões de outubro?" }, { role: "assistant", content: same }],
     });
     expect(r.output.reply).toContain("Ficou alguma dúvida");
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("repete quase igual");
@@ -918,5 +921,48 @@ describe("escopo e repetição", () => {
     });
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("1%");
     expect(r.output.handoff).toBe(true);
+  });
+});
+
+describe("ordem e forma do prompt", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+  });
+
+  const systemFor = async (config: V2AgentConfig, context: Record<string, unknown>, userMessage = "oi") => {
+    await callV2LLM({ agentId: "agent-1", config, context: { deals: [], fields: config.contextFields, ...context } as never, userMessage, stage: "active" });
+    return (generateWithTools as ReturnType<typeof vi.fn>).mock.lastCall![0].system as string;
+  };
+
+  it("comportamento no topo, dados no meio, saída por último e sem placeholders", async () => {
+    const config = baseConfig({ media: { confirmUnderstanding: true } } as never);
+    const system = await systemFor(config, { contact: null, selectedDeal: null }, "[Áudio do cliente, transcrito]: oi");
+    const at = (h: string) => system.indexOf(h);
+    expect(at("# Tom de voz")).toBe(0);
+    expect(at("# Fontes")).toBeGreaterThan(at("# Escopo"));
+    expect(at("# Dados do cliente para consulta interna")).toBeGreaterThan(at("# Mídia do cliente"));
+    expect(at("# Mídia do cliente")).toBeGreaterThan(at("# Data de hoje"));
+    expect(system.lastIndexOf("\n# ")).toBe(at("# Saída") - 1);
+    for (const noise of ["${", "(opcional)", '"campo"', "tabulationId", "sentiment", "# Etapa atual", "NUNCA", "APENAS"]) {
+      expect(system).not.toContain(noise);
+    }
+  });
+
+  it("regra de citação só quando há campo que não pode ser citado", async () => {
+    const config = baseConfig();
+    const all = await systemFor(config, { contact: { Nome: "Ana" }, citableContact: { Nome: "Ana" }, selectedDeal: null });
+    expect(all).not.toContain("Regra de citação");
+    const hidden = await systemFor(config, { contact: { Nome: "Ana", Telefone: "1" }, citableContact: { Nome: "Ana" }, selectedDeal: null });
+    expect(hidden).toContain("Regra de citação");
+  });
+});
+
+describe("themePromptText", () => {
+  it("lista só as ações do assunto; tools de consulta ficam de fora", async () => {
+    const { themePromptText } = await import("../theme-prompt");
+    expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search", "handoff", "ask_with_options"] }))
+      .toBe("Ajude.\nAções que você pode devolver em actions neste assunto: handoff, ask_with_options.");
+    expect(themePromptText({ instructions: "Ajude.", allowedTools: ["knowledge_search"] })).toBe("Ajude.");
   });
 });

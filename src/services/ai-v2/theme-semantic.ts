@@ -104,8 +104,8 @@ export async function selectV2ThemeSemantic(args: {
   const byTrigger = selectV2Theme(args.config, args.message);
   const themes = args.config.themes ?? [];
   if (byTrigger) {
-    // Palavra solta da lista ("empresa") levava "a empresa pediu comprovante
-    // de matrícula" para o assunto de estágio. Com frase de verdade, confere
+    // Palavra solta da lista ("empresa") levava "a empresa pediu um
+    // comprovante" para o assunto que tinha essa palavra no gatilho. Com frase de verdade, confere
     // o sentido: se outro assunto é claramente mais próximo, ele vence.
     if (!args.apiKey || contentWordCount(args.message) < 4) return { theme: byTrigger, method: "trigger" };
     try {

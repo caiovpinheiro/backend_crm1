@@ -376,10 +376,6 @@ export function normalizeV2Config(input: unknown): V2AgentConfig {
   return parsed as V2AgentConfig;
 }
 
-/** Regra absoluta de todos os presets: não prometer retorno. */
-const NO_RETURN_PROMISE =
-  "NUNCA prometa ao cliente que você vai verificar algo e retornar depois. Se depender de outra pessoa ou de informação que não está nos materiais, transfira na hora para um atendente.";
-
 /** Preset base compartilhado. */
 function basePreset(): V2AgentConfig {
   return normalizeV2Config({
@@ -389,12 +385,9 @@ function basePreset(): V2AgentConfig {
     model: "gpt-4o-mini",
     responseBehavior: "balanced",
     tone: "Profissional, direto e educado.",
-    globalRules: [
-      "Só responda com base nos materiais, dados do cliente ou catálogo de produtos.",
-      "Não diga que fez algo que ainda não foi feito.",
-      NO_RETURN_PROMISE,
-      "Se não souber a resposta, não invente: peça para transferir para um atendente.",
-    ],
+    // Fontes, não prometer retorno e não afirmar ação já estão no prompt
+    // fixo; repetidas aqui, em caixa alta, puxavam para transferir demais.
+    globalRules: [],
     variables: [],
     contextFields: {
       contact: [

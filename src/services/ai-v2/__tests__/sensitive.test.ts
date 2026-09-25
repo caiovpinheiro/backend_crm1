@@ -96,8 +96,8 @@ describe("SensitiveVault", () => {
 describe("guarda de saída com dado sensível", () => {
   it("remove senha e mascara documento, mantém e-mail", async () => {
     const { guardV2Output } = await import("../output-guard");
-    const r = guardV2Output(`Seu e-mail: aluno@exemplo.com Senha: Abc@1234. CPF ${CPF}`, []);
-    expect(r.text).toContain("aluno@exemplo.com");
+    const r = guardV2Output(`Seu e-mail: cliente@exemplo.com Senha: Abc@1234. CPF ${CPF}`, []);
+    expect(r.text).toContain("cliente@exemplo.com");
     expect(r.text).not.toContain("Abc@1234");
     expect(r.text).not.toContain("982.247");
     expect(r.warnings.join(" ")).toContain("sensível");

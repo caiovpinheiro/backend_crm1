@@ -14,7 +14,7 @@ describe("breakInlineSteps", () => {
   });
 
   it("não mexe em número solto nem em sequência que não começa em 1", () => {
-    for (const t of ["A prova será de 6 a 9. Depois vem a AF.", "Temos 2. opções e 3. prazos", "Custa R$ 10. Pague até dia 5."]) {
+    for (const t of ["O evento será de 6 a 9. Depois vem a etapa B.", "Temos 2. opções e 3. prazos", "Custa R$ 10. Pague até dia 5."]) {
       expect(breakInlineSteps(t)).toBe(t);
     }
   });

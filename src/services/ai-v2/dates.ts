@@ -1,7 +1,7 @@
 /**
  * Marca "(já passou)" nas datas de um texto que ficaram antes de hoje.
- * Modelo compara data mal: com um calendário nos trechos, listava prova de
- * setembro como "próxima" em fins de setembro. Marcando no texto, ele não
+ * Modelo compara data mal: com um calendário nos trechos, listava um evento
+ * do começo do mês como "próximo" no fim do mesmo mês. Marcando no texto, ele não
  * precisa calcular. Só português; nenhum domínio de cliente.
  */
 

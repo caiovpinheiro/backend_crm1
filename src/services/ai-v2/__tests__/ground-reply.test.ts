@@ -23,7 +23,7 @@ describe("unsupportedFigures e isNearDuplicateReply", () => {
 
   it("reconhece resposta repetida e deixa passar a que mudou", async () => {
     const { isNearDuplicateReply } = await import("../ground-reply");
-    expect(isNearDuplicateReply("As aulas de outubro começam no dia 01/10/2026. Se precisar, é só avisar!", "As aulas de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(true);
-    expect(isNearDuplicateReply("Isso, dia 01/10. Ficou alguma dúvida sobre o começo das aulas?", "As aulas de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(false);
+    expect(isNearDuplicateReply("Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!", "Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(true);
+    expect(isNearDuplicateReply("Isso, dia 01/10. Ficou alguma dúvida sobre o começo dos plantões?", "Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(false);
   });
 });

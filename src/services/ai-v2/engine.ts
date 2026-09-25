@@ -21,6 +21,7 @@ import { evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
+import { themePromptText } from "./theme-prompt";
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -1470,7 +1471,7 @@ async function callLLMWithTheme(
 }> {
   const theme = getV2ThemeById(config, themeId);
   const themeInstructions = theme
-    ? `${theme.instructions}\nFerramentas permitidas: ${theme.allowedTools.join(", ")}`
+    ? themePromptText(theme)
     : undefined;
 
   const previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [];

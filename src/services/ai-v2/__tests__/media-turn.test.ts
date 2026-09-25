@@ -29,8 +29,8 @@ describe("mídia do turno", () => {
   });
 
   it("troca o marcador pelo conteúdo e mantém o texto do cliente", () => {
-    const r = composeTurnText("bom dia\n[Áudio]", [{ kind: "audio", text: "quero saber a data da prova", content: "[Áudio]" }]);
-    expect(r).toBe("bom dia\n[Áudio do cliente, transcrito]: quero saber a data da prova");
+    const r = composeTurnText("bom dia\n[Áudio]", [{ kind: "audio", text: "quero saber a data da entrega", content: "[Áudio]" }]);
+    expect(r).toBe("bom dia\n[Áudio do cliente, transcrito]: quero saber a data da entrega");
   });
 
   it("legenda da imagem vai junto da leitura, sem repetir solta", () => {
