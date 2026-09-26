@@ -27,7 +27,7 @@ import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
-import { runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
+import { noteV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior } from "./closure";
 import { simpleHandoff } from "./handoff";
@@ -181,6 +181,16 @@ async function getConversationPhone(conversationId: string): Promise<string | nu
     select: { contact: { select: { phone: true } } },
   });
   return conv?.contact?.phone ?? null;
+}
+
+/** A mensagem traz uma das palavras de "pedir atendente" da configuração. */
+export function mentionsHumanRequest(config: V2AgentConfig, message: string): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const text = ` ${fold(message).replace(/[^a-z0-9]+/g, " ")} `;
+  return (config.handoff?.humanRequestKeywords ?? []).some((w) => {
+    const k = fold(w).replace(/[^a-z0-9]+/g, " ").trim();
+    return k.length > 0 && text.includes(` ${k} `);
+  });
 }
 
 function isPhoneAllowed(config: V2AgentConfig, phone: string | null): boolean {
@@ -351,6 +361,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (!isPhoneAllowed(config, phone)) {
     return { handoff: false, closed: false, error: "Phone number not in allowed test list" };
   }
+  // Fase de teste (lista de números) = conversa de teste; sem lista, produção.
+  noteV2Fact("source", (config.allowedPhoneNumbers ?? []).length > 0 ? "test" : "production");
 
   // Resolver org pela conversa
   const convOrg = await (prisma as unknown as {
@@ -712,6 +724,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
   if (media && media.action === "handoff") {
+    noteV2Fact("handoffCause", "media", { keepFirst: true });
     const handoffMessage = renderMessage(media.message ?? config.handoff.message, vars, defaultFormatter());
     await sendV2TextMessage({
       conversationId: input.conversationId,
@@ -840,6 +853,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
     let ruleReply: string | undefined;
     if (ruleHandoff) {
+      noteV2Fact("handoffCause", "rule", { keepFirst: true });
       const ruleAlreadyReplied = otherRuleActions.some((a) => replyActionTypes.has(a.type));
       ruleReply = await performHandoff(ruleHandoff.destination as V2Destination | undefined, { skipMessage: ruleAlreadyReplied });
       executedActions.push({ action: ruleHandoff, ok: true });
@@ -890,11 +904,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       const onDealNotFound = config.entry.onDealNotFound;
       traceStep("entrada", `Nenhum negócio do contato encontrado → "${onDealNotFound}"`);
       if (onDealNotFound === "handoff") {
+        noteV2Fact("handoffCause", "identification", { keepFirst: true });
         await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, "Não encontrei seu cadastro. Vou transferir para um atendente.", counters);
         return { handoff: true, closed: false };
       } else if (onDealNotFound === "create_deal") {
         const created = await createInitialDeal(contactId);
         if (!created) {
+          noteV2Fact("handoffCause", "identification", { keepFirst: true });
           // Sem funil/etapa para criar o negócio: melhor um humano do que um
           // turno que falha e é reprocessado até virar FAILED sem resposta.
           await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
@@ -926,6 +942,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         // (a 2ª com outro texto) e depois transfere para humano.
         const asked = stage === "identifying" ? Math.max(1, stateRow?.identificationAttempts ?? 1) : 0;
         if (asked >= (config.entry.maxAttempts ?? 2)) {
+          noteV2Fact("handoffCause", "identification", { keepFirst: true });
           await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
           return { handoff: true, closed: false };
         }
@@ -1059,6 +1076,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         const nextState = incrementStepAttempt(prevState, step.id);
         collectedVariables.onboarding_state = nextState as unknown as Record<string, unknown>;
         if (shouldHandoffOnboardingStep(step, nextState)) {
+          noteV2Fact("handoffCause", "onboarding", { keepFirst: true });
           const sent = await performHandoff(step.handoffOnStuck);
           await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", counters: counters as V2Counters, versionId: versionId, collectedVariables });
           await logV2Turn({
@@ -1085,6 +1103,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       outputTokens: 0,
     }).catch(() => ({ allowed: true as const }));
     if (!cap.allowed) {
+      noteV2Fact("handoffCause", "cost_cap", { keepFirst: true });
       await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
       return { handoff: true, closed: false };
     }
@@ -1107,10 +1126,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         }`
       : `Nenhum assunto${selection.similarity !== undefined ? ` (mais próximo teve similaridade ${selection.similarity.toFixed(2)}, abaixo do mínimo)` : ""}`,
       { method: selection.method, themeId: selection.theme?.id ?? null });
+    noteV2Fact("theme", { method: selection.method, themeId: selection.theme?.id ?? null, similarity: selection.similarity ?? null });
     if (selection.theme?.directHandoff) {
       // "Passar direto para o destino sem responder": transfere para o
       // destino do assunto sem chamar o modelo.
       traceStep("assunto", `"${selection.theme.name}" vai direto para o destino, sem resposta do agente`);
+      noteV2Fact("handoffCause", "direct_theme", { keepFirst: true });
       llmOutput = {
         reply: "",
         handoff: true,
@@ -1153,6 +1174,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       llmOutput.handoff = true;
       llmOutput.reply = config.handoff.message;
       llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
+      noteV2Fact("handoffCause", "no_source", { keepFirst: true });
     }
   }
 
@@ -1176,6 +1198,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       llmOutput.handoff = true;
       llmOutput.reply = config.handoff.message;
       llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados";
+      noteV2Fact("handoffCause", "no_source", { keepFirst: true });
     }
   }
 
@@ -1196,6 +1219,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   if (!llmOutput) {
+    noteV2Fact("handoffCause", "error", { keepFirst: true });
     // "Erro técnico" configurado na tela só valia no modo de teste.
     const fallback = config.fallback?.error?.message || config.handoff.message;
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters);
@@ -1216,10 +1240,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // do aviso ao cliente (ver `performHandoff`).
   let wantsHandoff = llmOutput.handoff;
   let requestedDestination: V2Destination | undefined;
+  const noteModelHandoff = () =>
+    noteV2Fact("handoffCause", mentionsHumanRequest(config, input.userMessage) ? "human_request" : "model", { keepFirst: true });
+  if (wantsHandoff) noteModelHandoff();
   const allowedActions: V2Action[] = [];
   for (const a of llmOutput.actions) {
     if (a.type === "handoff") {
       wantsHandoff = true;
+      noteModelHandoff();
       const dest = (a as { destination?: V2Destination }).destination;
       if (dest && typeof dest === "object" && typeof dest.type === "string") requestedDestination = dest;
       continue;
@@ -1247,6 +1275,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // "Notificar e continuar" e "Apenas registrar" também transferiam.
     if (config.sentiment.action === "handoff") {
       wantsHandoff = true;
+      noteV2Fact("handoffCause", "sentiment", { keepFirst: true });
       traceStep("sentimento", `Cliente classificado como "${sentiment}" → transferência`);
     } else {
       traceStep("sentimento", `Cliente classificado como "${sentiment}" → registrado, atendimento continua`);
@@ -1267,7 +1296,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   });
   let replyText = guard.text;
   if (guard.warnings.length > 0) traceStep("guarda", guard.warnings.join("; "));
-  if (guard.forceHandoff) wantsHandoff = true;
+  if (guard.forceHandoff) {
+    wantsHandoff = true;
+    noteV2Fact("handoffCause", "guard", { keepFirst: true });
+  }
 
   // Executa ações
   const actionCtx = buildActionCtx(resolved!.userId, resolved!.agentConfigId, orgId, config, loadedContext, input, contactId, mapV2AutonomyToPrisma(config.autonomyMode), (v) => { counters.surveyPending = v; });
@@ -1324,6 +1356,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (stopLimits.action === "handoff") {
       anyHandoff = true;
       llmOutput.handoff = true;
+      noteV2Fact("handoffCause", "limit", { keepFirst: true });
     } else if (stopLimits.action === "close") {
       anyClose = true;
       llmOutput.concluded = true;
@@ -1346,12 +1379,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     !allowedActions.some((a) => a.type === "send_message_model")
   ) {
     traceStep("ações", "Mensagem pronta pedida não está liberada → transferência para enviar o material");
+    noteV2Fact("handoffCause", "message_model_not_allowed", { keepFirst: true });
     anyHandoff = true;
   }
 
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
     const res = await sendReply(replyText);
+    noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
       sentReply = replyText;
     } else if (res.reason === "near_duplicate") {
@@ -1375,6 +1410,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // A reply já anunciou o material; se ele não saiu, uma pessoa envia.
     if (outRes.results.some((r) => !r.ok && r.action.type === "send_message_model")) {
       traceStep("ações", "A mensagem pronta anunciada não foi enviada → transferência");
+      noteV2Fact("handoffCause", "message_model_failed", { keepFirst: true });
       anyHandoff = true;
       anyClose = false;
     }

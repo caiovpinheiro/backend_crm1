@@ -18,7 +18,8 @@ import { getV2Agent } from "./agents";
 import { simulateV2Turn } from "./test-turn";
 import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./replay-extract";
-import { maskSensitive } from "./sensitive";
+import { maskSensitive, maskSensitiveDeep } from "./sensitive";
+import { runWithV2Trace, takeV2Facts, takeV2TraceForLog } from "./trace";
 import { IMPORT_LIMITS, parseTranscript, transcriptToRows } from "./replay-import";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { understandMedia, understoodKindOf } from "./media-understanding";
@@ -311,6 +312,8 @@ async function ensureReplaySchema(): Promise<void> {
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
   await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "history" JSONB`);
+  // O que a simulação decidiu e por quê (assunto, busca, verificação, descartes, rastro).
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "facts" JSONB`);
   await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ai_simple_replay_items_run_idx" ON "ai_simple_replay_items" ("runId")`);
   schemaReady = true;
 }
@@ -749,17 +752,29 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
     let sources: V2TurnSource[] = [];
     let verdict: ReplayVerdict | null = null;
     let error: string | null = null;
+    let facts: Record<string, unknown> | null = null;
     let skipReason = point.skipReason;
     if (!skipReason) {
       try {
-        const sim = await withTimeout(
-          simulateV2Turn(
-            args.agentId, args.config, point.clientText, point.history,
-            args.organizationId, w.contactId ?? undefined, undefined, "active",
-          ),
+        const { sim, trace, turnFacts } = await withTimeout(
+          runWithV2Trace(async () => {
+            const r = await simulateV2Turn(
+              args.agentId, args.config, point.clientText, point.history,
+              args.organizationId, w.contactId ?? undefined, undefined, "active",
+            );
+            return { sim: r, trace: takeV2TraceForLog() ?? [], turnFacts: takeV2Facts() ?? {} };
+          }),
           POINT_TIMEOUT_MS,
           "O agente demorou demais para responder neste ponto.",
         );
+        facts = maskSensitiveDeep({
+          ...turnFacts,
+          themeId: sim.themeId,
+          reason: sim.reason,
+          discardedActions: sim.discardedActions.map((d) => d.action.type),
+          sourceDocIds: [...new Set(sim.ragChunks.map((c) => c.docId).filter(Boolean))],
+          trace,
+        }) as Record<string, unknown>;
         agentText = maskSensitive(sim.reply ?? "").text;
         agentHandoff = sim.handoff;
         themeName = sim.themeName;
@@ -785,11 +800,12 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
       }
     }
     await db.$executeRawUnsafe(
-      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error","history")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb)`,
+      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error","history","facts")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17::jsonb)`,
       randomUUID(), args.runId, args.organizationId, w.conversationId, point.index, new Date(point.at),
       point.clientText, point.humanText, agentText, agentHandoff, themeName,
       JSON.stringify(sources), verdict ? JSON.stringify(verdict) : null, skipReason, error, JSON.stringify(point.history),
+      facts ? JSON.stringify(facts) : null,
     );
     await db.$executeRawUnsafe(
       `UPDATE "ai_simple_replay_runs" SET "done"="done"+1, "inputTokens"=$2, "outputTokens"=$3, "costUsd"=$4, "updatedAt"=now() WHERE "id"=$1`,

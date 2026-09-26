@@ -22,7 +22,7 @@ export type V2TraceStep = {
   at: number;
 };
 
-type TraceStore = { startedAt: number; steps: V2TraceStep[]; logged: boolean };
+type TraceStore = { startedAt: number; steps: V2TraceStep[]; logged: boolean; facts: Record<string, unknown> };
 
 const store = new AsyncLocalStorage<TraceStore>();
 
@@ -30,7 +30,7 @@ const MAX_STEPS = 60;
 const MAX_DETAIL = 300;
 
 export function runWithV2Trace<T>(fn: () => Promise<T>): Promise<T> {
-  return store.run({ startedAt: Date.now(), steps: [], logged: false }, fn);
+  return store.run({ startedAt: Date.now(), steps: [], logged: false, facts: {} }, fn);
 }
 
 /** Registra um passo no turno corrente. Fora de um turno não faz nada. */
@@ -51,6 +51,25 @@ export function takeV2TraceForLog(): V2TraceStep[] | undefined {
   if (!s) return undefined;
   s.logged = true;
   return [...s.steps];
+}
+
+/**
+ * Fato estruturado do turno (motivo da transferência, busca, verificação…),
+ * gravado em `contextSnapshot.facts`. O rastro é texto para pessoas; os fatos
+ * são para o relatório de feedback agregar sem ler texto livre.
+ * `keepFirst`: o primeiro valor vence (ex.: a primeira causa de transferência).
+ */
+export function noteV2Fact(key: string, value: unknown, opts?: { keepFirst?: boolean }): void {
+  const s = store.getStore();
+  if (!s) return;
+  if (opts?.keepFirst && s.facts[key] !== undefined) return;
+  s.facts[key] = value;
+}
+
+/** Fatos do turno corrente (cópia). */
+export function takeV2Facts(): Record<string, unknown> | undefined {
+  const s = store.getStore();
+  return s ? { ...s.facts } : undefined;
 }
 
 /** O turno já gravou log? (o motor grava um log de erro quando não gravou) */

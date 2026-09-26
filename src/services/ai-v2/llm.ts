@@ -34,7 +34,7 @@ import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
-import { traceStep } from "./trace";
+import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
@@ -183,10 +183,12 @@ async function prefetchKnowledge(args: {
   const query = knowledgePrefetchQuery(args.userMessage, args.previousMessages);
   if (docIds.length === 0) {
     traceStep("base", "Sem materiais liberados para este agente/assunto — não buscou na base");
+    noteV2Fact("prefetch", { searchable: hasSearchableQuestion(query), searched: false, reason: "no_docs", docCount: 0, queries: [], found: 0 });
     return { query, chunks: [] };
   }
   if (!hasSearchableQuestion(query)) {
     traceStep("base", "Mensagem sem pergunta a buscar (saudação/curta) — não buscou na base");
+    noteV2Fact("prefetch", { searchable: false, searched: false, reason: "not_a_question", docCount: docIds.length, queries: [], found: 0 });
     return { query, chunks: [] };
   }
   let rewrites: string[] = [];
@@ -226,9 +228,21 @@ async function prefetchKnowledge(args: {
       ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)})`).join(", ")}`
       : `Nenhum trecho relevante em ${docIds.length} material(is)`,
       { queries });
+    noteV2Fact("prefetch", {
+      searchable: true,
+      searched: true,
+      docCount: docIds.length,
+      queries,
+      found: chunks.length,
+      bestSimilarity: chunks.length > 0 ? Math.max(...chunks.map((c) => 1 - c.distance)) : null,
+      docIds: [...new Set(chunks.map((c) => c.docId).filter(Boolean))],
+      // O modelo lê só o começo de cada trecho (PREFETCH_CHUNK_CHARS).
+      truncatedDocIds: [...new Set(chunks.filter((c) => c.content.length > PREFETCH_CHUNK_CHARS).map((c) => c.docId).filter(Boolean))],
+    });
     return { query: queries.join(" | "), chunks };
   } catch (err) {
     traceStep("base", `Falha ao buscar na base: ${err instanceof Error ? err.message : String(err)}`);
+    noteV2Fact("prefetch", { searchable: true, searched: false, reason: "error", docCount: docIds.length, queries: [query], found: 0 });
     console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
     return { query, chunks: [] };
   }
@@ -863,6 +877,12 @@ function buildV2SystemPrompt(
   lines.push(`# Tom de voz\n${config.tone}`);
   if (config.globalRules.length > 0) lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
   lines.push(`# Escopo\n${scopeInstruction(config)}`);
+  const humanWords = (config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim()).filter(Boolean);
+  if (humanWords.length > 0) {
+    // As palavras da tela não tinham efeito: "pediu uma pessoa" dependia só
+    // do modelo adivinhar.
+    lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido.`);
+  }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
   lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
@@ -1044,6 +1064,7 @@ export async function callV2LLM(args: {
   systemPrompt: string;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
+  noteV2Fact("model", args.config.model);
   // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
   // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
   // precisa (ferramenta, variável coletada, ação).
@@ -1296,6 +1317,7 @@ export async function callV2LLM(args: {
     const unsupported = unsupportedOf(r.output.reply);
     if (unsupported.length === 0) return;
     const list = unsupported.join(", ");
+    noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: false });
     traceStep("verificação", `Resposta cita ${list}, que não está no material nem na conversa — pedindo reescrita`);
     const reviewSystem = [
       system,
@@ -1324,6 +1346,7 @@ export async function callV2LLM(args: {
         const still = unsupportedOf(fixed.reply);
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
+          noteV2Fact("verification", { unsupported, rewritten: true, forcedHandoff: false });
           r.output = fixed;
           return;
         }
@@ -1332,6 +1355,8 @@ export async function callV2LLM(args: {
       console.warn("[ai-v2] revisão de termos falhou:", err instanceof Error ? err.message : err);
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
+    noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: true });
+    noteV2Fact("handoffCause", "verification", { keepFirst: true });
     r.output = {
       ...r.output,
       reply: args.config.fallback?.noSource?.message || args.config.handoff?.message || "Vou chamar uma pessoa da equipe para te ajudar com isso.",
