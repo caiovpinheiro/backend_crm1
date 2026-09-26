@@ -4,6 +4,7 @@
  */
 
 import type { V2AgentConfig, V2Rule, V2RuleAction, V2RuleCondition, V2CRMContext, V2BusinessHoursSlot } from "@/lib/ai-v2/types";
+import { HUMAN_REQUEST_RULE_ID, humanRequestTerms } from "@/lib/ai-v2/config";
 
 export type V2RuleEvaluationInput = {
   userMessage: string;
@@ -138,9 +139,25 @@ export function evaluateV2Rules(
 ): V2Rule | null {
   const sorted = config.rules.filter((r) => r.enabled !== false).sort((a, b) => a.order - b.order);
   for (const rule of sorted) {
-    if (evaluateRule(rule, input, context)) return rule;
+    if (evaluateRule(withHumanRequestTerms(rule, config), input, context)) return rule;
   }
   return null;
+}
+
+/**
+ * Regra "Pedido de humano" (ligada): as palavras-chave valem junto com as de
+ * "Chamar a equipe" e as frases explícitas — antes eram duas listas que
+ * precisavam ser editadas juntas.
+ */
+function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig): V2Rule {
+  if (rule.id !== HUMAN_REQUEST_RULE_ID) return rule;
+  const terms = humanRequestTerms(config);
+  return {
+    ...rule,
+    conditions: rule.conditions.map((c) =>
+      c.type === "keywords" ? { ...c, values: [...new Set([...(c.values ?? []), ...terms])] } : c,
+    ),
+  };
 }
 
 export function applyRuleActions(rule: V2Rule): V2RuleAction[] {

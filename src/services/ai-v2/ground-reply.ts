@@ -125,6 +125,18 @@ export function unsupportedFigures(reply: string, sources: string[]): string[] {
       if (!haystack.includes(squash(token))) out.add(token);
     }
   }
+  // Por extenso: "50 por cento", "cinquenta por cento" (vale se a fonte
+  // traz o mesmo número com % ou a mesma frase).
+  const plain = normalize(sources.join(" ")).replace(/\s+/g, " ");
+  for (const m of reply.matchAll(/\b(\d+(?:[.,]\d+)?|[a-zà-ú]+)\s+por\s*cento\b/gi)) {
+    const token = m[0].trim();
+    const asPercent = /^\d/.test(m[1]) ? squash(`${m[1]}%`) : "";
+    if (!haystack.includes(squash(token)) && !(asPercent && haystack.includes(asPercent)) && !plain.includes(normalize(token))) out.add(token);
+  }
+  // "metade do valor/da parcela": proporção de dinheiro sem fonte.
+  for (const m of reply.matchAll(/\bmetade\s+d[oa]s?\s+(?:valor|pre[cç]o|parcela|pagamento|cobran[cç]a|mensalidade|taxa|fatura)\b/gi)) {
+    if (!/metade|50\s?%|cinquenta por cento/.test(sources.join(" ").toLowerCase())) out.add(m[0].trim());
+  }
   return [...out];
 }
 

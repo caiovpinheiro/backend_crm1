@@ -1541,6 +1541,45 @@ describe("processV2Turn — correções do motor", () => {
     expect(sentTexts()).not.toContain("Pode escrever?");
   });
 
+  it("imagem com legenda e imagem seguida de texto: a política de imagem vale (não só o tipo da última bolha)", async () => {
+    const config = baseConfig({ media: { ...baseConfig().media, image: { action: "handoff" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    // Legenda: o texto do turno é só "Aparece assim", a mensagem é imagem.
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ messageType: "image", createdAt: new Date("2026-09-26T12:00:00Z") }] : [],
+    );
+    await run("Aparece assim", { messageIds: ["m-1"], messageType: "image" });
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+
+    // Imagem e depois texto: o turno é "text", mas tem imagem.
+    mocks.simpleHandoff.mockClear();
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in
+        ? [{ messageType: "image", createdAt: new Date("2026-09-26T12:00:00Z") }, { messageType: "text", createdAt: new Date("2026-09-26T12:00:01Z") }]
+        : [],
+    );
+    await run("[Imagem]\nAparece isso", { messageIds: ["m-2", "m-3"], messageType: "text" });
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    mocks.messageFindMany.mockReset();
+  });
+
+  it("encerrar sem despedida configurada: a resposta do modelo sai (antes o cliente ficava sem nada)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado! Qualquer coisa, é só chamar.", concluded: true }));
+    await run("Obrigada, vou fazer");
+    expect(sentTexts()).toContain("Combinado! Qualquer coisa, é só chamar.");
+
+    // Com despedida configurada, sai só a despedida.
+    mocks.sendText.mockClear();
+    const withGoodbye = baseConfig({ closure: { goodbyeMessage: "Até mais!" } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: withGoodbye, active: true });
+    await run("Obrigada, vou fazer");
+    expect(sentTexts()).toEqual(["Até mais!"]);
+  });
+
   it("só áudio com \"pedir texto\": pede para escrever", async () => {
     const config = baseConfig({ media: { ...baseConfig().media, audio: { action: "ask_text", askTextMessage: "Pode escrever?" } } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

@@ -39,6 +39,16 @@ describe("unsupportedFigures e isNearDuplicateReply", () => {
     expect(unsupportedFigures("Valor: R$ 1.290,00", src)).toEqual([]);
   });
 
+  it("valores por extenso também contam", async () => {
+    const { unsupportedFigures } = await import("../ground-reply");
+    expect(unsupportedFigures("Sim, você paga 50 por cento da parcela.", ["Inclua o item na área do cliente."])).toEqual(["50 por cento"]);
+    expect(unsupportedFigures("Sim, cinquenta por cento.", ["Sem valores aqui."])).toEqual(["cinquenta por cento"]);
+    expect(unsupportedFigures("Fica a metade do valor.", ["Sem valores aqui."])).toEqual(["metade do valor"]);
+    // Na fonte com %, ou a mesma frase: ok.
+    expect(unsupportedFigures("Você paga 50 por cento.", ["O item custa 50% da parcela."])).toEqual([]);
+    expect(unsupportedFigures("Fica a metade do valor.", ["O item custa 50% da parcela."])).toEqual([]);
+  });
+
   it("reconhece resposta repetida e deixa passar a que mudou", async () => {
     const { isNearDuplicateReply } = await import("../ground-reply");
     expect(isNearDuplicateReply("Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!", "Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(true);

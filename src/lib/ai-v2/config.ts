@@ -452,6 +452,31 @@ export function validateV2Config(input: unknown): { ok: true; data: V2AgentConfi
   return { ok: true, data: parsed.data as V2AgentConfig };
 }
 
+/**
+ * Frases que sempre são pedido de atendente, somadas às palavras da tela.
+ * "Falar com equipe" (rótulo comum de botão) não casava com as palavras
+ * padrão e a transferência ficava por conta do modelo. Só frases inteiras:
+ * palavra solta ("equipe") aparece em outros assuntos.
+ */
+export const HUMAN_REQUEST_PHRASES = [
+  "falar com a equipe",
+  "falar com equipe",
+  "falar com alguem",
+  "falar com uma pessoa",
+  "falar com um atendente",
+  "falar com atendente",
+  "atendimento humano",
+];
+
+/** Id da regra de preset "Pedido de humano". */
+export const HUMAN_REQUEST_RULE_ID = "human_request";
+
+/** Palavras da tela + frases explícitas. */
+export function humanRequestTerms(config: Pick<V2AgentConfig, "handoff">): string[] {
+  const own = (config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim()).filter(Boolean);
+  return [...new Set([...own, ...HUMAN_REQUEST_PHRASES])];
+}
+
 export function normalizeV2Config(input: unknown): V2AgentConfig {
   const parsed = v2AgentConfigSchema.parse(input);
   return parsed as V2AgentConfig;

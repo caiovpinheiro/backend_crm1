@@ -107,6 +107,25 @@ describe("evaluateV2Rules conditions", () => {
   });
 });
 
+describe("regra Pedido de humano: frases explícitas e palavras de 'Chamar a equipe'", () => {
+  const rule = (enabled = true) =>
+    ({ id: "human_request", name: "Pedido de humano", order: 0, enabled, conditions: [{ type: "keywords", values: ["humano"] }], actions: [{ type: "handoff" }] }) as any;
+  const cfg = (enabled = true) => ({ ...baseRulesConfig([rule(enabled)]), handoff: { humanRequestKeywords: ["supervisor"] } }) as any;
+  const match = (c: V2AgentConfig, m: string) =>
+    evaluateV2Rules(c, { userMessage: m, isFirstMessage: false, withinBusinessHours: true } as any, emptyContext)?.id ?? null;
+
+  it("'Falar com equipe' (botão) e palavras da outra lista casam", () => {
+    expect(match(cfg(), "Falar com equipe")).toBe("human_request");
+    expect(match(cfg(), "quero atendimento humano")).toBe("human_request");
+    expect(match(cfg(), "chama o supervisor")).toBe("human_request");
+  });
+
+  it("palavra solta não casa; regra desligada não casa", () => {
+    expect(match(cfg(), "a equipe me mandou um e-mail")).toBeNull();
+    expect(match(cfg(false), "Falar com equipe")).toBeNull();
+  });
+});
+
 describe("evaluateV2Rules — palavras-chave", () => {
   const cfg = {
     rules: [

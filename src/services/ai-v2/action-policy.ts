@@ -5,6 +5,7 @@
  */
 
 import type { V2Action, V2AgentConfig } from "@/lib/ai-v2/types";
+import { humanRequestTerms } from "@/lib/ai-v2/config";
 
 import { QUERY_TOOL_NAMES } from "./theme-prompt";
 
@@ -116,7 +117,7 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
 export function mentionsHumanRequest(config: V2AgentConfig, message: string): boolean {
   const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const text = ` ${fold(message).replace(/[^a-z0-9]+/g, " ")} `;
-  return (config.handoff?.humanRequestKeywords ?? []).some((w) => {
+  return humanRequestTerms(config).some((w) => {
     const k = fold(w).replace(/[^a-z0-9]+/g, " ").trim();
     return k.length > 0 && text.includes(` ${k} `);
   });

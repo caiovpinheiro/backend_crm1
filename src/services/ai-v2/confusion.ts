@@ -16,12 +16,25 @@ const fold = (s: string) =>
 
 const CONFUSED = /^(?:nao entendi(?: nada)?|nao entendo|nao compreendi|nao ficou claro|como assim|hein|ha|que|oi)$/;
 
-/** A mensagem inteira só mostra confusão (não traz pergunta nova). */
-export function isConfusionMessage(text: string): boolean {
+/**
+ * Estado de confusão dito pelo cliente: "estou confusa", "fiquei super
+ * perdido no app", "não estou entendendo". Pode vir com desculpa antes.
+ */
+const CONFUSED_STATE =
+  /^(?:(?:desculp[ae]|perdao|ai|ah|nossa)[, ]*)?(?:eu )?(?:(?:estou|to|tou|fiquei|fico|me sinto|t[oô] meio)\s+(?:meio |muito |bem |super |um pouco |totalmente )?(?:confus[ao]s?|perdid[ao]s?)(?:\s+(?:no|na|nos|nas|com|aqui|nisso|nessa|nesse)(?:\s+[a-z]+){0,3})?|nao (?:estou|to|tou) entendendo(?: nada)?)$/;
+
+/**
+ * A mensagem inteira só mostra confusão (não traz pergunta nova).
+ * `includeState: false` deixa de fora "estou confusa"/"fiquei perdida"
+ * (só "?", "não entendi", "como assim").
+ */
+export function isConfusionMessage(text: string, opts: { includeState?: boolean } = {}): boolean {
   const raw = text.trim();
   if (!raw) return false;
   if (/^[?¿]+$/.test(raw.replace(/\s+/g, ""))) return true;
-  return CONFUSED.test(fold(raw).replace(/[?!.¿]+/g, "").trim());
+  const folded = fold(raw).replace(/[?!.¿,]+/g, " ").replace(/\s+/g, " ").trim();
+  if (CONFUSED.test(folded)) return true;
+  return opts.includeState !== false && CONFUSED_STATE.test(folded);
 }
 
 /** Resposta que refaz a última pergunta do agente (ou pede o que ficou confuso). */
@@ -38,4 +51,4 @@ export function rephraseAfterConfusion(lastAgentMessage: string | null | undefin
 
 /** Linha do prompt quando o modo é refazer. */
 export const CONFUSION_PROMPT =
-  "Se o cliente mandar só \"?\" ou disser que não entendeu, explique de outro jeito ou refaça sua última pergunta de forma mais simples. Não transfira por isso.";
+  "Se o cliente mandar só \"?\", disser que não entendeu ou que está confuso/perdido, explique de outro jeito, mais simples e em passos curtos, ou refaça sua última pergunta. Não transfira por isso.";

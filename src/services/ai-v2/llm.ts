@@ -44,6 +44,7 @@ import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
 import { knowledgeMinSimilarity } from "./similarity-presets";
+import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
@@ -910,7 +911,7 @@ function buildV2SystemPrompt(
   lines.push(`# Tom de voz\n${config.tone}`);
   if (config.globalRules.length > 0) lines.push(`# Regras globais\n${config.globalRules.join("\n")}`);
   lines.push(`# Escopo\n${scopeInstruction(config)}`);
-  const humanWords = (config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim()).filter(Boolean);
+  const humanWords = humanRequestTerms(config);
   if (humanWords.length > 0) {
     // As palavras da tela não tinham efeito: "pediu uma pessoa" dependia só
     // do modelo adivinhar.

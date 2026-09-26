@@ -26,6 +26,11 @@ describe("cliente confuso", () => {
   it("reconhece só confusão, não pergunta nova", () => {
     for (const m of ["?", "??", " ? ", "não entendi", "Não entendi nada", "como assim?", "hein?"]) expect(isConfusionMessage(m)).toBe(true);
     for (const m of ["qual o prazo?", "não entendi o prazo da entrega", "", "ok"]) expect(isConfusionMessage(m)).toBe(false);
+    for (const m of ["Desculpe, estou confusa", "fiquei super perdida no app", "to meio perdido", "não estou entendendo nada"]) {
+      expect(isConfusionMessage(m)).toBe(true);
+      expect(isConfusionMessage(m, { includeState: false })).toBe(false);
+    }
+    for (const m of ["estou confusa com o valor da parcela, quanto é?", "fiquei perdida, onde clico para incluir o item?"]) expect(isConfusionMessage(m)).toBe(false);
   });
 
   it("refaz a última pergunta do agente, ou pede o que ficou confuso", () => {

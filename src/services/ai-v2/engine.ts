@@ -17,7 +17,7 @@ import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
-import { evaluateV2Media } from "./media";
+import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
@@ -240,7 +240,25 @@ export function isFillerMessage(text: string): boolean {
   if (!t) return false;
   // "alô?" / "ei": chamando atenção, sem pedido.
   if (/^(?:al[oô]+|ei+|hey)[\s?!.…]*$/i.test(t)) return true;
-  return /^[\s?!.…]+$/.test(t) || isGreetingOnlyMessage(t) || isConfusionMessage(t);
+  return /^[\s?!.…]+$/.test(t) || isGreetingOnlyMessage(t) || isConfusionMessage(t, { includeState: false });
+}
+
+/** Tipos das mensagens do turno, em ordem (o turno junta várias bolhas). */
+async function turnMessageTypes(messageIds: string[] | undefined): Promise<string[]> {
+  if (!messageIds?.length) return [];
+  try {
+    const db = prisma as unknown as {
+      message: { findMany: (args: unknown) => Promise<Array<{ messageType?: string | null }>> };
+    };
+    const rows = await db.message.findMany({
+      where: { id: { in: messageIds }, direction: "in" },
+      select: { messageType: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+    });
+    return rows.map((r) => r.messageType ?? "").filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 /** Resposta que traz um e-mail ou um número com cara de documento. */
@@ -873,7 +891,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   counters.postCloseAsked = false;
 
   // Mídia recebida
-  const media = evaluateV2Media(config, input.messageType);
+  // A política vale para a mídia do turno, em qualquer bolha: antes só o tipo
+  // da última decidia (imagem e depois "aparece isso" ignorava a imagem).
+  const turnMediaType = (await turnMessageTypes(input.messageIds)).find((t) => detectV2MediaKinds(t).length > 0);
+  const media = evaluateV2Media(config, turnMediaType ?? input.messageType);
   if (media) traceStep("mídia", `Recebeu ${media.kind} → política "${media.action}"`);
 
   // "Pedir para escrever" e "não entendi": responde e espera o cliente, sem
@@ -903,7 +924,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // e áudio + texto nem transcrevia o áudio.
   const turnLines = input.userMessage.split(/\r?\n/).filter((l) => l.trim());
   const turnHasText = turnLines.some((l) => !isMediaPlaceholderText(l));
-  const turnHasMedia = turnLines.some((l) => isMediaPlaceholderText(l));
+  // Imagem com legenda chega só com a legenda no texto (sem "[Imagem]").
+  const understandsMedia = (["transcribe", "describe"] as string[]).some(
+    (a) => a === config.media.audio?.action || a === config.media.image?.action,
+  );
+  const turnHasMedia = understandsMedia && (turnLines.some((l) => isMediaPlaceholderText(l)) || !!turnMediaType);
   if (media && media.action === "ask_text") {
     if (!turnHasText) return replyAndWait(media.message || MEDIA_ASK_TEXT_DEFAULT[media.kind], "media ask_text");
     traceStep("mídia", "Mídia veio junto com texto → responde o texto");
@@ -1815,6 +1840,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (goodbye && !anyHandoff) {
       const goodbyeRendered = renderMessage(goodbye, vars, defaultFormatter());
       if ((await sendReply(goodbyeRendered)).sent) sentReply = goodbyeRendered;
+    } else if (!anyHandoff && replyText.trim()) {
+      // Sem despedida configurada, sai a resposta do modelo ("Combinado!
+      // Qualquer coisa, é só chamar."). Antes era descartada e o cliente
+      // ficava sem nada, com o atendimento encerrado.
+      if ((await sendReply(replyText)).sent) sentReply = replyText;
+      traceStep("encerramento", "Sem despedida configurada → envia a resposta do modelo e encerra");
     }
     await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables, activeTheme);
   } else {
