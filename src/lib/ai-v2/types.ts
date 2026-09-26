@@ -107,22 +107,16 @@ export interface V2InactivityConfig {
   closeMessage?: string;
 }
 
-/** Como o assunto da conversa é reconhecido e trocado. */
+/** Como o assunto da conversa é reconhecido e trocado (opção com nome). */
 export interface V2ThemeRecognitionConfig {
-  /** Similaridade mínima para escolher um assunto pelo sentido (0–1). */
-  minSimilarity?: number;
-  /** Similaridade mínima para TROCAR o assunto atual por outro (0–1). */
-  switchSimilarity?: number;
-  /** Quanto o outro assunto precisa ficar acima do atual para trocar. */
-  switchMargin?: number;
-  /** Mensagens com menos palavras que isto mantêm o assunto atual. */
-  shortMessageWords?: number;
+  /** "strict" rígido, "balanced" equilibrado (padrão), "loose" flexível. */
+  preset?: "strict" | "balanced" | "loose";
 }
 
-/** Busca nos materiais. */
+/** Quais trechos dos materiais vão ao modelo (opção com nome). */
 export interface V2KnowledgeSearchConfig {
-  /** Trechos com similaridade abaixo disto não vão ao modelo (0 = todos). */
-  minSimilarity?: number;
+  /** "all" todos (padrão), "related" só os relacionados, "close" só os muito parecidos. */
+  preset?: "all" | "related" | "close";
 }
 
 export interface V2TabulationConfig {

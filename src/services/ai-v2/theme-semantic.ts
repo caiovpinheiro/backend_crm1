@@ -16,38 +16,14 @@
 import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { embedTexts } from "@/services/ai/provider";
 import { matchV2Theme, selectV2Theme } from "./themes";
-
-function envSimilarity(name: string, fallback: number): number {
-  const raw = Number.parseFloat(process.env[name] ?? "");
-  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : fallback;
-}
+import { themeThresholdsFor, type ThemeThresholds } from "./similarity-presets";
 
 /**
- * Réguas do reconhecimento, da config do agente ("Do que ele cuida ›
- * Reconhecimento"); sem valor, as variáveis de ambiente e os padrões.
- * Escolher pelo sentido: similaridade >= mínimo (mesma régua da base, 0,4).
- * TROCAR o assunto atual: o outro passa de `switchSimilarity` e fica
- * `switchMargin` acima do atual — sem margem, um acompanhamento empatava
- * com outro assunto e a conversa pulava.
- * `shortMessageWords`: com o padrão antigo (3), um assunto dito em duas
- * palavras nunca trocava o atual; o padrão agora é 2 — "ok", "sim",
- * "obrigado" continuam no assunto atual, e mensagem curta que pergunta
- * ("consegue me enviar?") é acompanhamento (ver `isShortFollowUp`).
+ * Réguas do reconhecimento pela opção de "Do que ele cuida › Assuntos"
+ * (rígido / equilibrado / flexível) — ver similarity-presets.
  */
-export function themeThresholds(config: V2AgentConfig): {
-  minSimilarity: number;
-  switchSimilarity: number;
-  switchMargin: number;
-  shortMessageWords: number;
-} {
-  const t = config.themeRecognition ?? {};
-  const inRange = (v: unknown) => (typeof v === "number" && v > 0 && v < 1 ? v : undefined);
-  return {
-    minSimilarity: inRange(t.minSimilarity) ?? envSimilarity("AI_V2_THEME_MIN_SIMILARITY", 0.4),
-    switchSimilarity: inRange(t.switchSimilarity) ?? envSimilarity("AI_V2_THEME_SWITCH_SIMILARITY", 0.5),
-    switchMargin: typeof t.switchMargin === "number" && t.switchMargin >= 0 ? t.switchMargin : 0.05,
-    shortMessageWords: typeof t.shortMessageWords === "number" && t.shortMessageWords >= 0 ? t.shortMessageWords : 2,
-  };
+export function themeThresholds(config: V2AgentConfig): ThemeThresholds {
+  return themeThresholdsFor(config.themeRecognition?.preset);
 }
 
 /** Texto que representa o assunto no espaço de embeddings. */

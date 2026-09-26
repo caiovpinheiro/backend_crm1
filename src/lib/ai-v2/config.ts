@@ -197,12 +197,10 @@ const inactivitySchema = z.object({
   closeMessage: optionalText,
 }).optional();
 
-const similarity = z.number().min(0).max(1).optional();
+// Réguas de similaridade são opções com nome; os números ficam no motor
+// (services/ai-v2/similarity-presets).
 const themeRecognitionSchema = z.object({
-  minSimilarity: similarity,
-  switchSimilarity: similarity,
-  switchMargin: z.number().min(0).max(0.5).optional(),
-  shortMessageWords: z.number().int().min(0).max(10).optional(),
+  preset: z.enum(["strict", "balanced", "loose"]).optional(),
 }).optional();
 
 const tabulationSchema = z.object({
@@ -422,7 +420,7 @@ export const v2AgentConfigSchema = z.object({
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
   themeRecognition: themeRecognitionSchema,
-  knowledgeSearch: z.object({ minSimilarity: similarity }).optional(),
+  knowledgeSearch: z.object({ preset: z.enum(["all", "related", "close"]).optional() }).optional(),
   derivedFields: z.array(derivedFieldSchema).optional(),
   businessHours: z
     .object({

@@ -43,6 +43,7 @@ import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
+import { knowledgeMinSimilarity } from "./similarity-presets";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
@@ -224,7 +225,7 @@ async function prefetchKnowledge(args: {
           query: q,
           allowedDocIds: docIds,
           limit: PREFETCH_LIMIT,
-          minSimilarity: args.config.knowledgeSearch?.minSimilarity,
+          minSimilarity: knowledgeMinSimilarity(args.config),
         }).catch(() => undefined),
       ),
     );
@@ -464,7 +465,7 @@ export function buildV2ToolSet(args: {
         query: input.query,
         allowedDocIds,
         limit: input.limit,
-        minSimilarity: args.config.knowledgeSearch?.minSimilarity,
+        minSimilarity: knowledgeMinSimilarity(args.config),
       });
       const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
       return { ...found, chunks: found.chunks.map((c) => ({ ...c, content: markPastDates(c.content, new Date(), tz) })) };

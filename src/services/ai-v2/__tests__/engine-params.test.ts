@@ -10,6 +10,7 @@ import { isConfusionMessage, rephraseAfterConfusion } from "@/services/ai-v2/con
 import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity";
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
 import { isShortFollowUp, themeThresholds } from "@/services/ai-v2/theme-semantic";
+import { knowledgeMinSimilarity } from "@/services/ai-v2/similarity-presets";
 import { describeV2ContextForTrace } from "@/services/ai-v2/context";
 import { isGreetingOnlyReply } from "@/services/ai-v2/reply-ending";
 
@@ -97,13 +98,21 @@ describe("inatividade", () => {
 });
 
 describe("reconhecimento de assunto", () => {
-  it("réguas da config ou padrão", () => {
+  it("réguas pela opção (rígido / equilibrado / flexível); números não vêm da config", () => {
     expect(themeThresholds(cfg())).toEqual({ minSimilarity: 0.4, switchSimilarity: 0.5, switchMargin: 0.05, shortMessageWords: 2 });
-    expect(themeThresholds(cfg({ themeRecognition: { minSimilarity: 0.55, switchMargin: 0.1, shortMessageWords: 3 } }))).toMatchObject({
-      minSimilarity: 0.55,
-      switchMargin: 0.1,
-      shortMessageWords: 3,
-    });
+    const strict = themeThresholds(cfg({ themeRecognition: { preset: "strict" } }));
+    const loose = themeThresholds(cfg({ themeRecognition: { preset: "loose" } }));
+    expect(strict.minSimilarity).toBeGreaterThan(0.4);
+    expect(strict.switchMargin).toBeGreaterThan(0.05);
+    expect(loose.minSimilarity).toBeLessThan(0.4);
+    // Número solto na config é ignorado.
+    expect(themeThresholds(cfg({ themeRecognition: { minSimilarity: 0.9 } }))).toEqual(themeThresholds(cfg()));
+  });
+
+  it("trechos dos materiais pela opção", () => {
+    expect(knowledgeMinSimilarity(cfg())).toBe(0);
+    expect(knowledgeMinSimilarity(cfg({ knowledgeSearch: { preset: "related" } }))).toBeGreaterThan(0);
+    expect(knowledgeMinSimilarity(cfg({ knowledgeSearch: { preset: "close" } }))).toBeGreaterThan(knowledgeMinSimilarity(cfg({ knowledgeSearch: { preset: "related" } })));
   });
 
   it("acompanhamento curto mantém o assunto; assunto em duas palavras pode trocar", () => {
