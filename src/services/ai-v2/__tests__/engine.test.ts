@@ -1479,6 +1479,18 @@ describe("processV2Turn — correções do motor", () => {
 
   const sentTexts = () => mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
 
+  it("conversa recebida de outro agente de IA: assume e responde, mesmo com pendência de fila antiga", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-anterior" });
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-velha" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O desconto aparece no corpo da fatura." }));
+    await run("o valor da fatura veio diferente");
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(sentTexts()).toEqual(["O desconto aparece no corpo da fatura."]);
+    expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("'não sou eu' com negócio carregado: não chama o modelo com os dados do cadastro", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

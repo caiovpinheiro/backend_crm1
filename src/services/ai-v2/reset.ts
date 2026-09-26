@@ -99,6 +99,22 @@ export async function handleV2ResetCommand(input: {
     where: { conversationId: { in: conversations.map((c) => c.id) } },
   });
 
+  // Pendência de distribuição de um teste anterior fazia o agente achar que o
+  // cliente estava na fila (e a conversa era devolvida à fila).
+  try {
+    await (prisma as unknown as {
+      distributionPending: { updateMany: (args: unknown) => Promise<{ count: number }> };
+    }).distributionPending.updateMany({
+      where: {
+        status: "PENDING",
+        OR: [{ conversationId: { in: conversations.map((c) => c.id) } }, { contactId: input.contactId }],
+      },
+      data: { status: "CANCELLED" },
+    });
+  } catch {
+    /* sem pendência a cancelar não impede o reset */
+  }
+
   const { isAiAttendanceEnabled } = await import("@/services/ai/attendance-gate");
   const gateOn = await isAiAttendanceEnabled();
   const confirmation = gateOn

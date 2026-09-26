@@ -619,6 +619,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           return;
         }
 
+        // Conversa do motor v2: quem decide o que fazer na fila é o agente v2
+        // ("Enquanto espera na fila"). Reassumir aqui colocava o agente de IA
+        // mais antigo da organização — às vezes de outro motor — respondendo.
+        const v2State = await (prisma as unknown as {
+          aISimpleConversationState: { findFirst: (args: unknown) => Promise<{ id: string } | null> };
+        }).aISimpleConversationState
+          .findFirst({ where: { conversationId: args.conversationId }, select: { id: true } })
+          .catch(() => null);
+        if (v2State) {
+          logAi("waiting_queue_v2_conversation", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
+          });
+          return;
+        }
+
         const orgId = getOrgIdOrNull();
         const aiAgent = orgId
           ? await prisma.user.findFirst({

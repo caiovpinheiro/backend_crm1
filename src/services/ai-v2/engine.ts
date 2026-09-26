@@ -553,7 +553,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // voltou ao agente enquanto espera na fila (o cliente escreveu de novo).
   // Na fila vale "Chamar a equipe › Enquanto espera na fila": antes o agente
   // reassumia, transferia de novo e a trava anti-repetição engolia o aviso.
-  const waitingInQueue = owner === "pessoa" && (await isWaitingInQueue(input.conversationId));
+  // Conversa que outro agente de IA passou para este: o dono agora é este
+  // agente, não uma pessoa na fila. Antes o agente que recebia via "cliente
+  // na fila", devolvia a conversa à fila e ela ficava sem responsável.
+  const handedByAnotherAgent = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
+  if (handedByAnotherAgent) traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+  const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
   const queueMode = config.handoff.whileQueued ?? "notify";
   if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
   if (owner === "pessoa" && !(waitingInQueue && queueMode === "notify")) {
