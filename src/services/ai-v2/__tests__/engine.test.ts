@@ -1327,6 +1327,32 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
   });
 
+  it("'?' que chegou enquanto ele respondia a anterior não recebe outra resposta", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-09-26T13:15:30Z") }] : [],
+    );
+    // Resposta do agente saiu depois do "?".
+    mocks.messageFindFirst.mockResolvedValue({ id: "out-1" });
+    await run("?", { messageIds: ["m-2"] });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions).toEqual([{ type: "no_reply", reason: "answered meanwhile" }]);
+
+    // Com pedido de verdade, responde normalmente.
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Claro, o prazo é de 5 dias úteis." }));
+    await run("e qual o prazo?", { messageIds: ["m-3"] });
+    expect(mocks.callLLM).toHaveBeenCalled();
+    mocks.messageFindFirst.mockReset();
+    mocks.messageFindFirst.mockImplementation(async () => null);
+
+    const { isFillerMessage } = await import("../engine");
+    for (const m of ["?", "??", "oi", "alô?", "Boa tarde!"]) expect(isFillerMessage(m)).toBe(true);
+    for (const m of ["", "quero trocar de plano", "e o prazo?"]) expect(isFillerMessage(m)).toBe(false);
+  });
+
   it("saudação confere de novo depois do 'digitando…'; resposta com conteúdo não", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

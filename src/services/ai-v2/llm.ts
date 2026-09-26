@@ -174,6 +174,28 @@ export function mergeChunks(lists: PrefetchedChunk[][], limit: number): Prefetch
   return [...picked.values()].sort((a, b) => a.distance - b.distance);
 }
 
+/**
+ * Prazo da reformulação da busca: numa sessão real ela levou 31 s. Passado o
+ * prazo, busca só com a frase original (que já está buscando em paralelo).
+ */
+const REWRITE_TIMEOUT_MS = 5000;
+
+function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`tempo esgotado (${Math.round(ms / 1000)} s)`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function prefetchKnowledge(args: {
   agentId: string;
   apiKey: string;
@@ -209,14 +231,14 @@ async function prefetchKnowledge(args: {
   let rewrites: string[] = [];
   if (queryRewriteEnabled()) {
     try {
-      rewrites = await rewriteKnowledgeQueries({
+      rewrites = await withTimeout(REWRITE_TIMEOUT_MS, rewriteKnowledgeQueries({
         // Tarefa auxiliar: na OpenAI, com a chave de busca do agente.
         model: v2AuxModel(args.config.model),
         apiKey: args.apiKey,
         userMessage: args.userMessage,
         previousMessages: args.previousMessages,
         materialTitles: args.materialTitles,
-      });
+      }));
       traceStep("base", rewrites.length > 0
         ? `Busca reformulada: ${rewrites.map((q) => `"${q}"`).join(", ")}`
         : "Reformulação não gerou consultas — busca só com a mensagem");

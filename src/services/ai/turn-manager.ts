@@ -636,6 +636,22 @@ export async function claimTurn(
   organizationId: string,
   claimedBy = workerIdentity(),
 ): Promise<ConversationTurn | null> {
+  // Um turno por vez em cada conversa: o turno aberto durante PROCESSING
+  // fica READY (e continua juntando bolhas) até o anterior terminar. Antes
+  // os dois rodavam juntos, ambos como "primeiro turno", e o cliente
+  // recebia duas respostas e o mesmo material duas vezes.
+  const pending = await prismaBase.conversationTurn.findUnique({
+    where: { id: turnId },
+  });
+  if (!pending || pending.status !== "READY") {
+    logTurn("claim_lost", { turnId, claimedBy });
+    return null;
+  }
+  if ((await otherLiveTurns(pending.conversationId, turnId)).length > 0) {
+    logTurn("claim_deferred", { turnId, conversationId: pending.conversationId });
+    return null;
+  }
+
   const res = await prismaBase.conversationTurn.updateMany({
     where: { id: turnId, organizationId, status: "READY" },
     data: {
@@ -652,8 +668,48 @@ export async function claimTurn(
   const turn = await prismaBase.conversationTurn.findUnique({
     where: { id: turnId },
   });
+  // Dois claims da mesma conversa ao mesmo tempo: quem gravou por último vê
+  // o outro. Fica o turno mais antigo; o mais novo volta a READY.
+  if (turn) {
+    const rivals = await otherLiveTurns(turn.conversationId, turnId);
+    if (rivals.some((r) => r.createdAt.getTime() < turn.createdAt.getTime() || (r.createdAt.getTime() === turn.createdAt.getTime() && r.id < turn.id))) {
+      await prismaBase.conversationTurn.updateMany({
+        where: { id: turnId, organizationId, status: "PROCESSING", claimedBy },
+        data: { status: "READY", claimedBy: null, claimedAt: null, openKey: turn.conversationId },
+      });
+      logTurn("claim_deferred", { turnId, conversationId: turn.conversationId });
+      return null;
+    }
+  }
   if (turn) logTurn("claimed", { turnId, claimedBy });
   return turn;
+}
+
+/** Outros turnos da conversa em PROCESSING e ainda vivos (dentro do teto). */
+async function otherLiveTurns(
+  conversationId: string,
+  turnId: string,
+): Promise<Array<{ id: string; createdAt: Date }>> {
+  const cutoff = Date.now() - turnStaleMs();
+  const rows = await prismaBase.conversationTurn.findMany({
+    where: { conversationId, status: "PROCESSING" },
+    select: { id: true, createdAt: true, claimedAt: true },
+  });
+  return rows.filter(
+    (r) => r.id !== turnId && r.claimedAt != null && new Date(r.claimedAt).getTime() >= cutoff,
+  );
+}
+
+/** Turno que esperou o anterior terminar: despacha agora. */
+async function dispatchDeferredTurn(conversationId: string, finishedTurnId: string): Promise<void> {
+  const ready = await prismaBase.conversationTurn.findMany({
+    where: { conversationId, status: "READY" },
+    orderBy: { createdAt: "asc" },
+  });
+  const next = ready.find((t) => t.id !== finishedTurnId);
+  if (!next) return;
+  // Chegou bolha depois do READY: a janela reinicia (o sweeper pega depois).
+  await dispatchReadyTurn(next.id, next.organizationId);
 }
 
 /** Claim + execução do agente sobre o texto agregado. */
@@ -746,7 +802,15 @@ export async function runTurn(turn: {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[ai-turn] runTurn falhou", { turnId: turn.id, err: message });
     await failOrRetryTurn(turn.id, turn.organizationId, message);
+    // Falhou: o retry e o turno seguinte ficam com o sweeper.
+    return;
   }
+  void dispatchDeferredTurn(turn.conversationId, turn.id).catch((err) => {
+    console.error("[ai-turn] turno seguinte falhou", {
+      conversationId: turn.conversationId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  });
 }
 
 /** PROCESSING → COMPLETED. */

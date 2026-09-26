@@ -208,6 +208,41 @@ function mergeCollectedVariables(
   return { ...existing, ...collected };
 }
 
+/**
+ * As mensagens do turno chegaram antes da última resposta do agente: o
+ * turno anterior (que rodava quando elas chegaram) já respondeu.
+ */
+async function arrivedBeforeLastReply(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt: Date }>>;
+        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
+    const reply = await db.message.findFirst({
+      where: { conversationId, direction: "out", createdAt: { gt: last } },
+      select: { id: true },
+    });
+    return !!reply;
+  } catch {
+    return false;
+  }
+}
+
+/** Mensagem sem pedido: "?", "oi", "alô", "não entendi". */
+export function isFillerMessage(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  // "alô?" / "ei": chamando atenção, sem pedido.
+  if (/^(?:al[oô]+|ei+|hey)[\s?!.…]*$/i.test(t)) return true;
+  return /^[\s?!.…]+$/.test(t) || isGreetingOnlyMessage(t) || isConfusionMessage(t);
+}
+
 /** Resposta que traz um e-mail ou um número com cara de documento. */
 export function looksLikeIdentification(text: string): boolean {
   return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(text) || (text.match(/\d/g)?.length ?? 0) >= 5;
@@ -527,6 +562,26 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   };
 
   const vars = { ...messageVariables(config, context) };
+
+  // "?" ou "oi" mandado enquanto ele respondia a mensagem anterior: essa
+  // resposta já saiu depois e cobre. Responder de novo duplicava tudo.
+  if (
+    stage !== "closed" &&
+    !(owner === "pessoa" && waitingInQueue) &&
+    (!input.messageType || input.messageType === "text") &&
+    isFillerMessage(input.userMessage) &&
+    (await arrivedBeforeLastReply(input.conversationId, input.messageIds))
+  ) {
+    traceStep("entrada", "Mensagem sem pedido novo que chegou enquanto ele respondia a anterior → sem resposta (a resposta já cobriu)");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context,
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "answered meanwhile" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
 
   function renderConfirmationText(): string {
     const rendered = renderMessage(

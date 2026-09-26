@@ -365,6 +365,7 @@ import {
   appendToOpenTurn,
   buildAggregatedText,
   claimTurn,
+  completeTurn,
   invalidateOpenTurns,
   isTurnDue,
   onInboundMessageForAi,
@@ -618,6 +619,32 @@ describe("concorrência", () => {
     const novo = [...turns.values()].find((t) => t.id !== first)!;
     expect(novo.messageIds).toEqual(["m2"]);
     expect(novo.status).toBe("RECEIVING");
+  });
+
+  it("turno aberto durante PROCESSING espera o anterior terminar (um por vez na conversa)", async () => {
+    await ingest("m1", "Oi quero trocar de plano");
+    const first = firstTurn().id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(first, ORG);
+    await claimTurn(first, ORG, "worker-a");
+
+    vi.advanceTimersByTime(500);
+    await ingest("m2", "?");
+    const second = [...turns.values()].find((t) => t.id !== first)!.id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(second, ORG);
+    expect(await claimTurn(second, ORG, "worker-b")).toBeNull();
+    expect(turns.get(second)!.status).toBe("READY");
+
+    // Bolha nova ainda entra no turno que espera.
+    await ingest("m3", "alô");
+    expect(turns.get(second)!.messageIds).toEqual(["m2", "m3"]);
+
+    await completeTurn(first, ORG);
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(second, ORG);
+    expect(await claimTurn(second, ORG, "worker-b")).not.toBeNull();
+    expect(turns.get(second)!.status).toBe("PROCESSING");
   });
 
   it("promoção concorrente materializa o turno uma vez só", async () => {
