@@ -17,6 +17,8 @@ vi.mock("@/services/ai/provider", () => ({
 
 vi.mock("@/services/ai/agent-key", () => ({
   getAgentApiKey: vi.fn().mockResolvedValue("api-key"),
+  getAgentChatKey: vi.fn(async () => "api-key"),
+  tryGetAgentAnthropicKey: vi.fn(async () => null),
 }));
 
 vi.mock("@/services/ai/knowledge-docs", () => ({

@@ -13,6 +13,7 @@ import {
   type ReplayTranscript,
 } from "@/services/ai-v2/replay";
 import { IMPORT_LIMITS } from "@/services/ai-v2/replay-import";
+import { v2ModelInfo } from "@/lib/ai-v2/models";
 
 function parseTranscripts(body: Record<string, unknown>): ReplayTranscript[] {
   const list = Array.isArray(body.transcripts) ? body.transcripts : [];
@@ -36,6 +37,8 @@ function parseParams(body: Record<string, unknown>): ReplayParams {
       ? Math.min(Math.max(Math.round(conversations), 1), REPLAY_LIMITS.maxConversations)
       : 30,
     config: body.config === "published" ? "published" : "draft",
+    // Benchmark: só modelos da lista.
+    ...(typeof body.model === "string" && v2ModelInfo(body.model) ? { model: body.model } : {}),
   };
 }
 
@@ -79,7 +82,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         const ids = parseConversationRefs(typeof body.conversationRefs === "string" ? body.conversationRefs : "");
         if (ids.length === 0) return NextResponse.json({ message: "Cole o link ou o id de ao menos uma conversa." }, { status: 400 });
         if (body.estimate === true) {
-          return NextResponse.json(await estimateChosenReplay({ organizationId, agentId: id, config: p.config, conversationIds: ids }));
+          return NextResponse.json(await estimateChosenReplay({ organizationId, agentId: id, config: p.config, conversationIds: ids, model: p.model }));
         }
         const params: ReplayParams = { ...p, source: "crm_ids", conversationIds: ids, conversations: ids.length };
         const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, requester });
@@ -92,7 +95,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           return NextResponse.json({ message: "Marque quem é da equipe em cada conversa." }, { status: 400 });
         }
         if (body.estimate === true) {
-          return NextResponse.json(await estimateImportedReplay({ organizationId, agentId: id, config: p.config, transcripts }));
+          return NextResponse.json(await estimateImportedReplay({ organizationId, agentId: id, config: p.config, transcripts, model: p.model }));
         }
         const params: ReplayParams = { ...p, source: "import", conversations: transcripts.length, files: transcripts.map((t) => t.name) };
         const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, transcripts });
@@ -107,6 +110,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "NO_OPENAI_KEY") {
         return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para comparar." }, { status: 400 });
+      }
+      if (msg === "NO_ANTHROPIC_KEY") {
+        return NextResponse.json({ code: "NO_ANTHROPIC_KEY", message: "Para testar um modelo Claude, cadastre a chave Anthropic do agente em Publicação." }, { status: 400 });
       }
       const status = msg.includes("em andamento") ? 409 : msg.includes("não encontrado") ? 404 : 500;
       if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/replay]", err);

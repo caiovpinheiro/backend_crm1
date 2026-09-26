@@ -87,6 +87,8 @@ vi.mock("@/lib/org-settings", () => ({
 
 vi.mock("@/services/ai/agent-key", () => ({
   getAgentApiKey: vi.fn(async () => "sk-test"),
+  getAgentChatKey: vi.fn(async () => "api-key"),
+  tryGetAgentAnthropicKey: vi.fn(async () => null),
 }));
 
 vi.mock("@/services/conversation-events", () => ({

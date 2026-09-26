@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/services/ai/agent-key", () => ({
   tryGetAgentApiKey: mocks.tryGetAgentApiKey,
+  getAgentChatKey: vi.fn(async () => "api-key"),
+  tryGetAgentAnthropicKey: vi.fn(async () => null),
 }));
 
 vi.mock("../llm", () => ({

@@ -8,6 +8,8 @@
  */
 
 import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { v2ModelInfo } from "@/lib/ai-v2/models";
 import {
   embedMany,
   experimental_transcribe as transcribe,
@@ -48,11 +50,49 @@ export function resetAIProviderCache(): void {
   clientByKey.clear();
 }
 
+const anthropicByKey = new Map<string, ReturnType<typeof createAnthropic>>();
+
+/**
+ * Modelo pelo id: `claude-*` vai para a Anthropic (a chave passada tem de
+ * ser a Anthropic do agente); o resto, para a OpenAI.
+ */
 export function getModel(
   modelName: string,
   apiKey: string | null | undefined,
 ): LanguageModel {
+  if (modelName.startsWith("claude-")) {
+    const key = (apiKey ?? "").trim();
+    if (!key) throw new Error("NO_ANTHROPIC_KEY");
+    let client = anthropicByKey.get(key);
+    if (!client) {
+      client = createAnthropic({ apiKey: key });
+      anthropicByKey.set(key, client);
+    }
+    return client(modelName);
+  }
   return getOpenAI(apiKey)(modelName);
+}
+
+/** Folga no limite de tokens para o raciocínio dos modelos que pensam antes. */
+const REASONING_HEADROOM = 4000;
+
+/**
+ * O que cada modelo aceita: modelos que raciocinam recusam temperatura e
+ * gastam tokens pensando (sem folga, a resposta saía vazia); Claude não tem
+ * modo JSON sem esquema (o prompt já exige JSON e quem chama extrai).
+ */
+function modelCallOptions(modelName: string, args: { temperature?: number; maxOutputTokens?: number; jsonMode?: boolean }) {
+  const info = v2ModelInfo(modelName);
+  const isClaude = modelName.startsWith("claude-");
+  const reasoning = info?.reasoning ?? false;
+  const temperature = info && !info.temperature ? undefined : (args.temperature ?? 0.7);
+  const maxOutputTokens = reasoning && args.maxOutputTokens ? args.maxOutputTokens + REASONING_HEADROOM : args.maxOutputTokens;
+  const providerOptions = reasoning
+    ? isClaude
+      ? { anthropic: { effort: "low" } }
+      : { openai: { reasoningEffort: "low", forceReasoning: true } }
+    : undefined;
+  return { temperature, maxOutputTokens, jsonMode: args.jsonMode && !isClaude, providerOptions };
 }
 
 export const DEFAULT_CHAT_MODEL =
@@ -109,7 +149,8 @@ export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
   const base = getModel(args.model, args.apiKey);
-  const model = args.jsonMode ? withJsonMode(base) : base;
+  const opts = modelCallOptions(args.model, args);
+  const model = opts.jsonMode ? withJsonMode(base) : base;
   // `maxRetries: 0` desliga o retry interno do SDK de propósito: ele não
   // conhece o nosso timeout (retentaria por dentro de uma tentativa que já
   // deveria ter sido abortada) e não loga nada. Quem retenta é
@@ -124,8 +165,9 @@ export async function generateWithTools(
         system: args.system,
         messages: args.messages,
         tools: args.tools,
-        temperature: args.temperature ?? 0.7,
-        maxOutputTokens: args.maxOutputTokens,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        maxOutputTokens: opts.maxOutputTokens,
+        ...(opts.providerOptions ? { providerOptions: opts.providerOptions as never } : {}),
         stopWhen: stepCountIs(args.maxSteps ?? 8),
         abortSignal,
         maxRetries: 0,

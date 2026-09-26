@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { v2AuxModel } from "@/lib/ai-v2/models";
 
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { extractKnowledgeText, KnowledgeExtractError, MAX_UPLOAD_BYTES } from "@/services/ai/knowledge-extract";
@@ -47,7 +48,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const result = await importCalendarText({
       text,
       defaultYear: year,
-      model: config.model,
+      model: v2AuxModel(config.model),
       apiKey: await tryGetAgentApiKey(id),
       forceAi,
     });

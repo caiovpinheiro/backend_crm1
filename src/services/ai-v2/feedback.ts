@@ -20,6 +20,7 @@ import { embedTexts, generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import { retrieveAgentKnowledge } from "@/services/ai/retrieval";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
+import { v2AuxModel } from "@/lib/ai-v2/models";
 import { getV2Agent } from "./agents";
 import { ensureV2AgentSchema } from "./ensure-schema";
 import { knowledgeDocIdsFor } from "./themes";
@@ -434,8 +435,8 @@ export async function estimateFeedback(args: { organizationId: string; agentId: 
     candidates: prep.candidates.length,
     sampled: prep.sampled,
     calls: labelCalls + groupCalls,
-    estimatedCostUsd: estimateCost(prep.config.model, inTok, outTok),
-    model: prep.config.model,
+    estimatedCostUsd: estimateCost(v2AuxModel(prep.config.model), inTok, outTok),
+    model: v2AuxModel(prep.config.model),
   };
 }
 
@@ -525,7 +526,8 @@ async function executeFeedback(args: {
 }): Promise<void> {
   const prep = await prepare(args);
   const { config, candidates } = prep;
-  const model = config.model;
+  // Análise na OpenAI (a chave carregada é a da OpenAI), qualquer que seja o modelo do agente.
+  const model = v2AuxModel(config.model);
   const themeName = (id: string) => config.themes.find((t) => t.id === id)?.name;
   let tokensIn = 0;
   let tokensOut = 0;
@@ -898,7 +900,7 @@ export async function draftFeedbackDocument(args: { organizationId: string; agen
     `Conversas:\n${item.evidences.map((e, i) => `[${i + 1}] Cliente: ${e.client}${e.human ? `\nEquipe: ${e.human}` : ""}`).join("\n\n")}`,
   ].join("\n\n");
   const res = await generateWithTools({
-    model: config.model,
+    model: v2AuxModel(config.model),
     apiKey,
     system: DRAFT_SYSTEM,
     messages: [{ role: "user", content: input }] as any,

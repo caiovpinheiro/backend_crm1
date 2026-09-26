@@ -55,6 +55,13 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   if (feedbackResult[0]?.exists !== true) needs.push("turn log feedback column");
 
+  const anthropicResult = await db.$queryRawUnsafe<
+    Array<{ exists: boolean }>
+  >(
+    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_agent_configs' AND column_name = 'anthropicApiKeyEnc') AS exists`,
+  );
+  if (anthropicResult[0]?.exists !== true) needs.push("anthropic key columns");
+
   if (needs.length === 0) {
     checked = true;
     return;
@@ -92,6 +99,12 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   await (prismaBase as any).$executeRawUnsafe(
     `ALTER TABLE "ai_simple_turn_logs" ADD COLUMN IF NOT EXISTS "feedback" JSONB`,
+  );
+  await (prismaBase as any).$executeRawUnsafe(
+    `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "anthropicApiKeyEnc" TEXT`,
+  );
+  await (prismaBase as any).$executeRawUnsafe(
+    `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "anthropicApiKeyHint" TEXT`,
   );
 
   checked = true;

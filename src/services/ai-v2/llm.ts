@@ -7,7 +7,8 @@
 import { z } from "zod";
 import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
-import { getAgentApiKey } from "@/services/ai/agent-key";
+import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
+import { v2AuxModel } from "@/lib/ai-v2/models";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
 import { renderMessage } from "@/lib/ai-v2/message-render";
@@ -195,7 +196,8 @@ async function prefetchKnowledge(args: {
   if (queryRewriteEnabled()) {
     try {
       rewrites = await rewriteKnowledgeQueries({
-        model: args.config.model,
+        // Tarefa auxiliar: na OpenAI, com a chave de busca do agente.
+        model: v2AuxModel(args.config.model),
         apiKey: args.apiKey,
         userMessage: args.userMessage,
         previousMessages: args.previousMessages,
@@ -1061,6 +1063,9 @@ export async function callV2LLM(args: {
   systemPrompt: string;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
+  // Resposta ao cliente: chave do fornecedor do modelo (Claude → Anthropic).
+  // Busca nos materiais continua com a chave OpenAI (`apiKey`).
+  const chatKey = await getAgentChatKey(args.agentId, args.config.model, apiKey);
   noteV2Fact("model", args.config.model);
   // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
   // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
@@ -1165,7 +1170,7 @@ export async function callV2LLM(args: {
       const call = (json: boolean) =>
         generateWithTools({
           model: args.config.model,
-          apiKey,
+          apiKey: chatKey,
           system,
           messages: messages as any,
           tools,
@@ -1228,7 +1233,7 @@ export async function callV2LLM(args: {
         messages,
         rawText: text,
         model: args.config.model,
-        apiKey,
+        apiKey: chatKey,
         responseBehavior: args.config.responseBehavior,
         maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
         jsonMode,
@@ -1324,7 +1329,7 @@ export async function callV2LLM(args: {
     try {
       const res = await generateWithTools({
         model: args.config.model,
-        apiKey,
+        apiKey: chatKey,
         system: reviewSystem,
         messages: [...messages, { role: "assistant", content: JSON.stringify(r.output) }] as any,
         temperature: 0,
@@ -1379,7 +1384,7 @@ export async function callV2LLM(args: {
     try {
       const res = await generateWithTools({
         model: args.config.model,
-        apiKey,
+        apiKey: chatKey,
         system: reviewSystem,
         messages: messages as any,
         temperature: 0.7,

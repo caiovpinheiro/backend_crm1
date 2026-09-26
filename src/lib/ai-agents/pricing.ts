@@ -10,6 +10,8 @@
  * listado, assume fallback (gpt-4o-mini) — é seguro.
  */
 
+import { V2_MODELS } from "@/lib/ai-v2/models";
+
 export type ModelPricing = {
   /// USD por 1M tokens de INPUT.
   inputPer1M: number;
@@ -23,6 +25,11 @@ const PRICING: Record<string, ModelPricing> = {
   "gpt-4.1-mini": { inputPer1M: 0.4, outputPer1M: 1.6 },
   "text-embedding-3-small": { inputPer1M: 0.02, outputPer1M: 0 },
 };
+
+// Modelos do agente v2 (OpenAI e Anthropic) com preço de tabela.
+for (const m of V2_MODELS) {
+  if (!PRICING[m.id]) PRICING[m.id] = { inputPer1M: m.inputPer1M, outputPer1M: m.outputPer1M };
+}
 
 const FALLBACK = PRICING["gpt-4o-mini"];
 

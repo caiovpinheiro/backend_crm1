@@ -11,6 +11,7 @@
  * Nenhum domínio de cliente: o guia descreve o motor, não um produto.
  */
 
+import { v2AuxModel } from "@/lib/ai-v2/models";
 import { z } from "zod";
 
 import { prisma } from "@/lib/prisma";
@@ -255,7 +256,8 @@ export async function diagnoseV2Turn(args: {
   try {
     const apiKey = await getAgentApiKey(args.agentId);
     const result = await generateWithTools({
-      model: config.model,
+      // Análise: modelo auxiliar na OpenAI (a chave carregada acima).
+      model: v2AuxModel(config.model),
       apiKey,
       system,
       messages: [{ role: "user", content: JSON.stringify(payload) }] as any,

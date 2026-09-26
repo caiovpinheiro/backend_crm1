@@ -1,11 +1,9 @@
 import { z } from "zod";
 
-export const SUPPORTED_V2_MODELS = [
-  { id: "gpt-4o-mini", label: "GPT-4o mini" },
-  { id: "gpt-4o", label: "GPT-4o" },
-  { id: "gpt-4-turbo", label: "GPT-4 Turbo" },
-  { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo" },
-] as const;
+import { V2_MODELS } from "./models";
+
+/** Modelos da tela (id + nome); detalhes em `./models`. */
+export const SUPPORTED_V2_MODELS = V2_MODELS.map((m) => ({ id: m.id, label: m.label }));
 
 import type {
   V2AgentConfig,

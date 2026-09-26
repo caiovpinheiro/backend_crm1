@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
-import { SUPPORTED_V2_MODELS } from "@/lib/ai-v2/config";
+import { V2_MODELS } from "@/lib/ai-v2/models";
 
 export async function GET() {
   const r = await requireAuth();
@@ -117,7 +117,14 @@ export async function GET() {
       ),
       products,
       whatsappTemplates: whatsappTemplateCatalog,
-      models: SUPPORTED_V2_MODELS.map((m) => ({ id: m.id, name: m.label })),
+      models: V2_MODELS.map((m) => ({
+        id: m.id,
+        name: m.label,
+        provider: m.provider,
+        hint: m.hint,
+        inputPer1M: m.inputPer1M,
+        outputPer1M: m.outputPer1M,
+      })),
       contacts: contacts.map((c: any) => ({
         id: c.id,
         name: c.name || c.phone || c.email || c.id,

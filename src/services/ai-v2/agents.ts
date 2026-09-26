@@ -13,7 +13,7 @@ import {
   normalizeV2Config,
   validateV2Config,
 } from "@/lib/ai-v2/config";
-import { openaiKeyFields } from "@/services/ai-v2/agent-key";
+import { anthropicKeyFields, openaiKeyFields } from "@/services/ai-v2/agent-key";
 
 export type V2AgentListItem = {
   id: string;
@@ -149,6 +149,8 @@ export type V2AgentDetail = {
   archetype: string | null;
   hasOwnOpenaiKey: boolean;
   openaiApiKeyHint: string | null;
+  hasAnthropicKey: boolean;
+  anthropicApiKeyHint: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -196,6 +198,8 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       archetype: row.archetype,
       hasOwnOpenaiKey: Boolean(row.openaiApiKeyEnc),
       openaiApiKeyHint: row.openaiApiKeyHint ?? null,
+      hasAnthropicKey: Boolean(row.anthropicApiKeyEnc),
+      anthropicApiKeyHint: row.anthropicApiKeyHint ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -272,7 +276,7 @@ export async function createV2Agent(organizationId: string, input: {
   });
 }
 
-export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null }): Promise<{ id: string; config: V2AgentConfig }> {
+export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null; anthropicApiKey?: string | null }): Promise<{ id: string; config: V2AgentConfig }> {
   let config: V2AgentConfig | undefined;
   if (input.config !== undefined) {
     const validated = validateV2Config(input.config);
@@ -299,6 +303,11 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
   if (keyUpdate) {
     data.openaiApiKeyEnc = keyUpdate.openaiApiKeyEnc;
     data.openaiApiKeyHint = keyUpdate.openaiApiKeyHint;
+  }
+  const anthropicUpdate = anthropicKeyFields(input.anthropicApiKey);
+  if (anthropicUpdate) {
+    data.anthropicApiKeyEnc = anthropicUpdate.anthropicApiKeyEnc;
+    data.anthropicApiKeyHint = anthropicUpdate.anthropicApiKeyHint;
   }
 
   const row = await (prisma as any).$transaction(async (tx: any) => {

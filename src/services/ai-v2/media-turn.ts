@@ -4,6 +4,7 @@
  * de cliente.
  */
 
+import { v2AuxModel } from "@/lib/ai-v2/models";
 import { prismaBase } from "@/lib/prisma-base";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
@@ -70,7 +71,8 @@ export async function enrichTurnWithMedia(args: {
       userId: args.agentUserId,
       message: m,
       kind,
-      model: args.config.model,
+      // Leitura de imagem com a chave OpenAI do agente.
+      model: v2AuxModel(args.config.model),
       apiKey,
     });
     const label = kind === "audio" ? "Áudio" : "Imagem";

@@ -4909,6 +4909,9 @@ model AIAgentConfig {
   /// o read expõe só `openaiApiKeyHint` (últimos 4 chars).
   openaiApiKeyEnc  String?
   openaiApiKeyHint String?
+  /// Chave Anthropic do agente (modelos Claude), cifrada como a da OpenAI.
+  anthropicApiKeyEnc  String?
+  anthropicApiKeyHint String?
   /// Prompt-template do arquétipo (renderizado em tempo de execução
   /// com variáveis do contato/deal/conversa). Copiado do catálogo
   /// no momento da criação — depois vive por conta própria.

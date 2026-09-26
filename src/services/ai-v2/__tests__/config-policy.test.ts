@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { actionValueAllowed, actionsGuide, allowedActionTypes, themeToolRestriction } from "../action-policy";
@@ -116,5 +116,18 @@ describe("guarda de saída", () => {
     const text = ["1. Acesse https://fora.com/x", "2. Clique em Entrar", "3. Pronto"].join(String.fromCharCode(10));
     const r = guardV2Output(text, ["permitido.com"]);
     expect(r.text.split(String.fromCharCode(10))).toEqual(["1. Acesse", "2. Clique em Entrar", "3. Pronto"]);
+  });
+});
+
+describe("chave Anthropic do agente", () => {
+  it("aceita sk-ant-…, limpa lixo colado e recusa outro formato", async () => {
+    vi.stubEnv("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef");
+    const { anthropicKeyFields } = await import("../agent-key");
+    const ok = anthropicKeyFields('  "sk-ant-api03-abcdefghijKLMNOP_123"  ');
+    expect(ok?.anthropicApiKeyHint).toBe("_123");
+    expect(ok?.anthropicApiKeyEnc).toBeTruthy();
+    expect(anthropicKeyFields("")).toEqual({ anthropicApiKeyEnc: null, anthropicApiKeyHint: null });
+    expect(() => anthropicKeyFields("sk-proj-123456789012")).toThrow(/Anthropic/);
+    vi.unstubAllEnvs();
   });
 });

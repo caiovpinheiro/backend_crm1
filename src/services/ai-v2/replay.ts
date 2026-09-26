@@ -14,6 +14,8 @@ import { estimateCost } from "@/lib/ai-agents/pricing";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
+import { v2AuxModel, v2ModelProvider } from "@/lib/ai-v2/models";
+import { tryGetAgentAnthropicKey } from "@/services/ai/agent-key";
 import { getV2Agent } from "./agents";
 import { simulateV2Turn } from "./test-turn";
 import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
@@ -342,7 +344,19 @@ export type ReplayParams = {
   conversationIds?: string[];
   /** Nomes das conversas anexadas (só para mostrar). */
   files?: string[];
+  /**
+   * Modelo a testar no lugar do configurado (benchmark). O avaliador fica
+   * fixo — o modelo auxiliar do agente — para as comparações serem justas.
+   */
+  model?: string;
 };
+
+/** Config do agente com o modelo pedido para a comparação. */
+function replayConfig(agent: { publishedConfig: V2AgentConfig; draftConfig?: V2AgentConfig }, params: ReplayParams): { config: V2AgentConfig; evalModel: string } {
+  const base = (params.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const config = params.model ? { ...base, model: params.model } : base;
+  return { config, evalModel: v2AuxModel(base.model) };
+}
 
 /** Conversa anexada: texto da exportação/colado e quem é da equipe. */
 export type ReplayTranscript = { name: string; text: string; teamAuthors: string[] };
@@ -364,15 +378,16 @@ export async function estimateImportedReplay(args: {
   agentId: string;
   config: "draft" | "published";
   transcripts: ReplayTranscript[];
+  model?: string;
 }) {
   const agent = await getV2Agent(args.agentId, args.organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
-  const config = (args.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const { config, evalModel } = replayConfig(agent, { days: 0, conversations: 0, config: args.config, model: args.model });
   const work = pointsFromTranscripts(args.transcripts);
   const evaluable = work.filter((w) => !w.point.skipReason).length;
   const cost = evaluable * (
     estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
-    estimateCost(config.model, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+    estimateCost(evalModel, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
   );
   return {
     availableConversations: args.transcripts.length,
@@ -576,10 +591,11 @@ export async function estimateChosenReplay(args: {
   agentId: string;
   config: "draft" | "published";
   conversationIds: string[];
+  model?: string;
 }) {
   const agent = await getV2Agent(args.agentId, args.organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
-  const config = (args.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const { config, evalModel } = replayConfig(agent, { days: 0, conversations: 0, config: args.config, model: args.model });
   const found = await conversationsByIds(args.organizationId, args.conversationIds);
   let points = 0;
   let audioOnly = 0;
@@ -591,7 +607,7 @@ export async function estimateChosenReplay(args: {
   }
   const cost = points * (
     estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
-    estimateCost(config.model, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+    estimateCost(evalModel, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
   );
   return {
     availableConversations: found.length,
@@ -613,13 +629,13 @@ export async function estimateReplay(args: { organizationId: string; agentId: st
   await ensureReplaySchema();
   const agent = await getV2Agent(args.agentId, args.organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
-  const config = (args.params.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const { config, evalModel } = replayConfig(agent, args.params);
   const { available } = await pickConversations(args.organizationId, args.params.days, 0);
   const conversations = Math.min(args.params.conversations, available);
   const points = Math.min(conversations * 4, REPLAY_LIMITS.maxPoints);
   const cost = points * (
     estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
-    estimateCost(config.model, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+    estimateCost(evalModel, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
   );
   return { availableConversations: available, conversations, estimatedPoints: points, estimatedCalls: points * 2, estimatedCostUsd: Number(cost.toFixed(4)), model: config.model };
 }
@@ -637,10 +653,13 @@ export async function startReplay(args: {
   await ensureReplaySchema();
   const agent = await getV2Agent(args.agentId, args.organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
-  const config = (args.params.config === "published" ? agent.publishedConfig : agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
+  const { config, evalModel } = replayConfig(agent, args.params);
   if (!config) throw new Error("O agente não tem configuração para testar.");
   const apiKey = await getAgentApiKey(args.agentId).catch(() => null);
   if (!apiKey) throw new Error("NO_OPENAI_KEY");
+  if (v2ModelProvider(config.model) === "anthropic" && !(await tryGetAgentAnthropicKey(args.agentId))) {
+    throw new Error("NO_ANTHROPIC_KEY");
+  }
 
   const running = (await listReplayRuns(args.organizationId, args.agentId)).find((r) => r.status === "running");
   if (running) throw new Error("Já existe uma comparação em andamento para este agente.");
@@ -662,7 +681,7 @@ export async function startReplay(args: {
   void Promise.resolve(
     runWithContext(ctx, () =>
       executeReplay({
-        runId, organizationId: args.organizationId, agentId: args.agentId, config, apiKey,
+        runId, organizationId: args.organizationId, agentId: args.agentId, config, evalModel, apiKey,
         params: args.params, transcripts: args.transcripts, requester: args.requester,
       }),
     ),
@@ -681,6 +700,8 @@ async function executeReplay(args: {
   organizationId: string;
   agentId: string;
   config: V2AgentConfig;
+  /** Modelo do avaliador (fixo entre comparações do mesmo agente). */
+  evalModel: string;
   apiKey: string;
   params: ReplayParams;
   transcripts?: ReplayTranscript[];
@@ -708,7 +729,7 @@ async function pointsFromCrm(args: Parameters<typeof executeReplay>[0]) {
   for (const conv of picked) {
     if (work.length >= REPLAY_LIMITS.maxPoints) break;
     const rows = await loadMessages(args.organizationId, conv.id, historySince);
-    await transcribeAudios(rows.filter((r) => r.createdAt >= since), args.organizationId, args.requester, budget, { model: args.config.model, apiKey: args.apiKey });
+    await transcribeAudios(rows.filter((r) => r.createdAt >= since), args.organizationId, args.requester, budget, { model: args.evalModel, apiKey: args.apiKey });
     const points = extractReplayPoints(rows, { maxPoints: REPLAY_LIMITS.pointsPerConversation })
       .filter((p) => new Date(p.at) >= since);
     for (const p of points) work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
@@ -724,7 +745,7 @@ async function pointsFromChosen(args: Parameters<typeof executeReplay>[0]) {
   for (const conv of found) {
     if (work.length >= REPLAY_LIMITS.maxPoints) break;
     const rows = await loadMessages(args.organizationId, conv.id, new Date(0));
-    await transcribeAudios(rows, args.organizationId, args.requester, budget, { model: args.config.model, apiKey: args.apiKey });
+    await transcribeAudios(rows, args.organizationId, args.requester, budget, { model: args.evalModel, apiKey: args.apiKey });
     for (const p of extractReplayPoints(rows, { maxPoints: IMPORT_LIMITS.pointsPerTranscript })) {
       work.push({ conversationId: conv.id, contactId: conv.contactId, point: p });
     }
@@ -783,14 +804,14 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
         tokensOut += sim.outputTokens;
         cost += estimateCost(args.config.model, sim.inputTokens, sim.outputTokens);
         const ev = await withTimeout(
-          evaluate({ model: args.config.model, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources }),
+          evaluate({ model: args.evalModel, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources }),
           POINT_TIMEOUT_MS,
           "O avaliador demorou demais neste ponto.",
         );
         verdict = ev.verdict;
         tokensIn += ev.inputTokens;
         tokensOut += ev.outputTokens;
-        cost += estimateCost(args.config.model, ev.inputTokens, ev.outputTokens);
+        cost += estimateCost(args.evalModel, ev.inputTokens, ev.outputTokens);
         if (!verdict) error = "O avaliador não devolveu um resultado válido.";
         else if (!verdict.comparavel) skipReason = NOT_COMPARABLE_LABEL[verdict.motivoNaoComparavel ?? "outro"];
       } catch (err) {
