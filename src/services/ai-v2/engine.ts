@@ -35,7 +35,7 @@ import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyV2Tabulation } from "./tabulation";
-import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
+import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { ALREADY_SENT_REPLY, MESSAGE_MODEL_REPEATED, recentlySentMessageModels } from "./sent-materials";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
@@ -205,6 +205,29 @@ function mergeCollectedVariables(
   collected: Record<string, string>,
 ): Record<string, unknown> {
   return { ...existing, ...collected };
+}
+
+/** Chegou mensagem do cliente depois das deste turno. */
+async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt: Date }>>;
+        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
+    const newer = await db.message.findFirst({
+      where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
+      select: { id: true },
+    });
+    return !!newer;
+  } catch {
+    return false;
+  }
 }
 
 /** Aviso padrão para quem escreve enquanto espera na fila. */
@@ -1594,6 +1617,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
   // Aviso de limite no lugar da resposta: sem opções.
   if (stopLimits.blocksReply) replyOptions = [];
+
+  // Saudação que ficou para trás: o cliente mandou "Oi" e logo o pedido, e o
+  // pedido chegou enquanto este turno pensava. Mandar "Como posso ajudar?"
+  // depois do pedido parece que o agente não leu; o próximo turno responde.
+  if (
+    !anyHandoff &&
+    !anyClose &&
+    replyOptions.length === 0 &&
+    outboundActions.length === 0 &&
+    isGreetingOnlyReply(replyText) &&
+    (await newerInboundArrived(input.conversationId, input.messageIds))
+  ) {
+    traceStep("resposta", "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas");
+    replyText = "";
+  }
 
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {

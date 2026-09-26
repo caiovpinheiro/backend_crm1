@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   distributeNewInbound: vi.fn(),
   recentlySent: vi.fn(async (): Promise<Set<string>> => new Set()),
   pendingFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
+  messageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
   conversationUpdateMany: vi.fn(async () => ({ count: 1 })),
 }));
 
@@ -37,7 +38,7 @@ vi.mock("@/lib/prisma", () => ({
     aIAgentConfig: { findUnique: mocks.prismaAIAgentFindUnique },
     conversation: { findUnique: mocks.prismaConversationFindUnique, updateMany: mocks.conversationUpdateMany },
     distributionPending: { findFirst: mocks.pendingFindFirst },
-    message: { findMany: mocks.messageFindMany },
+    message: { findMany: mocks.messageFindMany, findFirst: mocks.messageFindFirst },
   },
 }));
 
@@ -1292,6 +1293,23 @@ describe("processV2Turn — correções do motor", () => {
     const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|");
     expect(texts).not.toContain("Você precisa de ajuda com algo novo?");
     expect(mocks.callLLM).toHaveBeenCalled();
+  });
+
+  it("saudação que ficou para trás (o cliente já mandou o pedido) não sai", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-09-26T12:08:00Z") }] : [],
+    );
+    mocks.messageFindFirst.mockResolvedValueOnce({ id: "m-2" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi, Maria! Boa tarde 😊 Como posso ajudar você hoje?" }));
+    await run("Oi, boa tarde!", { messageIds: ["m-1"] });
+    expect(mocks.sendText).not.toHaveBeenCalled();
+
+    // Sem mensagem nova, a saudação sai normalmente.
+    mocks.messageFindFirst.mockResolvedValueOnce(null);
+    await run("Oi, boa tarde!", { messageIds: ["m-1"] });
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
   });
 
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {

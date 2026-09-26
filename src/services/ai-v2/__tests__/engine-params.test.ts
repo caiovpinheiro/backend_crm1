@@ -11,6 +11,7 @@ import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
 import { isShortFollowUp, themeThresholds } from "@/services/ai-v2/theme-semantic";
 import { describeV2ContextForTrace } from "@/services/ai-v2/context";
+import { isGreetingOnlyReply } from "@/services/ai-v2/reply-ending";
 
 const cfg = (extra: Record<string, unknown> = {}): V2AgentConfig =>
   normalizeV2Config({
@@ -36,7 +37,7 @@ describe("cliente confuso", () => {
 describe("pergunta depois de encerrar", () => {
   it("textos da config ou padrão; rótulo até 20 caracteres", () => {
     expect(postCloseQuestion(cfg())).toEqual({ message: "Você precisa de ajuda com algo novo?", yes: "Preciso de ajuda", no: "Só agradecer" });
-    const own = cfg({ closure: { postCloseQuestion: { message: "Mais alguma coisa?", yesLabel: "Sim, tenho outra dúvida aqui", noLabel: "Não" }, shortReplyMessage: "Disponha!" } });
+    const own = cfg({ closure: { postCloseQuestion: { message: "Mais alguma coisa?", yesLabel: "Sim, tenho outra dúvida aqui", noLabel: "Não" }, postCloseMessages: { courtesy: "Disponha!" } } });
     expect(postCloseQuestion(own)).toEqual({ message: "Mais alguma coisa?", yes: "Sim, tenho outra dúv", no: "Não" });
     expect(postCloseShortReply(own)).toBe("Disponha!");
   });
@@ -134,7 +135,8 @@ describe("depois de encerrar: classificação e mensagens por caso", () => {
   });
   it("mensagem por caso, com a geral e o padrão como reserva", () => {
     const own = cfg({ closure: { shortReplyMessage: "Geral", postCloseMessages: { new_demand: "Vou te passar para a equipe." } }, handoff: { defaultDestination: { type: "department" }, message: "Transferindo." } });
-    expect(postCloseShortReply(own, "courtesy")).toBe("Geral");
+    // A resposta única antiga não vale mais: sem mensagem própria, o padrão.
+    expect(postCloseShortReply(own, "courtesy")).toContain("Por nada");
     expect(postCloseShortReply(own, "new_demand")).toBe("Vou te passar para a equipe.");
     expect(postCloseHandoffMessage(own, "new_demand")).toBe("Vou te passar para a equipe.");
     expect(postCloseHandoffMessage(own, "ambiguous")).toBe("Transferindo.");
@@ -170,5 +172,18 @@ describe("passo dados: o que o agente recebeu do cadastro", () => {
 
   it("sem cadastro", () => {
     expect(describeV2ContextForTrace(cfg(), { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } } as never)).toContain("Contato: sem cadastro");
+  });
+});
+
+describe("resposta que é só saudação", () => {
+  it("reconhece cumprimento/convite sem conteúdo", () => {
+    for (const r of ["Oi, Marcelo! Boa tarde 😊 Como posso ajudar você hoje?", "Olá! Em que posso te ajudar?", "Bom dia! Me conta o que você precisa."]) {
+      expect(isGreetingOnlyReply(r)).toBe(true);
+    }
+  });
+  it("resposta com conteúdo não é saudação", () => {
+    for (const r of ["Para emitir o boleto, acesse https://exemplo.com e toque em Pagar.", "O prazo é 19/10. Posso ajudar em algo mais?", ""]) {
+      expect(isGreetingOnlyReply(r)).toBe(false);
+    }
   });
 });

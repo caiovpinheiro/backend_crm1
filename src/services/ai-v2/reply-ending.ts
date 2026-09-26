@@ -35,6 +35,17 @@ export function asksClient(reply: string): boolean {
   return ASKS_CLIENT.test(last);
 }
 
+/**
+ * Resposta que só cumprimenta e convida o cliente a dizer o que precisa
+ * ("Oi! Como posso ajudar?"), sem conteúdo.
+ */
+export function isGreetingOnlyReply(reply: string): boolean {
+  const text = reply.trim();
+  if (!text || /\d|https?:\/\//.test(text)) return false;
+  if (text.split(/\s+/).length > 25) return false;
+  return /\b(?:como posso|em que posso|posso (?:te |lhe )?ajudar|me (?:conta|conte|diga|diz)|qual (?:[ée] )?(?:a )?sua d[uú]vida|o que (?:voc[eê] )?precisa)\b/i.test(text);
+}
+
 /** Passo a passo (2+ passos numerados) ou informação. */
 export function classifyReply(reply: string): V2ReplyKind {
   const steps = reply.split(/\n+/).filter((l) => STEP_LINE.test(l)).length;

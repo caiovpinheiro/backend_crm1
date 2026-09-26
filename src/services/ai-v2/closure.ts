@@ -97,17 +97,13 @@ export function postCloseQuestion(config: V2AgentConfig): { message: string; yes
 }
 
 /**
- * Mensagem do caso pós-encerramento: a própria do caso; senão, a resposta
- * curta geral; senão o padrão. Antes era uma frase só para todos os casos —
- * um aviso de transferência cadastrado para "pedido novo" saía também para
- * "valeu".
+ * Mensagem do caso pós-encerramento: a própria do caso, senão o padrão.
+ * A resposta curta única (`shortReplyMessage`) não vale mais: servia a todos
+ * os casos e um aviso de transferência cadastrado para "pedido novo" saía
+ * também para "valeu"/"obrigado".
  */
 export function postCloseShortReply(config: V2AgentConfig, caseType: V2PostCloseCase = "courtesy"): string {
-  return (
-    config.closure?.postCloseMessages?.[caseType]?.trim() ||
-    config.closure?.shortReplyMessage?.trim() ||
-    "Por nada! Se precisar de algo novo, é só chamar."
-  );
+  return config.closure?.postCloseMessages?.[caseType]?.trim() || "Por nada! Se precisar de algo novo, é só chamar.";
 }
 
 /** Aviso ao transferir depois de encerrar: o do caso; senão o de transferência. */
