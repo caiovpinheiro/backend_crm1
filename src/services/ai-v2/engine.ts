@@ -34,6 +34,7 @@ import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits
 import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
+import { ALREADY_SENT_REPLY, MESSAGE_MODEL_REPEATED, recentlySentMessageModels } from "./sent-materials";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
 import {
@@ -1360,7 +1361,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // apresenta, a mensagem pronta/produto/modelo vem em seguida). As demais
   // (tag, campo, nota…) rodam agora.
   const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message"]);
-  const outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
+  let outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
+  // Mensagem pronta enviada há pouco (cliente repetiu o pedido): não sai de
+  // novo. Antes a introdução ("vou te enviar…") saía, o texto era barrado
+  // pela trava anti-repetição e o cliente ficava sem nada.
+  const requestedModelIds = outboundActions
+    .filter((a) => a.type === "send_message_model" && typeof a.modelId === "string")
+    .map((a) => a.modelId as string);
+  if (requestedModelIds.length > 0) {
+    const alreadySent = await recentlySentMessageModels(input.conversationId, requestedModelIds).catch(() => new Set<string>());
+    if (alreadySent.size > 0) {
+      outboundActions = outboundActions.filter((a) => !(a.type === "send_message_model" && alreadySent.has(a.modelId as string)));
+      traceStep("ações", `Mensagem pronta já enviada nesta conversa há pouco — não reenviada (${[...alreadySent].join(", ")})`);
+      // Resposta que só apresentava o material vira o aviso de que ele está acima.
+      if (!outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length <= 30) {
+        replyText = ALREADY_SENT_REPLY;
+      }
+    }
+  }
   const actionRes = await executeV2Actions(allowedActions.filter((a) => !OUTBOUND_ACTIONS.has(a.type)), actionCtx);
   if (actionRes.results.length > 0) {
     traceStep("ações", actionRes.results
@@ -1436,7 +1454,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Fecho configurado ("me avise se funcionou"): o motor põe, não o modelo.
   // Não vai em transferência, encerramento, confirmação, botões nem na
   // resposta de fora do escopo (ela já diz com o que ele pode ajudar).
-  if (!anyHandoff && !anyClose && replyText.trim() && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope) {
+  // Com material a seguir (mensagem pronta/produto), vai depois dele: na
+  // apresentação, "posso ajudar em algo mais?" chegava antes do tutorial.
+  const materialFollows = !stopLimits.blocksReply && outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_product");
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope;
+  if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
       ending: effectiveReplyEnding(config, activeTheme),
@@ -1484,11 +1506,36 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .join(", "));
     executedActions = [...executedActions, ...outRes.results];
     // A reply já anunciou o material; se ele não saiu, uma pessoa envia.
-    if (outRes.results.some((r) => !r.ok && r.action.type === "send_message_model")) {
+    // Barrado só por repetir uma mensagem recente: o cliente já tem o material.
+    if (outRes.results.some((r) => !r.ok && r.action.type === "send_message_model" && r.error !== MESSAGE_MODEL_REPEATED)) {
       traceStep("ações", "A mensagem pronta anunciada não foi enviada → transferência");
       noteV2Fact("handoffCause", "message_model_failed", { keepFirst: true });
       anyHandoff = true;
       anyClose = false;
+    }
+
+    // Fecho depois do material, em mensagem própria (com os botões, se houver).
+    const material = outRes.results
+      .filter((r) => r.ok && typeof r.text === "string")
+      .map((r) => r.text as string)
+      .join("\n\n");
+    if (endingAllowed && materialFollows && !anyHandoff && material.trim()) {
+      const ending = applyReplyEnding({
+        reply: material,
+        ending: effectiveReplyEnding(config, activeTheme),
+        lastAgentMessage: replyText,
+        turnSeed: historyLength,
+      });
+      if (ending.added) {
+        const buttons = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
+        const built = buttons.length > 0 ? buildV2Interactive(ending.added, buttons) : null;
+        const text = built ? built.fallbackText : ending.added;
+        if ((await sendReply(text, built?.payload)).sent) {
+          sentReply = [sentReply, text].filter(Boolean).join("\n\n");
+          if (built && built.labels.length > 0) counters.pendingOptions = built.labels;
+          traceStep("resposta", `Fecho enviado depois do material: "${ending.added}"`);
+        }
+      }
     }
   }
 

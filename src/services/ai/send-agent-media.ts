@@ -37,6 +37,8 @@ export async function sendAgentFollowUpMedia(args: {
   contactId: string;
   agentUserId: string;
   attachments: AgentFaqMedia[];
+  /** Conta repetição só a partir daqui (ex.: último #reset do teste). */
+  since?: Date;
 }): Promise<number> {
   const orgId = getOrgIdOrThrow();
   const allowed = args.attachments.filter((att) => {
@@ -60,7 +62,7 @@ export async function sendAgentFollowUpMedia(args: {
     where: {
       conversationId: args.conversationId,
       mediaUrl: { in: allowed.map((a) => a.url) },
-      createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+      createdAt: { gte: new Date(Math.max(Date.now() - 7 * 24 * 60 * 60 * 1000, args.since?.getTime() ?? 0)) },
     },
     select: { mediaUrl: true },
   });

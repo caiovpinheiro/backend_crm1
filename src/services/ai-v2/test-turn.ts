@@ -565,7 +565,10 @@ export async function simulateV2Turn(
     const askAction = executedActions.find((e) => e.action.type === "ask_with_options");
     const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
     let labels = options.map((o) => o.label);
-    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope) {
+    // Com material a seguir, a produção manda o fecho depois dele; aqui a
+    // apresentação fica sem fecho.
+    const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product");
+    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows) {
       // Fecho configurado, igual à produção.
       const ending = applyReplyEnding({
         reply,

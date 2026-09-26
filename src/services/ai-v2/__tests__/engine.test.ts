@@ -22,6 +22,12 @@ const mocks = vi.hoisted(() => ({
   findInherited: vi.fn(),
   resolveInline: vi.fn(),
   distributeNewInbound: vi.fn(),
+  recentlySent: vi.fn(async (): Promise<Set<string>> => new Set()),
+}));
+
+vi.mock("../sent-materials", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../sent-materials")>()),
+  recentlySentMessageModels: mocks.recentlySent,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -1188,6 +1194,69 @@ describe("processV2Turn — correções do motor", () => {
     }));
     await run("Quero falar com alguém sobre o acesso");
     expect(order.some((o) => o.includes("send_message_model"))).toBe(false);
+  });
+
+  it("fecho vai depois da mensagem pronta, não na apresentação", async () => {
+    const config = baseConfig({
+      allowedMessageModelIds: ["mm-1"],
+      replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: true, phrases: ["Posso ajudar em algo mais?"] } },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return {
+        results: actions.map((a) => ({ action: a, ok: true, text: "Tutorial:\n1️⃣ Abra o app.\n2️⃣ Toque em Aulas." })),
+        anyHandoff: false,
+        anyClose: false,
+      };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Vou te enviar um tutorial rápido.",
+      actions: [{ type: "send_message_model", modelId: "mm-1" }] as any,
+    }));
+
+    await run("Preciso de ajuda para acessar o aplicativo");
+
+    expect(order).toEqual(["texto:Vou te enviar um tutorial rápido.", "ações:send_message_model", "texto:Me avisa se funcionou."]);
+  });
+
+  it("mesma mensagem pronta pedida de novo logo depois: não reenvia e aponta a de cima", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.recentlySent.mockResolvedValueOnce(new Set(["mm-1"]));
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Vou te enviar um tutorial rápido.",
+      actions: [{ type: "send_message_model", modelId: "mm-1" }] as any,
+    }));
+
+    await run("Preciso de ajuda para acessar o aplicativo");
+
+    expect(order.some((o) => o.includes("send_message_model"))).toBe(false);
+    expect(order.join("|")).toContain("logo acima");
+    expect(order.join("|")).not.toContain("Vou te enviar");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+  });
+
+  it("mensagem pronta barrada só por repetir uma recente não transfere", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { MESSAGE_MODEL_REPEATED } = await import("../sent-materials");
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => (a.type === "send_message_model" ? { action: a, ok: false, error: MESSAGE_MODEL_REPEATED } : { action: a, ok: true })),
+      anyHandoff: false,
+      anyClose: false,
+    }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Segue o material.", actions: [{ type: "send_message_model", modelId: "mm-1" }] as any }));
+    await run("manda o material");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
   });
 
   it("histórico não repete as bolhas do turno atual", async () => {

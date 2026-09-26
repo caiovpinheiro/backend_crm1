@@ -10,6 +10,7 @@ import type { V2Action, V2ActionType, V2AgentConfig, V2Destination, V2LLMOutput 
 import { sendAgentMessage, type HumanBehaviorConfig } from "@/services/ai/piloting-actions";
 import type { V2InteractivePayload } from "./interactive";
 import { adaptMessageModelText } from "./message-adapt";
+import { MESSAGE_MODEL_REPEATED, lastV2ResetAt } from "./sent-materials";
 import { applyExistingTagToContact } from "@/services/tags";
 import { createDeal, updateDeal } from "@/services/deals";
 import { createActivity } from "@/services/activities";
@@ -377,7 +378,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     }
     // Mensagem pronta só com anexo (sem texto) é válida.
     if (text.trim()) {
-      await sendV2TextMessage({
+      const sent = await sendV2TextMessage({
         conversationId: ctx.conversationId,
         contactId: ctx.contactId,
         agentUserId: ctx.agentUserId,
@@ -386,12 +387,18 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
         autonomyMode: ctx.autonomyMode,
         humanBehavior: v2HumanBehavior(ctx.config),
       });
+      // Antes o resultado era ignorado: texto barrado saía como ✓ e o
+      // cliente ficava só com o "vou te enviar".
+      if (!sent.sent) {
+        return { action, ok: false, modelId, error: sent.reason === "near_duplicate" ? MESSAGE_MODEL_REPEATED : (sent.reason ?? "não enviada") };
+      }
     }
 
     // Anexos (imagem, vídeo, áudio, documento): antes o v2 mandava só o
     // texto do modelo e descartava a mídia. Mesmo envio do agente v1 e do
     // inbox humano: só arquivo do armazenamento da org, até 2 por vez,
-    // sem repetir o mesmo arquivo na conversa em 7 dias.
+    // sem repetir o mesmo arquivo na conversa em 7 dias — contados a partir
+    // do último #reset, para o teste receber o anexo de novo.
     const { mediaFromTemplateRow } = await import("@/services/ai/message-models-retrieval");
     const media = mediaFromTemplateRow(template);
     let mediaSent = 0;
@@ -400,11 +407,13 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
         traceStep("mídia", `Anexos de "${template.name}" não enviados (modo sugestão)`);
       } else {
         const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
+        const since = await lastV2ResetAt(ctx.conversationId).catch(() => null);
         mediaSent = await sendAgentFollowUpMedia({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
           agentUserId: ctx.agentUserId,
           attachments: media,
+          ...(since ? { since } : {}),
         });
         traceStep("mídia", mediaSent > 0
           ? `Enviou ${mediaSent} anexo(s) de "${template.name}": ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")}`
