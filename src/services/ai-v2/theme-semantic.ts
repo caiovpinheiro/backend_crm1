@@ -17,22 +17,37 @@ import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { embedTexts } from "@/services/ai/provider";
 import { matchV2Theme, selectV2Theme } from "./themes";
 
-/** Mesma régua da busca na base: similaridade de cosseno >= 0,4. */
-/**
- * Para TROCAR o assunto atual da conversa por outro, pelo significado: o
- * outro precisa passar deste mínimo e ficar SWITCH_MARGIN acima do atual.
- * Um acompanhamento ("a nota não apareceu") empatava com outro assunto e a
- * conversa pulava de assunto por 0,05 de diferença.
- */
-function switchSimilarity(): number {
-  const raw = Number.parseFloat(process.env.AI_V2_THEME_SWITCH_SIMILARITY ?? "");
-  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : 0.5;
+function envSimilarity(name: string, fallback: number): number {
+  const raw = Number.parseFloat(process.env[name] ?? "");
+  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : fallback;
 }
-const SWITCH_MARGIN = 0.05;
 
-function minSimilarity(): number {
-  const raw = Number.parseFloat(process.env.AI_V2_THEME_MIN_SIMILARITY ?? "");
-  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : 0.4;
+/**
+ * Réguas do reconhecimento, da config do agente ("Do que ele cuida ›
+ * Reconhecimento"); sem valor, as variáveis de ambiente e os padrões.
+ * Escolher pelo sentido: similaridade >= mínimo (mesma régua da base, 0,4).
+ * TROCAR o assunto atual: o outro passa de `switchSimilarity` e fica
+ * `switchMargin` acima do atual — sem margem, um acompanhamento empatava
+ * com outro assunto e a conversa pulava.
+ * `shortMessageWords`: com o padrão antigo (3), um assunto dito em duas
+ * palavras nunca trocava o atual; o padrão agora é 2 — "ok", "sim",
+ * "obrigado" continuam no assunto atual, e mensagem curta que pergunta
+ * ("consegue me enviar?") é acompanhamento (ver `isShortFollowUp`).
+ */
+export function themeThresholds(config: V2AgentConfig): {
+  minSimilarity: number;
+  switchSimilarity: number;
+  switchMargin: number;
+  shortMessageWords: number;
+} {
+  const t = config.themeRecognition ?? {};
+  const inRange = (v: unknown) => (typeof v === "number" && v > 0 && v < 1 ? v : undefined);
+  return {
+    minSimilarity: inRange(t.minSimilarity) ?? envSimilarity("AI_V2_THEME_MIN_SIMILARITY", 0.4),
+    switchSimilarity: inRange(t.switchSimilarity) ?? envSimilarity("AI_V2_THEME_SWITCH_SIMILARITY", 0.5),
+    switchMargin: typeof t.switchMargin === "number" && t.switchMargin >= 0 ? t.switchMargin : 0.05,
+    shortMessageWords: typeof t.shortMessageWords === "number" && t.shortMessageWords >= 0 ? t.shortMessageWords : 2,
+  };
 }
 
 /** Texto que representa o assunto no espaço de embeddings. */
@@ -82,6 +97,17 @@ function contentWordCount(text: string): number {
     .filter((w) => w.length >= 4).length;
 }
 
+/**
+ * Mensagem curta que s\u00f3 acompanha a conversa: menos palavras de conte\u00fado
+ * que `minWords`, ou curta (menos de 3) terminando em pergunta ("consegue
+ * me enviar?"). Duas palavras sem pergunta costumam ser um assunto dito
+ * direto e podem trocar o atual.
+ */
+export function isShortFollowUp(text: string, minWords: number): boolean {
+  const words = contentWordCount(text);
+  return words < minWords || (words < 3 && /\?\s*$/.test(text.trim()));
+}
+
 export type V2ThemeSelection = {
   theme: V2Theme | null;
   method: "trigger" | "semantic" | "kept" | "none";
@@ -103,6 +129,7 @@ export async function selectV2ThemeSemantic(args: {
   // gatilho casa, o que impediria o significado de trocar de assunto.
   const byTrigger = selectV2Theme(args.config, args.message);
   const themes = args.config.themes ?? [];
+  const th = themeThresholds(args.config);
   if (byTrigger) {
     // Palavra solta da lista ("empresa") levava "a empresa pediu um
     // comprovante" para o assunto que tinha essa palavra no gatilho. Com frase de verdade, confere
@@ -122,7 +149,7 @@ export async function selectV2ThemeSemantic(args: {
           best = t;
         }
       });
-      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= switchSimilarity() && bestSim >= triggerSim + 0.08) {
+      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= th.switchSimilarity && bestSim >= triggerSim + 0.08) {
         return { theme: best, method: "semantic", similarity: bestSim };
       }
     } catch (err) {
@@ -139,7 +166,7 @@ export async function selectV2ThemeSemantic(args: {
   if (themes.length === 0 || !text || !args.apiKey) return fallback();
   // Acompanhamento curto ("ok", "consegue me enviar?") continua no assunto
   // da conversa; pouco texto dá similaridade instável.
-  if (current && contentWordCount(text) < 3) return fallback();
+  if (current && isShortFollowUp(text, th.shortMessageWords)) return fallback();
 
   try {
     const [{ embeddings }, vectors] = await Promise.all([
@@ -159,10 +186,10 @@ export async function selectV2ThemeSemantic(args: {
       }
     });
     const switching = !!current && best !== null && (best as V2Theme).id !== current.id;
-    if (switching && (bestSim < switchSimilarity() || bestSim < currentSim + SWITCH_MARGIN)) {
+    if (switching && (bestSim < th.switchSimilarity || bestSim < currentSim + th.switchMargin)) {
       return fallback(bestSim);
     }
-    if (best && bestSim >= minSimilarity()) {
+    if (best && bestSim >= th.minSimilarity) {
       return { theme: best, method: "semantic", similarity: bestSim };
     }
     return fallback(bestSim);
@@ -211,7 +238,7 @@ export async function explainV2ThemeRecognition(args: {
       return b.score - a.score || (b.similarity ?? 0) - (a.similarity ?? 0);
     })
     .map(({ score: _score, ...rest }) => rest);
-  return { selection, ranking, minSimilarity: minSimilarity() };
+  return { selection, ranking, minSimilarity: themeThresholds(args.config).minSimilarity };
 }
 
 /** Limpa o cache (testes). */

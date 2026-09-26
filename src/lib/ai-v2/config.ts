@@ -154,6 +154,7 @@ const fallbackSchema = z.object({
   humanRequest: z.object({ message: optionalText }).optional(),
   noSource: z.object({ message: optionalText }).optional(),
   error: z.object({ message: optionalText }).optional(),
+  confusion: z.object({ action: z.enum(["rephrase", "handoff"]).optional() }).optional(),
 }).optional();
 
 const scopeSchema = z.object({
@@ -170,6 +171,15 @@ const inactivitySchema = z.object({
   nudgeAfter: z.number().int().min(0).optional().default(30),
   nudgeMessage: optionalText,
   closeAfter: z.number().int().min(0).optional().default(1440),
+  closeMessage: optionalText,
+}).optional();
+
+const similarity = z.number().min(0).max(1).optional();
+const themeRecognitionSchema = z.object({
+  minSimilarity: similarity,
+  switchSimilarity: similarity,
+  switchMargin: z.number().min(0).max(0.5).optional(),
+  shortMessageWords: z.number().int().min(0).max(10).optional(),
 }).optional();
 
 const tabulationSchema = z.object({
@@ -206,6 +216,8 @@ const closureConfigSchema = z.object({
     .array(z.object({ entity: z.enum(["contact", "deal"]), key: z.string(), value: z.string() }))
     .optional()
     .default([]),
+  shortReplyMessage: optionalText,
+  postCloseQuestion: z.object({ message: optionalText, yesLabel: optionalText, noLabel: optionalText }).optional(),
 });
 
 const limitsConfigSchema = z.object({
@@ -308,6 +320,8 @@ export const v2AgentConfigSchema = z.object({
     defaultDestination: destinationSchema,
     message: optionalText.default("Vou transferir para um atendente."),
     humanRequestKeywords: z.array(z.string()).optional().default(["humano", "pessoa", "atendente", "consultor"]),
+    whileQueued: z.enum(["notify", "answer"]).optional(),
+    queuedMessage: optionalText,
   }).optional().default({
     defaultDestination: { type: "department" } as V2Destination,
     message: "Vou transferir para um atendente.",
@@ -379,6 +393,8 @@ export const v2AgentConfigSchema = z.object({
   messageModelAdapt: z.boolean().optional().default(false),
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
+  themeRecognition: themeRecognitionSchema,
+  knowledgeSearch: z.object({ minSimilarity: similarity }).optional(),
   businessHours: z
     .object({
       enabled: z.boolean().optional().default(false),

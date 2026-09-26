@@ -52,6 +52,12 @@ export interface V2FallbackConfig {
   humanRequest?: { message?: string };
   noSource?: { message?: string };
   error?: { message?: string };
+  /**
+   * Cliente mostra que não entendeu ("?", "não entendi") logo depois de uma
+   * pergunta ou explicação do agente. "rephrase" (padrão): explica de outro
+   * jeito ou refaz a pergunta, sem transferir. "handoff": o modelo decide.
+   */
+  confusion?: { action?: "rephrase" | "handoff" };
 }
 
 export interface V2ScopeConfig {
@@ -60,11 +66,34 @@ export interface V2ScopeConfig {
   forbidden?: { subject: string; destination?: V2Destination }[];
 }
 
+/** Cliente sem responder: aviso e encerramento (minutos desde a última mensagem do agente). */
 export interface V2InactivityConfig {
   enabled?: boolean;
+  /** Minutos até o aviso; 0 = sem aviso. */
   nudgeAfter?: number;
   nudgeMessage?: string;
+  /** Minutos até encerrar (contados da mensagem do agente, não do aviso). */
   closeAfter?: number;
+  /** Mensagem ao encerrar por falta de resposta; vazia = encerra sem mensagem. */
+  closeMessage?: string;
+}
+
+/** Como o assunto da conversa é reconhecido e trocado. */
+export interface V2ThemeRecognitionConfig {
+  /** Similaridade mínima para escolher um assunto pelo sentido (0–1). */
+  minSimilarity?: number;
+  /** Similaridade mínima para TROCAR o assunto atual por outro (0–1). */
+  switchSimilarity?: number;
+  /** Quanto o outro assunto precisa ficar acima do atual para trocar. */
+  switchMargin?: number;
+  /** Mensagens com menos palavras que isto mantêm o assunto atual. */
+  shortMessageWords?: number;
+}
+
+/** Busca nos materiais. */
+export interface V2KnowledgeSearchConfig {
+  /** Trechos com similaridade abaixo disto não vão ao modelo (0 = todos). */
+  minSimilarity?: number;
 }
 
 export interface V2TabulationConfig {
@@ -238,6 +267,15 @@ export interface V2HandoffConfig {
   message: string;
   /** Palavras-chave que disparam pedido de humano. */
   humanRequestKeywords: string[];
+  /**
+   * Cliente escreve enquanto espera na fila depois da transferência e a
+   * conversa volta ao agente. "notify" (padrão): avisa que está na fila,
+   * sem responder nem transferir de novo. "answer": responde normalmente;
+   * se decidir transferir, só avisa que já está na fila.
+   */
+  whileQueued?: "notify" | "answer";
+  /** Aviso de fila (vazio = texto padrão). */
+  queuedMessage?: string;
 }
 
 export type V2PostCloseCaseBehavior =
@@ -263,6 +301,10 @@ export interface V2ClosureConfig {
   nextAutomationStepId?: string;
   /** Campos do contato/negócio a atualizar automaticamente ao encerrar. */
   fieldUpdates?: Array<{ entity: "contact" | "deal"; key: string; value: string }>;
+  /** Resposta curta ("short_reply") depois de encerrar. */
+  shortReplyMessage?: string;
+  /** Pergunta depois de encerrar ("ask_with_options"), com dois botões. */
+  postCloseQuestion?: { message?: string; yesLabel?: string; noLabel?: string };
 }
 
 export interface V2LimitsConfig {
@@ -473,6 +515,8 @@ export interface V2AgentConfig {
   inactivity?: V2InactivityConfig;
   /** Tabulação ao encerrar/transferir. */
   tabulation?: V2TabulationConfig;
+  themeRecognition?: V2ThemeRecognitionConfig;
+  knowledgeSearch?: V2KnowledgeSearchConfig;
 }
 
 export interface V2ToolGovernorConfig {

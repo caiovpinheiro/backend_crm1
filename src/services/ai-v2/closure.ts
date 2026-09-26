@@ -56,6 +56,36 @@ export function keepOpenOnNewRequest(
   return true;
 }
 
+/** Pergunta pós-encerramento e rótulos dos botões (até 20 caracteres), da config ou padrão. */
+export function postCloseQuestion(config: V2AgentConfig): { message: string; yes: string; no: string } {
+  const q = config.closure?.postCloseQuestion ?? {};
+  return {
+    message: q.message?.trim() || "Você precisa de ajuda com algo novo?",
+    yes: (q.yesLabel?.trim() || "Preciso de ajuda").slice(0, 20),
+    no: (q.noLabel?.trim() || "Só agradecer").slice(0, 20),
+  };
+}
+
+/** Resposta curta pós-encerramento, da config ou padrão. */
+export function postCloseShortReply(config: V2AgentConfig): string {
+  return config.closure?.shortReplyMessage?.trim() || "Por nada! Se precisar de algo novo, é só chamar.";
+}
+
+/**
+ * A pergunta pós-encerramento já foi feita (as opções pendentes são as dela):
+ * a resposta decide, e nunca se pergunta de novo — "Oi" outra vez é pedido
+ * novo. Antes cada "Oi" repetia a pergunta.
+ */
+export function answerToPostCloseQuestion(
+  config: V2AgentConfig,
+  pendingOptions: string[],
+  chosen: string | null,
+): V2PostCloseCase | null {
+  const q = postCloseQuestion(config);
+  if (pendingOptions.length !== 2 || pendingOptions[0] !== q.yes || pendingOptions[1] !== q.no) return null;
+  return chosen === q.no ? "courtesy" : "new_demand";
+}
+
 export function getPostCloseBehavior(
   config: V2AgentConfig,
   caseType: V2PostCloseCase,

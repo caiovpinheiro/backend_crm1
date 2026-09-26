@@ -42,6 +42,7 @@ import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
+import { CONFUSION_PROMPT } from "./confusion";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
@@ -223,6 +224,7 @@ async function prefetchKnowledge(args: {
           query: q,
           allowedDocIds: docIds,
           limit: PREFETCH_LIMIT,
+          minSimilarity: args.config.knowledgeSearch?.minSimilarity,
         }).catch(() => undefined),
       ),
     );
@@ -458,6 +460,7 @@ export function buildV2ToolSet(args: {
         query: input.query,
         allowedDocIds,
         limit: input.limit,
+        minSimilarity: args.config.knowledgeSearch?.minSimilarity,
       });
       const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
       return { ...found, chunks: found.chunks.map((c) => ({ ...c, content: markPastDates(c.content, new Date(), tz) })) };
@@ -889,6 +892,7 @@ function buildV2SystemPrompt(
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
   // Fecho configurado: quem põe é o motor; o modelo não cria o próprio.
   if (hasReplyEnding(effectiveReplyEnding(config, activeTheme(config, themeId)))) lines.push(REPLY_ENDING_PROMPT);
+  if ((config.fallback?.confusion?.action ?? "rephrase") === "rephrase") lines.push(CONFUSION_PROMPT);
   lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);

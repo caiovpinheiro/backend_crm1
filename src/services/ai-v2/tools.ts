@@ -233,6 +233,8 @@ export async function searchV2Knowledge(args: {
   query: string;
   allowedDocIds?: string[];
   limit?: number;
+  /** "O que ele sabe › Similaridade mínima": trecho abaixo disto não vai ao modelo. */
+  minSimilarity?: number;
 }): Promise<{
   query: string;
   chunks: Array<{ docId: string; docTitle: string; content: string; distance: number }>;
@@ -248,9 +250,8 @@ export async function searchV2Knowledge(args: {
   const allowedSet = Array.isArray(args.allowedDocIds)
     ? new Set(args.allowedDocIds)
     : null;
-  const filtered = allowedSet
-    ? chunks.filter((c) => allowedSet.has(c.docId))
-    : chunks;
+  const min = typeof args.minSimilarity === "number" && args.minSimilarity > 0 ? args.minSimilarity : 0;
+  const filtered = chunks.filter((c) => (!allowedSet || allowedSet.has(c.docId)) && 1 - c.distance >= min);
   return {
     query: args.query.trim(),
     chunks: filtered.map((c) => ({

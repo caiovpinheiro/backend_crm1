@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   resolveInline: vi.fn(),
   distributeNewInbound: vi.fn(),
   recentlySent: vi.fn(async (): Promise<Set<string>> => new Set()),
+  pendingFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
+  conversationUpdateMany: vi.fn(async () => ({ count: 1 })),
 }));
 
 vi.mock("../sent-materials", async (importOriginal) => ({
@@ -33,7 +35,8 @@ vi.mock("../sent-materials", async (importOriginal) => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     aIAgentConfig: { findUnique: mocks.prismaAIAgentFindUnique },
-    conversation: { findUnique: mocks.prismaConversationFindUnique },
+    conversation: { findUnique: mocks.prismaConversationFindUnique, updateMany: mocks.conversationUpdateMany },
+    distributionPending: { findFirst: mocks.pendingFindFirst },
     message: { findMany: mocks.messageFindMany },
   },
 }));
@@ -1194,6 +1197,70 @@ describe("processV2Turn — correções do motor", () => {
     }));
     await run("Quero falar com alguém sobre o acesso");
     expect(order.some((o) => o.includes("send_message_model"))).toBe(false);
+  });
+
+  it("cliente na fila escreve de novo: só avisa que está na fila e devolve à fila (padrão)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    await run("Qual o prazo?");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("fila");
+    expect(mocks.conversationUpdateMany).toHaveBeenCalled();
+  });
+
+  it("cliente na fila, modo responder: responde; se transferir de novo, o aviso é o de fila", async () => {
+    const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [], whileQueued: "answer", queuedMessage: "Aguarde na fila, por favor." } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "x", handoff: true }));
+    await run("Qual o prazo da minha solicitação?");
+    expect(mocks.callLLM).toHaveBeenCalled();
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toContain("Aguarde na fila, por favor.");
+    expect(texts).not.toContain("Vou transferir.");
+  });
+
+  it("cliente manda só \"?\": refaz a pergunta em vez de transferir (padrão)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.messageFindMany.mockResolvedValue([
+      { direction: "in", authorType: "contact", content: "?" },
+      { direction: "out", authorType: "bot", content: "Entendi. Qual documento você precisa enviar?" },
+      { direction: "in", authorType: "contact", content: "preciso enviar documentos" },
+    ]);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Vou transferir.", handoff: true }));
+    await run("?");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Desculpa, acho que não fui claro.");
+  });
+
+  it("depois de encerrar: pergunta com botões uma vez; \"Oi\" de novo não repete a pergunta", async () => {
+    const config = baseConfig({ closure: { ambiguousBehavior: "ask_with_options" } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const closedState = (counters: Record<string, unknown> = {}) => ({
+      ...makeState("closed", "ninguem", counters),
+      postCloseWindowEndAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    mocks.getState.mockResolvedValue(closedState());
+    await run("Oi");
+    const first = mocks.sendText.mock.calls.at(-1)![0] as { text: string; interactive?: { kind: string; options: Array<{ title: string }> } };
+    expect(first.interactive?.kind).toBe("buttons");
+    expect(first.interactive?.options.map((o) => o.title)).toEqual(["Preciso de ajuda", "Só agradecer"]);
+    expect(first.text).toContain("1. Preciso de ajuda");
+    const saved = mocks.upsertState.mock.calls.map((c) => c[0]).find((a: { counters?: { pendingOptions?: string[] } }) => a.counters?.pendingOptions);
+    expect(saved.counters.pendingOptions).toEqual(["Preciso de ajuda", "Só agradecer"]);
+
+    mocks.sendText.mockClear();
+    mocks.getState.mockResolvedValue(closedState({ pendingOptions: ["Preciso de ajuda", "Só agradecer"] }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Claro! Em que posso ajudar?" }));
+    await run("Oi");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts.join("|")).not.toContain("Você precisa de ajuda com algo novo?");
+    expect(mocks.callLLM).toHaveBeenCalled();
   });
 
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {

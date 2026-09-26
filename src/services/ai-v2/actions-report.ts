@@ -104,6 +104,7 @@ const SKIP_ERRORS = [
 const NO_REPLY_REASON: Record<string, string> = {
   "human owner": "A conversa está com uma pessoa da equipe; o agente não responde",
   "post-close no_reply": "Cortesia depois de encerrar; sem resposta",
+  queued: "Cliente na fila; o aviso de fila já tinha sido enviado há pouco",
 };
 
 /** Ações internas do motor: não aparecem para quem opera. */

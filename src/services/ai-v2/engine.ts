@@ -5,7 +5,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
-import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput, V2Owner, V2Stage, V2Theme } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
 import { applyConfirmationIdentity, buildVariableMap, confirmationIdentityValues, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
 import { createDeal } from "@/services/deals";
@@ -31,7 +31,9 @@ import { findInheritablePostCloseState, getV2ConversationState, upsertV2Conversa
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest, postCloseQuestion, postCloseShortReply } from "./closure";
+import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
+import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { ALREADY_SENT_REPLY, MESSAGE_MODEL_REPEATED, recentlySentMessageModels } from "./sent-materials";
@@ -202,6 +204,34 @@ function mergeCollectedVariables(
   collected: Record<string, string>,
 ): Record<string, unknown> {
   return { ...existing, ...collected };
+}
+
+/** Aviso padrão para quem escreve enquanto espera na fila. */
+const QUEUED_MESSAGE_DEFAULT = "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.";
+
+/** Conversa transferida esperando atendente (pendência de distribuição aberta). */
+async function isWaitingInQueue(conversationId: string): Promise<boolean> {
+  try {
+    const pending = await (prisma as unknown as {
+      distributionPending: { findFirst: (args: unknown) => Promise<{ id: string } | null> };
+    }).distributionPending.findFirst({
+      where: { status: "PENDING", conversationId },
+      select: { id: true },
+    });
+    return !!pending;
+  } catch {
+    return false;
+  }
+}
+
+/** Devolve a conversa à fila: sem responsável IA, como no handoff. */
+async function releaseToQueue(conversationId: string): Promise<void> {
+  await (prisma as unknown as {
+    conversation: { updateMany: (args: unknown) => Promise<unknown> };
+  }).conversation.updateMany({
+    where: { id: conversationId, assignedTo: { type: "AI" } },
+    data: { assignedToId: null },
+  }).catch(() => undefined);
 }
 
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
@@ -403,9 +433,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // ("2") vira o rótulo da opção, que é o que o modelo e as regras entendem.
   // Valem só para a próxima mensagem do cliente.
   const pendingOptions = counters.pendingOptions ?? [];
+  let chosenOption: string | null = null;
   if (pendingOptions.length > 0) {
     counters.pendingOptions = undefined;
     const chosen = matchPendingOption(pendingOptions, input.userMessage);
+    chosenOption = chosen;
     if (chosen) {
       traceStep("opções", `Cliente escolheu a opção "${chosen}"`);
       if (chosen !== input.userMessage.trim()) input = { ...input, userMessage: chosen };
@@ -421,10 +453,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
-  // A conversa está atribuída a este agente v2. owner=pessoa aqui é estado
-  // antigo (humano anterior ou handoff que não trocou o responsável) e
-  // deixava o motor mudo mesmo com o agente como assignee.
-  if (owner === "pessoa") {
+  // A conversa está atribuída a este agente v2 com owner=pessoa: ou é estado
+  // antigo (humano anterior, handoff que não trocou o responsável) — o motor
+  // ficava mudo com o agente como responsável — ou a conversa transferida
+  // voltou ao agente enquanto espera na fila (o cliente escreveu de novo).
+  // Na fila vale "Chamar a equipe › Enquanto espera na fila": antes o agente
+  // reassumia, transferia de novo e a trava anti-repetição engolia o aviso.
+  const waitingInQueue = owner === "pessoa" && (await isWaitingInQueue(input.conversationId));
+  const queueMode = config.handoff.whileQueued ?? "notify";
+  if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
+  if (owner === "pessoa" && !(waitingInQueue && queueMode === "notify")) {
     owner = "agente";
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -538,6 +576,41 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const automationVariables = mapAutomationVariables(bridge, config);
   for (const [k, v] of Object.entries(automationVariables)) vars[k] = v;
 
+  // Na fila, modo "avisar": responde só o aviso e devolve a conversa à fila.
+  if (owner === "pessoa" && waitingInQueue) {
+    const notice = renderMessage(config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT, vars, defaultFormatter());
+    const res = await sendV2TextMessage({
+      conversationId: input.conversationId,
+      contactId,
+      agentUserId: resolved!.userId,
+      text: notice,
+      channel: input.channel,
+      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+      humanBehavior,
+    });
+    await releaseToQueue(input.conversationId);
+    await logV2Turn({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      agentId: resolved!.agentConfigId,
+      turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: context,
+      prompt: "queued",
+      ...(res.sent ? { reply: notice } : {}),
+      executedActions: [],
+      discardedActions: res.sent ? [] : [{ type: "no_reply", reason: "queued" } as any],
+      handoff: false,
+      latencyMs: Date.now() - startedAt,
+      inputTokens: 0,
+      outputTokens: 0,
+      owner,
+      stage,
+      versionId,
+    });
+    return { handoff: false, closed: false, ...(res.sent ? { sentReply: notice } : {}) };
+  }
+
   // Se dono é pessoa, só registra e não responde
   if (owner === "pessoa") {
     await logV2Turn({
@@ -563,7 +636,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Pós-encerramento
   if (stage === "closed" && stateRow?.postCloseWindowEndAt && new Date() < new Date(stateRow.postCloseWindowEndAt)) {
-    const caseType = classifyPostCloseMessage(config, input.userMessage);
+    const caseType = answerToPostCloseQuestion(config, pendingOptions, chosenOption) ?? classifyPostCloseMessage(config, input.userMessage);
     const behavior = getPostCloseBehavior(config, caseType);
     traceStep("pós-encerramento", `Dentro da janela pós-encerramento: mensagem classificada como "${caseType}" → comportamento "${behavior}"`);
 
@@ -635,7 +708,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         versionId: versionId,
       });
     } else if (behavior === "short_reply") {
-      const short = "Por nada! Se precisar de algo novo, é só chamar.";
+      const short = renderMessage(postCloseShortReply(config), vars, defaultFormatter());
       await sendV2TextMessage({
         conversationId: input.conversationId,
         contactId,
@@ -656,8 +729,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       });
       return { handoff: false, closed: true, sentReply: short };
     } else if (behavior === "ask_with_options") {
-      const reply = "Você precisa de ajuda com algo novo? Responda 1 para Sim ou 2 para Só agradecer.";
-      await sendV2TextMessage({
+      // Botões (ou opções numeradas onde não há botão); a resposta volta
+      // pelas opções pendentes e decide o caso no próximo turno.
+      const q = postCloseQuestion(config);
+      const built = buildV2Interactive(renderMessage(q.message, vars, defaultFormatter()), [q.yes, q.no]);
+      const reply = built.fallbackText;
+      const sent = await sendV2TextMessage({
         conversationId: input.conversationId,
         contactId,
         agentUserId: resolved!.userId,
@@ -665,7 +742,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         channel: input.channel,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         humanBehavior,
+        interactive: built.payload,
       });
+      if (sent.sent) counters.pendingOptions = built.labels;
       await persistPostCloseCounters();
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -904,7 +983,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: true, closed: false, sentReply: ruleReply };
     }
     if (anyClose) {
-      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables);
+      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables, getV2ThemeById(config, themeId));
       return { handoff: false, closed: true };
     }
     if (isTerminal) {
@@ -1322,6 +1401,22 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     traceStep("ações", `Descartadas (fora do permitido neste assunto/config): ${discardedActions.map((a) => a.type).join(", ")}`);
   }
 
+  // Cliente confuso ("?", "não entendi"): "Quando não souber › Cliente
+  // confuso" = refazer (padrão) — refaz a última pergunta em vez de
+  // transferir. Pedido de pessoa continua transferindo.
+  if (
+    wantsHandoff &&
+    (config.fallback?.confusion?.action ?? "rephrase") === "rephrase" &&
+    peekV2Fact("handoffCause") === "model" &&
+    isConfusionMessage(input.userMessage)
+  ) {
+    wantsHandoff = false;
+    requestedDestination = undefined;
+    llmOutput.handoff = false;
+    llmOutput.reply = rephraseAfterConfusion(lastAgentMessage);
+    traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
+  }
+
   // Sentimento
   const sentiment = detectV2Sentiment(config, input.userMessage);
   if (shouldActOnSentiment(config, sentiment)) {
@@ -1545,7 +1640,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
     // modelo já a montou), não a de transferência padrão.
     const noSourceMsg = peekV2Fact("handoffCause") === "verification" ? config.fallback?.noSource?.message?.trim() : "";
-    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination, noSourceMsg ? { message: noSourceMsg } : {});
+    // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
+    const queuedMsg = waitingInQueue ? config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT : "";
+    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination, queuedMsg || noSourceMsg ? { message: queuedMsg || noSourceMsg } : {});
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
   }
@@ -1557,7 +1654,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       const goodbyeRendered = renderMessage(goodbye, vars, defaultFormatter());
       if ((await sendReply(goodbyeRendered)).sent) sentReply = goodbyeRendered;
     }
-    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables);
+    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables, activeTheme);
   } else {
     // Atualiza estado
     await upsertV2ConversationState({
@@ -1634,6 +1731,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       destination,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
+    await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId });
     return sent;
   }
 
@@ -1777,6 +1875,7 @@ async function handoffAndReply(
     dealId: loadedContext.dealId,
     destination: fallbackDestination,
   });
+  await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId });
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId: input.conversationId,
@@ -1850,7 +1949,7 @@ async function createInitialDeal(contactId: string): Promise<string | null> {
   }
 }
 
-async function closeState(
+export async function closeState(
   orgId: string,
   conversationId: string,
   agentConfigId: string,
@@ -1860,7 +1959,10 @@ async function closeState(
   reason: string,
   contactId?: string,
   collectedVariables?: Record<string, unknown>,
+  theme?: V2Theme | null,
 ): Promise<void> {
+  // Tabulação (se ligada) antes de resolver: o encerramento não sobrescreve.
+  await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId });
   if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
     await applyV2ClosureFieldUpdates(config, contactId, dealId);
   }
