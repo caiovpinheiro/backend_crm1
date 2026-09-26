@@ -6,6 +6,7 @@ import {
   estimateImportedReplay,
   parseConversationRefs,
   estimateReplay,
+  estimateRerun,
   listReplayRuns,
   REPLAY_LIMITS,
   startReplay,
@@ -78,6 +79,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         role: (r.session.user as { role?: string | null }).role ?? null,
         isSuperAdmin: Boolean((r.session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
       };
+      if (body.source === "rerun") {
+        const baseRunId = typeof body.baseRunId === "string" ? body.baseRunId : "";
+        if (!baseRunId) return NextResponse.json({ message: "Escolha a execução de onde vêm os pontos." }, { status: 400 });
+        if (body.estimate === true) {
+          return NextResponse.json(await estimateRerun({ organizationId, agentId: id, baseRunId, config: p.config, model: p.model }));
+        }
+        const params: ReplayParams = { ...p, source: "rerun", baseRunId };
+        const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, requester });
+        return NextResponse.json(result, { status: 202 });
+      }
       if (body.source === "crm_ids") {
         const ids = parseConversationRefs(typeof body.conversationRefs === "string" ? body.conversationRefs : "");
         if (ids.length === 0) return NextResponse.json({ message: "Cole o link ou o id de ao menos uma conversa." }, { status: 400 });

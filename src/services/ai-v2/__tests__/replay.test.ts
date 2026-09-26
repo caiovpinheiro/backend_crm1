@@ -89,6 +89,23 @@ describe("summarizeReplay", () => {
   });
 });
 
+describe("notas 0–100", () => {
+  it("atendimento pondera os resultados; só materiais conta invenção; tempo p90", async () => {
+    const { replayScores } = await import("../replay");
+    const s = summarizeReplay([
+      item({ verdict: v({ desfecho: "igual" }), latencyMs: 4000 }),
+      item({ verdict: v({ desfecho: "parcial" }), latencyMs: 6000 }),
+      item({ verdict: v({ desfecho: "igual", inventou: true }), latencyMs: 9000 }),
+      item({ verdict: v({ desfecho: "igual", tom: "inadequado" }), latencyMs: 20000 }),
+    ]);
+    // (1 + 0,5 + 0 + 1 − 0,2) / 4
+    expect(s.notas).toEqual({ atendimento: 58, soMateriais: 75, tempoP90s: 20, avaliados: 4 });
+    expect(replayScores({ avaliados: 0, inventou: 0, resultados: {} })).toEqual({ atendimento: null, soMateriais: null, tempoP90s: null, avaliados: 0 });
+    // Placar antigo, sem tom nem tempo.
+    expect(replayScores({ avaliados: 2, inventou: 0, resultados: { igual: 1, transferiu_sem_precisar: 1 } }).atendimento).toBe(63);
+  });
+});
+
 describe("buildEvaluatorInput", () => {
   it("inclui cliente, pessoa, agente, transferência e trechos", () => {
     const t = buildEvaluatorInput({

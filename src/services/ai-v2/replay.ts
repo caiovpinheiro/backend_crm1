@@ -157,6 +157,8 @@ export type ReplayItemRow = {
   skipReason: string | null;
   error: string | null;
   history?: ReplayPoint["history"];
+  /** Tempo da simulação do turno (ms), sem o "digitando…". */
+  latencyMs?: number | null;
 };
 
 type Metrics = {
@@ -167,8 +169,55 @@ type Metrics = {
   inventou: number;
   transferenciaCorreta: number;
   resolveuComoHumano: number;
+  /** Pontos com tom inadequado (ríspido, prolixo, robótico). */
+  tomInadequado?: number;
   resultados: Partial<Record<ReplayOutcome, number>>;
 };
+
+/**
+ * Notas 0–100 de uma execução.
+ *  - atendimento: cada ponto vale 1 (mesmo desfecho da pessoa ou transferiu
+ *    quando ela precisou do sistema), 0,5 (parcial), 0,25 (transferiu sem
+ *    precisar) ou 0 (inventou, errou, não transferiu, outro caminho); tom
+ *    inadequado tira 0,2 do ponto.
+ *  - soMateriais: pontos sem invenção (fato que não está nos trechos nem
+ *    no histórico).
+ *  - tempoP90s: 9 em cada 10 respostas saem em até este tempo (sem o
+ *    "digitando…").
+ */
+export type ReplayScores = {
+  atendimento: number | null;
+  soMateriais: number | null;
+  tempoP90s: number | null;
+  avaliados: number;
+};
+
+const OUTCOME_WEIGHT: Record<ReplayOutcome, number> = {
+  igual: 1,
+  transferiu_certo: 1,
+  parcial: 0.5,
+  transferiu_sem_precisar: 0.25,
+  inventou: 0,
+  incorreto: 0,
+  deveria_transferir: 0,
+  diferente: 0,
+};
+
+export function replayScores(m: Pick<Metrics, "avaliados" | "inventou" | "resultados" | "tomInadequado">, latenciesMs: number[] = []): ReplayScores {
+  const sorted = latenciesMs.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  const p90 = sorted.length > 0 ? sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9) - 1)] : null;
+  const tempoP90s = p90 === null ? null : Math.round(p90 / 100) / 10;
+  if (m.avaliados === 0) return { atendimento: null, soMateriais: null, tempoP90s, avaliados: 0 };
+  const points = (Object.entries(m.resultados) as Array<[ReplayOutcome, number]>).reduce((sum, [o, n]) => sum + OUTCOME_WEIGHT[o] * n, 0);
+  // Em vigésimos (os pesos são múltiplos de 0,05): sem erro de ponto flutuante no arredondamento.
+  const twentieths = Math.max(0, Math.round((points - 0.2 * (m.tomInadequado ?? 0)) * 20));
+  return {
+    atendimento: Math.round((twentieths * 5) / m.avaliados),
+    soMateriais: Math.round((1 - m.inventou / m.avaliados) * 100),
+    tempoP90s,
+    avaliados: m.avaliados,
+  };
+}
 
 export type ReplaySummary = {
   pontos: number;
@@ -178,10 +227,11 @@ export type ReplaySummary = {
   geral: Metrics;
   causas: Record<string, number>;
   porAssunto: Array<{ assunto: string } & Metrics>;
+  notas?: ReplayScores;
 };
 
 function emptyMetrics(): Metrics {
-  return { avaliados: 0, igual: 0, parcial: 0, diferente: 0, inventou: 0, transferenciaCorreta: 0, resolveuComoHumano: 0, resultados: {} };
+  return { avaliados: 0, igual: 0, parcial: 0, diferente: 0, inventou: 0, transferenciaCorreta: 0, resolveuComoHumano: 0, tomInadequado: 0, resultados: {} };
 }
 
 /** Transferiu quando a pessoa precisou do sistema, e só então. */
@@ -229,7 +279,9 @@ export function summarizeReplay(items: ReplayItemRow[]): ReplaySummary {
   const motivos: Record<string, number> = {};
   let naoAvaliaveis = 0;
   let erros = 0;
+  const latencies: number[] = [];
   for (const it of items) {
+    if (typeof it.latencyMs === "number") latencies.push(it.latencyMs);
     if (it.skipReason) {
       naoAvaliaveis++;
       motivos[it.skipReason] = (motivos[it.skipReason] ?? 0) + 1;
@@ -247,6 +299,7 @@ export function summarizeReplay(items: ReplayItemRow[]): ReplaySummary {
       target.avaliados++;
       target[it.verdict.desfecho]++;
       if (it.verdict.inventou) target.inventou++;
+      if (it.verdict.tom === "inadequado") target.tomInadequado = (target.tomInadequado ?? 0) + 1;
       if (handoffWasRight(it)) target.transferenciaCorreta++;
       if (REPLAY_HITS.has(outcome)) target.resolveuComoHumano++;
     }
@@ -261,6 +314,7 @@ export function summarizeReplay(items: ReplayItemRow[]): ReplaySummary {
     geral,
     causas,
     porAssunto: [...byTheme.entries()].map(([assunto, m]) => ({ assunto, ...m })).sort((a, b) => b.avaliados - a.avaliados),
+    notas: replayScores(geral, latencies),
   };
 }
 
@@ -316,6 +370,7 @@ async function ensureReplaySchema(): Promise<void> {
   await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "history" JSONB`);
   // O que a simulação decidiu e por quê (assunto, busca, verificação, descartes, rastro).
   await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "facts" JSONB`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_simple_replay_items" ADD COLUMN IF NOT EXISTS "latencyMs" INTEGER`);
   await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ai_simple_replay_items_run_idx" ON "ai_simple_replay_items" ("runId")`);
   schemaReady = true;
 }
@@ -338,8 +393,13 @@ export type ReplayParams = {
   days: number;
   conversations: number;
   config: "draft" | "published";
-  /** "crm": conversas do período; "crm_ids": conversas escolhidas; "import": anexadas. */
-  source?: "crm" | "crm_ids" | "import";
+  /**
+   * "crm": conversas do período; "crm_ids": conversas escolhidas; "import":
+   * anexadas; "rerun": os mesmos pontos de outra execução (compara versões).
+   */
+  source?: "crm" | "crm_ids" | "import" | "rerun";
+  /** Execução de onde vêm os pontos (source "rerun"). */
+  baseRunId?: string;
   /** Conversas escolhidas pelo link/id (source "crm_ids"). */
   conversationIds?: string[];
   /** Nomes das conversas anexadas (só para mostrar). */
@@ -402,6 +462,8 @@ export async function estimateImportedReplay(args: {
 
 function toRun(r: Record<string, any>): ReplayRun {
   const stale = r.status === "running" && Date.now() - new Date(r.updatedAt).getTime() > STALE_MS;
+  // Execuções anteriores às notas: calcula pelo placar guardado (sem o tempo).
+  if (r.summary?.geral && !r.summary.notas) r.summary = { ...r.summary, notas: replayScores(r.summary.geral) };
   return {
     id: r.id,
     agentId: r.agentId,
@@ -452,6 +514,7 @@ export async function getReplayRun(organizationId: string, agentId: string, runI
     skipReason: r.skipReason,
     error: r.error,
     history: Array.isArray(r.history) ? r.history : [],
+    latencyMs: typeof r.latencyMs === "number" ? r.latencyMs : null,
   }));
   const run = toRun(runs[0]);
   return { run, items: items.map((i) => ({ ...i, outcome: i.skipReason ? null : pointOutcome(i) })), summary: summarizeReplay(items) };
@@ -753,9 +816,56 @@ async function pointsFromChosen(args: Parameters<typeof executeReplay>[0]) {
   return work.slice(0, REPLAY_LIMITS.maxPoints);
 }
 
+/**
+ * Os mesmos pontos de outra execução (só os que foram avaliados): a nota de
+ * uma versão nova fica comparável com a anterior. Antes cada execução
+ * sorteava outras conversas e a diferença podia ser só a amostra.
+ */
+async function pointsFromRun(organizationId: string, agentId: string, baseRunId: string) {
+  const rows = await db.$queryRawUnsafe<Array<Record<string, any>>>(
+    `SELECT i."conversationId", i."pointIndex", i."at", i."clientText", i."humanText", i."history", c."contactId"
+       FROM "ai_simple_replay_items" i
+       JOIN "ai_simple_replay_runs" r ON r."id" = i."runId"
+       LEFT JOIN "conversations" c ON c."id" = i."conversationId" AND c."organizationId" = i."organizationId"
+      WHERE i."runId" = $1 AND i."organizationId" = $2 AND r."agentId" = $3
+        AND i."verdict" IS NOT NULL AND i."skipReason" IS NULL
+        AND COALESCE(i."verdict"->>'comparavel', 'true') <> 'false'
+      ORDER BY i."conversationId", i."pointIndex"
+      LIMIT $4`,
+    baseRunId, organizationId, agentId, REPLAY_LIMITS.maxPoints,
+  );
+  return rows.map((r) => ({
+    conversationId: String(r.conversationId),
+    contactId: (r.contactId as string | null) ?? null,
+    point: {
+      index: Number(r.pointIndex),
+      clientText: String(r.clientText),
+      humanText: String(r.humanText),
+      history: Array.isArray(r.history) ? r.history : [],
+      skipReason: null,
+      at: r.at ? new Date(r.at).toISOString() : new Date().toISOString(),
+    } as ReplayPoint,
+  }));
+}
+
+/** Estimativa de "rodar de novo com os mesmos pontos". */
+export async function estimateRerun(args: { organizationId: string; agentId: string; baseRunId: string; config: "draft" | "published"; model?: string }) {
+  await ensureReplaySchema();
+  const agent = await getV2Agent(args.agentId, args.organizationId);
+  if (!agent) throw new Error("Agente não encontrado.");
+  const { config, evalModel } = replayConfig(agent, { days: 0, conversations: 0, config: args.config, model: args.model });
+  const points = (await pointsFromRun(args.organizationId, args.agentId, args.baseRunId)).length;
+  const cost = points * (
+    estimateCost(config.model, EST_TOKENS.agentIn, EST_TOKENS.agentOut) +
+    estimateCost(evalModel, EST_TOKENS.evalIn, EST_TOKENS.evalOut)
+  );
+  return { availableConversations: 0, conversations: 0, estimatedPoints: points, evaluablePoints: points, estimatedCalls: points * 2, estimatedCostUsd: Number(cost.toFixed(4)), model: config.model };
+}
+
 async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): Promise<void> {
   const queue =
-    args.params.source === "import" ? pointsFromTranscripts(args.transcripts ?? [])
+    args.params.source === "rerun" && args.params.baseRunId ? await pointsFromRun(args.organizationId, args.agentId, args.params.baseRunId)
+    : args.params.source === "import" ? pointsFromTranscripts(args.transcripts ?? [])
     : args.params.source === "crm_ids" ? await pointsFromChosen(args)
     : await pointsFromCrm(args);
   await db.$executeRawUnsafe(`UPDATE "ai_simple_replay_runs" SET "total"=$2, "updatedAt"=now() WHERE "id"=$1`, args.runId, queue.length);
@@ -774,9 +884,11 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
     let verdict: ReplayVerdict | null = null;
     let error: string | null = null;
     let facts: Record<string, unknown> | null = null;
+    let latencyMs: number | null = null;
     let skipReason = point.skipReason;
     if (!skipReason) {
       try {
+        const simStartedAt = Date.now();
         const { sim, trace, turnFacts } = await withTimeout(
           runWithV2Trace(async () => {
             const r = await simulateV2Turn(
@@ -788,6 +900,7 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
           POINT_TIMEOUT_MS,
           "O agente demorou demais para responder neste ponto.",
         );
+        latencyMs = Date.now() - simStartedAt;
         facts = maskSensitiveDeep({
           ...turnFacts,
           themeId: sim.themeId,
@@ -821,12 +934,12 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
       }
     }
     await db.$executeRawUnsafe(
-      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error","history","facts")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17::jsonb)`,
+      `INSERT INTO "ai_simple_replay_items" ("id","runId","organizationId","conversationId","pointIndex","at","clientText","humanText","agentText","agentHandoff","themeName","sources","verdict","skipReason","error","history","facts","latencyMs")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17::jsonb,$18)`,
       randomUUID(), args.runId, args.organizationId, w.conversationId, point.index, new Date(point.at),
       point.clientText, point.humanText, agentText, agentHandoff, themeName,
       JSON.stringify(sources), verdict ? JSON.stringify(verdict) : null, skipReason, error, JSON.stringify(point.history),
-      facts ? JSON.stringify(facts) : null,
+      facts ? JSON.stringify(facts) : null, latencyMs,
     );
     await db.$executeRawUnsafe(
       `UPDATE "ai_simple_replay_runs" SET "done"="done"+1, "inputTokens"=$2, "outputTokens"=$3, "costUsd"=$4, "updatedAt"=now() WHERE "id"=$1`,
