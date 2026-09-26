@@ -34,7 +34,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
@@ -839,7 +839,7 @@ function responseLengthInstruction(length: V2AgentConfig["responseLength"]): str
  * o que fazer sem fonte (transferir, ignorar ou dizer que não tem).
  */
 const SOURCES_GUIDE =
-  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Não adivinhe com \"geralmente\" ou \"normalmente\": ou a fonte diz, ou você não sabe. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
+  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Não adivinhe com \"geralmente\" ou \"normalmente\": ou a fonte diz, ou você não sabe. Nome específico que o cliente citou (produto, plano, serviço, item) e que não aparece nas fontes nem nos dados dele: não confirme que existe nem atribua a ele datas, valores ou regras próprias; dê a regra geral e diga que não consegue confirmar esse item. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
 
 /** Como uma pessoa da equipe escreve numa conversa. Vale para qualquer produto. */
 const WRITING_GUIDE = [
@@ -1314,7 +1314,12 @@ export async function callV2LLM(args: {
       ...messageModels.map((m) => m.name),
       JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
     ];
+    // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
+    // prova que a coisa existe).
+    const factSources = sources.slice(1 + previousMessages.length);
+    const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
     const unsupportedOf = (reply: string) => [
+      ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
       ...unsupportedQuotedTerms(reply, sources).map((t) => `"${t}"`),
       ...unsupportedFigures(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
@@ -1327,7 +1332,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({

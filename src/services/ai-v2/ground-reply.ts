@@ -112,6 +112,38 @@ export function unsupportedFigures(reply: string, sources: string[]): string[] {
   return [...out];
 }
 
+/** Data, período, valor, percentual ou quantidade na frase. */
+const FACT_IN_SENTENCE = /\d{1,2}\s*\/\s*\d{1,2}|\b\d{1,2}(?:\s*(?:a|e|até)\s*\d{1,2})?\s+de\s+[a-zç]{3,}|R\$\s?\d|\d+(?:[.,]\d+)?\s?%|\b\d+\s*(?:dias?|horas?|meses|semanas?|pontos?)\b/i;
+
+/**
+ * Nome que só o cliente usou (não está em nenhuma fonte nem nos dados dele)
+ * e que a resposta trata como coisa real, ligando-o a data, valor ou prazo:
+ * "a prova de <nome> será de 6 a 9/11". A mensagem do cliente não é fonte
+ * de fato — sem esta checagem, qualquer nome inventado pelo cliente passava.
+ * Nome = palavra com inicial maiúscula no meio da frase da resposta.
+ */
+export function clientNamesBoundToFacts(reply: string, clientTexts: string[], factSources: string[]): string[] {
+  const factWords = new Set(normalize(factSources.join(" ")).split(/\s+/).filter((w) => w.length >= 4));
+  const factStems = new Set([...factWords].map((w) => w.slice(0, 6)));
+  const clientOnly = new Set(
+    normalize(clientTexts.join(" "))
+      .split(/\s+/)
+      .filter((w) => w.length >= 5 && !FILLER.has(w) && !factWords.has(w) && !factStems.has(w.slice(0, 6))),
+  );
+  if (clientOnly.size === 0) return [];
+  const out = new Set<string>();
+  for (const sentence of reply.split(/(?<=[.!?])\s+|\n+/)) {
+    if (!FACT_IN_SENTENCE.test(sentence)) continue;
+    const words = sentence.trim().split(/\s+/);
+    words.forEach((raw, i) => {
+      const word = raw.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
+      if (i === 0 || !/^\p{Lu}/u.test(word)) return;
+      if (clientOnly.has(normalize(word).trim())) out.add(word);
+    });
+  }
+  return [...out];
+}
+
 function tokensOf(s: string): string[] {
   return normalize(s).split(/\s+/).filter((w) => w.length > 1);
 }

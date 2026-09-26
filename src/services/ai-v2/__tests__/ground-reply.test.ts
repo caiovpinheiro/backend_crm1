@@ -45,3 +45,20 @@ describe("unsupportedFigures e isNearDuplicateReply", () => {
     expect(isNearDuplicateReply("Isso, dia 01/10. Ficou alguma dúvida sobre o começo dos plantões?", "Os plantões de outubro começam no dia 01/10/2026. Se precisar, é só avisar!")).toBe(false);
   });
 });
+
+describe("clientNamesBoundToFacts", () => {
+  it("nome que só o cliente usou, ligado a data, é marcado", async () => {
+    const { clientNamesBoundToFacts } = await import("../ground-reply");
+    const sources = ["Calendário: Prova A1 das disciplinas de outubro de 6 a 9 de novembro. Prova de Estatística em 10/11."];
+    const reply = "Para a disciplina de Optometria, referente ao mês de outubro, a Prova A1 será realizada de 6 a 9 de novembro.";
+    expect(clientNamesBoundToFacts(reply, ["quando é a prova de optometria?"], sources)).toEqual(["Optometria"]);
+  });
+
+  it("não marca: nome que está nas fontes, frase sem data/valor, início de frase", async () => {
+    const { clientNamesBoundToFacts } = await import("../ground-reply");
+    const sources = ["Prova de Estatística em 10/11."];
+    expect(clientNamesBoundToFacts("A prova de Estatística é em 10/11.", ["e estatística?"], sources)).toEqual([]);
+    expect(clientNamesBoundToFacts("Na disciplina de Optometria, abra o app e veja a aba Conteúdo.", ["optometria"], sources)).toEqual([]);
+    expect(clientNamesBoundToFacts("Optometria: provas de 6 a 9 de novembro.", ["optometria"], sources)).toEqual([]);
+  });
+});
