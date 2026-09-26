@@ -1290,9 +1290,11 @@ describe("processV2Turn — correções do motor", () => {
       .mockResolvedValueOnce({ sent: false, reason: "near_duplicate" })
       .mockResolvedValue({ sent: true });
     await run("?");
-    expect(sentTexts()[1]).toContain("Ficou alguma dúvida");
+    // Sem explicação anterior na conversa: a saída não pergunta se ficou dúvida.
+    expect(sentTexts()[1]).toContain("Me conta");
+    expect(sentTexts()[1]).not.toContain("Ficou alguma dúvida");
     const logged = mocks.logTurn.mock.lastCall![0] as { reply?: string };
-    expect(logged.reply).toContain("Ficou alguma dúvida");
+    expect(logged.reply).toContain("Me conta");
   });
 
   it("resposta barrada por outro motivo não entra no log como enviada", async () => {

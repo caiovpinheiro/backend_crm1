@@ -33,6 +33,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
+import { repeatFallback } from "./ground-reply";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
 import {
@@ -201,8 +202,6 @@ function mergeCollectedVariables(
 ): Record<string, unknown> {
   return { ...existing, ...collected };
 }
-
-const REPEAT_FALLBACK = "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito.";
 
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
 function stopWarning(config: V2AgentConfig, reason: string): string {
@@ -1435,8 +1434,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   // Fecho configurado ("me avise se funcionou"): o motor põe, não o modelo.
-  // Não vai em transferência, encerramento, confirmação nem com botões.
-  if (!anyHandoff && !anyClose && replyText.trim() && askOptions.length === 0 && (stage as V2Stage) !== "confirming") {
+  // Não vai em transferência, encerramento, confirmação, botões nem na
+  // resposta de fora do escopo (ela já diz com o que ele pode ajudar).
+  if (!anyHandoff && !anyClose && replyText.trim() && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope) {
     const ending = applyReplyEnding({
       reply: replyText,
       ending: effectiveReplyEnding(config, activeTheme),
@@ -1467,8 +1467,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (res.reason === "near_duplicate") {
       // A trava anti-repetição do envio olha as últimas mensagens do agente;
       // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
-      const alt = await sendReply(REPEAT_FALLBACK);
-      if (alt.sent) sentReply = REPEAT_FALLBACK;
+      const fallback = repeatFallback(lastAgentMessage);
+      const alt = await sendReply(fallback);
+      if (alt.sent) sentReply = fallback;
     }
     // Não enviada fica fora do log do turno: antes o log dizia que o agente
     // respondeu e o cliente não tinha recebido nada.

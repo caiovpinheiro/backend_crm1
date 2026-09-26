@@ -176,3 +176,15 @@ export function isNearDuplicateReply(a: string, b: string): boolean {
   for (const w of sa) if (sb.has(w)) inter++;
   return inter / (sa.size + sb.size - inter) >= 0.85;
 }
+
+/**
+ * Saída quando a resposta repetiria a anterior e não houve outra forma.
+ * "Ficou alguma dúvida sobre o que te passei?" só cabe depois de uma
+ * explicação; depois de cumprimento ou pergunta curta ("Tudo bem?" logo
+ * após o "Oi") soava como se o agente tivesse explicado algo.
+ */
+export function repeatFallback(lastAgentMessage: string | null | undefined): string {
+  return tokensOf(lastAgentMessage ?? "").length >= 20
+    ? "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito."
+    : "Estou por aqui! Me conta o que você precisa que eu te ajudo.";
+}

@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { adaptedKeepsContent } from "@/services/ai-v2/message-adapt";
-import { procedureAdmittedMissing } from "@/services/ai-v2/ground-reply";
+import { procedureAdmittedMissing, repeatFallback } from "@/services/ai-v2/ground-reply";
 import { applyReplyEnding, asksClient } from "@/services/ai-v2/reply-ending";
+
+describe("repeatFallback", () => {
+  it("depois de cumprimento não pergunta se ficou dúvida; depois de explicação, pergunta", () => {
+    expect(repeatFallback("Oi! Tudo bem por aqui. Como posso ajudar você hoje?")).not.toContain("dúvida");
+    expect(repeatFallback(null)).not.toContain("dúvida");
+    const explanation = "Para acessar, abra o aplicativo, toque em Entrar, informe seu usuário e a senha cadastrada, confirme o código recebido por mensagem e aguarde a tela inicial carregar.";
+    expect(repeatFallback(explanation)).toContain("Ficou alguma dúvida");
+  });
+});
 
 describe("adaptedKeepsContent", () => {
   const original = "Olá! O prazo é de 5 dias úteis. Acesse https://exemplo.com/guia para ver o passo a passo.";

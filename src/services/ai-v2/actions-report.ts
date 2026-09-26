@@ -131,17 +131,56 @@ type Row = {
   conversationNumber: number | null;
   contactName: string | null;
   contactPhone: string | null;
+  /** Só na exportação: diagnóstico do turno. */
+  trace?: unknown;
+  reason?: string | null;
+  latencyMs?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
 };
+
+/** Diagnóstico do turno para a exportação: passos do motor, decisão do modelo, custo. */
+export type TurnDiagnostics = { model: string; reason: string; seconds: string; tokens: string; steps: string };
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
-async function loadRows(organizationId: string, agentId: string, from: Date, to: Date): Promise<{ rows: Row[]; truncated: boolean }> {
+/** Passos gravados no turno, uma linha cada: "+2957ms · mídia · Imagem lida…". */
+export function formatTraceSteps(trace: unknown): string {
+  return asArray(trace)
+    .map((x) => asRecord(x))
+    .filter((s) => typeof s.detail === "string")
+    .map((s) => `+${Number(s.at) || 0}ms · ${String(s.step ?? "")} · ${String(s.detail)}`)
+    .join("\n");
+}
+
+export function turnDiagnostics(r: Row): TurnDiagnostics {
+  const facts = r.facts ?? {};
+  const tokens = (r.inputTokens ?? 0) + (r.outputTokens ?? 0);
+  return {
+    model: typeof facts.model === "string" ? facts.model : "",
+    reason: (r.reason ?? "").trim(),
+    seconds: typeof r.latencyMs === "number" && r.latencyMs > 0 ? (r.latencyMs / 1000).toFixed(1).replace(".", ",") : "",
+    tokens: tokens > 0 ? String(tokens) : "",
+    steps: formatTraceSteps(r.trace),
+  };
+}
+
+async function loadRows(
+  organizationId: string,
+  agentId: string,
+  from: Date,
+  to: Date,
+  withDiagnostics = false,
+): Promise<{ rows: Row[]; truncated: boolean }> {
   await ensureV2AgentSchema().catch(() => undefined);
-  // Só as partes pequenas do contexto: o rastro e os trechos lidos ficam fora.
+  // Na tela, só as partes pequenas do contexto; o rastro vem só na exportação.
+  const diagnostics = withDiagnostics
+    ? `l."contextSnapshot"->'trace' AS "trace", l."llmOutput"->>'reason' AS "reason", l."latencyMs", l."inputTokens", l."outputTokens",`
+    : "";
   const rows = await db.$queryRawUnsafe<Row[]>(
     `SELECT l."id", l."conversationId", l."createdAt", l."inboundText", l."reply", l."handoff", l."error", l."prompt",
-            l."executedActions", l."discardedActions",
+            l."executedActions", l."discardedActions", ${diagnostics}
             l."contextSnapshot"->'facts' AS "facts",
             l."contextSnapshot"->>'themeId' AS "themeId",
             l."contextSnapshot"->>'closed' AS "closed",
@@ -298,13 +337,13 @@ function matches(e: ActionEvent, f: ActionReportFilters, skip?: "type" | "status
   return true;
 }
 
-async function buildEvents(organizationId: string, agentId: string, f: ActionReportFilters) {
+async function buildEvents(organizationId: string, agentId: string, f: ActionReportFilters, withDiagnostics = false) {
   const agent = await getV2Agent(agentId, organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
   const config = (agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
-  const { rows, truncated } = await loadRows(organizationId, agentId, f.from, f.to);
+  const { rows, truncated } = await loadRows(organizationId, agentId, f.from, f.to, withDiagnostics);
   const names = await nameMaps(organizationId, rows);
-  return { config, events: eventsFromRows(rows, config, names), truncated, turns: rows.length };
+  return { config, rows, events: eventsFromRows(rows, config, names), truncated, turns: rows.length };
 }
 
 export async function getActionsReport(args: { organizationId: string; agentId: string; filters: ActionReportFilters; page: number }) {
@@ -352,10 +391,27 @@ function csvPhone(phone: string | null): string {
 
 /** CSV (separador ";" e BOM, abre direto no Excel em português). */
 export async function exportActionsReportCsv(args: { organizationId: string; agentId: string; filters: ActionReportFilters }): Promise<string> {
-  const { events } = await buildEvents(args.organizationId, args.agentId, args.filters);
+  const { events, rows } = await buildEvents(args.organizationId, args.agentId, args.filters, true);
   const filtered = events.filter((e) => matches(e, args.filters)).slice(0, ACTIONS_REPORT_LIMITS.maxExport);
-  const header = ["Data", "Hora", "Conversa", "Cliente", "Telefone", "Mensagem do cliente", "Ação", "Situação", "Detalhe", "Assunto", "Atalho", "Origem"];
-  const lines = filtered.map((e) => {
+  return actionsCsv(filtered, new Map(rows.map((r) => [r.id, turnDiagnostics(r)])));
+}
+
+/**
+ * Linhas do CSV. Cada turno leva o diagnóstico (modelo, decisão, tempo,
+ * tokens, passos do motor) uma vez, na primeira linha dele que passou no
+ * filtro; "Turno" junta as linhas do mesmo turno.
+ */
+export function actionsCsv(events: ActionEvent[], diagnostics: Map<string, TurnDiagnostics>): string {
+  const header = [
+    "Data", "Hora", "Conversa", "Cliente", "Telefone", "Mensagem do cliente", "Ação", "Situação", "Detalhe", "Assunto", "Atalho", "Origem",
+    "Turno", "Modelo", "Decisão do modelo", "Tempo (s)", "Tokens", "Passos do agente",
+  ];
+  const seen = new Set<string>();
+  const lines = events.map((e) => {
+    const turnId = e.id.split(":")[0];
+    const first = !seen.has(turnId);
+    seen.add(turnId);
+    const diag = first ? diagnostics.get(turnId) : undefined;
     const d = new Date(e.at);
     const date = d.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     const time = d.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -372,6 +428,12 @@ export async function exportActionsReportCsv(args: { organizationId: string; age
       e.themeName ?? "",
       e.ruleName ?? "",
       e.source === "test" ? "Teste" : "Produção",
+      turnId.slice(-8),
+      diag?.model ?? "",
+      diag?.reason ?? "",
+      diag?.seconds ?? "",
+      diag?.tokens ?? "",
+      diag?.steps ?? "",
     ].map(csvCell).join(";");
   });
   return `﻿${[header.join(";"), ...lines].join("\r\n")}`;

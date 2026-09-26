@@ -4,7 +4,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
-import { eventsFromRows, parseActionReportFilters } from "../actions-report";
+import { actionsCsv, eventsFromRows, formatTraceSteps, parseActionReportFilters, turnDiagnostics } from "../actions-report";
 
 const config = normalizeV2Config({
   name: "A",
@@ -95,5 +95,38 @@ describe("relatório de ações", () => {
     expect(f.types).toEqual(["add_tag"]);
     expect(f.statuses).toEqual(["failed"]);
     expect(f.sources).toEqual(["test"]);
+  });
+
+  it("CSV leva modelo, decisão, tempo, tokens e passos uma vez por turno", () => {
+    const r = row({
+      reply: "Resposta",
+      handoff: true,
+      closed: "true",
+      facts: { model: "gpt-x", handoffCause: "model" },
+      reason: "Material não traz o passo",
+      latencyMs: 4300,
+      inputTokens: 5000,
+      outputTokens: 300,
+      trace: [
+        { step: "assunto", detail: "Assunto \"Assunto 1\" — um gatilho casou", at: 50 },
+        { step: "llm", detail: "Decisão do modelo: transferir", at: 6490 },
+      ],
+    });
+    const events = eventsFromRows([r as never], config, names);
+    expect(events.length).toBe(2);
+    const csv = actionsCsv(events, new Map([["r1", turnDiagnostics(r as never)]]));
+    const [header, ...rest] = csv.replace(/^﻿/, "").split("\r\n");
+    expect(header.split(";").slice(-6)).toEqual(["Turno", "Modelo", "Decisão do modelo", "Tempo (s)", "Tokens", "Passos do agente"]);
+    const body = rest.join("\r\n");
+    expect(body).toContain("gpt-x;Material não traz o passo;4,3;5300;");
+    expect(body).toContain('+50ms · assunto · Assunto ""Assunto 1"" — um gatilho casou\n+6490ms · llm · Decisão do modelo: transferir');
+    // Segunda ação do mesmo turno: mesmo "Turno", sem repetir o diagnóstico.
+    expect(body.split("gpt-x").length).toBe(2);
+    expect(body.endsWith(";r1;;;;;")).toBe(true);
+  });
+
+  it("passos: ignora entradas sem texto", () => {
+    expect(formatTraceSteps([{ step: "a", detail: "x", at: 1 }, null, { step: "b" }])).toBe("+1ms · a · x");
+    expect(formatTraceSteps(undefined)).toBe("");
   });
 });

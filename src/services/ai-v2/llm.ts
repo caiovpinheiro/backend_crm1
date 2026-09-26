@@ -34,7 +34,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
@@ -1423,7 +1423,7 @@ export async function callV2LLM(args: {
     } catch (err) {
       console.warn("[ai-v2] reescrita de repetição falhou:", err instanceof Error ? err.message : err);
     }
-    r.output = { ...r.output, reply: "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito." };
+    r.output = { ...r.output, reply: repeatFallback(last) };
   }
 
   let lastError: Error | undefined;

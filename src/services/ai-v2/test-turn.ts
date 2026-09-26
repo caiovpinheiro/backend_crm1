@@ -565,7 +565,7 @@ export async function simulateV2Turn(
     const askAction = executedActions.find((e) => e.action.type === "ask_with_options");
     const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
     let labels = options.map((o) => o.label);
-    if (options.length === 0 && effectiveStage !== "confirming") {
+    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope) {
       // Fecho configurado, igual à produção.
       const ending = applyReplyEnding({
         reply,
