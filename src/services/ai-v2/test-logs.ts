@@ -1,7 +1,8 @@
 /**
  * Conversas de teste do agente v2: turnos dos números da lista de teste
  * (`allowedPhoneNumbers`), agrupados por contato e divididos em sessões pelo
- * `#reset`. Cada turno leva o rastro de decisões e o feedback marcado.
+ * `#reset`. Sem números de teste (o agente atende todo mundo), as últimas
+ * conversas dele, para a tela não ficar vazia com o agente atendendo. Cada turno leva o rastro de decisões e o feedback marcado.
  * Nenhum domínio de cliente.
  */
 
@@ -68,6 +69,9 @@ type LogRow = {
  * (agent-resolver): uma configuração que não passasse na validação completa
  * escondia os números aqui e a tela dizia "nenhum".
  */
+/** Sem números de teste: quantas conversas recentes mostrar. */
+const RECENT_CONVERSATIONS = 30;
+
 function testPhonesOf(configs: unknown[]): string[] {
   const out = new Set<string>();
   for (const raw of configs) {
@@ -85,7 +89,7 @@ export async function listV2TestConversations(args: {
   organizationId: string;
   agentId: string;
   days?: number;
-}): Promise<{ testNumbers: string[]; contacts: V2TestContact[] }> {
+}): Promise<{ testNumbers: string[]; scope: "test" | "all"; contacts: V2TestContact[] }> {
   await ensureV2AgentSchema().catch(() => undefined);
 
   const agent = await (prisma as unknown as {
@@ -103,7 +107,7 @@ export async function listV2TestConversations(args: {
     // Config inválida: a tela ainda mostra os turnos, só sem nome de assunto/regra.
   }
   const testNumbers = testPhonesOf([agent.simpleConfig, agent.draftConfig]);
-  if (testNumbers.length === 0) return { testNumbers, contacts: [] };
+  const scope: "test" | "all" = testNumbers.length > 0 ? "test" : "all";
   const allow = new Set(testNumbers.map((p) => normalizePhoneDigits(p)).filter(Boolean));
 
   const since = new Date(Date.now() - (args.days ?? 7) * 24 * 60 * 60 * 1000);
@@ -118,14 +122,18 @@ export async function listV2TestConversations(args: {
     where: { organizationId: args.organizationId, agentId: args.agentId, createdAt: { gte: since } },
     select: { conversationId: true },
     distinct: ["conversationId"],
+    orderBy: { createdAt: "desc" },
     take: 500,
   });
   const conversations = await db.conversation.findMany({
     where: { id: { in: recent.map((r) => r.conversationId) } },
     select: { id: true, contact: { select: { id: true, name: true, phone: true } } },
   });
-  const testConversations = conversations.filter((c) => phoneMatchesAllowlist(c.contact?.phone ?? null, allow));
-  if (testConversations.length === 0) return { testNumbers, contacts: [] };
+  const order = new Map(recent.map((r, i) => [r.conversationId, i]));
+  const testConversations = scope === "test"
+    ? conversations.filter((c) => phoneMatchesAllowlist(c.contact?.phone ?? null, allow))
+    : conversations.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0)).slice(0, RECENT_CONVERSATIONS);
+  if (testConversations.length === 0) return { testNumbers, scope, contacts: [] };
 
   const logs = await db.aISimpleTurnLog.findMany({
     where: {
@@ -135,7 +143,7 @@ export async function listV2TestConversations(args: {
       conversationId: { in: testConversations.map((c) => c.id) },
     },
     orderBy: { createdAt: "asc" },
-    take: 1000,
+    take: 2000,
   });
 
   const themeNames = new Map((config?.themes ?? []).map((t) => [t.id, t.name]));
@@ -187,5 +195,5 @@ export async function listV2TestConversations(args: {
   const contacts = [...byContact.values()]
     .map((c) => ({ ...c, sessions: c.sessions.reverse() }))
     .sort((a, b) => (b.sessions[0]?.startedAt ?? "").localeCompare(a.sessions[0]?.startedAt ?? ""));
-  return { testNumbers, contacts };
+  return { testNumbers, scope, contacts };
 }

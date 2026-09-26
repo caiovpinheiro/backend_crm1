@@ -177,11 +177,19 @@ describe("conversas de teste", () => {
     });
   });
 
-  it("sem números de teste configurados não lista nada", async () => {
+  it("sem números de teste (atende todo mundo): mostra as últimas conversas do agente", async () => {
     mocks.agentFindFirst.mockResolvedValue({ simpleConfig: { name: "A", tone: "Objetivo" }, draftConfig: null });
+    mocks.logFindMany
+      .mockResolvedValueOnce([{ conversationId: "conv-x" }, { conversationId: "conv-1" }])
+      .mockResolvedValueOnce([logRow({ id: "a", conversationId: "conv-1" }), logRow({ id: "b", conversationId: "conv-x" })]);
+    mocks.conversationFindMany.mockResolvedValue([
+      { id: "conv-1", contact: { id: "c1", name: "Teste", phone: "5511911112222" } },
+      { id: "conv-x", contact: { id: "c9", name: "Cliente real", phone: "5511988887777" } },
+    ]);
     const r = await listV2TestConversations({ organizationId: "org-1", agentId: "agent-1" });
-    expect(r).toEqual({ testNumbers: [], contacts: [] });
-    expect(mocks.logFindMany).not.toHaveBeenCalled();
+    expect(r.testNumbers).toEqual([]);
+    expect(r.scope).toBe("all");
+    expect(r.contacts.map((c) => c.contactId).sort()).toEqual(["c1", "c9"]);
   });
 });
 
