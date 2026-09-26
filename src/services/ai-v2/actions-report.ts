@@ -101,6 +101,11 @@ const SKIP_ERRORS = [
   "No v2 agent assigned",
   "Phone number not in allowed test list",
 ];
+const NO_REPLY_REASON: Record<string, string> = {
+  "human owner": "A conversa está com uma pessoa da equipe; o agente não responde",
+  "post-close no_reply": "Cortesia depois de encerrar; sem resposta",
+};
+
 /** Ações internas do motor: não aparecem para quem opera. */
 const INTERNAL = new Set(["set_theme", "set_variable", "handoff"]);
 
@@ -245,7 +250,8 @@ export function eventsFromRows(
     const push = (type: ActionEventType, status: ActionEventStatus, detail: string, extra: Partial<ActionEvent> = {}) =>
       out.push({ ...base, id: `${r.id}:${n++}`, type, status, detail, ...extra });
 
-    if (r.reply) push("reply", "ok", clip(r.reply, 300));
+    // Na transferência a resposta é o aviso ao cliente: vai no detalhe dela.
+    if (r.reply && !r.handoff) push("reply", "ok", clip(r.reply, 2000));
     for (const x of asArray(r.executedActions)) {
       const res = asRecord(x);
       const a = asRecord(res.action);
@@ -259,12 +265,18 @@ export function eventsFromRows(
     for (const x of asArray(r.discardedActions)) {
       const a = asRecord(x);
       const type = String(a.type ?? "");
+      // "Não responder" registrado pelo próprio motor é decisão, não bloqueio.
+      if (type === "no_reply" && typeof a.reason === "string") {
+        push("no_reply", "ok", NO_REPLY_REASON[a.reason] ?? a.reason);
+        continue;
+      }
       if (!type || INTERNAL.has(type) || !(ACTION_EVENT_TYPES as readonly string[]).includes(type)) continue;
       push(type as ActionEventType, "discarded", actionDetail(a, names));
     }
     if (r.handoff) {
       const cause = typeof facts.handoffCause === "string" ? facts.handoffCause : r.prompt === "rule" ? "rule" : null;
-      push("handoff", "ok", cause ? HANDOFF_CAUSE_LABEL[cause] ?? cause : "", { handoffCause: cause });
+      const why = cause ? HANDOFF_CAUSE_LABEL[cause] ?? cause : "";
+      push("handoff", "ok", [why, r.reply ? clip(r.reply, 2000) : ""].filter(Boolean).join(" — "), { handoffCause: cause });
     }
     if (r.closed === "true") push("close", "ok", "");
     if (r.error && !r.reply && !r.handoff) push("failure", "failed", clip(r.error, 200));
@@ -327,6 +339,17 @@ function csvCell(v: unknown): string {
   return /[";\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
+/**
+ * Telefone sem "+" na frente: o Excel lê "+55…" como fórmula (ou número em
+ * notação científica). Com espaços fica texto: "55 11 98439-3285".
+ */
+function csvPhone(phone: string | null): string {
+  const d = (phone ?? "").replace(/\D/g, "");
+  if (d.length >= 12) return `${d.slice(0, 2)} ${d.slice(2, 4)} ${d.slice(4, -4)}-${d.slice(-4)}`;
+  if (d.length >= 10) return `${d.slice(0, 2)} ${d.slice(2, -4)}-${d.slice(-4)}`;
+  return phone ?? "";
+}
+
 /** CSV (separador ";" e BOM, abre direto no Excel em português). */
 export async function exportActionsReportCsv(args: { organizationId: string; agentId: string; filters: ActionReportFilters }): Promise<string> {
   const { events } = await buildEvents(args.organizationId, args.agentId, args.filters);
@@ -341,7 +364,7 @@ export async function exportActionsReportCsv(args: { organizationId: string; age
       time,
       e.conversationNumber ? `#${e.conversationNumber}` : e.conversationId,
       e.contactName ?? "",
-      e.contactPhone ?? "",
+      csvPhone(e.contactPhone),
       e.clientMessage,
       ACTION_EVENT_LABEL[e.type],
       ACTION_STATUS_LABEL[e.status],

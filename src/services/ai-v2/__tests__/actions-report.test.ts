@@ -57,13 +57,19 @@ describe("relatório de ações", () => {
       names,
     );
     expect(ev.map((e) => [e.type, e.status, e.detail])).toEqual([
-      ["reply", "ok", "Pronto!"],
       ["add_tag", "ok", "Retorno"],
       ["move_stage", "failed", "Funil › Novo — No deal"],
       ["send_message_model", "discarded", "Boas-vindas"],
-      ["handoff", "ok", "sem material"],
+      ["handoff", "ok", "sem material — Pronto!"],
     ]);
     expect(ev[0]).toMatchObject({ themeName: "Assunto 1", source: "production", conversationNumber: 12 });
+  });
+
+  it("'não responder' do motor é decisão explicada, não ação barrada", () => {
+    const ev = eventsFromRows([row({ discardedActions: [{ type: "no_reply", reason: "human owner" }] }) as never], config, names);
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ type: "no_reply", status: "ok" });
+    expect(ev[0].detail).toContain("pessoa da equipe");
   });
 
   it("turno ignorado fica de fora; número de teste vira origem teste", () => {
