@@ -28,6 +28,7 @@ export async function GET() {
       whatsappTemplates,
       contacts,
       tags,
+      tabulationRows,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -91,7 +92,21 @@ export async function GET() {
           orderBy: { name: "asc" },
         }) ?? [],
       ).catch(() => []),
+      // Tabulações ("Começo e fim › Tabulação"): extras, mesma tolerância.
+      Promise.resolve(
+        p.tabulation?.findMany?.({
+          where: { organizationId, active: true },
+          select: { id: true, name: true, parentId: true, parent: { select: { name: true } } },
+          orderBy: [{ position: "asc" }, { name: "asc" }],
+        }) ?? [],
+      ).catch(() => []),
     ]);
+
+    // Só folhas: o CRM só aplica tabulação sem filhas.
+    const parents = new Set((tabulationRows as any[]).map((t) => t.parentId).filter(Boolean));
+    const tabulations = (tabulationRows as any[])
+      .filter((t) => !parents.has(t.id))
+      .map((t) => ({ id: t.id, name: t.parent?.name ? `${t.parent.name} › ${t.name}` : t.name }));
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
     const whatsappTemplateCatalog = whatsappTemplates.map((t: any) => ({
@@ -109,6 +124,7 @@ export async function GET() {
       channels,
       pipelines,
       tags,
+      tabulations,
       contactCustomFields: customFields.filter(
         (f: any) => typeof f.entity === "string" && f.entity.toLowerCase() === "contact",
       ),
