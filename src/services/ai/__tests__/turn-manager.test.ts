@@ -370,6 +370,7 @@ import {
   isTurnDue,
   onInboundMessageForAi,
   promoteTurnToReady,
+  requeueTurnForAssignee,
   turnDueAt,
 } from "@/services/ai/turn-manager";
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
@@ -645,6 +646,25 @@ describe("concorrência", () => {
     await promoteTurnToReady(second, ORG);
     expect(await claimTurn(second, ORG, "worker-b")).not.toBeNull();
     expect(turns.get(second)!.status).toBe("PROCESSING");
+  });
+
+  it("transferência para outro agente de IA: as mesmas mensagens viram turno pronto, que roda depois do atual", async () => {
+    await ingest("m1", "o boleto veio com valor diferente");
+    const first = firstTurn().id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(first, ORG);
+    await claimTurn(first, ORG, "worker-a");
+
+    const again = await requeueTurnForAssignee(first);
+    expect(again).toBeTruthy();
+    const row = turns.get(again!)!;
+    expect(row.status).toBe("READY");
+    expect(row.openKey).toBeNull();
+    expect(row.messageIds).toEqual(["m1"]);
+    // Espera o turno atual terminar.
+    expect(await claimTurn(again!, ORG, "worker-b")).toBeNull();
+    await completeTurn(first, ORG);
+    expect(await claimTurn(again!, ORG, "worker-b")).not.toBeNull();
   });
 
   it("promoção concorrente materializa o turno uma vez só", async () => {

@@ -700,6 +700,38 @@ async function otherLiveTurns(
   );
 }
 
+/**
+ * A conversa passou para outro agente de IA no meio do turno: as mesmas
+ * mensagens viram um turno novo, pronto, para o novo responsável responder
+ * sem o cliente precisar escrever de novo. Roda quando o turno atual
+ * terminar (um por vez na conversa). Devolve o id do turno novo.
+ */
+export async function requeueTurnForAssignee(turnId: string): Promise<string | null> {
+  const t = await prismaBase.conversationTurn.findUnique({ where: { id: turnId } });
+  if (!t) return null;
+  const now = new Date();
+  const created = await prismaBase.conversationTurn.create({
+    data: {
+      organizationId: t.organizationId,
+      conversationId: t.conversationId,
+      contactId: t.contactId,
+      channel: t.channel,
+      status: "READY",
+      // Fora do "acumulando": não disputa o turno que o cliente abrir agora.
+      openKey: null,
+      messageIds: t.messageIds as Prisma.InputJsonValue,
+      aggregatedText: t.aggregatedText,
+      debounceMs: t.debounceMs,
+      maxWaitMs: t.maxWaitMs,
+      firstMessageAt: t.firstMessageAt,
+      lastMessageAt: t.lastMessageAt,
+      readyAt: now,
+    },
+  });
+  logTurn("requeued_for_assignee", { turnId: created.id, fromTurnId: turnId, conversationId: t.conversationId });
+  return created.id;
+}
+
 /** Turno que esperou o anterior terminar: despacha agora. */
 async function dispatchDeferredTurn(conversationId: string, finishedTurnId: string): Promise<void> {
   const ready = await prismaBase.conversationTurn.findMany({

@@ -26,6 +26,8 @@ describe("unsupportedHedges", () => {
     const { unsupportedHedges } = await import("../ground-reply");
     expect(unsupportedHedges('Geralmente é pela opção "Solicitações".', ["1. Acesse a área do cliente"])).toEqual(["geralmente"]);
     expect(unsupportedHedges("Normalmente sai em 2 dias.", ["O documento normalmente sai em 2 dias úteis."])).toEqual([]);
+    // Sinônimo do que a fonte já diz ("normalmente" → "costuma") é paráfrase.
+    expect(unsupportedHedges("O desconto costuma aparecer no corpo da fatura.", ["Os descontos normalmente aparecem no corpo da fatura."])).toEqual([]);
   });
 });
 

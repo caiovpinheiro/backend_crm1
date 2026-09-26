@@ -7,18 +7,33 @@ import { prisma } from "@/lib/prisma";
 import { executeDistribution } from "@/services/distribution";
 import { isAgentAvailable } from "@/services/lead-distribution";
 import type { V2Destination } from "@/lib/ai-v2/types";
+import { traceStep } from "./trace";
 
 type HandoffArgs = {
   conversationId: string;
   contactId?: string | null;
   dealId?: string | null;
   destination: V2Destination;
+  /** Turno em andamento: com destino agente de IA, ele responde as mesmas mensagens. */
+  turnId?: string;
 };
 
 export async function simpleHandoff(args: HandoffArgs): Promise<void> {
   await routeHandoff(args);
   if (args.destination.type !== "ai_agent") {
     await releaseFromAi(args.conversationId);
+    return;
+  }
+  // Outro agente de IA assumiu: antes ele só respondia quando o cliente
+  // escrevia de novo ("???"), sem ter respondido a pergunta que motivou a
+  // transferência.
+  if (args.turnId) {
+    try {
+      const { requeueTurnForAssignee } = await import("@/services/ai/turn-manager");
+      await requeueTurnForAssignee(args.turnId);
+    } catch (err) {
+      console.warn("[ai-v2] turno para o agente de destino não foi criado:", err instanceof Error ? err.message : err);
+    }
   }
 }
 
@@ -62,9 +77,13 @@ async function routeHandoff(args: HandoffArgs): Promise<void> {
     if (!destination.id) throw new Error("Handoff para agente de IA sem id");
     const agent = await (prisma as any).aIAgentConfig.findUnique({
       where: { id: destination.id },
-      select: { userId: true },
+      select: { userId: true, engine: true, active: true },
     });
     if (!agent?.userId) throw new Error("Agente de IA destino não encontrado");
+    // Destino salvo antes pode apontar para um agente do motor antigo ou
+    // desligado: quem responde depois não é o agente que se esperava.
+    if (agent.engine !== "simple") traceStep("transferência", `Atenção: o agente de destino (${destination.id}) usa o motor antigo — é ele que vai responder`);
+    if (agent.active === false) traceStep("transferência", `Atenção: o agente de destino (${destination.id}) está desligado — ninguém vai responder`);
     await assignConversation(args.conversationId, agent.userId);
     return;
   }

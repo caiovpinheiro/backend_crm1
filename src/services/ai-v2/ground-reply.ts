@@ -138,6 +138,9 @@ export function procedureAdmittedMissing(reply: string, reason: string | undefin
 export function unsupportedHedges(reply: string, sources: string[]): string[] {
   const text = ` ${normalize(reply).replace(/\s+/g, " ")} `;
   const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
+  // Fonte que já fala em "normalmente": "costuma"/"geralmente" na resposta é
+  // paráfrase dela, não palpite (o cliente era transferido por sinônimo).
+  if (HEDGES.some((h) => haystack.includes(` ${h} `))) return [];
   return HEDGES.filter((h) => text.includes(` ${h} `) && !haystack.includes(` ${h} `));
 }
 

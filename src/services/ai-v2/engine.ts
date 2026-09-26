@@ -981,6 +981,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       contactId,
       dealId: loadedContext.dealId,
       destination: mediaDestination,
+      turnId: input.turnId,
     });
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -1960,6 +1961,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       contactId,
       dealId: loadedContext.dealId,
       destination,
+      turnId: input.turnId,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
     await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
@@ -2111,6 +2113,7 @@ async function handoffAndReply(
     contactId,
     dealId: loadedContext.dealId,
     destination: fallbackDestination,
+    turnId: input.turnId,
   });
   await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await upsertV2ConversationState({
