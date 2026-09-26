@@ -26,6 +26,7 @@ vi.mock("@/services/ai/provider", () => ({
 vi.mock("../context", () => ({
   loadV2Context: mocks.loadV2Context,
   buildAskDealMessage: mocks.buildAskDealMessage,
+  describeV2ContextForTrace: () => "",
 }));
 
 function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
