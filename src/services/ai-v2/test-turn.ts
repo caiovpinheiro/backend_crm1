@@ -12,6 +12,7 @@ import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
+import { applyBoldPolicy } from "./reply-format";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -517,7 +518,7 @@ export async function simulateV2Turn(
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
   });
-  output = { ...output, reply: guard.text };
+  output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
   // Igual à produção: pedido novo nesta mensagem não encerra.
   if (keepOpenOnNewRequest(config, userMessage, output)) {
     output = { ...output, reason: `${output.reason} (não encerrou: o cliente fez um pedido nesta mensagem)`.trim() };

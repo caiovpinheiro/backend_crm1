@@ -543,6 +543,12 @@ export interface V2AgentConfig {
   responseLength?: "short" | "medium" | "long";
   /** Quanto emoji o agente usa nas respostas. */
   emojis?: "none" | "light" | "moderate";
+  /**
+   * Negrito do WhatsApp (*assim*). "auto" (padrão): como o modelo quiser;
+   * "key": só no que o cliente precisa ver primeiro (datas, valores, botões,
+   * telas), poucos por mensagem; "off": sem negrito.
+   */
+  bold?: "auto" | "key" | "off";
   /** Datas e prazos oficiais (fora dos materiais). */
   calendar?: V2CalendarConfig;
   /** Pede à API resposta sempre em JSON (modo JSON), em vez de só pedir no prompt. */

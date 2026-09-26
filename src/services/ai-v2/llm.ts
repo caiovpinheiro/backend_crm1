@@ -37,7 +37,7 @@ import { knowledgeDocIdsFor } from "./themes";
 import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
-import { breakInlineSteps } from "./reply-format";
+import { boldInstruction, breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
@@ -900,6 +900,8 @@ function buildV2SystemPrompt(
   lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);
+  const bold = boldInstruction(config.bold);
+  if (bold) lines.push(`# Negrito\n${bold}`);
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
   if (mediaNote) lines.push(mediaNote);
   if (stage === "confirming") {

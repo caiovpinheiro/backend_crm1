@@ -389,6 +389,7 @@ export const v2AgentConfigSchema = z.object({
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
+  bold: z.enum(["auto", "key", "off"]).optional(),
   calendar: z
     .object({
       // Linha incompleta (recém-adicionada na tela, sem descrição ou data)

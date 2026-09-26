@@ -38,3 +38,36 @@ export function breakInlineSteps(text: string): string {
   }
   return out;
 }
+
+/** Máximo de destaques em negrito por mensagem no modo "key". */
+export const MAX_BOLD_HIGHLIGHTS = 4;
+
+/** *trecho* do WhatsApp: asterisco colado ao texto dos dois lados (não pega "* item"). */
+const BOLD_SPAN = /(^|[^\p{L}\p{N}*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?=$|[^\p{L}\p{N}*])/gu;
+
+/**
+ * Negrito conforme a config: "**x**" (Markdown) vira "*x*" (WhatsApp) sempre.
+ * "off" tira o negrito; "key" tira de links (quebram no WhatsApp), de frases
+ * longas (mais de 6 palavras — negrito de frase inteira não destaca nada) e
+ * o que passar de MAX_BOLD_HIGHLIGHTS.
+ */
+export function applyBoldPolicy(text: string, mode: "auto" | "key" | "off" | undefined): string {
+  const t = text.replace(/\*\*([^*\n]+)\*\*/g, "*$1*");
+  if (!mode || mode === "auto") return t;
+  if (mode === "off") return t.replace(BOLD_SPAN, "$1$2");
+  let kept = 0;
+  return t.replace(BOLD_SPAN, (match: string, pre: string, inner: string) => {
+    if (/https?:\/\//i.test(inner) || inner.trim().split(/\s+/).length > 6 || kept >= MAX_BOLD_HIGHLIGHTS) return `${pre}${inner}`;
+    kept++;
+    return match;
+  });
+}
+
+/** Linha do prompt para o negrito. */
+export function boldInstruction(mode: "auto" | "key" | "off" | undefined): string | null {
+  if (mode === "key") {
+    return `Destaque em negrito do WhatsApp (*assim*, um asterisco de cada lado) só o que o cliente precisa enxergar primeiro: datas, prazos, valores, nomes de botões, menus e telas que ele vai tocar. No máximo ${MAX_BOLD_HIGHLIGHTS} destaques por mensagem, de poucas palavras cada; nunca negrite frases inteiras nem links.`;
+  }
+  if (mode === "off") return "Não use negrito nem asteriscos para destacar texto.";
+  return null;
+}

@@ -37,6 +37,7 @@ import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
+import { applyBoldPolicy } from "./reply-format";
 import { ALREADY_SENT_REPLY, MESSAGE_MODEL_REPEATED, recentlySentMessageModels } from "./sent-materials";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -1519,7 +1520,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
   });
-  let replyText = guard.text;
+  // Negrito conforme "Quem é o agente › Destaques em negrito".
+  let replyText = applyBoldPolicy(guard.text, config.bold);
   if (guard.warnings.length > 0) traceStep("guarda", guard.warnings.join("; "));
   if (guard.forceHandoff) {
     wantsHandoff = true;
