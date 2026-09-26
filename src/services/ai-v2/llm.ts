@@ -8,7 +8,8 @@ import { z } from "zod";
 import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
-import { v2AuxModel } from "@/lib/ai-v2/models";
+import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
+import { statesProcedure } from "./no-source";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
 import { renderMessage } from "@/lib/ai-v2/message-render";
@@ -34,7 +35,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -181,7 +182,7 @@ export function mergeChunks(lists: PrefetchedChunk[][], limit: number): Prefetch
  * Prazo da reformulação da busca: numa sessão real ela levou 31 s. Passado o
  * prazo, busca só com a frase original (que já está buscando em paralelo).
  */
-const REWRITE_TIMEOUT_MS = 5000;
+const REWRITE_TIMEOUT_MS = 3500;
 
 function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -233,20 +234,29 @@ async function prefetchKnowledge(args: {
   const original = search(query);
   let rewrites: string[] = [];
   if (queryRewriteEnabled()) {
-    try {
-      rewrites = await withTimeout(REWRITE_TIMEOUT_MS, rewriteKnowledgeQueries({
-        // Tarefa auxiliar: na OpenAI, com a chave de busca do agente.
-        model: v2AuxModel(args.config.model),
-        apiKey: args.apiKey,
-        userMessage: args.userMessage,
-        previousMessages: args.previousMessages,
-        materialTitles: args.materialTitles,
-      }));
-      traceStep("base", rewrites.length > 0
-        ? `Busca reformulada: ${rewrites.map((q) => `"${q}"`).join(", ")}`
-        : "Reformulação não gerou consultas — busca só com a mensagem");
-    } catch (err) {
-      traceStep("base", `Reformulação da busca falhou (${err instanceof Error ? err.message : String(err)}) — busca só com a mensagem`);
+    const rewriting = withTimeout(REWRITE_TIMEOUT_MS, rewriteKnowledgeQueries({
+      // Tarefa auxiliar: na OpenAI, com a chave de busca do agente.
+      model: v2FastAuxModel(args.config.model),
+      apiKey: args.apiKey,
+      userMessage: args.userMessage,
+      previousMessages: args.previousMessages,
+      materialTitles: args.materialTitles,
+    }));
+    rewriting.catch(() => undefined);
+    // A frase original já achou um trecho forte: não espera a reformulação.
+    const direct = await original;
+    const directBest = direct?.chunks.length ? Math.max(...direct.chunks.map((c) => 1 - c.distance)) : 0;
+    if (directBest >= MAIN_SOURCE_SIMILARITY) {
+      traceStep("base", `A busca direta já achou trecho forte (${directBest.toFixed(2)}) — sem esperar a reformulação`);
+    } else {
+      try {
+        rewrites = await rewriting;
+        traceStep("base", rewrites.length > 0
+          ? `Busca reformulada: ${rewrites.map((q) => `"${q}"`).join(", ")}`
+          : "Reformulação não gerou consultas — busca só com a mensagem");
+      } catch (err) {
+        traceStep("base", `Reformulação da busca falhou (${err instanceof Error ? err.message : String(err)}) — busca só com a mensagem`);
+      }
     }
   }
 
@@ -1396,6 +1406,7 @@ export async function callV2LLM(args: {
       ...previousMessages.map((m) => m.content),
       ...prefetch.chunks.flatMap((c) => [c.docTitle, c.content]),
       ...knowledgeChunkTexts(r.toolCalls),
+      ...lookupResultTexts(r.toolCalls),
       args.themeInstructions ?? "",
       ...args.config.globalRules,
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
@@ -1408,8 +1419,8 @@ export async function callV2LLM(args: {
     // prova que a coisa existe).
     const factSources = sources.slice(1 + previousMessages.length);
     const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
-    // Valores que o cliente informou sobre a própria situação ("o boleto
-    // veio R$ 480") contam como fonte nas regras: explicar o boleto dele com
+    // Valores que o cliente informou sobre a própria situação ("a cobrança
+    // veio R$ 480") contam como fonte nas regras: explicar a cobrança dele com
     // a regra do material é o esperado. Confirmar como preço da empresa um
     // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
     // checagem por modelo, que distingue os dois casos.
@@ -1425,7 +1436,10 @@ export async function callV2LLM(args: {
     // Checagem por modelo: o que as regras não pegam (política sem número,
     // conhecimento geral, recurso ou material que não existe). Só roda
     // quando as regras não acharam nada e a resposta não é transferência.
-    const claimSources = [...factSources, ...previousMessages.filter((m) => m.role === "assistant").map((m) => m.content)];
+    // O que o agente já disse não é fonte: uma afirmação sem fonte que
+    // escapasse num turno sustentaria as seguintes. Vai só como contexto.
+    const claimSources = factSources;
+    const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
     const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
       if ((args.config.groundingCheck ?? "model") !== "model" || output.handoff || !worthClaimCheck(output.reply)) return [];
       // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
@@ -1433,9 +1447,15 @@ export async function callV2LLM(args: {
       // a frase barrava o envio e transferia o cliente.
       const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
-      const res = await checkClaimsWithModel({ model: v2AuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts });
+      const res = await checkClaimsWithModel({ model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory });
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
+      // Checagem indisponível (erro ou tempo): passo a passo, caminho de tela
+      // ou link não conferido não sai — as regras fixas não pegam esses.
+      if (!res.ok && statesProcedure(output.reply)) {
+        traceStep("verificação", "Checagem por modelo indisponível e a resposta traz passo a passo, caminho ou link não conferido");
+        return ["um passo a passo, caminho ou link que não pôde ser conferido nos materiais"];
+      }
       if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
       else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
       return res.unsupported.map((c) => `"${c}" (afirmação que não está nos materiais)`);

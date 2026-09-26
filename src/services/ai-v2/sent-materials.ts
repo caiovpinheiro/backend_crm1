@@ -18,6 +18,14 @@ export const RESEND_WINDOW_MS = 30 * 60 * 1000;
 export const ALREADY_SENT_REPLY =
   "Te enviei esse material logo acima 👆 Se ficou alguma dúvida ou algo não funcionou, me conta que eu te ajudo.";
 
+/** Fim da resposta longa que anunciava um anexo já enviado há pouco. */
+export const ATTACHMENT_ABOVE_NOTE = "O arquivo que mencionei já está logo acima na conversa 👆";
+
+/** A resposta anuncia um envio ("segue o vídeo", "vou te mandar", "abaixo"). */
+export function announcesSending(reply: string): boolean {
+  return /\b(?:segue|seguem|envio|enviei|enviando|mando|mandei|mandando|vou (?:te |lhe )?(?:enviar|mandar)|abaixo|anexo|anexei)\b/i.test(reply);
+}
+
 /** Erro do executor quando o texto da mensagem pronta foi barrado por repetir uma recente. */
 export const MESSAGE_MODEL_REPEATED = "não reenviada: igual a uma mensagem recente";
 

@@ -40,6 +40,38 @@ export function knowledgeChunkTexts(
 }
 
 /**
+ * Resultado das consultas do modelo que não são a base (produtos, registros
+ * do CRM, mensagens prontas): vale como fonte. Sem isso, o preço que veio da
+ * busca de produtos era tratado como invenção e o cliente era transferido.
+ */
+export function lookupResultTexts(
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+): string[] {
+  const texts: string[] = [];
+  const leaves = (v: unknown, out: string[], depth: number) => {
+    if (depth > 6 || out.length > 400) return;
+    if (typeof v === "string") {
+      if (v.trim()) out.push(v.trim());
+    } else if (typeof v === "number") {
+      out.push(String(v));
+    } else if (Array.isArray(v)) {
+      for (const x of v) leaves(x, out, depth + 1);
+    } else if (v && typeof v === "object") {
+      for (const x of Object.values(v)) leaves(x, out, depth + 1);
+    }
+  };
+  for (const call of toolCalls ?? []) {
+    if (call.toolName === "knowledge_search") continue;
+    const result = call.result;
+    if (!result || typeof result !== "object" || "error" in (result as Record<string, unknown>)) continue;
+    const out: string[] = [];
+    leaves(result, out, 0);
+    if (out.length > 0) texts.push(out.join(" · ").slice(0, 8000));
+  }
+  return texts;
+}
+
+/**
  * Nomes citados entre aspas na resposta (menu, botão, tela, opção) que não
  * aparecem em nenhuma fonte (material, instruções, conversa). É onde o
  * modelo mais inventa ao completar um passo a passo: "vá em \"Fale Conosco\"".
@@ -132,7 +164,7 @@ export function procedureAdmittedMissing(reply: string, reason: string | undefin
 
 /**
  * Palpite: "geralmente é pela opção X", "normalmente no valor da
- * mensalidade". Quando a palavra não vem da fonte, o modelo está
+ * parcela". Quando a palavra não vem da fonte, o modelo está
  * completando o que não sabe.
  */
 export function unsupportedHedges(reply: string, sources: string[]): string[] {
@@ -228,13 +260,29 @@ export function unsupportedFacts(reply: string, sources: string[]): string[] {
   return [...out];
 }
 
+const MONTHS = ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+
+/** Datas por extenso ("6 de novembro") na resposta que não estão nas fontes (nem como 6/11). */
+export function unsupportedLongDates(reply: string, sources: string[]): string[] {
+  const joined = sources.join(" ");
+  const keys = dateKeys(joined);
+  const plain = normalize(joined).replace(/\s+/g, " ");
+  const out = new Set<string>();
+  for (const m of normalize(reply).matchAll(/\b(\d{1,2})\s+de\s+([a-z]+)\b/g)) {
+    const month = MONTHS.indexOf(m[2]) + 1;
+    if (month === 0) continue;
+    if (!keys.has(`${+m[1]}/${month}`) && !plain.includes(`${+m[1]} de ${m[2]}`)) out.add(m[0]);
+  }
+  return [...out];
+}
+
 /** Data, período, valor, percentual ou quantidade na frase. */
 export const FACT_IN_SENTENCE = /\d{1,2}\s*\/\s*\d{1,2}|\b\d{1,2}(?:\s*(?:a|e|até)\s*\d{1,2})?\s+de\s+[a-zç]{3,}|R\$\s?\d|\d+(?:[.,]\d+)?\s?%|\b\d+\s*(?:dias?|horas?|meses|semanas?|pontos?)\b/i;
 
 /**
  * Nome que só o cliente usou (não está em nenhuma fonte nem nos dados dele)
  * e que a resposta trata como coisa real, ligando-o a data, valor ou prazo:
- * "a prova de <nome> será de 6 a 9/11". A mensagem do cliente não é fonte
+ * "o evento <nome> será de 6 a 9/11". A mensagem do cliente não é fonte
  * de fato — sem esta checagem, qualquer nome inventado pelo cliente passava.
  * Nome = palavra com inicial maiúscula no meio da frase da resposta.
  */

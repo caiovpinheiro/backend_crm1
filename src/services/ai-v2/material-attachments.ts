@@ -245,6 +245,26 @@ export async function attachmentsByIds(agentId: string, ids: string[]): Promise<
   return ids.map((id) => byId.get(id)).filter((a): a is V2MaterialAttachment => !!a);
 }
 
+/**
+ * Anexos pedidos que já saíram na conversa dentro da trava de cada um (o
+ * envio os barraria). Mesma conta do envio: janela do anexo, no máximo 7
+ * dias, a partir do último #reset.
+ */
+export async function attachmentsBlockedByResend(agentId: string, conversationId: string, ids: string[], now: Date = new Date()): Promise<Set<string>> {
+  const list = await attachmentsByIds(agentId, ids);
+  if (list.length === 0) return new Set();
+  const { lastV2ResetAt } = await import("./sent-materials");
+  const { prisma } = await import("@/lib/prisma");
+  const lastReset = await lastV2ResetAt(conversationId).catch(() => null);
+  const weekAgo = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+  const sinceOf = (a: V2MaterialAttachment) => Math.max(weekAgo, resendSince(a.resendWindow, lastReset, now).getTime());
+  const rows = await prisma.message.findMany({
+    where: { conversationId, mediaUrl: { in: list.map((a) => a.url) }, createdAt: { gte: new Date(Math.min(...list.map(sinceOf))) } },
+    select: { mediaUrl: true, createdAt: true },
+  });
+  return new Set(list.filter((a) => rows.some((r) => r.mediaUrl === a.url && new Date(r.createdAt).getTime() >= sinceOf(a))).map((a) => a.id));
+}
+
 /** Linhas do prompt: o que dá para enviar e quando. */
 export function attachmentsPromptSection(list: Array<Pick<V2MaterialAttachment, "id" | "kind" | "name" | "description"> & { docTitle: string }>): string {
   if (list.length === 0) return "";

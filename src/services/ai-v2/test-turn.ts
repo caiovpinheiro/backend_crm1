@@ -514,6 +514,7 @@ export async function simulateV2Turn(
     toolCalls: llmResult.toolCalls,
     queriedEmpty: emptyQueries || !!governorBlind,
     prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
+    themeId,
   });
   if (guarded.applied) {
     noSourceApplied = !guarded.handoff;

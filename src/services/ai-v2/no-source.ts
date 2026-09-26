@@ -6,8 +6,10 @@
  */
 
 import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types";
-import { FACT_IN_SENTENCE } from "./ground-reply";
+import { calendarPromptSection } from "./calendar";
+import { FACT_IN_SENTENCE, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedLongDates } from "./ground-reply";
 import { WEAK_MATCH_SIMILARITY } from "./similarity-presets";
+import { getV2ThemeById } from "./themes";
 
 /** A resposta afirma algo verificável: número/data/prazo, passos, caminho de tela, link. */
 export function statesFacts(reply: string): boolean {
@@ -17,6 +19,41 @@ export function statesFacts(reply: string): boolean {
     /\S\s*[>→»]\s*\S/.test(reply) ||
     /https?:\/\//i.test(reply)
   );
+}
+
+/** Passo a passo, caminho de tela ou link: o que só um material sustenta. */
+export function statesProcedure(reply: string): boolean {
+  return /^\s*\d+[.)]\s+\S/m.test(reply) || /\S\s*[>→»]\s*\S/.test(reply) || /https?:\/\//i.test(reply);
+}
+
+/**
+ * Fontes fixas do agente, fora dos materiais: informações fixas, regras
+ * gerais, instruções do assunto, calendário e o que as consultas do modelo
+ * (produtos, CRM) devolveram.
+ */
+export function fixedSources(
+  config: V2AgentConfig,
+  themeId: string | null | undefined,
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+  now: Date = new Date(),
+): string[] {
+  return [
+    ...(config.variables ?? []).map((v) => `${v.key}: ${v.value}`),
+    ...(config.globalRules ?? []),
+    (themeId ? getV2ThemeById(config, themeId)?.instructions : undefined) ?? "",
+    calendarPromptSection(config.calendar?.events, now, config.businessHours?.timezone || "America/Sao_Paulo"),
+    ...lookupResultTexts(toolCalls),
+  ].filter((s) => s.trim());
+}
+
+/**
+ * A resposta traz data, valor ou prazo e todos vêm das fontes fixas (ex.: a
+ * data do calendário). Passo a passo, caminho e link não entram: esses só o
+ * material sustenta.
+ */
+export function factsBackedBy(reply: string, sources: string[]): boolean {
+  if (sources.length === 0 || !FACT_IN_SENTENCE.test(reply) || statesProcedure(reply)) return false;
+  return unsupportedFigures(reply, sources).length === 0 && unsupportedFacts(reply, sources).length === 0 && unsupportedLongDates(reply, sources).length === 0;
 }
 
 /** A resposta usa um dado do cadastro do cliente (então não é invenção de produto). */
@@ -63,6 +100,8 @@ export function applyNoSourceGuard(args: {
   toolCalls: Array<{ toolName: string; args?: unknown; result: unknown }> | undefined;
   queriedEmpty: boolean;
   prefetch: V2PrefetchFact | undefined;
+  /** Assunto do turno: as instruções dele contam como fonte fixa. */
+  themeId?: string | null;
 }): { applied: boolean; handoff: boolean } {
   const { config, output, context } = args;
   if (output.handoff || output.concluded) return { applied: false, handoff: false };
@@ -73,7 +112,10 @@ export function applyNoSourceGuard(args: {
   const invented =
     (args.queriedEmpty || (nothingRelevantFound(args.prefetch) && !modelFound)) &&
     statesFacts(output.reply) &&
-    !mentionsClientData(output.reply, context);
+    !mentionsClientData(output.reply, context) &&
+    // Data do calendário, valor das informações fixas, preço do catálogo:
+    // não é invenção só porque os materiais não falam disso.
+    !factsBackedBy(output.reply, fixedSources(config, args.themeId, args.toolCalls));
   if (!legacy && !invented) return { applied: false, handoff: false };
   const noSourceMessage = config.fallback?.noSource?.message?.trim();
   if (noSourceMessage) {

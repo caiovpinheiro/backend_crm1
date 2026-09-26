@@ -26,7 +26,9 @@ NÃO liste:
 - repetir o que o cliente disse sem confirmar como verdade.
 - dizer o que o atendente vai fazer agora ou em seguida ("vou te orientar", "vou te enviar o passo a passo", "segue o material"): é intenção, não fato — só é afirmação se trouxer regra, valor, prazo ou canal que as fontes não dizem.
 
-O que o cliente disse sobre a própria situação (o valor que veio no boleto dele, a data em que comprou, o que aparece na tela dele) pode ser usado para explicar a regra das fontes: isso NÃO é afirmação sem fonte. Só é sem fonte quando a resposta confirma como regra, preço, prazo ou condição da empresa algo que só o cliente afirmou e as fontes não dizem (ex.: cliente "a taxa é R$ 30, né?" → resposta "Isso, a taxa é R$ 30").
+O que o atendente já disse antes na conversa não é fonte: repetir uma afirmação anterior só está sustentado se as fontes a sustentam.
+
+O que o cliente disse sobre a própria situação (o valor que veio na cobrança dele, a data em que comprou, o que aparece na tela dele) pode ser usado para explicar a regra das fontes: isso NÃO é afirmação sem fonte. Só é sem fonte quando a resposta confirma como regra, preço, prazo ou condição da empresa algo que só o cliente afirmou e as fontes não dizem (ex.: cliente "a taxa é R$ 30, né?" → resposta "Isso, a taxa é R$ 30").
 
 Responda só com JSON: {"unsupported": ["trecho curto da resposta com a afirmação sem fonte", ...]}. Sem nenhuma, {"unsupported": []}.`;
 
@@ -46,7 +48,7 @@ export function worthClaimCheck(reply: string): boolean {
   return !sentences.every((s) => s.endsWith("?"));
 }
 
-export function buildClaimCheckInput(args: { reply: string; sources: string[]; clientTexts: string[] }): string {
+export function buildClaimCheckInput(args: { reply: string; sources: string[]; clientTexts: string[]; agentHistory?: string[] }): string {
   let budget = MAX_SOURCE_CHARS;
   const kept: string[] = [];
   for (const s of args.sources.map((x) => x.trim()).filter(Boolean)) {
@@ -58,6 +60,9 @@ export function buildClaimCheckInput(args: { reply: string; sources: string[]; c
   return [
     `Fontes da empresa:\n${kept.map((s, i) => `[${i + 1}] ${s}`).join("\n\n") || "(nenhuma)"}`,
     `O que o cliente disse (não é fonte):\n${args.clientTexts.slice(-4).map((t) => `- ${t.slice(0, 400)}`).join("\n") || "(nada)"}`,
+    ...(args.agentHistory?.length
+      ? [`O que o atendente já disse antes (não é fonte; só para entender a conversa):\n${args.agentHistory.slice(-3).map((t) => `- ${t.slice(0, 400)}`).join("\n")}`]
+      : []),
     `Resposta do atendente:\n${args.reply}`,
   ].join("\n\n");
 }
@@ -77,14 +82,23 @@ export function parseClaimCheck(text: string, reply: string): string[] {
   }
   const list = (parsed as { unsupported?: unknown } | undefined)?.unsupported;
   if (!Array.isArray(list)) return [];
-  // Só trechos que existem na resposta: o verificador às vezes inventa o que apontar.
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  // Só trechos que existem na resposta: o verificador às vezes inventa o que
+  // apontar. Vale o trecho literal ou parafraseado (a maior parte das
+  // palavras dele está na resposta); antes a paráfrase era descartada.
+  const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
   const replyNorm = norm(reply);
+  const replyWords = new Set(replyNorm.split(/[^\p{L}\p{N}$%]+/u).filter(Boolean));
+  const inReply = (x: string) => {
+    const n = norm(x);
+    if (replyNorm.includes(n.slice(0, 40))) return true;
+    const words = n.split(/[^\p{L}\p{N}$%]+/u).filter((w) => w.length >= 4 || /\d/.test(w));
+    return words.length >= 2 && words.filter((w) => replyWords.has(w)).length / words.length >= 0.7;
+  };
   return [...new Set(
     list
       .filter((x): x is string => typeof x === "string")
       .map((x) => x.trim().replace(/^["“]|["”]$/g, ""))
-      .filter((x) => x.length >= 3 && replyNorm.includes(norm(x).slice(0, 40))),
+      .filter((x) => x.length >= 3 && inReply(x)),
   )].slice(0, 5);
 }
 
@@ -95,6 +109,7 @@ export async function checkClaimsWithModel(args: {
   reply: string;
   sources: string[];
   clientTexts: string[];
+  agentHistory?: string[];
 }): Promise<{ unsupported: string[]; inputTokens: number; outputTokens: number; ok: boolean }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

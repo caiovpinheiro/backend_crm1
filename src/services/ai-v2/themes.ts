@@ -27,7 +27,7 @@ export function sameWordStem(a: string, b: string): boolean {
   // Plural/gênero: uma é a outra + final de plural ou gênero. Só por
   // prefixo — "estar dentro" fazia "um" casar "documento". E só esses
   // finais: com "+ até 3 letras quaisquer", "está" (esta) casava "estágio"
-  // (esta + gio) e a mensagem sobre boleto ia para o assunto de estágio.
+  // (esta + gio) e a mensagem ia para um assunto sem relação com ela.
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
   if (short.length >= 3 && long.startsWith(short) && PLURAL_GENDER_ENDINGS.has(long.slice(short.length))) return true;
   const shorter = short.length;

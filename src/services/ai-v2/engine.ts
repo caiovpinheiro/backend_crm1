@@ -40,7 +40,8 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { ALREADY_SENT_REPLY, MESSAGE_MODEL_REPEATED, recentlySentMessageModels } from "./sent-materials";
+import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, recentlySentMessageModels } from "./sent-materials";
+import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
 import {
@@ -1480,6 +1481,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       toolCalls,
       queriedEmpty: allQueryToolResultsEmpty(toolCalls),
       prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
+      themeId,
     });
     if (guarded.applied) {
       noSourceApplied = !guarded.handoff;
@@ -1668,6 +1670,27 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       // Resposta que só apresentava o material vira o aviso de que ele está acima.
       if (!outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length <= 30) {
         replyText = ALREADY_SENT_REPLY;
+      }
+    }
+  }
+  // Anexo de material que já saiu dentro da trava dele: não sai de novo, e a
+  // resposta não pode dizer "segue o vídeo" sem nada chegar.
+  const requestedAttachmentIds = [...new Set(outboundActions
+    .filter((a) => a.type === "send_material_attachment")
+    .flatMap((a) => (Array.isArray((a as { attachmentIds?: unknown }).attachmentIds) ? (a as unknown as { attachmentIds: unknown[] }).attachmentIds : []))
+    .filter((x): x is string => typeof x === "string"))];
+  if (requestedAttachmentIds.length > 0 && input.conversationId) {
+    const blocked = await attachmentsBlockedByResend(resolved!.agentConfigId, input.conversationId, requestedAttachmentIds).catch(() => new Set<string>());
+    if (blocked.size > 0) {
+      outboundActions = outboundActions
+        .map((a) => a.type === "send_material_attachment"
+          ? ({ ...a, attachmentIds: ((a as { attachmentIds?: string[] }).attachmentIds ?? []).filter((id) => !blocked.has(id)) } as V2Action)
+          : a)
+        .filter((a) => a.type !== "send_material_attachment" || ((a as { attachmentIds?: string[] }).attachmentIds ?? []).length > 0);
+      traceStep("mídia", `Anexo(s) já enviado(s) nesta conversa dentro da trava de repetição — não reenviado(s) (${[...blocked].join(", ")})`);
+      const nothingFollows = !outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment");
+      if (nothingFollows && announcesSending(replyText)) {
+        replyText = replyText.trim().split(/\s+/).length <= 30 ? ALREADY_SENT_REPLY : `${replyText.trim()}\n\n${ATTACHMENT_ABOVE_NOTE}`;
       }
     }
   }

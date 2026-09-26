@@ -58,3 +58,13 @@ export function v2ModelProvider(id: string): V2ModelProvider {
 export function v2AuxModel(id: string): string {
   return v2ModelProvider(id) === "openai" ? id : V2_AUX_OPENAI_MODEL;
 }
+
+/**
+ * Tarefa auxiliar dentro do turno (reformular a busca, conferir a resposta):
+ * modelo sem raciocínio. Com o modelo do agente sendo de raciocínio, cada
+ * uma somava vários segundos à espera do cliente.
+ */
+export function v2FastAuxModel(id: string): string {
+  const aux = v2AuxModel(id);
+  return v2ModelInfo(aux)?.reasoning ? V2_AUX_OPENAI_MODEL : aux;
+}

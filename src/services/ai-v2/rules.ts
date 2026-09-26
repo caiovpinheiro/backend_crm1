@@ -139,23 +139,35 @@ export function evaluateV2Rules(
 ): V2Rule | null {
   const sorted = config.rules.filter((r) => r.enabled !== false).sort((a, b) => a.order - b.order);
   for (const rule of sorted) {
-    if (evaluateRule(withHumanRequestTerms(rule, config), input, context)) return rule;
+    if (evaluateRule(withHumanRequestTerms(rule, config, input.userMessage), input, context)) return rule;
   }
   return null;
 }
+
+/** Até quantas palavras a mensagem é um pedido curto ("atendente", "quero um humano"). */
+export const HUMAN_REQUEST_SHORT_MESSAGE_WORDS = 4;
 
 /**
  * Regra "Pedido de humano" (ligada): as palavras-chave valem junto com as de
  * "Chamar a equipe" e as frases explícitas — antes eram duas listas que
  * precisavam ser editadas juntas.
+ *
+ * Palavra solta ("atendente", "humano") só vale em mensagem curta. Numa
+ * frase ("a atendente disse que o prazo era outro") ela não é pedido: a
+ * regra transferia sem chamar o modelo. Ali valem as frases; o resto o
+ * modelo decide.
  */
-function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig): V2Rule {
+function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig, userMessage: string): V2Rule {
   if (!isHumanRequestRule(rule, config)) return rule;
   const terms = humanRequestTerms(config);
+  const wordCount = (s: string) => normalize(s).split(/\s+/).filter(Boolean).length;
+  const short = wordCount(userMessage) <= HUMAN_REQUEST_SHORT_MESSAGE_WORDS;
   return {
     ...rule,
     conditions: rule.conditions.map((c) =>
-      c.type === "keywords" ? { ...c, values: [...new Set([...(c.values ?? []), ...terms])] } : c,
+      c.type === "keywords"
+        ? { ...c, values: [...new Set([...(c.values ?? []), ...terms])].filter((v) => short || wordCount(v) > 1) }
+        : c,
     ),
   };
 }
