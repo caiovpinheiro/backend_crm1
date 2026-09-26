@@ -74,6 +74,7 @@ const ACTION_LABELS: Record<string, string> = {
   send_message_model: "Enviar mensagem pronta",
   send_product: "Enviar produto",
   send_whatsapp_template: "Enviar template oficial",
+  send_material_attachment: "Enviar anexo do material",
   ask_with_options: "Perguntar com opções",
   close_conversation: "Encerrar conversa",
   tabulate_conversation: "Classificar atendimento",
@@ -634,7 +635,7 @@ export async function simulateV2Turn(
     let labels = options.map((o) => o.label);
     // Com material a seguir, a produção manda o fecho depois dele; aqui a
     // apresentação fica sem fecho.
-    const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product");
+    const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product" || e.action.type === "send_material_attachment");
     if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows && !noSourceApplied) {
       // Fecho configurado, igual à produção.
       const ending = applyReplyEnding({

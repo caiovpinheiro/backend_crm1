@@ -26,6 +26,11 @@ vi.mock("@/services/ai/knowledge-docs", () => ({
   knowledgeDocTitlesByIds: vi.fn().mockResolvedValue([]),
 }));
 
+vi.mock("../material-attachments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../material-attachments")>()),
+  attachmentsForDocs: vi.fn(async () => []),
+}));
+
 vi.mock("../tools", () => ({
   searchV2Products: vi.fn(),
   searchV2CrmRecords: vi.fn(),
@@ -237,6 +242,27 @@ describe("callV2LLM — pré-busca na base", () => {
     // Com trechos já no prompt, não manda buscar de novo a mesma coisa.
     expect(result.systemPrompt).toContain("já vieram da base");
     expect(result.systemPrompt).not.toContain("chame knowledge_search antes de responder");
+  });
+
+  it("anexos do material lido vão ao prompt; o pedido vira envio só com ids oferecidos", async () => {
+    const { attachmentsForDocs } = await import("../material-attachments");
+    (attachmentsForDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { id: "att-1", docId: "doc-1", url: "/uploads/org/a.mp4", mimeType: "video/mp4", name: "Onde fica o botão", description: "quando o cliente não achar o botão", kind: "video", position: 0, createdAt: "", docTitle: "Como emitir o comprovante" },
+    ]);
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [chunk] });
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: "Te mando um vídeo mostrando onde fica.", attachments: ["att-1", "att-inventado"], actions: [] })),
+    );
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"] } as Partial<V2AgentConfig>);
+    const result = await callV2LLM({
+      agentId: "agent-1", config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "não acho onde emite o comprovante", stage: "active",
+    });
+    expect(attachmentsForDocs).toHaveBeenCalledWith("agent-1", ["doc-1"]);
+    expect(result.systemPrompt).toContain("# Anexos dos materiais");
+    expect(result.systemPrompt).toContain('att-1: vídeo "Onde fica o botão"');
+    expect(result.output.actions).toContainEqual({ type: "send_material_attachment", attachmentIds: ["att-1"] });
   });
 
   it("sem materiais liberados não busca", async () => {

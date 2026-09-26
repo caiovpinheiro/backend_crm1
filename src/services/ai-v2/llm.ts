@@ -45,6 +45,7 @@ import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./rep
 import { CONFUSION_PROMPT } from "./confusion";
 import { WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
+import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
@@ -549,6 +550,10 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
         variables: (v as { variables?: Record<string, string> }).variables ?? {},
       };
     }),
+  attachments: z
+    .unknown()
+    .optional()
+    .transform((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()) : undefined)),
   // Campo fora do formato vira o padrão em vez de invalidar a resposta
   // inteira: antes, um `"nome": null` em collected ou um sentimento fora da
   // lista mandava o turno para o fallback de erro (transferência).
@@ -912,6 +917,7 @@ function buildV2SystemPrompt(
   mediaNote = "",
   actionStages: Array<{ id: string; name: string }> = [],
   nothingRelevant = false,
+  attachmentsSection = "",
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1025,6 +1031,7 @@ function buildV2SystemPrompt(
       lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
     }
   }
+  if (attachmentsSection) lines.push(attachmentsSection);
 
   const availableTools = QUERY_TOOL_NAMES.filter((t) => (allowedToolNames ?? []).includes(t));
   if (availableTools.length > 0) {
@@ -1071,6 +1078,7 @@ function buildV2SystemPrompt(
     "- handoff: true só quando precisa de uma pessoa (ver Fontes).",
     "- actions: ações deste turno; vazia quando não há.",
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
+    ...(attachmentsSection ? ["- attachments: ids de \"Anexos dos materiais\" para enviar, ou []."] : []),
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
     "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
     ...(offerTheme ? [`- theme: id do assunto que melhor descreve o pedido (${config.themes.map((t) => t.id).join(", ")}) ou null.`] : []),
@@ -1175,6 +1183,9 @@ export async function callV2LLM(args: {
   // Entra no trace como uma consulta à base: o aterramento da resposta e o
   // log do turno enxergam os trechos. Só quando achou algo — pré-busca
   // vazia não pode contar como "consultou e não achou".
+  // Anexos dos materiais lidos (vídeo, imagem, áudio, PDF): o modelo pode
+  // pedir para enviar depois da reply.
+  const offeredAttachments = await attachmentsForDocs(args.agentId, prefetch.chunks.map((c) => c.docId));
   const prefetchCalls = prefetch.chunks.length > 0
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
     : [];
@@ -1193,6 +1204,7 @@ export async function callV2LLM(args: {
     mediaUnderstandingNote(args.config, userMessage),
     actionStages,
     prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
+    attachmentsPromptSection(offeredAttachments),
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1338,6 +1350,14 @@ export async function callV2LLM(args: {
         },
         ...output.actions,
       ];
+    }
+
+    // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
+    const offeredIds = new Set(offeredAttachments.map((a) => a.id));
+    const picked = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))].slice(0, MATERIAL_ATTACHMENT_LIMITS.perReply);
+    output.attachments = picked;
+    if (picked.length > 0) {
+      output.actions = [...output.actions, { type: "send_material_attachment", attachmentIds: picked } as V2Action];
     }
 
     // Aplica renderizador de mensagens em todas as respostas.

@@ -46,6 +46,9 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   // A lista de mensagens prontas liberadas é a permissão: com ela, enviar
   // uma mensagem pronta vale mesmo que o assunto não liste a ação.
   if (allowedMessageModelIdsFor(config, theme).length > 0) allowed.add("send_message_model");
+  // Anexo de material: só chega aqui o que veio dos materiais liberados e
+  // lidos no turno (o motor monta a ação; o modelo não a devolve em actions).
+  allowed.add("send_material_attachment");
   return allowed;
 }
 

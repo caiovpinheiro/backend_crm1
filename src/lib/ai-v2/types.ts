@@ -585,6 +585,7 @@ export type V2ActionType =
   | "send_message_model"
   | "send_product"
   | "send_whatsapp_template"
+  | "send_material_attachment"
   | "ask_with_options"
   | "close_conversation"
   | "tabulate_conversation"
@@ -609,6 +610,8 @@ export interface V2LLMOutput {
     adapt?: boolean;
     variables?: Record<string, string>;
   };
+  /** Ids de anexos dos materiais lidos no turno, para enviar depois da reply. */
+  attachments?: string[];
   handoff: boolean;
   concluded: boolean;
   confirmed: boolean | null;

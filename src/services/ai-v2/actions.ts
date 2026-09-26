@@ -426,6 +426,39 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
   }
 }
 
+/** Anexos dos materiais (vídeo, imagem, áudio, PDF), pelo mesmo envio das mensagens prontas. */
+async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  const raw = (action as { attachmentIds?: unknown }).attachmentIds;
+  const ids = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+  if (ids.length === 0) return { action, ok: false, error: "Missing attachmentIds" };
+  if (!ctx.contactId || !ctx.conversationId) return { action, ok: false, error: "No contact/conversation" };
+  try {
+    const { attachmentsByIds } = await import("./material-attachments");
+    const list = await attachmentsByIds(ctx.agentId, ids);
+    if (list.length === 0) return { action, ok: false, error: "Attachment not found" };
+    const text = list.map((a) => a.description || a.name).join("\n");
+    if (ctx.autonomyMode === "DRAFT") {
+      traceStep("mídia", `Anexos do material não enviados (modo sugestão): ${list.map((a) => a.name).join(", ")}`);
+      return { action, ok: true, mediaSent: 0, text };
+    }
+    const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
+    const since = await lastV2ResetAt(ctx.conversationId).catch(() => null);
+    const mediaSent = await sendAgentFollowUpMedia({
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      agentUserId: ctx.agentUserId,
+      attachments: list.map((a) => ({ url: a.url, mimeType: a.mimeType, name: a.name })),
+      ...(since ? { since } : {}),
+    });
+    traceStep("mídia", mediaSent > 0
+      ? `Enviou ${mediaSent} anexo(s) do material: ${list.slice(0, mediaSent).map((a) => a.name).join(", ")}`
+      : `Anexos do material não enviados (já enviados nesta conversa nos últimos 7 dias, ou canal indisponível): ${list.map((a) => a.name).join(", ")}`);
+    return { action, ok: true, mediaSent, text };
+  } catch (err) {
+    return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function executeSendProduct(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const productId = typeof action.productId === "string" ? action.productId : "";
   if (!productId) return { action, ok: false, error: "Missing productId" };
@@ -575,6 +608,7 @@ const EXECUTORS: Partial<Record<V2ActionType, (action: V2Action, ctx: V2ActionCo
   send_message_model: executeSendMessageModel,
   send_product: executeSendProduct,
   send_whatsapp_template: executeSendWhatsappTemplate,
+  send_material_attachment: executeSendMaterialAttachment,
 };
 
 export async function executeV2Actions(

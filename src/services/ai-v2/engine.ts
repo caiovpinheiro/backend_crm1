@@ -1644,7 +1644,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Ações que mandam mensagem ao cliente saem DEPOIS da reply (a reply
   // apresenta, a mensagem pronta/produto/modelo vem em seguida). As demais
   // (tag, campo, nota…) rodam agora.
-  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message"]);
+  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message", "send_material_attachment"]);
   let outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
   // Mensagem pronta enviada há pouco (cliente repetiu o pedido): não sai de
   // novo. Antes a introdução ("vou te enviar…") saía, o texto era barrado
@@ -1745,7 +1745,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // resposta de fora do escopo (ela já diz com o que ele pode ajudar).
   // Com material a seguir (mensagem pronta/produto), vai depois dele: na
   // apresentação, "posso ajudar em algo mais?" chegava antes do tutorial.
-  const materialFollows = !stopLimits.blocksReply && outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_product");
+  const materialFollows = !stopLimits.blocksReply && outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_product" || a.type === "send_material_attachment");
   // A mensagem "sem material" não ganha fecho ("Posso ajudar em algo mais?"
   // colado em "não tenho essa informação").
   const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied;
