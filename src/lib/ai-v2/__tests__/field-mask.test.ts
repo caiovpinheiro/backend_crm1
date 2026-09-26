@@ -43,6 +43,25 @@ describe("informação montada", () => {
     expect(derivedFieldValue(senha, { doc: "218.456.789-21" }, {})).toBe("");
     expect(derivedFieldValues({ derivedFields: [senha] }, { doc: "" }, { matricula: "1" })).toEqual({});
   });
+
+  it("letras, maiúsculas e dígitos: primeiras 3 letras do nome (1ª maiúscula) + texto + dígitos de dois campos", () => {
+    const f: V2DerivedField = {
+      id: "d2",
+      label: "Código",
+      parts: [
+        { kind: "field", key: "name", take: "first", count: 3, charset: "letters", letterCase: "capitalize" },
+        { kind: "text", text: "@" },
+        { kind: "field", key: "a", take: "first", count: 3, charset: "digits" },
+        { kind: "field", key: "b", take: "first", count: 3, charset: "digits" },
+      ],
+    };
+    expect(derivedFieldValue(f, { name: "MARIA souza", a: "12.345-6", b: "456.789.000-11" }, null)).toBe("Mar@123456");
+    expect(derivedFieldValue(f, { name: "Ângela", a: "1234", b: "4567" }, null)).toBe("Âng@123456");
+  });
+
+  it("parte sem campo escolhido: informação vazia", () => {
+    expect(derivedFieldValue({ id: "d3", label: "X", parts: [{ kind: "field", take: "all" }] }, { name: "A" }, null)).toBe("");
+  });
 });
 
 describe("variáveis e confirmação", () => {

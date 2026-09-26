@@ -50,8 +50,12 @@ export interface V2DerivedPart {
   key?: string;
   take?: "all" | "first" | "last";
   count?: number;
-  /** Usa só os dígitos do campo (antes de cortar). */
+  /** Legado: o mesmo que charset "digits". */
   digitsOnly?: boolean;
+  /** Quais caracteres do campo contam (antes de cortar). */
+  charset?: "all" | "digits" | "letters";
+  /** Maiúsculas/minúsculas do pedaço. */
+  letterCase?: "keep" | "upper" | "lower" | "capitalize";
   text?: string;
 }
 

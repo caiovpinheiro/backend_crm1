@@ -9,14 +9,16 @@
  * O valor mascarado é o único que o modelo recebe e o que sai na
  * confirmação e nas mensagens com @variável.
  *
- * Informação montada: partes de campos (inteiro, primeiros N ou últimos N
- * caracteres, opcionalmente só os dígitos) e textos fixos. Calculada pelo
- * motor — o modelo não monta valores. Se algum campo usado estiver vazio,
- * a informação fica vazia (nunca sai pela metade).
+ * Informação montada: partes de campos e textos fixos. Em cada campo:
+ * quais caracteres contam (todos, só dígitos, só letras), quantos (tudo,
+ * primeiros N, últimos N) e maiúsculas (como está, MAIÚSCULAS, minúsculas,
+ * Primeira maiúscula) — nessa ordem. Calculada pelo motor; o modelo não
+ * monta valores. Se algum campo usado estiver vazio (ou a parte não tiver
+ * campo), a informação fica vazia: nunca sai pela metade.
  * Nenhum domínio de cliente.
  */
 
-import type { V2AgentConfig, V2DerivedField, V2FieldMask } from "./types";
+import type { V2AgentConfig, V2DerivedField, V2DerivedPart, V2FieldMask } from "./types";
 
 const ALNUM = /[\p{L}\p{N}]/u;
 
@@ -40,6 +42,28 @@ export function maskFieldValue(value: string, mask: V2FieldMask | undefined): st
   return [...v].map((c, i) => (hidden.has(i) ? "x" : c)).join("");
 }
 
+/** Pedaço de um campo: caracteres → quantidade → maiúsculas. */
+export function derivedPartText(raw: unknown, part: V2DerivedPart): string {
+  let text = raw === null || raw === undefined ? "" : String(raw).trim();
+  const charset = part.charset ?? (part.digitsOnly ? "digits" : "all");
+  if (charset === "digits") text = text.replace(/\D/g, "");
+  else if (charset === "letters") text = text.replace(/[^\p{L}]/gu, "");
+  const chars = [...text];
+  const n = Math.max(0, Math.floor(part.count ?? 0));
+  if (part.take === "first" && n > 0) text = chars.slice(0, n).join("");
+  else if (part.take === "last" && n > 0) text = chars.slice(-n).join("");
+  switch (part.letterCase) {
+    case "upper":
+      return text.toLocaleUpperCase("pt-BR");
+    case "lower":
+      return text.toLocaleLowerCase("pt-BR");
+    case "capitalize":
+      return text.charAt(0).toLocaleUpperCase("pt-BR") + text.slice(1).toLocaleLowerCase("pt-BR");
+    default:
+      return text;
+  }
+}
+
 /** Valor de uma informação montada; "" se faltar algum campo usado. */
 export function derivedFieldValue(
   field: V2DerivedField,
@@ -54,13 +78,9 @@ export function derivedFieldValue(
     }
     const source = part.entity === "deal" ? deal : contact;
     const raw = part.key ? source?.[part.key] : undefined;
-    let text = raw === null || raw === undefined ? "" : String(raw).trim();
-    if (part.digitsOnly) text = text.replace(/\D/g, "");
-    if (!text) return "";
-    const n = Math.max(0, Math.floor(part.count ?? 0));
-    if (part.take === "first" && n > 0) text = text.slice(0, n);
-    else if (part.take === "last" && n > 0) text = text.slice(-n);
-    out += text;
+    const piece = derivedPartText(raw, part);
+    if (!piece) return "";
+    out += piece;
   }
   return out;
 }
