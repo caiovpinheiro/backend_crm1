@@ -34,7 +34,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { breakInlineSteps } from "./reply-format";
@@ -839,7 +839,7 @@ function responseLengthInstruction(length: V2AgentConfig["responseLength"]): str
  * o que fazer sem fonte (transferir, ignorar ou dizer que não tem).
  */
 const SOURCES_GUIDE =
-  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Não adivinhe com \"geralmente\" ou \"normalmente\": ou a fonte diz, ou você não sabe. Nome específico que o cliente citou (produto, plano, serviço, item) e que não aparece nas fontes nem nos dados dele: não confirme que existe nem atribua a ele datas, valores ou regras próprias; dê a regra geral e diga que não consegue confirmar esse item. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
+  "Responda com o que está nos trechos da base, no calendário, nos dados do cliente e nas informações fixas da empresa. Não complete com prazos, datas, valores, condições, canais, etapas nem nomes de menus, telas ou botões que não estejam nessas fontes, mesmo que pareçam óbvios. Não adivinhe com \"geralmente\" ou \"normalmente\": ou a fonte diz, ou você não sabe. Nome específico que o cliente citou (produto, plano, serviço, item) e que não aparece nas fontes nem nos dados dele: não confirme que existe nem atribua a ele datas, valores ou regras próprias; dê a regra geral e diga que não consegue confirmar esse item. Passo a passo só se um trecho descreve esse procedimento: não monte um caminho geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Quando falta a informação, diga com naturalidade que não tem; marque handoff=true se o cliente precisa dela para seguir, se pediu uma pessoa ou se depende de outra pessoa. Não prometa verificar e retornar depois. Só diga que fez algo que esteja em actions.";
 
 /** Como uma pessoa da equipe escreve numa conversa. Vale para qualquer produto. */
 const WRITING_GUIDE = [
@@ -969,6 +969,9 @@ function buildV2SystemPrompt(
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
     lines.push("Para enviar uma, devolva messageModel: { \"id\": \"<id>\" }. Ela chega ao cliente depois da sua reply, com os anexos (imagem, vídeo, áudio, documento). Use quando a mensagem pronta atende ao que o cliente pediu — principalmente quando ele precisa ver algo. Ao usar, a reply deve ser só uma frase curta de introdução: não repita o conteúdo da mensagem pronta nem descreva o anexo.");
+    if (config.messageModelAdapt) {
+      lines.push("Se o texto da mensagem pronta precisar se encaixar na conversa (tratamento, responder primeiro o ponto que o cliente perguntou), devolva também \"adapt\": true. O conteúdo não muda: links, números, datas e passos ficam iguais.");
+    }
     for (const m of messageModels) {
       lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
     }
@@ -1277,7 +1280,12 @@ export async function callV2LLM(args: {
     // messageModel é uma forma curta de devolver a ação send_message_model.
     if (output.messageModel?.id) {
       output.actions = [
-        { type: "send_message_model", modelId: output.messageModel.id, variables: output.messageModel.variables },
+        {
+          type: "send_message_model",
+          modelId: output.messageModel.id,
+          variables: output.messageModel.variables,
+          ...(output.messageModel.adapt && args.config.messageModelAdapt ? { adapt: true } : {}),
+        },
         ...output.actions,
       ];
     }
@@ -1318,13 +1326,14 @@ export async function callV2LLM(args: {
     // prova que a coisa existe).
     const factSources = sources.slice(1 + previousMessages.length);
     const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
-    const unsupportedOf = (reply: string) => [
+    const unsupportedOf = (reply: string, reason?: string) => [
+      ...(procedureAdmittedMissing(reply, reason) ? ["um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)"] : []),
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
       ...unsupportedQuotedTerms(reply, sources).map((t) => `"${t}"`),
       ...unsupportedFigures(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];
-    const unsupported = unsupportedOf(r.output.reply);
+    const unsupported = unsupportedOf(r.output.reply, r.output.reason);
     if (unsupported.length === 0) return;
     const list = unsupported.join(", ");
     noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: false });
@@ -1332,7 +1341,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
@@ -1353,7 +1362,7 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
-        const still = unsupportedOf(fixed.reply);
+        const still = unsupportedOf(fixed.reply, fixed.reason);
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
           noteV2Fact("verification", { unsupported, rewritten: true, forcedHandoff: false });

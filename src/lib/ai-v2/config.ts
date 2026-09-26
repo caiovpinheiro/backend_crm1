@@ -52,6 +52,7 @@ const fieldConfigSchema = z.object({
 const replyEndingRuleSchema = z.object({
   enabled: z.boolean().optional().default(false),
   phrases: z.array(z.string()).optional().default([]),
+  buttons: z.array(z.string()).optional(),
 });
 const replyEndingSchema = z.object({
   /** No assunto: true = segue o agente. */
@@ -374,6 +375,8 @@ export const v2AgentConfigSchema = z.object({
   fallback: fallbackSchema,
   scope: scopeSchema,
   replyEnding: replyEndingSchema.optional(),
+  /** Mensagens prontas: o modelo pode pedir para ajustar o texto à conversa. */
+  messageModelAdapt: z.boolean().optional().default(false),
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
   businessHours: z

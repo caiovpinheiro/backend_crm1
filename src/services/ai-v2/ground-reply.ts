@@ -82,6 +82,22 @@ function sameLineVariant(norm: string, lines: string[][]): boolean {
 
 const HEDGES = ["geralmente", "normalmente", "costuma", "costumam", "em geral", "provavelmente", "possivelmente"];
 
+/** A decisão do modelo diz que o material não traz o procedimento pedido. */
+const ADMITS_NO_PROCEDURE =
+  /\bn[aã]o (?:informa|traz|descreve|detalha|explica|mostra|cont[eé]m|tem|apresenta)\b[^.]{0,40}?\b(?:procedimento|passo|caminho|como)\b|\bsem (?:procedimento|passo a passo|orienta[cç][aã]o)\b/i;
+/** Instrução de como fazer algo (verbo de ação no imperativo). */
+const INSTRUCTION = /\b(?:selecione|clique|acesse|escolha|inclua|anexe|toque|preencha|abra|digite|localize|v[aá] (?:em|at[eé]|para))\b/i;
+
+/**
+ * Passo a passo que o próprio modelo admite não estar no material: a
+ * decisão diz "a base não informa o procedimento" e a resposta, mesmo
+ * assim, manda selecionar, clicar, anexar. É procedimento montado a partir
+ * de outro serviço ou do que aparece numa imagem.
+ */
+export function procedureAdmittedMissing(reply: string, reason: string | undefined): boolean {
+  return !!reason && ADMITS_NO_PROCEDURE.test(reason) && INSTRUCTION.test(reply);
+}
+
 /**
  * Palpite: "geralmente é pela opção X", "normalmente no valor da
  * mensalidade". Quando a palavra não vem da fonte, o modelo está

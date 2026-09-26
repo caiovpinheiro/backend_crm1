@@ -126,6 +126,22 @@ export type SendAgentMessageResult =
  * fora do escopo do usuário logado — seria necessário resolver a
  * sessão Baileys correta por tenant, o que é escopo futuro).
  */
+/**
+ * Botões/lista do WhatsApp. `text` continua sendo a versão em texto
+ * (opções numeradas): vale fora da Meta, em rascunho e se o envio
+ * interativo for recusado.
+ */
+export type AgentInteractiveMessage = {
+  kind: "buttons" | "list";
+  /** Enviado antes, quando a resposta não cabe no corpo interativo. */
+  leadText?: string;
+  body: string;
+  options: Array<{ id: string; title: string; description?: string }>;
+  listButton: string;
+  /** Conteúdo registrado na conversa. */
+  displayContent: string;
+};
+
 export type HumanBehaviorConfig = {
   simulateTyping: boolean;
   typingPerCharMs: number;
@@ -158,6 +174,7 @@ export async function sendAgentMessage(args: {
    * segunda confirmação (que só muda o horário) morre como near-duplicate.
    */
   bypassDuplicateGuard?: boolean;
+  interactive?: AgentInteractiveMessage;
 }): Promise<SendAgentMessageResult> {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
@@ -325,23 +342,60 @@ export async function sendAgentMessage(args: {
     }
 
     let externalId: string | null = null;
-    try {
-      const send = await metaClient.sendText(contact.phone, text);
-      externalId = send.messages?.[0]?.id ?? null;
-    } catch (err) {
-      console.error(
-        `[ai-piloting] envio autônomo falhou conv=${args.conversationId}: ${err}. Gravando rascunho.`,
-      );
-      return saveDraft(args.conversationId, args.agentUserId, text);
+    let sentInteractive = false;
+    let leadSent = false;
+    const iv = args.interactive;
+    if (iv) {
+      try {
+        if (iv.leadText) {
+          await metaClient.sendText(contact.phone, iv.leadText);
+          leadSent = true;
+        }
+        const send =
+          iv.kind === "buttons"
+            ? await metaClient.sendInteractiveButtons(
+                contact.phone,
+                iv.body,
+                iv.options.map((o) => ({ id: o.id, title: o.title })),
+              )
+            : await metaClient.sendInteractiveList(contact.phone, iv.body, iv.listButton, [
+                { rows: iv.options },
+              ]);
+        externalId = send.messages?.[0]?.id ?? null;
+        sentInteractive = true;
+      } catch (err) {
+        // Recusado (janela, formato): as opções seguem numeradas no texto.
+        console.warn(
+          `[ai-piloting] envio interativo falhou conv=${args.conversationId}: ${err}. Enviando como texto.`,
+        );
+      }
     }
+    if (!sentInteractive) {
+      try {
+        const send = await metaClient.sendText(
+          contact.phone,
+          // O texto do corpo já saiu antes da falha: manda só as opções.
+          leadSent && iv?.leadText && text.startsWith(iv.leadText)
+            ? text.slice(iv.leadText.length).trim() || text
+            : text,
+        );
+        externalId = send.messages?.[0]?.id ?? null;
+      } catch (err) {
+        console.error(
+          `[ai-piloting] envio autônomo falhou conv=${args.conversationId}: ${err}. Gravando rascunho.`,
+        );
+        return saveDraft(args.conversationId, args.agentUserId, text);
+      }
+    }
+    const savedContent = sentInteractive && iv ? iv.displayContent : text;
 
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: args.conversationId,
         channelId: conv?.channelRef?.id ?? undefined,
-        content: text,
+        content: savedContent,
         direction: "out",
-        messageType: "text",
+        messageType: sentInteractive ? "interactive" : "text",
         authorType: "bot",
         aiAgentUserId: args.agentUserId,
         senderName: await aiSenderName(args.agentUserId),
@@ -363,7 +417,7 @@ export async function sendAgentMessage(args: {
       conversationId: args.conversationId,
       contactId: args.contactId,
       direction: "out",
-      content: text,
+      content: savedContent,
       timestamp: saved.createdAt,
     });
     await closeAttendanceIfFarewell({

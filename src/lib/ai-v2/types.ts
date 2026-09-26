@@ -103,6 +103,8 @@ export interface V2ProductPolicy {
 export interface V2ReplyEndingRule {
   enabled: boolean;
   phrases: string[];
+  /** Botões de resposta rápida junto do fecho (ex.: "Sim", "Não"); até 3. */
+  buttons?: string[];
 }
 
 /** Fecho das respostas por tipo: depois de passo a passo e depois de informação. */
@@ -465,6 +467,8 @@ export interface V2AgentConfig {
   /** Fora do escopo / assuntos proibidos. */
   scope?: V2ScopeConfig;
   replyEnding?: V2ReplyEnding;
+  /** Mensagens prontas: permite ajustar o texto à conversa (links e números ficam iguais). */
+  messageModelAdapt?: boolean;
   /** Inatividade do cliente. */
   inactivity?: V2InactivityConfig;
   /** Tabulação ao encerrar/transferir. */

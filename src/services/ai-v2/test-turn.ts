@@ -10,9 +10,10 @@ import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
-import { noteV2Fact, peekV2Fact } from "./trace";
+import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { keepOpenOnNewRequest } from "./closure";
-import { applyReplyEnding, effectiveReplyEnding } from "./reply-ending";
+import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
+import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -50,6 +51,13 @@ export type V2TestTurnResult = {
   scrubbedFields?: string[];
   /** Estágio da conversa após este turno (para simulação multi-turno). */
   stage?: V2Stage;
+  /**
+   * Botões/lista que a produção mandaria. `reply` segue com as opções
+   * numeradas (o que vai quando o canal não aceita botões).
+   */
+  interactive?: { kind: "buttons" | "list"; body: string; labels: string[]; displayContent: string } | null;
+  /** Opção da mensagem anterior que a mensagem do cliente escolheu. */
+  chosenOption?: string | null;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -141,6 +149,13 @@ export async function simulateV2Turn(
    */
   opts: { skipEntry?: boolean } = {},
 ): Promise<V2TestTurnResult> {
+  // Clique/número na opção da mensagem anterior vira o rótulo, como na produção.
+  const lastAgent = [...history].reverse().find((h) => h.role === "assistant")?.content ?? null;
+  const chosenOption = matchPendingOption(optionsFromAgentMessage(lastAgent), userMessage);
+  if (chosenOption && chosenOption !== userMessage.trim()) {
+    traceStep("opções", `Cliente escolheu a opção "${chosenOption}"`);
+    userMessage = chosenOption;
+  }
   // Garante contexto de tenant para as tools do motor no ambiente de teste.
   if (organizationId && !getRequestContext()) {
     enterRequestContext({
@@ -538,6 +553,7 @@ export async function simulateV2Turn(
   // Em produção, ao transferir o cliente recebe a mensagem de transferência,
   // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
   let reply = output.reply;
+  let interactive: V2TestTurnResult["interactive"] = null;
   if (handoff) {
     // Mesma mensagem que a produção manda: "sem material" quando citava algo
     // sem fonte, senão a do destino do assunto, senão a padrão.
@@ -548,16 +564,24 @@ export async function simulateV2Turn(
   } else {
     const askAction = executedActions.find((e) => e.action.type === "ask_with_options");
     const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
-    if (options.length > 0) {
-      reply = [reply.trim(), options.map((o, i) => `${i + 1}. ${o.label}`).join("\n")].filter(Boolean).join("\n\n");
-    } else if (effectiveStage !== "confirming") {
+    let labels = options.map((o) => o.label);
+    if (options.length === 0 && effectiveStage !== "confirming") {
       // Fecho configurado, igual à produção.
-      reply = applyReplyEnding({
+      const ending = applyReplyEnding({
         reply,
         ending: effectiveReplyEnding(config, activeTheme),
-        lastAgentMessage: [...history].reverse().find((h) => h.role === "assistant")?.content ?? null,
+        lastAgentMessage: lastAgent,
         turnSeed: history.length,
-      }).text;
+      });
+      reply = ending.text;
+      if (ending.added) labels = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
+    }
+    if (labels.length > 0) {
+      const built = buildV2Interactive(reply, labels);
+      interactive = built.payload
+        ? { kind: built.payload.kind, body: reply.trim(), labels: built.labels, displayContent: built.payload.displayContent }
+        : null;
+      reply = built.fallbackText;
     }
   }
 
@@ -610,6 +634,8 @@ export async function simulateV2Turn(
     dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
     scrubbedFields: guard.scrubbedFields,
     stage: nextStage,
+    interactive: nextStage === "identifying" ? null : interactive,
+    chosenOption,
   };
 }
 

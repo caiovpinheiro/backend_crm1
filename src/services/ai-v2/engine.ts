@@ -32,7 +32,8 @@ import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
-import { applyReplyEnding, effectiveReplyEnding } from "./reply-ending";
+import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
+import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
 import {
   currentV2OnboardingStep,
@@ -398,6 +399,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
   const humanBehavior = v2HumanBehavior(config);
   let counters = parseV2Counters(stateRow?.counters);
+  // Opções da última resposta (botões/lista/numeradas): o clique ou o número
+  // ("2") vira o rótulo da opção, que é o que o modelo e as regras entendem.
+  // Valem só para a próxima mensagem do cliente.
+  const pendingOptions = counters.pendingOptions ?? [];
+  if (pendingOptions.length > 0) {
+    counters.pendingOptions = undefined;
+    const chosen = matchPendingOption(pendingOptions, input.userMessage);
+    if (chosen) {
+      traceStep("opções", `Cliente escolheu a opção "${chosen}"`);
+      if (chosen !== input.userMessage.trim()) input = { ...input, userMessage: chosen };
+    }
+  }
   traceStep("estado", stateRow
     ? `Etapa "${stage}", dono "${owner}"`
     : "Primeiro turno deste atendimento (sem estado anterior)");
@@ -1361,12 +1374,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   anyClose = actionRes.anyClose || llmOutput.concluded;
   if (actionRes.themeId) themeId = actionRes.themeId;
 
-  // ask_with_options: o executor só devolve as opções. Sem isto elas nunca
-  // chegavam ao cliente. Vai como lista numerada junto da resposta.
+  // ask_with_options: o executor só devolve as opções; saem com a resposta
+  // como botões/lista do WhatsApp (ou numeradas no texto, onde não dá).
   const askOptions = normalizeAskOptions(actionRes.askOptions);
-  if (askOptions.length > 0) {
-    replyText = [replyText.trim(), askOptions.map((o, i) => `${i + 1}. ${o.label}`).join("\n")].filter(Boolean).join("\n\n");
-  }
+  let replyOptions = askOptions.map((o) => o.label);
 
   // Confirmação negativa
   if ((stage as V2Stage) === "confirming" && llmOutput.confirmed === false) {
@@ -1435,15 +1446,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (ending.added) {
       replyText = ending.text;
       traceStep("resposta", `Fecho acrescentado (${ending.kind === "procedure" ? "passo a passo" : "informação"}): "${ending.added}"`);
+      replyOptions = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
     }
   }
+  // Aviso de limite no lugar da resposta: sem opções.
+  if (stopLimits.blocksReply) replyOptions = [];
 
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
-    const res = await sendReply(replyText);
+    const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions) : null;
+    const outText = withOptions ? withOptions.fallbackText : replyText;
+    const res = await sendReply(outText, withOptions?.payload);
     noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
-      sentReply = replyText;
+      sentReply = outText;
+      if (withOptions && withOptions.labels.length > 0) {
+        counters.pendingOptions = withOptions.labels;
+        traceStep("opções", `${withOptions.payload ? (withOptions.payload.kind === "buttons" ? "Botões" : "Lista") : "Opções numeradas"}: ${withOptions.labels.join(" | ")}`);
+      }
     } else if (res.reason === "near_duplicate") {
       // A trava anti-repetição do envio olha as últimas mensagens do agente;
       // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
@@ -1569,9 +1589,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return sent;
   }
 
-  async function sendReply(text: string): Promise<{ sent: boolean; reason?: string }> {
+  async function sendReply(text: string, interactive?: V2InteractivePayload | null): Promise<{ sent: boolean; reason?: string }> {
     if (!text.trim()) return { sent: false, reason: "empty" };
     return sendV2TextMessage({
+      interactive,
       conversationId: input.conversationId,
       contactId: contactId!,
       agentUserId: resolved!.userId,
@@ -1848,5 +1869,6 @@ function buildActionCtx(
     channel: input.channel,
     autonomyMode,
     setSurveyPending,
+    userMessage: input.userMessage,
   };
 }

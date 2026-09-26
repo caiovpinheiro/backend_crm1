@@ -8,6 +8,8 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import type { V2Action, V2ActionType, V2AgentConfig, V2Destination, V2LLMOutput } from "@/lib/ai-v2/types";
 import { sendAgentMessage, type HumanBehaviorConfig } from "@/services/ai/piloting-actions";
+import type { V2InteractivePayload } from "./interactive";
+import { adaptMessageModelText } from "./message-adapt";
 import { applyExistingTagToContact } from "@/services/tags";
 import { createDeal, updateDeal } from "@/services/deals";
 import { createActivity } from "@/services/activities";
@@ -46,6 +48,8 @@ export interface V2ActionContext {
   channel?: string;
   autonomyMode: "AUTONOMOUS" | "DRAFT";
   setSurveyPending?: (pending: boolean) => void;
+  /** Mensagem do cliente no turno (para adaptar mensagem pronta). */
+  userMessage?: string;
 }
 
 async function executeHandoff(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
@@ -362,7 +366,15 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     if (!template) return { action, ok: false, error: "Message model not found" };
 
     const vars = { ...ctx.llmOutput?.collected, ...messageVars(ctx), ...((action.variables as Record<string, string> | undefined) ?? {}) };
-    const text = renderMessage(template.content ?? "", vars, defaultFormatter());
+    let text = renderMessage(template.content ?? "", vars, defaultFormatter());
+    // "Adaptar": só com a opção ligada na config e o modelo pedindo.
+    if (action.adapt === true && ctx.config.messageModelAdapt === true && text.trim() && ctx.userMessage?.trim()) {
+      const adapted = await adaptMessageModelText({ agentId: ctx.agentId, config: ctx.config, text, clientMessage: ctx.userMessage });
+      traceStep("ações", adapted.adapted
+        ? `Mensagem pronta "${template.name}" adaptada à conversa`
+        : `Mensagem pronta "${template.name}" enviada sem adaptar (${adapted.reason ?? "motivo desconhecido"})`);
+      text = adapted.text;
+    }
     // Mensagem pronta só com anexo (sem texto) é válida.
     if (text.trim()) {
       await sendV2TextMessage({
@@ -627,9 +639,19 @@ export async function sendV2TextMessage(args: {
   channel?: string;
   autonomyMode: "AUTONOMOUS" | "DRAFT";
   humanBehavior?: HumanBehaviorConfig;
+  /** Botões/lista; `text` é a versão com as opções numeradas. */
+  interactive?: V2InteractivePayload | null;
 }): Promise<{ sent: boolean; reason?: string }> {
   if (!args.text.trim()) return { sent: false, reason: "empty" };
   const text = toWhatsAppText(args.text);
+  const iv = args.interactive;
+  const interactive = iv
+    ? {
+        ...iv,
+        body: toWhatsAppText(iv.body),
+        ...(iv.leadText ? { leadText: toWhatsAppText(iv.leadText) } : {}),
+      }
+    : undefined;
   const result = (await sendAgentMessage({
     conversationId: args.conversationId,
     contactId: args.contactId,
@@ -639,6 +661,7 @@ export async function sendV2TextMessage(args: {
     channel: args.channel === "baileys" ? "baileys" : "meta",
     bypassAssigneeCheck: false,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
+    ...(interactive ? { interactive } : {}),
   })) as { status?: string; reason?: string } | undefined;
   const preview = text.length > 90 ? `${text.slice(0, 90)}…` : text;
   if (result?.status === "skipped") {

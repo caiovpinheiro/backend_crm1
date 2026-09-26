@@ -14,6 +14,8 @@ export interface V2Counters {
   lastLoopMessage?: string;
   aiTransferCount: number;
   surveyPending: boolean;
+  /** Opções mandadas na última resposta (botões/lista/numeradas), até o cliente responder. */
+  pendingOptions?: string[];
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -40,6 +42,9 @@ export function parseV2Counters(raw: unknown): V2Counters {
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
     aiTransferCount: Number(r.aiTransferCount) || 0,
     surveyPending: Boolean(r.surveyPending),
+    ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
+      ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
+      : {}),
   };
 }
 

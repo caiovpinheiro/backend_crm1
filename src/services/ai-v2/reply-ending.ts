@@ -22,6 +22,19 @@ const fold = (s: string) =>
 /** Linha de passo: "1.", "2)", "1️⃣", "Passo 3". */
 const STEP_LINE = /^\s*(?:\d{1,2}\s*[.)-]|\d️?⃣|passo\s+\d)/i;
 
+/** Pedido de informação ao cliente sem ponto de interrogação. */
+const ASKS_CLIENT =
+  /\b(?:preciso (?:saber|que voc[eê]|confirmar)|me (?:diga|diz|informe|informa|conte|conta|envie|envia|mande|manda|passe|passa)|pode(?:ria)? me (?:dizer|informar|enviar|mandar|contar|passar)|qual (?:[ée]|seria) (?:a|o|sua|seu)\b)/i;
+
+/** A resposta termina com pergunta ou o último parágrafo pede algo ao cliente. */
+export function asksClient(reply: string): boolean {
+  const paragraphs = reply.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const last = paragraphs[paragraphs.length - 1] ?? "";
+  // Pergunta no fim ou no meio do último parágrafo ("Qual solicitação? Assim indico…").
+  if (last.includes("?")) return true;
+  return ASKS_CLIENT.test(last);
+}
+
 /** Passo a passo (2+ passos numerados) ou informação. */
 export function classifyReply(reply: string): V2ReplyKind {
   const steps = reply.split(/\n+/).filter((l) => STEP_LINE.test(l)).length;
@@ -57,9 +70,10 @@ export function applyReplyEnding(args: {
   const phrases = (rule?.enabled ? rule.phrases : []).map((p) => p.trim()).filter(Boolean);
   if (phrases.length === 0) return { text: args.reply, added: null, kind };
 
-  // Já termina com pergunta (pedido de dado, opção, confirmação): não soma outra.
-  const lastLine = reply.split("\n").filter((l) => l.trim()).pop() ?? "";
-  if (/\?\s*[\p{Emoji_Presentation}\p{Extended_Pictographic}\s]*$/u.test(lastLine)) return { text: args.reply, added: null, kind };
+  // Já termina com pergunta ou pede algo ao cliente ("preciso saber qual…",
+  // "me diga…"): o atendimento espera a resposta dele, e "posso ajudar em
+  // algo mais?" contradiria o pedido.
+  if (asksClient(reply)) return { text: args.reply, added: null, kind };
 
   // A resposta ou a mensagem anterior do agente já traz uma das frases.
   const foldedReply = fold(reply);
@@ -70,6 +84,13 @@ export function applyReplyEnding(args: {
 
   const phrase = phrases[Math.abs(args.turnSeed ?? 0) % phrases.length];
   return { text: `${reply}\n\n${phrase}`, added: phrase, kind };
+}
+
+/** Botões de resposta do fecho (rótulos até 20 caracteres, no máximo 3). */
+export function replyEndingButtons(ending: V2ReplyEnding | undefined, kind: V2ReplyKind | null): string[] {
+  if (!ending || !kind) return [];
+  const labels = (ending[kind]?.buttons ?? []).map((b) => b.trim()).filter(Boolean);
+  return labels.slice(0, 3).map((b) => b.slice(0, 20));
 }
 
 /** Linha do prompt: quem põe o fecho é o motor. */
