@@ -382,13 +382,10 @@ export function buildV2ToolSet(args: {
           return result;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          // DIAGNÓSTICO TEMPORÁRIO (remover após achar a causa do bug
-          // "organization context ausente" em prod/dev — ver ai-v2 RAG):
-          // expõe se capturedCtx existia no momento em que a tool foi
-          // montada, pra distinguir "nunca capturou" de "capturou mas
-          // perdeu no meio do execute()".
-          const diag = `capturedCtxAtBuild=${capturedCtx ? `org:${capturedCtx.organizationId}` : "AUSENTE"} ctxNoCatch=${getRequestContext() ? `org:${getRequestContext()?.organizationId}` : "AUSENTE"}`;
-          const failure = { ok: false as const, error: `${msg} [[diag: ${diag}]]` };
+          // O erro volta ao modelo e vai para o log: sem ids internos. O
+          // contexto (tinha ou não organização) fica só no log do servidor.
+          console.warn(`[ai-v2] ferramenta ${toolName} falhou (contexto na montagem: ${capturedCtx ? "sim" : "não"}; na falha: ${getRequestContext() ? "sim" : "não"}):`, msg);
+          const failure = { ok: false as const, error: msg };
           governor.record(toolName, input, failure);
           return failure;
         }
@@ -943,7 +940,7 @@ function buildV2SystemPrompt(
   }
 
   if (themeInstructions) {
-    lines.push(`# Assunto ativo: ${themeId}`);
+    lines.push(`# Assunto ativo: ${activeTheme(config, themeId)?.name ?? themeId}`);
     lines.push(themeInstructions);
   }
 

@@ -66,6 +66,11 @@ export function noteV2Fact(key: string, value: unknown, opts?: { keepFirst?: boo
   s.facts[key] = value;
 }
 
+/** Valor de um fato já anotado no turno. */
+export function peekV2Fact(key: string): unknown {
+  return store.getStore()?.facts[key];
+}
+
 /** Fatos do turno corrente (cópia). */
 export function takeV2Facts(): Record<string, unknown> | undefined {
   const s = store.getStore();

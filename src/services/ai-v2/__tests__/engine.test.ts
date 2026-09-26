@@ -1304,4 +1304,76 @@ describe("processV2Turn — correções do motor", () => {
     const logged = mocks.logTurn.mock.lastCall![0] as { reply?: string };
     expect(logged.reply).toBeUndefined();
   });
+
+  const THEME = {
+    id: "t-acesso", name: "Acesso", when: ["primeiro acesso"], examples: [], instructions: "Explique como acessar.",
+    allowedTools: [], allowedKnowledgeDocIds: [], allowedMessageModelIds: [], knowledgeDocIds: [], messageModelIds: [],
+  };
+
+  it("pedido na primeira mensagem: o assunto fica guardado na confirmação e vale depois do 'sim'", async () => {
+    const config = baseConfig({ themes: [THEME] } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(null);
+    await run("como faço meu primeiro acesso?");
+    const upsert = mocks.upsertState.mock.calls.find((c) => c[0].stage === "confirming");
+    expect(upsert?.[0].themeId).toBe("t-acesso");
+    expect(mocks.logTurn.mock.lastCall![0].themeId).toBe("t-acesso");
+
+    vi.clearAllMocks();
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false });
+    mocks.prismaConversationFindUnique.mockResolvedValue({ contactId: "contact-1", organizationId: "org-1", contact: { phone: "5511999999999" } });
+    mocks.loadBridge.mockResolvedValue({ variables: {} });
+    mocks.mapBridgeVars.mockReturnValue({});
+    mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.findInherited.mockResolvedValue(null);
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.loadContext.mockResolvedValue(CONTEXT_WITH_DEAL);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("confirming"), themeId: "t-acesso" });
+    mocks.callLLM.mockResolvedValue(llmOut({ confirmed: true, reply: "Para acessar, siga os passos." }));
+    await run("sim");
+    expect(mocks.callLLM.mock.lastCall![0].themeId).toBe("t-acesso");
+    expect(mocks.logTurn.mock.lastCall![0].themeId).toBe("t-acesso");
+  });
+
+  it("assunto indicado pelo modelo vale quando nada casou (igual à Conversa de teste)", async () => {
+    const config = baseConfig({ themes: [THEME] } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ theme: "t-acesso" } as Partial<V2LLMOutput>));
+    await run("não consigo entrar de jeito nenhum");
+    expect(mocks.logTurn.mock.lastCall![0].themeId).toBe("t-acesso");
+    const upsert = mocks.upsertState.mock.lastCall![0];
+    expect(upsert.themeId).toBe("t-acesso");
+  });
+
+  it("atalho com palavra de pedir atendente registra 'cliente pediu pessoa'", async () => {
+    const config = baseConfig({
+      handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["atendente"] },
+      rules: [{ id: "r1", name: "Pedido de pessoa", enabled: true, order: 0, conditions: [{ type: "keywords", values: ["atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { takeV2Facts } = await import("../trace");
+    let facts: Record<string, unknown> | undefined;
+    mocks.logTurn.mockImplementation(async () => {
+      facts = takeV2Facts();
+    });
+    await run("quero falar com um atendente");
+    expect(facts?.handoffCause).toBe("human_request");
+  });
+
+  it("transferência por citar algo sem fonte usa a mensagem 'sem material' configurada", async () => {
+    const config = baseConfig({ fallback: { noSource: { message: "Não tenho essa informação; vou chamar alguém da equipe." } } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { noteV2Fact } = await import("../trace");
+    mocks.callLLM.mockImplementation(async () => {
+      noteV2Fact("handoffCause", "verification", { keepFirst: true });
+      return llmOut({ handoff: true, reply: "Não tenho essa informação; vou chamar alguém da equipe.", reason: "Citava algo sem fonte" });
+    });
+    await run("qual o valor da taxa extra?");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text);
+    expect(texts).toContain("Não tenho essa informação; vou chamar alguém da equipe.");
+    expect(texts).not.toContain("Vou transferir.");
+  });
 });

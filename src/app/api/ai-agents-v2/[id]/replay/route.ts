@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth, requirePermission } from "@/lib/auth-helpers";
+import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import {
   estimateChosenReplay,
   estimateImportedReplay,
@@ -46,13 +46,14 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!r.ok) return r.response;
   const denied = await requirePermission(r.session.user, "settings:ai");
   if (denied) return denied;
-  try {
-    const runs = await listReplayRuns(r.session.user.organizationId!, id);
-    return NextResponse.json({ runs, limits: REPLAY_LIMITS });
-  } catch (err) {
-    console.error("[GET /api/ai-agents-v2/[id]/replay]", err);
-    return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar comparações." }, { status: 500 });
-  }
+  return runInSessionContext(r.session, async () => {    try {
+      const runs = await listReplayRuns(r.session.user.organizationId!, id);
+      return NextResponse.json({ runs, limits: REPLAY_LIMITS });
+    } catch (err) {
+      console.error("[GET /api/ai-agents-v2/[id]/replay]", err);
+      return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar comparações." }, { status: 500 });
+    }
+  });
 }
 
 /**
@@ -65,50 +66,51 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!r.ok) return r.response;
   const denied = await requirePermission(r.session.user, "settings:ai");
   if (denied) return denied;
-  try {
-    const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
-    const p = parseParams(body);
-    const organizationId = r.session.user.organizationId!;
-    const requester = {
-      userId: r.session.user.id,
-      role: (r.session.user as { role?: string | null }).role ?? null,
-      isSuperAdmin: Boolean((r.session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
-    };
-    if (body.source === "crm_ids") {
-      const ids = parseConversationRefs(typeof body.conversationRefs === "string" ? body.conversationRefs : "");
-      if (ids.length === 0) return NextResponse.json({ message: "Cole o link ou o id de ao menos uma conversa." }, { status: 400 });
+  return runInSessionContext(r.session, async () => {    try {
+      const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
+      const p = parseParams(body);
+      const organizationId = r.session.user.organizationId!;
+      const requester = {
+        userId: r.session.user.id,
+        role: (r.session.user as { role?: string | null }).role ?? null,
+        isSuperAdmin: Boolean((r.session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+      };
+      if (body.source === "crm_ids") {
+        const ids = parseConversationRefs(typeof body.conversationRefs === "string" ? body.conversationRefs : "");
+        if (ids.length === 0) return NextResponse.json({ message: "Cole o link ou o id de ao menos uma conversa." }, { status: 400 });
+        if (body.estimate === true) {
+          return NextResponse.json(await estimateChosenReplay({ organizationId, agentId: id, config: p.config, conversationIds: ids }));
+        }
+        const params: ReplayParams = { ...p, source: "crm_ids", conversationIds: ids, conversations: ids.length };
+        const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, requester });
+        return NextResponse.json(result, { status: 202 });
+      }
+      if (body.source === "import") {
+        const transcripts = parseTranscripts(body);
+        if (transcripts.length === 0) return NextResponse.json({ message: "Anexe ao menos uma conversa." }, { status: 400 });
+        if (transcripts.some((t) => t.teamAuthors.length === 0)) {
+          return NextResponse.json({ message: "Marque quem é da equipe em cada conversa." }, { status: 400 });
+        }
+        if (body.estimate === true) {
+          return NextResponse.json(await estimateImportedReplay({ organizationId, agentId: id, config: p.config, transcripts }));
+        }
+        const params: ReplayParams = { ...p, source: "import", conversations: transcripts.length, files: transcripts.map((t) => t.name) };
+        const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, transcripts });
+        return NextResponse.json(result, { status: 202 });
+      }
       if (body.estimate === true) {
-        return NextResponse.json(await estimateChosenReplay({ organizationId, agentId: id, config: p.config, conversationIds: ids }));
+        return NextResponse.json(await estimateReplay({ organizationId, agentId: id, params: p }));
       }
-      const params: ReplayParams = { ...p, source: "crm_ids", conversationIds: ids, conversations: ids.length };
-      const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, requester });
+      const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params: { ...p, source: "crm" }, requester });
       return NextResponse.json(result, { status: 202 });
-    }
-    if (body.source === "import") {
-      const transcripts = parseTranscripts(body);
-      if (transcripts.length === 0) return NextResponse.json({ message: "Anexe ao menos uma conversa." }, { status: 400 });
-      if (transcripts.some((t) => t.teamAuthors.length === 0)) {
-        return NextResponse.json({ message: "Marque quem é da equipe em cada conversa." }, { status: 400 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "NO_OPENAI_KEY") {
+        return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para comparar." }, { status: 400 });
       }
-      if (body.estimate === true) {
-        return NextResponse.json(await estimateImportedReplay({ organizationId, agentId: id, config: p.config, transcripts }));
-      }
-      const params: ReplayParams = { ...p, source: "import", conversations: transcripts.length, files: transcripts.map((t) => t.name) };
-      const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params, transcripts });
-      return NextResponse.json(result, { status: 202 });
+      const status = msg.includes("em andamento") ? 409 : msg.includes("não encontrado") ? 404 : 500;
+      if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/replay]", err);
+      return NextResponse.json({ message: msg }, { status });
     }
-    if (body.estimate === true) {
-      return NextResponse.json(await estimateReplay({ organizationId, agentId: id, params: p }));
-    }
-    const result = await startReplay({ organizationId, agentId: id, userId: r.session.user.id, params: { ...p, source: "crm" }, requester });
-    return NextResponse.json(result, { status: 202 });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg === "NO_OPENAI_KEY") {
-      return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para comparar." }, { status: 400 });
-    }
-    const status = msg.includes("em andamento") ? 409 : msg.includes("não encontrado") ? 404 : 500;
-    if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/replay]", err);
-    return NextResponse.json({ message: msg }, { status });
-  }
+  });
 }

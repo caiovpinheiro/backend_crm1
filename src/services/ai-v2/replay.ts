@@ -760,7 +760,7 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
           runWithV2Trace(async () => {
             const r = await simulateV2Turn(
               args.agentId, args.config, point.clientText, point.history,
-              args.organizationId, w.contactId ?? undefined, undefined, "active",
+              args.organizationId, w.contactId ?? undefined, undefined, "active", undefined, { skipEntry: true },
             );
             return { sim: r, trace: takeV2TraceForLog() ?? [], turnFacts: takeV2Facts() ?? {} };
           }),

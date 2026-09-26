@@ -34,6 +34,8 @@ describe("unsupportedFigures e isNearDuplicateReply", () => {
     const { unsupportedFigures } = await import("../ground-reply");
     const src = ["O reajuste é de 8% a 12% ao ano. Taxa de R$ 1.290,00."];
     expect(unsupportedFigures("Reajuste de 8% a 12%, juros de 1% ao mês e taxa de R$ 50", src)).toEqual(["1%", "R$ 50"]);
+    // Ponto final da frase não faz o valor "sumir" do material.
+    expect(unsupportedFigures("A taxa é R$ 50.", ["A taxa é R$ 50"])).toEqual([]);
     expect(unsupportedFigures("Valor: R$ 1.290,00", src)).toEqual([]);
   });
 

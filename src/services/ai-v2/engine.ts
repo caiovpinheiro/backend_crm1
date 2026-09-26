@@ -14,7 +14,7 @@ import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedCo
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
-import { selectV2ThemeSemantic } from "./theme-semantic";
+import { selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
@@ -22,12 +22,14 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+
+export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
-import { noteV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
+import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior } from "./closure";
 import { simpleHandoff } from "./handoff";
@@ -181,16 +183,6 @@ async function getConversationPhone(conversationId: string): Promise<string | nu
     select: { contact: { select: { phone: true } } },
   });
   return conv?.contact?.phone ?? null;
-}
-
-/** A mensagem traz uma das palavras de "pedir atendente" da configuração. */
-export function mentionsHumanRequest(config: V2AgentConfig, message: string): boolean {
-  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const text = ` ${fold(message).replace(/[^a-z0-9]+/g, " ")} `;
-  return (config.handoff?.humanRequestKeywords ?? []).some((w) => {
-    const k = fold(w).replace(/[^a-z0-9]+/g, " ").trim();
-    return k.length > 0 && text.includes(` ${k} `);
-  });
 }
 
 function isPhoneAllowed(config: V2AgentConfig, phone: string | null): boolean {
@@ -409,6 +401,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ? `Etapa "${stage}", dono "${owner}"`
     : "Primeiro turno deste atendimento (sem estado anterior)");
   let themeId: string | undefined = stateRow?.themeId ?? undefined;
+  // Assunto escolhido por atalho neste turno: vale sobre gatilhos e sentido.
+  let themeFromRule = false;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
   // A conversa está atribuída a este agente v2. owner=pessoa aqui é estado
   // antigo (humano anterior ou handoff que não trocou o responsável) e
@@ -820,7 +814,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const replyActionTypes = new Set(["send_message", "send_message_model", "send_whatsapp_template"]);
     if (stop.blocksReply && ruleActions.some((a) => replyActionTypes.has(a.type))) {
       ruleActions = ruleActions.filter((a) => !replyActionTypes.has(a.type));
-      if (stop.action === "handoff") ruleActions.push({ type: "handoff" });
+      if (stop.action === "handoff") {
+        noteV2Fact("handoffCause", "limit", { keepFirst: true });
+        ruleActions.push({ type: "handoff" });
+      }
       else if (stop.action === "close") ruleActions.push({ type: "close_conversation" });
       else if (stop.action === "silence" || stop.action === "none") {
         // A resposta da regra foi bloqueada pelos limites de parada. Encerra o
@@ -848,12 +845,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const res = await executeV2Actions(otherRuleActions, actionCtx);
     executedActions = res.results;
     anyClose = res.anyClose;
-    if (res.themeId) themeId = res.themeId;
+    if (res.themeId) {
+      themeId = res.themeId;
+      themeFromRule = true;
+    }
     Object.assign(collectedVariables, variablesFromActions(res.results));
 
     let ruleReply: string | undefined;
     if (ruleHandoff) {
-      noteV2Fact("handoffCause", "rule", { keepFirst: true });
+      // Atalho que casa as palavras de "pedir atendente" é pedido de pessoa.
+      noteV2Fact("handoffCause", mentionsHumanRequest(config, input.userMessage) ? "human_request" : "rule", { keepFirst: true });
       const ruleAlreadyReplied = otherRuleActions.some((a) => replyActionTypes.has(a.type));
       ruleReply = await performHandoff(ruleHandoff.destination as V2Destination | undefined, { skipMessage: ruleAlreadyReplied });
       executedActions.push({ action: ruleHandoff, ok: true });
@@ -897,6 +898,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: false, closed: false };
     }
   }
+
+  // Pedido que já veio na primeira mensagem: o assunto fica escolhido para o
+  // turno que responde depois da confirmação (o "sim" sozinho não diz nada).
+  const pendingTheme = async (): Promise<string | undefined> => {
+    if ((config.themes ?? []).length === 0) return undefined;
+    const sel = await selectV2ThemeSemantic({
+      config,
+      message: input.userMessage,
+      apiKey: await tryGetAgentApiKey(resolved!.agentConfigId),
+    }).catch(() => null);
+    if (!sel?.theme) return undefined;
+    traceStep("assunto", `Pedido na primeira mensagem → assunto "${sel.theme.name}" guardado para depois da confirmação`, { method: sel.method, themeId: sel.theme.id });
+    noteV2Fact("theme", { method: sel.method, themeId: sel.theme.id, similarity: sel.similarity ?? null });
+    return sel.theme.id;
+  };
 
   // Fluxo de entrada (boas-vindas / confirmação / identificação)
   if (stage === "idle" || stage === "confirming" || stage === "identifying") {
@@ -972,6 +988,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (config.entry.confirmContact && stage === "idle") {
       const mode = config.entry.confirmationMode ?? "combined";
       traceStep("entrada", `Primeiro contato: boas-vindas e confirmação de identidade (${mode === "combined" ? "na mesma mensagem" : "em turnos separados"})`);
+      const entryTheme = await pendingTheme();
       if (mode === "separate_turn") {
         const welcomeMsg = config.entry.openingEnabled && config.entry.openingMessage
           ? renderMessage(config.entry.openingMessage, vars, defaultFormatter())
@@ -982,12 +999,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         await upsertV2ConversationState({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
           stage: "confirming", versionId: versionId, entryConfirmationPending: true,
+          ...(entryTheme ? { themeId: entryTheme } : {}),
         });
         await logV2Turn({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
           inboundText: input.userMessage, crmContext: context, prompt: "welcome", reply: welcomeMsg,
           executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
-          inputTokens: 0, outputTokens: 0, owner, stage: "confirming", versionId,
+          inputTokens: 0, outputTokens: 0, owner, stage: "confirming", versionId, themeId: entryTheme,
         });
         return { handoff: false, closed: false, sentReply: welcomeMsg };
       }
@@ -1002,12 +1020,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       await upsertV2ConversationState({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
         stage: "confirming", versionId: versionId, entryConfirmationPending: false,
+        ...(entryTheme ? { themeId: entryTheme } : {}),
       });
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
         inboundText: input.userMessage, crmContext: context, prompt: "confirmation", reply: confirmMsg,
         executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
-        inputTokens: 0, outputTokens: 0, owner, stage: "confirming", versionId,
+        inputTokens: 0, outputTokens: 0, owner, stage: "confirming", versionId, themeId: entryTheme,
       });
       return { handoff: false, closed: false, sentReply: confirmMsg };
     } else if (stage === "idle") {
@@ -1104,17 +1123,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }).catch(() => ({ allowed: true as const }));
     if (!cap.allowed) {
       noteV2Fact("handoffCause", "cost_cap", { keepFirst: true });
-      await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
+      await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters, themeId);
       return { handoff: true, closed: false };
     }
 
-    // Gatilho > significado > assunto atual (ver theme-semantic).
-    const selection = await selectV2ThemeSemantic({
-      config,
-      message: input.userMessage,
-      currentThemeId: themeId,
-      apiKey: await tryGetAgentApiKey(resolved.agentConfigId),
-    });
+    // Atalho > gatilho > significado > assunto atual (ver theme-semantic).
+    const selection: V2ThemeSelection = themeFromRule
+      ? { theme: getV2ThemeById(config, themeId), method: "kept" }
+      : await selectV2ThemeSemantic({
+          config,
+          message: input.userMessage,
+          currentThemeId: themeId,
+          apiKey: await tryGetAgentApiKey(resolved.agentConfigId),
+        });
     themeId = selection.theme?.id ?? themeId;
     traceStep("assunto", selection.theme
       ? `Assunto "${selection.theme.name}" — ${
@@ -1222,8 +1243,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     noteV2Fact("handoffCause", "error", { keepFirst: true });
     // "Erro técnico" configurado na tela só valia no modo de teste.
     const fallback = config.fallback?.error?.message || config.handoff.message;
-    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters);
+    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, fallback, counters, themeId);
     return { handoff: true, closed: false, sentReply: fallback };
+  }
+
+  // Nenhum assunto por atalho, palavras ou sentido: vale o que o modelo
+  // indicou (a Conversa de teste já fazia assim). Fica para os próximos turnos.
+  if (!themeId && llmOutput.theme && config.themes.some((t) => t.id === llmOutput!.theme)) {
+    themeId = llmOutput.theme;
+    traceStep("assunto", `O modelo indicou o assunto "${getV2ThemeById(config, themeId)?.name ?? themeId}"`);
+    noteV2Fact("theme", { method: "model", themeId, similarity: null });
   }
 
   // Memória: o que o LLM coletou neste turno fica para os próximos.
@@ -1419,7 +1448,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >
   // o do assunto ativo > o padrão da config.
   if (anyHandoff && !anyClose) {
-    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination);
+    // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
+    // modelo já a montou), não a de transferência padrão.
+    const noSourceMsg = peekV2Fact("handoffCause") === "verification" ? config.fallback?.noSource?.message?.trim() : "";
+    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination, noSourceMsg ? { message: noSourceMsg } : {});
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
   }
@@ -1487,14 +1519,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
    */
   async function performHandoff(
     requested: V2Destination | undefined,
-    opts: { skipMessage?: boolean } = {},
+    opts: { skipMessage?: boolean; message?: string } = {},
   ): Promise<string | undefined> {
     let sent: string | undefined;
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
       // tinha o campo, mas valia sempre a mensagem padrão.
       const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
-      const handoffMsg = renderMessage(destinationMessage || config.handoff.message, vars, defaultFormatter());
+      const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
       if (handoffMsg.trim() && (await sendReply(handoffMsg)).sent) {
         sent = handoffMsg;
       }
@@ -1625,6 +1657,7 @@ async function handoffAndReply(
   versionId: string | undefined,
   message: string,
   counters: V2Counters,
+  themeId?: string,
 ): Promise<void> {
   await sendV2TextMessage({
     conversationId: input.conversationId,
@@ -1651,6 +1684,7 @@ async function handoffAndReply(
     owner: "pessoa",
     counters: counters as V2Counters,
     versionId,
+    ...(themeId ? { themeId } : {}),
   });
   await logV2Turn({
     organizationId: orgId,
@@ -1658,7 +1692,15 @@ async function handoffAndReply(
     agentId: resolved!.agentConfigId,
     turnId: input.turnId,
     inboundText: input.userMessage,
-    crmContext: { contact: loadedContext.contact, deals: loadedContext.deals, selectedDeal: loadedContext.selectedDeal, fields: config.contextFields },
+    // contactRaw vai junto: é dele que o log tira nome e telefone para mascarar.
+    crmContext: {
+      contact: loadedContext.contact,
+      contactRaw: loadedContext.contactRaw,
+      deals: loadedContext.deals,
+      selectedDeal: loadedContext.selectedDeal,
+      fields: config.contextFields,
+    },
+    themeId,
     prompt: "handoff",
     reply: message,
     executedActions: [{ action: { type: "handoff" }, ok: true }],

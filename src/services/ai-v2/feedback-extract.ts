@@ -434,7 +434,7 @@ export function maskEvidenceText(text: string, names: string[] = []): string {
     const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.map(escape).join("|")})(?![\\p{L}\\p{N}])`, "giu"), "[nome]");
   }
-  return out.replace(/\+?\d[\d\s().-]{8,}\d/g, (m) => (m.replace(/\D/g, "").length >= 10 ? "[telefone]" : m));
+  return out.replace(/\(?\+?\d[\d\s().-]{8,}\d/g, (m) => (m.replace(/\D/g, "").length >= 10 ? "[telefone]" : m));
 }
 
 /** Etiquetas curtas dos fatos para mostrar junto da evidência. */

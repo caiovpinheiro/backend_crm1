@@ -9,7 +9,8 @@ import type { V2Action, V2AgentConfig, V2CRMContext, V2Rule, V2Stage } from "@/l
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { noteV2Fact, peekV2Fact } from "./trace";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -131,6 +132,12 @@ export async function simulateV2Turn(
   stage: V2Stage = "active",
   /** Assunto do turno anterior, para manter o assunto como em produção. */
   currentThemeId?: string | null,
+  /**
+   * Comparador: o ponto é o meio de uma conversa real, mesmo sem histórico.
+   * Sem isto, o 1º ponto virava boas-vindas/confirmação e era comparado com a
+   * resposta da pessoa.
+   */
+  opts: { skipEntry?: boolean } = {},
 ): Promise<V2TestTurnResult> {
   // Garante contexto de tenant para as tools do motor no ambiente de teste.
   if (organizationId && !getRequestContext()) {
@@ -156,7 +163,7 @@ export async function simulateV2Turn(
 
   // Fluxo de entrada na primeira mensagem da simulação.
   // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
-  const effectiveStage: V2Stage = history.length === 0 ? "idle" : stage;
+  const effectiveStage: V2Stage = history.length === 0 && !opts.skipEntry ? "idle" : stage;
   if (effectiveStage === "idle") {
     const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
     if (!context.selectedDeal) {
@@ -333,7 +340,9 @@ export async function simulateV2Turn(
       userMessage,
       isFirstMessage: history.length === 0,
       withinBusinessHours: isWithinV2BusinessHours(config),
-      contactTags: [],
+      // Como em produção: etiquetas do cliente e etapa do negócio carregados.
+      contactTags: (context.contactRaw?.tags as string[] | undefined) ?? [],
+      dealStageName: context.selectedDealRaw?.stageName as string | undefined,
       mediaKinds: ["text"],
     },
     context,
@@ -370,6 +379,7 @@ export async function simulateV2Turn(
   // Antes o teste seguia para o modelo e mostrava outra resposta.
   const ruleTurn = rule ? simulateTerminalRule(config, rule, vars) : null;
   if (ruleTurn) {
+    if (ruleTurn.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "rule", { keepFirst: true });
     return quickResult({
       reply: ruleTurn.reply,
       reason: `Regra "${rule!.name}" respondeu sem chamar o modelo.`,
@@ -394,11 +404,15 @@ export async function simulateV2Turn(
       apiKey,
     });
     themeId = selection.theme?.id ?? currentThemeId ?? null;
+    noteV2Fact("theme", { method: selection.method, themeId: selection.theme?.id ?? null, similarity: selection.similarity ?? null });
+  } else {
+    noteV2Fact("theme", { method: "rule", themeId, similarity: null });
   }
   const selectedTheme = getV2ThemeById(config, themeId ?? undefined);
   if (selectedTheme?.directHandoff) {
+    noteV2Fact("handoffCause", "direct_theme", { keepFirst: true });
     return quickResult({
-      reply: config.handoff.message,
+      reply: renderMessage(selectedTheme.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter()),
       reason: `Assunto "${selectedTheme.name}" vai direto para o destino, sem resposta do agente.`,
       handoff: true,
       themeId: selectedTheme.id,
@@ -412,6 +426,7 @@ export async function simulateV2Turn(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[simulateV2Turn] LLM failed:", msg);
+    noteV2Fact("handoffCause", "error", { keepFirst: true });
     llmResult = {
       output: {
         reply: config.fallback?.error?.message?.trim() || config.handoff.message,
@@ -445,6 +460,7 @@ export async function simulateV2Turn(
     output = noSourceMessage
       ? { ...output, handoff: false, reply: noSourceMessage, reason: "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada" }
       : { ...output, handoff: true, reply: config.handoff.message, reason: "Consulta sem resultados e sem dados do cliente" };
+    if (!noSourceMessage) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
   }
 
   // Guarda de saída, como em produção.
@@ -457,10 +473,14 @@ export async function simulateV2Turn(
   output = { ...output, reply: guard.text };
   let handoff = output.handoff || !!guard.forceHandoff;
   let closed = output.concluded;
+  if (output.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });
+  if (guard.forceHandoff) noteV2Fact("handoffCause", "guard", { keepFirst: true });
 
-  // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum casou.
-  if (!themeId && output.theme) {
+  // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum
+  // casou e se existe (igual à produção).
+  if (!themeId && output.theme && config.themes.some((t) => t.id === output.theme)) {
     themeId = output.theme;
+    noteV2Fact("theme", { method: "model", themeId, similarity: null });
   }
 
   // Mesma política de ações da produção (action-policy).
@@ -472,6 +492,7 @@ export async function simulateV2Turn(
   for (const action of output.actions) {
     if (action.type === "handoff") {
       handoff = true;
+      noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });
       executedActions.push({ action, label: actionLabel(action.type) });
       continue;
     }
@@ -496,6 +517,7 @@ export async function simulateV2Turn(
   // Sentimento, igual à produção.
   if (shouldActOnSentiment(config, detectV2Sentiment(config, userMessage)) && config.sentiment.action === "handoff") {
     handoff = true;
+    noteV2Fact("handoffCause", "sentiment", { keepFirst: true });
   }
   // Mensagem pronta anunciada e não liberada: produção transfere.
   if (
@@ -503,6 +525,7 @@ export async function simulateV2Turn(
     !executedActions.some((e) => e.action.type === "send_message_model")
   ) {
     handoff = true;
+    noteV2Fact("handoffCause", "message_model_not_allowed", { keepFirst: true });
   }
   if (handoff && closed) closed = false;
 
@@ -510,7 +533,10 @@ export async function simulateV2Turn(
   // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
   let reply = output.reply;
   if (handoff) {
-    reply = renderMessage(config.handoff.message, vars, defaultFormatter());
+    // Mesma mensagem que a produção manda: "sem material" quando citava algo
+    // sem fonte, senão a do destino do assunto, senão a padrão.
+    const noSourceMsg = peekV2Fact("handoffCause") === "verification" ? config.fallback?.noSource?.message?.trim() : "";
+    reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
   } else if (closed && config.closure.goodbyeMessage) {
     reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
   } else {

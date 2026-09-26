@@ -104,7 +104,8 @@ export function unsupportedFigures(reply: string, sources: string[]): string[] {
   const patterns = [/\d+(?:[.,]\d+)?\s?%/g, /R\$\s?\d[\d.]*(?:,\d{1,2})?/gi];
   for (const re of patterns) {
     for (const m of reply.matchAll(re)) {
-      const token = m[0].trim();
+      // "R$ 50." no fim da frase: o ponto é da frase, não do valor.
+      const token = m[0].trim().replace(/[.,;:!?]+$/, "");
       if (!haystack.includes(squash(token))) out.add(token);
     }
   }

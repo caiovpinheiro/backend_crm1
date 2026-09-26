@@ -548,7 +548,10 @@ async function executeFeedback(args: {
     .map((c) => ({ ...c, category: c.deterministic!.category, need: c.deterministic!.need, confidence: 1, groupKey: c.deterministic!.key }));
   for (const batch of batches) {
     if ((await reportStatus(args.reportId)) !== "running") return;
-    const payloads = new Map(batch.map((c) => [c.id, candidatePayload(c, themeName, config)]));
+    // Nome e telefone do contato não vão ao modelo.
+    const payloads = new Map(
+      batch.map((c) => [c.id, maskEvidenceText(candidatePayload(c, themeName, config), [prep.names.get(c.conversationId) ?? ""].filter(Boolean))]),
+    );
     try {
       const res = await generateWithTools({
         model,

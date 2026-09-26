@@ -104,7 +104,7 @@ export function contactIdentityMasker(ctx: V2CRMContext): (s: string) => string 
   const phoneTail = phone.length >= 8 ? phone.slice(-8) : "";
   return (s: string) => {
     let out = nameRe ? s.replace(nameRe, "[nome]") : s;
-    if (phoneTail) out = out.replace(/\+?\d[\d\s().-]{6,}\d/g, (m) => (m.replace(/\D/g, "").endsWith(phoneTail) ? "[telefone]" : m));
+    if (phoneTail) out = out.replace(/\(?\+?\d[\d\s().-]{6,}\d/g, (m) => (m.replace(/\D/g, "").endsWith(phoneTail) ? "[telefone]" : m));
     return out;
   };
 }

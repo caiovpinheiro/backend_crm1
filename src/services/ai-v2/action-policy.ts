@@ -112,6 +112,16 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
   ].join("\n");
 }
 
+/** A mensagem traz uma das palavras de "pedir atendente" da configuração. */
+export function mentionsHumanRequest(config: V2AgentConfig, message: string): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const text = ` ${fold(message).replace(/[^a-z0-9]+/g, " ")} `;
+  return (config.handoff?.humanRequestKeywords ?? []).some((w) => {
+    const k = fold(w).replace(/[^a-z0-9]+/g, " ").trim();
+    return k.length > 0 && text.includes(` ${k} `);
+  });
+}
+
 /** Aceita opções como string ou `{ label }` (formato livre do LLM). */
 export function normalizeAskOptions(raw: unknown[] | undefined): Array<{ label: string }> {
   if (!Array.isArray(raw)) return [];
