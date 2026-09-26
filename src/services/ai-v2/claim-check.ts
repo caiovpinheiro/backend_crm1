@@ -24,6 +24,7 @@ NÃO liste:
 - dizer que não tem a informação, que não consegue confirmar ou que vai chamar alguém da equipe;
 - dados do próprio cliente que aparecem nas fontes;
 - repetir o que o cliente disse sem confirmar como verdade.
+- dizer o que o atendente vai fazer agora ou em seguida ("vou te orientar", "vou te enviar o passo a passo", "segue o material"): é intenção, não fato — só é afirmação se trouxer regra, valor, prazo ou canal que as fontes não dizem.
 
 O que o cliente disse sobre a própria situação (o valor que veio no boleto dele, a data em que comprou, o que aparece na tela dele) pode ser usado para explicar a regra das fontes: isso NÃO é afirmação sem fonte. Só é sem fonte quando a resposta confirma como regra, preço, prazo ou condição da empresa algo que só o cliente afirmou e as fontes não dizem (ex.: cliente "a taxa é R$ 30, né?" → resposta "Isso, a taxa é R$ 30").
 

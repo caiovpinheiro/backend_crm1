@@ -959,6 +959,18 @@ describe("escopo e repetição", () => {
     expect(r.output.reply).toBe("Essa informação eu não tenho por aqui.");
   });
 
+  it("checagem por modelo: apresentação curta de mensagem pronta não é conferida", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      makeLLMResponse(JSON.stringify({ reply: "Vou te orientar sobre a solicitação pelo canal correto.", messageModel: { id: "mm-1" }, actions: [] })),
+    );
+    await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model", allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "quero mudar de unidade", stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
   it("checagem por modelo: tudo sustentado, resposta segue; cortesia curta nem é conferida", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Você pode trocar o produto direto na loja mais próxima.", actions: [] })))

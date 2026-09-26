@@ -1417,6 +1417,11 @@ export async function callV2LLM(args: {
     const claimSources = [...factSources, ...previousMessages.filter((m) => m.role === "assistant").map((m) => m.content)];
     const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
       if ((args.config.groundingCheck ?? "model") !== "model" || output.handoff || !worthClaimCheck(output.reply)) return [];
+      // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
+      // material; a frase só anuncia o envio ("vou te orientar…"). Conferir
+      // a frase barrava o envio e transferia o cliente.
+      const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
+      if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
       const res = await checkClaimsWithModel({ model: v2AuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts });
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
