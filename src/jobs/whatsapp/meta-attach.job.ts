@@ -26,7 +26,6 @@ import {
   readLegacyUploadsFile,
   readStoredFile,
   resolveOutboundAttachmentMime,
-  reuseLocateProbePlan,
 } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -198,28 +197,18 @@ export async function processMetaAttach(
     storedFileName = relative.split("/").pop() || storedFileName;
   }
 
-  // Mesmo objeto com outro nome ou bucket (mp4↔MP4, jpg↔jpeg, outros
-  // buckets de mídia): o reaproveitamento do inbox já procura assim; aqui a
-  // leitura era só do caminho exato e o anexo de modelo (agente, automação)
-  // falhava enquanto o inbox mostrava o arquivo.
-  if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId) {
-    for (const probe of reuseLocateProbePlan(storedPath.bucket, storedPath.fileName).slice(1)) {
-      const alt = await readStoredFile(storedPath.orgId, probe.bucket, probe.fileName);
-      if (alt?.buffer.length) {
-        stored = alt;
-        storedFileName = probe.fileName;
-        break;
-      }
-    }
-    // Último recurso, como no reaproveitamento do inbox: arquivo que só
-    // existe no backend antigo (STORAGE_FALLBACK_URL; sem env, nada).
-    if (!stored?.buffer.length) {
-      const { readUpstreamFallbackBytes } = await import("@/lib/storage/upstream-fallback");
-      const bytes = await readUpstreamFallbackBytes(
-        `${storedPath.orgId}/${storedPath.bucket}/${storedPath.fileName}`,
-        null,
-      ).catch(() => null);
-      if (bytes?.length) stored = { buffer: bytes, mimeType: mimeFromFilename(storedPath.fileName) };
+  // Sem o arquivo neste processo: mesmo read do envio de mídia das
+  // automações — variantes de nome (mp4↔MP4, jpg↔jpeg), /uploads legado e
+  // GET no servidor da API (STORAGE_PEER_URL / NEXTAUTH_URL com
+  // CRON_SECRET). Com storage em disco (sem S3), o arquivo gravado pela API
+  // não existe no volume do worker de WhatsApp: o anexo de modelo falhava
+  // enquanto o inbox mostrava o vídeo.
+  if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId && msg.mediaUrl) {
+    const { readStoredMediaForSend } = await import("@/lib/storage/read-for-send");
+    const found = await readStoredMediaForSend(msg.mediaUrl).catch(() => null);
+    if (found?.buffer.length) {
+      stored = { buffer: found.buffer, mimeType: found.mimeType };
+      storedFileName = found.fileName;
     }
   }
 
