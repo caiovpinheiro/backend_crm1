@@ -19,13 +19,17 @@ function normalize(s: string): string {
  * palavra menor. Só substring não bastava — "cadastrei" não contém
  * "cadastro" e o assunto não era escolhido.
  */
+/** Finais que só mudam número ou gênero (sem acento: "ões" vira "oes"). */
+const PLURAL_GENDER_ENDINGS = new Set(["s", "es", "a", "o", "as", "os", "is", "ns", "oes", "aes"]);
+
 export function sameWordStem(a: string, b: string): boolean {
   if (a === b) return true;
-  // Plural/gênero: uma é a outra + até 3 letras. Só por prefixo — "estar
-  // dentro" fazia "um" casar "documento" e qualquer frase com "um" pegava
-  // o assunto.
+  // Plural/gênero: uma é a outra + final de plural ou gênero. Só por
+  // prefixo — "estar dentro" fazia "um" casar "documento". E só esses
+  // finais: com "+ até 3 letras quaisquer", "está" (esta) casava "estágio"
+  // (esta + gio) e a mensagem sobre boleto ia para o assunto de estágio.
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  if (short.length >= 3 && long.startsWith(short) && long.length - short.length <= 3) return true;
+  if (short.length >= 3 && long.startsWith(short) && PLURAL_GENDER_ENDINGS.has(long.slice(short.length))) return true;
   const shorter = short.length;
   if (shorter < 5) return false;
   let i = 0;

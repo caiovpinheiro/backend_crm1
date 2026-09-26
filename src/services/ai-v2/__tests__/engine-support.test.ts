@@ -147,6 +147,19 @@ describe("selectV2Theme — flexões da mesma palavra", () => {
     expect(selectV2Theme(docs, "preciso dos documentos")?.id).toBe("d");
   });
 
+  it("palavra + letras quaisquer não é plural ('está' não casa 'estadia')", () => {
+    const two = {
+      themes: [
+        { id: "hosp", name: "Hospedagem", when: ["contrato de estadia"], examples: [] },
+        { id: "fat", name: "Faturas", when: ["fatura"], examples: [] },
+      ],
+    } as unknown as V2AgentConfig;
+    expect(selectV2Theme(two, "minha fatura está com valor maior do que contratei")?.id).toBe("fat");
+    // Plural e gênero continuam valendo.
+    expect(selectV2Theme(two, "e as faturas?")?.id).toBe("fat");
+    expect(selectV2Theme(two, "quero ver o contrato da estadia")?.id).toBe("hosp");
+  });
+
   it("mensagem sem relação não casa", () => {
     expect(selectV2Theme(cfg, "quero saber o preço do serviço")).toBeNull();
   });

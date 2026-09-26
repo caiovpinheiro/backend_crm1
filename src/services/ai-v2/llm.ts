@@ -1186,6 +1186,9 @@ export async function callV2LLM(args: {
   // Anexos dos materiais lidos (vídeo, imagem, áudio, PDF): o modelo pode
   // pedir para enviar depois da reply.
   const offeredAttachments = await attachmentsForDocs(args.agentId, prefetch.chunks.map((c) => c.docId));
+  if (offeredAttachments.length > 0) {
+    traceStep("base", `Anexos disponíveis dos materiais lidos: ${offeredAttachments.map((x) => `"${x.name}"${x.description ? "" : " (sem “quando enviar”)"}`).join(", ")}`);
+  }
   const prefetchCalls = prefetch.chunks.length > 0
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
     : [];
@@ -1356,6 +1359,7 @@ export async function callV2LLM(args: {
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
     const picked = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))].slice(0, MATERIAL_ATTACHMENT_LIMITS.perReply);
     output.attachments = picked;
+    if (picked.length > 0) traceStep("mídia", `O agente pediu para enviar: ${picked.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
     if (picked.length > 0) {
       output.actions = [...output.actions, { type: "send_material_attachment", attachmentIds: picked } as V2Action];
     }
