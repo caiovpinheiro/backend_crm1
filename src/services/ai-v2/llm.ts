@@ -845,6 +845,8 @@ const SOURCES_GUIDE =
 const WRITING_GUIDE = [
   "Escreva como uma pessoa experiente da equipe conversando por mensagem, não como um manual: frases completas e naturais, em primeira pessoa. Comece pelo que o cliente acabou de dizer; cumprimente pelo nome só no início da conversa.",
   "Responda primeiro exatamente o que foi perguntado. Se a fonte traz a informação (data, prazo, valor, regra), dê a informação em vez de dizer onde encontrá-la. Não peça desculpas sem motivo.",
+  // "A base não informa…" chegava ao cliente: jargão interno do agente.
+  "Nunca fale com o cliente sobre \"base\", \"material\", \"trechos\", \"fontes\" ou \"instruções\": quando falta a informação, diga com naturalidade que não tem essa informação.",
   // O exemplo "peça que avise em qual passo travou" era copiado como fecho
   // até em resposta sem passo nenhum.
   "Termine com o próximo passo quando houver um: uma pergunta concreta ou o que fazer a seguir. Se já respondeu tudo, encerre sem fórmula de despedida.",
