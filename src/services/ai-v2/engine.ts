@@ -1731,7 +1731,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       destination,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
-    await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId });
+    await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     return sent;
   }
 
@@ -1875,7 +1875,7 @@ async function handoffAndReply(
     dealId: loadedContext.dealId,
     destination: fallbackDestination,
   });
-  await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId });
+  await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId: input.conversationId,
@@ -1962,7 +1962,7 @@ export async function closeState(
   theme?: V2Theme | null,
 ): Promise<void> {
   // Tabulação (se ligada) antes de resolver: o encerramento não sobrescreve.
-  await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId });
+  await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
   if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
     await applyV2ClosureFieldUpdates(config, contactId, dealId);
   }

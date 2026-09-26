@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requirePermission } from "@/lib/auth-helpers";
+import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { V2_MODELS } from "@/lib/ai-v2/models";
 
 export async function GET() {
@@ -92,21 +92,17 @@ export async function GET() {
           orderBy: { name: "asc" },
         }) ?? [],
       ).catch(() => []),
-      // Tabulações ("Começo e fim › Tabulação"): extras, mesma tolerância.
-      Promise.resolve(
-        p.tabulation?.findMany?.({
-          where: { organizationId, active: true },
-          select: { id: true, name: true, parentId: true, parent: { select: { name: true } } },
-          orderBy: [{ position: "asc" }, { name: "asc" }],
-        }) ?? [],
-      ).catch(() => []),
+      // Tabulações ("Começo e fim › Tabulação"): folhas ativas com o caminho
+      // completo — as mesmas que o agente vê. Extras, mesma tolerância.
+      import("@/services/tabulations")
+        .then(({ listActiveTabulationLeaves }) => runInSessionContext(r.session, () => listActiveTabulationLeaves({ organizationId })))
+        .catch(() => []),
     ]);
 
-    // Só folhas: o CRM só aplica tabulação sem filhas.
-    const parents = new Set((tabulationRows as any[]).map((t) => t.parentId).filter(Boolean));
-    const tabulations = (tabulationRows as any[])
-      .filter((t) => !parents.has(t.id))
-      .map((t) => ({ id: t.id, name: t.parent?.name ? `${t.parent.name} › ${t.name}` : t.name }));
+    const tabulations = (tabulationRows as Array<{ id: string; path: string; departmentName: string }>).map((t) => ({
+      id: t.id,
+      name: `${t.departmentName} › ${t.path}`,
+    }));
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));
     const whatsappTemplateCatalog = whatsappTemplates.map((t: any) => ({

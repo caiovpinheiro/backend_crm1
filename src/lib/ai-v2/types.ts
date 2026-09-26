@@ -103,6 +103,16 @@ export interface V2TabulationConfig {
   fallbackId?: string;
   byTheme?: Record<string, string>;
   mode?: "suggest" | "require";
+  /**
+   * Como escolher a folha. "fixed" (padrão): assunto > padrão > departamento.
+   * "ai": o agente lê o atendimento e escolhe entre as permitidas; sem
+   * decisão, vale a regra fixa.
+   */
+  strategy?: "fixed" | "ai";
+  /** Folhas que o agente pode escolher no modo "ai" (vazio = as do departamento da conversa). */
+  allowedIds?: string[];
+  /** Orientações para o agente escolher (modo "ai"). */
+  instructions?: string;
 }
 
 export interface V2Destination {

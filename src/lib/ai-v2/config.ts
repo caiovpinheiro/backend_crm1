@@ -189,6 +189,9 @@ const tabulationSchema = z.object({
   fallbackId: z.string().optional(),
   byTheme: z.record(z.string(), z.string()).optional().default({}),
   mode: z.enum(["suggest", "require"]).optional().default("suggest"),
+  strategy: z.enum(["fixed", "ai"]).optional(),
+  allowedIds: z.array(z.string()).optional(),
+  instructions: optionalText,
 }).optional();
 
 const entryConfigSchema = z.object({
