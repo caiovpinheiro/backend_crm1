@@ -1376,4 +1376,20 @@ describe("processV2Turn — correções do motor", () => {
     expect(texts).toContain("Não tenho essa informação; vou chamar alguém da equipe.");
     expect(texts).not.toContain("Vou transferir.");
   });
+
+  it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
+    const config = baseConfig({
+      replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: false, phrases: [] } },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para acessar:\n1. Abra o app.\n2. Toque em Entrar." }));
+    await run("como faço para acessar o aplicativo?");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts.at(-1)).toBe("Para acessar:\n1. Abra o app.\n2. Toque em Entrar.\n\nMe avisa se funcionou.");
+
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "1. Abra.\n2. Entre.", handoff: true }));
+    await run("não consegui entrar no aplicativo de jeito nenhum");
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Me avisa se funcionou.");
+  });
 });

@@ -32,6 +32,7 @@ import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
+import { applyReplyEnding, effectiveReplyEnding } from "./reply-ending";
 import { simpleHandoff } from "./handoff";
 import {
   currentV2OnboardingStep,
@@ -403,6 +404,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let themeId: string | undefined = stateRow?.themeId ?? undefined;
   // Assunto escolhido por atalho neste turno: vale sobre gatilhos e sentido.
   let themeFromRule = false;
+  // Para o fecho das respostas: não repetir a frase da mensagem anterior e alternar.
+  let lastAgentMessage: string | null = null;
+  let historyLength = 0;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
   // A conversa está atribuída a este agente v2. owner=pessoa aqui é estado
   // antigo (humano anterior ou handoff que não trocou o responsável) e
@@ -1173,6 +1177,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       latencyMs = llmResult.latencyMs;
       toolCalls = llmResult.toolCalls;
       governorStats = llmResult.governorStats;
+      lastAgentMessage = llmResult.lastAgentMessage ?? null;
+      historyLength = llmResult.historyLength ?? 0;
     }
   }
 
@@ -1417,6 +1423,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     anyHandoff = true;
   }
 
+  // Fecho configurado ("me avise se funcionou"): o motor põe, não o modelo.
+  // Não vai em transferência, encerramento, confirmação nem com botões.
+  if (!anyHandoff && !anyClose && replyText.trim() && askOptions.length === 0 && (stage as V2Stage) !== "confirming") {
+    const ending = applyReplyEnding({
+      reply: replyText,
+      ending: effectiveReplyEnding(config, activeTheme),
+      lastAgentMessage,
+      turnSeed: historyLength,
+    });
+    if (ending.added) {
+      replyText = ending.text;
+      traceStep("resposta", `Fecho acrescentado (${ending.kind === "procedure" ? "passo a passo" : "informação"}): "${ending.added}"`);
+    }
+  }
+
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
     const res = await sendReply(replyText);
@@ -1580,6 +1601,9 @@ async function callLLMWithTheme(
   latencyMs: number;
   toolCalls?: Array<{ toolName: string; args: unknown; result: unknown }>;
   governorStats?: { totalCalls: number; replays: number; denials: number; limitHit: boolean };
+  /** Última mensagem do agente na conversa (o fecho não se repete). */
+  lastAgentMessage?: string | null;
+  historyLength?: number;
 }> {
   const theme = getV2ThemeById(config, themeId);
   const themeInstructions = theme
@@ -1640,6 +1664,8 @@ async function callLLMWithTheme(
       latencyMs: result.latencyMs,
       toolCalls: result.toolCalls,
       governorStats: result.governorStats,
+      lastAgentMessage: [...previousMessages].reverse().find((m) => m.role === "assistant")?.content ?? null,
+      historyLength: previousMessages.length,
     };
   } catch (err) {
     return {

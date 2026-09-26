@@ -41,6 +41,7 @@ import { breakInlineSteps } from "./reply-format";
 import { markPastDates } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
+import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
@@ -884,6 +885,8 @@ function buildV2SystemPrompt(
   }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
+  // Fecho configurado: quem põe é o motor; o modelo não cria o próprio.
+  if (hasReplyEnding(effectiveReplyEnding(config, activeTheme(config, themeId)))) lines.push(REPLY_ENDING_PROMPT);
   lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
   lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);

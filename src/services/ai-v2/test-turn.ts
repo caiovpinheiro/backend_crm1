@@ -12,6 +12,7 @@ import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact } from "./trace";
 import { keepOpenOnNewRequest } from "./closure";
+import { applyReplyEnding, effectiveReplyEnding } from "./reply-ending";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -549,6 +550,14 @@ export async function simulateV2Turn(
     const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
     if (options.length > 0) {
       reply = [reply.trim(), options.map((o, i) => `${i + 1}. ${o.label}`).join("\n")].filter(Boolean).join("\n\n");
+    } else if (effectiveStage !== "confirming") {
+      // Fecho configurado, igual à produção.
+      reply = applyReplyEnding({
+        reply,
+        ending: effectiveReplyEnding(config, activeTheme),
+        lastAgentMessage: [...history].reverse().find((h) => h.role === "assistant")?.content ?? null,
+        turnSeed: history.length,
+      }).text;
     }
   }
 

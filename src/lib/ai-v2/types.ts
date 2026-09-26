@@ -100,6 +100,19 @@ export interface V2ProductPolicy {
   actions?: string[];
 }
 
+export interface V2ReplyEndingRule {
+  enabled: boolean;
+  phrases: string[];
+}
+
+/** Fecho das respostas por tipo: depois de passo a passo e depois de informação. */
+export interface V2ReplyEnding {
+  /** No assunto: true (ou ausente) = segue o agente. */
+  inherit?: boolean;
+  procedure: V2ReplyEndingRule;
+  info: V2ReplyEndingRule;
+}
+
 export interface V2Theme {
   id: string;
   name: string;
@@ -131,6 +144,7 @@ export interface V2Theme {
   messageModelIds?: string[];
   /** Quem responde neste tema: "self" ou id de outro agente de IA. */
   answerBy?: "self" | string;
+  replyEnding?: V2ReplyEnding;
 }
 
 export type V2RuleConditionType =
@@ -450,6 +464,7 @@ export interface V2AgentConfig {
   fallback?: V2FallbackConfig;
   /** Fora do escopo / assuntos proibidos. */
   scope?: V2ScopeConfig;
+  replyEnding?: V2ReplyEnding;
   /** Inatividade do cliente. */
   inactivity?: V2InactivityConfig;
   /** Tabulação ao encerrar/transferir. */

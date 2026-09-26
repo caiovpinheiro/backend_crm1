@@ -48,6 +48,18 @@ const fieldConfigSchema = z.object({
   permissions: z.array(z.enum(["read", "cite", "write"])).optional().default(["read"]),
 });
 
+// Fecho das respostas: frases que o motor põe no fim, por tipo de resposta.
+const replyEndingRuleSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  phrases: z.array(z.string()).optional().default([]),
+});
+const replyEndingSchema = z.object({
+  /** No assunto: true = segue o agente. */
+  inherit: z.boolean().optional(),
+  procedure: replyEndingRuleSchema.optional().default({ enabled: false, phrases: [] }),
+  info: replyEndingRuleSchema.optional().default({ enabled: false, phrases: [] }),
+});
+
 const themeSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -76,6 +88,7 @@ const themeSchema = z.object({
   tabulationId: z.string().optional(),
   maxTurns: z.number().int().min(0).optional(),
   answerBy: z.enum(["self"]).or(z.string()).optional().default("self"),
+  replyEnding: replyEndingSchema.optional(),
 });
 
 const ruleConditionSchema = z.object({
@@ -360,6 +373,7 @@ export const v2AgentConfigSchema = z.object({
   structuredOutput: z.boolean().optional().default(false),
   fallback: fallbackSchema,
   scope: scopeSchema,
+  replyEnding: replyEndingSchema.optional(),
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
   businessHours: z
