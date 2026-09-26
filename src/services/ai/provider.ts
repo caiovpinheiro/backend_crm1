@@ -116,6 +116,8 @@ export type GenerateArgs = {
   /// Modo JSON da API: a resposta final é sempre um objeto JSON válido
   /// (o formato dos campos continua validado por quem chama).
   jsonMode?: boolean;
+  /// Limite por tentativa (ms). Padrão: AI_LLM_TIMEOUT_MS (60 s).
+  timeoutMs?: number;
 };
 
 export type GenerateResult = {
@@ -173,7 +175,7 @@ export async function generateWithTools(
         maxRetries: 0,
         ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
       }),
-    { label: `generateText ${args.model}` },
+    { label: `generateText ${args.model}`, ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
   );
 
   const toolCalls: GenerateResult["toolCalls"] = [];

@@ -115,6 +115,30 @@ describe("exportação das regras — pontos de atenção", () => {
   });
 });
 
+describe("exportação das regras — verificações a partir de uma ficha real", () => {
+  it("etiqueta citada não liberada, CRM bloqueado, horário repetido, tabulação sem padrão, atalho de pessoa com outro id", () => {
+    const texts = gapTexts({
+      globalRules: ["No início, consulte os dados do cliente com search_crm_records."],
+      themes: [
+        { id: "s", name: "Saída", when: ["cancelar"], examples: [], instructions: "Se ele mantiver, adicione a tag ret-x e transfira.", allowedTools: ["knowledge_search", "add_tag"] },
+        { id: "p", name: "Pedido de pessoa", when: ["humano", "atendente"], examples: [], instructions: "Transfira." },
+      ],
+      actionOptions: { tags: ["tag-teste"], stageIds: [] },
+      businessHours: { enabled: true, timezone: "America/Sao_Paulo", weekdays: [{ day: 1, start: "08:00", end: "18:00" }, { day: 1, start: "08:00", end: "18:00" }, { day: 2, start: "08:00", end: "18:00" }, { day: 3, start: "08:00", end: "18:00" }, { day: 4, start: "08:00", end: "18:00" }] },
+      tabulation: { enabled: true, strategy: "ai" },
+      rules: [{ id: "regra_pessoa", name: "Pessoa", order: 0, conditions: [{ type: "keywords", values: ["humano", "atendente"] }], actions: [{ type: "handoff" }] }],
+      handoff: { defaultDestination: { type: "department", id: "dep-1" }, message: "Vou transferir.", humanRequestKeywords: ["humano", "atendente"] },
+    });
+    expect(texts).toContain("alta|A etiqueta “ret-x” (instruções de “Saída”) não está entre as etiquetas liberadas");
+    expect(texts).toContain("As regras mandam consultar o CRM, mas a consulta está bloqueada em 1 assunto(s) (Saída)");
+    expect(texts).toContain("Horário com dia repetido (seg)");
+    expect(texts).toContain("Horário sem sex");
+    expect(texts).toContain("“O agente avalia” sem tabulação padrão");
+    expect(texts).toContain("Assunto “Pedido de pessoa” repete o pedido de pessoa");
+    expect(texts).toContain("Pedido de pessoa por palavra solta (humano, atendente)");
+  });
+});
+
 describe("exportação das regras — ficha", () => {
   it("nomes e ids, como o motor decide, fidelidade de horário/sentimento/limites", () => {
     const md = buildAgentRulesMarkdown({

@@ -7,7 +7,7 @@
  */
 
 import type { V2AgentConfig, V2Destination, V2FieldConfig, V2PostCloseCaseBehavior, V2ReplyEnding, V2Rule, V2Theme } from "@/lib/ai-v2/types";
-import { HUMAN_REQUEST_PHRASES } from "@/lib/ai-v2/config";
+import { HUMAN_REQUEST_PHRASES, isHumanRequestRule } from "@/lib/ai-v2/config";
 import { V2_MODELS } from "@/lib/ai-v2/models";
 import { FACT_IN_SENTENCE } from "./ground-reply";
 import { extractUrls, isUrlAllowed } from "./output-guard";
@@ -394,12 +394,49 @@ export function detectConfigGaps(config: V2AgentConfig, names: V2ExportNames, ct
   }
 
   // Pedido de pessoa: vale sempre (no atalho, no prompt e na causa da transferência)
-  const humanRule = c.rules.find((r) => r.id === "human_request" && r.enabled !== false);
+  const humanRule = c.rules.find((r) => r.enabled !== false && isHumanRequestRule(r, c));
   const humanWords = [...(humanRule?.conditions.flatMap((x) => (x.type === "keywords" ? x.values ?? [] : [])) ?? []), ...(c.handoff?.humanRequestKeywords ?? [])];
   const loose = [...new Set(humanWords.map(norm).filter((w) => w && !w.includes(" ") && !HUMAN_REQUEST_PHRASES.includes(w)))];
   if (loose.length > 0) {
     const custom = loose.filter((w) => !DEFAULT_HUMAN_WORDS.has(w));
     add(custom.length > 0 ? "média" : "baixa", "Chamar a equipe", `Pedido de pessoa por palavra solta (${loose.join(", ")}): “a pessoa que me atendeu disse…” também transfere.`, "Troque por frases (“falar com uma pessoa”).");
+  }
+
+  // Assunto que só repete o pedido de pessoa (o atalho já transfere antes).
+  if (humanRule) {
+    const hw = new Set(humanWords.map(norm));
+    for (const t of c.themes) {
+      const w = (t.when ?? []).map(norm).filter(Boolean);
+      if (w.length > 0 && w.filter((x) => hw.has(x)).length >= Math.ceil(w.length / 2)) {
+        add("baixa", "Assuntos", `Assunto “${t.name}” repete o pedido de pessoa: o atalho “${humanRule.name}” transfere antes de o assunto ser escolhido.`, "Apague o assunto ou deixe só o atalho.");
+      }
+    }
+  }
+
+  // Etiqueta citada em instruções e regras que não está liberada.
+  const allowedTagNames = (c.actionOptions?.tags ?? []).map((id) => norm(names.tags[id] ?? id));
+  if (allowedTagNames.length > 0) {
+    const texts: Array<[string, string]> = [
+      ...c.themes.map((t) => [`instruções de “${t.name}”`, t.instructions ?? ""] as [string, string]),
+      ...c.globalRules.map((r, i) => [`regra geral ${i + 1}`, r] as [string, string]),
+    ];
+    for (const [where, text] of texts) {
+      for (const m of text.matchAll(/(?:^|[^\p{L}])(?:tag|etiqueta)\s+["“']?([\p{L}\p{N}_-]{2,40})/giu)) {
+        const tag = m[1];
+        if (["de", "da", "do", "que", "para", "com"].includes(norm(tag))) continue;
+        if (!allowedTagNames.includes(norm(tag))) add("alta", "Atalhos e ações", `A etiqueta “${tag}” (${where}) não está entre as etiquetas liberadas: a ação é barrada.`, `Libere “${tag}” em “O que ele pode fazer”.`);
+      }
+    }
+  }
+
+  // Regra mandando consultar o CRM em assuntos onde a consulta está bloqueada.
+  const crmRule = [...c.globalRules, ...c.themes.map((t) => t.instructions ?? "")].some((r) => /search_crm_records|consult\w*\s+(?:os\s+)?(?:dados|cadastro)|consult\w*\s+o\s+crm/i.test(r));
+  if (crmRule) {
+    const blocked = c.themes.filter((t) => {
+      const q = (t.allowedTools ?? []).filter((x) => (QUERY_TOOL_NAMES as readonly string[]).includes(x));
+      return q.length > 0 && !q.includes("search_crm_records");
+    });
+    if (blocked.length > 0) add("média", "Atalhos e ações", `As regras mandam consultar o CRM, mas a consulta está bloqueada em ${blocked.length} assunto(s) (${blocked.map((t) => t.name).join(", ")}). Os dados do cliente configurados já chegam prontos para o agente.`, "Tire a regra de consultar o CRM ou libere a consulta nesses assuntos.");
   }
 
   // Ações liberadas sem opções
@@ -444,6 +481,9 @@ export function detectConfigGaps(config: V2AgentConfig, names: V2ExportNames, ct
     if (!cfg?.permissions.includes("write")) add("alta", "Começo e fim", `Ao encerrar, o campo “${fieldName(fu.key, names)}” não será gravado: ele não tem a permissão Gravar.`, "Marque Gravar no campo em Dados do cliente.");
   }
   const tabu = c.tabulation;
+  if (tabu?.enabled && tabu.strategy === "ai" && !tabu.fallbackId) {
+    add("média", "Começo e fim", "“O agente avalia” sem tabulação padrão: quando ele não acha uma que sirva, o atendimento fica sem tabulação.", "Escolha a tabulação padrão.");
+  }
   if (tabu?.enabled) {
     const anyLeaf = !!tabu.fallbackId || tabu.strategy === "ai" || c.themes.some((t) => themeTabulationId(c, t));
     if (!anyLeaf) add("média", "Começo e fim", `Tabulação ligada sem tabulação escolhida${(tabu.when ?? "on_close") === "on_close" ? " (ao encerrar vale a do departamento, se houver)" : ": ao transferir fica sem tabulação"}.`, "Escolha a tabulação padrão ou use “o agente avalia”.");
@@ -456,6 +496,11 @@ export function detectConfigGaps(config: V2AgentConfig, names: V2ExportNames, ct
   const bh = c.businessHours;
   if (bh?.enabled) {
     if ((bh.weekdays ?? []).length === 0) add("média", "Chamar a equipe", "Horário ligado sem dias: vale como sempre aberto; atalhos “fora do horário” nunca disparam.", "Cadastre os dias e horários.");
+    const days = (bh.weekdays ?? []).map((d) => d.day);
+    const repeated = [...new Set(days.filter((d, i) => days.indexOf(d) !== i))];
+    if (repeated.length > 0) add("média", "Chamar a equipe", `Horário com dia repetido (${repeated.map((d) => WEEKDAY[d] ?? d).join(", ")}): provável erro de digitação no lugar de outro dia.`, "Revise os dias do horário.");
+    const missingWeek = [1, 2, 3, 4, 5].filter((d) => !days.includes(d));
+    if (days.length > 0 && missingWeek.length > 0) add("baixa", "Chamar a equipe", `Horário sem ${missingWeek.map((d) => WEEKDAY[d]).join(", ")}: nesses dias ele conta como fora do horário.`, "Confirme se é isso mesmo.");
     for (const d of bh.weekdays ?? []) {
       if (!/^\d{2}:\d{2}$/.test(d.start) || !/^\d{2}:\d{2}$/.test(d.end) || d.end <= d.start) add("média", "Chamar a equipe", `Horário de ${WEEKDAY[d.day] ?? d.day} inválido (${d.start}–${d.end}): nesse dia nunca está dentro do horário.`, "Corrija o horário.");
     }

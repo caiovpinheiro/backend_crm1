@@ -4,7 +4,7 @@
  */
 
 import type { V2AgentConfig, V2Rule, V2RuleAction, V2RuleCondition, V2CRMContext, V2BusinessHoursSlot } from "@/lib/ai-v2/types";
-import { HUMAN_REQUEST_RULE_ID, humanRequestTerms } from "@/lib/ai-v2/config";
+import { humanRequestTerms, isHumanRequestRule } from "@/lib/ai-v2/config";
 
 export type V2RuleEvaluationInput = {
   userMessage: string;
@@ -150,7 +150,7 @@ export function evaluateV2Rules(
  * precisavam ser editadas juntas.
  */
 function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig): V2Rule {
-  if (rule.id !== HUMAN_REQUEST_RULE_ID) return rule;
+  if (!isHumanRequestRule(rule, config)) return rule;
   const terms = humanRequestTerms(config);
   return {
     ...rule,

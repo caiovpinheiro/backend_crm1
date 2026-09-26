@@ -474,6 +474,19 @@ export const HUMAN_REQUEST_PHRASES = [
 /** Id da regra de preset "Pedido de humano". */
 export const HUMAN_REQUEST_RULE_ID = "human_request";
 
+/**
+ * Atalho de pedido de pessoa: o do modelo pronto (id "human_request") ou
+ * qualquer atalho ligado que transfere por palavras-chave que são palavras
+ * de pedido de pessoa (atalho recriado com outro id).
+ */
+export function isHumanRequestRule(rule: { id: string; conditions: Array<{ type: string; values?: string[] }>; actions: Array<{ type: string }> }, config: Pick<V2AgentConfig, "handoff">): boolean {
+  if (rule.id === HUMAN_REQUEST_RULE_ID) return true;
+  if (!rule.actions.some((a) => a.type === "handoff")) return false;
+  const own = new Set((config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim().toLowerCase()).filter(Boolean));
+  if (own.size === 0) return false;
+  return rule.conditions.some((c) => c.type === "keywords" && (c.values ?? []).some((v) => own.has(v.trim().toLowerCase())));
+}
+
 /** Palavras da tela + frases explícitas. */
 export function humanRequestTerms(config: Pick<V2AgentConfig, "handoff">): string[] {
   const own = (config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim()).filter(Boolean);
