@@ -31,7 +31,7 @@ import { findInheritablePostCloseState, getV2ConversationState, upsertV2Conversa
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { classifyPostCloseMessage, getPostCloseBehavior } from "./closure";
+import { classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest } from "./closure";
 import { simpleHandoff } from "./handoff";
 import {
   currentV2OnboardingStep,
@@ -1237,6 +1237,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       { confirmed: llmOutput.confirmed, outOfScope: llmOutput.outOfScope, tokens: inputTokens + outputTokens });
   } else {
     traceStep("llm", `O modelo não respondeu (erro: ${prompt || "desconhecido"}) → transferência`);
+  }
+
+  // Pedido novo nesta mensagem não encerra (a despedida ia no lugar da resposta).
+  if (llmOutput && keepOpenOnNewRequest(config, input.userMessage, llmOutput)) {
+    traceStep("encerramento", "O modelo quis encerrar, mas o cliente fez um pedido nesta mensagem → a resposta vai e o atendimento segue aberto");
   }
 
   if (!llmOutput) {

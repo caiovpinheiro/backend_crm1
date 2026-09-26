@@ -3,7 +3,8 @@
  * Nenhum domínio de cliente.
  */
 
-import type { V2AgentConfig, V2CloseReason, V2PostCloseCaseBehavior, V2Stage } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CloseReason, V2PostCloseCaseBehavior, V2Stage } from "@/lib/ai-v2/types";
+import { hasSearchableQuestion } from "./ground-reply";
 
 export type V2PostCloseCase = "courtesy" | "new_demand" | "ambiguous";
 
@@ -27,6 +28,32 @@ export function classifyPostCloseMessage(
   if (hasCourtesy && !hasNewDemand) return "courtesy";
   if (hasNewDemand && !hasCourtesy) return "new_demand";
   return "ambiguous";
+}
+
+/**
+ * A mensagem traz um pedido novo (não é só agradecimento/despedida). Com
+ * pedido novo o turno não encerra: ao encerrar, o cliente recebe a despedida
+ * no lugar da resposta — perguntou as datas e recebeu "fico feliz em ajudar".
+ */
+export function isNewRequest(config: V2AgentConfig, message: string): boolean {
+  if (!hasSearchableQuestion(message) && !message.includes("?")) return false;
+  return classifyPostCloseMessage(config, message) !== "courtesy";
+}
+
+/**
+ * Tira o encerramento do turno quando o cliente fez um pedido novo: `concluded`
+ * e a ação `close_conversation` vão para descartados. Devolve se mudou algo.
+ */
+export function keepOpenOnNewRequest(
+  config: V2AgentConfig,
+  message: string,
+  output: { concluded: boolean; actions: V2Action[] },
+): boolean {
+  const closing = output.concluded || output.actions.some((a) => a.type === "close_conversation");
+  if (!closing || !isNewRequest(config, message)) return false;
+  output.concluded = false;
+  output.actions = output.actions.filter((a) => a.type !== "close_conversation");
+  return true;
 }
 
 export function getPostCloseBehavior(

@@ -1017,7 +1017,7 @@ function buildV2SystemPrompt(
     "- actions: ações deste turno; vazia quando não há.",
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
-    "- concluded: true quando o atendimento terminou.",
+    "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
     ...(offerTheme ? [`- theme: id do assunto que melhor descreve o pedido (${config.themes.map((t) => t.id).join(", ")}) ou null.`] : []),
   ].join("\n"));
 

@@ -11,6 +11,7 @@ import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact } from "./trace";
+import { keepOpenOnNewRequest } from "./closure";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
@@ -471,6 +472,10 @@ export async function simulateV2Turn(
     citableDeal: context.citableDeal ?? null,
   });
   output = { ...output, reply: guard.text };
+  // Igual à produção: pedido novo nesta mensagem não encerra.
+  if (keepOpenOnNewRequest(config, userMessage, output)) {
+    output = { ...output, reason: `${output.reason} (não encerrou: o cliente fez um pedido nesta mensagem)`.trim() };
+  }
   let handoff = output.handoff || !!guard.forceHandoff;
   let closed = output.concluded;
   if (output.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });

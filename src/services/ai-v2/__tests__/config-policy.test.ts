@@ -131,3 +131,16 @@ describe("chave Anthropic do agente", () => {
     vi.unstubAllEnvs();
   });
 });
+
+describe("encerramento com pedido novo", () => {
+  it("pergunta nova não encerra; agradecimento encerra", async () => {
+    const { keepOpenOnNewRequest, isNewRequest } = await import("../closure");
+    const config = normalizeV2Config({ name: "A", tone: "t" } as never);
+    const out = { concluded: true, actions: [{ type: "close_conversation" }] as never[] };
+    expect(keepOpenOnNewRequest(config, "quais as proximas atividades de outubro", out)).toBe(true);
+    expect(out).toEqual({ concluded: false, actions: [] });
+    expect(isNewRequest(config, "obrigado, era isso")).toBe(false);
+    expect(isNewRequest(config, "ok, valeu!")).toBe(false);
+    expect(isNewRequest(config, "e quando começam as aulas?")).toBe(true);
+  });
+});
