@@ -16,7 +16,7 @@ import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { v2AuxModel } from "@/lib/ai-v2/models";
 import { maskEvidenceText } from "./feedback-extract";
 import { speaker, type LearnMessage } from "./learn-extract";
-import { traceStep } from "./trace";
+import { noteV2Fact, traceStep } from "./trace";
 
 export type V2TabulationMoment = "close" | "transfer";
 
@@ -169,11 +169,14 @@ export async function applyV2Tabulation(args: {
   if (!tabulationAppliesAt(args.config, args.moment)) return;
   try {
     let tabulationId: string | null = null;
+    // De onde veio a folha (relatório de ações e passos).
+    let by: "agent" | "rule" | "department" = "rule";
     if (args.config.tabulation?.strategy === "ai" && args.agentId) {
       tabulationId = await chooseWithAgent({ ...args, agentId: args.agentId }).catch((err) => {
         traceStep("tabulação", `Escolha pelo agente falhou (${err instanceof Error ? err.message : String(err)}) → regra por assunto/padrão`);
         return null;
       });
+      if (tabulationId) by = "agent";
     }
     tabulationId ??= pickV2TabulationId(args.config, args.theme, args.moment);
     if (!tabulationId && args.moment === "close") {
@@ -182,6 +185,7 @@ export async function applyV2Tabulation(args: {
         const { resolveAutoCloseTabulation } = await import("@/services/tabulations");
         const auto = await resolveAutoCloseTabulation({ organizationId: args.organizationId, departmentId }).catch(() => null);
         tabulationId = auto?.tabulationId ?? null;
+        if (tabulationId) by = "department";
       }
     }
     if (!tabulationId) {
@@ -198,6 +202,7 @@ export async function applyV2Tabulation(args: {
       closeIfOpen: false,
     });
     traceStep("tabulação", res.ok ? `Tabulada: "${res.tabulation.name}"` : `Não tabulada: ${res.error}`);
+    if (res.ok && !res.alreadyApplied) noteV2Fact("tabulation", { name: res.tabulation.name, by });
   } catch (err) {
     traceStep("tabulação", `Falhou: ${err instanceof Error ? err.message : String(err)}`);
   }

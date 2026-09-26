@@ -1312,6 +1312,23 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
   });
 
+  it("sem confirmação: só cumprimento recebe as boas-vindas configuradas; com pedido, responde direto", async () => {
+    const config = baseConfig({
+      entry: { confirmContact: false, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Olá! Sou a assistente virtual. Como posso te ajudar?" },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("idle"));
+    await run("Oi, boa tarde!");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Olá! Sou a assistente virtual. Como posso te ajudar?"]);
+
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para emitir o boleto, acesse a área de pagamentos." }));
+    await run("Oi, preciso do boleto");
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("assistente virtual");
+  });
+
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {
     const config = baseConfig({
       allowedMessageModelIds: ["mm-1"],

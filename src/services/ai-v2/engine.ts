@@ -32,7 +32,7 @@ import { findInheritablePostCloseState, getV2ConversationState, upsertV2Conversa
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
@@ -1176,6 +1176,34 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: false, closed: false, sentReply: confirmMsg };
     } else if (stage === "idle") {
       stage = "active";
+      // Boas-vindas sem confirmação: antes só saíam junto da confirmação ou
+      // da identificação — com "Confirmar" desligado, nunca, e o modelo
+      // improvisava o cumprimento. Saem quando a primeira mensagem é só
+      // cumprimento; se já traz o pedido, ele responde direto (perguntar
+      // "como posso ajudar?" a quem já disse parece que não leu).
+      if (config.entry.openingEnabled && config.entry.openingMessage?.trim()) {
+        if (!isGreetingOnlyMessage(input.userMessage)) {
+          traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
+        } else {
+          const superseded = await newerInboundArrived(input.conversationId, input.messageIds);
+          const welcome = superseded ? "" : renderMessage(config.entry.openingMessage, vars, defaultFormatter());
+          traceStep("entrada", superseded
+            ? "O cliente já mandou outra mensagem: as boas-vindas não saem — a próxima resposta cobre"
+            : "Primeira mensagem só com cumprimento → boas-vindas configuradas");
+          if (welcome) await sendReply(welcome);
+          await upsertV2ConversationState({
+            organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+            stage: "active", versionId: versionId,
+          });
+          await logV2Turn({
+            organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+            inboundText: input.userMessage, crmContext: context, prompt: "welcome", ...(welcome ? { reply: welcome } : {}),
+            executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
+            inputTokens: 0, outputTokens: 0, owner, stage: "active", versionId,
+          });
+          return { handoff: false, closed: false, ...(welcome ? { sentReply: welcome } : {}) };
+        }
+      }
     }
   }
 

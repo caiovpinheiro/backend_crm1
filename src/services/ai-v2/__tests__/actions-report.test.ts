@@ -129,4 +129,10 @@ describe("relatório de ações", () => {
     expect(formatTraceSteps([{ step: "a", detail: "x", at: 1 }, null, { step: "b" }])).toBe("+1ms · a · x");
     expect(formatTraceSteps(undefined)).toBe("");
   });
+
+  it("tabulação automática aparece como ação, com a origem", () => {
+    const events = eventsFromRows([row({ closed: "true", facts: { tabulation: { name: "Resolvido", by: "agent" } } }) as never], config, names);
+    const tab = events.find((e) => e.type === "tabulate_conversation");
+    expect(tab?.detail).toBe("Resolvido (escolhida pelo agente)");
+  });
 });

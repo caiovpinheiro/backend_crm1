@@ -31,8 +31,14 @@ const NEW_DEMAND_TERMS = [
   "como faco", "como eu", "onde", "quando", "qual", "quanto", "nao consigo", "nao consegui", "nao funciona", "nao funcionou",
   "erro", "outra coisa", "mais uma",
 ];
-/** Só cumprimento: pode ser pedido novo chegando — ambíguo, nunca agradecimento. */
-const GREETING_ONLY = /^(?:oi+|ola|opa|e ai|eai|bom dia|boa tarde|boa noite|hello|hi)(?: (?:tudo bem|td bem|tudo bom))?\??$/;
+/** Só cumprimento ("oi", "oi, boa tarde", "olá, tudo bem?"): ambíguo, nunca agradecimento. */
+const GREETING_ONLY = /^(?:(?:oi+|ola|opa|e ai|eai|bom dia|boa tarde|boa noite|hello|hi|tudo bem|td bem|tudo bom|como vai)\s*\??\s*)+$/;
+
+/** A mensagem é só um cumprimento, sem pedido. */
+export function isGreetingOnlyMessage(message: string): boolean {
+  const text = foldText(message);
+  return !!text && GREETING_ONLY.test(text);
+}
 const COURTESY_EMOJI = /^[\s\p{Emoji_Presentation}\p{Extended_Pictographic}]+$/u;
 
 const hasTerm = (text: string, terms: string[]) => terms.some((t) => ` ${text} `.includes(` ${t} `));

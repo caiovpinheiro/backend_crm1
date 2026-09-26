@@ -11,7 +11,7 @@ import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
-import { keepOpenOnNewRequest } from "./closure";
+import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -283,6 +283,33 @@ export async function simulateV2Turn(
         crmContext: context,
         dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
         stage: "confirming",
+      };
+    } else if (config.entry.openingEnabled && config.entry.openingMessage?.trim() && isGreetingOnlyMessage(userMessage)) {
+      // Sem confirmação: boas-vindas quando a primeira mensagem é só cumprimento (igual à produção).
+      return {
+        userMessage,
+        appliedRuleId: null,
+        appliedRuleName: null,
+        themeId: null,
+        themeName: null,
+        reply: renderMessage(config.entry.openingMessage, vars, defaultFormatter()),
+        reason: "Primeira mensagem só com cumprimento: boas-vindas configuradas.",
+        handoff: false,
+        closed: false,
+        toolCalls: [],
+        ragChunks: [],
+        executedActions: [],
+        discardedActions: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        tone: config.tone ?? "",
+        responseLength: config.responseLength ?? "medium",
+        globalRules: config.globalRules,
+        systemPrompt: "",
+        crmContext: context,
+        dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+        stage: "active",
       };
     }
   }

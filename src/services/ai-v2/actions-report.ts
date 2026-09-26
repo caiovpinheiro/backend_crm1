@@ -318,6 +318,12 @@ export function eventsFromRows(
       const why = cause ? HANDOFF_CAUSE_LABEL[cause] ?? cause : "";
       push("handoff", "ok", [why, r.reply ? clip(r.reply, 2000) : ""].filter(Boolean).join(" — "), { handoffCause: cause });
     }
+    // Tabulação automática (config), que não passa pelas ações do modelo.
+    const tab = facts.tabulation as { name?: unknown; by?: unknown } | undefined;
+    if (tab && typeof tab.name === "string") {
+      const origin = tab.by === "agent" ? "escolhida pelo agente" : tab.by === "department" ? "padrão do departamento" : "pelo assunto/padrão";
+      push("tabulate_conversation", "ok", `${tab.name} (${origin})`);
+    }
     if (r.closed === "true") push("close", "ok", "");
     if (r.error && !r.reply && !r.handoff) push("failure", "failed", clip(r.error, 200));
   }

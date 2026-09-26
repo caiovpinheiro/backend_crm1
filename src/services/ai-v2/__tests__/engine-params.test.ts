@@ -5,7 +5,7 @@ vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
-import { answerToPostCloseQuestion, classifyPostCloseMessage, isNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "@/services/ai-v2/closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, isGreetingOnlyMessage, isNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "@/services/ai-v2/closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "@/services/ai-v2/confusion";
 import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity";
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
@@ -185,5 +185,12 @@ describe("resposta que é só saudação", () => {
     for (const r of ["Para emitir o boleto, acesse https://exemplo.com e toque em Pagar.", "O prazo é 19/10. Posso ajudar em algo mais?", ""]) {
       expect(isGreetingOnlyReply(r)).toBe(false);
     }
+  });
+});
+
+describe("mensagem que é só cumprimento", () => {
+  it("cumprimentos (combinados ou não) e pedidos", () => {
+    for (const m of ["Oi", "Oi, boa tarde!", "olá, tudo bem?", "Bom dia", "oi oi"]) expect(isGreetingOnlyMessage(m)).toBe(true);
+    for (const m of ["Oi, preciso do boleto", "bom dia, qual o prazo?", "valeu", ""]) expect(isGreetingOnlyMessage(m)).toBe(false);
   });
 });
