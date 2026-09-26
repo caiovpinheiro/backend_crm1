@@ -10,6 +10,7 @@ import { isConfusionMessage, rephraseAfterConfusion } from "@/services/ai-v2/con
 import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity";
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
 import { isShortFollowUp, themeThresholds } from "@/services/ai-v2/theme-semantic";
+import { describeV2ContextForTrace } from "@/services/ai-v2/context";
 
 const cfg = (extra: Record<string, unknown> = {}): V2AgentConfig =>
   normalizeV2Config({
@@ -138,5 +139,36 @@ describe("depois de encerrar: classificação e mensagens por caso", () => {
     expect(postCloseHandoffMessage(own, "new_demand")).toBe("Vou te passar para a equipe.");
     expect(postCloseHandoffMessage(own, "ambiguous")).toBe("Transferindo.");
     expect(postCloseShortReply(cfg(), "courtesy")).toContain("Por nada");
+  });
+});
+
+describe("passo dados: o que o agente recebeu do cadastro", () => {
+  it("lista rótulos (sem valores) e diz por que a informação montada não saiu", () => {
+    const c = cfg({
+      contextFields: { contact: [{ key: "doc", label: "Documento", permissions: ["read"] }], deal: [{ key: "mail", label: "E-mail da conta", permissions: ["read", "cite"] }] },
+      derivedFields: [
+        { id: "a", label: "Código", parts: [{ kind: "field", key: "name", take: "first", count: 3 }, { kind: "field", key: "doc" }] },
+        { id: "b", label: "Outro", parts: [{ kind: "field", take: "all" }] },
+      ],
+    });
+    const text = describeV2ContextForTrace(c, {
+      contact: { Documento: "123" },
+      contactRaw: { name: "Ana", doc: "" },
+      citableContact: {},
+      selectedDeal: { "E-mail da conta": "x@y.com" },
+      selectedDealRaw: { mail: "x@y.com" },
+      citableDeal: { "E-mail da conta": "x@y.com" },
+      deals: [],
+      fields: c.contextFields,
+    } as never);
+    expect(text).toContain("Contato: usa Documento");
+    expect(text).toContain("Negócio: usa E-mail da conta; pode dizer E-mail da conta");
+    expect(text).toContain("Código ✗ (Documento vazio)");
+    expect(text).toContain("Outro ✗ (parte 1 sem campo)");
+    expect(text).not.toContain("x@y.com");
+  });
+
+  it("sem cadastro", () => {
+    expect(describeV2ContextForTrace(cfg(), { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } } as never)).toContain("Contato: sem cadastro");
   });
 });

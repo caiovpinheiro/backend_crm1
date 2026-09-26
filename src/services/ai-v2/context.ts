@@ -3,7 +3,7 @@
  * Nenhum domínio de cliente aqui.
  */
 
-import { derivedFieldValues, maskFieldValue } from "@/lib/ai-v2/field-mask";
+import { derivedFieldMissing, derivedFieldValues, maskFieldValue } from "@/lib/ai-v2/field-mask";
 import { prisma } from "@/lib/prisma";
 import {
   loadCrmFieldCatalog,
@@ -396,4 +396,36 @@ export async function loadV2Context(args: {
     dealId,
     dealSelectionReason,
   };
+}
+
+/**
+ * Passo "dados" do turno: o que o agente recebeu do cadastro — rótulos do que
+ * ele usa e do que pode dizer, e cada informação montada (✓ ou por que não
+ * saiu). Só nomes, nunca valores. Sem isto não dava para saber por que ele
+ * respondeu "não tenho essa informação".
+ */
+export function describeV2ContextForTrace(config: V2AgentConfig, ctx: V2LoadedContext): string {
+  const derivedLabels = new Set((config.derivedFields ?? []).map((d) => d.label?.trim()).filter(Boolean));
+  const names = (obj: Record<string, unknown> | null | undefined) =>
+    Object.keys(obj ?? {}).filter((k) => !derivedLabels.has(k));
+  const part = (title: string, visible: Record<string, unknown> | null | undefined, citable: Record<string, unknown> | null | undefined) => {
+    const use = names(visible);
+    const say = names(citable);
+    return `${title}: usa ${use.length ? use.join(", ") : "nenhum campo preenchido"}${say.length ? `; pode dizer ${say.join(", ")}` : ""}`;
+  };
+  const out: string[] = [];
+  out.push(ctx.contactRaw ? part("Contato", ctx.contact, ctx.citableContact) : "Contato: sem cadastro");
+  out.push(ctx.selectedDealRaw ? part("Negócio", ctx.selectedDeal, ctx.citableDeal) : "Negócio: nenhum");
+  const derived = (config.derivedFields ?? []).filter((d) => d.label?.trim());
+  if (derived.length) {
+    out.push(
+      `Informações montadas: ${derived
+        .map((d) => {
+          const why = derivedFieldMissing(d, config, ctx.contactRaw, ctx.selectedDealRaw);
+          return why ? `${d.label} ✗ (${why})` : `${d.label} ✓`;
+        })
+        .join("; ")}`,
+    );
+  }
+  return out.join(" · ");
 }

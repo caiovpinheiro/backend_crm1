@@ -17,7 +17,7 @@ import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from 
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
-import { loadV2Context, buildAskDealMessage } from "./context";
+import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, type V2LoadedContext } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
 import { fieldMasks } from "@/lib/ai-v2/field-mask";
@@ -176,6 +176,7 @@ export async function simulateV2Turn(
       contactId,
       selectedDealId,
     });
+    traceStep("dados", describeV2ContextForTrace(config, context as V2LoadedContext));
   } else {
     context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
   }

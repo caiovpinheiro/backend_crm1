@@ -85,6 +85,32 @@ export function derivedFieldValue(
   return out;
 }
 
+const BUILTIN_LABEL: Record<string, string> = { name: "Nome", phone: "Telefone", email: "E-mail" };
+
+/**
+ * Por que a informação montada não sai (para os passos do turno): parte sem
+ * campo ou campo vazio. Null = monta. Só nomes, nunca valores.
+ */
+export function derivedFieldMissing(
+  field: V2DerivedField,
+  config: Pick<V2AgentConfig, "contextFields">,
+  contact: Record<string, unknown> | null | undefined,
+  deal: Record<string, unknown> | null | undefined,
+): string | null {
+  const labelOf = (entity: "contact" | "deal", key: string) =>
+    config.contextFields?.[entity]?.find((f) => f.key === key)?.label || BUILTIN_LABEL[key] || key;
+  for (const [i, part] of (field.parts ?? []).entries()) {
+    if (part.kind !== "field") continue;
+    if (!part.key) return `parte ${i + 1} sem campo`;
+    const entity = part.entity === "deal" ? "deal" : "contact";
+    const source = entity === "deal" ? deal : contact;
+    if (!derivedPartText(source?.[part.key], part)) {
+      return `${labelOf(entity, part.key)} vazio${entity === "deal" && !deal ? " (sem negócio)" : ""}`;
+    }
+  }
+  return (field.parts ?? []).length === 0 ? "sem partes" : null;
+}
+
 /** Máscaras configuradas por chave e por rótulo do campo. */
 export function fieldMasks(config: Pick<V2AgentConfig, "contextFields">): Record<string, V2FieldMask> {
   const out: Record<string, V2FieldMask> = {};

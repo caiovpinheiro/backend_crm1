@@ -11,7 +11,7 @@ import { applyConfirmationIdentity, buildVariableMap, confirmationIdentityValues
 import { fieldMasks } from "@/lib/ai-v2/field-mask";
 import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
-import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedContext } from "./context";
+import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, tryParseDealChoice, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
@@ -483,6 +483,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     config,
     selectedDealId: stateRow?.selectedDealId ?? undefined,
   });
+  traceStep("dados", describeV2ContextForTrace(config, loadedContext));
 
   const context: V2CRMContext = {
     contact: loadedContext.contact,
