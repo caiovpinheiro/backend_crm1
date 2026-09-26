@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
-import { listConfigReviews, startConfigReview } from "@/services/ai-v2/config-review";
+import { currentReviewConfigHash, listConfigReviews, startConfigReview } from "@/services/ai-v2/config-review";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +14,9 @@ export async function GET(_request: Request, { params }: Params) {
   if (denied) return denied;
   return runInSessionContext(r.session, async () => {
     try {
-      return NextResponse.json({ runs: await listConfigReviews(r.session.user.organizationId!, id) });
+      const orgId = r.session.user.organizationId!;
+      const [runs, currentConfigHash] = await Promise.all([listConfigReviews(orgId, id), currentReviewConfigHash(orgId, id)]);
+      return NextResponse.json({ runs, currentConfigHash });
     } catch (err) {
       console.error("[GET /api/ai-agents-v2/[id]/review]", err);
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar as revisões." }, { status: 500 });
