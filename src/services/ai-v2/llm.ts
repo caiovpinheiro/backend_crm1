@@ -1377,15 +1377,17 @@ export async function callV2LLM(args: {
     // prova que a coisa existe).
     const factSources = sources.slice(1 + previousMessages.length);
     const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
-    // Valor em dinheiro/percentual: o que o cliente sugere ("é R$ 30, né?")
-    // não é fonte; o que o agente já disse em turnos anteriores é.
-    const figureSources = [...factSources, ...previousMessages.filter((m) => m.role === "assistant").map((m) => m.content)];
+    // Valores que o cliente informou sobre a própria situação ("o boleto
+    // veio R$ 923") contam como fonte nas regras: explicar o boleto dele com
+    // a regra do material é o esperado. Confirmar como preço da empresa um
+    // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
+    // checagem por modelo, que distingue os dois casos.
     const unsupportedOf = (reply: string, reason?: string) => [
       ...(procedureAdmittedMissing(reply, reason) ? ["um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)"] : []),
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
       ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => `"${t}"`),
       ...unsupportedMenuPaths(reply, sources, factSources).map((t) => `"${t}"`),
-      ...unsupportedFigures(reply, figureSources),
+      ...unsupportedFigures(reply, sources),
       ...unsupportedFacts(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];

@@ -25,7 +25,7 @@ NÃO liste:
 - dados do próprio cliente que aparecem nas fontes;
 - repetir o que o cliente disse sem confirmar como verdade.
 
-O que o cliente disse NÃO é fonte: se a resposta confirma algo que só o cliente afirmou, é afirmação sem fonte.
+O que o cliente disse sobre a própria situação (o valor que veio no boleto dele, a data em que comprou, o que aparece na tela dele) pode ser usado para explicar a regra das fontes: isso NÃO é afirmação sem fonte. Só é sem fonte quando a resposta confirma como regra, preço, prazo ou condição da empresa algo que só o cliente afirmou e as fontes não dizem (ex.: cliente "a taxa é R$ 30, né?" → resposta "Isso, a taxa é R$ 30").
 
 Responda só com JSON: {"unsupported": ["trecho curto da resposta com a afirmação sem fonte", ...]}. Sem nenhuma, {"unsupported": []}.`;
 
