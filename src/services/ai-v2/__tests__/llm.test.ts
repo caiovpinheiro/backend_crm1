@@ -955,14 +955,14 @@ describe("escopo e repetição", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
-  it("valor que o cliente informou sobre o próprio boleto não é invenção", async () => {
+  it("valor que o cliente informou sobre a própria fatura não é invenção", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
-      makeLLMResponse(JSON.stringify({ reply: "Os R$ 923 do boleto são o valor integral; com o desconto até o vencimento, você paga os R$ 129 combinados.", actions: [] })),
+      makeLLMResponse(JSON.stringify({ reply: "Os R$ 480 da fatura são o valor cheio; com o desconto até o vencimento, você paga os R$ 150 combinados.", actions: [] })),
     );
     await callV2LLM({
       agentId: "agent-1", config: baseConfig(),
       context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
-      userMessage: "me disseram que iria pagar R$ 129 e o boleto está R$ 923", stage: "active",
+      userMessage: "me disseram que eu pagaria R$ 150 e a fatura veio R$ 480", stage: "active",
     });
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });

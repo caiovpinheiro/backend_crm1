@@ -1378,7 +1378,7 @@ export async function callV2LLM(args: {
     const factSources = sources.slice(1 + previousMessages.length);
     const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
     // Valores que o cliente informou sobre a própria situação ("o boleto
-    // veio R$ 923") contam como fonte nas regras: explicar o boleto dele com
+    // veio R$ 480") contam como fonte nas regras: explicar o boleto dele com
     // a regra do material é o esperado. Confirmar como preço da empresa um
     // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
     // checagem por modelo, que distingue os dois casos.
