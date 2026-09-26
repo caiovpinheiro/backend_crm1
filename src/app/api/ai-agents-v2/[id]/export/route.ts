@@ -12,20 +12,20 @@ type Row = { id: string; name?: string | null };
 const byId = (rows: Row[] | undefined) => Object.fromEntries((rows ?? []).map((r) => [r.id, r.name ?? ""]));
 
 /** Nomes do que a configuração cita por id (departamento, agente, material…). */
-async function loadNames(organizationId: string, config: V2AgentConfig): Promise<V2ExportNames> {
+async function loadNames(organizationId: string, agentId: string, config: V2AgentConfig): Promise<V2ExportNames> {
   const p = prisma as any;
   const docIds = [...new Set([
     ...(config.allowedKnowledgeDocIds ?? []),
     ...config.themes.flatMap((t) => [...(t.allowedKnowledgeDocIds ?? []), ...(t.knowledgeDocIds ?? [])]),
   ])];
   const safe = <T,>(promise: Promise<T>, fallback: T) => promise.catch(() => fallback);
-  const [departments, users, distributionRules, agents, models, docs, customFields, pipelines, tags, tabulations, attachments] = await Promise.all([
+  const [departments, users, distributionRules, agents, models, docs, customFields, pipelines, tags, tabulations, attachments, channels] = await Promise.all([
     safe(p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.user.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.aIAgentConfig.findMany({ where: { organizationId }, select: { id: true, engine: true, active: true, user: { select: { name: true } } } }), []),
     safe(p.messageTemplate.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
-    safe(p.aIAgentKnowledgeDoc.findMany({ where: { organizationId, id: { in: docIds } }, select: { id: true, title: true, status: true, validUntil: true } }), []),
+    safe(p.aIAgentKnowledgeDoc.findMany({ where: { organizationId, agentId, id: { in: docIds } }, select: { id: true, title: true, status: true, validUntil: true } }), []),
     safe(p.customField.findMany({ where: { organizationId }, select: { id: true, name: true, label: true } }), []),
     safe(p.pipeline.findMany({ where: { organizationId }, select: { name: true, stages: { select: { id: true, name: true } } } }), []),
     safe(Promise.resolve(p.tag?.findMany?.({ where: { organizationId }, select: { id: true, name: true } }) ?? []), []),
@@ -39,6 +39,7 @@ async function loadNames(organizationId: string, config: V2AgentConfig): Promise
           ),
           [] as Array<{ docId: string; n: number }>,
         ),
+    safe(p.channel.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
   ]);
   const attachmentCount = new Map((attachments as Array<{ docId: string; n: number }>).map((a) => [a.docId, Number(a.n)]));
   return {
@@ -57,6 +58,7 @@ async function loadNames(organizationId: string, config: V2AgentConfig): Promise
     tabulations: Object.fromEntries((tabulations as Array<{ id: string; path: string; departmentName: string }>).map((t) => [t.id, `${t.departmentName} › ${t.path}`])),
     stages: Object.fromEntries((pipelines as Array<{ name: string; stages: Row[] }>).flatMap((pl) => pl.stages.map((s) => [s.id, `${pl.name} › ${s.name}`]))),
     tags: byId(tags as Row[]),
+    channels: byId(channels as Row[]),
   };
 }
 
@@ -80,13 +82,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
       const config = version === "draft" ? agent.draftConfig ?? agent.publishedConfig : agent.publishedConfig;
       const versionLabel = version === "draft" ? "rascunho" : `publicada v${agent.lastVersionNumber}`;
-      const names = await loadNames(organizationId, config);
+      const names = await loadNames(organizationId, agent.id, config);
       const slug = (agent.name || "agente").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "agente";
       const date = new Date().toISOString().slice(0, 10);
       const fileBase = `regras-${slug}-${version === "draft" ? "rascunho" : `v${agent.lastVersionNumber}`}-${date}`;
 
       if (format === "json") {
-        const body = JSON.stringify({ agent: agent.name, version: versionLabel, gaps: detectConfigGaps(config, names), names, config }, null, 2);
+        const body = JSON.stringify({ agent: agent.name, agentId: agent.id, version: versionLabel, gaps: detectConfigGaps(config, names, { agentId: agent.id, version }), names, config }, null, 2);
         return new NextResponse(body, {
           headers: {
             "Content-Type": "application/json; charset=utf-8",
@@ -94,7 +96,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           },
         });
       }
-      const markdown = buildAgentRulesMarkdown({ config, names, agentName: agent.name, version: versionLabel });
+      const markdown = buildAgentRulesMarkdown({ config, names, agentName: agent.name, version: versionLabel, agentId: agent.id, versionKind: version });
       return new NextResponse(markdown, {
         headers: {
           "Content-Type": "text/markdown; charset=utf-8",

@@ -19,7 +19,7 @@ function normalize(s: string): string {
  * palavra menor. Só substring não bastava — "cadastrei" não contém
  * "cadastro" e o assunto não era escolhido.
  */
-function sameWordStem(a: string, b: string): boolean {
+export function sameWordStem(a: string, b: string): boolean {
   if (a === b) return true;
   // Plural/gênero: uma é a outra + até 3 letras. Só por prefixo — "estar
   // dentro" fazia "um" casar "documento" e qualquer frase com "um" pegava
