@@ -26,6 +26,7 @@ import {
   readLegacyUploadsFile,
   readStoredFile,
   resolveOutboundAttachmentMime,
+  reuseLocateProbePlan,
 } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -197,13 +198,44 @@ export async function processMetaAttach(
     storedFileName = relative.split("/").pop() || storedFileName;
   }
 
+  // Mesmo objeto com outro nome ou bucket (mp4↔MP4, jpg↔jpeg, outros
+  // buckets de mídia): o reaproveitamento do inbox já procura assim; aqui a
+  // leitura era só do caminho exato e o anexo de modelo (agente, automação)
+  // falhava enquanto o inbox mostrava o arquivo.
+  if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId) {
+    for (const probe of reuseLocateProbePlan(storedPath.bucket, storedPath.fileName).slice(1)) {
+      const alt = await readStoredFile(storedPath.orgId, probe.bucket, probe.fileName);
+      if (alt?.buffer.length) {
+        stored = alt;
+        storedFileName = probe.fileName;
+        break;
+      }
+    }
+    // Último recurso, como no reaproveitamento do inbox: arquivo que só
+    // existe no backend antigo (STORAGE_FALLBACK_URL; sem env, nada).
+    if (!stored?.buffer.length) {
+      const { readUpstreamFallbackBytes } = await import("@/lib/storage/upstream-fallback");
+      const bytes = await readUpstreamFallbackBytes(
+        `${storedPath.orgId}/${storedPath.bucket}/${storedPath.fileName}`,
+        null,
+      ).catch(() => null);
+      if (bytes?.length) stored = { buffer: bytes, mimeType: mimeFromFilename(storedPath.fileName) };
+    }
+  }
+
   if (!stored?.buffer.length) {
     if (!storedPath || storedPath.orgId !== payload.organizationId) {
       return markFailed(payload, "Arquivo não encontrado no storage.", {
         messageType: kind,
       });
     }
-    return markFailed(payload, "Arquivo vazio ou ilegível.", { messageType: kind });
+    // Sem objeto nenhum ≠ objeto vazio: "vazio ou ilegível" escondia que o
+    // arquivo não existe no storage (upload não concluído, trocado ou apagado).
+    return markFailed(
+      payload,
+      stored ? "Arquivo vazio ou ilegível." : "Arquivo não encontrado no storage — envie o arquivo de novo.",
+      { messageType: kind },
+    );
   }
 
   const classifiedMime = resolveOutboundAttachmentMime({
