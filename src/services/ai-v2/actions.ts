@@ -442,17 +442,23 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
       return { action, ok: true, mediaSent: 0, text };
     }
     const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
-    const since = await lastV2ResetAt(ctx.conversationId).catch(() => null);
-    const mediaSent = await sendAgentFollowUpMedia({
-      conversationId: ctx.conversationId,
-      contactId: ctx.contactId,
-      agentUserId: ctx.agentUserId,
-      attachments: list.map((a) => ({ url: a.url, mimeType: a.mimeType, name: a.name })),
-      ...(since ? { since } : {}),
-    });
+    const { resendSince } = await import("./material-attachments");
+    const lastReset = await lastV2ResetAt(ctx.conversationId).catch(() => null);
+    // A trava de repetição é de cada anexo ("7d" padrão; "always" sai sempre).
+    let mediaSent = 0;
+    for (const window of [...new Set(list.map((a) => a.resendWindow))]) {
+      const group = list.filter((a) => a.resendWindow === window);
+      mediaSent += await sendAgentFollowUpMedia({
+        conversationId: ctx.conversationId,
+        contactId: ctx.contactId,
+        agentUserId: ctx.agentUserId,
+        attachments: group.map((a) => ({ url: a.url, mimeType: a.mimeType, name: a.name })),
+        since: resendSince(window, lastReset),
+      });
+    }
     traceStep("mídia", mediaSent > 0
       ? `Enviou ${mediaSent} anexo(s) do material: ${list.slice(0, mediaSent).map((a) => a.name).join(", ")}`
-      : `Anexos do material não enviados (já enviados nesta conversa nos últimos 7 dias, ou canal indisponível): ${list.map((a) => a.name).join(", ")}`);
+      : `Anexos do material não enviados (já enviados nesta conversa dentro da trava de repetição, ou canal indisponível): ${list.map((a) => a.name).join(", ")}`);
     return { action, ok: true, mediaSent, text };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };

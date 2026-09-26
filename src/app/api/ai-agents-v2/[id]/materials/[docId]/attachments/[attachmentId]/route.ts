@@ -21,6 +21,8 @@ export async function PATCH(request: Request, { params }: Params) {
         attachmentId,
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.autoSend !== undefined ? { autoSend: body.autoSend } : {}),
+        ...(body.resendWindow !== undefined ? { resendWindow: body.resendWindow } : {}),
       });
       if (!attachment) return NextResponse.json({ message: "Anexo não encontrado." }, { status: 404 });
       return NextResponse.json({ attachment });

@@ -265,6 +265,27 @@ describe("callV2LLM — pré-busca na base", () => {
     expect(result.output.actions).toContainEqual({ type: "send_material_attachment", attachmentIds: ["att-1"] });
   });
 
+  it("anexo 'enviar sempre' sai quando o material é a principal fonte; não em transferência", async () => {
+    const { attachmentsForDocs } = await import("../material-attachments");
+    const att = { id: "att-auto", docId: "doc-1", url: "/uploads/org/a.png", mimeType: "image/png", name: "Exemplo", description: "", autoSend: true, resendWindow: "7d", kind: "image", position: 0, createdAt: "", docTitle: "Como emitir o comprovante" };
+    (attachmentsForDocs as ReturnType<typeof vi.fn>).mockResolvedValue([att]);
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [{ ...chunk, distance: 0.2 }] });
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Veja o passo a passo.", actions: [] })));
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"] } as Partial<V2AgentConfig>);
+    const args = {
+      agentId: "agent-1", config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "como emito o comprovante", stage: "active",
+    };
+    const r = await callV2LLM(args as never);
+    expect(r.output.actions).toContainEqual({ type: "send_material_attachment", attachmentIds: ["att-auto"] });
+
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Vou chamar alguém.", handoff: true, actions: [] })));
+    const h = await callV2LLM(args as never);
+    expect(h.output.actions.some((a) => a.type === "send_material_attachment")).toBe(false);
+    (attachmentsForDocs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  });
+
   it("sem materiais liberados não busca", async () => {
     const config = baseConfig({ allowedKnowledgeDocIds: [] } as Partial<V2AgentConfig>);
 

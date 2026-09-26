@@ -43,7 +43,7 @@ import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
-import { WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
+import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
@@ -1357,9 +1357,16 @@ export async function callV2LLM(args: {
 
     // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
-    const picked = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))].slice(0, MATERIAL_ATTACHMENT_LIMITS.perReply);
+    const chosen = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))];
+    // "Enviar sempre": o material do trecho mais parecido é a principal fonte.
+    const mainDocId = (prefetch.best ?? 0) >= MAIN_SOURCE_SIMILARITY ? prefetch.chunks[0]?.docId : undefined;
+    const automatic = output.handoff || !mainDocId
+      ? []
+      : offeredAttachments.filter((a) => a.autoSend && a.docId === mainDocId && !chosen.includes(a.id)).map((a) => a.id);
+    if (automatic.length > 0) traceStep("mídia", `Anexo de envio automático (material principal da resposta): ${automatic.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
+    const picked = [...chosen, ...automatic].slice(0, MATERIAL_ATTACHMENT_LIMITS.perReply);
     output.attachments = picked;
-    if (picked.length > 0) traceStep("mídia", `O agente pediu para enviar: ${picked.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
+    if (chosen.length > 0) traceStep("mídia", `O agente pediu para enviar: ${chosen.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
     if (picked.length > 0) {
       output.actions = [...output.actions, { type: "send_material_attachment", attachmentIds: picked } as V2Action];
     }

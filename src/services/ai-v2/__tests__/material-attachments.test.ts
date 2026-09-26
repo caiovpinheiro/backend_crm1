@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 
-import { attachmentKind, attachmentsPromptSection } from "../material-attachments";
+import { attachmentKind, attachmentsPromptSection, resendSince } from "../material-attachments";
 
 describe("anexos dos materiais", () => {
   it("tipo pelo mime", () => {
@@ -22,5 +22,15 @@ describe("anexos dos materiais", () => {
     expect(s).toContain('- a1: documento "Tabela de preços" (material "Preços") — enviar quando: quando pedirem os valores por escrito');
     expect(s).toContain('- a2: imagem "Tela de login" (material "Acesso")');
     expect(s).toContain('attachments: ["<id>"]');
+  });
+
+  it("trava de repetição por anexo", () => {
+    const now = new Date("2026-09-26T12:00:00Z");
+    const reset = new Date("2026-09-26T11:50:00Z");
+    expect(resendSince("always", reset, now).toISOString()).toBe(now.toISOString());
+    // 30 min atrás é antes do #reset: vale o #reset.
+    expect(resendSince("30m", reset, now).toISOString()).toBe(reset.toISOString());
+    expect(resendSince("30m", null, now).toISOString()).toBe("2026-09-26T11:30:00.000Z");
+    expect(resendSince("7d", null, now).toISOString()).toBe("2026-09-19T12:00:00.000Z");
   });
 });

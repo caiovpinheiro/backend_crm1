@@ -1652,6 +1652,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // (tag, campo, nota…) rodam agora.
   const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message", "send_material_attachment"]);
   let outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
+  // Resposta trocada pela mensagem "sem material": anexo de material não cabe.
+  if (noSourceApplied) outboundActions = outboundActions.filter((a) => a.type !== "send_material_attachment");
   // Mensagem pronta enviada há pouco (cliente repetiu o pedido): não sai de
   // novo. Antes a introdução ("vou te enviar…") saía, o texto era barrado
   // pela trava anti-repetição e o cliente ficava sem nada.

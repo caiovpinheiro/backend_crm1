@@ -55,6 +55,12 @@ export function themeThresholdsFor(preset: V2ThemeRecognitionPreset | undefined)
 export const WEAK_MATCH_SIMILARITY = 0.3;
 
 /**
+ * Material é a principal fonte da resposta quando é o trecho mais parecido
+ * com a mensagem e passa desta similaridade (anexo "enviar sempre").
+ */
+export const MAIN_SOURCE_SIMILARITY = 0.5;
+
+/**
  * Trechos dos materiais que vão ao modelo:
  *  - "all" (padrão): todos os encontrados;
  *  - "related": corta os pouco parecidos com a pergunta;

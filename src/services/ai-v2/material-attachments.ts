@@ -15,6 +15,23 @@ export const MATERIAL_ATTACHMENT_LIMITS = { perMaterial: 5, perTurnOffered: 6, p
 
 export type V2MaterialAttachmentKind = "image" | "video" | "audio" | "document";
 
+/**
+ * Quando o mesmo anexo pode sair de novo na conversa: "7d" (padrão, a trava
+ * de sempre), "24h", "30m" ou "always" (sai toda vez que for usado).
+ * A contagem começa no último #reset.
+ */
+export type V2AttachmentResendWindow = "always" | "30m" | "24h" | "7d";
+export const RESEND_WINDOWS: V2AttachmentResendWindow[] = ["always", "30m", "24h", "7d"];
+const RESEND_WINDOW_MS: Record<V2AttachmentResendWindow, number> = { always: 0, "30m": 30 * 60_000, "24h": 24 * 3_600_000, "7d": 7 * 86_400_000 };
+
+/** A partir de quando um envio anterior conta como repetição (para o envio de anexos). */
+export function resendSince(window: V2AttachmentResendWindow, lastReset: Date | null, now: Date = new Date()): Date {
+  const ms = RESEND_WINDOW_MS[window] ?? RESEND_WINDOW_MS["7d"];
+  // "Sempre": nada antes de agora conta.
+  const fromWindow = ms === 0 ? now.getTime() : now.getTime() - ms;
+  return new Date(Math.max(fromWindow, lastReset?.getTime() ?? 0));
+}
+
 export type V2MaterialAttachment = {
   id: string;
   docId: string;
@@ -23,6 +40,10 @@ export type V2MaterialAttachment = {
   name: string;
   /** Quando enviar (vai para o agente decidir). */
   description: string;
+  /** Envia sempre que o material for a principal fonte da resposta. */
+  autoSend: boolean;
+  /** Quando pode repetir na mesma conversa. */
+  resendWindow: V2AttachmentResendWindow;
   kind: V2MaterialAttachmentKind;
   position: number;
   createdAt: string;
@@ -65,6 +86,8 @@ async function ensureSchema(): Promise<void> {
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
   await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ai_v2_material_attachments_doc_idx" ON "ai_v2_material_attachments" ("agentId", "docId")`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_v2_material_attachments" ADD COLUMN IF NOT EXISTS "autoSend" BOOLEAN NOT NULL DEFAULT false`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_v2_material_attachments" ADD COLUMN IF NOT EXISTS "resendWindow" TEXT NOT NULL DEFAULT '7d'`);
   schemaReady = true;
 }
 
@@ -77,6 +100,8 @@ function toAttachment(r: Record<string, unknown>): V2MaterialAttachment {
     mimeType,
     name: String(r.name ?? ""),
     description: String(r.description ?? ""),
+    autoSend: r.autoSend === true,
+    resendWindow: RESEND_WINDOWS.includes(r.resendWindow as V2AttachmentResendWindow) ? (r.resendWindow as V2AttachmentResendWindow) : "7d",
     kind: attachmentKind(mimeType),
     position: Number(r.position ?? 0),
     createdAt: new Date(r.createdAt as string).toISOString(),
@@ -142,6 +167,8 @@ export async function updateMaterialAttachment(args: {
   attachmentId: string;
   name?: unknown;
   description?: unknown;
+  autoSend?: unknown;
+  resendWindow?: unknown;
 }): Promise<V2MaterialAttachment | null> {
   await ensureSchema();
   const sets: string[] = [];
@@ -153,6 +180,14 @@ export async function updateMaterialAttachment(args: {
   if (args.description !== undefined) {
     values.push(clean(args.description, MATERIAL_ATTACHMENT_LIMITS.descriptionChars));
     sets.push(`"description" = $${values.length}`);
+  }
+  if (typeof args.autoSend === "boolean") {
+    values.push(args.autoSend);
+    sets.push(`"autoSend" = $${values.length}`);
+  }
+  if (typeof args.resendWindow === "string" && RESEND_WINDOWS.includes(args.resendWindow as V2AttachmentResendWindow)) {
+    values.push(args.resendWindow);
+    sets.push(`"resendWindow" = $${values.length}`);
   }
   if (sets.length > 0) {
     await db.$executeRawUnsafe(
