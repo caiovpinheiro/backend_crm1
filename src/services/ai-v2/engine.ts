@@ -208,6 +208,11 @@ function mergeCollectedVariables(
   return { ...existing, ...collected };
 }
 
+/** Resposta que traz um e-mail ou um número com cara de documento. */
+export function looksLikeIdentification(text: string): boolean {
+  return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(text) || (text.match(/\d/g)?.length ?? 0) >= 5;
+}
+
 /** Chegou mensagem do cliente depois das deste turno. */
 async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
@@ -453,7 +458,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
   let stage: V2Stage = (stateRow?.stage as V2Stage) ?? "idle";
   let owner: V2Owner = stateRow ? prismaToOwner(stateRow.owner) : "agente";
-  const humanBehavior = v2HumanBehavior(config);
+  // O "digitando…" desconta o tempo que o turno já levou pensando.
+  const humanBehavior = { ...v2HumanBehavior(config), turnStartedAt: startedAt };
   let counters = parseV2Counters(stateRow?.counters);
   // Opções da última resposta (botões/lista/numeradas): o clique ou o número
   // ("2") vira o rótulo da opção, que é o que o modelo e as regras entendem.
@@ -1017,6 +1023,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       traceStep("regra", `Ação da regra falhou (${failedTerminal.map((r) => `${r.action.type}${r.error ? `: ${r.error}` : ""}`).join("; ")}) → segue para o agente`);
     }
 
+    // Encerramento antes do log: é ele que tabula, e a tabulação precisa
+    // entrar no registro do turno (relatório de ações).
+    if (anyClose && !anyHandoff) {
+      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables, getV2ThemeById(config, themeId));
+    }
+
     // Logs e saída
     await logV2Turn({
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -1033,7 +1045,6 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: true, closed: false, sentReply: ruleReply };
     }
     if (anyClose) {
-      await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "rule", loadedContext.contactId, collectedVariables, getV2ThemeById(config, themeId));
       return { handoff: false, closed: true };
     }
     if (isTerminal) {
@@ -1067,7 +1078,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       traceStep("entrada", `Nenhum negócio do contato encontrado → "${onDealNotFound}"`);
       if (onDealNotFound === "handoff") {
         noteV2Fact("handoffCause", "identification", { keepFirst: true });
-        await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, "Não encontrei seu cadastro. Vou transferir para um atendente.", counters);
+        await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
         return { handoff: true, closed: false };
       } else if (onDealNotFound === "create_deal") {
         const created = await createInitialDeal(contactId);
@@ -1097,13 +1108,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         Object.assign(vars, messageVariables(config, context));
         stage = "active";
       } else {
-        // O motor não identifica pela resposta do cliente (não há busca por
-        // e-mail/CPF). Antes repetia a mesma pergunta para sempre e, da 2ª
-        // vez em diante, a trava anti-repetição engolia o envio: o cliente
-        // ficava sem resposta. Agora pergunta até `entry.maxAttempts` vezes
-        // (a 2ª com outro texto) e depois transfere para humano.
+        // O motor não vincula cadastro pelo dado que o cliente digita: quem
+        // digita o documento de outra pessoa receberia os dados dela. A equipe
+        // localiza o cadastro. Resposta com e-mail/documento → transfere; sem
+        // nada disso, pede de novo até `entry.maxAttempts` vezes.
         const asked = stage === "identifying" ? Math.max(1, stateRow?.identificationAttempts ?? 1) : 0;
-        if (asked >= (config.entry.maxAttempts ?? 2)) {
+        const answered = asked > 0 && looksLikeIdentification(input.userMessage);
+        if (answered) traceStep("entrada", "Cliente mandou e-mail/documento → a equipe localiza o cadastro");
+        if (answered || asked >= (config.entry.maxAttempts ?? 2)) {
           noteV2Fact("handoffCause", "identification", { keepFirst: true });
           await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
           return { handoff: true, closed: false };
@@ -1115,7 +1127,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           }
           parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
         } else {
-          parts.push("Ainda não localizei seu cadastro com essa informação. Pode me enviar outro dado, como o e-mail ou o telefone usado no cadastro?");
+          parts.push("Não encontrei um e-mail ou documento na sua mensagem. Pode me enviar o e-mail ou o documento usado no cadastro?");
         }
         const identMsg = parts.filter(Boolean).join("\n\n");
         await sendReply(identMsg);
@@ -1187,11 +1199,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
         } else {
           const superseded = await newerInboundArrived(input.conversationId, input.messageIds);
-          const welcome = superseded ? "" : renderMessage(config.entry.openingMessage, vars, defaultFormatter());
+          const rendered = superseded ? "" : renderMessage(config.entry.openingMessage, vars, defaultFormatter());
           traceStep("entrada", superseded
             ? "O cliente já mandou outra mensagem: as boas-vindas não saem — a próxima resposta cobre"
             : "Primeira mensagem só com cumprimento → boas-vindas configuradas");
-          if (welcome) await sendReply(welcome);
+          // Confere de novo depois do "digitando…": o pedido pode chegar nele.
+          const welcome = rendered && (await sendReply(rendered, null, { dropIfSuperseded: true })).sent ? rendered : "";
           await upsertV2ConversationState({
             organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
             stage: "active", versionId: versionId,
@@ -1651,14 +1664,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Saudação que ficou para trás: o cliente mandou "Oi" e logo o pedido, e o
   // pedido chegou enquanto este turno pensava. Mandar "Como posso ajudar?"
   // depois do pedido parece que o agente não leu; o próximo turno responde.
-  if (
+  const greetingOnlyReply =
     !anyHandoff &&
     !anyClose &&
     replyOptions.length === 0 &&
     outboundActions.length === 0 &&
-    isGreetingOnlyReply(replyText) &&
-    (await newerInboundArrived(input.conversationId, input.messageIds))
-  ) {
+    isGreetingOnlyReply(replyText);
+  if (greetingOnlyReply && (await newerInboundArrived(input.conversationId, input.messageIds))) {
     traceStep("resposta", "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas");
     replyText = "";
   }
@@ -1667,7 +1679,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (!anyHandoff && !anyClose && replyText.trim()) {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions) : null;
     const outText = withOptions ? withOptions.fallbackText : replyText;
-    const res = await sendReply(outText, withOptions?.payload);
+    // A saudação é conferida de novo depois do "digitando…".
+    const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply });
     noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
       sentReply = outText;
@@ -1829,7 +1842,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return sent;
   }
 
-  async function sendReply(text: string, interactive?: V2InteractivePayload | null): Promise<{ sent: boolean; reason?: string }> {
+  async function sendReply(
+    text: string,
+    interactive?: V2InteractivePayload | null,
+    opts?: { dropIfSuperseded?: boolean },
+  ): Promise<{ sent: boolean; reason?: string }> {
     if (!text.trim()) return { sent: false, reason: "empty" };
     return sendV2TextMessage({
       interactive,
@@ -1839,7 +1856,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       text,
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-      humanBehavior,
+      humanBehavior: opts?.dropIfSuperseded
+        ? { ...humanBehavior, abortIf: () => newerInboundArrived(input.conversationId, input.messageIds) }
+        : humanBehavior,
     });
   }
 }

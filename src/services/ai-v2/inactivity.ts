@@ -66,6 +66,7 @@ type IdleRow = {
   simple_config: unknown;
   channel_kind: "meta" | "baileys";
   theme_id: string | null;
+  deal_id: string | null;
   last_out_content: string | null;
   last_out_at: Date;
   last_inbound_at: Date | null;
@@ -87,6 +88,11 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
             a."simpleConfig" AS simple_config,
             CASE WHEN ch."provider" = 'BAILEYS_MD' THEN 'baileys' ELSE 'meta' END AS channel_kind,
             s."themeId" AS theme_id,
+            COALESCE(s."selectedDealId", (
+              SELECT d."id" FROM "deals" d
+               WHERE d."contactId" = c."contactId" AND d."status" <> 'LOST'
+               ORDER BY d."updatedAt" DESC LIMIT 1
+            )) AS deal_id,
             last_out."content" AS last_out_content, last_out."createdAt" AS last_out_at,
             c."lastInboundAt" AS last_inbound_at
        FROM "conversations" c
@@ -177,7 +183,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             const canText = !!row.last_inbound_at && now.getTime() - new Date(row.last_inbound_at).getTime() < WINDOW_24H;
             if (closeText && canText && (await send(closeText)).sent) reply = closeText;
             await closeState(
-              row.organization_id, row.conversation_id, row.agent_config_id, undefined, config, undefined,
+              row.organization_id, row.conversation_id, row.agent_config_id, row.deal_id ?? undefined, config, undefined,
               "inactivity", row.contact_id, {}, getV2ThemeById(config, row.theme_id ?? undefined),
             );
             closed++;

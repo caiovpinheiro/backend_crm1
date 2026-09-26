@@ -1053,6 +1053,21 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 
+  it("identificação: resposta com e-mail/documento transfere (a equipe localiza o cadastro)", async () => {
+    const config = baseConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", maxAttempts: 3 } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1" }, deals: [], selectedDeal: null, dealId: undefined });
+    mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 1 });
+    const result = await run("meu documento é 123.456.789-00");
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("localizei");
+
+    const { looksLikeIdentification } = await import("../engine");
+    for (const m of ["ana@exemplo.com", "123.456.789-00", "meu código é 98765"]) expect(looksLikeIdentification(m)).toBe(true);
+    for (const m of ["como assim?", "não sei", "oi", "dia 12"]) expect(looksLikeIdentification(m)).toBe(false);
+  });
+
   it("identificação: 2ª tentativa com outro texto e depois transfere", async () => {
     const config = baseConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", maxAttempts: 2 } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
@@ -1064,16 +1079,16 @@ describe("processV2Turn — correções do motor", () => {
     const first = mocks.sendText.mock.calls.at(-1)![0].text as string;
     expect(mocks.upsertState.mock.calls.at(-1)![0]).toMatchObject({ stage: "identifying", identificationAttempts: 1 });
 
-    // 2º turno: cliente respondeu, ainda sem negócio → pergunta diferente.
+    // 2º turno: resposta sem e-mail nem documento → pede de novo, com outro texto.
     mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 1 });
-    await run("123.456.789-00");
+    await run("como assim?");
     const second = mocks.sendText.mock.calls.at(-1)![0].text as string;
     expect(second).not.toBe(first);
     expect(mocks.upsertState.mock.calls.at(-1)![0]).toMatchObject({ stage: "identifying", identificationAttempts: 2 });
 
     // 3º turno: esgotou → transfere, sem chamar o LLM.
     mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 2 });
-    const result = await run("ana@x.com");
+    const result = await run("não sei");
     expect(result.handoff).toBe(true);
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
     expect(mocks.callLLM).not.toHaveBeenCalled();
@@ -1310,6 +1325,30 @@ describe("processV2Turn — correções do motor", () => {
     mocks.messageFindFirst.mockResolvedValueOnce(null);
     await run("Oi, boa tarde!", { messageIds: ["m-1"] });
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
+  });
+
+  it("saudação confere de novo depois do 'digitando…'; resposta com conteúdo não", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-09-26T12:08:00Z") }] : [],
+    );
+    mocks.messageFindFirst.mockResolvedValue(null);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi, Maria! Boa tarde 😊 Como posso ajudar você hoje?" }));
+    await run("Oi, boa tarde!", { messageIds: ["m-1"] });
+    const hb = mocks.sendText.mock.calls.at(-1)![0].humanBehavior as { abortIf?: () => Promise<boolean>; turnStartedAt?: number };
+    expect(typeof hb.abortIf).toBe("function");
+    expect(typeof hb.turnStartedAt).toBe("number");
+    // O pedido chega durante o "digitando…": a saudação desiste.
+    mocks.messageFindFirst.mockResolvedValueOnce({ id: "m-2" });
+    await expect(hb.abortIf!()).resolves.toBe(true);
+
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O boleto fica na área de pagamentos, no menu Financeiro." }));
+    await run("Preciso do boleto", { messageIds: ["m-2"] });
+    expect((mocks.sendText.mock.calls.at(-1)![0].humanBehavior as { abortIf?: unknown }).abortIf).toBeUndefined();
+    mocks.messageFindFirst.mockReset();
+    mocks.messageFindFirst.mockImplementation(async () => null);
   });
 
   it("sem confirmação: só cumprimento recebe as boas-vindas configuradas; com pedido, responde direto", async () => {

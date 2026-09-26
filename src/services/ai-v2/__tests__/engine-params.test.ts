@@ -25,7 +25,7 @@ const cfg = (extra: Record<string, unknown> = {}): V2AgentConfig =>
 describe("cliente confuso", () => {
   it("reconhece só confusão, não pergunta nova", () => {
     for (const m of ["?", "??", " ? ", "não entendi", "Não entendi nada", "como assim?", "hein?"]) expect(isConfusionMessage(m)).toBe(true);
-    for (const m of ["qual o prazo?", "não entendi o prazo da prova", "", "ok"]) expect(isConfusionMessage(m)).toBe(false);
+    for (const m of ["qual o prazo?", "não entendi o prazo da entrega", "", "ok"]) expect(isConfusionMessage(m)).toBe(false);
   });
 
   it("refaz a última pergunta do agente, ou pede o que ficou confuso", () => {
@@ -131,7 +131,7 @@ describe("depois de encerrar: classificação e mensagens por caso", () => {
     }
   });
   it("pedido novo", () => {
-    for (const m of ["Preciso de ajuda", "não consegui acessar", "quero trocar meu curso", "sim"]) {
+    for (const m of ["Preciso de ajuda", "não consegui acessar", "quero trocar meu plano", "sim"]) {
       expect(classifyPostCloseMessage(c, m)).toBe("new_demand");
     }
   });
@@ -177,6 +177,20 @@ describe("passo dados: o que o agente recebeu do cadastro", () => {
     expect(text).toContain("Código ✗ (Documento vazio)");
     expect(text).toContain("Outro ✗ (parte 1 sem campo)");
     expect(text).not.toContain("x@y.com");
+  });
+
+  it("campo configurado sem valor aparece — e avisa quando o nome existe na outra entidade", () => {
+    const c = cfg({ contextFields: { contact: [{ key: "cf1", label: "Código da conta", permissions: ["read", "cite"] }], deal: [] } });
+    const text = describeV2ContextForTrace(c, {
+      contact: { Nome: "Ana" },
+      contactRaw: { name: "Ana" },
+      citableContact: {},
+      selectedDeal: null,
+      deals: [],
+      fields: c.contextFields,
+      emptyFields: [{ entity: "contact", label: "Código da conta", onOtherEntity: true }],
+    } as never);
+    expect(text).toContain("Configurados sem valor: Código da conta (contato; há campo com esse nome no negócio — configure lá)");
   });
 
   it("sem cadastro", () => {

@@ -621,8 +621,15 @@ export function v2HumanBehavior(config: {
     simulateTyping: config.simulateTyping !== false,
     typingPerCharMs: typeof pace === "number" && pace >= 0 ? pace : 25,
     markMessagesRead: config.markMessagesRead !== false,
+    maxTypingMs: V2_MAX_TYPING_MS,
   };
 }
+
+/**
+ * Teto do "digitando…" no v2. A fórmula chegava a 25 s por mensagem e o
+ * turno com resposta + mensagem pronta + fecho pagava três vezes.
+ */
+export const V2_MAX_TYPING_MS = 8000;
 
 /**
  * Markdown do modelo → formatação do WhatsApp. O WhatsApp não tem link com
@@ -673,6 +680,10 @@ export async function sendV2TextMessage(args: {
     ...(interactive ? { interactive } : {}),
   })) as { status?: string; reason?: string } | undefined;
   const preview = text.length > 90 ? `${text.slice(0, 90)}…` : text;
+  if (result?.status === "skipped" && result.reason === "superseded") {
+    traceStep("resposta", `Não enviada: o cliente mandou outra mensagem enquanto ele digitava — a próxima resposta cobre: "${preview}"`);
+    return { sent: false, reason: "superseded" };
+  }
   if (result?.status === "skipped") {
     // Antes o motor não sabia que o envio foi barrado — o turno parecia ter
     // respondido e o cliente não recebia nada.

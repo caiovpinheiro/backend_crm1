@@ -20,6 +20,7 @@ import type { AIAgentAutonomy } from "@prisma/client";
 
 import {
   computeTypingDelayMs,
+  typingDelayWithinBudget,
   renderTemplate,
 } from "@/lib/ai-agents/piloting";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
@@ -146,6 +147,15 @@ export type HumanBehaviorConfig = {
   simulateTyping: boolean;
   typingPerCharMs: number;
   markMessagesRead: boolean;
+  /** Teto do "digitando…" (ms). Sem valor: o da fórmula (até 25 s). */
+  maxTypingMs?: number;
+  /** Início do turno (epoch ms): o tempo já gasto sai do "digitando…". */
+  turnStartedAt?: number;
+  /**
+   * Conferido depois do "digitando…": true → não envia (motivo
+   * "superseded"). Ex.: saudação quando o cliente já mandou o pedido.
+   */
+  abortIf?: () => Promise<boolean>;
 };
 
 export async function sendAgentMessage(args: {
@@ -313,7 +323,10 @@ export async function sendAgentMessage(args: {
 
       if (inboundWamid && simulateTyping) {
         await metaClient.sendTypingIndicator(inboundWamid);
-        const delayMs = computeTypingDelayMs(text.length, typingPerCharMs);
+        const delayMs = typingDelayWithinBudget(
+          computeTypingDelayMs(text.length, typingPerCharMs),
+          args.humanBehavior,
+        );
         await sleep(delayMs);
       } else if (inboundWamid && markMessagesRead) {
         try {
@@ -325,6 +338,16 @@ export async function sendAgentMessage(args: {
           );
         }
       }
+    }
+
+    if (args.humanBehavior?.abortIf) {
+      let abort = false;
+      try {
+        abort = await args.humanBehavior.abortIf();
+      } catch {
+        abort = false;
+      }
+      if (abort) return { status: "skipped", reason: "superseded" };
     }
 
     if (!args.bypassAssigneeCheck) {

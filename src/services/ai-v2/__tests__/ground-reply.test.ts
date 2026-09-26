@@ -49,16 +49,16 @@ describe("unsupportedFigures e isNearDuplicateReply", () => {
 describe("clientNamesBoundToFacts", () => {
   it("nome que só o cliente usou, ligado a data, é marcado", async () => {
     const { clientNamesBoundToFacts } = await import("../ground-reply");
-    const sources = ["Calendário: Prova A1 das disciplinas de outubro de 6 a 9 de novembro. Prova de Estatística em 10/11."];
-    const reply = "Para a disciplina de Optometria, referente ao mês de outubro, a Prova A1 será realizada de 6 a 9 de novembro.";
-    expect(clientNamesBoundToFacts(reply, ["quando é a prova de optometria?"], sources)).toEqual(["Optometria"]);
+    const sources = ["Agenda: Revisão R1 dos equipamentos de outubro de 6 a 9 de novembro. Revisão da filial Centro em 10/11."];
+    const reply = "Para a filial Pinheiros, referente ao mês de outubro, a Revisão R1 será realizada de 6 a 9 de novembro.";
+    expect(clientNamesBoundToFacts(reply, ["quando é a revisão da pinheiros?"], sources)).toEqual(["Pinheiros"]);
   });
 
   it("não marca: nome que está nas fontes, frase sem data/valor, início de frase", async () => {
     const { clientNamesBoundToFacts } = await import("../ground-reply");
-    const sources = ["Prova de Estatística em 10/11."];
-    expect(clientNamesBoundToFacts("A prova de Estatística é em 10/11.", ["e estatística?"], sources)).toEqual([]);
-    expect(clientNamesBoundToFacts("Na disciplina de Optometria, abra o app e veja a aba Conteúdo.", ["optometria"], sources)).toEqual([]);
-    expect(clientNamesBoundToFacts("Optometria: provas de 6 a 9 de novembro.", ["optometria"], sources)).toEqual([]);
+    const sources = ["Revisão da filial Centro em 10/11."];
+    expect(clientNamesBoundToFacts("A revisão da filial Centro é em 10/11.", ["e a centro?"], sources)).toEqual([]);
+    expect(clientNamesBoundToFacts("Na filial Pinheiros, abra o app e veja a aba Agenda.", ["pinheiros"], sources)).toEqual([]);
+    expect(clientNamesBoundToFacts("Pinheiros: revisões de 6 a 9 de novembro.", ["pinheiros"], sources)).toEqual([]);
   });
 });

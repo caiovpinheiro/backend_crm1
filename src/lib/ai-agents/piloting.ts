@@ -54,6 +54,24 @@ export function computeTypingDelayMs(textLength: number, perCharMs: number): num
   return Math.min(Math.max(base, Math.round(raw)), 25_000);
 }
 
+/** Menor "digitando…" visível quando o turno já demorou. */
+export const MIN_TYPING_MS = 800;
+
+/**
+ * "Digitando…" dentro do orçamento: no máximo `maxTypingMs` e descontando o
+ * que o turno já levou desde `turnStartedAt` (o cliente já esperou esse
+ * tempo pensando). Nunca menos que MIN_TYPING_MS.
+ */
+export function typingDelayWithinBudget(
+  delayMs: number,
+  opts: { maxTypingMs?: number; turnStartedAt?: number },
+  now: number = Date.now(),
+): number {
+  let ms = opts.maxTypingMs && opts.maxTypingMs > 0 ? Math.min(delayMs, opts.maxTypingMs) : delayMs;
+  if (opts.turnStartedAt) ms -= Math.max(0, now - opts.turnStartedAt);
+  return Math.max(Math.min(MIN_TYPING_MS, delayMs), Math.round(ms));
+}
+
 // ── Qualification questions ───────────────────────────────────
 
 export type QualificationQuestion = {

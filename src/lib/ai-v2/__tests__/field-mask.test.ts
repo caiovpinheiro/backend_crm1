@@ -26,22 +26,22 @@ describe("máscara de campo", () => {
 describe("informação montada", () => {
   const senha: V2DerivedField = {
     id: "d1",
-    label: "Senha provisória",
+    label: "Código de acesso",
     parts: [
       { kind: "field", entity: "contact", key: "doc", take: "first", count: 6, digitsOnly: true },
       { kind: "text", text: "@" },
-      { kind: "field", entity: "deal", key: "matricula" },
+      { kind: "field", entity: "deal", key: "pedido" },
     ],
   };
 
   it("junta as partes na ordem", () => {
-    expect(derivedFieldValue(senha, { doc: "218.456.789-21" }, { matricula: "12345" })).toBe("218456@12345");
+    expect(derivedFieldValue(senha, { doc: "218.456.789-21" }, { pedido: "12345" })).toBe("218456@12345");
     expect(derivedFieldValue({ ...senha, parts: [{ kind: "field", key: "doc", take: "last", count: 2, digitsOnly: true }] }, { doc: "218.456.789-21" }, null)).toBe("21");
   });
 
   it("campo vazio: informação vazia (nunca pela metade)", () => {
     expect(derivedFieldValue(senha, { doc: "218.456.789-21" }, {})).toBe("");
-    expect(derivedFieldValues({ derivedFields: [senha] }, { doc: "" }, { matricula: "1" })).toEqual({});
+    expect(derivedFieldValues({ derivedFields: [senha] }, { doc: "" }, { pedido: "1" })).toEqual({});
   });
 
   it("letras, maiúsculas e dígitos: primeiras 3 letras do nome (1ª maiúscula) + texto + dígitos de dois campos", () => {

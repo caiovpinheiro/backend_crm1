@@ -195,6 +195,17 @@ async function prefetchKnowledge(args: {
     noteV2Fact("prefetch", { searchable: false, searched: false, reason: "not_a_question", docCount: docIds.length, queries: [], found: 0 });
     return { query, chunks: [] };
   }
+  const search = (q: string) =>
+    searchV2Knowledge({
+      agentId: args.agentId,
+      apiKey: args.apiKey,
+      query: q,
+      allowedDocIds: docIds,
+      limit: PREFETCH_LIMIT,
+      minSimilarity: knowledgeMinSimilarity(args.config),
+    }).catch(() => undefined);
+  // A frase original já busca enquanto a reformulação roda (antes esperava).
+  const original = search(query);
   let rewrites: string[] = [];
   if (queryRewriteEnabled()) {
     try {
@@ -216,19 +227,9 @@ async function prefetchKnowledge(args: {
 
   try {
     // Frase original + reformulações, em paralelo; fica o melhor de cada trecho.
-    const queries = [query, ...rewrites.filter((q) => q.toLowerCase() !== query.toLowerCase())];
-    const results = await Promise.all(
-      queries.map((q) =>
-        searchV2Knowledge({
-          agentId: args.agentId,
-          apiKey: args.apiKey,
-          query: q,
-          allowedDocIds: docIds,
-          limit: PREFETCH_LIMIT,
-          minSimilarity: knowledgeMinSimilarity(args.config),
-        }).catch(() => undefined),
-      ),
-    );
+    const extra = rewrites.filter((q) => q.toLowerCase() !== query.toLowerCase());
+    const queries = [query, ...extra];
+    const results = await Promise.all([original, ...extra.map(search)]);
     const chunks = mergeChunks(results.map((r) => r?.chunks ?? []), PREFETCH_LIMIT);
     traceStep("base", chunks.length > 0
       ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)})`).join(", ")}`

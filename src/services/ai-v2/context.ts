@@ -13,8 +13,17 @@ import {
 } from "@/services/ai/crm-field-policy";
 import type { V2AgentConfig, V2CRMContext, V2FieldConfig } from "@/lib/ai-v2/types";
 
+/** Campo configurado (usar/dizer) que veio sem valor neste cadastro. */
+export type V2EmptyField = {
+  entity: "contact" | "deal";
+  label: string;
+  /** Existe campo com o mesmo nome na outra entidade (contato × negócio). */
+  onOtherEntity: boolean;
+};
+
 export type V2LoadedContext = V2CRMContext & {
   exposure: CrmFieldExposure;
+  emptyFields?: V2EmptyField[];
   contactId?: string;
   dealId?: string;
   dealSelectionReason: string;
@@ -362,6 +371,31 @@ export async function loadV2Context(args: {
     }, value };
   });
 
+  // Configurado e vazio: o caso comum é o valor estar na outra entidade
+  // (configurado em "Dados do contato", preenchido no negócio).
+  const norm = (s: string) => s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const emptyFields: V2EmptyField[] = [];
+  const collectEmpty = (
+    entity: "contact" | "deal",
+    configs: V2FieldConfig[],
+    loaded: Array<{ field: { label: string }; value: string }>,
+  ) => {
+    const other = entity === "contact" ? "deal" : "contact";
+    configs.forEach((f, i) => {
+      if (!f.permissions.includes("read") && !f.permissions.includes("cite")) return;
+      const item = loaded[i];
+      if (!item || item.value !== "") return;
+      const label = item.field.label || f.label || f.key;
+      emptyFields.push({
+        entity,
+        label,
+        onOtherEntity: catalog.fields.some((d) => d.entity === other && norm(d.label) === norm(label)),
+      });
+    });
+  };
+  if (contact) collectEmpty("contact", args.config.contextFields.contact, contactFieldConfigs);
+  if (selectedDeal) collectEmpty("deal", args.config.contextFields.deal, selectedDealFields);
+
   const contactPartition = partitionFieldValues(contactFieldConfigs, exposure);
   const dealPartition = partitionFieldValues(selectedDealFields, exposure);
 
@@ -392,6 +426,7 @@ export async function loadV2Context(args: {
     citableDeal: selectedDeal ? citableDeal : null,
     fields: args.config.contextFields,
     exposure,
+    emptyFields,
     contactId,
     dealId,
     dealSelectionReason,
@@ -416,6 +451,15 @@ export function describeV2ContextForTrace(config: V2AgentConfig, ctx: V2LoadedCo
   const out: string[] = [];
   out.push(ctx.contactRaw ? part("Contato", ctx.contact, ctx.citableContact) : "Contato: sem cadastro");
   out.push(ctx.selectedDealRaw ? part("Negócio", ctx.selectedDeal, ctx.citableDeal) : "Negócio: nenhum");
+  const empty = ctx.emptyFields ?? [];
+  if (empty.length) {
+    const where = (e: "contact" | "deal") => (e === "contact" ? "contato" : "negócio");
+    out.push(
+      `Configurados sem valor: ${empty
+        .map((e) => `${e.label} (${where(e.entity)}${e.onOtherEntity ? `; há campo com esse nome no ${where(e.entity === "contact" ? "deal" : "contact")} — configure lá` : ""})`)
+        .join(", ")}`,
+    );
+  }
   const derived = (config.derivedFields ?? []).filter((d) => d.label?.trim());
   if (derived.length) {
     out.push(
