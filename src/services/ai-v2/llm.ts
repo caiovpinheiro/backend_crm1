@@ -44,6 +44,7 @@ import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
 import { WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
+import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
@@ -1388,7 +1389,21 @@ export async function callV2LLM(args: {
       ...unsupportedFacts(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];
-    const unsupported = unsupportedOf(r.output.reply, r.output.reason);
+    // Checagem por modelo: o que as regras não pegam (política sem número,
+    // conhecimento geral, recurso ou material que não existe). Só roda
+    // quando as regras não acharam nada e a resposta não é transferência.
+    const claimSources = [...factSources, ...previousMessages.filter((m) => m.role === "assistant").map((m) => m.content)];
+    const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
+      if ((args.config.groundingCheck ?? "model") !== "model" || output.handoff || !worthClaimCheck(output.reply)) return [];
+      const res = await checkClaimsWithModel({ model: v2AuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts });
+      r.inputTokens += res.inputTokens;
+      r.outputTokens += res.outputTokens;
+      if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
+      else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
+      return res.unsupported.map((c) => `"${c}" (afirmação que não está nos materiais)`);
+    };
+    let unsupported = unsupportedOf(r.output.reply, r.output.reason);
+    if (unsupported.length === 0) unsupported = await modelClaims(r.output);
     if (unsupported.length === 0) return;
     const list = unsupported.join(", ");
     noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: false });
@@ -1417,7 +1432,8 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
-        const still = unsupportedOf(fixed.reply, fixed.reason);
+        let still = unsupportedOf(fixed.reply, fixed.reason);
+        if (still.length === 0) still = await modelClaims(fixed);
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
           noteV2Fact("verification", { unsupported, rewritten: true, forcedHandoff: false });

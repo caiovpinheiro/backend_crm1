@@ -41,6 +41,9 @@ function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
     responseBehavior: "balanced",
     tone: "Objetivo",
     globalRules: ["Não prometa retornar depois."],
+    // A maioria dos testes conta as chamadas ao modelo: a checagem por modelo
+    // tem testes próprios ("checagem por modelo").
+    groundingCheck: "rules",
     allowedDomains: [],
     contextFields: { contact: [], deal: [] },
     variables: [],
@@ -910,6 +913,46 @@ describe("escopo e repetição", () => {
     });
     expect(r.output.reply).toContain("Ficou alguma dúvida");
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("repete quase igual");
+  });
+
+  it("checagem por modelo: afirmação sem fonte pede reescrita; persistindo, transfere", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Pode ficar tranquilo, a instalação é gratuita para todos os planos.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["a instalação é gratuita para todos os planos"]}'))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "A instalação é gratuita, sim.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A instalação é gratuita"]}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Essa informação eu não tenho por aqui." } } } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "a instalação é paga?", stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[1][0].system).toContain("sustentada pelas fontes");
+    expect(calls[2][0].system).toContain("a instalação é gratuita para todos os planos");
+    expect(r.output.handoff).toBe(true);
+    expect(r.output.reply).toBe("Essa informação eu não tenho por aqui.");
+  });
+
+  it("checagem por modelo: tudo sustentado, resposta segue; cortesia curta nem é conferida", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Você pode trocar o produto direto na loja mais próxima.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": []}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "qual o prazo?", stage: "active",
+    });
+    expect(r.output.reply).toContain("loja mais próxima");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+
+    (generateWithTools as ReturnType<typeof vi.fn>).mockReset();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Por nada!", actions: [] })));
+    await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "obrigado", stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
   it("número sem fonte pede reescrita", async () => {

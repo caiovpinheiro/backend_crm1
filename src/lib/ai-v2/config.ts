@@ -417,6 +417,9 @@ export const v2AgentConfigSchema = z.object({
   replyEnding: replyEndingSchema.optional(),
   /** Mensagens prontas: o modelo pode pedir para ajustar o texto à conversa. */
   messageModelAdapt: z.boolean().optional().default(false),
+  // "model" (padrão): além das regras, um modelo confere cada afirmação da
+  // resposta contra os materiais. "rules": só as regras fixas.
+  groundingCheck: z.enum(["model", "rules"]).optional(),
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
   themeRecognition: themeRecognitionSchema,

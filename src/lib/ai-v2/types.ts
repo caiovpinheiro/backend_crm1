@@ -554,6 +554,11 @@ export interface V2AgentConfig {
   replyEnding?: V2ReplyEnding;
   /** Mensagens prontas: permite ajustar o texto à conversa (links e números ficam iguais). */
   messageModelAdapt?: boolean;
+  /**
+   * Conferência das respostas contra os materiais: "model" (padrão) usa um
+   * modelo para cada afirmação, além das regras; "rules" só as regras fixas.
+   */
+  groundingCheck?: "model" | "rules";
   /** Inatividade do cliente. */
   inactivity?: V2InactivityConfig;
   /** Tabulação ao encerrar/transferir. */
