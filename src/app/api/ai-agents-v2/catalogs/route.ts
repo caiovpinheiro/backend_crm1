@@ -83,11 +83,14 @@ export async function GET() {
         orderBy: { name: "asc" },
         take: 200,
       }),
-      p.tag.findMany({
-        where: { organizationId },
-        select: { id: true, name: true },
-        orderBy: { name: "asc" },
-      }),
+      // Etiquetas são extras ("O que ele pode fazer"): falha aqui não derruba o catálogo.
+      Promise.resolve(
+        p.tag?.findMany?.({
+          where: { organizationId },
+          select: { id: true, name: true },
+          orderBy: { name: "asc" },
+        }) ?? [],
+      ).catch(() => []),
     ]);
 
     const aiAgentCatalog = aiAgents.map((a: any) => ({ id: a.id, name: a.user?.name ?? "" }));

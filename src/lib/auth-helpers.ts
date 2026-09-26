@@ -282,6 +282,24 @@ export function userOrgFilter(
  * O handler interno pode retornar NextResponse ou dado serializavel; em
  * ambos os casos o callback principal devolve o Response final.
  */
+/**
+ * Roda `fn` com o contexto da sessão explícito. Para handlers que já fizeram
+ * `requireAuth()` e chamam código que lê `getOrgIdOrThrow()` depois de várias
+ * idas assíncronas (busca em materiais, embeddings), onde o contexto
+ * implícito se perdia ("organization context ausente").
+ */
+export function runInSessionContext<T>(session: Session, fn: () => Promise<T>): Promise<T> {
+  return runWithContext(
+    {
+      organizationId: session.user.organizationId,
+      userId: session.user.id,
+      isSuperAdmin: session.user.isSuperAdmin,
+      actor: sessionHumanActor(session),
+    },
+    fn,
+  ) as Promise<T>;
+}
+
 export async function withOrgContext<T>(
   handler: (session: Session) => Promise<T> | T,
 ): Promise<NextResponse | T> {

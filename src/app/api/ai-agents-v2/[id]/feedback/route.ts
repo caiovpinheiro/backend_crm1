@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth, requirePermission } from "@/lib/auth-helpers";
+import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import {
   estimateFeedback,
   listFeedbackReports,
@@ -27,13 +27,14 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!r.ok) return r.response;
   const denied = await requirePermission(r.session.user, "settings:ai");
   if (denied) return denied;
-  try {
-    const reports = await listFeedbackReports(r.session.user.organizationId!, id);
-    return NextResponse.json({ reports });
-  } catch (err) {
-    console.error("[GET /api/ai-agents-v2/[id]/feedback]", err);
-    return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar relatórios." }, { status: 500 });
-  }
+  return runInSessionContext(r.session, async () => {    try {
+      const reports = await listFeedbackReports(r.session.user.organizationId!, id);
+      return NextResponse.json({ reports });
+    } catch (err) {
+      console.error("[GET /api/ai-agents-v2/[id]/feedback]", err);
+      return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar relatórios." }, { status: 500 });
+    }
+  });
 }
 
 /** Gera um relatório (em segundo plano). Com `estimate: true` só estima. */
@@ -43,21 +44,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!r.ok) return r.response;
   const denied = await requirePermission(r.session.user, "settings:ai");
   if (denied) return denied;
-  try {
-    const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
-    const p = parseParams(body);
-    const organizationId = r.session.user.organizationId!;
-    if (body.estimate === true) {
-      return NextResponse.json(await estimateFeedback({ organizationId, agentId: id, params: p }));
+  return runInSessionContext(r.session, async () => {    try {
+      const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
+      const p = parseParams(body);
+      const organizationId = r.session.user.organizationId!;
+      if (body.estimate === true) {
+        return NextResponse.json(await estimateFeedback({ organizationId, agentId: id, params: p }));
+      }
+      const res = await startFeedbackReport({ organizationId, agentId: id, userId: r.session.user.id, params: p });
+      return NextResponse.json(res, { status: 202 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao gerar o relatório.";
+      if (msg === "NO_OPENAI_KEY") {
+        return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para gerar o relatório." }, { status: 400 });
+      }
+      console.error("[POST /api/ai-agents-v2/[id]/feedback]", err);
+      return NextResponse.json({ message: msg }, { status: msg.startsWith("Já existe") ? 409 : 500 });
     }
-    const res = await startFeedbackReport({ organizationId, agentId: id, userId: r.session.user.id, params: p });
-    return NextResponse.json(res, { status: 202 });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Erro ao gerar o relatório.";
-    if (msg === "NO_OPENAI_KEY") {
-      return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para gerar o relatório." }, { status: 400 });
-    }
-    console.error("[POST /api/ai-agents-v2/[id]/feedback]", err);
-    return NextResponse.json({ message: msg }, { status: msg.startsWith("Já existe") ? 409 : 500 });
-  }
+  });
 }

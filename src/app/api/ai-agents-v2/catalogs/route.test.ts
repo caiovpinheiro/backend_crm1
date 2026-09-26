@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   customFieldFindMany: vi.fn().mockResolvedValue([]),
   productFindMany: vi.fn().mockResolvedValue([]),
   whatsAppTemplateConfigFindMany: vi.fn().mockResolvedValue([]),
+  tagFindMany: vi.fn().mockResolvedValue([]),
   contactFindMany: vi.fn().mockResolvedValue([{ id: "c1", name: "João", phone: "+5511999999999", email: null }]),
 }));
 
@@ -35,6 +36,7 @@ vi.mock("@/lib/prisma", () => ({
     product: { findMany: mocks.productFindMany },
     whatsAppTemplateConfig: { findMany: mocks.whatsAppTemplateConfigFindMany },
     contact: { findMany: mocks.contactFindMany },
+    tag: { findMany: mocks.tagFindMany },
   },
 }));
 
