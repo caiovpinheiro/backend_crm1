@@ -16,6 +16,8 @@ export interface V2Counters {
   surveyPending: boolean;
   /** Opções mandadas na última resposta (botões/lista/numeradas), até o cliente responder. */
   pendingOptions?: string[];
+  /** A pergunta pós-encerramento já foi feita nesta janela (não se repete). */
+  postCloseAsked?: boolean;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -42,6 +44,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
     aiTransferCount: Number(r.aiTransferCount) || 0,
     surveyPending: Boolean(r.surveyPending),
+    ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
       ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
       : {}),

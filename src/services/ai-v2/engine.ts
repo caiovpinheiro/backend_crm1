@@ -32,7 +32,7 @@ import { findInheritablePostCloseState, getV2ConversationState, upsertV2Conversa
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest, postCloseQuestion, postCloseShortReply } from "./closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
@@ -640,7 +640,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Pós-encerramento
   if (stage === "closed" && stateRow?.postCloseWindowEndAt && new Date() < new Date(stateRow.postCloseWindowEndAt)) {
     const caseType = answerToPostCloseQuestion(config, pendingOptions, chosenOption) ?? classifyPostCloseMessage(config, input.userMessage);
-    const behavior = getPostCloseBehavior(config, caseType);
+    let behavior = getPostCloseBehavior(config, caseType);
+    // A pergunta sai uma vez por janela: repetida, a conversa andava em
+    // círculo ("??" → pergunta de novo). Depois dela, o ambíguo volta para o
+    // agente, que pergunta do jeito dele; agradecimento vira resposta curta.
+    if (behavior === "ask_with_options" && counters.postCloseAsked) {
+      behavior = caseType === "courtesy" ? "short_reply" : "reopen_and_route";
+      traceStep("pós-encerramento", "A pergunta já foi feita nesta janela → não repete");
+    }
     traceStep("pós-encerramento", `Dentro da janela pós-encerramento: mensagem classificada como "${caseType}" → comportamento "${behavior}"`);
 
     // O contador de cortesia só vale dentro da janela e precisa ser salvo em
@@ -696,10 +703,20 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         inputTokens: 0, outputTokens: 0, owner, stage, versionId,
       });
       return { handoff: false, closed: true };
+    } else if (behavior === "handoff") {
+      // "Transferir para a equipe" depois de encerrar, com o aviso do caso.
+      counters.postCloseAsked = false;
+      await handoffAndReply(
+        resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId,
+        renderMessage(postCloseHandoffMessage(config, caseType), vars, defaultFormatter()),
+        counters, themeId,
+      );
+      return { handoff: true, closed: false };
     } else if (behavior === "reopen_and_route") {
       stage = "active";
       owner = "agente";
       counters.courtesyReplies = 0;
+      counters.postCloseAsked = false;
       await upsertV2ConversationState({
         organizationId: orgId,
         conversationId: input.conversationId,
@@ -711,7 +728,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         versionId: versionId,
       });
     } else if (behavior === "short_reply") {
-      const short = renderMessage(postCloseShortReply(config), vars, defaultFormatter());
+      const short = renderMessage(postCloseShortReply(config, caseType), vars, defaultFormatter());
       await sendV2TextMessage({
         conversationId: input.conversationId,
         contactId,
@@ -747,7 +764,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         humanBehavior,
         interactive: built.payload,
       });
-      if (sent.sent) counters.pendingOptions = built.labels;
+      if (sent.sent) {
+        counters.pendingOptions = built.labels;
+        counters.postCloseAsked = true;
+      }
       await persistPostCloseCounters();
       await logV2Turn({
         organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
@@ -761,8 +781,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
 
   // Fora da janela pós-encerramento o limite de cortesia não se aplica —
-  // sem zerar, uma cortesia antiga bloquearia toda resposta futura.
+  // sem zerar, uma cortesia antiga bloquearia toda resposta futura. A
+  // pergunta pós-encerramento volta a valer no próximo encerramento.
   counters.courtesyReplies = 0;
+  counters.postCloseAsked = false;
 
   // Mídia recebida
   const media = evaluateV2Media(config, input.messageType);

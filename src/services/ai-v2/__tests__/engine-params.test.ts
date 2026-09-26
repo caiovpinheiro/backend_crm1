@@ -5,7 +5,7 @@ vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
-import { answerToPostCloseQuestion, postCloseQuestion, postCloseShortReply } from "@/services/ai-v2/closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, isNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "@/services/ai-v2/closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "@/services/ai-v2/confusion";
 import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity";
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
@@ -109,5 +109,34 @@ describe("reconhecimento de assunto", () => {
     expect(isShortFollowUp("consegue me enviar?", 2)).toBe(true);
     expect(isShortFollowUp("segunda chamada", 2)).toBe(false);
     expect(isShortFollowUp("segunda chamada", 3)).toBe(true);
+  });
+});
+
+describe("depois de encerrar: classificação e mensagens por caso", () => {
+  const c = cfg();
+  it("agradecimento, confirmação e despedida", () => {
+    for (const m of ["combinado", "valeu", "Não, obrigado(a)!", "👏 Deu Certo!", "não entendi, foi resolvido", "ok 👍", "👍", "consegui, obrigado", "era só isso"]) {
+      expect(classifyPostCloseMessage(c, m)).toBe("courtesy");
+    }
+  });
+  it("pedido novo", () => {
+    for (const m of ["Preciso de ajuda", "não consegui acessar", "quero trocar meu curso", "sim"]) {
+      expect(classifyPostCloseMessage(c, m)).toBe("new_demand");
+    }
+  });
+  it("cumprimento e \"??\" são ambíguos (nunca agradecimento)", () => {
+    for (const m of ["bom dia", "Oi", "oi, tudo bem?", "??"]) expect(classifyPostCloseMessage(c, m)).toBe("ambiguous");
+  });
+  it("\"deu certo\" não é pedido novo (o encerramento do modelo vale)", () => {
+    expect(isNewRequest(c, "👏 Deu Certo!")).toBe(false);
+    expect(isNewRequest(c, "e quando sai a nota?")).toBe(true);
+  });
+  it("mensagem por caso, com a geral e o padrão como reserva", () => {
+    const own = cfg({ closure: { shortReplyMessage: "Geral", postCloseMessages: { new_demand: "Vou te passar para a equipe." } }, handoff: { defaultDestination: { type: "department" }, message: "Transferindo." } });
+    expect(postCloseShortReply(own, "courtesy")).toBe("Geral");
+    expect(postCloseShortReply(own, "new_demand")).toBe("Vou te passar para a equipe.");
+    expect(postCloseHandoffMessage(own, "new_demand")).toBe("Vou te passar para a equipe.");
+    expect(postCloseHandoffMessage(own, "ambiguous")).toBe("Transferindo.");
+    expect(postCloseShortReply(cfg(), "courtesy")).toContain("Por nada");
   });
 });

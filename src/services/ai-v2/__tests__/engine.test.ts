@@ -1263,6 +1263,37 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.callLLM).toHaveBeenCalled();
   });
 
+  it("depois de encerrar: \"valeu\" recebe a mensagem de agradecimento, não o aviso de transferência", async () => {
+    const config = baseConfig({
+      closure: {
+        courtesyBehavior: "short_reply",
+        newDemandBehavior: "handoff",
+        postCloseMessages: { courtesy: "Por nada!", new_demand: "Vou te passar para a equipe." },
+      },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("closed", "ninguem"), postCloseWindowEndAt: new Date(Date.now() + 3600_000) });
+    await run("valeu");
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Por nada!"]);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+
+    mocks.sendText.mockClear();
+    await run("Preciso de ajuda com outra coisa");
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toContain("Vou te passar para a equipe.");
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("depois de encerrar: a pergunta não se repete na mesma janela", async () => {
+    const config = baseConfig({ closure: { ambiguousBehavior: "ask_with_options" } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("closed", "ninguem", { postCloseAsked: true }), postCloseWindowEndAt: new Date(Date.now() + 3600_000) });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Me conta o que você precisa." }));
+    await run("??");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|");
+    expect(texts).not.toContain("Você precisa de ajuda com algo novo?");
+    expect(mocks.callLLM).toHaveBeenCalled();
+  });
+
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {
     const config = baseConfig({
       allowedMessageModelIds: ["mm-1"],

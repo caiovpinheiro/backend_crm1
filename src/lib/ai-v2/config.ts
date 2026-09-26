@@ -230,9 +230,9 @@ const entryConfigSchema = z.object({
 
 const closureConfigSchema = z.object({
   postCloseWindowHours: z.number().min(0).optional().default(6),
-  courtesyBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("no_reply"),
-  newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("reopen_and_route"),
-  ambiguousBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options"]).optional().default("ask_with_options"),
+  courtesyBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("no_reply"),
+  newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("reopen_and_route"),
+  ambiguousBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("ask_with_options"),
   goodbyeMessage: optionalText,
   returnToOriginStage: z.boolean().optional().default(true),
   nextAutomationStepId: z.string().optional(),
@@ -241,6 +241,7 @@ const closureConfigSchema = z.object({
     .optional()
     .default([]),
   shortReplyMessage: optionalText,
+  postCloseMessages: z.object({ courtesy: optionalText, new_demand: optionalText, ambiguous: optionalText }).optional(),
   postCloseQuestion: z.object({ message: optionalText, yesLabel: optionalText, noLabel: optionalText }).optional(),
 });
 

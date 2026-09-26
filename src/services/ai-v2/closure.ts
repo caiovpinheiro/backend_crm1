@@ -8,25 +8,55 @@ import { hasSearchableQuestion } from "./ground-reply";
 
 export type V2PostCloseCase = "courtesy" | "new_demand" | "ambiguous";
 
+const foldText = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9?]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Agradecimento, confirmação de que deu certo, despedida. */
+const COURTESY_TERMS = [
+  "obrigado", "obrigada", "obrigad", "brigado", "brigada", "agradeco", "agradecido", "agradecida", "grato", "grata",
+  "valeu", "vlw", "tmj", "tchau", "ate mais", "ate logo", "falou", "flw",
+  "ok", "okay", "blz", "beleza", "combinado", "certo", "perfeito", "otimo", "show", "top", "joia", "legal", "massa",
+  "entendi", "entendido", "fechou", "fechado", "tudo certo", "tudo bem", "deu certo", "resolvido", "resolveu",
+  "consegui", "funcionou", "so isso", "era so isso", "nada mais", "so agradecer",
+];
+/** Pedido novo. */
+const NEW_DEMAND_TERMS = [
+  "preciso", "quero", "queria", "gostaria", "duvida", "problema", "ajuda", "ajudar", "solicitar", "comprar", "alterar", "mudar",
+  "como faco", "como eu", "onde", "quando", "qual", "quanto", "nao consigo", "nao consegui", "nao funciona", "nao funcionou",
+  "erro", "outra coisa", "mais uma",
+];
+/** Só cumprimento: pode ser pedido novo chegando — ambíguo, nunca agradecimento. */
+const GREETING_ONLY = /^(?:oi+|ola|opa|e ai|eai|bom dia|boa tarde|boa noite|hello|hi)(?: (?:tudo bem|td bem|tudo bom))?\??$/;
+const COURTESY_EMOJI = /^[\s\p{Emoji_Presentation}\p{Extended_Pictographic}]+$/u;
+
+const hasTerm = (text: string, terms: string[]) => terms.some((t) => ` ${text} `.includes(` ${t} `));
+
 export function classifyPostCloseMessage(
   config: V2AgentConfig,
   message: string,
 ): V2PostCloseCase {
-  const m = message.toLowerCase();
-  // Resposta à pergunta do `ask_with_options` pós-encerramento
-  // ("1 para Sim ou 2 para Só agradecer"). Sem isto "1"/"2" caíam em
-  // "ambíguo" e a mesma pergunta era repetida.
-  const trimmed = m.trim().replace(/[.!]+$/, "");
-  if (trimmed === "1" || trimmed === "sim") return "new_demand";
-  if (trimmed === "2") return "courtesy";
-  const courtesyWords = ["obrigado", "obrigada", "valeu", "vlw", "tchau", "até", "ate", "boa noite", "boa tarde", "bom dia", "ok"];
-  const newDemandWords = ["preciso", "quero", "dúvida", "duvida", "problema", "ajuda", "solicitar", "comprar", "alterar", "mudar"];
+  // Resposta numérica à pergunta pós-encerramento ("1 Sim / 2 Não").
+  const text = foldText(message);
+  const bare = text.replace(/\?/g, "").trim();
+  if (bare === "1" || bare === "sim") return "new_demand";
+  if (bare === "2") return "courtesy";
+  if (!bare) return COURTESY_EMOJI.test(message.trim()) && message.trim() ? "courtesy" : "ambiguous";
+  if (GREETING_ONLY.test(text)) return "ambiguous";
 
-  const hasCourtesy = courtesyWords.some((w) => m.includes(w));
-  const hasNewDemand = newDemandWords.some((w) => m.includes(w));
-
+  // "Não consegui" e "não funcionou" não são "consegui"/"funcionou".
+  const withoutNegated = bare.replace(/\bnao (?:consegui|funcionou|deu certo|resolveu|resolvido|entendi)\b/g, " ");
+  const hasCourtesy = hasTerm(withoutNegated, COURTESY_TERMS);
+  const hasNewDemand = hasTerm(bare, NEW_DEMAND_TERMS);
   if (hasCourtesy && !hasNewDemand) return "courtesy";
   if (hasNewDemand && !hasCourtesy) return "new_demand";
+  // "Não, obrigado. Preciso de mais nada" — negação de pedido é agradecimento.
+  if (hasCourtesy && /\b(?:nao preciso|nada mais|mais nada|so isso)\b/.test(bare)) return "courtesy";
   return "ambiguous";
 }
 
@@ -66,9 +96,23 @@ export function postCloseQuestion(config: V2AgentConfig): { message: string; yes
   };
 }
 
-/** Resposta curta pós-encerramento, da config ou padrão. */
-export function postCloseShortReply(config: V2AgentConfig): string {
-  return config.closure?.shortReplyMessage?.trim() || "Por nada! Se precisar de algo novo, é só chamar.";
+/**
+ * Mensagem do caso pós-encerramento: a própria do caso; senão, a resposta
+ * curta geral; senão o padrão. Antes era uma frase só para todos os casos —
+ * um aviso de transferência cadastrado para "pedido novo" saía também para
+ * "valeu".
+ */
+export function postCloseShortReply(config: V2AgentConfig, caseType: V2PostCloseCase = "courtesy"): string {
+  return (
+    config.closure?.postCloseMessages?.[caseType]?.trim() ||
+    config.closure?.shortReplyMessage?.trim() ||
+    "Por nada! Se precisar de algo novo, é só chamar."
+  );
+}
+
+/** Aviso ao transferir depois de encerrar: o do caso; senão o de transferência. */
+export function postCloseHandoffMessage(config: V2AgentConfig, caseType: V2PostCloseCase): string {
+  return config.closure?.postCloseMessages?.[caseType]?.trim() || config.handoff?.message?.trim() || "Vou transferir para um atendente.";
 }
 
 /**

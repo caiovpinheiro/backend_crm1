@@ -317,7 +317,9 @@ export type V2PostCloseCaseBehavior =
   | "no_reply"
   | "short_reply"
   | "reopen_and_route"
-  | "ask_with_options";
+  | "ask_with_options"
+  /** Transfere para a equipe (destino padrão), com a mensagem do caso. */
+  | "handoff";
 
 export interface V2ClosureConfig {
   /** Janela pós-encerramento em horas (padrão 6). */
@@ -336,8 +338,10 @@ export interface V2ClosureConfig {
   nextAutomationStepId?: string;
   /** Campos do contato/negócio a atualizar automaticamente ao encerrar. */
   fieldUpdates?: Array<{ entity: "contact" | "deal"; key: string; value: string }>;
-  /** Resposta curta ("short_reply") depois de encerrar. */
+  /** Resposta curta ("short_reply") depois de encerrar — vale para os casos sem mensagem própria. */
   shortReplyMessage?: string;
+  /** Mensagem por caso (resposta curta ou aviso de transferência). */
+  postCloseMessages?: { courtesy?: string; new_demand?: string; ambiguous?: string };
   /** Pergunta depois de encerrar ("ask_with_options"), com dois botões. */
   postCloseQuestion?: { message?: string; yesLabel?: string; noLabel?: string };
 }
