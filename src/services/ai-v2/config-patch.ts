@@ -12,6 +12,9 @@
 
 export type V2ConfigChange = { path: string; op: "set" | "add" | "remove"; value?: unknown };
 
+/** Nomes que levariam ao protótipo dos objetos: nunca aceitos num caminho. */
+const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
 /** Um passo do caminho: chave de objeto ou item de lista. */
 type Step = { kind: "key"; key: string } | { kind: "index"; index: number } | { kind: "match"; field: string; equals: string };
 
@@ -19,14 +22,14 @@ export function parseConfigPath(path: string): Step[] {
   const steps: Step[] = [];
   for (const raw of path.split(".")) {
     const m = /^([A-Za-z_][\w-]*)((?:\[[^\]]+\])*)$/.exec(raw.trim());
-    if (!m) throw new Error(`Caminho inválido: ${path}`);
+    if (!m || FORBIDDEN_KEYS.has(m[1])) throw new Error(`Caminho inválido: ${path}`);
     steps.push({ kind: "key", key: m[1] });
     for (const s of m[2].matchAll(/\[([^\]]+)\]/g)) {
       const inner = s[1].trim();
       if (/^\d+$/.test(inner)) steps.push({ kind: "index", index: Number(inner) });
       else {
         const eq = /^([\w-]+)=(.+)$/.exec(inner);
-        if (!eq) throw new Error(`Seletor inválido: [${inner}]`);
+        if (!eq || FORBIDDEN_KEYS.has(eq[1])) throw new Error(`Seletor inválido: [${inner}]`);
         steps.push({ kind: "match", field: eq[1], equals: eq[2].replace(/^["']|["']$/g, "") });
       }
     }
@@ -72,7 +75,7 @@ function applyOne(root: unknown, ch: V2ConfigChange): void {
   for (let i = 0; i < steps.length - 1; i++) {
     const key = resolve(cur, steps[i], ch.path);
     const holder = cur as Record<string | number, unknown>;
-    if (holder[key] === undefined || holder[key] === null) {
+    if (!Object.hasOwn(holder, key) || holder[key] === undefined || holder[key] === null) {
       if (steps[i + 1].kind !== "key") throw new Error(`Lista não existe: ${ch.path}`);
       holder[key] = {};
     }

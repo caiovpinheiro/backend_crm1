@@ -46,4 +46,12 @@ describe("alterações na configuração", () => {
     expect(() => applyConfigChanges(base, [{ path: "themes..when", op: "add", value: "x" }])).toThrow(/Caminho inválido/);
     expect(() => applyConfigChanges(base, [{ path: "handoff.message", op: "add", value: "x" }])).toThrow(/exige uma lista/);
   });
+
+  it("nunca toca no protótipo dos objetos", () => {
+    for (const path of ["__proto__.x", "handoff.__proto__.x", "themes[__proto__=a].when", "constructor.prototype.x", "handoff.constructor"]) {
+      expect(() => applyConfigChanges(base, [{ path, op: "set", value: "y" }])).toThrow(/inválid/);
+    }
+    expect(({} as Record<string, unknown>).x).toBeUndefined();
+    expect(getAtPath(base, "__proto__")).toBeUndefined();
+  });
 });
