@@ -44,17 +44,48 @@ export function knowledgeChunkTexts(
  * aparecem em nenhuma fonte (material, instruções, conversa). É onde o
  * modelo mais inventa ao completar um passo a passo: "vá em \"Fale Conosco\"".
  */
-export function unsupportedQuotedTerms(reply: string, sources: string[]): string[] {
+export function unsupportedQuotedTerms(reply: string, sources: string[], variantSources: string[] = sources): string[] {
   const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
-  const lines = sourceLines(sources);
+  const lines = sourceLines(variantSources);
   const out = new Set<string>();
   for (const m of reply.matchAll(/["“”]([^"“”\n]{2,60})["“”]/g)) {
     const term = m[1].trim();
-    const norm = normalize(term).replace(/\s+/g, " ").trim();
-    if (!norm || !/[a-z]/.test(norm)) continue;
-    if (haystack.includes(` ${norm} `)) continue;
-    if (sameLineVariant(norm, lines)) continue;
-    out.add(term);
+    if (!termSupported(term, haystack, lines)) out.add(term);
+  }
+  return [...out];
+}
+
+/** Nome igual numa fonte, ou variante nas fontes de fato (`lines`). */
+function termSupported(term: string, haystack: string, lines: string[][]): boolean {
+  const norm = normalize(term).replace(/\s+/g, " ").trim();
+  if (!norm || !/[a-z]/.test(norm)) return true;
+  if (haystack.includes(` ${norm} `)) return true;
+  return sameLineVariant(norm, lines);
+}
+
+const PATH_VERB = /^(?:\d+[.)]\s*)?(?:acesse|abra|v[aá] (?:em|at[eé]|para)|entre em|clique em|toque em|selecione|escolha)\s+(?:(?:o|a|os|as|no|na|em)\s+)?/i;
+
+/**
+ * Caminho de tela sem aspas ("Configurações > Integrações > Planilhas"):
+ * cada parte com inicial maiúscula precisa estar nas fontes, como os nomes
+ * entre aspas. Antes só o que vinha entre aspas era conferido.
+ */
+export function unsupportedMenuPaths(reply: string, sources: string[], variantSources: string[] = sources): string[] {
+  const haystack = ` ${normalize(sources.join(" ")).replace(/\s+/g, " ")} `;
+  const lines = sourceLines(variantSources);
+  const out = new Set<string>();
+  for (const line of reply.split(/\n+/)) {
+    if (!/\S\s*[>→»]\s*\S/.test(line)) continue;
+    const parts = line.split(/\s*[>→»]\s*/);
+    parts.forEach((raw, i) => {
+      let part = raw.replace(/["“”*_]/g, "").trim();
+      // Primeira parte: tira o verbo ("Acesse o app e toque em Minha conta" → "Minha conta").
+      if (i === 0) part = part.split(/\s+(?:em|no|na)\s+/i).pop()!.replace(PATH_VERB, "");
+      part = part.replace(/[.,;:!?)]+$/, "").trim();
+      const words = part.split(/\s+/).filter(Boolean);
+      if (words.length === 0 || words.length > 5 || !/^\p{Lu}/u.test(part)) return;
+      if (!termSupported(part, haystack, lines)) out.add(part);
+    });
   }
   return [...out];
 }
@@ -75,7 +106,8 @@ function sourceLines(sources: string[]): string[][] {
  * "Esqueci minha senha".
  */
 function sameLineVariant(norm: string, lines: string[][]): boolean {
-  const stems = norm.split(" ").filter((w) => w.length >= 4 && !FILLER.has(w)).map((w) => w.slice(0, 5));
+  // Radical de 6 letras: com 5, "Configurações" passava por "confirme".
+  const stems = norm.split(" ").filter((w) => w.length >= 4 && !FILLER.has(w)).map((w) => w.slice(0, 6));
   if (stems.length === 0) return false;
   return lines.some((words) => stems.every((stem) => words.some((w) => w.startsWith(stem))));
 }
@@ -140,8 +172,61 @@ export function unsupportedFigures(reply: string, sources: string[]): string[] {
   return [...out];
 }
 
+const FACT_PATTERNS: Array<{ kind: "date" | "amount" | "phone" | "email"; re: RegExp }> = [
+  { kind: "date", re: /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g },
+  { kind: "amount", re: /\b\d+(?:[.,]\d+)?\s*(?:dias?(?:\s+[úu]teis)?|horas?|minutos?|semanas?|meses|m[êe]s|anos?)\b/gi },
+  { kind: "phone", re: /(?:\+?55\s?)?\(?\b\d{2}\)?\s?9?\d{4}[-\s]?\d{4}\b|\b0[38]00[\s-]?\d{3}[\s-]?\d{4}\b/g },
+  { kind: "email", re: /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g },
+];
+
+/** "05/10", "5/10/2026" e "2026-10-05" viram "5/10" e "5/10/2026". */
+function dateKeys(sources: string): Set<string> {
+  const keys = new Set<string>();
+  for (const m of sources.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) {
+    keys.add(`${+m[3]}/${+m[2]}`);
+    keys.add(`${+m[3]}/${+m[2]}/${m[1]}`);
+  }
+  for (const m of sources.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g)) {
+    keys.add(`${+m[1]}/${+m[2]}`);
+    if (m[3]) keys.add(`${+m[1]}/${+m[2]}/${m[3].length === 2 ? `20${m[3]}` : m[3]}`);
+  }
+  return keys;
+}
+
+/**
+ * Data, prazo/quantidade ("15 dias úteis", "6 horas"), telefone e e-mail na
+ * resposta que não aparecem em nenhuma fonte. Antes só R$ e % eram
+ * conferidos e o resto chegava ao cliente.
+ */
+export function unsupportedFacts(reply: string, sources: string[]): string[] {
+  const joined = sources.join(" ");
+  const squash = (s: string) => normalize(s).replace(/\s+/g, "");
+  const haystack = squash(joined);
+  const digits = joined.replace(/\D/g, "");
+  const dates = dateKeys(joined);
+  const out = new Set<string>();
+  for (const { kind, re } of FACT_PATTERNS) {
+    for (const m of reply.matchAll(re)) {
+      const token = m[0].trim().replace(/[.,;:!?]+$/, "");
+      if (kind === "date") {
+        const [d, mo, y] = token.split("/");
+        const key = y ? `${+d}/${+mo}/${y.length === 2 ? `20${y}` : y}` : `${+d}/${+mo}`;
+        if (!dates.has(key)) out.add(token);
+      } else if (kind === "phone") {
+        const own = token.replace(/\D/g, "").replace(/^55(?=\d{10,11}$)/, "");
+        if (!digits.includes(own)) out.add(token);
+      } else if (kind === "email") {
+        if (!joined.toLowerCase().includes(token.toLowerCase())) out.add(token);
+      } else if (!haystack.includes(squash(token))) {
+        out.add(token);
+      }
+    }
+  }
+  return [...out];
+}
+
 /** Data, período, valor, percentual ou quantidade na frase. */
-const FACT_IN_SENTENCE = /\d{1,2}\s*\/\s*\d{1,2}|\b\d{1,2}(?:\s*(?:a|e|até)\s*\d{1,2})?\s+de\s+[a-zç]{3,}|R\$\s?\d|\d+(?:[.,]\d+)?\s?%|\b\d+\s*(?:dias?|horas?|meses|semanas?|pontos?)\b/i;
+export const FACT_IN_SENTENCE = /\d{1,2}\s*\/\s*\d{1,2}|\b\d{1,2}(?:\s*(?:a|e|até)\s*\d{1,2})?\s+de\s+[a-zç]{3,}|R\$\s?\d|\d+(?:[.,]\d+)?\s?%|\b\d+\s*(?:dias?|horas?|meses|semanas?|pontos?)\b/i;
 
 /**
  * Nome que só o cliente usou (não está em nenhuma fonte nem nos dados dele)

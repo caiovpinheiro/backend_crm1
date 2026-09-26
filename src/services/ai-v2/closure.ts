@@ -63,6 +63,9 @@ export function classifyPostCloseMessage(
   if (hasNewDemand && !hasCourtesy) return "new_demand";
   // "Não, obrigado. Preciso de mais nada" — negação de pedido é agradecimento.
   if (hasCourtesy && /\b(?:nao preciso|nada mais|mais nada|so isso)\b/.test(bare)) return "courtesy";
+  // Pergunta com conteúdo ("oi, a garantia cobre queda?") é pedido: recebia
+  // botões "precisa de ajuda?" em vez da resposta.
+  if (!hasCourtesy && message.includes("?") && hasSearchableQuestion(message)) return "new_demand";
   return "ambiguous";
 }
 

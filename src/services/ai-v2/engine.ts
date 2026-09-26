@@ -34,6 +34,8 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
+import { announcesTransfer, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
@@ -124,6 +126,13 @@ export type V2TurnResult = {
 };
 
 const STAGES_ORDERED: V2Stage[] = ["idle", "confirming", "identifying", "active", "closed"];
+
+/** Mídia que veio junto com texto e ficou de fora ("pedir texto"). */
+const MEDIA_IGNORED_NOTE: Record<string, string> = {
+  audio: "[O cliente também mandou um áudio, que não dá para ouvir por aqui: responda o texto e avise em uma frase curta que só consegue ler mensagens escritas.]",
+  image: "[O cliente também mandou uma imagem, que não dá para ver por aqui: responda o texto e avise em uma frase curta que não consegue abrir imagens.]",
+  document: "[O cliente também mandou um documento, que não dá para abrir por aqui: responda o texto e avise em uma frase curta que não consegue abrir arquivos.]",
+};
 
 const MEDIA_ASK_TEXT_DEFAULT: Record<string, string> = {
   audio: "Não consigo ouvir áudios por aqui. Pode me escrever o que precisa?",
@@ -931,7 +940,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const turnHasMedia = understandsMedia && (turnLines.some((l) => isMediaPlaceholderText(l)) || !!turnMediaType);
   if (media && media.action === "ask_text") {
     if (!turnHasText) return replyAndWait(media.message || MEDIA_ASK_TEXT_DEFAULT[media.kind], "media ask_text");
-    traceStep("mídia", "Mídia veio junto com texto → responde o texto");
+    traceStep("mídia", "Mídia veio junto com texto → responde o texto e avisa que a mídia não foi vista");
+    // O cliente não sabia que a mídia ficou de fora.
+    const note = MEDIA_IGNORED_NOTE[media.kind];
+    const kept = turnLines.filter((l) => !isMediaPlaceholderText(l));
+    input = { ...input, userMessage: [...kept, note].join("\n") };
   }
   if (turnHasMedia && (input.messageIds?.length ?? 0) > 0) {
     const enriched = await enrichTurnWithMedia({
@@ -1153,14 +1166,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Fluxo de entrada (boas-vindas / confirmação / identificação)
   if (stage === "idle" || stage === "confirming" || stage === "identifying") {
-    if (!loadedContext.selectedDeal) {
+    // Identificando: vale também com negócio carregado. Quem disse "não sou
+    // eu" não pode ser atendido com os dados do cadastro do número.
+    if (!loadedContext.selectedDeal || stage === "identifying") {
       const onDealNotFound = config.entry.onDealNotFound;
-      traceStep("entrada", `Nenhum negócio do contato encontrado → "${onDealNotFound}"`);
-      if (onDealNotFound === "handoff") {
+      traceStep("entrada", stage === "identifying"
+        ? "Aguardando o cliente se identificar"
+        : `Nenhum negócio do contato encontrado → "${onDealNotFound}"`);
+      if (stage !== "identifying" && onDealNotFound === "handoff") {
         noteV2Fact("handoffCause", "identification", { keepFirst: true });
         await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters);
         return { handoff: true, closed: false };
-      } else if (onDealNotFound === "create_deal") {
+      } else if (stage !== "identifying" && onDealNotFound === "create_deal") {
         const created = await createInitialDeal(contactId);
         if (!created) {
           noteV2Fact("handoffCause", "identification", { keepFirst: true });
@@ -1445,26 +1462,25 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
 
-  // Guarda: se usou tools de consulta, todas voltaram vazias e não tem dados do
-  // cliente, não pode inventar resposta. Aplica a saída configurada.
-  if (
-    llmOutput &&
-    !llmOutput.handoff &&
-    !llmOutput.concluded &&
-    allQueryToolResultsEmpty(toolCalls) &&
-    !context.contact &&
-    !context.selectedDeal
-  ) {
-    const noSourceMessage = config.fallback?.noSource?.message?.trim();
-    if (noSourceMessage) {
-      llmOutput.handoff = false;
-      llmOutput.reply = noSourceMessage;
-      llmOutput.reason = "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada";
-    } else {
-      llmOutput.handoff = true;
-      llmOutput.reply = config.handoff.message;
-      llmOutput.reason = "Consulta sem resultados e sem dados do cliente";
-      noteV2Fact("handoffCause", "no_source", { keepFirst: true });
+  // Guarda "sem material": nada nos materiais cobre a mensagem e a resposta
+  // afirma fatos (número, prazo, passo, caminho, link) que não vêm do
+  // cadastro do cliente. Aplica a saída configurada.
+  let noSourceApplied = false;
+  if (llmOutput) {
+    const guarded = applyNoSourceGuard({
+      config,
+      output: llmOutput,
+      context,
+      toolCalls,
+      queriedEmpty: allQueryToolResultsEmpty(toolCalls),
+      prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
+    });
+    if (guarded.applied) {
+      noSourceApplied = !guarded.handoff;
+      if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
+      traceStep("verificação", guarded.handoff
+        ? "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → transfere"
+        : "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → mensagem \"sem material\"");
     }
   }
 
@@ -1481,6 +1497,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   ) {
     const noSourceMessage = config.fallback?.noSource?.message?.trim();
     if (noSourceMessage) {
+      noSourceApplied = true;
       llmOutput.handoff = false;
       llmOutput.reply = noSourceMessage;
       llmOutput.reason = "Limite de chamadas de ferramenta atingido sem resultados — saída 'sem material de consulta' configurada";
@@ -1683,7 +1700,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Limites de parada (a detecção de loop já contou este turno lá em cima;
   // aqui entra o contador de mensagens sem sentido atualizado agora).
-  const stopLimits = stop.blocksReply ? stop : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
+  // Fora do escopo: o limite do início do turno usa o contador antes desta
+  // mensagem. Reavalia com o contador novo — o aviso saía duas vezes, e um
+  // cliente que voltou ao assunto ficava sem resposta.
+  const stopLimits = stop.blocksReply && stop.reason !== NONSENSE_LIMIT_REASON
+    ? stop
+    : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
   if (stopLimits.blocksReply) {
     if (stopLimits !== stop) traceStep("limites", `Limite de parada atingido: ${stopLimits.reason} → ${stopLimits.action}`);
     replyText = stopLimits.warn ? stopWarning(config, stopLimits.reason) : "";
@@ -1724,7 +1746,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Com material a seguir (mensagem pronta/produto), vai depois dele: na
   // apresentação, "posso ajudar em algo mais?" chegava antes do tutorial.
   const materialFollows = !stopLimits.blocksReply && outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_product");
-  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope;
+  // A mensagem "sem material" não ganha fecho ("Posso ajudar em algo mais?"
+  // colado em "não tenho essa informação").
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied;
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
@@ -1826,7 +1850,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (anyHandoff && !anyClose) {
     // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
     // modelo já a montou), não a de transferência padrão.
-    const noSourceMsg = peekV2Fact("handoffCause") === "verification" ? config.fallback?.noSource?.message?.trim() : "";
+    const cause = peekV2Fact("handoffCause");
+    // Mensagem "sem material" também quando o próprio modelo diz que não tem
+    // a informação (antes só quando a verificação barrava).
+    const noSourceMsg = cause === "verification" || cause === "no_source" || (cause === "model" && lacksInformation(replyText))
+      ? config.fallback?.noSource?.message?.trim() ?? ""
+      : "";
+    // Cliente irritado: a resposta útil do modelo sai antes do aviso de
+    // transferência (antes só o aviso chegava).
+    if (cause === "sentiment" && !waitingInQueue && replyText.trim() && !announcesTransfer(replyText)) {
+      const answered = await sendReply(replyText);
+      if (answered.sent) {
+        sentReply = replyText;
+        traceStep("resposta", "Cliente irritado: responde antes de transferir");
+      }
+    }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
     const queuedMsg = waitingInQueue ? config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT : "";
     const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination, queuedMsg || noSourceMsg ? { message: queuedMsg || noSourceMsg } : {});

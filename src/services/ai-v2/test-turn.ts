@@ -13,6 +13,8 @@ import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, ment
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy } from "./reply-format";
+import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
+import { announcesTransfer, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -498,16 +500,32 @@ export async function simulateV2Turn(
   }
   let output = llmResult.output;
 
-  // Guarda de fonte, igual à produção: consulta sem resultado e sem dados do
-  // cliente usa a saída configurada; sem ela, transfere.
+  // Guarda "sem material", a mesma da produção.
   const noClientData = !context.contact && !context.selectedDeal;
   const emptyQueries = allQueryToolResultsEmpty(llmResult.toolCalls);
   const governorBlind = llmResult.governorStats?.limitHit && (!llmResult.toolCalls?.length || emptyQueries);
-  if (!output.handoff && !output.concluded && noClientData && (emptyQueries || governorBlind)) {
+  let noSourceApplied = false;
+  output = { ...output };
+  const guarded = applyNoSourceGuard({
+    config,
+    output,
+    context,
+    toolCalls: llmResult.toolCalls,
+    queriedEmpty: emptyQueries || !!governorBlind,
+    prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
+  });
+  if (guarded.applied) {
+    noSourceApplied = !guarded.handoff;
+    if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
+    traceStep("verificação", guarded.handoff
+      ? "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → transfere"
+      : "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → mensagem \"sem material\"");
+  } else if (!output.handoff && !output.concluded && noClientData && governorBlind) {
     const noSourceMessage = config.fallback?.noSource?.message?.trim();
     output = noSourceMessage
-      ? { ...output, handoff: false, reply: noSourceMessage, reason: "Consulta sem resultados e sem dados do cliente — saída 'sem material de consulta' configurada" }
-      : { ...output, handoff: true, reply: config.handoff.message, reason: "Consulta sem resultados e sem dados do cliente" };
+      ? { ...output, handoff: false, reply: noSourceMessage }
+      : { ...output, handoff: true, reply: config.handoff.message };
+    noSourceApplied = !!noSourceMessage;
     if (!noSourceMessage) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
   }
 
@@ -566,6 +584,19 @@ export async function simulateV2Turn(
   }
   if (output.actions.some((a) => a.type === "close_conversation") && allowedTools.has("close_conversation")) closed = true;
 
+  // Cliente confuso ("?", "estou confusa"), igual à produção: refaz em vez de transferir.
+  if (
+    handoff &&
+    (config.fallback?.confusion?.action ?? "rephrase") === "rephrase" &&
+    peekV2Fact("handoffCause") === "model" &&
+    isConfusionMessage(userMessage)
+  ) {
+    handoff = false;
+    output = { ...output, handoff: false, reply: rephraseAfterConfusion(lastAgent), actions: output.actions.filter((a) => a.type !== "handoff") };
+    for (let i = executedActions.length - 1; i >= 0; i--) if (executedActions[i].action.type === "handoff") executedActions.splice(i, 1);
+    traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
+  }
+
   // Sentimento, igual à produção.
   if (shouldActOnSentiment(config, detectV2Sentiment(config, userMessage)) && config.sentiment.action === "handoff") {
     handoff = true;
@@ -588,8 +619,13 @@ export async function simulateV2Turn(
   if (handoff) {
     // Mesma mensagem que a produção manda: "sem material" quando citava algo
     // sem fonte, senão a do destino do assunto, senão a padrão.
-    const noSourceMsg = peekV2Fact("handoffCause") === "verification" ? config.fallback?.noSource?.message?.trim() : "";
+    const cause = peekV2Fact("handoffCause");
+    const noSourceMsg = cause === "verification" || cause === "no_source" || (cause === "model" && lacksInformation(output.reply))
+      ? config.fallback?.noSource?.message?.trim() ?? ""
+      : "";
     reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    // Cliente irritado: a resposta do modelo sai antes do aviso, como na produção.
+    if (cause === "sentiment" && output.reply.trim() && !announcesTransfer(output.reply)) reply = `${output.reply}\n\n${reply}`;
   } else if (closed && config.closure.goodbyeMessage) {
     reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
   } else {
@@ -599,7 +635,7 @@ export async function simulateV2Turn(
     // Com material a seguir, a produção manda o fecho depois dele; aqui a
     // apresentação fica sem fecho.
     const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product");
-    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows) {
+    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows && !noSourceApplied) {
       // Fecho configurado, igual à produção.
       const ending = applyReplyEnding({
         reply,

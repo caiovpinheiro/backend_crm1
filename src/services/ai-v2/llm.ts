@@ -34,7 +34,7 @@ import {
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, unsupportedFigures, unsupportedHedges, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -43,7 +43,7 @@ import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
-import { knowledgeMinSimilarity } from "./similarity-presets";
+import { WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
@@ -205,18 +205,18 @@ async function prefetchKnowledge(args: {
   materialTitles?: string[];
   userMessage: string;
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
-}): Promise<{ query: string; chunks: PrefetchedChunk[] }> {
+}): Promise<{ query: string; chunks: PrefetchedChunk[]; searched: boolean; best: number | null }> {
   const docIds = knowledgeDocIdsFor(args.config, activeTheme(args.config, args.themeId));
   const query = knowledgePrefetchQuery(args.userMessage, args.previousMessages);
   if (docIds.length === 0) {
     traceStep("base", "Sem materiais liberados para este agente/assunto — não buscou na base");
     noteV2Fact("prefetch", { searchable: hasSearchableQuestion(query), searched: false, reason: "no_docs", docCount: 0, queries: [], found: 0 });
-    return { query, chunks: [] };
+    return { query, chunks: [], searched: false, best: null };
   }
   if (!hasSearchableQuestion(query)) {
     traceStep("base", "Mensagem sem pergunta a buscar (saudação/curta) — não buscou na base");
     noteV2Fact("prefetch", { searchable: false, searched: false, reason: "not_a_question", docCount: docIds.length, queries: [], found: 0 });
-    return { query, chunks: [] };
+    return { query, chunks: [], searched: false, best: null };
   }
   const search = (q: string) =>
     searchV2Knowledge({
@@ -269,12 +269,17 @@ async function prefetchKnowledge(args: {
       // O modelo lê só o começo de cada trecho (PREFETCH_CHUNK_CHARS).
       truncatedDocIds: [...new Set(chunks.filter((c) => c.content.length > PREFETCH_CHUNK_CHARS).map((c) => c.docId).filter(Boolean))],
     });
-    return { query: queries.join(" | "), chunks };
+    return {
+      query: queries.join(" | "),
+      chunks,
+      searched: true,
+      best: chunks.length > 0 ? Math.max(...chunks.map((c) => 1 - c.distance)) : null,
+    };
   } catch (err) {
     traceStep("base", `Falha ao buscar na base: ${err instanceof Error ? err.message : String(err)}`);
     noteV2Fact("prefetch", { searchable: true, searched: false, reason: "error", docCount: docIds.length, queries: [query], found: 0 });
     console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
-    return { query, chunks: [] };
+    return { query, chunks: [], searched: false, best: null };
   }
 }
 
@@ -905,6 +910,7 @@ function buildV2SystemPrompt(
   messageModels: V2MessageModelSummary[] = [],
   mediaNote = "",
   actionStages: Array<{ id: string; name: string }> = [],
+  nothingRelevant = false,
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1002,6 +1008,11 @@ function buildV2SystemPrompt(
       const body = markPastDates(raw, new Date(), timezone);
       lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
     });
+  }
+  if (nothingRelevant) {
+    // Sem trecho que responda, o modelo completava com conhecimento geral.
+    lines.push("# Sem material para esta mensagem");
+    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
@@ -1180,6 +1191,7 @@ export async function callV2LLM(args: {
     messageModels,
     mediaUnderstandingNote(args.config, userMessage),
     actionStages,
+    prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1358,16 +1370,22 @@ export async function callV2LLM(args: {
       ...(args.config.calendar?.events ?? []).map((e) => e.title),
       ...messageModels.map((m) => m.name),
       JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
+      calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
     ];
     // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
     // prova que a coisa existe).
     const factSources = sources.slice(1 + previousMessages.length);
     const clientTexts = [userMessage, ...previousMessages.filter((m) => m.role === "user").map((m) => m.content)];
+    // Valor em dinheiro/percentual: o que o cliente sugere ("é R$ 30, né?")
+    // não é fonte; o que o agente já disse em turnos anteriores é.
+    const figureSources = [...factSources, ...previousMessages.filter((m) => m.role === "assistant").map((m) => m.content)];
     const unsupportedOf = (reply: string, reason?: string) => [
       ...(procedureAdmittedMissing(reply, reason) ? ["um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)"] : []),
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
-      ...unsupportedQuotedTerms(reply, sources).map((t) => `"${t}"`),
-      ...unsupportedFigures(reply, sources),
+      ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => `"${t}"`),
+      ...unsupportedMenuPaths(reply, sources, factSources).map((t) => `"${t}"`),
+      ...unsupportedFigures(reply, figureSources),
+      ...unsupportedFacts(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];
     const unsupported = unsupportedOf(r.output.reply, r.output.reason);

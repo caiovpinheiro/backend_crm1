@@ -146,6 +146,14 @@ export function renderMessage(
   while (i < template.length) {
     const char = template[i];
 
+    // "@" colado em letra/número é e-mail ("suporte@empresa.com.br"), não
+    // variável: antes o domínio sumia e o cliente recebia "suporte".
+    if (char === "@" && i > 0 && /[\p{L}\p{N}._%+-]/u.test(template[i - 1])) {
+      result += char;
+      i++;
+      continue;
+    }
+
     if (char === "@") {
       const keyRead = readKey(template, i + 1, variables);
       if (!keyRead) {

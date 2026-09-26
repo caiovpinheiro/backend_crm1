@@ -1479,6 +1479,63 @@ describe("processV2Turn — correções do motor", () => {
 
   const sentTexts = () => mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
 
+  it("'não sou eu' com negócio carregado: não chama o modelo com os dados do cadastro", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 1 });
+    await run("como assim?");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    await run("sou o marido, o documento dela é 123.456.789-00");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("cliente irritado: a resposta útil sai antes do aviso de transferência", async () => {
+    const config = baseConfig({ sentiment: { enabled: true, threshold: "any", action: "handoff" } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Seu pedido saiu hoje e chega amanhã." }));
+    await run("isso está péssimo");
+    expect(sentTexts()).toEqual(["Seu pedido saiu hoje e chega amanhã.", "Vou transferir."]);
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("fora do escopo: aviso uma vez, depois silêncio; voltou ao assunto, responde", async () => {
+    const config = baseConfig({ limits: { nonsenseLimit: 2, nonsenseAction: "warn_and_silence", maxLoopCount: 99 } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Isso eu não atendo.", outOfScope: true }));
+    // 2ª fora do escopo: aviso.
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { nonsenseMessages: 1 }));
+    await run("me conta uma piada");
+    expect(sentTexts()).toHaveLength(1);
+    // 3ª: silêncio (antes o aviso saía de novo).
+    mocks.sendText.mockClear();
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { nonsenseMessages: 2 }));
+    await run("e outra piada");
+    expect(sentTexts()).toEqual([]);
+    // Voltou ao assunto: responde.
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O prazo é de 3 dias úteis." }));
+    await run("qual o prazo de entrega?");
+    expect(sentTexts()).toEqual(["O prazo é de 3 dias úteis."]);
+  });
+
+  it("nada nos materiais e resposta com fato: mensagem 'sem material', sem fecho", async () => {
+    const config = baseConfig({
+      fallback: { noSource: { message: "Essa informação eu não tenho por aqui." } },
+      replyEnding: { info: { enabled: true, phrases: ["Posso ajudar em algo mais?"] } },
+    } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { noteV2Fact } = await import("../trace");
+    mocks.callLLM.mockImplementation(async () => {
+      noteV2Fact("prefetch", { searchable: true, searched: true, found: 0 });
+      return llmOut({ reply: "A entrega internacional leva 20 dias." });
+    });
+    await run("vocês entregam fora do país?");
+    expect(sentTexts()).toEqual(["Essa informação eu não tenho por aqui."]);
+    mocks.callLLM.mockReset();
+  });
+
   it("sentimento com \"apenas registrar\" não transfere", async () => {
     const config = baseConfig({ sentiment: { enabled: true, threshold: "any", action: "log_only" } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
@@ -1539,6 +1596,8 @@ describe("processV2Turn — correções do motor", () => {
     await run(["tenho uma dúvida sobre o boleto", "[Áudio]"].join("\n"), { messageType: "audio" });
     expect(mocks.callLLM).toHaveBeenCalled();
     expect(sentTexts()).not.toContain("Pode escrever?");
+    // O modelo sabe que o áudio ficou de fora e avisa o cliente.
+    expect(JSON.stringify(mocks.callLLM.mock.calls[0])).toContain("não dá para ouvir");
   });
 
   it("imagem com legenda e imagem seguida de texto: a política de imagem vale (não só o tipo da última bolha)", async () => {

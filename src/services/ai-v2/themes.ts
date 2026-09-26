@@ -88,12 +88,17 @@ export function selectV2Theme(
     }
   }
 
+  // Empate: vence o gatilho mais específico (mais letras casadas) — antes
+  // vencia a ordem da lista ("desmarcar a consulta" caía em "Marcar").
   let best: V2Theme | null = null;
   let bestScore = 0;
+  let bestLength = 0;
   for (const theme of config.themes) {
-    const s = scoreTheme(theme, message);
-    if (s > bestScore) {
-      bestScore = s;
+    const m = matchV2Theme(theme, message);
+    const length = m.matched.reduce((n, t) => n + t.length, 0);
+    if (m.score > bestScore || (m.score > 0 && m.score === bestScore && length > bestLength)) {
+      bestScore = m.score;
+      bestLength = length;
       best = theme;
     }
   }

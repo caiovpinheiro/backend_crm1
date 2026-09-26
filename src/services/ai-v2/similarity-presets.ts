@@ -49,6 +49,12 @@ export function themeThresholdsFor(preset: V2ThemeRecognitionPreset | undefined)
 }
 
 /**
+ * Abaixo disto o trecho encontrado só lembra a pergunta: para a guarda
+ * "sem material" e o aviso no prompt, conta como nada encontrado.
+ */
+export const WEAK_MATCH_SIMILARITY = 0.3;
+
+/**
  * Trechos dos materiais que vão ao modelo:
  *  - "all" (padrão): todos os encontrados;
  *  - "related": corta os pouco parecidos com a pergunta;

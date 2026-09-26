@@ -97,6 +97,9 @@ export interface V2StopResult {
   warn?: boolean;
 }
 
+/** Motivo do limite de mensagens sem sentido/fora do escopo. */
+export const NONSENSE_LIMIT_REASON = "limite de mensagens sem sentido";
+
 export function evaluateV2StopLimits(
   config: V2AgentConfig,
   counters: V2Counters,
@@ -125,7 +128,7 @@ export function evaluateV2StopLimits(
     return {
       blocksReply: true,
       action: config.limits.nonsenseAction === "handoff" ? "handoff" : "silence",
-      reason: "limite de mensagens sem sentido",
+      reason: NONSENSE_LIMIT_REASON,
       warn: config.limits.nonsenseAction !== "handoff" && counters.nonsenseMessages === config.limits.nonsenseLimit,
     };
   }
