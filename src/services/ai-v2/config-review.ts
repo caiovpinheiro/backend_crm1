@@ -18,7 +18,7 @@ import { validateV2Config } from "@/lib/ai-v2/config";
 import { v2ModelInfo, v2ModelProvider } from "@/lib/ai-v2/models";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import { getV2Agent, saveV2AgentDraft } from "./agents";
-import { applyConfigChanges, getAtPath, type V2ConfigChange } from "./config-patch";
+import { applyConfigChanges, getAtPath, touchesProtectedPath, type V2ConfigChange } from "./config-patch";
 import { buildAgentRulesMarkdown, detectConfigGaps } from "./rules-export";
 import { loadExportNames } from "./rules-export-names";
 import { maskSensitive } from "./sensitive";
@@ -118,6 +118,7 @@ Regras:
   - Destinos: {"type":"department"|"user"|"ai_agent"|"distribution_rule","id":"<id existente>"}.
   - Textos em português do Brasil, no tom do agente, curtos.
 - Se a correção depende de algo fora da configuração (escrever um material, dado no CRM, decisão da equipe), deixe "alteracoes" vazio e explique em "correcao".
+- Nunca proponha alterar allowedPhoneNumbers (números de teste), channelIds, model ou autonomyMode: são decisões de publicação. Se achar problema neles, descreva em "correcao" com "alteracoes" vazio.
 - Não desfaça escolhas deliberadas da equipe sem evidência de problema. Não repita o mesmo ajuste em duas sugestões.
 - No máximo ${REVIEW_LIMITS.maxSuggestions} sugestões, das mais graves para as menos. gravidade:
   - "alta": só com prova de dano ao cliente — um atendimento citado em que ele ficou sem resposta, recebeu resposta errada ou foi transferido sem precisar, ou um ponto de atenção da ficha de nível alta. Sem isso, no máximo "media".
@@ -201,6 +202,11 @@ export function checkSuggestions(
     const alteracoes: ReviewChange[] = s.alteracoes.map((a) => ({ ...a, before: getAtPath(config, a.path) }));
     let aplicavel = alteracoes.length > 0;
     let erro: string | undefined;
+    const protectedPath = alteracoes.find((a) => touchesProtectedPath(a.path));
+    if (protectedPath) {
+      aplicavel = false;
+      erro = `Mexe em ${protectedPath.path}, que é de publicação: mude à mão em Publicação, se fizer sentido.`;
+    }
     if (aplicavel) {
       try {
         const next = applyConfigChanges(config, alteracoes.map(({ before: _b, ...ch }) => ch));
@@ -281,6 +287,11 @@ async function recentTurns(organizationId: string, agentId: string, days: number
   return { text, ids };
 }
 
+/** Já aplicadas ou recusadas (revisões e escuta da equipe): não propor de novo. */
+export async function decidedFingerprints(organizationId: string, agentId: string): Promise<Set<string>> {
+  return (await previousDecisions(organizationId, agentId)).fingerprints;
+}
+
 /** O que a equipe aplicou ou recusou nas revisões passadas deste agente. */
 async function previousDecisions(organizationId: string, agentId: string): Promise<{ text: string; fingerprints: Set<string> }> {
   const rows = await db.$queryRawUnsafe<Array<{ result: { suggestions?: ReviewSuggestion[] } | null }>>(
@@ -289,6 +300,16 @@ async function previousDecisions(organizationId: string, agentId: string): Promi
   ).catch(() => [] as Array<{ result: { suggestions?: ReviewSuggestion[] } | null }>);
   const fingerprints = new Set<string>();
   const lines: string[] = [];
+  // Decisões da "Escutar a equipe": o mesmo ajuste não volta pela revisão.
+  const listened = await db.$queryRawUnsafe<Array<{ kind: string; title: string; status: string; fingerprint: string }>>(
+    `SELECT "kind", "title", "status", "fingerprint" FROM "ai_v2_listen_proposals"
+      WHERE "organizationId" = $1 AND "agentId" = $2 AND "status" IN ('applied','refused') ORDER BY "statusAt" DESC NULLS LAST LIMIT 60`,
+    organizationId, agentId,
+  ).catch(() => [] as Array<{ kind: string; title: string; status: string; fingerprint: string }>);
+  for (const p of listened) {
+    fingerprints.add(p.fingerprint);
+    if (p.kind !== "knowledge") lines.push(`- [${p.status === "applied" ? "aplicada" : "recusada"}] ${clip(p.title, 120)} (escuta da equipe)`);
+  }
   for (const row of rows) {
     for (const s of row.result?.suggestions ?? []) {
       if (!s.aplicada && !s.recusada) continue;
@@ -478,6 +499,7 @@ export async function applyReviewSuggestions(args: {
     if (s.aplicada) { failed.push({ id, erro: "Já aplicada." }); continue; }
     if (s.recusada) { failed.push({ id, erro: "Recusada — desfaça a recusa para aplicar." }); continue; }
     try {
+      if (s.alteracoes.some((a) => touchesProtectedPath(a.path))) throw new Error("Mexe em campo de publicação (números de teste, canais, modelo ou autonomia): mude à mão em Publicação.");
       const next = applyConfigChanges(config, s.alteracoes.map(({ before: _b, ...ch }) => ch));
       const valid = validateV2Config(next);
       if (!valid.ok) throw new Error(`A configuração ficaria inválida: ${valid.errors.issues[0]?.message ?? ""}`);

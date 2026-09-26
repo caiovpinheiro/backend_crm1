@@ -35,7 +35,7 @@ describe("revisão da configuração com IA", () => {
     const out = checkSuggestions(config, [
       { titulo: "Gatilho", gravidade: "alta", area: "", problema: "", evidencia: "", correcao: "", atendimentos: [], pontos: [], alteracoes: [{ path: "themes[id=t1].when", op: "add", value: "entrega" }] },
       { titulo: "Assunto inexistente", gravidade: "media", area: "", problema: "", evidencia: "", correcao: "", atendimentos: [], pontos: [], alteracoes: [{ path: "themes[id=zz].when", op: "add", value: "x" }] },
-      { titulo: "Invalida", gravidade: "baixa", area: "", problema: "", evidencia: "", correcao: "", atendimentos: [], pontos: [], alteracoes: [{ path: "autonomyMode", op: "set", value: "qualquer" }] },
+      { titulo: "Invalida", gravidade: "baixa", area: "", problema: "", evidencia: "", correcao: "", atendimentos: [], pontos: [], alteracoes: [{ path: "responseLength", op: "set", value: "enorme" }] },
       { titulo: "Fora da config", gravidade: "baixa", area: "", problema: "", evidencia: "", correcao: "Escrever material.", atendimentos: [], pontos: [], alteracoes: [] },
     ]);
     expect(out.map((s) => s.id)).toEqual(["S01", "S02", "S03", "S04"]);
@@ -65,5 +65,14 @@ describe("revisão da configuração com IA", () => {
     ]);
     expect(out[1].rebaixada).toMatch(/Sem atendimento/);
     expect(out[1].atendimentos).toEqual([]);
+  });
+
+  it("nunca mexe em campo de publicação (números de teste, canais, modelo, autonomia)", () => {
+    const base = { area: "", problema: "", evidencia: "", correcao: "", atendimentos: [] as string[], pontos: [] as string[] };
+    const out = checkSuggestions(config, [
+      { ...base, titulo: "Tirar números de teste", gravidade: "alta", alteracoes: [{ path: "allowedPhoneNumbers", op: "set", value: [] }] },
+      { ...base, titulo: "Trocar modelo", gravidade: "media", alteracoes: [{ path: "model", op: "set", value: "gpt-4.1-mini" }] },
+    ]);
+    expect(out.every((s) => !s.aplicavel && /publicação/.test(s.erro ?? ""))).toBe(true);
   });
 });

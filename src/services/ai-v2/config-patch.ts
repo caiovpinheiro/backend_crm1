@@ -12,6 +12,19 @@
 
 export type V2ConfigChange = { path: string; op: "set" | "add" | "remove"; value?: unknown };
 
+/**
+ * Campos de publicação: quem atende (números de teste, canais), o modelo e a
+ * autonomia. Sugestão automática (revisão com IA, escuta da equipe) nunca
+ * mexe neles — tirar os números de teste fazia o agente atender todo mundo.
+ */
+export const PROTECTED_CONFIG_PATHS = ["allowedPhoneNumbers", "channelIds", "model", "autonomyMode"];
+
+/** A alteração toca um campo de publicação. */
+export function touchesProtectedPath(path: string): boolean {
+  const head = path.trim().split(/[.[]/)[0];
+  return PROTECTED_CONFIG_PATHS.includes(head);
+}
+
 /** Nomes que levariam ao protótipo dos objetos: nunca aceitos num caminho. */
 const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 

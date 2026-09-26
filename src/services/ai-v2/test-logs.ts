@@ -63,16 +63,19 @@ type LogRow = {
   feedback: unknown;
 };
 
+/**
+ * Números de teste lidos direto do JSON, como o roteador do motor
+ * (agent-resolver): uma configuração que não passasse na validação completa
+ * escondia os números aqui e a tela dizia "nenhum".
+ */
 function testPhonesOf(configs: unknown[]): string[] {
   const out = new Set<string>();
   for (const raw of configs) {
-    if (!raw) continue;
-    try {
-      for (const p of normalizeV2Config(raw).allowedPhoneNumbers ?? []) {
-        if (p.trim()) out.add(p.trim());
-      }
-    } catch {
-      /* config inválida não derruba a tela */
+    const list = (raw as { allowedPhoneNumbers?: unknown } | null)?.allowedPhoneNumbers;
+    if (!Array.isArray(list)) continue;
+    for (const p of list) {
+      const phone = typeof p === "number" ? String(p) : typeof p === "string" ? p.trim() : "";
+      if (phone) out.add(phone);
     }
   }
   return [...out];
