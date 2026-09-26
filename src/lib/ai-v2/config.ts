@@ -46,6 +46,27 @@ const fieldConfigSchema = z.object({
   key: z.string(),
   label: z.string().optional(),
   permissions: z.array(z.enum(["read", "cite", "write"])).optional().default(["read"]),
+  mask: z.enum(["none", "partial", "email"]).optional(),
+});
+
+const derivedFieldSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  parts: z
+    .array(
+      z.object({
+        kind: z.enum(["field", "text"]),
+        entity: z.enum(["contact", "deal"]).optional(),
+        key: z.string().optional(),
+        take: z.enum(["all", "first", "last"]).optional(),
+        count: z.number().int().min(0).max(100).optional(),
+        digitsOnly: z.boolean().optional(),
+        text: z.string().optional(),
+      }),
+    )
+    .optional()
+    .default([]),
+  mask: z.enum(["none", "partial", "email"]).optional(),
 });
 
 // Fecho das respostas: frases que o motor põe no fim, por tipo de resposta.
@@ -398,6 +419,7 @@ export const v2AgentConfigSchema = z.object({
   tabulation: tabulationSchema,
   themeRecognition: themeRecognitionSchema,
   knowledgeSearch: z.object({ minSimilarity: similarity }).optional(),
+  derivedFields: z.array(derivedFieldSchema).optional(),
   businessHours: z
     .object({
       enabled: z.boolean().optional().default(false),

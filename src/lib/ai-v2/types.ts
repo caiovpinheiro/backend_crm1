@@ -32,10 +32,35 @@ export type V2Sentiment = "neutral" | "dissatisfied" | "angry";
 
 export type V2SurveyType = "nps" | "csat" | "binary";
 
+/** Como o valor do campo aparece para o cliente e para o modelo. */
+export type V2FieldMask = "none" | "partial" | "email";
+
 export interface V2FieldConfig {
   key: string;
   label?: string;
   permissions: V2FieldPermission[];
+  /** Máscara ao mostrar (ex.: 218.xxx.xxx-21). */
+  mask?: V2FieldMask;
+}
+
+/** Parte de uma informação montada: um campo (inteiro/começo/fim) ou texto fixo. */
+export interface V2DerivedPart {
+  kind: "field" | "text";
+  entity?: "contact" | "deal";
+  key?: string;
+  take?: "all" | "first" | "last";
+  count?: number;
+  /** Usa só os dígitos do campo (antes de cortar). */
+  digitsOnly?: boolean;
+  text?: string;
+}
+
+/** Informação montada a partir de campos do CRM (ex.: senha provisória), que o agente pode dizer. */
+export interface V2DerivedField {
+  id: string;
+  label: string;
+  parts: V2DerivedPart[];
+  mask?: V2FieldMask;
 }
 
 export interface V2Variable {
@@ -527,6 +552,8 @@ export interface V2AgentConfig {
   tabulation?: V2TabulationConfig;
   themeRecognition?: V2ThemeRecognitionConfig;
   knowledgeSearch?: V2KnowledgeSearchConfig;
+  /** Informações montadas a partir de campos do CRM, que o agente pode dizer ao cliente. */
+  derivedFields?: V2DerivedField[];
 }
 
 export interface V2ToolGovernorConfig {

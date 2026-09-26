@@ -7,6 +7,8 @@
  * puros de entrada/saída para facilitar testes.
  */
 
+import { maskFieldValue } from "@/lib/ai-v2/field-mask";
+import type { V2FieldMask } from "@/lib/ai-v2/types";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { retrieveAgentKnowledge } from "@/services/ai/retrieval";
@@ -151,12 +153,16 @@ export async function searchV2CrmRecords(args: {
   dealId?: string;
   limit?: number;
   readableKeys?: string[];
+  /** Máscara por chave ("contact.<campo>"): o resultado não traz o valor inteiro. */
+  masks?: Record<string, V2FieldMask>;
 }): Promise<{
   query: string;
   contacts: Array<Record<string, unknown>>;
   deals: Array<Record<string, unknown>>;
 }> {
   const orgId = getOrgIdOrThrow();
+  const m = (key: string, value: unknown) =>
+    value === null || value === undefined ? value : maskFieldValue(String(value), args.masks?.[key]);
   const term = args.query.trim();
   const limit = Math.min(Math.max(args.limit ?? 5, 1), 10);
   const readable = new Set(args.readableKeys ?? []);
@@ -177,9 +183,9 @@ export async function searchV2CrmRecords(args: {
     return {
       id: c.id,
       name: c.name,
-      ...(readable.has("contact.phone") ? { phone: c.phone } : {}),
-      ...(readable.has("contact.email") ? { email: c.email } : {}),
-      customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
+      ...(readable.has("contact.phone") ? { phone: m("contact.phone", c.phone) } : {}),
+      ...(readable.has("contact.email") ? { email: m("contact.email", c.email) } : {}),
+      customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(`contact.${v.customFieldId}`, v.value) })),
     };
   });
 
@@ -212,7 +218,7 @@ export async function searchV2CrmRecords(args: {
         status: d.status,
         value: d.value ? Number(d.value) : null,
         stage: d.stage,
-        customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: v.value })),
+        customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(`deal.${v.customFieldId}`, v.value) })),
         score,
       };
     })

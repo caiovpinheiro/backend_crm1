@@ -9,6 +9,9 @@
  * Nenhum termo de domínio de cliente aqui.
  */
 
+import type { V2AgentConfig, V2FieldMask } from "./types";
+import { derivedFieldValues, fieldMasks, maskFieldValue } from "./field-mask";
+
 export type V2MessageFormatter = (key: string, value: unknown) => string | undefined;
 
 const KEY_CHARS = /[\p{L}\p{N}_. ]/u;
@@ -239,6 +242,8 @@ export function buildVariableMap(
   deal: Record<string, unknown> | null,
   contactRaw?: Record<string, unknown> | null,
   dealRaw?: Record<string, unknown> | null,
+  /** Máscaras dos campos e informações montadas (config do agente). */
+  policy?: Pick<V2AgentConfig, "contextFields" | "derivedFields">,
 ): Record<string, unknown> {
   const map: Record<string, unknown> = {};
   for (const v of agentVariables) {
@@ -258,6 +263,20 @@ export function buildVariableMap(
     }
     map.deal = { ...rawDeal };
   }
+  if (policy) {
+    // @CPF numa mensagem sai mascarado como o campo está configurado.
+    const masks = fieldMasks(policy);
+    const maskIn = (obj: Record<string, unknown>) => {
+      for (const [k, mask] of Object.entries(masks)) {
+        if (typeof obj[k] === "string" || typeof obj[k] === "number") obj[k] = maskFieldValue(String(obj[k]), mask);
+      }
+    };
+    maskIn(map);
+    if (map.contact && typeof map.contact === "object") maskIn(map.contact as Record<string, unknown>);
+    if (map.deal && typeof map.deal === "object") maskIn(map.deal as Record<string, unknown>);
+    // Informações montadas viram @Rótulo.
+    Object.assign(map, derivedFieldValues(policy, rawContact, rawDeal));
+  }
   return map;
 }
 
@@ -272,6 +291,8 @@ export function confirmationIdentityValues(args: {
   fieldKeys: string[];
   fieldLabels: Array<{ key: string; label?: string }>;
   sources: Array<Record<string, unknown> | null | undefined>;
+  /** Máscara por chave/rótulo: "seu CPF é 218.xxx.xxx-21". */
+  masks?: Record<string, V2FieldMask>;
 }): string[] {
   const keys = args.fieldKeys.length > 0 ? args.fieldKeys : ["name"];
   const values: string[] = [];
@@ -283,7 +304,7 @@ export function confirmationIdentityValues(args: {
       const raw = source[key] ?? (label ? source[label] : undefined);
       const text = identityText(raw);
       if (text) {
-        found = text;
+        found = maskFieldValue(text, args.masks?.[key] ?? (label ? args.masks?.[label] : undefined));
         break;
       }
     }

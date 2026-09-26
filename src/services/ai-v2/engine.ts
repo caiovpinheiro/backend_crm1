@@ -8,6 +8,7 @@ import { normalizeV2Config } from "@/lib/ai-v2/config";
 import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2LLMOutput, V2Owner, V2Stage, V2Theme } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
 import { applyConfirmationIdentity, buildVariableMap, confirmationIdentityValues, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
+import { fieldMasks } from "@/lib/ai-v2/field-mask";
 import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
 import { loadV2Context, buildAskDealMessage, tryParseDealChoice, type V2LoadedContext } from "./context";
@@ -278,6 +279,7 @@ function messageVariables(config: V2AgentConfig, context: V2CRMContext): Record<
     context.selectedDeal,
     context.contactRaw,
     context.selectedDealRaw,
+    config,
   );
 }
 
@@ -505,6 +507,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       fieldKeys: config.entry.confirmationFields ?? [],
       fieldLabels: [...config.contextFields.contact, ...config.contextFields.deal],
       sources: [loadedContext.contactRaw, loadedContext.selectedDealRaw, loadedContext.contact, loadedContext.selectedDeal],
+      masks: fieldMasks(config),
     }));
   }
 

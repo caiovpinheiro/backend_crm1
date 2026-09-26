@@ -20,6 +20,7 @@ import { guardV2Output } from "./output-guard";
 import { loadV2Context, buildAskDealMessage } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
+import { fieldMasks } from "@/lib/ai-v2/field-mask";
 import { getRequestContext, enterRequestContext } from "@/lib/request-context";
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
@@ -128,6 +129,7 @@ function renderConfirmationText(config: V2AgentConfig, context: V2CRMContext, va
     fieldKeys: config.entry.confirmationFields ?? [],
     fieldLabels: [...config.contextFields.contact, ...config.contextFields.deal],
     sources: [context.contactRaw, context.selectedDealRaw, context.contact, context.selectedDeal],
+    masks: fieldMasks(config),
   }));
 }
 
@@ -182,7 +184,7 @@ export async function simulateV2Turn(
   // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
   const effectiveStage: V2Stage = history.length === 0 && !opts.skipEntry ? "idle" : stage;
   if (effectiveStage === "idle") {
-    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
     if (!context.selectedDeal) {
       if (config.entry.onDealNotFound === "ask_identification") {
         const parts: string[] = [];
@@ -286,7 +288,7 @@ export async function simulateV2Turn(
 
   // Turno seguinte às boas-vindas no modo separate_turn: envia a confirmação.
   if (effectiveStage === "confirming" && config.entry.confirmContact && (config.entry.confirmationMode ?? "combined") === "separate_turn") {
-    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
     const confirmMsg = renderConfirmationText(config, context, vars);
     return {
       userMessage,
@@ -365,7 +367,7 @@ export async function simulateV2Turn(
     context,
   );
   const appliedRuleId = rule?.id ?? null;
-  const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw);
+  const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
 
   const quickResult = (partial: Partial<V2TestTurnResult> & { reply: string; reason: string }): V2TestTurnResult => ({
     userMessage,

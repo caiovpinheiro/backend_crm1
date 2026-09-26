@@ -3,6 +3,7 @@
  * Nenhum domínio de cliente aqui.
  */
 
+import { derivedFieldValues, maskFieldValue } from "@/lib/ai-v2/field-mask";
 import { prisma } from "@/lib/prisma";
 import {
   loadCrmFieldCatalog,
@@ -340,14 +341,14 @@ export async function loadV2Context(args: {
         valueAvailable: true,
         readable: true,
       },
-      value: contact?.[f.key] != null ? String(contact[f.key]) : "",
+      value: contact?.[f.key] != null ? maskFieldValue(String(contact[f.key]), f.mask) : "",
     };
   });
 
   const selectedDealFields = args.config.contextFields.deal.map((f) => {
     const key = crmFieldKey("deal", f.key);
     const descriptor = catalog.fields.find((d) => d.key === key);
-    const value = selectedDeal?.[f.key] != null ? String(selectedDeal[f.key]) : "";
+    const value = selectedDeal?.[f.key] != null ? maskFieldValue(String(selectedDeal[f.key]), f.mask) : "";
     return { field: descriptor ?? {
       key,
       entity: "deal",
@@ -368,6 +369,13 @@ export async function loadV2Context(args: {
   for (const v of contactPartition.visible) visibleContact[v.label] = v.value;
   const citableContact: Record<string, unknown> = {};
   for (const v of contactPartition.citable) citableContact[v.label] = v.value;
+
+  // Informações montadas (config): o agente pode dizer ao cliente; o motor
+  // calcula a partir dos campos, o modelo só recebe o resultado.
+  for (const [label, value] of Object.entries(derivedFieldValues(args.config, contact, selectedDeal))) {
+    visibleContact[label] = value;
+    citableContact[label] = value;
+  }
 
   const visibleDeal: Record<string, unknown> = {};
   for (const v of dealPartition.visible) visibleDeal[v.label] = v.value;

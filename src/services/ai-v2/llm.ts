@@ -442,6 +442,10 @@ export function buildV2ToolSet(args: {
         contactId: (args.context.contactRaw?.id ?? args.context.contact?.id) as string | undefined,
         dealId: (args.context.selectedDealRaw?.id ?? args.context.selectedDeal?.id) as string | undefined,
         readableKeys: crmReadableKeys,
+        masks: Object.fromEntries([
+          ...args.config.contextFields.contact.filter((f) => f.mask && f.mask !== "none").map((f) => [`contact.${f.key}`, f.mask!]),
+          ...args.config.contextFields.deal.filter((f) => f.mask && f.mask !== "none").map((f) => [`deal.${f.key}`, f.mask!]),
+        ]),
       }),
   );
   if (searchCrm) tools.search_crm_records = searchCrm;
