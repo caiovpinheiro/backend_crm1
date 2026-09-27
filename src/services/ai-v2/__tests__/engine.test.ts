@@ -1733,6 +1733,8 @@ describe("processV2Turn — correções do motor", () => {
       rules: [{ id: "r1", name: "Pedido de pessoa", enabled: true, order: 0, conditions: [{ type: "keywords", values: ["atendente"] }], actions: [{ type: "handoff" }] }],
     } as unknown as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    // Sem assunto, a primeira vez pergunta o que a pessoa precisa; a transferência (com a causa) é na seguinte.
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { humanRequestAsked: true }));
     const { takeV2Facts } = await import("../trace");
     let facts: Record<string, unknown> | undefined;
     mocks.logTurn.mockImplementation(async () => {
@@ -1801,5 +1803,34 @@ describe("processV2Turn — correções do motor", () => {
     expect(texts2[0]).toMatch(/Não estou conseguindo enviar o vídeo/);
     expect(mocks.executeActions.mock.calls.flatMap((c) => c[0] as any[]).some((a) => a.type === "send_message_model")).toBe(false);
     expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("pedido de pessoa: com pergunta responde primeiro; sem assunto pergunta uma vez e transfere na próxima", async () => {
+    const config = baseConfig({
+      handoff: { ...baseConfig().handoff, humanRequestKeywords: ["falar com atendente"] },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "A entrega leva dois dias úteis após a confirmação do pedido." }));
+
+    const r1 = await run("quero falar com atendente, qual o prazo de entrega?");
+    expect(r1.handoff).toBe(false);
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM.mock.calls[0][0].humanRequestWithQuestion).toBe(true);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+
+    mocks.callLLM.mockClear();
+    mocks.sendText.mockClear();
+    const r2 = await run("quero falar com atendente");
+    expect(r2.handoff).toBe(false);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls[0][0].text).toContain("me conta em uma frase o que você precisa");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters.humanRequestAsked).toBe(true);
+
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { humanRequestAsked: true }));
+    const r3 = await run("quero falar com atendente");
+    expect(r3.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 });

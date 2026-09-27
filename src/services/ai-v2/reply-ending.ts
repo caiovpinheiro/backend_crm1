@@ -46,8 +46,16 @@ export function isGreetingOnlyReply(reply: string): boolean {
   return /\b(?:como posso|em que posso|posso (?:te |lhe )?ajudar|me (?:conta|conte|diga|diz)|qual (?:[ée] )?(?:a )?sua d[uú]vida|o que (?:voc[eê] )?precisa)\b/i.test(text);
 }
 
+/**
+ * A resposta diz que algo ainda não está disponível ou só ficará numa data:
+ * não há o que o cliente "fazer e avisar se deu certo".
+ */
+const FUTURE_AVAILABILITY =
+  /\bainda n[ãa]o (?:est[áa]|fica|foi|ser[áa]|estar[áa]) (?:dispon[ií]vel|liberad[oa]s?|aberto|aberta|ativo|ativa|habilitad[oa])|\bs[óo] (?:ser[áa]|fica|ficar[áa]|estar[áa]) (?:dispon[ií]vel|liberad[oa]|aberto|aberta)|\bser[áa] (?:liberad[oa]|disponibilizad[oa]|aberto|aberta)\b|\bdispon[ií]vel (?:a partir|somente a partir|s[óo] a partir)\b|\ba partir d[eo] dia \d|\bainda n[ãa]o (?:abriu|come[çc]ou|est[áa] aberto|foi liberad)|\bn[ãa]o est[áa] dispon[ií]vel ainda\b/i;
+
 /** Passo a passo (2+ passos numerados) ou informação. */
 export function classifyReply(reply: string): V2ReplyKind {
+  if (FUTURE_AVAILABILITY.test(reply)) return "info";
   const steps = reply.split(/\n+/).filter((l) => STEP_LINE.test(l)).length;
   return steps >= 2 ? "procedure" : "info";
 }

@@ -49,6 +49,21 @@ export type V2TestDelivery = {
   error: string | null;
 };
 
+/**
+ * A API já tinha enviado o arquivo à Meta (rastro do turno) e mesmo assim
+ * a entrega falhou por "arquivo não encontrado": só um worker de WhatsApp
+ * na versão antiga (que ignora o id) faz isso. O painel mostra o motivo.
+ */
+export function markOldWorker(deliveries: V2TestDelivery[], trace: V2TraceStep[]): V2TestDelivery[] {
+  const preUploaded = trace.some((s) => /já enviado à Meta pela API/.test(String(s.detail ?? "")));
+  if (!preUploaded) return deliveries;
+  return deliveries.map((d) =>
+    d.status === "failed" && /Arquivo não encontrado no storage/.test(d.error ?? "")
+      ? { ...d, error: `${d.error} — o job trazia o arquivo já enviado à Meta: worker de WhatsApp na versão antiga` }
+      : d,
+  );
+}
+
 export type V2TestSession = { startedAt: string; turns: V2TestTurn[] };
 
 export type V2TestContact = {
@@ -232,7 +247,7 @@ export async function listV2TestConversations(args: {
       latencyMs: row.latencyMs,
       tokens: (row.inputTokens ?? 0) + (row.outputTokens ?? 0),
       feedback: (row.feedback as V2TurnFeedback | null) ?? null,
-      deliveries: deliveriesByLog.get(row.id) ?? [],
+      deliveries: markOldWorker(deliveriesByLog.get(row.id) ?? [], Array.isArray(snap.trace) ? (snap.trace as V2TraceStep[]) : []),
     };
     // `#reset` abre uma sessão nova; o primeiro turno também.
     if (isReset || entry.sessions.length === 0) {

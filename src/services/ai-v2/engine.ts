@@ -23,7 +23,7 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { HUMAN_REQUEST_ASK, actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
@@ -34,7 +34,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
@@ -1084,6 +1084,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem: o modelo
+  // responde a pergunta e só marca transferência se não conseguir.
+  let humanRequestWithSubject = false;
 
   // Regra determinística: executa ações; se for terminal (handoff/close/mensagem),
   // encerra o turno; se for set_theme/set_variable, segue para o LLM com estado atualizado.
@@ -1120,8 +1123,36 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Handoff da regra sai do executor genérico: primeiro roda o resto,
     // depois avisa o cliente e só então transfere. Transferir antes fazia a
     // mensagem de transferência morrer na checagem de responsável.
-    const ruleHandoff = ruleActions.find((a) => a.type === "handoff");
+    let ruleHandoff = ruleActions.find((a) => a.type === "handoff");
     const otherRuleActions = ruleActions.filter((a) => a.type !== "handoff");
+    // Pedido de pessoa: com pergunta ou assunto junto, o agente responde
+    // primeiro e só transfere se não conseguir (ou se o cliente insistir).
+    // Só o pedido, sem assunto: pergunta uma vez o que a pessoa precisa e
+    // transfere na mensagem seguinte.
+    if (ruleHandoff && mentionsHumanRequest(config, input.userMessage)) {
+      if (humanRequestSubject(config, input.userMessage)) {
+        humanRequestWithSubject = true;
+        counters.humanRequestAsked = true;
+        ruleHandoff = undefined;
+        traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
+      } else if (!counters.humanRequestAsked) {
+        counters.humanRequestAsked = true;
+        traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
+        const ask = renderMessage(HUMAN_REQUEST_ASK, vars, defaultFormatter());
+        await sendReply(ask);
+        await upsertV2ConversationState({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+          owner, counters: counters as V2Counters, versionId: versionId, collectedVariables,
+        });
+        await logV2Turn({
+          organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+          inboundText: input.userMessage, crmContext: context, prompt: "rule", reply: ask,
+          executedActions: [], discardedActions: [], handoff: false, closed: false, latencyMs: Date.now() - startedAt,
+          inputTokens: 0, outputTokens: 0, owner, stage, appliedRuleId, versionId,
+        });
+        return { handoff: false, closed: false, sentReply: ask };
+      }
+    }
     const res = await executeV2Actions(otherRuleActions, actionCtx);
     executedActions = res.results;
     anyClose = res.anyClose;
@@ -1484,7 +1515,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -1955,31 +1986,29 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
     // modelo já a montou), não a de transferência padrão.
     const cause = peekV2Fact("handoffCause");
-    // Mensagem "sem material" também quando o próprio modelo diz que não tem
-    // a informação (antes só quando a verificação barrava).
-    const noSourceMsg = cause === "verification" || cause === "no_source" || (cause === "model" && lacksInformation(replyText))
-      ? config.fallback?.noSource?.message?.trim() ?? ""
-      : "";
-    // Cliente irritado: a resposta útil do modelo sai antes do aviso de
-    // transferência (antes só o aviso chegava).
-    let announced = false;
-    if (cause === "sentiment" && !waitingInQueue && replyText.trim() && !announcesTransfer(replyText)) {
-      const answered = await sendReply(replyText);
+    // Um caminho só de mensagem: explicação curta do modelo (sem as frases
+    // que avisam a transferência) + mensagem configurada. O "não encontrei
+    // resposta segura" fica só quando não há resposta validada nenhuma
+    // (a checagem barrou ou nada nos materiais cobre a mensagem). Antes a
+    // mesma situação saía de três jeitos diferentes.
+    const fallbackOnly = cause === "verification" || cause === "no_source";
+    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    // Só quando a resposta do modelo é uma explicação de verdade (transferiu
+    // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
+    // "segue o material:" de uma mensagem pronta barrada não é explicação.
+    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request";
+    const explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    if (explanation) {
+      const answered = await sendReply(explanation);
       if (answered.sent) {
-        sentReply = replyText;
-        traceStep("resposta", "Cliente irritado: responde antes de transferir");
-      }
-    } else if (cause === "model" && !waitingInQueue && answersBeforeHandoff(replyText)) {
-      // O modelo orientou e transferiu: a orientação chega ao cliente (já
-      // conferida contra os materiais). Se ela já avisa a transferência, o
-      // aviso padrão não se repete.
-      const answered = await sendReply(replyText);
-      if (answered.sent) {
-        sentReply = replyText;
-        announced = announcesTransfer(replyText);
-        traceStep("resposta", announced ? "Orientou e avisou a transferência na mesma mensagem" : "Orienta antes de transferir");
+        sentReply = explanation;
+        traceStep("resposta", cause === "sentiment"
+          ? "Cliente irritado: responde antes de transferir"
+          : cause === "media_failed"
+            ? "Explica que o anexo não está chegando e chama a equipe"
+            : "Explica antes de transferir; a mensagem configurada vem em seguida");
         // Os anexos do material (vídeo, imagem…) acompanham a orientação.
-        const attachments = outboundActions.filter((a) => a.type === "send_material_attachment");
+        const attachments = cause === "model" ? outboundActions.filter((a) => a.type === "send_material_attachment") : [];
         if (attachments.length > 0 && !stopLimits.blocksReply) {
           const attRes = await executeV2Actions(attachments, actionCtx);
           executedActions = [...executedActions, ...attRes.results];
@@ -1989,28 +2018,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
     const queuedMsg = waitingInQueue ? queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config)) : "";
-    // O cliente disse que não recebeu o anexo e não dá para reenviar: a
-    // explicação honesta sai antes do aviso de transferência.
-    if (cause === "media_failed" && !waitingInQueue && replyText.trim()) {
-      const answered = await sendReply(replyText);
-      if (answered.sent) {
-        sentReply = replyText;
-        announced = announcesTransfer(replyText);
-        traceStep("resposta", "Explica que o anexo não está chegando e chama a equipe");
-      }
-    }
-    // Depois de uma orientação, o "não encontrei resposta segura" contradiz o
-    // que o cliente acabou de ler: vale o aviso padrão de transferência.
-    const afterAnswer = !!sentReply;
-    const handoffNote = queuedMsg || (afterAnswer ? "" : noSourceMsg);
+    const handoffNote = queuedMsg || noSourceMsg;
     const hoursNote = outsideHoursNote(config);
     const sent = await performHandoff(
       requestedDestination ?? activeTheme?.handoffDestination,
-      announced
-        ? { skipMessage: true }
-        : handoffNote || hoursNote
-          ? { message: [handoffNote || renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter()), hoursNote].filter(Boolean).join("\n\n") }
-          : {},
+      handoffNote || hoursNote
+        ? { message: [handoffNote || renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter()), hoursNote].filter(Boolean).join("\n\n") }
+        : {},
     );
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
@@ -2142,6 +2156,7 @@ async function callLLMWithTheme(
   rule: ReturnType<typeof evaluateV2Rules> | null,
   owner: string,
   stage: V2Stage,
+  humanRequestWithQuestion = false,
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -2204,6 +2219,7 @@ async function callLLMWithTheme(
       themeInstructions,
       collectedVariables,
       previousMessages,
+      humanRequestWithQuestion,
     });
     return {
       llmOutput: result.output,

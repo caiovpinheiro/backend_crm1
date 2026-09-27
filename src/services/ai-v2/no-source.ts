@@ -108,6 +108,21 @@ export function announcesTransfer(reply: string): boolean {
   return /\b(?:transfer|encaminh|chamar (?:algu[eé]m|uma pessoa)|atendente|equipe)\w*/i.test(reply);
 }
 
+/**
+ * Explicação curta do modelo que sai antes da mensagem configurada de
+ * transferência: a resposta sem as frases que avisam a transferência (essas
+ * viram a mensagem configurada). Vazio quando não sobra explicação. Um
+ * caminho só: a mesma situação gera a mesma estrutura de mensagem.
+ */
+export function handoffExplanation(reply: string): string {
+  const lines = reply
+    .split(/\r?\n/)
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => s.trim() && !announcesTransfer(s)).join(" ").trim())
+    .filter(Boolean);
+  const text = lines.join("\n").trim();
+  return text.split(/\s+/).filter(Boolean).length >= 4 ? text : "";
+}
+
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };
 
 /** Nada relevante nos materiais para esta mensagem (buscou e não achou). */

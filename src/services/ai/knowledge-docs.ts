@@ -421,13 +421,18 @@ export async function updateKnowledgeDoc(
  * títulos no prompt.
  */
 export async function knowledgeDocTitlesByIds(agentId: string, ids: string[]): Promise<string[]> {
-  if (ids.length === 0) return [];
+  const byId = await knowledgeDocTitleMapByIds(agentId, ids);
+  return ids.map((id) => byId.get(id)).filter((t): t is string => Boolean(t));
+}
+
+/** id → título dos materiais pedidos (só os que existem para o agente). */
+export async function knowledgeDocTitleMapByIds(agentId: string, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
   const docs = await prisma.aIAgentKnowledgeDoc.findMany({
     where: { agentId, id: { in: ids } },
     select: { id: true, title: true },
   });
-  const byId = new Map(docs.map((d) => [d.id, d.title]));
-  return ids.map((id) => byId.get(id)).filter((t): t is string => Boolean(t));
+  return new Map(docs.map((d) => [d.id, d.title]));
 }
 
 // Agentes já verificados neste processo (a correção roda uma vez).

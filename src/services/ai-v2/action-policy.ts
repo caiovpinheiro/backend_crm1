@@ -116,6 +116,28 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
   ].join("\n");
 }
 
+/** Pergunta feita uma vez a quem pede uma pessoa sem dizer o assunto. */
+export const HUMAN_REQUEST_ASK = "Claro! Antes de te passar para a equipe, me conta em uma frase o que você precisa, para eu encaminhar certo.";
+
+const HUMAN_FILLER = new Set(["quero", "queria", "gostaria", "preciso", "favor", "obrigado", "obrigada", "pessoa", "humano", "humana", "atendente", "alguem", "equipe", "consultor", "consultora", "urgente", "agora", "poderia", "pode", "possivel", "voce", "voces", "aqui", "para", "falar", "conversar", "ajuda", "atendimento", "alguma", "algum", "coisa"]);
+
+/**
+ * A mensagem que pede uma pessoa também traz um assunto ou pergunta ("quero
+ * falar com atendente, meu pedido não chegou"): tirando as palavras do
+ * pedido, sobra pergunta ou conteúdo. Aí o agente responde primeiro e só
+ * transfere se não conseguir.
+ */
+export function humanRequestSubject(config: V2AgentConfig, message: string): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  let text = ` ${fold(message).replace(/[^a-z0-9?]+/g, " ")} `;
+  for (const w of humanRequestTerms(config)) {
+    const k = fold(w).replace(/[^a-z0-9]+/g, " ").trim();
+    if (k) text = text.split(` ${k} `).join(" ");
+  }
+  const words = text.replace(/\?/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !HUMAN_FILLER.has(w));
+  return text.includes("?") ? words.length >= 1 : words.length >= 2;
+}
+
 /** A mensagem traz uma das palavras de "pedir atendente" da configuração. */
 export function mentionsHumanRequest(config: V2AgentConfig, message: string): boolean {
   const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");

@@ -65,6 +65,40 @@ describe("fecho e transferência condicional (paridade produção × teste)", ()
     expect(r.interactive).toBeNull();
   });
 
+  it("transferência: explicação do modelo + mensagem configurada, sem o fallback 'sem material' (igual à produção)", async () => {
+    const { simulateV2Turn } = await import("../test-turn");
+    const cfg = { ...config(), fallback: { noSource: { message: "Não encontrei uma resposta segura." } } } as V2AgentConfig;
+    mocks.callV2LLMTest.mockResolvedValueOnce(llm("Não tenho o seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe.", true));
+    const r = await simulateV2Turn("agent-1", cfg, "qual é o meu e-mail?", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(r.handoff).toBe(true);
+    expect(r.reply).toBe("Não tenho o seu e-mail no cadastro.\n\nVou transferir.");
+    mocks.callV2LLMTest.mockResolvedValueOnce(llm("Vou te passar para a equipe.", true));
+    const only = await simulateV2Turn("agent-1", cfg, "qual é o meu e-mail?", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(only.reply).toBe("Vou transferir.");
+  });
+
+  it("pedido de pessoa: com pergunta responde primeiro; sem assunto pergunta uma vez e transfere na próxima (paridade)", async () => {
+    const { simulateV2Turn } = await import("../test-turn");
+    const cfg = {
+      ...config(),
+      handoff: { ...config().handoff, humanRequestKeywords: ["falar com atendente"] },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as V2AgentConfig;
+    mocks.callV2LLMTest.mockResolvedValueOnce(llm("A entrega leva dois dias úteis após a confirmação do pedido.", false));
+    const answered = await simulateV2Turn("agent-1", cfg, "quero falar com atendente, qual o prazo de entrega?", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(answered.handoff).toBe(false);
+    expect(answered.reply).toContain("A entrega leva dois dias úteis");
+    expect(mocks.callV2LLMTest.mock.calls.at(-1)![7]).toEqual({ humanRequestWithQuestion: true });
+
+    const asked = await simulateV2Turn("agent-1", cfg, "quero falar com atendente", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(asked.handoff).toBe(false);
+    expect(asked.reply).toContain("me conta em uma frase o que você precisa");
+
+    const again = await simulateV2Turn("agent-1", cfg, "quero falar com atendente", [{ role: "user", content: "quero falar com atendente" }, { role: "assistant", content: asked.reply }], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(again.handoff).toBe(true);
+    expect(again.reply).toBe("Vou transferir.");
+  });
+
   it("passo a passo sem transferência continua com o fecho e os botões", async () => {
     const { simulateV2Turn } = await import("../test-turn");
     mocks.callV2LLMTest.mockResolvedValueOnce(llm(STEPS, false));

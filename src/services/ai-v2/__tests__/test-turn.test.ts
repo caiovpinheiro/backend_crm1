@@ -404,12 +404,12 @@ describe("simulateV2Turn — igual à produção", () => {
     expect(r.reply).toBe("Resposta do modelo.");
   });
 
-  it("ao transferir mostra a mensagem de transferência, como o cliente receberia", async () => {
-    mocks.callV2LLMTest.mockResolvedValue(llm({ handoff: true, reply: "Texto que não seria enviado." }));
+  it("ao transferir mostra a explicação do modelo e a mensagem de transferência, como o cliente receberia", async () => {
+    mocks.callV2LLMTest.mockResolvedValue(llm({ handoff: true, reply: "Esse caso precisa de análise da conta. Vou te transferir agora." }));
     const { simulateV2Turn } = await import("../test-turn");
     const r = await simulateV2Turn("agent-1", baseConfig(), "quero falar com alguém", history);
     expect(r.handoff).toBe(true);
-    expect(r.reply).toBe("Vou transferir.");
+    expect(r.reply).toBe("Esse caso precisa de análise da conta.\n\nVou transferir.");
   });
 
   it("assunto criado sem lista de ações não bloqueia as ações liberadas no agente", async () => {

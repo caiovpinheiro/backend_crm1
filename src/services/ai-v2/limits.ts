@@ -18,6 +18,8 @@ export interface V2Counters {
   pendingOptions?: string[];
   /** A pergunta pós-encerramento já foi feita nesta janela (não se repete). */
   postCloseAsked?: boolean;
+  /** Já perguntou uma vez o que a pessoa precisa (pedido de atendente sem assunto). */
+  humanRequestAsked?: boolean;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -45,6 +47,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     aiTransferCount: Number(r.aiTransferCount) || 0,
     surveyPending: Boolean(r.surveyPending),
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
+    ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
       ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
       : {}),

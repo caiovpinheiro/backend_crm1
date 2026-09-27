@@ -9,12 +9,12 @@ import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2St
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { HUMAN_REQUEST_ASK, actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -428,9 +428,25 @@ export async function simulateV2Turn(
     ...partial,
   });
 
+  // Pedido de pessoa, igual à produção: com pergunta junto, responde primeiro;
+  // sem assunto, pergunta uma vez (se a última mensagem do agente já foi a
+  // pergunta, transfere).
+  let humanRequestWithQuestion = false;
+  let ruleForTurn: V2Rule | null = rule;
+  if (rule?.actions.some((a) => a.type === "handoff") && mentionsHumanRequest(config, userMessage)) {
+    const ask = renderMessage(HUMAN_REQUEST_ASK, vars, defaultFormatter());
+    if (humanRequestSubject(config, userMessage)) {
+      humanRequestWithQuestion = true;
+      ruleForTurn = { ...rule, actions: rule.actions.filter((a) => a.type !== "handoff") } as V2Rule;
+      traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
+    } else if (!history.some((h) => h.role === "assistant" && h.content.trim() === ask)) {
+      traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
+      return quickResult({ reply: ask, reason: "Pedido de pessoa sem assunto: pergunta uma vez o que precisa e transfere na próxima mensagem." });
+    }
+  }
   // Regra com ação terminal: em produção o turno acaba ali, sem modelo.
   // Antes o teste seguia para o modelo e mostrava outra resposta.
-  const ruleTurn = rule ? simulateTerminalRule(config, rule, vars) : null;
+  const ruleTurn = ruleForTurn ? simulateTerminalRule(config, ruleForTurn, vars) : null;
   if (ruleTurn) {
     if (ruleTurn.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "rule", { keepFirst: true });
     return quickResult({
@@ -476,7 +492,7 @@ export async function simulateV2Turn(
 
   let llmResult: Awaited<ReturnType<typeof callV2LLMTest>>;
   try {
-    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId, effectiveStage === "idle" ? "active" : effectiveStage);
+    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId, effectiveStage === "idle" ? "active" : effectiveStage, { humanRequestWithQuestion });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[simulateV2Turn] LLM failed:", msg);
@@ -637,16 +653,13 @@ export async function simulateV2Turn(
     // Mesma mensagem que a produção manda: "sem material" quando citava algo
     // sem fonte, senão a do destino do assunto, senão a padrão.
     const cause = handoffCauseNow();
-    const noSourceMsg = cause === "verification" || cause === "no_source" || (cause === "model" && lacksInformation(output.reply))
-      ? config.fallback?.noSource?.message?.trim() ?? ""
-      : "";
-    // Igual à produção: o modelo orientou e transferiu → a orientação sai
-    // antes do aviso (padrão, não o "sem material"); se ela já avisa, só ela.
-    const oriented = cause === "model" && answersBeforeHandoff(output.reply);
-    reply = renderMessage((oriented ? "" : noSourceMsg) || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
-    if (oriented) reply = announcesTransfer(output.reply) ? output.reply : `${output.reply}\n\n${reply}`;
-    // Cliente irritado: a resposta do modelo sai antes do aviso, como na produção.
-    if (cause === "sentiment" && output.reply.trim() && !announcesTransfer(output.reply)) reply = `${output.reply}\n\n${reply}`;
+    // Igual à produção, um caminho só: explicação do modelo (sem as frases de
+    // aviso) + mensagem configurada; "sem material" só sem resposta validada.
+    const fallbackOnly = cause === "verification" || cause === "no_source";
+    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    const explanation = fallbackOnly ? "" : handoffExplanation(output.reply);
+    reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    if (explanation) reply = `${explanation}\n\n${reply}`;
   } else if (closed && config.closure.goodbyeMessage) {
     reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
   } else {

@@ -6,6 +6,38 @@ import { guardV2Output, isCommonFieldValue } from "../output-guard";
 import { QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, QUEUE_NOTICES, pickQueueNotice, queuedMessageFor } from "../queue-notice";
 import { mediaResendPlan, saysNotReceived } from "../sent-materials";
 import { trimUnsupportedSentences } from "../reply-trim";
+import { handoffExplanation } from "../no-source";
+import { classifyReply } from "../reply-ending";
+import { humanRequestSubject } from "../action-policy";
+import type { V2AgentConfig } from "@/lib/ai-v2/types";
+
+describe("transferência — um caminho só de mensagem", () => {
+  it("explicação do modelo sem as frases de aviso; vazio quando a resposta só avisa ou é curta demais", () => {
+    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro.");
+    expect(handoffExplanation("Vou te passar para a equipe.")).toBe("");
+    expect(handoffExplanation("Claro! Vou encaminhar.")).toBe("");
+    expect(handoffExplanation("Resposta do agente.")).toBe("");
+    expect(handoffExplanation("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.")).toBe("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.");
+  });
+});
+
+describe("fecho — algo que ainda não está disponível", () => {
+  it("resposta que diz que só fica disponível numa data recebe o fecho de informação, não o de passo a passo", () => {
+    expect(classifyReply("O pedido ainda não está disponível. Será liberado em 01/10.\n1. Abra o app.\n2. Veja o pedido.")).toBe("info");
+    expect(classifyReply("A consulta fica disponível a partir do dia 5.\n1. Abra o app.\n2. Veja o pedido.")).toBe("info");
+    expect(classifyReply("1. Abra o app.\n2. Veja o pedido.")).toBe("procedure");
+  });
+});
+
+describe("pedido de pessoa — com ou sem assunto", () => {
+  const cfg = { handoff: { humanRequestKeywords: ["falar com atendente", "quero falar com alguém"] } } as unknown as V2AgentConfig;
+  it("reconhece quando a mensagem traz pergunta ou assunto além do pedido", () => {
+    expect(humanRequestSubject(cfg, "quero falar com atendente")).toBe(false);
+    expect(humanRequestSubject(cfg, "Quero falar com alguém, por favor")).toBe(false);
+    expect(humanRequestSubject(cfg, "quero falar com atendente, meu pedido não chegou")).toBe(true);
+    expect(humanRequestSubject(cfg, "falar com atendente sobre a fatura?")).toBe(true);
+  });
+});
 
 describe("guarda de saída — campo só-leitura com valor comum", () => {
   it("não mascara 'Sim'/'Não', número pequeno nem palavra curta", () => {

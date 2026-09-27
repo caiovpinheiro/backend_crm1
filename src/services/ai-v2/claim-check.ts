@@ -217,6 +217,29 @@ export function claimEchoesClient(claim: string, clientTexts: string[]): boolean
   });
 }
 
+const COMMON_CITABLE = new Set(["sim", "nao", "yes", "no", "true", "false", "ok", "ativo", "inativo", "aberto", "fechado", "pendente"]);
+
+/**
+ * A marcação traz um valor do cadastro ou informação montada que o agente
+ * pode dizer (e-mail, código, senha provisória): o valor literal está nos
+ * dados, então está sustentado — de forma determinística, antes e no lugar
+ * do modelo. Só quando, tirando os valores, não sobra número, link nem nome
+ * entre aspas: a frase apenas apresentava o dado.
+ */
+export function claimBackedByCitableValues(claim: string, values: string[]): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[*_~`]/g, "");
+  let rest = fold(claim);
+  let hit = false;
+  for (const raw of values) {
+    const v = fold(String(raw).trim());
+    if (v.length < 4 || COMMON_CITABLE.has(v) || !rest.includes(v)) continue;
+    hit = true;
+    rest = rest.split(v).join(" ");
+  }
+  if (!hit) return false;
+  return !/\d|https?:\/\//.test(rest) && !/["“”]/.test(rest);
+}
+
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
 export async function checkClaimsWithModel(args: {
   model: string;
@@ -225,6 +248,8 @@ export async function checkClaimsWithModel(args: {
   sources: string[];
   clientTexts: string[];
   agentHistory?: string[];
+  /** Valores do cadastro/informações montadas que o agente pode citar. */
+  citableValues?: string[];
 }): Promise<{ unsupported: string[]; inputTokens: number; outputTokens: number; ok: boolean }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -244,7 +269,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimFoundInSources(c, args.sources));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources));
     if (unsupported.length < flagged.length) {
       console.info("[ai-v2] checagem por modelo: marcação descartada, está nas fontes:", flagged.filter((c) => !unsupported.includes(c)));
     }

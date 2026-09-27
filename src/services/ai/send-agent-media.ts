@@ -14,6 +14,7 @@ import { parseStoragePath, resolveOutboundAttachmentMime } from "@/lib/storage/l
 import { isOrgOwnedStorageUrl, readStoredMediaForSend } from "@/lib/storage/read-for-send";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
+import { traceStep } from "@/services/ai-v2/trace";
 
 function kindFromMime(mime: string | null): "image" | "video" | "audio" | "document" {
   const t = (mime ?? "").toLowerCase();
@@ -187,6 +188,9 @@ export async function sendAgentFollowUpMedia(args: {
       kind,
       ...(mediaId ? { mediaId } : {}),
     };
+    // No rastro do turno: se mesmo assim a entrega falhar com "Arquivo não
+    // encontrado no storage", o worker de WhatsApp está na versão antiga.
+    if (mediaId) traceStep("mídia", `Arquivo "${fileName}" já enviado à Meta pela API (o worker só envia pelo id)`);
     const job = await enqueueMetaAttach(payload);
     if (!job) {
       // Já está na Meta: envia daqui mesmo (o job é o fallback síncrono sem Redis).

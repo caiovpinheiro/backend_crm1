@@ -2,9 +2,10 @@
  * Corte de frase sem fonte. Quando a checagem marca uma afirmação que não
  * está nos materiais, o caminho era pedir ao modelo outra resposta — que
  * parafraseava a mesma afirmação e acabava em transferência, com o cliente
- * sem a parte da resposta que estava certa. Aqui a frase marcada é tirada
- * e o resto segue, sem nova chamada ao modelo, desde que o que sobra ainda
- * responda. Passo de lista numerada não é cortado (quebraria o
+ * sem a parte da resposta que estava certa. Aqui só o que foi marcado sai e
+ * o resto segue, sem nova chamada ao modelo, desde que o que sobra ainda
+ * responda e não fique mutilado (sem abertura, sem o link, começando por
+ * "Se aparecer…"). Passo de lista numerada não é cortado (quebraria o
  * procedimento): nesse caso o corte não se aplica. Nenhum domínio de cliente.
  */
 
@@ -14,8 +15,13 @@ export type TrimResult = { reply: string; removed: string[] };
 const COURTESY = /^(?:oi|ol[aá]|bom dia|boa tarde|boa noite|tudo bem|obrigad|de nada|por nada|fico [àa] disposi|qualquer (?:d[úu]vida|coisa)|estou por aqui|[ée] s[óo] (?:me )?chamar|posso (?:te )?ajudar|precisa de (?:mais )?alguma coisa|se precisar|conte comigo|espero ter ajudado|disponha|entendi|entendo|perfeito|combinado|claro|certo)\b/i;
 /** Conector que fica órfão quando a frase anterior sai. */
 const ORPHAN_CONNECTOR = /^(?:al[ée]m disso|por isso|assim|dessa forma|desse modo|ou seja|tamb[ée]m|ent[ãa]o|por esse motivo|isso significa que|no entanto|mas|por[ée]m|e|sendo assim|nesse caso|com isso)[,:]?\s+/i;
+/** Resposta que começa no meio: condição ou continuação sem o que veio antes. */
+const CONTINUATION_START = /^(?:se|caso|depois|em seguida|ent[ãa]o|assim|tamb[ée]m|al[ée]m disso|por fim|agora|na sequ[êe]ncia|quando|feito isso|ap[óo]s|a[ií])\b/i;
 // Passo numerado: "1.", "1)", "1️⃣", "Passo 1:", marcador ou emoji de lista.
 const LIST_ITEM = /^\s*(?:\d+[.)]|\d️?⃣|(?:passo|etapa)\s+\d+\s*[:.)-]|[-•*▪➡👉✅📌]️?)\s*/iu;
+const URL_RE = /https?:\/\/[^\s"'<>)\]]+/g;
+/** Fim de frase, ou link seguido de espaço e maiúscula (link não termina com ponto). */
+const SENTENCE_BOUNDARY = /(?<=[.!?])\s+|(?<=https?:\/\/[^\s]+)\s+(?=\p{Lu})/u;
 
 function norm(s: string): string {
   return s
@@ -33,12 +39,12 @@ function contentWords(s: string): string[] {
 
 type Unit = { text: string; line: number; listItem: boolean };
 
-/** Frases da resposta: por linha e, dentro da linha, por ponto/!/?. */
+/** Frases da resposta: por linha e, dentro da linha, por ponto/!/? (link também separa). */
 export function splitReplyUnits(reply: string): Unit[] {
   const units: Unit[] = [];
   reply.split(/\r?\n/).forEach((line, i) => {
     const listItem = LIST_ITEM.test(line);
-    const parts = listItem ? [line] : line.split(/(?<=[.!?])\s+/);
+    const parts = listItem ? [line] : line.split(SENTENCE_BOUNDARY);
     for (const p of parts) if (p.trim()) units.push({ text: p, line: i, listItem });
   });
   return units;
@@ -59,6 +65,52 @@ function wordCount(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
+/** Texto dobrado (minúsculas, sem acento, sem marcação) com o índice original de cada caractere. */
+function foldChars(s: string): { folded: string; map: number[] } {
+  const out: string[] = [];
+  const map: number[] = [];
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (/[*_~`"“”]/.test(ch)) continue;
+    if (/\s/.test(ch)) {
+      if (out.length > 0 && out[out.length - 1] === " ") continue;
+      out.push(" ");
+      map.push(i);
+      continue;
+    }
+    for (const c of ch.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")) {
+      out.push(c);
+      map.push(i);
+    }
+  }
+  return { folded: out.join(""), map };
+}
+
+/**
+ * Tira só o trecho marcado de dentro da frase (a frase que trazia o link e
+ * o passo 1 saía inteira por causa de uma oração sem fonte). Vale quando a
+ * marcação é uma oração (4+ palavras) achada literalmente e sobra frase.
+ */
+function removeSpan(unitText: string, flagged: string): string | null {
+  const f = norm(flagged);
+  if (contentWords(flagged).length < 4) return null;
+  const { folded, map } = foldChars(unitText);
+  const idx = folded.indexOf(f);
+  if (idx < 0) return null;
+  const start = map[idx];
+  const end = map[idx + f.length - 1] + 1;
+  let rest = `${unitText.slice(0, start)} ${unitText.slice(end)}`;
+  rest = rest
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .replace(/[,;:]\s*([.!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .replace(/(?:^|\s)(?:e|ou|mas)\s*([.!?])?\s*$/i, "$1")
+    .trim();
+  if (wordCount(rest.replace(URL_RE, "link")) < 4 && !URL_RE.test(rest)) return null;
+  if (!/[.!?]$/.test(rest) && /[.!?]$/.test(unitText.trim())) rest = `${rest}.`;
+  return rest;
+}
+
 /** O que sobrou ainda responde: tamanho mínimo e ao menos uma frase de conteúdo. */
 function stillAnswers(units: Unit[]): boolean {
   const text = units.map((u) => u.text).join(" ");
@@ -66,32 +118,58 @@ function stillAnswers(units: Unit[]): boolean {
   return units.some((u) => wordCount(u.text) >= 8 && !COURTESY.test(u.text.trim()) && !/\?\s*$/.test(u.text.trim()));
 }
 
+function firstLine(text: string): string {
+  return text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+}
+
 /**
- * Tira da resposta as frases que contêm as marcações. `null` quando o corte
- * não se aplica: marcação não localizada, marcação num passo de lista, ou o
- * que sobra não responde mais (aí vale a reescrita pelo modelo).
+ * A versão cortada ficou mutilada: começa por condição/continuação que o
+ * original não tinha, começa por passo de lista sem a abertura, ou perdeu um
+ * link que não estava marcado. Aí não sai assim.
+ */
+export function isMutilated(original: string, trimmed: string, flagged: string[] = []): boolean {
+  const first = firstLine(trimmed);
+  const firstOriginal = firstLine(original);
+  if (CONTINUATION_START.test(first) && !CONTINUATION_START.test(firstOriginal)) return true;
+  if (LIST_ITEM.test(first) && !LIST_ITEM.test(firstOriginal)) return true;
+  const flaggedUrls = new Set(flagged.flatMap((f) => f.match(URL_RE) ?? []));
+  const kept = new Set(trimmed.match(URL_RE) ?? []);
+  for (const url of original.match(URL_RE) ?? []) if (!flaggedUrls.has(url) && !kept.has(url)) return true;
+  return false;
+}
+
+/**
+ * Tira da resposta o que foi marcado: só o trecho, quando a marcação é uma
+ * oração dentro de uma frase maior; a frase inteira quando ela é a própria
+ * marcação. `null` quando o corte não se aplica: marcação não localizada,
+ * marcação num passo de lista, resposta mutilada ou o que sobra não
+ * responde mais (aí vale a reescrita pelo modelo).
  */
 export function trimUnsupportedSentences(reply: string, flagged: string[]): TrimResult | null {
   const texts = flagged.map((f) => f.trim()).filter(Boolean);
   if (texts.length === 0) return null;
   const units = splitReplyUnits(reply);
   const drop = new Set<number>();
+  const replaced = new Map<number, string>();
   for (const f of texts) {
     let found = false;
     units.forEach((u, i) => {
       if (!unitMatches(norm(u.text), f)) return;
       found = true;
-      drop.add(i);
+      const rest = removeSpan(replaced.get(i) ?? u.text, f);
+      if (rest !== null) replaced.set(i, rest);
+      else drop.add(i);
     });
     if (!found) return null;
   }
-  if ([...drop].some((i) => units[i].listItem)) return null;
-  if (drop.size === 0 || drop.size === units.length) return null;
+  for (const i of replaced.keys()) if (drop.has(i)) replaced.delete(i);
+  if ([...drop, ...replaced.keys()].some((i) => units[i].listItem)) return null;
+  if (drop.size + replaced.size === 0 || drop.size === units.length) return null;
 
   const kept: Unit[] = [];
   units.forEach((u, i) => {
     if (drop.has(i)) return;
-    let text = u.text;
+    let text = replaced.get(i) ?? u.text;
     // Frase logo depois de uma cortada: o conector fica sem antecedente.
     if (i > 0 && drop.has(i - 1) && ORPHAN_CONNECTOR.test(text.trim())) {
       const rest = text.trim().replace(ORPHAN_CONNECTOR, "");
@@ -115,7 +193,11 @@ export function trimUnsupportedSentences(reply: string, flagged: string[]): Trim
     out.push(u.text.trim());
     lastLine = u.line;
   }
-  return { reply: out.join("\n").trim(), removed: [...drop].sort((a, b) => a - b).map((i) => units[i].text.trim()) };
+  const result = out.join("\n").trim();
+  if (isMutilated(reply, result, texts)) return null;
+  const removed = [...drop].sort((a, b) => a - b).map((i) => units[i].text.trim());
+  for (const [i, rest] of replaced) removed.push(`${units[i].text.trim()} → ${rest}`);
+  return { reply: result, removed };
 }
 
 /**

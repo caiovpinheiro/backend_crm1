@@ -34,7 +34,7 @@ import {
   listV2MessageModels,
   knowledgeChunksContaining,
 } from "./tools";
-import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
+import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
@@ -48,12 +48,15 @@ import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./rep
 import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
-import { onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
+import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
 
-type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number };
+type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
+/** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
+const PRIORITY_CHUNK_CHARS = 6000;
+const PRIORITY_LIMIT = 2;
 
 const PREFETCH_LIMIT = 5;
 const PREFETCH_CHUNK_CHARS = 1500;
@@ -205,16 +208,47 @@ function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
   });
 }
 
+const foldTitle = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+/**
+ * Materiais que entram primeiro, com o conteúdo inteiro: os vinculados ao
+ * assunto escolhido e os cujo título casa com a busca. Pela nota de
+ * embedding o material do próprio assunto ficava atrás de um vizinho
+ * (0,47 contra 0,61) e cada rodada partia de uma base diferente.
+ */
+export function priorityDocIds(args: {
+  theme: { allowedKnowledgeDocIds?: string[]; knowledgeDocIds?: string[] } | null | undefined;
+  allowedDocIds: string[];
+  titles: Map<string, string>;
+  queries: string[];
+}): string[] {
+  const allowed = new Set(args.allowedDocIds);
+  const out: string[] = [];
+  for (const id of [...(args.theme?.allowedKnowledgeDocIds ?? []), ...(args.theme?.knowledgeDocIds ?? [])]) {
+    if (allowed.has(id) && !out.includes(id)) out.push(id);
+  }
+  const folded = args.queries.map(foldTitle).filter(Boolean);
+  for (const [id, title] of args.titles) {
+    const t = foldTitle(title);
+    if (!t || t.length < 6 || !allowed.has(id) || out.includes(id)) continue;
+    if (folded.some((q) => q === t || q.includes(t) || (t.includes(q) && q.length >= 12))) out.push(id);
+  }
+  return out.slice(0, 3);
+}
+
 async function prefetchKnowledge(args: {
   agentId: string;
   apiKey: string;
   config: V2AgentConfig;
   themeId?: string;
   materialTitles?: string[];
+  /** id → título dos materiais liberados (para o material do assunto entrar primeiro). */
+  docTitles?: Map<string, string>;
   userMessage: string;
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
 }): Promise<{ query: string; chunks: PrefetchedChunk[]; searched: boolean; best: number | null }> {
-  const docIds = knowledgeDocIdsFor(args.config, activeTheme(args.config, args.themeId));
+  const theme = activeTheme(args.config, args.themeId);
+  const docIds = knowledgeDocIdsFor(args.config, theme);
   const query = knowledgePrefetchQuery(args.userMessage, args.previousMessages);
   if (docIds.length === 0) {
     traceStep("base", "Sem materiais liberados para este agente/assunto — não buscou na base");
@@ -273,10 +307,22 @@ async function prefetchKnowledge(args: {
     // Frase original + reformulações, em paralelo; fica o melhor de cada trecho.
     const extra = rewrites.filter((q) => q.toLowerCase() !== query.toLowerCase());
     const queries = [query, ...extra];
-    const results = await Promise.all([original, ...extra.map(search)]);
-    const chunks = mergeChunks(results.map((r) => r?.chunks ?? []), PREFETCH_LIMIT);
+    // Material do assunto (ou cujo título casa com a busca): os melhores
+    // trechos dele entram primeiro, sem depender da nota mínima.
+    const priority = priorityDocIds({ theme, allowedDocIds: docIds, titles: args.docTitles ?? new Map(), queries });
+    const priorityQuery = queries.find((q) => [...(args.docTitles ?? new Map<string, string>()).entries()].some(([id, t]) => priority.includes(id) && foldTitle(q) === foldTitle(t))) ?? query;
+    const prioritySearch = priority.length > 0
+      ? searchV2Knowledge({ agentId: args.agentId, apiKey: args.apiKey, query: priorityQuery, allowedDocIds: priority, limit: PRIORITY_LIMIT, minSimilarity: 0 }).catch(() => undefined)
+      : Promise.resolve(undefined);
+    const [priorityResult, ...results] = await Promise.all([prioritySearch, original, ...extra.map(search)]);
+    const priorityChunks: PrefetchedChunk[] = (priorityResult?.chunks ?? []).slice(0, PRIORITY_LIMIT).map((c) => ({ ...c, priority: true }));
+    const keyOf = (c: PrefetchedChunk) => `${c.docId}\u0000${c.content}`;
+    const taken = new Set(priorityChunks.map(keyOf));
+    const others = mergeChunks(results.map((r) => r?.chunks ?? []), PREFETCH_LIMIT).filter((c) => !taken.has(keyOf(c)));
+    const chunks = [...priorityChunks, ...others];
+    if (priorityChunks.length > 0) traceStep("base", `Material do assunto primeiro, inteiro: ${[...new Set(priorityChunks.map((c) => `"${c.docTitle}"`))].join(", ")}`);
     traceStep("base", chunks.length > 0
-      ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)})`).join(", ")}`
+      ? `Encontrou ${chunks.length} trecho(s): ${chunks.map((c) => `"${c.docTitle}" (${(1 - c.distance).toFixed(2)}${c.priority ? ", assunto" : ""})`).join(", ")}`
       : `Nenhum trecho relevante em ${docIds.length} material(is)`,
       { queries });
     noteV2Fact("prefetch", {
@@ -287,8 +333,8 @@ async function prefetchKnowledge(args: {
       found: chunks.length,
       bestSimilarity: chunks.length > 0 ? Math.max(...chunks.map((c) => 1 - c.distance)) : null,
       docIds: [...new Set(chunks.map((c) => c.docId).filter(Boolean))],
-      // O modelo lê só o começo de cada trecho (PREFETCH_CHUNK_CHARS).
-      truncatedDocIds: [...new Set(chunks.filter((c) => c.content.length > PREFETCH_CHUNK_CHARS).map((c) => c.docId).filter(Boolean))],
+      // O modelo lê só o começo de cada trecho (PREFETCH_CHUNK_CHARS); o do assunto vai inteiro.
+      truncatedDocIds: [...new Set(chunks.filter((c) => c.content.length > (c.priority ? PRIORITY_CHUNK_CHARS : PREFETCH_CHUNK_CHARS)).map((c) => c.docId).filter(Boolean))],
     });
     return {
       query: queries.join(" | "),
@@ -760,6 +806,7 @@ export async function callV2LLMTest(
   context?: V2CRMContext,
   themeId?: string | null,
   stage = "active",
+  opts: { humanRequestWithQuestion?: boolean } = {},
 ): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -788,6 +835,7 @@ export async function callV2LLMTest(
       ? themePromptText(theme)
       : undefined,
     previousMessages,
+    humanRequestWithQuestion: opts.humanRequestWithQuestion === true,
   });
   return result;
 }
@@ -937,6 +985,7 @@ function buildV2SystemPrompt(
   actionStages: Array<{ id: string; name: string }> = [],
   nothingRelevant = false,
   attachmentsSection = "",
+  humanRequestWithQuestion = false,
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -947,7 +996,10 @@ function buildV2SystemPrompt(
   if (humanWords.length > 0) {
     // As palavras da tela não tinham efeito: "pediu uma pessoa" dependia só
     // do modelo adivinhar.
-    lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido. Vale só o pedido feito na mensagem atual: pedido de uma mensagem anterior já foi tratado — se a conversa segue com você, responda o que o cliente perguntou agora.`);
+    lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido. Vale só o pedido feito na mensagem atual: pedido de uma mensagem anterior já foi tratado — se a conversa segue com você, responda o que o cliente perguntou agora. Se ele pede uma pessoa e faz uma pergunta na mesma mensagem, responda a pergunta com as fontes; marque handoff=true só se não conseguir responder.`);
+  }
+  if (humanRequestWithQuestion) {
+    lines.push("# Nesta mensagem\nO cliente pediu uma pessoa e também fez uma pergunta ou disse o assunto. Responda a pergunta com as fontes (dados dele, trechos, informações fixas). Marque handoff=true só se não conseguir responder com o que tem.");
   }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
@@ -1032,9 +1084,10 @@ function buildV2SystemPrompt(
     lines.push("# Trechos da base de conhecimento relacionados à mensagem");
     lines.push("Já buscados pelo significado da mensagem. Use os que atendem ao pedido; ignore os outros sem mencioná-los.");
     prefetchedChunks.forEach((c, i) => {
-      const raw = c.content.length > PREFETCH_CHUNK_CHARS ? `${c.content.slice(0, PREFETCH_CHUNK_CHARS)}…` : c.content;
+      const max = c.priority ? PRIORITY_CHUNK_CHARS : PREFETCH_CHUNK_CHARS;
+      const raw = c.content.length > max ? `${c.content.slice(0, max)}…` : c.content;
       const body = markPastDates(raw, new Date(), timezone);
-      lines.push(`[${i + 1}] ${c.docTitle}\n${body}`);
+      lines.push(`[${i + 1}] ${c.docTitle}${c.priority ? " (material do assunto)" : ""}\n${body}`);
     });
   }
   if (nothingRelevant) {
@@ -1136,6 +1189,8 @@ export async function callV2LLM(args: {
   themeInstructions?: string;
   collectedVariables?: Record<string, unknown>;
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
+  /** O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem. */
+  humanRequestWithQuestion?: boolean;
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1155,16 +1210,16 @@ export async function callV2LLM(args: {
   // materiais continua com a chave OpenAI), títulos dos materiais, mensagens
   // prontas e etapas: leituras independentes, em paralelo — em série cada
   // uma somava sua ida ao banco à espera do cliente.
-  const [chatKey, knowledgeDocTitles, messageModels, actionStages] = await Promise.all([
+  const [chatKey, docTitleMap, messageModels, actionStages] = await Promise.all([
     getAgentChatKey(args.agentId, args.config.model, apiKey),
     // Títulos dos materiais permitidos: ajudam o modelo a decidir quando
     // chamar knowledge_search e a contextualizar a resposta.
     promptDocIds.length > 0
-      ? knowledgeDocTitlesByIds(args.agentId, promptDocIds).catch((err) => {
+      ? knowledgeDocTitleMapByIds(args.agentId, promptDocIds).catch((err) => {
           console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
-          return [] as string[];
+          return new Map<string, string>();
         })
-      : Promise.resolve([] as string[]),
+      : Promise.resolve(new Map<string, string>()),
     // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
     describeV2MessageModels(modelIds).catch((err) => {
       console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
@@ -1172,6 +1227,7 @@ export async function callV2LLM(args: {
     }),
     actionStageNames(args.config, promptTheme),
   ]);
+  const knowledgeDocTitles = promptDocIds.map((id) => docTitleMap.get(id)).filter((t): t is string => Boolean(t));
   // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
   // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
   // precisa (ferramenta, variável coletada, ação).
@@ -1197,6 +1253,7 @@ export async function callV2LLM(args: {
     config: args.config,
     themeId: args.themeId,
     materialTitles: knowledgeDocTitles,
+    docTitles: docTitleMap,
     userMessage,
     previousMessages,
   });
@@ -1234,6 +1291,7 @@ export async function callV2LLM(args: {
     actionStages,
     prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
     attachmentsPromptSection(offeredAttachments),
+    args.humanRequestWithQuestion === true,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1507,6 +1565,13 @@ export async function callV2LLM(args: {
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
+    // O que o agente pode dizer do cadastro (inclui informações montadas):
+    // valor literal nos dados é sustentado sem depender do modelo.
+    const citableValues = [args.context.citableContact, args.context.citableDeal]
+      .flatMap((o) => Object.values(o ?? {}))
+      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      .map((v) => String(v).trim())
+      .filter((v) => v.length >= 4);
     const modelClaims = async (output: V2LLMOutput): Promise<Unsupported[]> => {
       // Transferência só com o aviso não tem o que conferir; com orientação
       // (que agora chega ao cliente antes do aviso), confere.
@@ -1516,7 +1581,7 @@ export async function callV2LLM(args: {
       // a frase barrava o envio e transferia o cliente.
       const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
-      const res = await checkClaimsWithModel({ model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory });
+      const res = await checkClaimsWithModel({ model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues });
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
       // Checagem indisponível (erro ou tempo): passo a passo, caminho de tela
@@ -1600,6 +1665,12 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
+        // Reescrita que perdeu o link ou começa no meio ("Se aparecer…") não
+        // sai assim: melhor uma pessoa do que uma resposta mutilada.
+        if (!fixed.handoff && isMutilated(output.reply, fixed.reply, textsOf(flags))) {
+          traceStep("verificação", "A reescrita ficou mutilada (perdeu o link ou a abertura) — não sai assim");
+          throw new Error("reescrita mutilada");
+        }
         let still = unsupportedOf(fixed.reply, fixed.reason);
         const rulesClean = still.length === 0;
         if (rulesClean && modelChecked && onlyKeptSentences(fixed.reply, output.reply, textsOf(flags))) {

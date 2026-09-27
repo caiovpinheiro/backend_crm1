@@ -25,6 +25,7 @@ vi.mock("@/services/ai/agent-key", () => ({
 vi.mock("@/services/ai/knowledge-docs", () => ({
   listKnowledgeDocs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, perPage: 25 }),
   knowledgeDocTitlesByIds: vi.fn().mockResolvedValue([]),
+  knowledgeDocTitleMapByIds: vi.fn(async () => new Map<string, string>()),
 }));
 
 vi.mock("../material-attachments", async (importOriginal) => ({
@@ -391,8 +392,8 @@ describe("callV2LLM — reformulação da busca", () => {
   });
 
   it("a reformulação recebe os títulos dos materiais liberados", async () => {
-    const { knowledgeDocTitlesByIds } = await import("@/services/ai/knowledge-docs");
-    (knowledgeDocTitlesByIds as ReturnType<typeof vi.fn>).mockResolvedValue(["Como emitir o comprovante"]);
+    const { knowledgeDocTitleMapByIds } = await import("@/services/ai/knowledge-docs");
+    (knowledgeDocTitleMapByIds as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Map([["doc-a", "Como emitir o comprovante"]]));
     mockModel('{"queries": []}');
     (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
     const config = baseConfig({ allowedKnowledgeDocIds: ["doc-a"] } as Partial<V2AgentConfig>);
@@ -1107,6 +1108,41 @@ describe("escopo e repetição", () => {
     expect(checkInput).not.toContain("ana.lima@exemplo.com");
     expect(checkInput).toContain("\"E-mail\":\"[E-MAIL 1]\"");
     expect(r.output.reply).toBe("Seu e-mail cadastrado é a***@exemplo.com. Use ele para entrar no painel.");
+  });
+
+  it("material do assunto entra primeiro e inteiro, mesmo com nota menor que a de um vizinho", async () => {
+    const { knowledgeDocTitleMapByIds } = await import("@/services/ai/knowledge-docs");
+    (knowledgeDocTitleMapByIds as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Map([["doc-theme", "Primeiro pedido"], ["doc-other", "Segurança da conta"]]));
+    const themeBody = `${"Para o primeiro pedido, entre em https://painel.exemplo.com/entrar e confirme os dados. ".repeat(30)}FIM-DO-MATERIAL`;
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockImplementation(async (a: { allowedDocIds?: string[] }) =>
+      a.allowedDocIds?.length === 1 && a.allowedDocIds[0] === "doc-theme"
+        ? { query: "q", chunks: [{ docId: "doc-theme", docTitle: "Primeiro pedido", content: themeBody, distance: 0.55 }] }
+        : { query: "q", chunks: [{ docId: "doc-other", docTitle: "Segurança da conta", content: "Se aparecer uma tela de segurança, clique em Avançar.", distance: 0.35 }] });
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Ok.", actions: [] })));
+    const config = baseConfig({
+      allowedKnowledgeDocIds: ["doc-other", "doc-theme"],
+      themes: [{ id: "t1", name: "Primeiro pedido", when: [], examples: [], instructions: "", knowledgeDocIds: ["doc-theme"], allowedTools: [] }],
+    } as unknown as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1", config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "como faço o meu primeiro pedido?", stage: "active", themeId: "t1",
+    });
+    expect(themeBody.length).toBeGreaterThan(1500);
+    expect(r.systemPrompt).toContain("[1] Primeiro pedido (material do assunto)");
+    expect(r.systemPrompt.indexOf("[1] Primeiro pedido")).toBeLessThan(r.systemPrompt.indexOf("[2] Segurança da conta"));
+    expect(r.systemPrompt).toContain("FIM-DO-MATERIAL");
+  });
+
+  it("pedido de pessoa com pergunta: o modelo recebe a instrução de responder primeiro", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Ok.", actions: [] })));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "quero falar com um humano, qual o prazo de entrega?", stage: "active", humanRequestWithQuestion: true,
+    });
+    expect(r.systemPrompt).toContain("pediu uma pessoa e também fez uma pergunta");
+    expect(r.systemPrompt).toContain("responda a pergunta com as fontes; marque handoff=true só se não conseguir responder");
   });
 
   it("checagem por modelo: apresentação curta de mensagem pronta não é conferida", async () => {
