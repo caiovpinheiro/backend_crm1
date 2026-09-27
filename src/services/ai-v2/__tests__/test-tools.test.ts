@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   agentFindMany: vi.fn(),
   agentFindFirst: vi.fn(),
   conversationFindMany: vi.fn(),
+  messageFindMany: vi.fn(),
   stateDeleteMany: vi.fn(),
   logFindMany: vi.fn(),
   logFindFirst: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("@/lib/prisma", () => ({
     contact: { findUnique: mocks.contactFindUnique },
     aIAgentConfig: { findMany: mocks.agentFindMany, findFirst: mocks.agentFindFirst },
     conversation: { findMany: mocks.conversationFindMany },
+    message: { findMany: mocks.messageFindMany },
     aISimpleConversationState: { deleteMany: mocks.stateDeleteMany },
     aISimpleTurnLog: { findMany: mocks.logFindMany, findFirst: mocks.logFindFirst, update: mocks.logUpdate },
     aIAgentKnowledgeDoc: { findMany: mocks.docFindMany },
@@ -175,6 +177,31 @@ describe("conversas de teste", () => {
       trace: [{ step: "regra" }],
       sources: [{ title: "Material X", content: "conteúdo X", similarity: 0.7 }],
     });
+  });
+
+  it("cada turno mostra o que saiu para o WhatsApp e o que falhou no envio", async () => {
+    mocks.agentFindFirst.mockResolvedValue({ simpleConfig: TEST_AGENT.simpleConfig, draftConfig: null });
+    mocks.logFindMany
+      .mockResolvedValueOnce([{ conversationId: "conv-1" }])
+      .mockResolvedValueOnce([
+        logRow({ id: "t1", createdAt: new Date("2026-01-01T10:00:10Z") }),
+        logRow({ id: "t2", createdAt: new Date("2026-01-01T10:01:10Z") }),
+      ]);
+    mocks.conversationFindMany.mockResolvedValue([{ id: "conv-1", contact: { id: "c1", name: "Teste", phone: "5511911112222" } }]);
+    mocks.messageFindMany.mockResolvedValue([
+      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:08Z"), content: "Veja o boleto", messageType: "text", sendStatus: "sent", sendError: null },
+      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:09Z"), content: "📎 Boleto explicado", messageType: "image", sendStatus: "failed", sendError: "Arquivo não encontrado no storage." },
+      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:01:05Z"), content: "Mais algo?", messageType: "text", sendStatus: "sent", sendError: null },
+    ]);
+    const r = await listV2TestConversations({ organizationId: "org-1", agentId: "agent-1" });
+    const turns = r.contacts[0].sessions.flatMap((s) => s.turns);
+    const t1 = turns.find((t) => t.id === "t1")!;
+    expect(t1.deliveries.map((d) => [d.type, d.status, d.error])).toEqual([
+      ["text", "sent", null],
+      ["image", "failed", "Arquivo não encontrado no storage."],
+    ]);
+    expect(turns.find((t) => t.id === "t2")!.deliveries).toHaveLength(1);
+    mocks.messageFindMany.mockReset();
   });
 
   it("sem números de teste (atende todo mundo): mostra as últimas conversas do agente", async () => {

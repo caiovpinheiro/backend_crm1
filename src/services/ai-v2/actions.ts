@@ -419,7 +419,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
         const external = media.filter((m) => !isOrgOwnedStorageUrl(m.url));
         if (mediaSent > 0) for (const m of media) sentMediaNames(ctx).add(mediaKey(m.name ?? ""));
         traceStep("mídia", mediaSent > 0
-          ? `Enviou ${mediaSent} anexo(s) de "${template.name}": ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")}`
+          ? `${mediaSent} anexo(s) de "${template.name}" na fila de envio ao WhatsApp: ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
           : external.length === media.length
             ? `Anexos de "${template.name}" não enviados: são links externos, não arquivos enviados ao CRM (${external.map((m) => m.name ?? "arquivo").join(", ")})`
             : `Anexos de "${template.name}" não enviados (já enviados nesta conversa depois do último #reset, nos últimos 7 dias, ou canal indisponível)`);
@@ -480,7 +480,7 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
       });
     }
     traceStep("mídia", mediaSent > 0
-      ? `Enviou ${mediaSent} anexo(s) do material: ${list.slice(0, mediaSent).map((a) => a.name).join(", ")}`
+      ? `${mediaSent} anexo(s) do material na fila de envio ao WhatsApp: ${list.slice(0, mediaSent).map((a) => a.name).join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
       : `Anexos do material não enviados (já enviados nesta conversa dentro da trava de repetição, ou canal indisponível): ${list.map((a) => a.name).join(", ")}`);
     return { action, ok: true, mediaSent, text };
   } catch (err) {

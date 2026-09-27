@@ -90,6 +90,43 @@ describe("loadV2Context", () => {
     expect(ctx.contact).not.toHaveProperty("30");
   });
 
+  it("campo configurado pelo nome (não pelo id): lê o valor preenchido no negócio e diz como achou", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({ contactId: "c1" });
+    mocks.contactFindUnique.mockResolvedValue({ id: "c1", name: "Aluno", phone: null, email: null, tags: [], customFields: [] });
+    mocks.dealFindMany.mockResolvedValue([{ id: "d1" }]);
+    mocks.dealFindUnique.mockResolvedValue({
+      id: "d1",
+      number: 48030,
+      title: "Aluno",
+      status: "OPEN",
+      value: null,
+      stage: { id: "s1", name: "Qualificado" },
+      customFields: [
+        { customFieldId: "cf-111", value: "aluno@escola.edu", customField: { name: "email_academico", label: "Email acadêmico" } },
+        { customFieldId: "cf-222", value: "12345678", customField: { name: "rgm", label: "RGM" } },
+      ],
+    });
+    const { loadV2Context, describeV2ContextForTrace } = await import("../context");
+    const config = baseConfig({
+      contextFields: {
+        contact: [],
+        deal: [
+          { key: "email_academico", label: "E-mail acadêmico", permissions: ["read", "cite"] },
+          { key: "cf-222", label: "RGM", permissions: ["read", "cite"] },
+          { key: "campo_apagado", label: "Polo", permissions: ["read"] },
+        ],
+      },
+    });
+    const ctx = await loadV2Context({ organizationId: "org-1", conversationId: "conv-1", config });
+    expect(ctx.selectedDeal).toMatchObject({ "E-mail acadêmico": "aluno@escola.edu", RGM: "12345678" });
+    expect(ctx.selectedDealRaw).toMatchObject({ email_academico: "aluno@escola.edu", "cf-222": "12345678" });
+    const trace = describeV2ContextForTrace(config, ctx);
+    expect(trace).toContain("Negócio lido: #48030 Aluno (2 campo(s) personalizado(s) preenchido(s) no CRM)");
+    expect(trace).toContain("Achados pelo nome do campo (a configuração guarda o nome, não o id): E-mail acadêmico → “Email acadêmico”");
+    expect(trace).toContain("Configurados que não existem no CRM (escolha de novo em Dados do cliente): Polo (negócio)");
+    expect(trace).not.toContain("RGM →");
+  });
+
   it("carrega negócio com campo personalizado via relação", async () => {
     mocks.conversationFindUnique.mockResolvedValue({ contactId: "c1" });
     mocks.contactFindUnique.mockResolvedValue({

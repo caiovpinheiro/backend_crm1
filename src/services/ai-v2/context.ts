@@ -21,9 +21,22 @@ export type V2EmptyField = {
   onOtherEntity: boolean;
 };
 
+/** Como cada campo configurado foi achado no cadastro (para o passo "dados"). */
+export type V2FieldDiagnostics = {
+  /** Valores de campos personalizados que o registro tem no CRM. */
+  contactCustomCount: number;
+  dealCustomCount: number;
+  dealLabel: string | null;
+  /** Configurados achados pelo nome/rótulo (a chave gravada não é o id do campo). */
+  byName: Array<{ entity: "contact" | "deal"; label: string; via: string }>;
+  /** Configurados que não existem no CRM (nem por id, nem por nome/rótulo). */
+  unknown: Array<{ entity: "contact" | "deal"; label: string }>;
+};
+
 export type V2LoadedContext = V2CRMContext & {
   exposure: CrmFieldExposure;
   emptyFields?: V2EmptyField[];
+  fieldDiagnostics?: V2FieldDiagnostics;
   contactId?: string;
   dealId?: string;
   dealSelectionReason: string;
@@ -43,6 +56,63 @@ function normalizeFieldValue(value: unknown): unknown {
   }
   // Arrays e objetos genéricos viram string JSON para não renderizar [object Object].
   return JSON.stringify(value);
+}
+
+type CustomValue = { id: string; name: string; label: string; value: string };
+
+/** Valores personalizados do registro, fora do objeto (não vão ao prompt). */
+const CUSTOM_VALUES = new WeakMap<object, CustomValue[]>();
+const DEAL_NUMBER = new WeakMap<object, number>();
+
+function customValuesOf(rows: Array<{ customFieldId: string; value: unknown; customField?: unknown }>): CustomValue[] {
+  return rows.map((r) => {
+    const def = (r.customField ?? {}) as { name?: string | null; label?: string | null };
+    return { id: r.customFieldId, name: def.name ?? "", label: def.label ?? "", value: r.value == null ? "" : String(r.value) };
+  });
+}
+
+const CONTACT_BUILTIN = new Set(["id", "name", "phone", "email", "tags"]);
+const DEAL_BUILTIN = new Set(["id", "title", "stageId", "stageName", "status", "value", "number"]);
+const squashName = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+
+/**
+ * Campo configurado cujo valor não veio pelo id: acha no mesmo registro pelo
+ * nome técnico ou rótulo do campo. A chave gravada no agente pode ser o nome
+ * do campo (o catálogo usa nome) e a leitura só aceitava o id — todo campo
+ * personalizado vinha vazio, com o valor preenchido no CRM. Só no próprio
+ * registro; nunca de outro contato ou negócio.
+ */
+function resolveConfiguredFields(
+  record: Record<string, unknown>,
+  entity: "contact" | "deal",
+  fields: V2FieldConfig[],
+  defs: Map<string, { name: string; label: string }>,
+  diag: V2FieldDiagnostics,
+): void {
+  const custom = CUSTOM_VALUES.get(record) ?? [];
+  const builtin = entity === "contact" ? CONTACT_BUILTIN : DEAL_BUILTIN;
+  for (const f of fields) {
+    if (!f.permissions.includes("read") && !f.permissions.includes("cite")) continue;
+    if (builtin.has(f.key)) continue;
+    const current = record[f.key];
+    if (current !== null && current !== undefined && String(current).trim() !== "") continue;
+    const def = defs.get(f.key);
+    const label = def?.label || f.label || f.key;
+    const wanted = new Set([def?.name, def?.label, f.label, f.key].filter((x): x is string => !!x).map(squashName).filter((x) => x.length >= 2));
+    const matches = (c: CustomValue) => c.id === f.key || wanted.has(squashName(c.name)) || wanted.has(squashName(c.label));
+    const hit = custom.find((c) => c.value.trim() !== "" && matches(c));
+    if (hit) {
+      record[f.key] = normalizeFieldValue(hit.value);
+      if (hit.id !== f.key && !diag.byName.some((b) => b.entity === entity && b.label === label)) {
+        diag.byName.push({ entity, label, via: hit.label || hit.name });
+      }
+      continue;
+    }
+    // Não existe no CRM: nem o id configurado, nem campo com esse nome/rótulo.
+    if (!def && !custom.some(matches) && !diag.unknown.some((u) => u.entity === entity && u.label === label)) {
+      diag.unknown.push({ entity, label });
+    }
+  }
 }
 
 function buildExposure(config: V2AgentConfig): CrmFieldExposure {
@@ -83,7 +153,7 @@ async function loadContactFields(
       phone: true,
       email: true,
       tags: { select: { tag: { select: { name: true } } } },
-      customFields: { select: { customFieldId: true, value: true } },
+      customFields: { select: { customFieldId: true, value: true, customField: { select: { name: true, label: true } } } },
     } as Record<string, unknown>,
   });
   if (!contact) return {};
@@ -104,6 +174,7 @@ async function loadContactFields(
       out[cf.customFieldId] = normalizeFieldValue(cf.value);
     }
   }
+  CUSTOM_VALUES.set(out, customValuesOf(customFields));
   out.id = contact.id;
   out.name = contact.name;
   out.phone = contact.phone;
@@ -139,7 +210,8 @@ async function loadDealFields(
       stage: { select: { id: true, name: true } },
       status: true,
       value: true,
-      customFields: { select: { customFieldId: true, value: true } },
+      number: true,
+      customFields: { select: { customFieldId: true, value: true, customField: { select: { name: true, label: true } } } },
     } as Record<string, unknown>,
   });
   if (!deal) return null;
@@ -159,6 +231,8 @@ async function loadDealFields(
       out[cf.customFieldId] = normalizeFieldValue(cf.value);
     }
   }
+  CUSTOM_VALUES.set(out, customValuesOf(dealCustomFields));
+  if (typeof deal.number === "number") DEAL_NUMBER.set(out, deal.number);
   out.id = deal.id;
   out.title = deal.title;
   if (deal.stage) {
@@ -321,6 +395,29 @@ export async function loadV2Context(args: {
     }
   }
 
+  // Campos configurados: além do id, pelo nome/rótulo no próprio registro.
+  const diag: V2FieldDiagnostics = {
+    contactCustomCount: contact ? (CUSTOM_VALUES.get(contact) ?? []).filter((c) => c.value.trim()).length : 0,
+    dealCustomCount: selectedDeal ? (CUSTOM_VALUES.get(selectedDeal) ?? []).filter((c) => c.value.trim()).length : 0,
+    dealLabel: selectedDeal ? `${DEAL_NUMBER.has(selectedDeal) ? `#${DEAL_NUMBER.get(selectedDeal)} ` : ""}${String(selectedDeal.title ?? "")}`.trim() : null,
+    byName: [],
+    unknown: [],
+  };
+  const configuredKeys = [...args.config.contextFields.contact, ...args.config.contextFields.deal].map((f) => f.key);
+  const defRows = configuredKeys.length
+    ? await Promise.resolve()
+        .then(() =>
+          (prisma as unknown as { customField: { findMany: (a: unknown) => Promise<Array<{ id: string; name: string; label: string }>> } }).customField.findMany({
+            where: { id: { in: configuredKeys } },
+            select: { id: true, name: true, label: true },
+          }),
+        )
+        .catch(() => [] as Array<{ id: string; name: string; label: string }>)
+    : [];
+  const defs = new Map((defRows ?? []).map((d) => [d.id, { name: d.name, label: d.label }]));
+  if (contact) resolveConfiguredFields(contact, "contact", args.config.contextFields.contact, defs, diag);
+  for (const d of deals) resolveConfiguredFields(d, "deal", args.config.contextFields.deal, defs, diag);
+
   const dealSelectionReason =
     args.config.dealSelection === "ask" && deals.length > 1
       ? selectedDeal
@@ -430,6 +527,7 @@ export async function loadV2Context(args: {
     contactId,
     dealId,
     dealSelectionReason,
+    fieldDiagnostics: diag,
   };
 }
 
@@ -451,6 +549,18 @@ export function describeV2ContextForTrace(config: V2AgentConfig, ctx: V2LoadedCo
   const out: string[] = [];
   out.push(ctx.contactRaw ? part("Contato", ctx.contact, ctx.citableContact) : "Contato: sem cadastro");
   out.push(ctx.selectedDealRaw ? part("Negócio", ctx.selectedDeal, ctx.citableDeal) : "Negócio: nenhum");
+  // Prova do que veio do CRM: sem isto não dava para saber se o dado falta
+  // no cadastro ou se o agente não conseguiu ler o campo.
+  const fd = ctx.fieldDiagnostics;
+  if (fd) {
+    if (ctx.selectedDealRaw) out.push(`Negócio lido: ${fd.dealLabel || "sem título"} (${fd.dealCustomCount} campo(s) personalizado(s) preenchido(s) no CRM)`);
+    if (fd.byName.length) {
+      out.push(`Achados pelo nome do campo (a configuração guarda o nome, não o id): ${fd.byName.map((b) => `${b.label} → “${b.via}”`).join(", ")}`);
+    }
+    if (fd.unknown.length) {
+      out.push(`Configurados que não existem no CRM (escolha de novo em Dados do cliente): ${fd.unknown.map((u) => `${u.label} (${u.entity === "contact" ? "contato" : "negócio"})`).join(", ")}`);
+    }
+  }
   const empty = ctx.emptyFields ?? [];
   if (empty.length) {
     const where = (e: "contact" | "deal") => (e === "contact" ? "contato" : "negócio");

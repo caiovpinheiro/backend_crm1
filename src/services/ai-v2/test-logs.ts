@@ -35,6 +35,18 @@ export type V2TestTurn = {
   latencyMs: number | null;
   tokens: number;
   feedback: V2TurnFeedback | null;
+  /** O que saiu de fato para o WhatsApp neste turno (texto e anexos). */
+  deliveries: V2TestDelivery[];
+};
+
+/** Mensagem que o turno mandou ao cliente e o que aconteceu com ela no envio. */
+export type V2TestDelivery = {
+  at: string;
+  type: string;
+  preview: string;
+  /** Situação gravada pelo envio: pending, sent, delivered, read, failed (ou vazio). */
+  status: string | null;
+  error: string | null;
 };
 
 export type V2TestSession = { startedAt: string; turns: V2TestTurn[] };
@@ -146,6 +158,42 @@ export async function listV2TestConversations(args: {
     take: 2000,
   });
 
+  // Mensagens que saíram para o cliente, com a situação do envio: o rastro
+  // diz o que o agente pediu; aqui aparece o que o WhatsApp recebeu ou não.
+  type OutRow = { conversationId: string; createdAt: Date; content: string | null; messageType: string; sendStatus: string | null; sendError: string | null };
+  const outbound = await Promise.resolve()
+    .then(() =>
+      (prisma as unknown as { message: { findMany: (a: unknown) => Promise<OutRow[]> } }).message.findMany({
+        where: { conversationId: { in: testConversations.map((c) => c.id) }, direction: "out", isPrivate: false, createdAt: { gte: since } },
+        select: { conversationId: true, createdAt: true, content: true, messageType: true, sendStatus: true, sendError: true },
+        orderBy: { createdAt: "asc" },
+        take: 3000,
+      }),
+    )
+    .then((rows) => rows ?? [])
+    .catch(() => [] as OutRow[]);
+  const logTimes = new Map<string, number[]>();
+  for (const l of logs) logTimes.set(l.conversationId, [...(logTimes.get(l.conversationId) ?? []), new Date(l.createdAt).getTime()]);
+  const deliveriesByLog = new Map<string, V2TestDelivery[]>();
+  for (const m of outbound) {
+    const times = logTimes.get(m.conversationId) ?? [];
+    const at = new Date(m.createdAt).getTime();
+    // O log do turno é gravado no fim: a mensagem é do primeiro turno que terminou depois dela.
+    const idx = times.findIndex((t) => t >= at - 1000);
+    if (idx < 0) continue;
+    const log = logs.filter((l) => l.conversationId === m.conversationId)[idx];
+    if (!log) continue;
+    const list = deliveriesByLog.get(log.id) ?? [];
+    list.push({
+      at: new Date(m.createdAt).toISOString(),
+      type: m.messageType,
+      preview: (m.content ?? "").slice(0, 120),
+      status: m.sendStatus ?? null,
+      error: m.sendError ?? null,
+    });
+    deliveriesByLog.set(log.id, list);
+  }
+
   const themeNames = new Map((config?.themes ?? []).map((t) => [t.id, t.name]));
   const ruleNames = new Map((config?.rules ?? []).map((r) => [r.id, r.name ?? r.id]));
   const contactOf = new Map(testConversations.map((c) => [c.id, c.contact]));
@@ -184,6 +232,7 @@ export async function listV2TestConversations(args: {
       latencyMs: row.latencyMs,
       tokens: (row.inputTokens ?? 0) + (row.outputTokens ?? 0),
       feedback: (row.feedback as V2TurnFeedback | null) ?? null,
+      deliveries: deliveriesByLog.get(row.id) ?? [],
     };
     // `#reset` abre uma sessão nova; o primeiro turno também.
     if (isReset || entry.sessions.length === 0) {

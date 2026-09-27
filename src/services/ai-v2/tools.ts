@@ -167,6 +167,18 @@ export async function searchV2CrmRecords(args: {
   const limit = Math.min(Math.max(args.limit ?? 5, 1), 10);
   const readable = new Set(args.readableKeys ?? []);
   if (!args.contactId && !args.dealId) return { query: term, contacts: [], deals: [] };
+  // Chave liberada deste valor: pelo id do campo ou pelo nome/rótulo (a
+  // configuração pode guardar o nome; só o id era aceito e o valor sumia).
+  const squash = (x: string) => x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+  const keyOf = (entity: "contact" | "deal", v: any): string | null => {
+    const byId = `${entity}.${v.customFieldId}`;
+    if (readable.has(byId)) return byId;
+    const names = new Set([v.customField?.name, v.customField?.label].filter(Boolean).map((x: string) => squash(x)));
+    for (const k of readable) {
+      if (k.startsWith(`${entity}.`) && names.has(squash(k.slice(entity.length + 1)))) return k;
+    }
+    return null;
+  };
 
   const contacts: any[] = args.contactId
     ? await (prisma as any).contact.findMany({
@@ -178,14 +190,14 @@ export async function searchV2CrmRecords(args: {
 
   const matchedContacts = contacts.map((c: any) => {
     const fields = (c.customFields ?? []).filter(
-      (v: any) => v.value && String(v.value).trim() && readable.has(`contact.${v.customFieldId}`),
+      (v: any) => v.value && String(v.value).trim() && keyOf("contact", v),
     );
     return {
       id: c.id,
       name: c.name,
       ...(readable.has("contact.phone") ? { phone: m("contact.phone", c.phone) } : {}),
       ...(readable.has("contact.email") ? { email: m("contact.email", c.email) } : {}),
-      customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(`contact.${v.customFieldId}`, v.value) })),
+      customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(keyOf("contact", v)!, v.value) })),
     };
   });
 
@@ -205,7 +217,7 @@ export async function searchV2CrmRecords(args: {
   const matchedDeals = deals
     .map((d: any) => {
       const fields = (d.customFields ?? []).filter(
-        (v: any) => v.value && String(v.value).trim() && readable.has(`deal.${v.customFieldId}`),
+        (v: any) => v.value && String(v.value).trim() && keyOf("deal", v),
       );
       const cfText = fields.map((v: any) => `${v.customField.name} ${v.value}`).join(" ");
       const score =
@@ -218,7 +230,7 @@ export async function searchV2CrmRecords(args: {
         status: d.status,
         value: d.value ? Number(d.value) : null,
         stage: d.stage,
-        customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(`deal.${v.customFieldId}`, v.value) })),
+        customFields: fields.map((v: any) => ({ label: v.customField.label ?? v.customField.name, value: m(keyOf("deal", v)!, v.value) })),
         score,
       };
     })
