@@ -157,18 +157,18 @@ describe("searchV2CrmRecords", () => {
     (prisma.deal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         id: "d1",
-        title: "Aluno",
+        title: "Cliente",
         status: "OPEN",
         value: null,
         stage: { id: "s1", name: "Qualificado" },
         customFields: [
-          { customFieldId: "cf-111", value: "ana@escola.edu", customField: { name: "email_academico", label: "Email acadêmico" } },
+          { customFieldId: "cf-111", value: "ana@empresa.com", customField: { name: "email_corporativo", label: "Email corporativo" } },
           { customFieldId: "cf-cpf", value: "123.456.789-00", customField: { name: "cpf", label: "CPF" } },
         ],
       },
     ]);
-    const r = await searchV2CrmRecords({ query: "email", contactId: "c1", readableKeys: ["deal.email_academico"] });
-    expect(r.deals[0].customFields).toEqual([{ label: "Email acadêmico", value: "ana@escola.edu" }]);
+    const r = await searchV2CrmRecords({ query: "email", contactId: "c1", readableKeys: ["deal.email_corporativo"] });
+    expect(r.deals[0].customFields).toEqual([{ label: "Email corporativo", value: "ana@empresa.com" }]);
   });
 });
 

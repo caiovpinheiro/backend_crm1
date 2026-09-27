@@ -403,7 +403,7 @@ export async function loadV2Context(args: {
     byName: [],
     unknown: [],
   };
-  // Campos das informações montadas (ex.: senha provisória) também: podem
+  // Campos das informações montadas (ex.: um código montado de partes de campos) também: podem
   // não estar na lista de dados do cliente.
   const derivedFieldsOf = (entity: "contact" | "deal"): V2FieldConfig[] =>
     (args.config.derivedFields ?? [])

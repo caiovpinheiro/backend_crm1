@@ -9,15 +9,15 @@ const ago = (s: number) => new Date(now.getTime() - s * 1000);
 
 describe("aviso de fila", () => {
   it("entende o que o cliente escreveu", () => {
-    expect(queueNoticeKind("Pode.cancelar, um lixo esse atendimento")).toBe("cancel");
+    expect(queueNoticeKind("Pode cancelar, um lixo esse atendimento")).toBe("cancel");
     expect(queueNoticeKind("Jogando de um lado pro outro, ninguém resolve nada")).toBe("upset");
     expect(queueNoticeKind("???")).toBe("call");
     expect(queueNoticeKind("Alo?\nAlguém?")).toBe("call");
-    expect(queueNoticeKind("Qual meu RGM?")).toBe("again");
+    expect(queueNoticeKind("Qual meu código de cliente?")).toBe("again");
   });
 
   it("primeiro aviso é o configurado; depois acompanha o cliente e nunca repete o último", () => {
-    expect(pickQueueNotice({ message: "Qual meu RGM?", configured: CONFIGURED, lastReply: "Vou transferir você.", lastReplyAt: ago(30), now })).toEqual({ text: CONFIGURED, kind: "first" });
+    expect(pickQueueNotice({ message: "Qual meu código de cliente?", configured: CONFIGURED, lastReply: "Vou transferir você.", lastReplyAt: ago(30), now })).toEqual({ text: CONFIGURED, kind: "first" });
     const cancel = pickQueueNotice({ message: "Pode cancelar", configured: CONFIGURED, lastReply: CONFIGURED, lastReplyAt: ago(26), now });
     expect(cancel?.kind).toBe("cancel");
     const upset = pickQueueNotice({ message: "ninguém resolve nada", configured: CONFIGURED, lastReply: cancel!.text, lastReplyAt: ago(15), now });
@@ -27,8 +27,8 @@ describe("aviso de fila", () => {
   });
 
   it("mensagens neutras em poucos segundos: o aviso anterior vale", () => {
-    expect(pickQueueNotice({ message: "e o boleto", configured: CONFIGURED, lastReply: CONFIGURED, lastReplyAt: ago(5), now })).toBeNull();
-    expect(pickQueueNotice({ message: "e o boleto", configured: CONFIGURED, lastReply: CONFIGURED, lastReplyAt: ago(60), now })?.kind).toBe("again");
+    expect(pickQueueNotice({ message: "e a fatura", configured: CONFIGURED, lastReply: CONFIGURED, lastReplyAt: ago(5), now })).toBeNull();
+    expect(pickQueueNotice({ message: "e a fatura", configured: CONFIGURED, lastReply: CONFIGURED, lastReplyAt: ago(60), now })?.kind).toBe("again");
   });
 });
 

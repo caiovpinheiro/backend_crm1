@@ -104,8 +104,8 @@ describe("simulateV2Turn", () => {
   it("carrega contexto do contato real quando contactId é informado", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { Nome: "Marcelo", Telefone: "+5511999999999" },
-      citableContact: { Nome: "Marcelo" },
+      contact: { Nome: "Ana", Telefone: "+5511999999999" },
+      citableContact: { Nome: "Ana" },
       deals: [],
       selectedDeal: null,
       citableDeal: null,
@@ -115,7 +115,7 @@ describe("simulateV2Turn", () => {
     });
     mocks.callV2LLMTest.mockResolvedValue({
       output: {
-        reply: "Olá Marcelo!",
+        reply: "Olá Ana!",
         confirmed: null,
         handoff: false,
         concluded: false,
@@ -133,35 +133,35 @@ describe("simulateV2Turn", () => {
     });
     const cfg = baseConfig();
     const { simulateV2Turn } = await import("../test-turn");
-    const result = await simulateV2Turn("agent-1", cfg, "oi", [], "org-1", "contact-marcelo");
+    const result = await simulateV2Turn("agent-1", cfg, "oi", [], "org-1", "contact-ana");
     expect(mocks.loadV2Context).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: "org-1", contactId: "contact-marcelo" }),
+      expect.objectContaining({ organizationId: "org-1", contactId: "contact-ana" }),
     );
-    expect(result.crmContext.contact).toMatchObject({ Nome: "Marcelo" });
+    expect(result.crmContext.contact).toMatchObject({ Nome: "Ana" });
   });
 
   it("paridade com a produção: transferência condicional espera; orientação sai antes do aviso", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     const { simulateV2Turn } = await import("../test-turn");
     mocks.callV2LLMTest.mockResolvedValueOnce({
-      output: { reply: 'Confira o desconto no boleto. Se o valor continuar diferente do contratado, preciso encaminhar o caso ao financeiro.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
+      output: { reply: 'Confira o desconto na fatura. Se o valor continuar diferente do contratado, preciso encaminhar o caso à equipe.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
       inputTokens: 10, outputTokens: 5, latencyMs: 100,
       toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [{ docId: "d", docTitle: "T", content: "conteúdo", distance: 0.2 }] } }],
       systemPrompt: "",
     });
-    const cond = await simulateV2Turn("agent-1", baseConfig(), "meu boleto veio mais alto");
+    const cond = await simulateV2Turn("agent-1", baseConfig(), "minha fatura veio mais alta");
     expect(cond.handoff).toBe(false);
-    expect(cond.reply).toContain("Confira o desconto no boleto");
+    expect(cond.reply).toContain("Confira o desconto na fatura");
 
     mocks.callV2LLMTest.mockResolvedValueOnce({
-      output: { reply: 'A DP é cobrada só no mês em que for cursada, com desconto sobre a mensalidade cheia. O valor exato da sua eu não tenho aqui.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
+      output: { reply: 'O frete é cobrado só na primeira entrega, com desconto sobre o valor cheio. O valor exato do seu eu não tenho aqui.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
       inputTokens: 10, outputTokens: 5, latencyMs: 100,
       toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [{ docId: "d", docTitle: "T", content: "conteúdo", distance: 0.2 }] } }],
       systemPrompt: "",
     });
-    const oriented = await simulateV2Turn("agent-1", baseConfig(), "qual o valor da dp");
+    const oriented = await simulateV2Turn("agent-1", baseConfig(), "qual o valor do frete");
     expect(oriented.handoff).toBe(true);
-    expect(oriented.reply).toBe("A DP é cobrada só no mês em que for cursada, com desconto sobre a mensalidade cheia. O valor exato da sua eu não tenho aqui.\n\nVou transferir.");
+    expect(oriented.reply).toBe("O frete é cobrado só na primeira entrega, com desconto sobre o valor cheio. O valor exato do seu eu não tenho aqui.\n\nVou transferir.");
     expect(oriented.handoffDestination).toEqual({ type: "department" });
   });
 
@@ -198,8 +198,8 @@ describe("simulateV2Turn", () => {
   it("na primeira mensagem, envia boas-vindas + confirmação sem chamar o modelo", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { Nome: "Marcelo" },
-      citableContact: { Nome: "Marcelo" },
+      contact: { Nome: "Ana" },
+      citableContact: { Nome: "Ana" },
       deals: [],
       selectedDeal: { id: "d1", Título: "Contrato" },
       citableDeal: { Título: "Contrato" },
@@ -217,7 +217,7 @@ describe("simulateV2Turn", () => {
       } as any,
     });
     const { simulateV2Turn } = await import("../test-turn");
-    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-ana");
     expect(result.reply).toContain("Olá! Sou seu assistente virtual.");
     expect(result.reply).toContain("Encontrei você na nossa base! Posso ajudar?");
     expect(result.reason).toContain("fluxo de entrada");
@@ -227,8 +227,8 @@ describe("simulateV2Turn", () => {
   it("na primeira mensagem sem negócio, envia boas-vindas + pedido de identificação", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { Nome: "Marcelo" },
-      citableContact: { Nome: "Marcelo" },
+      contact: { Nome: "Ana" },
+      citableContact: { Nome: "Ana" },
       deals: [],
       selectedDeal: null,
       citableDeal: null,
@@ -246,7 +246,7 @@ describe("simulateV2Turn", () => {
       } as any,
     });
     const { simulateV2Turn } = await import("../test-turn");
-    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-ana");
     expect(result.reply).toContain("Olá! Sou seu assistente virtual.");
     expect(result.reply).toContain("Me confirme seu e-mail para prosseguir.");
   });
@@ -254,8 +254,8 @@ describe("simulateV2Turn", () => {
   it("separate_turn: primeiro turno só boas-vindas e stage confirming", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { name: "Marcelo" },
-      citableContact: { name: "Marcelo" },
+      contact: { name: "Ana" },
+      citableContact: { name: "Ana" },
       deals: [{ id: "d1", title: "Contrato" }],
       selectedDeal: { id: "d1", title: "Contrato" },
       citableDeal: { title: "Contrato" },
@@ -274,8 +274,8 @@ describe("simulateV2Turn", () => {
       } as any,
     });
     const { simulateV2Turn } = await import("../test-turn");
-    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-marcelo");
-    expect(result.reply).toBe("Oi Marcelo! Sou a consultora virtual.");
+    const result = await simulateV2Turn("agent-1", cfg, "Oi", [], "org-1", "contact-ana");
+    expect(result.reply).toBe("Oi Ana! Sou a consultora virtual.");
 
     expect(result.stage).toBe("confirming");
     expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
@@ -284,8 +284,8 @@ describe("simulateV2Turn", () => {
   it("separate_turn: segundo turno envia confirmação sem chamar LLM", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { name: "Marcelo" },
-      citableContact: { name: "Marcelo" },
+      contact: { name: "Ana" },
+      citableContact: { name: "Ana" },
       deals: [{ id: "d1", title: "Contrato" }],
       selectedDeal: { id: "d1", title: "Contrato" },
       citableDeal: { title: "Contrato" },
@@ -310,14 +310,14 @@ describe("simulateV2Turn", () => {
       "sim",
       [
         { role: "user", content: "Oi" },
-        { role: "assistant", content: "Oi Marcelo!" },
+        { role: "assistant", content: "Oi Ana!" },
       ],
       "org-1",
-      "contact-marcelo",
+      "contact-ana",
       undefined,
       "confirming",
     );
-    expect(result.reply).toBe("Marcelo, confirmo que estou falando com você. Como posso ajudar?");
+    expect(result.reply).toBe("Ana, confirmo que estou falando com você. Como posso ajudar?");
     expect(result.stage).toBe("confirming");
     expect(mocks.callV2LLMTest).not.toHaveBeenCalled();
   });
@@ -325,8 +325,8 @@ describe("simulateV2Turn", () => {
   it("consulta materiais sobre cancelamento e retorna resposta com trechos usados", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.loadV2Context.mockResolvedValue({
-      contact: { Nome: "Marcelo" },
-      citableContact: { Nome: "Marcelo" },
+      contact: { Nome: "Ana" },
+      citableContact: { Nome: "Ana" },
       deals: [],
       selectedDeal: null,
       citableDeal: null,

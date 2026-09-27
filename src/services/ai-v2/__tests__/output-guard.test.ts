@@ -51,8 +51,8 @@ describe("guardV2Output — scrub de campos só 'Ler'", () => {
   });
 
   it("senha configurada como 'pode dizer' para este cliente sai; outra senha continua removida", () => {
-    const ctx = { contact: { "Senha Provisória": "Mar@123678" }, citableContact: { "Senha Provisória": "Mar@123678" }, selectedDeal: null, citableDeal: null };
-    expect(guardV2Output("Sua senha provisória é *Mar@123678*.", [], ctx).text).toContain("Mar@123678");
+    const ctx = { contact: { "Código de acesso": "Ana@123678" }, citableContact: { "Código de acesso": "Ana@123678" }, selectedDeal: null, citableDeal: null };
+    expect(guardV2Output("Sua senha de acesso é *Ana@123678*.", [], ctx).text).toContain("Ana@123678");
     expect(guardV2Output("Sua senha é Xyz@987654.", [], ctx).text).not.toContain("Xyz@987654");
   });
 });

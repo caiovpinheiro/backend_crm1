@@ -141,6 +141,6 @@ describe("encerramento com pedido novo", () => {
     expect(out).toEqual({ concluded: false, actions: [] });
     expect(isNewRequest(config, "obrigado, era isso")).toBe(false);
     expect(isNewRequest(config, "ok, valeu!")).toBe(false);
-    expect(isNewRequest(config, "e quando começam as aulas?")).toBe(true);
+    expect(isNewRequest(config, "e quando começam as entregas?")).toBe(true);
   });
 });

@@ -1405,7 +1405,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
       if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
       return {
-        results: actions.map((a) => ({ action: a, ok: true, text: "Tutorial:\n1️⃣ Abra o app.\n2️⃣ Toque em Aulas." })),
+        results: actions.map((a) => ({ action: a, ok: true, text: "Tutorial:\n1️⃣ Abra o app.\n2️⃣ Toque em Pedidos." })),
         anyHandoff: false,
         anyClose: false,
       };

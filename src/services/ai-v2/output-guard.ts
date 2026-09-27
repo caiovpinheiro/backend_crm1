@@ -114,7 +114,7 @@ export function guardV2Output(
   // Senha/código e cartão não saem; documento sai mascarado — mesmo que
   // venha do material, de uma ferramenta ou do próprio modelo. Exceção: o
   // valor exato que a configuração marca "pode dizer" a este cliente
-  // (ex.: senha provisória montada dos campos dele).
+  // (ex.: um código de acesso montado dos campos dele).
   const citable = new Set(
     [ctx?.citableContact, ctx?.citableDeal]
       .flatMap((o) => Object.values(o ?? {}))

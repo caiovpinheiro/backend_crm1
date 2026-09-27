@@ -49,26 +49,26 @@ describe("escutar a equipe — autoria e transcrição", () => {
     const out = attributeHumanMessages(
       [
         msg("m1", "out", "human", "Oi!", { senderName: "Outra Pessoa" }),
-        msg("m2", "out", "human", "Posso ajudar?", { senderName: "mariana silva" }),
-        msg("m3", "out", "bot", "Sou a IA", { isAi: true, senderName: "Mariana Silva" }),
+        msg("m2", "out", "human", "Posso ajudar?", { senderName: "ana souza" }),
+        msg("m3", "out", "bot", "Sou a IA", { isAi: true, senderName: "Ana Souza" }),
         msg("m4", "in", "human", "oi"),
       ],
-      new Map([["m1", "u-mari"]]),
-      new Map([["mariana silva", "u-mari"]]),
+      new Map([["m1", "u-ana"]]),
+      new Map([["ana souza", "u-ana"]]),
     );
-    expect(out.map((m) => m.userId)).toEqual(["u-mari", "u-mari", null, null]);
+    expect(out.map((m) => m.userId)).toEqual(["u-ana", "u-ana", null, null]);
   });
 
   it("rótulos, máscara do contato e da pessoa escutada, texto da Referência", () => {
     const tr = buildListenTranscript(
       [
-        msg("1", "in", "human", "Oi, sou o João, meu fone é 11 99999-8888"),
-        msg("2", "out", "human", "Oi João! Aqui é a Mariana, já te ajudo.", { userId: "u-mari" }),
+        msg("1", "in", "human", "Oi, sou o Pedro, meu fone é 11 99999-8888"),
+        msg("2", "out", "human", "Oi Pedro! Aqui é a Ana, já te ajudo.", { userId: "u-ana" }),
         msg("3", "out", "human", "Assumindo aqui.", { userId: "u-outro" }),
         msg("4", "out", "bot", "Mensagem automática", { isAi: true }),
       ],
-      new Set(["u-mari"]),
-      ["João", "Mariana"],
+      new Set(["u-ana"]),
+      ["Pedro", "Ana"],
     );
     expect(tr.text).toContain("Cliente: Oi, sou o [nome]");
     expect(tr.text).not.toContain("99999");
@@ -150,11 +150,11 @@ describe("escutar a equipe — agregação", () => {
 
 describe("escutar a equipe — propostas na configuração", () => {
   it("tom e abordagem viram alterações válidas; nome da pessoa é recusado; igual ao atual é omitido", () => {
-    const tone = toneChanges(config, { tone: "Próximo e simples.", responseLength: "short", emojis: "light", bold: null, examples: ["Oi! Já te ajudo 😊", "Aqui é a Mariana"] }, ["Mariana Silva"]);
+    const tone = toneChanges(config, { tone: "Próximo e simples.", responseLength: "short", emojis: "light", bold: null, examples: ["Oi! Já te ajudo 😊", "Aqui é a Ana"] }, ["Ana Souza"]);
     expect(tone.map((c) => c.path)).toEqual(["tone", "responseLength", "emojis"]);
     expect(String(tone[0].value)).toContain("Oi! Já te ajudo");
-    expect(String(tone[0].value)).not.toContain("Mariana");
-    expect(toneChanges(config, { tone: "Fale como a Mariana." }, ["Mariana Silva"])).toEqual([]);
+    expect(String(tone[0].value)).not.toContain("Ana Souza");
+    expect(toneChanges(config, { tone: "Fale como a Ana." }, ["Ana Souza"])).toEqual([]);
     expect(toneChanges(config, { tone: "Cordial.", responseLength: "medium" }, [])).toEqual([]);
 
     const theme = approachChanges(config, { titulo: "x", texto: "Confirme o número do pedido antes de explicar.", themeId: "t1" }, []);

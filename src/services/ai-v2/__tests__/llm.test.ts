@@ -288,13 +288,13 @@ describe("callV2LLM — pré-busca na base", () => {
 
   it("anexo 'enviar sempre' de material forte que não é o primeiro trecho; e junto da orientação antes de transferir", async () => {
     const { attachmentsForDocs } = await import("../material-attachments");
-    const att = { id: "att-2", docId: "doc-2", url: "/uploads/org/b.png", mimeType: "image/png", name: "Boleto explicado", description: "", autoSend: true, resendWindow: "7d", kind: "image", position: 0, createdAt: "", docTitle: "Pagar" };
+    const att = { id: "att-2", docId: "doc-2", url: "/uploads/org/b.png", mimeType: "image/png", name: "Fatura explicada", description: "", autoSend: true, resendWindow: "7d", kind: "image", position: 0, createdAt: "", docTitle: "Pagar" };
     (attachmentsForDocs as ReturnType<typeof vi.fn>).mockResolvedValue([att]);
     const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1", "doc-2"] } as Partial<V2AgentConfig>);
     const args = {
       agentId: "agent-1", config,
       context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
-      userMessage: "como pago o boleto", stage: "active",
+      userMessage: "como pago a fatura", stage: "active",
     };
     (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [{ ...chunk, distance: 0.1 }, { ...chunk, id: "c2", docId: "doc-2", docTitle: "Pagar", distance: 0.4 }] });
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Veja como pagar.", actions: [] })));
@@ -306,7 +306,7 @@ describe("callV2LLM — pré-busca na base", () => {
     expect(weak.output.actions.some((a) => a.type === "send_material_attachment")).toBe(false);
 
     (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [{ ...chunk, id: "c2", docId: "doc-2", docTitle: "Pagar", distance: 0.3 }] });
-    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "O boleto mostra o valor integral antes dos descontos, confira o desconto no corpo do boleto. Vou te encaminhar ao financeiro para conferir o seu caso.", handoff: true, actions: [] })));
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "A fatura mostra o valor integral antes dos descontos, confira o desconto no corpo da fatura. Vou te encaminhar à equipe para conferir o seu caso.", handoff: true, actions: [] })));
     const oriented = await callV2LLM({ ...args, config: { ...config, groundingCheck: "rules" } } as never);
     expect(oriented.output.actions).toContainEqual({ type: "send_material_attachment", attachmentIds: ["att-2"] });
     (attachmentsForDocs as ReturnType<typeof vi.fn>).mockResolvedValue([]);

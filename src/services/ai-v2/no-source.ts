@@ -82,8 +82,8 @@ export function answersBeforeHandoff(reply: string): boolean {
   const text = reply.trim();
   if (text.split(/\s+/).length < 12) return false;
   // Tirando o aviso de transferência e o "não tenho essa informação", sobra
-  // orientação? ("A DP é cobrada com desconto sobre a mensalidade; o valor
-  // exato eu não tenho" — a regra vale mandar.)
+  // orientação? ("A taxa é cobrada só na primeira entrega; o valor exato
+  // eu não tenho" — a regra vale mandar.)
   const rest = text.split(/(?<=[.!?])\s+|\n+/).filter((s) => !announcesTransfer(s) && !lacksInformation(s)).join(" ");
   return rest.split(/\s+/).filter(Boolean).length >= 10;
 }
@@ -94,7 +94,7 @@ const CONDITION = /(?:^|[,;:(]\s*|\b(?:e|mas|ou|porém|porem|então|entao)\s+)(?
 
 /**
  * A resposta põe uma condição para transferir ("se o valor continuar
- * diferente, encaminho ao financeiro"; "caso não apareça, te transfiro"):
+ * diferente, encaminho à equipe"; "caso não apareça, te transfiro"):
  * toda frase que fala em transferir é condicional. Transferir na hora
  * deixava o cliente na fila sem ter conferido o que o agente pediu.
  */

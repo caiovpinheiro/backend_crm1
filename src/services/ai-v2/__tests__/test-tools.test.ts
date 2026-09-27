@@ -189,8 +189,8 @@ describe("conversas de teste", () => {
       ]);
     mocks.conversationFindMany.mockResolvedValue([{ id: "conv-1", contact: { id: "c1", name: "Teste", phone: "5511911112222" } }]);
     mocks.messageFindMany.mockResolvedValue([
-      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:08Z"), content: "Veja o boleto", messageType: "text", sendStatus: "sent", sendError: null },
-      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:09Z"), content: "📎 Boleto explicado", messageType: "image", sendStatus: "failed", sendError: "Arquivo não encontrado no storage." },
+      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:08Z"), content: "Veja a fatura", messageType: "text", sendStatus: "sent", sendError: null },
+      { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:00:09Z"), content: "📎 Fatura explicada", messageType: "image", sendStatus: "failed", sendError: "Arquivo não encontrado no storage." },
       { conversationId: "conv-1", createdAt: new Date("2026-01-01T10:01:05Z"), content: "Mais algo?", messageType: "text", sendStatus: "sent", sendError: null },
     ]);
     const r = await listV2TestConversations({ organizationId: "org-1", agentId: "agent-1" });

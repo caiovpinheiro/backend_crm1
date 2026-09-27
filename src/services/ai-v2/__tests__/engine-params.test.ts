@@ -205,7 +205,7 @@ describe("passo dados: o que o agente recebeu do cadastro", () => {
 
 describe("resposta que é só saudação", () => {
   it("reconhece cumprimento/convite sem conteúdo", () => {
-    for (const r of ["Oi, Marcelo! Boa tarde 😊 Como posso ajudar você hoje?", "Olá! Em que posso te ajudar?", "Bom dia! Me conta o que você precisa."]) {
+    for (const r of ["Oi, Ana! Boa tarde 😊 Como posso ajudar você hoje?", "Olá! Em que posso te ajudar?", "Bom dia! Me conta o que você precisa."]) {
       expect(isGreetingOnlyReply(r)).toBe(true);
     }
   });
