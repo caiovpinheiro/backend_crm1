@@ -31,6 +31,7 @@ import { resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { llmMaxAttempts, llmTimeoutMs } from "@/services/ai/llm-retry";
 import {
   handleAiTestCommand,
   parseAiTestCommand,
@@ -89,9 +90,14 @@ export function isTurnManagerEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "on";
 }
 
-/** Teto de tempo em PROCESSING antes do turno ser considerado travado. */
+/**
+ * Teto de tempo em PROCESSING antes do turno ser considerado travado. Padrão:
+ * o pior caso do modelo (tentativas × tempo de cada uma) + 60 s de checagem,
+ * envio e digitação. Com 120 s fixos, um turno lento (3×60 s) era retomado
+ * por outro processo enquanto o primeiro ainda respondia.
+ */
 export function turnStaleMs(): number {
-  return envInt("AI_TURN_STALE_MS", 120_000);
+  return envInt("AI_TURN_STALE_MS", llmMaxAttempts() * llmTimeoutMs() + 60_000);
 }
 
 /** Tentativas de processamento antes do turno virar FAILED. */

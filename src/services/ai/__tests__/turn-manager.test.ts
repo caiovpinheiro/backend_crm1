@@ -704,8 +704,8 @@ describe("resiliência", () => {
     await claimTurn(turnId, ORG, "worker-morto");
     expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
 
-    // Passa do teto de PROCESSING (AI_TURN_STALE_MS, default 120s).
-    vi.advanceTimersByTime(130_000);
+    // Passa do teto de PROCESSING (AI_TURN_STALE_MS; padrão = tentativas × tempo do modelo + 60 s = 240 s).
+    vi.advanceTimersByTime(250_000);
     const res = await sweepConversationTurns({ limit: 10 });
 
     // O tick devolve o turno para READY (attempts++) e, na etapa de
@@ -746,7 +746,7 @@ describe("resiliência", () => {
     await claimTurn(turnId, ORG, "worker-morto");
     turns.get(turnId)!.attempts = 2; // AI_TURN_MAX_ATTEMPTS default = 3
 
-    vi.advanceTimersByTime(130_000);
+    vi.advanceTimersByTime(250_000);
     const res = await sweepConversationTurns({ limit: 10 });
 
     expect(res.failed).toBe(1);
