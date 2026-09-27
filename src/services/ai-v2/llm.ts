@@ -1199,8 +1199,14 @@ export async function callV2LLM(args: {
   // Anexos dos materiais lidos (vídeo, imagem, áudio, PDF): o modelo pode
   // pedir para enviar depois da reply.
   const offeredAttachments = await attachmentsForDocs(args.agentId, prefetch.chunks.map((c) => c.docId));
+  // Semelhança do melhor trecho de cada material (para o envio automático e o rastro).
+  const docSimilarity = new Map<string, number>();
+  for (const c of prefetch.chunks) if (c.docId) docSimilarity.set(c.docId, Math.max(docSimilarity.get(c.docId) ?? 0, 1 - c.distance));
+  const docTitleOf = new Map(prefetch.chunks.map((c) => [c.docId, c.docTitle]));
   if (offeredAttachments.length > 0) {
-    traceStep("base", `Anexos disponíveis dos materiais lidos: ${offeredAttachments.map((x) => `"${x.name}"${x.description ? "" : " (sem “quando enviar”)"}`).join(", ")}`);
+    traceStep("base", `Anexos disponíveis dos materiais lidos: ${offeredAttachments
+      .map((x) => `"${x.name}" (material "${docTitleOf.get(x.docId) ?? "?"}" ${(docSimilarity.get(x.docId) ?? 0).toFixed(2)}; ${x.autoSend ? "enviar sempre" : "o agente decide"}${x.description ? "" : "; sem “quando enviar”"})`)
+      .join(", ")}`);
   }
   const prefetchCalls = prefetch.chunks.length > 0
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
@@ -1371,12 +1377,20 @@ export async function callV2LLM(args: {
     // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
     const chosen = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))];
-    // "Enviar sempre": o material do trecho mais parecido é a principal fonte.
-    const mainDocId = (prefetch.best ?? 0) >= MAIN_SOURCE_SIMILARITY ? prefetch.chunks[0]?.docId : undefined;
-    const automatic = output.handoff || !mainDocId
+    // "Enviar sempre": sai quando o material dele é fonte forte da resposta
+    // (qualquer um dos trechos lidos, não só o primeiro) e a resposta não é
+    // só um aviso de transferência (com orientação antes, o anexo vai junto).
+    const onlyTransfer = output.handoff && !answersBeforeHandoff(output.reply);
+    const strongDoc = (docId: string) => (docSimilarity.get(docId) ?? 0) >= MAIN_SOURCE_SIMILARITY;
+    const automatic = onlyTransfer
       ? []
-      : offeredAttachments.filter((a) => a.autoSend && a.docId === mainDocId && !chosen.includes(a.id)).map((a) => a.id);
-    if (automatic.length > 0) traceStep("mídia", `Anexo de envio automático (material principal da resposta): ${automatic.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
+      : offeredAttachments.filter((a) => a.autoSend && strongDoc(a.docId) && !chosen.includes(a.id)).map((a) => a.id);
+    if (automatic.length > 0) traceStep("mídia", `Anexo de envio automático (material é fonte forte da resposta): ${automatic.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);
+    // Por que um anexo "enviar sempre" não saiu: a tela mostra o motivo.
+    for (const a of offeredAttachments.filter((x) => x.autoSend && !chosen.includes(x.id) && !automatic.includes(x.id))) {
+      const sim = docSimilarity.get(a.docId) ?? 0;
+      traceStep("mídia", `"${a.name}" não enviado: ${onlyTransfer ? "o turno só transferiu" : `o material "${docTitleOf.get(a.docId) ?? "?"}" não é fonte forte da resposta (${sim.toFixed(2)} < ${MAIN_SOURCE_SIMILARITY.toFixed(2)})`}`);
+    }
     const picked = [...chosen, ...automatic].slice(0, MATERIAL_ATTACHMENT_LIMITS.perReply);
     output.attachments = picked;
     if (chosen.length > 0) traceStep("mídia", `O agente pediu para enviar: ${chosen.map((id) => offeredAttachments.find((x) => x.id === id)?.name ?? id).join(", ")}`);

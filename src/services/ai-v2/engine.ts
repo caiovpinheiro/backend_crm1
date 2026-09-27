@@ -1929,6 +1929,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         sentReply = replyText;
         announced = announcesTransfer(replyText);
         traceStep("resposta", announced ? "Orientou e avisou a transferência na mesma mensagem" : "Orienta antes de transferir");
+        // Os anexos do material (vídeo, imagem…) acompanham a orientação.
+        const attachments = outboundActions.filter((a) => a.type === "send_material_attachment");
+        if (attachments.length > 0 && !stopLimits.blocksReply) {
+          const attRes = await executeV2Actions(attachments, actionCtx);
+          executedActions = [...executedActions, ...attRes.results];
+          traceStep("mídia", attRes.results.some((r) => r.ok) ? "Anexo enviado junto da orientação, antes de transferir" : "Anexo não enviado antes de transferir");
+        }
       }
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
