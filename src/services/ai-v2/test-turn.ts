@@ -6,7 +6,8 @@
  */
 
 import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2Stage } from "@/lib/ai-v2/types";
-import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
+import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
+import { MESSAGE_MODEL_MIN_COVERAGE, introBeforeMaterial, messageModelCoverage } from "./sent-materials";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
@@ -65,6 +66,8 @@ export type V2TestTurnResult = {
   chosenOption?: string | null;
   /** Para onde a conversa iria ao transferir (pedido do modelo > assunto > padrão). */
   handoffDestination?: V2Destination | null;
+  /** Texto da mensagem pronta que sairia depois da resposta (o cliente recebe os dois). */
+  materialText?: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -648,6 +651,46 @@ export async function simulateV2Turn(
 
   // Em produção, ao transferir o cliente recebe a mensagem de transferência,
   // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
+  // Mensagem pronta, igual à produção: com a resposta longa, a mensagem pronta
+  // só sai se cobre o que a resposta explica (aí a resposta vira só a
+  // introdução); senão vai a resposta completa, sem ela. O texto da mensagem
+  // pronta entra no resultado — é o que o cliente recebe e o que o comparador mede.
+  let materialText = "";
+  const modelActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_message_model" && typeof e.action.modelId === "string");
+  if (modelActions.length > 0 && organizationId) {
+    try {
+      const { prisma } = await import("@/lib/prisma");
+      const rows: Array<{ id: string; name: string; content: string | null }> = await (prisma as any).messageTemplate.findMany({
+        where: { id: { in: modelActions.map((e) => e.action.modelId as string) }, organizationId },
+        select: { id: true, name: true, content: true },
+      });
+      const long = output.reply.trim().split(/\s+/).length > 40;
+      const kept: typeof rows = [];
+      for (const r of rows ?? []) {
+        if (long && (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") < MESSAGE_MODEL_MIN_COVERAGE) {
+          const idx = executedActions.findIndex((e) => e.action.type === "send_message_model" && e.action.modelId === r.id);
+          if (idx >= 0) {
+            discardedActions.push({ ...executedActions[idx], reason: "A mensagem pronta não traz o que a resposta explica: vai a resposta completa, sem ela." });
+            executedActions.splice(idx, 1);
+          }
+          traceStep("ações", `Mensagem pronta "${r.name}" não traz o que a resposta explica — vai a resposta completa, sem a mensagem pronta`);
+        } else {
+          kept.push(r);
+        }
+      }
+      if (kept.length > 0) {
+        materialText = kept.map((r) => renderMessage(r.content ?? "", vars, defaultFormatter())).filter((t) => t.trim()).join("\n\n");
+        if (long) {
+          const intro = introBeforeMaterial(output.reply);
+          traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");
+          output = { ...output, reply: intro };
+        }
+      }
+    } catch {
+      // Sem banco (teste unitário): segue com a resposta como está.
+    }
+  }
+
   let reply = output.reply;
   let interactive: V2TestTurnResult["interactive"] = null;
   if (handoff) {
@@ -661,6 +704,9 @@ export async function simulateV2Turn(
     const explanation = fallbackOnly ? "" : handoffExplanation(output.reply);
     reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
     if (explanation) reply = `${explanation}\n\n${reply}`;
+    // Fora do horário, a produção acrescenta o aviso de horário à mensagem de transferência.
+    const hoursNote = outsideHoursNote(config);
+    if (hoursNote) reply = `${reply}\n\n${hoursNote}`;
   } else if (closed && config.closure.goodbyeMessage) {
     reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
   } else {
@@ -750,6 +796,7 @@ export async function simulateV2Turn(
     interactive: nextStage === "identifying" ? null : interactive,
     chosenOption,
     handoffDestination,
+    ...(materialText ? { materialText } : {}),
   };
 }
 

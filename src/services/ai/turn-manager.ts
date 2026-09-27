@@ -769,6 +769,8 @@ export async function runTurn(turn: {
   aggregatedText: string | null;
   messageIds: Prisma.JsonValue;
   attempts: number;
+  /** Momento do claim: o motor confere que ainda é o dono antes de cada envio. */
+  claimedAt?: Date | null;
 }): Promise<void> {
   const startedAt = Date.now();
   const messageIds = readMessageIds(turn.messageIds);
@@ -805,6 +807,11 @@ export async function runTurn(turn: {
             messageType: await lastMessageType(turn.organizationId, messageIds),
             turnId: turn.id,
             messageIds,
+            // Nova tentativa depois de falha: o motor não responde de novo se a
+            // anterior já respondeu. Posse: turno retomado pelo sweeper (passou
+            // do teto) não pode continuar enviando em dois processos.
+            attempt: turn.attempts,
+            claimedAt: turn.claimedAt ?? null,
           });
         } else {
           const { maybeReplyAsAIAgent } = await import(

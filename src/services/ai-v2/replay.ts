@@ -963,7 +963,8 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
           sourceDocIds: [...new Set(sim.ragChunks.map((c) => c.docId).filter(Boolean))],
           trace,
         }) as Record<string, unknown>;
-        agentText = maskSensitive(sim.reply ?? "").text;
+        // A mensagem pronta chega ao cliente depois da resposta: o avaliador vê as duas.
+        agentText = maskSensitive([sim.reply ?? "", sim.materialText ?? ""].filter((t) => t.trim()).join("\n\n")).text;
         agentHandoff = sim.handoff;
         themeName = sim.themeName;
         sources = sourcesFromToolCalls(sim.toolCalls);

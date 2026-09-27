@@ -99,6 +99,25 @@ describe("fecho e transferência condicional (paridade produção × teste)", ()
     expect(again.reply).toBe("Vou transferir.");
   });
 
+  it("fora do horário, a transferência traz o aviso de horário (igual à produção)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z")); // domingo
+    try {
+      const { simulateV2Turn } = await import("../test-turn");
+      const cfg = {
+        ...config(),
+        businessHours: { enabled: true, timezone: "America/Sao_Paulo", weekdays: [{ day: 1, start: "08:00", end: "18:00" }] },
+      } as unknown as V2AgentConfig;
+      mocks.callV2LLMTest.mockResolvedValueOnce(llm("Vou te passar para a equipe.", true));
+      const r = await simulateV2Turn("agent-1", cfg, "quero falar com alguém", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+      expect(r.reply.startsWith("Vou transferir.")).toBe(true);
+      expect(r.reply).toContain("Nossa equipe atende");
+      expect(r.reply).toContain("próximo horário");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("passo a passo sem transferência continua com o fecho e os botões", async () => {
     const { simulateV2Turn } = await import("../test-turn");
     mocks.callV2LLMTest.mockResolvedValueOnce(llm(STEPS, false));

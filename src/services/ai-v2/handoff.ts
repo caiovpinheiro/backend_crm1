@@ -19,7 +19,19 @@ type HandoffArgs = {
 };
 
 export async function simpleHandoff(args: HandoffArgs): Promise<void> {
-  await routeHandoff(args);
+  try {
+    await routeHandoff(args);
+  } catch (err) {
+    // Destino inválido (id ausente, agente apagado) ou distribuição fora do
+    // ar: o aviso ao cliente já saiu. Antes a exceção derrubava o turno, a
+    // fila repetia a execução e a conversa continuava com a IA. Agora ela
+    // vai para a fila da equipe (sem responsável) e o rastro explica.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ai-v2] transferência falhou; conversa devolvida à fila da equipe:", msg);
+    traceStep("transferência", `Transferência para ${args.destination.type}${args.destination.id ? ` (${args.destination.id})` : ""} falhou (${msg}) → conversa devolvida à fila da equipe`);
+    await releaseFromAi(args.conversationId).catch(() => undefined);
+    return;
+  }
   if (args.destination.type !== "ai_agent") {
     await releaseFromAi(args.conversationId);
     return;

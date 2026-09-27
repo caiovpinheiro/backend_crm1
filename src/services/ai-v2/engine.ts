@@ -119,7 +119,27 @@ export type V2TurnInput = {
   turnId?: string;
   /** Mensagens do cliente neste turno (áudio/imagem viram texto a partir delas). */
   messageIds?: string[];
+  /** Tentativas anteriores deste turno (0 = primeira). */
+  attempt?: number;
+  /** Momento do claim do turno: prova de posse antes de cada envio. */
+  claimedAt?: Date | null;
 };
+
+/** Motivos de envio barrado que significam "uma pessoa assumiu a conversa". */
+const HUMAN_TOOK_OVER = new Set(["unassigned", "assignee_changed", "assignee_not_ai", "human_replied_during_run", "human_last_outbound"]);
+
+/** A conversa ainda é do agente (desconhecido = segue). */
+async function assignedToAgent(conversationId: string, agentUserId: string): Promise<boolean> {
+  try {
+    const conv = await (prisma as unknown as {
+      conversation: { findUnique: (args: unknown) => Promise<{ assignedToId?: string | null } | null> };
+    }).conversation.findUnique({ where: { id: conversationId }, select: { assignedToId: true } });
+    if (!conv || conv.assignedToId === undefined) return true;
+    return conv.assignedToId === agentUserId;
+  } catch {
+    return true;
+  }
+}
 
 export type V2TurnResult = {
   sentReply?: string;
@@ -491,6 +511,40 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   });
   if (!convOrg) return { handoff: false, closed: false, error: "Conversation not found" };
   const orgId = convOrg.organizationId;
+
+  // Nova tentativa do mesmo turno depois de uma falha: se a anterior já tinha
+  // respondido (o erro veio depois do envio), não responde de novo — o
+  // cliente recebia duas respostas, às vezes diferentes.
+  if ((input.attempt ?? 0) > 0 && (await arrivedBeforeLastReply(input.conversationId, input.messageIds))) {
+    traceStep("entrada", `Tentativa ${(input.attempt ?? 0) + 1} deste turno: a anterior já respondeu antes de falhar → não repete`);
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "already replied in a previous attempt" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt, inputTokens: 0, outputTokens: 0, owner: "agente", stage: "active",
+    }).catch(() => undefined);
+    return { handoff: false, closed: false };
+  }
+
+  // Posse do turno: o sweeper devolve para a fila um turno que passou do
+  // teto de tempo e outro processo o reprocessa. Quem perdeu a posse para de
+  // enviar (senão o cliente recebia a resposta dos dois).
+  const ownsTurn = async (): Promise<boolean> => {
+    if (!input.turnId || !input.claimedAt) return true;
+    try {
+      const row = await (prisma as unknown as {
+        conversationTurn: { findUnique: (args: unknown) => Promise<{ status: string; claimedAt: Date | null } | null> };
+      }).conversationTurn.findUnique({ where: { id: input.turnId }, select: { status: true, claimedAt: true } });
+      if (!row) return true;
+      return row.status === "PROCESSING" && !!row.claimedAt && new Date(row.claimedAt).getTime() === new Date(input.claimedAt).getTime();
+    } catch {
+      return true;
+    }
+  };
+  // Uma pessoa assumiu a conversa durante o turno: o agente para de enviar,
+  // não transfere e não manda materiais.
+  let humanTookOver = false;
 
   // Estado (necessário antes de ações que precisam de owner/stage/versionId)
   let stateRow = await getV2ConversationState(input.conversationId);
@@ -1535,6 +1589,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
 
+  // O modelo demorou e o turno foi retomado por outro processo: esta
+  // execução não envia mais nada (a outra responde).
+  if (!(await ownsTurn())) {
+    traceStep("parada", "Turno retomado por outro processo (passou do teto de tempo) → esta execução não envia");
+    return { handoff: false, closed: false, error: "Turno retomado por outro processo (passou do teto de tempo)" };
+  }
+
   // Guarda "sem material": nada nos materiais cobre a mensagem e a resposta
   // afirma fatos (número, prazo, passo, caminho, link) que não vêm do
   // cadastro do cliente. Aplica a saída configurada.
@@ -1926,6 +1987,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Aviso de limite no lugar da resposta: sem opções.
   if (stopLimits.blocksReply) replyOptions = [];
 
+  // Resposta vazia do modelo (sem transferir, encerrar, material ou botões):
+  // o cliente ficava sem nada. Pergunta o que ele precisa.
+  if (!anyHandoff && !anyClose && !replyText.trim() && outboundActions.length === 0 && replyOptions.length === 0 && !stopLimits.blocksReply) {
+    replyText = repeatFallback(lastAgentMessage);
+    traceStep("resposta", "O modelo devolveu uma resposta vazia → pede ao cliente que diga o que precisa");
+  }
+
   // Saudação que ficou para trás: o cliente mandou "Oi" e logo o pedido, e o
   // pedido chegou enquanto este turno pensava. Mandar "Como posso ajudar?"
   // depois do pedido parece que o agente não leu; o próximo turno responde.
@@ -1974,7 +2042,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Mensagens prontas/produtos/modelos: depois da reply. Não saem quando o
   // turno transfere ou quando um limite de parada bloqueou a resposta.
-  if (outboundActions.length > 0 && !anyHandoff && !stopLimits.blocksReply) {
+  if (outboundActions.length > 0 && !anyHandoff && !stopLimits.blocksReply && !humanTookOver) {
     const outRes = await executeV2Actions(outboundActions, actionCtx);
     traceStep("ações", outRes.results
       .map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`)
@@ -2086,7 +2154,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       agentId: resolved!.agentConfigId,
       stage: anyHandoff ? stage : "active",
       themeId,
-      owner,
+      owner: humanTookOver ? "pessoa" : owner,
       counters: counters as V2Counters,
       versionId: versionId,
       collectedVariables,
@@ -2145,6 +2213,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         sent = handoffMsg;
       }
     }
+    // Uma pessoa assumiu durante o turno (ou outro processo retomou o turno):
+    // transferir agora tiraria a conversa de quem já está atendendo.
+    if (humanTookOver || !(await ownsTurn()) || !(await assignedToAgent(input.conversationId, resolved!.userId))) {
+      traceStep("transferência", humanTookOver ? "Uma pessoa assumiu a conversa durante o turno → sem transferência" : "A conversa não está mais com o agente → sem transferência");
+      humanTookOver = true;
+      return sent;
+    }
     const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters);
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
     await simpleHandoff({
@@ -2165,7 +2240,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     opts?: { dropIfSuperseded?: boolean },
   ): Promise<{ sent: boolean; reason?: string }> {
     if (!text.trim()) return { sent: false, reason: "empty" };
-    return sendV2TextMessage({
+    if (humanTookOver) return { sent: false, reason: "human_took_over" };
+    if (!(await ownsTurn())) {
+      traceStep("resposta", "Turno retomado por outro processo (passou do teto de tempo) → esta execução não envia mais nada");
+      return { sent: false, reason: "turn_reclaimed" };
+    }
+    const res = await sendV2TextMessage({
       interactive,
       conversationId: input.conversationId,
       contactId: contactId!,
@@ -2177,6 +2257,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         ? { ...humanBehavior, abortIf: () => newerInboundArrived(input.conversationId, input.messageIds) }
         : humanBehavior,
     });
+    if (!res.sent && res.reason && HUMAN_TOOK_OVER.has(res.reason)) {
+      humanTookOver = true;
+      traceStep("resposta", "Uma pessoa assumiu a conversa durante o turno → o agente para por aqui (sem transferência nem materiais)");
+    }
+    return res;
   }
 }
 
@@ -2289,7 +2374,7 @@ async function handoffAndReply(
   counters: V2Counters,
   themeId?: string,
 ): Promise<void> {
-  await sendV2TextMessage({
+  const res = await sendV2TextMessage({
     conversationId: input.conversationId,
     contactId,
     agentUserId: resolved!.userId,
@@ -2298,6 +2383,19 @@ async function handoffAndReply(
     autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
     humanBehavior: v2HumanBehavior(config),
   });
+  // Uma pessoa assumiu a conversa enquanto isso: sem transferência.
+  if ((!res.sent && res.reason && HUMAN_TOOK_OVER.has(res.reason)) || !(await assignedToAgent(input.conversationId, resolved.userId))) {
+    traceStep("transferência", "Uma pessoa assumiu a conversa durante o turno → sem transferência");
+    await upsertV2ConversationState({ organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, owner: "pessoa", counters: counters as V2Counters, versionId, ...(themeId ? { themeId } : {}) });
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: loadedContext.contact, contactRaw: loadedContext.contactRaw, deals: loadedContext.deals, selectedDeal: loadedContext.selectedDeal, fields: config.contextFields },
+      themeId, prompt: "handoff", executedActions: [], discardedActions: [{ type: "handoff", reason: "human took over" } as any],
+      handoff: false, latencyMs: 0, inputTokens: 0, outputTokens: 0, owner: "pessoa", stage: (stateRow?.stage as V2Stage) ?? "idle", versionId,
+    });
+    return;
+  }
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
