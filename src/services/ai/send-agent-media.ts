@@ -3,14 +3,15 @@
  * Reusa o mesmo pipeline do inbox humano (pending + meta-attach / Baileys).
  */
 
-import { enqueueMetaAttach } from "@/lib/queue";
+import { WHATSAPP_VIDEO_MAX_BYTES } from "@/lib/audio-convert";
+import { enqueueMetaAttach, type MetaAttachPayload } from "@/lib/queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
 import { isBaileysChannel, sendWhatsAppMedia } from "@/lib/send-whatsapp";
-import { parseStoragePath } from "@/lib/storage/local";
-import { isOrgOwnedStorageUrl } from "@/lib/storage/read-for-send";
+import { parseStoragePath, resolveOutboundAttachmentMime } from "@/lib/storage/local";
+import { isOrgOwnedStorageUrl, readStoredMediaForSend } from "@/lib/storage/read-for-send";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
 
@@ -162,7 +163,13 @@ export async function sendAgentFollowUpMedia(args: {
       continue;
     }
 
-    const job = await enqueueMetaAttach({
+    // Sobe o arquivo para a Meta aqui, onde ele existe. O worker de WhatsApp
+    // não compartilha o disco da API: sem isto o job gravava "Arquivo não
+    // encontrado no storage" e a imagem/vídeo do material não chegava. Com o
+    // id, o worker só envia. Áudio fica com o worker (precisa de conversão);
+    // falha aqui → o job tenta ler o arquivo como antes.
+    const mediaId = kind === "audio" ? undefined : await preuploadToMeta(metaClient, att.url, mime, fileName);
+    const payload: MetaAttachPayload = {
       conversationId: conv.id,
       messageId: msgRow.id,
       organizationId: conv.organizationId,
@@ -170,8 +177,19 @@ export async function sendAgentFollowUpMedia(args: {
       mime,
       caption: "",
       kind,
-    });
+      ...(mediaId ? { mediaId } : {}),
+    };
+    const job = await enqueueMetaAttach(payload);
     if (!job) {
+      // Já está na Meta: envia daqui mesmo (o job é o fallback síncrono sem Redis).
+      if (mediaId) {
+        const { processMetaAttach } = await import("@/jobs/whatsapp/meta-attach.job");
+        const res = await processMetaAttach(payload).catch((err) => ({ sendStatus: "failed" as const, metaError: err instanceof Error ? err.message : String(err) }));
+        if (res.sendStatus === "sent") {
+          sentCount += 1;
+          continue;
+        }
+      }
       await prisma.message
         .updateMany({
           where: { id: msgRow.id, sendStatus: "pending" },
@@ -187,4 +205,28 @@ export async function sendAgentFollowUpMedia(args: {
   }
 
   return sentCount;
+}
+
+/**
+ * Upload do anexo à Meta a partir do processo que tem o arquivo. `undefined`
+ * quando não dá (arquivo não lido, vídeo acima do limite, erro da Meta): o
+ * worker segue pelo caminho de antes.
+ */
+async function preuploadToMeta(
+  metaClient: ReturnType<typeof metaClientFromConfig>,
+  mediaUrl: string,
+  mime: string,
+  fileName: string,
+): Promise<string | undefined> {
+  try {
+    const found = await readStoredMediaForSend(mediaUrl);
+    if (!found?.buffer.length) return undefined;
+    const uploadMime = resolveOutboundAttachmentMime({ rawType: mime || found.mimeType, fileNames: [fileName, found.fileName] });
+    if (uploadMime.startsWith("video/") && found.buffer.length > WHATSAPP_VIDEO_MAX_BYTES) return undefined;
+    const finalMime = uploadMime !== "application/octet-stream" ? uploadMime : mime || found.mimeType || "application/octet-stream";
+    return await metaClient.uploadMedia(found.buffer, finalMime, fileName || found.fileName);
+  } catch (err) {
+    console.warn("[send-agent-media] upload prévio à Meta falhou; o worker tenta com o arquivo:", err instanceof Error ? err.message : err);
+    return undefined;
+  }
 }

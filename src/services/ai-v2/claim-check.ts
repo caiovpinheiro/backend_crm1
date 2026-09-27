@@ -24,7 +24,8 @@ NÃO liste:
 - dizer que não tem a informação, que não consegue confirmar ou que vai chamar alguém da equipe;
 - dados do próprio cliente que aparecem nas fontes;
 - repetir o que o cliente disse sem confirmar como verdade.
-- dizer o que o atendente vai fazer agora ou em seguida ("vou te orientar", "vou te enviar o passo a passo", "segue o material"): é intenção, não fato — só é afirmação se trouxer regra, valor, prazo ou canal que as fontes não dizem.
+- dizer o que o atendente vai fazer agora ou em seguida ("vou te orientar", "vou te enviar o passo a passo", "segue o material"): é intenção, não fato — só é afirmação se trouxer regra, valor, prazo ou canal que as fontes não dizem;
+- frase vaga sem dado concreto ("pode levar um tempo", "depende do caso", "varia conforme a solicitação", "fica confuso"): sem número, data, nome, canal ou condição definida, o cliente não tem o que usar como verdade.
 
 O que o atendente já disse antes na conversa não é fonte: repetir uma afirmação anterior só está sustentado se as fontes a sustentam.
 
@@ -139,14 +140,73 @@ export function claimFoundInSources(claim: string, sources: string[]): boolean {
  */
 export function notAFactClaim(claim: string): boolean {
   const c = claim.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (/\bnao (?:consigo|posso|sei|tenho|temos|encontrei|achei)\b|\bnao (?:esta|estao|foi|ha) (?:informad|disponivel|disponiveis|confirmad)|\bsem (?:essa |esta )?informacao\b|\bnao da para (?:confirmar|saber)\b/.test(c)) return true;
+  if (/\bnao (?:consigo|posso|sei|tenho|temos|encontrei|achei)\b|\bnao (?:esta|estao|foi|ha) (?:informad|disponivel|disponiveis|confirmad|especificad|previst)|\bsem (?:essa |esta )?informacao\b|\bnao da para (?:confirmar|saber)\b/.test(c)) return true;
+  // "O material n\u00e3o traz esse encontro", "n\u00e3o consta", "n\u00e3o menciona": a
+  // resposta diz que a fonte n\u00e3o tem a informa\u00e7\u00e3o \u2014 n\u00e3o afirma nada.
+  if (/\bnao (?:traz|trazem|informa|informam|consta|constam|menciona|mencionam|inclui|incluem|aparece|aparecem|lista|listam|detalha|detalham|especifica|especificam|indica|indicam|mostra|mostram|cobre|cobrem)\b/.test(c)) return true;
   if (/\b(?:vou|irei|vamos|posso) (?:te |lhe )?(?:encaminhar|transferir|direcionar|passar|chamar)\b|\b(?:encaminhar|transferir|direcionar) (?:seu|o seu|voce|o) (?:atendimento|caso|pedido)\b/.test(c)) return true;
   if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
   // Motivo da transferência ("precisa ser tratado por uma pessoa da equipe").
   if (/\b(?:precisa|deve|tem que) ser (?:tratad|analisad|verificad|resolvid|feit|confirmad|avaliad)\w* (?:por|pela|pelo) (?:uma pessoa|alguem|a equipe|equipe|um atendente|atendente|setor|um consultor)/.test(c)) return true;
   // Pedido ao cliente ("para eu identificar o erro, envie…").
   if (/^para (?:eu|que eu|a gente) (?:identificar|verificar|entender|confirmar|analisar|te ajudar)\b/.test(c)) return true;
-  return false;
+  return isVagueClaim(claim);
+}
+
+const VAGUE = /\b(?:depende|dependem|varia|variam|pode (?:variar|levar|demorar|mudar|ser diferente)|podem (?:variar|levar|demorar|mudar)|conforme (?:o|a|os|as|cada) |caso a caso|um pouco de tempo|algum tempo|fica confuso|e comum|e normal|nao e incomum)\b/;
+
+/**
+ * Frase vaga sem dado concreto ("o retorno pode levar um pouco de tempo",
+ * "o valor depende do plano e da modalidade"): não traz número, data, link,
+ * nem nome próprio no meio da frase. O cliente não tem o que usar como
+ * verdade; barrar isso virava reescrita (outra frase vaga) e transferência.
+ */
+export function isVagueClaim(claim: string): boolean {
+  const raw = claim.trim();
+  if (/\d|https?:\/\/|@/.test(raw)) return false;
+  // Nome próprio no meio da frase (menu, sistema, setor): é fato, não vagueza.
+  if (raw.split(/\s+/).slice(1).some((w) => /^[*"“(]?\p{Lu}/u.test(w))) return false;
+  const c = raw.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  return VAGUE.test(c);
+}
+
+const ECHO_STOP = new Set(["para", "como", "com", "sem", "pela", "pelo", "uma", "que", "voce", "seu", "sua", "esta", "este", "isso", "esse", "essa", "mais", "menos", "muito", "tambem", "depois", "antes", "quando", "onde", "aqui", "esta", "estao", "nao", "sim", "mas", "porque", "sobre", "entre", "ainda", "sistema", "ja"]);
+
+/**
+ * A marcação repete o que o cliente contou sobre a própria situação, numa
+ * frase dele que não era pergunta: "o sistema não está aceitando arquivos
+ * acima de 60 páginas" quando foi o cliente quem disse isso. Repetir não é
+ * afirmar. Se o cliente PERGUNTOU ("a taxa é R$ 30, né?"), confirmar continua
+ * sendo afirmação sem fonte.
+ */
+export function claimEchoesClient(claim: string, clientTexts: string[]): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const wordsOf = (s: string) => fold(s).split(/[^a-z0-9]+/).filter((w) => (w.length >= 4 && !ECHO_STOP.has(w)) || /^\d+$/.test(w));
+  const words = wordsOf(claim.replace(/\d[\d.]*(?:,\d+)?/g, (n) => ` ${n.replace(/\./g, "")} `));
+  const numbers = words.filter((w) => /^\d+$/.test(w));
+  if (words.length < 2) return false;
+  // Pergunta de confirmação ("é R$ 30, né?", "o limite é 40, certo?") não é
+  // relato. Relato seguido de pergunta curta ("não está aceitando, e agora?")
+  // é relato: vale a parte antes da vírgula.
+  const CONFIRMATION_TAIL = /,?\s*(?:n[eé]|certo|correto|n[ãa]o [eé]|[eé] isso|ser[áa]|ser[áa] que|pode ser|confere|verdade)\s*\??\s*$/i;
+  const sentences = clientTexts
+    .flatMap((t) => t.split(/(?<=[.!?])\s+|\n+/))
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      if (!/\?\s*$/.test(s)) return CONFIRMATION_TAIL.test(s) ? "" : s;
+      if (CONFIRMATION_TAIL.test(s)) return "";
+      const comma = s.lastIndexOf(",");
+      if (comma < 0) return "";
+      const tail = s.slice(comma + 1).trim();
+      return tail.split(/\s+/).length <= 4 ? s.slice(0, comma).trim() : "";
+    })
+    .filter(Boolean);
+  return sentences.some((s) => {
+    const vocab = new Set(wordsOf(s.replace(/\d[\d.]*(?:,\d+)?/g, (n) => ` ${n.replace(/\./g, "")} `)));
+    if (!numbers.every((n) => vocab.has(n))) return false;
+    return words.filter((w) => vocab.has(w)).length / words.length >= 0.8;
+  });
 }
 
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
@@ -176,7 +236,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimFoundInSources(c, args.sources));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimFoundInSources(c, args.sources));
     if (unsupported.length < flagged.length) {
       console.info("[ai-v2] checagem por modelo: marcação descartada, está nas fontes:", flagged.filter((c) => !unsupported.includes(c)));
     }

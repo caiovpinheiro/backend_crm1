@@ -159,6 +159,13 @@ export type MetaAttachPayload = {
   caption: string;
   /** Ausente em jobs antigos de áudio — inferido do mime. */
   kind?: MetaAttachKind;
+  /**
+   * Id do arquivo já enviado à Meta por quem enfileirou (a API, onde o
+   * arquivo existe). Com ele o worker envia pelo id e não precisa ler o
+   * arquivo — que, sem volume compartilhado, ele não tem. Nunca para áudio
+   * (a conversão é no worker).
+   */
+  mediaId?: string;
 };
 
 /** Campos extras quando o job envia template Meta (mesma fila `meta-outbound`). */

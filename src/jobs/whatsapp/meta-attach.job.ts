@@ -181,54 +181,61 @@ export async function processMetaAttach(
     };
   }
 
+  // Quem enfileirou já subiu o arquivo para a Meta (a API, onde ele existe):
+  // envia pelo id, sem precisar do arquivo neste processo. Áudio nunca vem
+  // assim — a conversão é aqui.
+  const preUploadedId = kind !== "audio" && payload.mediaId?.trim() ? payload.mediaId.trim() : null;
+
   const storedPath = msg.mediaUrl ? parseStoragePath(msg.mediaUrl) : null;
   let stored: { buffer: Buffer; mimeType: string } | null = null;
   let storedFileName = storedPath?.fileName ?? payload.originalName ?? "file";
 
-  if (storedPath && storedPath.orgId === payload.organizationId) {
-    stored = await readStoredFile(
-      storedPath.orgId,
-      storedPath.bucket,
-      storedPath.fileName,
-    );
-  } else if (msg.mediaUrl?.startsWith("/uploads/") || msg.mediaUrl?.startsWith("/api/uploads/")) {
-    const relative = msg.mediaUrl.replace(/^\/api/, "").replace(/^\/uploads\//, "");
-    stored = await readLegacyUploadsFile(relative);
-    storedFileName = relative.split("/").pop() || storedFileName;
-  }
-
-  // Sem o arquivo neste processo: mesmo read do envio de mídia das
-  // automações — variantes de nome (mp4↔MP4, jpg↔jpeg), /uploads legado e
-  // GET no servidor da API (STORAGE_PEER_URL / NEXTAUTH_URL com
-  // CRON_SECRET). Com storage em disco (sem S3), o arquivo gravado pela API
-  // não existe no volume do worker de WhatsApp: o anexo de modelo falhava
-  // enquanto o inbox mostrava o vídeo.
-  if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId && msg.mediaUrl) {
-    const { readStoredMediaForSend } = await import("@/lib/storage/read-for-send");
-    const found = await readStoredMediaForSend(msg.mediaUrl).catch(() => null);
-    if (found?.buffer.length) {
-      stored = { buffer: found.buffer, mimeType: found.mimeType };
-      storedFileName = found.fileName;
+  if (!preUploadedId) {
+    if (storedPath && storedPath.orgId === payload.organizationId) {
+      stored = await readStoredFile(
+        storedPath.orgId,
+        storedPath.bucket,
+        storedPath.fileName,
+      );
+    } else if (msg.mediaUrl?.startsWith("/uploads/") || msg.mediaUrl?.startsWith("/api/uploads/")) {
+      const relative = msg.mediaUrl.replace(/^\/api/, "").replace(/^\/uploads\//, "");
+      stored = await readLegacyUploadsFile(relative);
+      storedFileName = relative.split("/").pop() || storedFileName;
     }
-  }
 
-  if (!stored?.buffer.length) {
-    if (!storedPath || storedPath.orgId !== payload.organizationId) {
-      return markFailed(payload, "Arquivo não encontrado no storage.", {
-        messageType: kind,
-      });
+    // Sem o arquivo neste processo: mesmo read do envio de mídia das
+    // automações — variantes de nome (mp4↔MP4, jpg↔jpeg), /uploads legado e
+    // GET no servidor da API (STORAGE_PEER_URL / NEXTAUTH_URL com
+    // CRON_SECRET). Com storage em disco (sem S3), o arquivo gravado pela API
+    // não existe no volume do worker de WhatsApp: o anexo de modelo falhava
+    // enquanto o inbox mostrava o vídeo.
+    if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId && msg.mediaUrl) {
+      const { readStoredMediaForSend } = await import("@/lib/storage/read-for-send");
+      const found = await readStoredMediaForSend(msg.mediaUrl).catch(() => null);
+      if (found?.buffer.length) {
+        stored = { buffer: found.buffer, mimeType: found.mimeType };
+        storedFileName = found.fileName;
+      }
     }
-    // Sem objeto nenhum ≠ objeto vazio: "vazio ou ilegível" escondia que o
-    // arquivo não existe no storage (upload não concluído, trocado ou apagado).
-    return markFailed(
-      payload,
-      stored ? "Arquivo vazio ou ilegível." : "Arquivo não encontrado no storage — envie o arquivo de novo.",
-      { messageType: kind },
-    );
+
+    if (!stored?.buffer.length) {
+      if (!storedPath || storedPath.orgId !== payload.organizationId) {
+        return markFailed(payload, "Arquivo não encontrado no storage.", {
+          messageType: kind,
+        });
+      }
+      // Sem objeto nenhum ≠ objeto vazio: "vazio ou ilegível" escondia que o
+      // arquivo não existe no storage (upload não concluído, trocado ou apagado).
+      return markFailed(
+        payload,
+        stored ? "Arquivo vazio ou ilegível." : "Arquivo não encontrado no storage — envie o arquivo de novo.",
+        { messageType: kind },
+      );
+    }
   }
 
   const classifiedMime = resolveOutboundAttachmentMime({
-    rawType: payload.mime || stored.mimeType,
+    rawType: payload.mime || stored?.mimeType || "",
     fileNames: [payload.originalName, storedFileName],
   });
   if (classifiedMime.startsWith("video/") && kind === "audio") {
@@ -241,16 +248,17 @@ export async function processMetaAttach(
   let uploadMime =
     classifiedMime !== "application/octet-stream"
       ? classifiedMime
-      : payload.mime || stored.mimeType || "application/octet-stream";
+      : payload.mime || stored?.mimeType || "application/octet-stream";
   let uploadName = payload.originalName || storedFileName;
-  let storeBuffer = stored.buffer;
+  let storeBuffer = stored?.buffer ?? Buffer.alloc(0);
+  const originalBytes = storeBuffer.length;
 
   if (kind === "video") {
     if (!uploadMime.startsWith("video/")) {
       const fromName = mimeFromFilename(uploadName);
       uploadMime = fromName.startsWith("video/") ? fromName : "video/mp4";
     }
-    if (storeBuffer.length > WHATSAPP_VIDEO_MAX_BYTES) {
+    if (!preUploadedId && storeBuffer.length > WHATSAPP_VIDEO_MAX_BYTES) {
       return markFailed(payload, WHATSAPP_VIDEO_TOO_LARGE_MESSAGE, { messageType: "video" });
     }
   }
@@ -261,7 +269,7 @@ export async function processMetaAttach(
       `[meta-attach] Convertendo audio ${payload.mime} (.${inputExt}) para formato aceito pela Meta`,
     );
     const prepared = await prepareWhatsAppAudio(
-      stored.buffer,
+      storeBuffer,
       inputExt,
       payload.originalName,
     );
@@ -285,7 +293,7 @@ export async function processMetaAttach(
     uploadName = prepared.payload.fileName;
     storeBuffer = prepared.payload.buffer;
     console.log(
-      `[meta-attach] Preparo OK (${audioDelivery}), ${stored.buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+      `[meta-attach] Preparo OK (${audioDelivery}), ${originalBytes} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
     );
   }
 
@@ -327,7 +335,7 @@ export async function processMetaAttach(
   let metaSendError: string | null = null;
 
   try {
-    const mediaId = await metaClient.uploadMedia(storeBuffer, uploadMime, uploadName);
+    const mediaId = preUploadedId ?? (await metaClient.uploadMedia(storeBuffer, uploadMime, uploadName));
     const result = await metaClient.sendMediaById(
       to,
       mediaId,

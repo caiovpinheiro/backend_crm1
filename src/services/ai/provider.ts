@@ -223,6 +223,18 @@ export async function transcribeWithOpenAI(apiKey: string, audio: Uint8Array): P
   return (result.text ?? "").trim();
 }
 
+// Vetor por texto, por pouco tempo: num turno a mesma mensagem do cliente
+// era embedada duas vezes em série (escolha do assunto e busca na base).
+// O vetor de um texto não muda para o mesmo modelo.
+const EMBED_CACHE_MAX = 300;
+const EMBED_CACHE_TTL_MS = 10 * 60 * 1000;
+const embedCache = new Map<string, { at: number; vector: number[] }>();
+
+/** Limpa o cache de vetores (testes). */
+export function clearEmbedCache(): void {
+  embedCache.clear();
+}
+
 export async function embedTexts(
   texts: string[],
   apiKey: string,
@@ -230,21 +242,36 @@ export async function embedTexts(
   embeddings: number[][];
   inputTokens: number;
 }> {
-  const openai = getOpenAI(apiKey);
-  // Mesmo tratamento do generateText: embedding entra no caminho de
-  // retrieval do inbound, então pendurar aqui também segura o worker.
-  const result = await callLlmWithRetry(
-    (abortSignal) =>
-      embedMany({
-        model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
-        values: texts,
-        abortSignal,
-        maxRetries: 0,
-      }),
-    { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
-  );
+  const now = Date.now();
+  const keyOf = (t: string) => `${DEFAULT_EMBEDDING_MODEL}\u0000${t}`;
+  const cached = texts.map((t) => {
+    const hit = embedCache.get(keyOf(t));
+    return hit && now - hit.at <= EMBED_CACHE_TTL_MS ? hit.vector : undefined;
+  });
+  const missing = [...new Set(texts.filter((_, i) => !cached[i]))];
+  let fresh = new Map<string, number[]>();
+  let inputTokens = 0;
+  if (missing.length > 0) {
+    const openai = getOpenAI(apiKey);
+    // Mesmo tratamento do generateText: embedding entra no caminho de
+    // retrieval do inbound, então pendurar aqui também segura o worker.
+    const result = await callLlmWithRetry(
+      (abortSignal) =>
+        embedMany({
+          model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
+          values: missing,
+          abortSignal,
+          maxRetries: 0,
+        }),
+      { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
+    );
+    inputTokens = result.usage?.tokens ?? 0;
+    fresh = new Map(missing.map((t, i) => [t, result.embeddings[i]]));
+    if (embedCache.size + fresh.size > EMBED_CACHE_MAX) embedCache.clear();
+    for (const [t, vector] of fresh) if (vector) embedCache.set(keyOf(t), { at: now, vector });
+  }
   return {
-    embeddings: result.embeddings,
-    inputTokens: result.usage?.tokens ?? 0,
+    embeddings: texts.map((t, i) => cached[i] ?? fresh.get(t) ?? []),
+    inputTokens,
   };
 }

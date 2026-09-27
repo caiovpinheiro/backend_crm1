@@ -47,6 +47,7 @@ import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./rep
 import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
+import { onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
@@ -1145,10 +1146,31 @@ export async function callV2LLM(args: {
   systemPrompt: string;
 }> {
   const apiKey = await getAgentApiKey(args.agentId);
-  // Resposta ao cliente: chave do fornecedor do modelo (Claude → Anthropic).
-  // Busca nos materiais continua com a chave OpenAI (`apiKey`).
-  const chatKey = await getAgentChatKey(args.agentId, args.config.model, apiKey);
   noteV2Fact("model", args.config.model);
+  const promptTheme = activeTheme(args.config, args.themeId);
+  const promptDocIds = knowledgeDocIdsFor(args.config, promptTheme);
+  const modelIds = allowedMessageModelIdsFor(args.config, promptTheme);
+  // Chave do fornecedor da resposta (Claude → Anthropic; a busca nos
+  // materiais continua com a chave OpenAI), títulos dos materiais, mensagens
+  // prontas e etapas: leituras independentes, em paralelo — em série cada
+  // uma somava sua ida ao banco à espera do cliente.
+  const [chatKey, knowledgeDocTitles, messageModels, actionStages] = await Promise.all([
+    getAgentChatKey(args.agentId, args.config.model, apiKey),
+    // Títulos dos materiais permitidos: ajudam o modelo a decidir quando
+    // chamar knowledge_search e a contextualizar a resposta.
+    promptDocIds.length > 0
+      ? knowledgeDocTitlesByIds(args.agentId, promptDocIds).catch((err) => {
+          console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
+          return [] as string[];
+        })
+      : Promise.resolve([] as string[]),
+    // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
+    describeV2MessageModels(modelIds).catch((err) => {
+      console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
+      return [] as V2MessageModelSummary[];
+    }),
+    actionStageNames(args.config, promptTheme),
+  ]);
   // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
   // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
   // precisa (ferramenta, variável coletada, ação).
@@ -1167,28 +1189,6 @@ export async function callV2LLM(args: {
     restoreInput: vault.size > 0 ? (input) => vault.restoreDeep(input) : undefined,
   });
   const allowedToolNames = Object.keys(tools);
-
-  // Carrega os títulos dos materiais permitidos para ajudar o modelo a
-  // decidir quando chamar knowledge_search e a contextualizar a resposta.
-  const promptTheme = activeTheme(args.config, args.themeId);
-  const promptDocIds = knowledgeDocIdsFor(args.config, promptTheme);
-  let knowledgeDocTitles: string[] = [];
-  if (promptDocIds.length > 0) {
-    try {
-      knowledgeDocTitles = await knowledgeDocTitlesByIds(args.agentId, promptDocIds);
-    } catch (err) {
-      console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
-    }
-  }
-
-  // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
-  const modelIds = allowedMessageModelIdsFor(args.config, promptTheme);
-  const messageModels = await describeV2MessageModels(modelIds).catch((err) => {
-    console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
-    return [] as V2MessageModelSummary[];
-  });
-
-  const actionStages = await actionStageNames(args.config, promptTheme);
 
   const prefetch = await prefetchKnowledge({
     agentId: args.agentId,
@@ -1450,14 +1450,15 @@ export async function callV2LLM(args: {
     // a regra do material é o esperado. Confirmar como preço da empresa um
     // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
     // checagem por modelo, que distingue os dois casos.
-    const unsupportedOf = (reply: string, reason?: string) => [
-      ...(procedureAdmittedMissing(reply, reason) ? ["um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)"] : []),
-      ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
-      ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => `"${t}"`),
-      ...unsupportedMenuPaths(reply, sources, factSources).map((t) => `"${t}"`),
-      ...unsupportedFigures(reply, sources, clientTexts),
-      ...unsupportedFacts(reply, sources, clientTexts),
-      ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
+    type Unsupported = { label: string; text: string };
+    const unsupportedOf = (reply: string, reason?: string): Unsupported[] => [
+      ...(procedureAdmittedMissing(reply, reason) ? [{ label: "um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)", text: "" }] : []),
+      ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => ({ label: `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`, text: n })),
+      ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
+      ...unsupportedMenuPaths(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
+      ...unsupportedFigures(reply, sources, clientTexts).map((t) => ({ label: t, text: t })),
+      ...unsupportedFacts(reply, sources, clientTexts).map((t) => ({ label: t, text: t })),
+      ...unsupportedHedges(reply, sources).map((h) => ({ label: `"${h}" (palpite sem fonte)`, text: h })),
     ];
     // Checagem por modelo: o que as regras não pegam (política sem número,
     // conhecimento geral, recurso ou material que não existe). Só roda
@@ -1480,7 +1481,7 @@ export async function callV2LLM(args: {
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
-    const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
+    const modelClaims = async (output: V2LLMOutput): Promise<Unsupported[]> => {
       // Transferência só com o aviso não tem o que conferir; com orientação
       // (que agora chega ao cliente antes do aviso), confere.
       if ((args.config.groundingCheck ?? "model") !== "model" || (output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
@@ -1496,29 +1497,70 @@ export async function callV2LLM(args: {
       // ou link não conferido não sai — as regras fixas não pegam esses.
       if (!res.ok && statesProcedure(output.reply)) {
         traceStep("verificação", "Checagem por modelo indisponível e a resposta traz passo a passo, caminho ou link não conferido");
-        return ["um passo a passo, caminho ou link que não pôde ser conferido nos materiais"];
+        return [{ label: "um passo a passo, caminho ou link que não pôde ser conferido nos materiais", text: "" }];
       }
       if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
       else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
-      return res.unsupported.map((c) => `"${c}" (afirmação que não está nos materiais)`);
+      return res.unsupported.map((c) => ({ label: `"${c}" (afirmação que não está nos materiais)`, text: c }));
     };
-    let unsupported = unsupportedOf(r.output.reply, r.output.reason);
-    if (unsupported.length === 0) unsupported = await modelClaims(r.output);
-    if (unsupported.length === 0) return;
-    const list = unsupported.join(", ");
-    noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: false });
+    const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
+    const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
+
+    let output = r.output;
+    let flags = unsupportedOf(output.reply, output.reason);
+    // A checagem por modelo já leu as frases que sobram? Depois dela, o
+    // corte não precisa de nova checagem (só das regras fixas).
+    let modelChecked = false;
+    if (flags.length === 0) {
+      flags = await modelClaims(output);
+      modelChecked = true;
+    }
+    if (flags.length === 0) return;
+    const firstLabels = labelsOf(flags);
+    const firstList = firstLabels.join(", ");
+    noteV2Fact("verification", { unsupported: firstLabels, rewritten: false, forcedHandoff: false });
+
+    // 1) Corte: tira só as frases marcadas, sem nova chamada ao modelo. A
+    // reescrita pelo modelo parafraseava a mesma afirmação e o cliente era
+    // transferido sem receber a parte certa da resposta. Duas rodadas no
+    // máximo: a segunda cobre o que a checagem por modelo apontar no que sobrou.
+    const removedTexts: string[] = [];
+    for (let round = 0; round < 2 && flags.length > 0 && textsOf(flags).length === flags.length; round += 1) {
+      const trimmed = trimUnsupportedSentences(output.reply, textsOf(flags));
+      if (!trimmed) break;
+      const candidate: V2LLMOutput = { ...output, reply: trimmed.reply };
+      let still = unsupportedOf(candidate.reply, candidate.reason);
+      if (still.length === 0 && !modelChecked) {
+        still = await modelClaims(candidate);
+        modelChecked = true;
+      }
+      traceStep("verificação", `Resposta cita ${labelsOf(flags).join(", ")}, que não está no material nem na conversa — frase retirada da resposta`);
+      removedTexts.push(...trimmed.removed);
+      output = candidate;
+      flags = still;
+    }
+    if (flags.length === 0) {
+      noteV2Fact("verification", { unsupported: firstLabels, rewritten: true, trimmed: removedTexts, forcedHandoff: false });
+      r.output = output;
+      return;
+    }
+
+    // 2) Reescrita pelo modelo: só tirar o que foi apontado, sem trocar por
+    // outra afirmação parecida. Se ela devolve só frases que já estavam na
+    // resposta, não há nada novo a conferir por modelo.
+    const list = labelsOf(flags).join(", ");
     traceStep("verificação", `Resposta cita ${list}, que não está no material nem na conversa — pedindo reescrita`);
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Reescreva a resposta usando só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Se os trechos não dizem como fazer o que o cliente pediu, diga isso com naturalidade e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e marque handoff=true. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
         model: args.config.model,
         apiKey: chatKey,
         system: reviewSystem,
-        messages: [...messages, { role: "assistant", content: JSON.stringify(r.output) }] as any,
+        messages: [...messages, { role: "assistant", content: JSON.stringify(output) }] as any,
         temperature: 0,
         maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
         maxSteps: 1,
@@ -1533,10 +1575,25 @@ export async function callV2LLM(args: {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
         let still = unsupportedOf(fixed.reply, fixed.reason);
-        if (still.length === 0) still = await modelClaims(fixed);
+        const rulesClean = still.length === 0;
+        if (rulesClean && modelChecked && onlyKeptSentences(fixed.reply, output.reply, textsOf(flags))) {
+          traceStep("verificação", "A reescrita só tirou as frases apontadas — sem nova checagem");
+        } else if (rulesClean) {
+          still = await modelClaims(fixed);
+        }
+        // A reescrita trouxe outra afirmação sem fonte: corta essa também,
+        // se o que sobra ainda responde (senão, transfere).
+        if (still.length > 0 && rulesClean && textsOf(still).length === still.length) {
+          const trimmed = trimUnsupportedSentences(fixed.reply, textsOf(still));
+          if (trimmed && unsupportedOf(trimmed.reply, fixed.reason).length === 0) {
+            traceStep("verificação", `A reescrita ainda citava ${labelsOf(still).join(", ")} — frase retirada da resposta`);
+            fixed.reply = trimmed.reply;
+            still = [];
+          }
+        }
         if (still.length === 0) {
           traceStep("verificação", "Reescrita só com o material");
-          noteV2Fact("verification", { unsupported, rewritten: true, forcedHandoff: false });
+          noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, forcedHandoff: false });
           r.output = fixed;
           return;
         }
@@ -1545,14 +1602,14 @@ export async function callV2LLM(args: {
       console.warn("[ai-v2] revisão de termos falhou:", err instanceof Error ? err.message : err);
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
-    noteV2Fact("verification", { unsupported, rewritten: false, forcedHandoff: true });
+    noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: false, forcedHandoff: true });
     noteV2Fact("handoffCause", "verification", { keepFirst: true });
     r.output = {
-      ...r.output,
+      ...output,
       reply: args.config.fallback?.noSource?.message || args.config.handoff?.message || "Vou chamar uma pessoa da equipe para te ajudar com isso.",
       handoff: true,
-      actions: [...r.output.actions.filter((a) => a.type !== "handoff"), { type: "handoff" }],
-      reason: `Citava ${list}, que não está no material.`,
+      actions: [...output.actions.filter((a) => a.type !== "handoff"), { type: "handoff" }],
+      reason: `Citava ${firstList === list ? list : `${firstList}; depois ${list}`}, que não está no material.`,
     };
   }
 
