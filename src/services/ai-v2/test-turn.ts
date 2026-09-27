@@ -9,7 +9,7 @@ import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2St
 import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
 import { MESSAGE_MODEL_MIN_COVERAGE, introBeforeMaterial, messageModelCoverage } from "./sent-materials";
 import { getV2ThemeById } from "./themes";
-import { selectV2ThemeSemantic } from "./theme-semantic";
+import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
@@ -21,6 +21,7 @@ import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from 
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
+import { knowledgeChunkTexts } from "./ground-reply";
 import { systemMessage } from "@/lib/ai-v2/system-messages";
 import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, type V2LoadedContext } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
@@ -475,6 +476,7 @@ export async function simulateV2Turn(
       message: userMessage,
       currentThemeId: currentThemeId ?? undefined,
       apiKey,
+      answeringQuestion: agentAskedQuestion(lastAgent, config),
     });
     themeId = selection.theme?.id ?? currentThemeId ?? null;
     noteV2Fact("theme", { method: selection.method, themeId: selection.theme?.id ?? null, similarity: selection.similarity ?? null });
@@ -560,6 +562,7 @@ export async function simulateV2Turn(
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
+    publicTexts: [userMessage, ...knowledgeChunkTexts(llmResult.toolCalls)],
   }, systemMessage(config, "returnPromiseHandoff"));
   output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
   // Igual à produção: pedido novo nesta mensagem não encerra.

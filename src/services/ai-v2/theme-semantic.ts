@@ -89,7 +89,42 @@ export type V2ThemeSelection = {
   theme: V2Theme | null;
   method: "trigger" | "semantic" | "kept" | "none";
   similarity?: number;
+  /** Mantido porque o cliente respondia a uma pergunta do agente. */
+  answer?: boolean;
 };
+
+const foldText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/** Pergunta de oferta de ajuda ("posso ajudar em algo mais?"): não espera resposta sobre o assunto. */
+const HELP_OFFER = /\b(?:posso|poderia|quer que eu)\b.*\b(?:ajud|mais alguma|algo mais)|\bmais alguma (?:coisa|duvida)\b|\balgo mais\b/;
+
+/**
+ * A última mensagem do agente terminou numa pergunta dele — fora o fecho
+ * configurado, a oferta de ajuda e as opções numeradas do fim. A mensagem
+ * seguinte do cliente é resposta a essa pergunta.
+ */
+export function agentAskedQuestion(lastAgentMessage: string | null | undefined, config: Pick<V2AgentConfig, "replyEnding" | "themes">): boolean {
+  if (!lastAgentMessage?.trim()) return false;
+  let text = lastAgentMessage;
+  const endings = [config.replyEnding, ...(config.themes ?? []).map((t) => t.replyEnding)];
+  for (const e of endings) {
+    for (const p of [...(e?.procedure?.phrases ?? []), ...(e?.info?.phrases ?? [])]) {
+      const phrase = p?.trim();
+      if (phrase) text = text.split(phrase).join(" ");
+    }
+  }
+  text = text.replace(/(?:\n\s*\d+[.)]\s+[^\n]*)+\s*$/u, "").trim();
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+  const last = sentences[sentences.length - 1] ?? "";
+  return last.endsWith("?") && !HELP_OFFER.test(foldText(last));
+}
+
+/** O cliente avisa que muda de assunto ("outra dúvida", "mudando de assunto"). */
+const SUBJECT_CHANGE = /\b(?:outro assunto|outra (?:duvida|coisa|questao|pergunta)|mudando de assunto|mudar de assunto|aproveitando|alem disso|tambem (?:queria|quero|preciso))\b/;
+
+export function changesSubject(message: string): boolean {
+  return SUBJECT_CHANGE.test(foldText(message));
+}
 
 /**
  * Ordem: gatilho casado na mensagem > assunto mais próximo em significado
@@ -101,7 +136,16 @@ export async function selectV2ThemeSemantic(args: {
   message: string;
   currentThemeId?: string;
   apiKey: string | null;
+  /**
+   * A última mensagem do agente era uma pergunta dele: a resposta do cliente
+   * fica no assunto atual. Antes, uma palavra da resposta ("me matricularam
+   * num lugar longe") casava o gatilho de outro assunto e o roteiro do
+   * assunto em andamento se perdia no meio.
+   */
+  answeringQuestion?: boolean;
 }): Promise<V2ThemeSelection> {
+  const currentTheme = args.currentThemeId ? (args.config.themes ?? []).find((t) => t.id === args.currentThemeId) ?? null : null;
+  const keepForAnswer = !!args.answeringQuestion && !!currentTheme && !changesSubject(args.message);
   // Sem o assunto atual: `selectV2Theme` o mantém sempre que nenhum outro
   // gatilho casa, o que impediria o significado de trocar de assunto.
   const byTrigger = selectV2Theme(args.config, args.message);
@@ -113,6 +157,7 @@ export async function selectV2ThemeSemantic(args: {
   if (byTrigger) {
     // Gatilho do assunto de pedido de pessoa: vale o gatilho (fora da conferência pelo sentido).
     if (isHumanRequestTheme(byTrigger, args.config)) return { theme: byTrigger, method: "trigger" };
+    if (keepForAnswer && currentTheme && currentTheme.id !== byTrigger.id) return { theme: currentTheme, method: "kept", answer: true };
     // Palavra solta da lista ("empresa") levava "a empresa pediu um
     // comprovante" para o assunto que tinha essa palavra no gatilho. Com frase de verdade, confere
     // o sentido: se outro assunto é claramente mais próximo, ele vence.
@@ -146,6 +191,7 @@ export async function selectV2ThemeSemantic(args: {
 
   const text = args.message.trim();
   if (themes.length === 0 || !text || !args.apiKey) return fallback();
+  if (keepForAnswer && current) return { theme: current, method: "kept", answer: true };
   // Acompanhamento curto ("ok", "consegue me enviar?") continua no assunto
   // da conversa; pouco texto dá similaridade instável.
   if (current && isShortFollowUp(text, th.shortMessageWords)) return fallback();

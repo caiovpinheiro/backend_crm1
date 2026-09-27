@@ -15,7 +15,7 @@ import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, tryParse
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
 import { getV2ThemeById } from "./themes";
-import { selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
+import { agentAskedQuestion, selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
@@ -39,7 +39,7 @@ import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2Pref
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
-import { repeatFallback } from "./ground-reply";
+import { knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -1539,6 +1539,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
 
     // Atalho > gatilho > significado > assunto atual (ver theme-semantic).
+    // Resposta a uma pergunta do agente fica no assunto em andamento.
+    const lastOut = themeId && !themeFromRule
+      ? await Promise.resolve()
+          .then(() =>
+            prisma.message.findFirst({
+              where: { conversationId: input.conversationId, direction: "out", isPrivate: false, messageType: { not: "note" } },
+              orderBy: { createdAt: "desc" },
+              select: { content: true },
+            }),
+          )
+          .catch(() => null)
+      : null;
     const selection: V2ThemeSelection = themeFromRule
       ? { theme: getV2ThemeById(config, themeId), method: "kept" }
       : await selectV2ThemeSemantic({
@@ -1546,6 +1558,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           message: input.userMessage,
           currentThemeId: themeId,
           apiKey: await tryGetAgentApiKey(resolved.agentConfigId),
+          answeringQuestion: agentAskedQuestion(lastOut?.content ?? null, config),
         });
     themeId = selection.theme?.id ?? themeId;
     traceStep("assunto", selection.theme
@@ -1554,7 +1567,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
             ? "um gatilho casou com a mensagem"
             : selection.method === "semantic"
               ? `mais próximo em significado (similaridade ${selection.similarity?.toFixed(2)})`
-              : "mantido o assunto da conversa"
+              : selection.answer
+                ? "mantido: o cliente respondia a uma pergunta do agente"
+                : "mantido o assunto da conversa"
         }`
       : `Nenhum assunto${selection.similarity !== undefined ? ` (mais próximo teve similaridade ${selection.similarity.toFixed(2)}, abaixo do mínimo)` : ""}`,
       { method: selection.method, themeId: selection.theme?.id ?? null });
@@ -1776,6 +1791,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
+    publicTexts: [input.userMessage, ...knowledgeChunkTexts(toolCalls)],
   }, systemMessage(config, "returnPromiseHandoff"));
   // Negrito conforme "Quem é o agente › Destaques em negrito".
   let replyText = applyBoldPolicy(guard.text, config.bold);

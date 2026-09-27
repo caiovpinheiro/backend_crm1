@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({ embedTexts: vi.fn() }));
 
 vi.mock("@/services/ai/provider", () => ({ embedTexts: mocks.embedTexts }));
 
-import { clearThemeVectorCache, selectV2ThemeSemantic, themeEmbeddingText } from "../theme-semantic";
+import { agentAskedQuestion, changesSubject, clearThemeVectorCache, selectV2ThemeSemantic, themeEmbeddingText } from "../theme-semantic";
 
 const THEMES = [
   { id: "docs", name: "Documentos", when: ["segunda via", "documento"], examples: [], instructions: "Ajude a emitir documentos." },
@@ -123,5 +123,38 @@ describe("gatilho x sentido", () => {
     const r = await selectV2ThemeSemantic({ config: cfg, message: "segunda via", apiKey: "k" });
     expect(r).toMatchObject({ method: "trigger", theme: { id: "docs" } });
     expect(mocks.embedTexts).not.toHaveBeenCalled();
+  });
+});
+
+describe("resposta a uma pergunta do agente fica no assunto em andamento", () => {
+  beforeEach(() => {
+    clearThemeVectorCache();
+    mocks.embedTexts.mockReset();
+  });
+
+  it("gatilho de outro assunto na resposta não troca o assunto", async () => {
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que o boleto chegou no endereço antigo", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
+    expect(r).toEqual(expect.objectContaining({ method: "kept", answer: true }));
+    expect(r.theme?.id).toBe("docs");
+  });
+
+  it("sem pergunta do agente, o gatilho vale como antes", async () => {
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que o boleto chegou no endereço antigo", currentThemeId: "docs", apiKey: null });
+    expect(r.theme?.id).toBe("pay");
+  });
+
+  it("cliente avisa que muda de assunto: o gatilho vale", async () => {
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "outra dúvida: e o boleto?", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
+    expect(r.theme?.id).toBe("pay");
+    expect(changesSubject("Mudando de assunto, quero ver o boleto")).toBe(true);
+  });
+
+  it("pergunta do agente = última frase com '?', fora fecho configurado, oferta de ajuda e opções", () => {
+    const config = { replyEnding: { info: { enabled: true, phrases: ["Posso te ajudar em mais alguma coisa?"] }, procedure: { enabled: false, phrases: [] } }, themes: [] } as never;
+    expect(agentAskedQuestion("Entendi. Qual é o motivo da troca?", config)).toBe(true);
+    expect(agentAskedQuestion(["Seu pedido saiu hoje.", "", "Posso te ajudar em mais alguma coisa?"].join("\n"), config)).toBe(false);
+    expect(agentAskedQuestion("Pronto! Posso ajudar em algo mais?", config)).toBe(false);
+    expect(agentAskedQuestion(["Você prefere retirar ou receber em casa?", "", "1. Retirar", "2. Receber"].join("\n"), config)).toBe(true);
+    expect(agentAskedQuestion("Seu pedido saiu hoje.", config)).toBe(false);
   });
 });

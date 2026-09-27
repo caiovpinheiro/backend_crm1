@@ -53,6 +53,13 @@ type ScrubContext = {
   citableContact: Record<string, unknown> | null;
   selectedDeal: Record<string, unknown> | null;
   citableDeal: Record<string, unknown> | null;
+  /**
+   * Textos que o modelo viu e não são dado interno: trechos dos materiais
+   * lidos no turno e o que o cliente escreveu. Valor de campo só-leitura que
+   * aparece aqui é informação pública ("cursos de Graduação" no material), não
+   * vazamento do cadastro.
+   */
+  publicTexts?: string[];
 };
 
 const SCRUB_MARKER = "[informação interna não compartilhada]";
@@ -89,21 +96,41 @@ function collectNonCitableValues(ctx: ScrubContext): string[] {
 
 /**
  * Marcador no começo de frase ou linha sai junto com a vírgula que o
- * seguia ("[…], Ana! Vou te enviar" → "Ana! Vou te enviar"); no meio da
- * frase ele fica, para a frase não mudar de sentido.
+ * seguia ("[…], Ana! Vou te enviar" → "Ana! Vou te enviar"). No meio da
+ * frase o cliente via "cursos de [informação interna…] EaD": a frase inteira
+ * sai. Sobrando só marcador, a resposta fica vazia (o motor pergunta o que o
+ * cliente precisa).
  */
 function tidyScrubMarkers(text: string): string {
   const marker = SCRUB_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text
+  const leading = text
     .replace(new RegExp(`(^|\\n|[.!?]\\s+)${marker}[,;:]?\\s*(\\p{L})`, "gu"), (_m, before: string, next: string) => `${before}${next.toUpperCase()}`)
-    .replace(new RegExp(`(^|\\n|[.!?]\\s+)${marker}[,;:]?\\s*`, "gu"), "$1");
+    .replace(new RegExp(`(^|\\n|[.!?]\\s+)${marker}[,;:]?\\s*`, "gu"), "$1")
+    // Vocativo no fim da frase ("…atende você, […].") sai com a vírgula.
+    .replace(new RegExp(`,\\s*${marker}(?=\\s*(?:[.!?]|$))`, "gmu"), "");
+  if (!leading.includes(SCRUB_MARKER)) return leading;
+  return leading
+    .split("\n")
+    .map((line) =>
+      line.includes(SCRUB_MARKER)
+        ? line
+            .split(/(?<=[.!?])\s+/)
+            .filter((sentence) => !sentence.includes(SCRUB_MARKER))
+            .join(" ")
+        : line,
+    )
+    .filter((line, i, all) => line.trim() || (i > 0 && all[i - 1].trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function scrubNonCitableFields(
   text: string,
   ctx: ScrubContext,
 ): { text: string; scrubbedFields: string[] } {
-  const values = collectNonCitableValues(ctx);
+  const publicText = (ctx.publicTexts ?? []).join("\n");
+  const values = collectNonCitableValues(ctx).filter((v) => !publicText.includes(v));
   const scrubbedFields: string[] = [];
   let result = text;
   for (const value of values) {

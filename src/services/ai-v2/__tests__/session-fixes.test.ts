@@ -60,10 +60,10 @@ describe("guarda de saída — campo só-leitura com valor comum", () => {
     expect(r.scrubbedFields).toBeUndefined();
   });
 
-  it("valor interno no começo da frase sai junto com a vírgula; no meio fica o marcador", () => {
+  it("valor interno no começo da frase sai junto com a vírgula; no meio, a frase sai inteira", () => {
     const ctx = { contact: null, citableContact: null, selectedDeal: { plano: "Plano Ouro Especial" }, citableDeal: null };
     expect(guardV2Output("Plano Ouro Especial, Ana! Vou te enviar o tutorial.", [], ctx).text).toBe("Ana! Vou te enviar o tutorial.");
-    expect(guardV2Output("Você está no Plano Ouro Especial desde março.", [], ctx).text).toBe("Você está no [informação interna não compartilhada] desde março.");
+    expect(guardV2Output("Você está no Plano Ouro Especial desde março. Posso ajudar em algo mais?", [], ctx).text).toBe("Posso ajudar em algo mais?");
   });
 });
 
