@@ -620,7 +620,7 @@ export async function simulateV2Turn(
     isConfusionMessage(userMessage)
   ) {
     handoff = false;
-    output = { ...output, handoff: false, reply: rephraseAfterConfusion(lastAgent), actions: output.actions.filter((a) => a.type !== "handoff") };
+    output = { ...output, handoff: false, reply: rephraseAfterConfusion(lastAgent, config), actions: output.actions.filter((a) => a.type !== "handoff") };
     for (let i = executedActions.length - 1; i >= 0; i--) if (executedActions[i].action.type === "handoff") executedActions.splice(i, 1);
     traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
   }

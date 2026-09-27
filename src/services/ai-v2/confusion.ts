@@ -6,6 +6,8 @@
  * Nenhum domínio de cliente.
  */
 
+import { systemMessage, type SystemMessages } from "@/lib/ai-v2/system-messages";
+
 const fold = (s: string) =>
   s
     .toLowerCase()
@@ -38,15 +40,16 @@ export function isConfusionMessage(text: string, opts: { includeState?: boolean 
 }
 
 /** Resposta que refaz a última pergunta do agente (ou pede o que ficou confuso). */
-export function rephraseAfterConfusion(lastAgentMessage: string | null | undefined): string {
+export function rephraseAfterConfusion(
+  lastAgentMessage: string | null | undefined,
+  config?: { systemMessages?: SystemMessages | null } | null,
+): string {
   const sentences = (lastAgentMessage ?? "")
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
   const question = [...sentences].reverse().find((s) => s.endsWith("?"));
-  return question
-    ? `Desculpa, acho que não fui claro. ${question}`
-    : "Desculpa, acho que não fui claro. O que ficou confuso? Me conta que eu explico de outro jeito.";
+  return question ? systemMessage(config, "confusionRephrase", { pergunta: question }) : systemMessage(config, "confusionAsk");
 }
 
 /** Linha do prompt quando o modo é refazer. */

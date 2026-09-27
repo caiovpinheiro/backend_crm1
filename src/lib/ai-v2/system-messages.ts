@@ -5,7 +5,8 @@
  * vazio usa o padrão abaixo. Nenhum domínio de cliente.
  *
  * Marcadores aceitos: {{anexo}} ("o vídeo", "a imagem", "o arquivo") e
- * {{Anexo}} (o mesmo com inicial maiúscula).
+ * {{Anexo}} (o mesmo com inicial maiúscula); {{pergunta}} (a última pergunta
+ * do agente, na mensagem de "não fui claro").
  */
 
 export const SYSTEM_MESSAGE_DEFAULTS = {
@@ -24,6 +25,10 @@ export const SYSTEM_MESSAGE_DEFAULTS = {
   queueUpset: "",
   queueCall: "",
   queueAgain: "",
+  repeatAfterAnswer: "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito.",
+  stillHere: "Estou por aqui! Me conta o que você precisa que eu te ajudo.",
+  confusionRephrase: "Desculpa, acho que não fui claro. {{pergunta}}",
+  confusionAsk: "Desculpa, acho que não fui claro. O que ficou confuso? Me conta que eu explico de outro jeito.",
   optionsPrompt: "Escolha uma opção:",
   optionsButton: "Ver opções",
 } as const;

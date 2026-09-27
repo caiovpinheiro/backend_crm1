@@ -1736,7 +1736,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     wantsHandoff = false;
     requestedDestination = undefined;
     llmOutput.handoff = false;
-    llmOutput.reply = rephraseAfterConfusion(lastAgentMessage);
+    llmOutput.reply = rephraseAfterConfusion(lastAgentMessage, config);
     traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
   }
 
@@ -1990,7 +1990,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Resposta vazia do modelo (sem transferir, encerrar, material ou botões):
   // o cliente ficava sem nada. Pergunta o que ele precisa.
   if (!anyHandoff && !anyClose && !replyText.trim() && outboundActions.length === 0 && replyOptions.length === 0 && !stopLimits.blocksReply) {
-    replyText = repeatFallback(lastAgentMessage);
+    replyText = repeatFallback(lastAgentMessage, config);
     traceStep("resposta", "O modelo devolveu uma resposta vazia → pede ao cliente que diga o que precisa");
   }
 
@@ -2032,7 +2032,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (res.reason === "near_duplicate") {
       // A trava anti-repetição do envio olha as últimas mensagens do agente;
       // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
-      const fallback = repeatFallback(lastAgentMessage);
+      const fallback = repeatFallback(lastAgentMessage, config);
       const alt = await sendReply(fallback);
       if (alt.sent) sentReply = fallback;
     }

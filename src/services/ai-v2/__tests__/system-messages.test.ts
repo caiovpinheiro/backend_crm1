@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { v2AgentConfigSchema } from "@/lib/ai-v2/config";
 import { SYSTEM_MESSAGE_DEFAULTS, systemMessage } from "@/lib/ai-v2/system-messages";
+import { rephraseAfterConfusion } from "../confusion";
+import { repeatFallback } from "../ground-reply";
 import { buildV2Interactive } from "../interactive";
 import { guardV2Output } from "../output-guard";
 import { QUEUE_NOTICES, pickQueueNotice, queuedMessageFor } from "../queue-notice";
@@ -61,5 +63,20 @@ describe("mensagens automáticas do motor — cada empresa escolhe o texto", () 
     const out = guardV2Output("Vou verificar e volto com a resposta.", [], undefined, "Vou chamar alguém do time agora.");
     expect(out.forceHandoff).toBe(true);
     expect(out.text).toBe("Vou chamar alguém do time agora.");
+  });
+});
+
+describe("mensagens automáticas — repetição e cliente confuso", () => {
+  const long = "Para trocar o produto, abra o aplicativo da loja, toque em Pedidos, escolha o pedido desejado, toque em Trocar, confirme o endereço de coleta, imprima a etiqueta gerada, embale bem o produto e leve até a agência dos correios mais próxima da sua casa ainda nesta semana.";
+  it("resposta repetida usa o texto da empresa conforme a mensagem anterior", () => {
+    const cfg = { systemMessages: { repeatAfterAnswer: "Quer que eu explique de outro jeito?", stillHere: "Sigo aqui." } };
+    expect(repeatFallback(long, cfg)).toBe("Quer que eu explique de outro jeito?");
+    expect(repeatFallback("Oi!", cfg)).toBe("Sigo aqui.");
+    expect(repeatFallback("Oi!")).toBe(SYSTEM_MESSAGE_DEFAULTS.stillHere);
+  });
+  it("cliente confuso: {{pergunta}} vira a última pergunta do agente", () => {
+    const cfg = { systemMessages: { confusionRephrase: "Vou reformular: {{pergunta}}" } };
+    expect(rephraseAfterConfusion("Anotei. Qual é o número do pedido?", cfg)).toBe("Vou reformular: Qual é o número do pedido?");
+    expect(rephraseAfterConfusion("Anotei.", cfg)).toBe(SYSTEM_MESSAGE_DEFAULTS.confusionAsk);
   });
 });

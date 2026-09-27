@@ -3,6 +3,8 @@
  * repetição). Nenhum assunto ou documento de cliente aqui.
  */
 
+import { systemMessage, type SystemMessages } from "@/lib/ai-v2/system-messages";
+
 const GREETINGS = new Set([
   "oi", "ola", "bom", "dia", "boa", "tarde", "noite",
   "ok", "sim", "nao", "obrigado", "obrigada", "valeu",
@@ -354,8 +356,9 @@ export function isNearDuplicateReply(a: string, b: string): boolean {
  * explicação; depois de cumprimento ou pergunta curta ("Tudo bem?" logo
  * após o "Oi") soava como se o agente tivesse explicado algo.
  */
-export function repeatFallback(lastAgentMessage: string | null | undefined): string {
-  return tokensOf(lastAgentMessage ?? "").length >= 20
-    ? "Ficou alguma dúvida sobre o que te passei? Me conta o que não ficou claro que eu explico de outro jeito."
-    : "Estou por aqui! Me conta o que você precisa que eu te ajudo.";
+export function repeatFallback(
+  lastAgentMessage: string | null | undefined,
+  config?: { systemMessages?: SystemMessages | null } | null,
+): string {
+  return systemMessage(config, tokensOf(lastAgentMessage ?? "").length >= 20 ? "repeatAfterAnswer" : "stillHere");
 }

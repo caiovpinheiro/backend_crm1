@@ -1752,7 +1752,7 @@ export async function callV2LLM(args: {
     } catch (err) {
       console.warn("[ai-v2] reescrita de repetição falhou:", err instanceof Error ? err.message : err);
     }
-    r.output = { ...r.output, reply: repeatFallback(last) };
+    r.output = { ...r.output, reply: repeatFallback(last, args.config) };
   }
 
   let lastError: Error | undefined;
