@@ -403,7 +403,17 @@ export async function loadV2Context(args: {
     byName: [],
     unknown: [],
   };
-  const configuredKeys = [...args.config.contextFields.contact, ...args.config.contextFields.deal].map((f) => f.key);
+  // Campos das informações montadas (ex.: senha provisória) também: podem
+  // não estar na lista de dados do cliente.
+  const derivedFieldsOf = (entity: "contact" | "deal"): V2FieldConfig[] =>
+    (args.config.derivedFields ?? [])
+      .flatMap((d) => d.parts ?? [])
+      .filter((p) => p.kind === "field" && !!p.key && (p.entity === "deal" ? "deal" : "contact") === entity)
+      .filter((p) => !args.config.contextFields[entity].some((f) => f.key === p.key))
+      .map((p) => ({ key: p.key as string, permissions: ["read"] }) as V2FieldConfig);
+  const contactResolveFields = [...args.config.contextFields.contact, ...derivedFieldsOf("contact")];
+  const dealResolveFields = [...args.config.contextFields.deal, ...derivedFieldsOf("deal")];
+  const configuredKeys = [...contactResolveFields, ...dealResolveFields].map((f) => f.key);
   const defRows = configuredKeys.length
     ? await Promise.resolve()
         .then(() =>
@@ -415,8 +425,8 @@ export async function loadV2Context(args: {
         .catch(() => [] as Array<{ id: string; name: string; label: string }>)
     : [];
   const defs = new Map((defRows ?? []).map((d) => [d.id, { name: d.name, label: d.label }]));
-  if (contact) resolveConfiguredFields(contact, "contact", args.config.contextFields.contact, defs, diag);
-  for (const d of deals) resolveConfiguredFields(d, "deal", args.config.contextFields.deal, defs, diag);
+  if (contact) resolveConfiguredFields(contact, "contact", contactResolveFields, defs, diag);
+  for (const d of deals) resolveConfiguredFields(d, "deal", dealResolveFields, defs, diag);
 
   const dealSelectionReason =
     args.config.dealSelection === "ask" && deals.length > 1

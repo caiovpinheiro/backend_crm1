@@ -127,6 +127,36 @@ describe("loadV2Context", () => {
     expect(trace).not.toContain("RGM →");
   });
 
+  it("informação montada (senha provisória) lê campo que só aparece nela, pelo nome", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({ contactId: "c1" });
+    mocks.contactFindUnique.mockResolvedValue({ id: "c1", name: "Marcelo Pinheiro", phone: null, email: null, tags: [], customFields: [] });
+    mocks.dealFindMany.mockResolvedValue([{ id: "d1" }]);
+    mocks.dealFindUnique.mockResolvedValue({
+      id: "d1", number: 1, title: "Aluno", status: "OPEN", value: null, stage: { id: "s1", name: "Qualificado" },
+      customFields: [
+        { customFieldId: "cf-rgm", value: "12345678", customField: { name: "rgm", label: "RGM" } },
+        { customFieldId: "cf-cpf", value: "678546334", customField: { name: "cpf", label: "CPF" } },
+      ],
+    });
+    const { loadV2Context } = await import("../context");
+    const { derivedFieldValues } = await import("@/lib/ai-v2/field-mask");
+    const config = baseConfig({
+      contextFields: { contact: [{ key: "name", label: "Nome", permissions: ["read", "cite"] }], deal: [] },
+      derivedFields: [{
+        id: "senha", label: "Senha Provisória",
+        parts: [
+          { kind: "field", entity: "contact", key: "name", take: "first", count: 3, letterCase: "capitalize" },
+          { kind: "text", text: "@" },
+          { kind: "field", entity: "deal", key: "rgm", take: "first", count: 3 },
+          { kind: "field", entity: "deal", key: "cpf", take: "first", count: 3 },
+        ],
+      }],
+    } as never);
+    const ctx = await loadV2Context({ organizationId: "org-1", conversationId: "conv-1", config });
+    expect(ctx.selectedDealRaw).toMatchObject({ rgm: "12345678", cpf: "678546334" });
+    expect(Object.values(derivedFieldValues(config, ctx.contactRaw ?? null, ctx.selectedDealRaw ?? null))[0]).toBe("Mar@123678");
+  });
+
   it("carrega negócio com campo personalizado via relação", async () => {
     mocks.conversationFindUnique.mockResolvedValue({ contactId: "c1" });
     mocks.contactFindUnique.mockResolvedValue({
