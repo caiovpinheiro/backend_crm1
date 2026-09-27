@@ -1456,7 +1456,7 @@ export async function callV2LLM(args: {
       ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => `"${t}"`),
       ...unsupportedMenuPaths(reply, sources, factSources).map((t) => `"${t}"`),
       ...unsupportedFigures(reply, sources, clientTexts),
-      ...unsupportedFacts(reply, sources),
+      ...unsupportedFacts(reply, sources, clientTexts),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];
     // Checagem por modelo: o que as regras não pegam (política sem número,
@@ -1464,7 +1464,21 @@ export async function callV2LLM(args: {
     // quando as regras não acharam nada e a resposta não é transferência.
     // O que o agente já disse não é fonte: uma afirmação sem fonte que
     // escapasse num turno sustentaria as seguintes. Vai só como contexto.
-    const claimSources = factSources;
+    // Fontes fixas (calendário, horário, data, informações fixas, instruções,
+    // cadastro) antes dos trechos longos: com o limite de tamanho da
+    // checagem, o calendário ficava no fim e era cortado — a data certa do
+    // calendário era barrada como "sem fonte" e o cliente, transferido.
+    const fixedFirst = [
+      calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
+      businessHoursText(args.config),
+      currentDateLine(args.config.businessHours?.timezone),
+      ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
+      args.themeInstructions ?? "",
+      ...args.config.globalRules,
+      JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
+      ...lookupResultTexts(r.toolCalls),
+    ].filter((s) => s && s.trim());
+    const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
     const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
       // Transferência só com o aviso não tem o que conferir; com orientação

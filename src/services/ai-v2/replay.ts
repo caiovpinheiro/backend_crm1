@@ -18,6 +18,7 @@ import { v2AuxModel, v2ModelProvider } from "@/lib/ai-v2/models";
 import { tryGetAgentAnthropicKey } from "@/services/ai/agent-key";
 import { getV2Agent } from "./agents";
 import { simulateV2Turn } from "./test-turn";
+import { fixedSources } from "./no-source";
 import { sourcesFromToolCalls, type V2TurnSource } from "./sources";
 import { extractReplayPoints, type ReplayMessageRow, type ReplayPoint } from "./replay-extract";
 import { maskSensitive, maskSensitiveDeep } from "./sensitive";
@@ -96,15 +97,19 @@ export function buildEvaluatorInput(args: {
   agentHandoff: boolean;
   sources: V2TurnSource[];
   fixedTexts?: string[];
+  /** Calendário, horário, informações fixas e instruções do assunto que o agente leu. */
+  agentFacts?: string[];
 }): string {
   const hist = args.point.history.slice(-6).map((h) => `${h.role === "user" ? "Cliente" : "Atendimento"}: ${clip(h.content, 400)}`).join("\n");
-  const src = args.sources.slice(0, 5).map((s, i) => `[${i + 1}] ${s.title}: ${clip(s.content, 700)}`).join("\n");
+  const src = args.sources.slice(0, 6).map((s, i) => `[${i + 1}] ${s.title}: ${clip(s.content, 1500)}`).join("\n");
+  const facts = (args.agentFacts ?? []).filter((f) => f.trim()).join("\n");
   return [
     `Histórico recente:\n${hist || "(início da conversa)"}`,
     `Mensagem do cliente:\n${args.point.clientText}`,
     `Resposta da pessoa:\n${args.point.humanText}`,
     `Resposta do agente:\n${args.agentReply || "(sem texto)"}${args.agentHandoff ? "\n[o agente transferiu para uma pessoa]" : ""}`,
     `Trechos da base que o agente leu:\n${src || "(nenhum)"}`,
+    ...(facts ? [`O que mais o agente sabia (calendário, horário, informações fixas, instruções do assunto) — vale como fonte:\n${clip(facts, 5000)}`] : []),
     ...(args.fixedTexts?.length ? [`TEXTOS FIXOS DA EMPRESA:\n${args.fixedTexts.map((t) => `- ${clip(t, 300)}`).join("\n")}`] : []),
   ].join("\n\n");
 }
@@ -169,6 +174,7 @@ async function evaluate(args: {
   agentHandoff: boolean;
   sources: V2TurnSource[];
   fixedTexts?: string[];
+  agentFacts?: string[];
 }): Promise<{ verdict: ReplayVerdict | null; inputTokens: number; outputTokens: number }> {
   const res = await generateWithTools({
     model: args.model,
@@ -987,7 +993,7 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
           }
         }
         const ev = await withTimeout(
-          evaluate({ model: args.evalModel, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources, fixedTexts }),
+          evaluate({ model: args.evalModel, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources, fixedTexts, agentFacts: fixedSources(args.config, sim.themeId, sim.toolCalls) }),
           POINT_TIMEOUT_MS,
           "O avaliador demorou demais neste ponto.",
         );

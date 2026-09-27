@@ -23,4 +23,14 @@ describe("checagem — marcações que não são afirmação de fato", () => {
     expect(unsupportedFacts("O limite é de 40 horas.", ["não de 40h"])).toEqual([]);
     expect(unsupportedFacts("O limite é de 50 horas.", ["não de 40h"])).toEqual(["50 horas"]);
   });
+
+  it("rodada 2: motivo de transferir, fala do cliente no meio da frase, pedido ao cliente, número do cliente", () => {
+    expect(notAFactClaim("trancamento precisa ser tratado por uma pessoa da equipe")).toBe(true);
+    expect(notAFactClaim("certificado que você enviou informa *1.846 horas*, e não 40 horas")).toBe(true);
+    expect(notAFactClaim("Você já enviou um comprovante de 40 horas e o sistema não aceitou o de 60 horas")).toBe(true);
+    expect(notAFactClaim("Para eu identificar por que o sistema recusou, envie o texto exato da mensagem de erro.")).toBe(true);
+    expect(notAFactClaim("A reprovação acontece quando a média fica abaixo de 6.")).toBe(false);
+    expect(unsupportedFacts("Selecione a opção de 14 horas.", ["o curso"], ["enviei nessa de 10 a 14 e foi"])).toEqual([]);
+    expect(unsupportedFacts("Selecione a opção de 18 horas.", ["o curso"], ["enviei nessa de 10 a 14 e foi"])).toEqual(["18 horas"]);
+  });
 });

@@ -247,7 +247,10 @@ function dateKeys(sources: string): Set<string> {
  * resposta que não aparecem em nenhuma fonte. Antes só R$ e % eram
  * conferidos e o resto chegava ao cliente.
  */
-export function unsupportedFacts(reply: string, sources: string[]): string[] {
+export function unsupportedFacts(reply: string, sources: string[], clientTexts: string[] = []): string[] {
+  // Número que o cliente escreveu ("enviei nessa de 10 a 14"): repetir como
+  // "14 horas" é citar o cliente, não inventar prazo.
+  const clientNumbers = new Set([...clientTexts.join(" ").matchAll(/\d+(?:[.,]\d+)?/g)].map((m) => m[0].replace(",", ".")));
   // "120h", "40 hs", "30min" nas fontes valem como "120 horas", "30 minutos".
   const joined = sources
     .join(" ")
@@ -271,6 +274,8 @@ export function unsupportedFacts(reply: string, sources: string[]): string[] {
       } else if (kind === "email") {
         if (!joined.toLowerCase().includes(token.toLowerCase())) out.add(token);
       } else if (!haystack.includes(squash(token))) {
+        const n = token.match(/\d+(?:[.,]\d+)?/)?.[0]?.replace(",", ".");
+        if (kind === "amount" && n && clientNumbers.has(n)) continue;
         out.add(token);
       }
     }

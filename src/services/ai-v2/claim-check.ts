@@ -11,7 +11,7 @@ import { generateWithTools } from "@/services/ai/provider";
 
 /** Tempo máximo da checagem: passou disso, a resposta segue (não trava o atendimento). */
 export const CLAIM_CHECK_TIMEOUT_MS = 8000;
-const MAX_SOURCE_CHARS = 14000;
+const MAX_SOURCE_CHARS = 20000;
 
 const CLAIM_CHECK_SYSTEM = `Você confere se a resposta de um atendente está sustentada pelas fontes da empresa.
 
@@ -141,7 +141,11 @@ export function notAFactClaim(claim: string): boolean {
   const c = claim.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (/\bnao (?:consigo|posso|sei|tenho|temos|encontrei|achei)\b|\bnao (?:esta|estao|foi|ha) (?:informad|disponivel|disponiveis|confirmad)|\bsem (?:essa |esta )?informacao\b|\bnao da para (?:confirmar|saber)\b/.test(c)) return true;
   if (/\b(?:vou|irei|vamos|posso) (?:te |lhe )?(?:encaminhar|transferir|direcionar|passar|chamar)\b|\b(?:encaminhar|transferir|direcionar) (?:seu|o seu|voce|o) (?:atendimento|caso|pedido)\b/.test(c)) return true;
-  if (/^(?:entendi[,.]?\s*)?voce (?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
+  if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
+  // Motivo da transferência ("precisa ser tratado por uma pessoa da equipe").
+  if (/\b(?:precisa|deve|tem que) ser (?:tratad|analisad|verificad|resolvid|feit|confirmad|avaliad)\w* (?:por|pela|pelo) (?:uma pessoa|alguem|a equipe|equipe|um atendente|atendente|setor|um consultor)/.test(c)) return true;
+  // Pedido ao cliente ("para eu identificar o erro, envie…").
+  if (/^para (?:eu|que eu|a gente) (?:identificar|verificar|entender|confirmar|analisar|te ajudar)\b/.test(c)) return true;
   return false;
 }
 
