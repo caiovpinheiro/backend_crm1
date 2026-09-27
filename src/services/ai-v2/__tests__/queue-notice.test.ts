@@ -33,12 +33,12 @@ describe("aviso de fila", () => {
 });
 
 describe("marcação do checador que está nas fontes", () => {
-  const sources = ["Primeiro acesso: acesse https://portal.exemplo.com/ com o seu e-mail acadêmico e a senha enviada na matrícula."];
+  const sources = ["Primeiro acesso: acesse https://portal.exemplo.com/ com o seu e-mail de cadastro e a senha enviada na compra."];
   it("link e palavras no mesmo trecho: descarta a marcação", () => {
-    expect(claimFoundInSources("entre em https://portal.exemplo.com/ e use seu e-mail acadêmico e sua senha", sources)).toBe(true);
+    expect(claimFoundInSources("entre em https://portal.exemplo.com/ e use seu e-mail de cadastro e sua senha", sources)).toBe(true);
   });
   it("link diferente ou palavras espalhadas: mantém", () => {
-    expect(claimFoundInSources("entre em https://outro.exemplo.com/ e use seu e-mail acadêmico", sources)).toBe(false);
+    expect(claimFoundInSources("entre em https://outro.exemplo.com/ e use seu e-mail de cadastro", sources)).toBe(false);
     const far = ["A instalação do equipamento é paga. Temos várias opções de plano para escolher com calma. Consulte a tabela completa no site. O frete é gratuito."];
     expect(claimFoundInSources("a instalação do equipamento é gratuita", far)).toBe(false);
     expect(claimFoundInSources("a instalação do equipamento é paga", far)).toBe(true);
