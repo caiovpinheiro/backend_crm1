@@ -1771,4 +1771,35 @@ describe("processV2Turn — correções do motor", () => {
     await run("não consegui entrar no aplicativo de jeito nenhum");
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Me avisa se funcionou.");
   });
+
+  it("cliente diz que não recebeu o anexo: reenvia só a mídia uma vez e diz a verdade; na segunda, chama a equipe", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.recentlySent.mockResolvedValue(new Set(["mm-1"]));
+    const failed = { sendStatus: "failed", sendError: "Arquivo não encontrado no storage", messageType: "video", createdAt: new Date() };
+    mocks.messageFindMany.mockImplementation(async (args: any) => (args?.where?.messageType?.in ? [failed] : []));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Segue o vídeo de novo:", actions: [{ type: "send_message_model", modelId: "mm-1" }] as any }));
+    mocks.executeActions.mockImplementation(async (actions: any[]) => ({ results: actions.map((a) => ({ action: a, ok: true, mediaSent: 1 })), anyHandoff: false, anyClose: false }));
+
+    await run("Não veio o vídeo");
+
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts[0]).toMatch(/não saiu da primeira vez/);
+    expect(texts.join("|")).not.toContain("logo acima");
+    const outbound = mocks.executeActions.mock.calls.flatMap((c) => c[0] as any[]).find((a) => a.type === "send_message_model");
+    expect(outbound).toMatchObject({ modelId: "mm-1", mediaOnly: true });
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+
+    // Segunda reclamação, duas falhas: não reenvia, explica e transfere.
+    mocks.sendText.mockClear();
+    mocks.executeActions.mockClear();
+    mocks.messageFindMany.mockImplementation(async (args: any) => (args?.where?.messageType?.in ? [failed, failed] : []));
+    const r2 = await run("Não recebi o vídeo");
+    expect(r2.handoff).toBe(true);
+    const texts2 = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts2[0]).toMatch(/Não estou conseguindo enviar o vídeo/);
+    expect(mocks.executeActions.mock.calls.flatMap((c) => c[0] as any[]).some((a) => a.type === "send_message_model")).toBe(false);
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
 });

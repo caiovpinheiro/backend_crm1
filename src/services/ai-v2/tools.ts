@@ -311,6 +311,51 @@ export async function describeV2MessageModels(ids: string[]): Promise<V2MessageM
   }));
 }
 
+/**
+ * Trechos dos materiais liberados que contêm um dos textos exatos (links
+ * citados na resposta). A busca por significado traz 5 trechos; o trecho
+ * com o link nem sempre está entre eles, e o link certo era barrado como
+ * "sem fonte". Uma consulta só, por substring.
+ */
+export async function knowledgeChunksContaining(args: {
+  agentId: string;
+  needles: string[];
+  allowedDocIds?: string[];
+  limit?: number;
+}): Promise<Array<{ docId: string; docTitle: string; content: string }>> {
+  const needles = [...new Set(args.needles.map((n) => n.trim()).filter((n) => n.length >= 8))].slice(0, 5);
+  if (needles.length === 0) return [];
+  if (Array.isArray(args.allowedDocIds) && args.allowedDocIds.length === 0) return [];
+  const orgId = getOrgIdOrThrow();
+  const values: unknown[] = [args.agentId, orgId, args.limit ?? 5];
+  const likes = needles.map((n) => {
+    values.push(`%${n.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+    return `c.content ILIKE $${values.length} ESCAPE '\\'`;
+  });
+  let allowedClause = "";
+  if (Array.isArray(args.allowedDocIds)) {
+    const ids = args.allowedDocIds.slice(0, 200);
+    const placeholders = ids.map((id) => {
+      values.push(id);
+      return `$${values.length}`;
+    });
+    allowedClause = ` AND d.id IN (${placeholders.join(", ")})`;
+  }
+  const rows = await (prisma as unknown as { $queryRawUnsafe: <T>(q: string, ...v: unknown[]) => Promise<T> }).$queryRawUnsafe<
+    Array<{ docId: string; title: string; content: string }>
+  >(
+    `SELECT c."docId" AS "docId", d.title, c.content
+       FROM "ai_agent_knowledge_chunks" c
+       JOIN "ai_agent_knowledge_docs" d ON d.id = c."docId"
+      WHERE d."agentId" = $1 AND d.status = 'READY'
+        AND d."organizationId" = $2 AND c."organizationId" = $2
+        AND (${likes.join(" OR ")})${allowedClause}
+      LIMIT $3`,
+    ...values,
+  );
+  return rows.map((r) => ({ docId: r.docId, docTitle: r.title, content: r.content }));
+}
+
 export async function listV2MessageModels(args: {
   query: string;
   allowedIds?: string[];

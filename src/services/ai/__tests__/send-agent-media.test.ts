@@ -85,4 +85,18 @@ describe("anexo do agente pelo canal Meta — upload onde o arquivo existe", () 
     expect(mocks.process).toHaveBeenCalledWith(expect.objectContaining({ mediaId: "media-123" }));
     expect(mocks.updateMany).not.toHaveBeenCalled();
   });
+
+  it("envio que falhou não conta como 'já enviado'", async () => {
+    await send();
+    const { prisma } = await import("@/lib/prisma");
+    const where = (prisma.message.findMany as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
+    expect(where.sendStatus).toEqual({ not: "failed" });
+  });
+
+  it("reenvio a pedido do cliente ignora a trava de repetição", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    await sendAgentFollowUpMedia({ conversationId: "conv-1", contactId: "c-1", agentUserId: "u-1", attachments: [VIDEO], ignoreRecent: true });
+    expect(prisma.message.findMany).not.toHaveBeenCalled();
+    expect(mocks.enqueue).toHaveBeenCalledTimes(1);
+  });
 });

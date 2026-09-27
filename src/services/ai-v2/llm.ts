@@ -32,6 +32,7 @@ import {
   searchV2CrmRecords,
   searchV2Knowledge,
   listV2MessageModels,
+  knowledgeChunksContaining,
 } from "./tools";
 import { knowledgeDocTitlesByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
@@ -1421,6 +1422,27 @@ export async function callV2LLM(args: {
    * pede uma reescrita só com o material. Se ainda inventar, transfere.
    */
   async function checkQuotedTerms(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
+    // Link citado que não está nos trechos lidos: procura nos materiais
+    // liberados (o trecho com o link nem sempre vem na busca por
+    // significado). Domínio liberado na configuração também é fonte: o
+    // operador autorizou esse endereço.
+    const replyUrls = [...r.output.reply.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, ""));
+    const readTexts = [...prefetch.chunks.map((c) => c.content), ...knowledgeChunkTexts(r.toolCalls)].join("\n");
+    const missingUrls = replyUrls.filter((u) => !readTexts.includes(u));
+    const linkedChunks = missingUrls.length > 0
+      ? await knowledgeChunksContaining({ agentId: args.agentId, needles: missingUrls, allowedDocIds: promptDocIds }).catch(() => [])
+      : [];
+    if (linkedChunks.length > 0) traceStep("verificação", `Link citado encontrado em material liberado: ${[...new Set(linkedChunks.map((c) => `"${c.docTitle}"`))].join(", ")}`);
+    const allowedDomainsLine = (args.config.allowedDomains ?? []).length > 0
+      ? `Endereços liberados pela empresa (podem ser citados): ${args.config.allowedDomains.map((d) => `https://${d}`).join(", ")}`
+      : "";
+    // O valor que o cliente digitou vai ao modelo como marcador; nas fontes
+    // (cadastro, consultas) ele aparece por extenso e a resposta que repetia
+    // o marcador era barrada como "sem fonte". As fontes ganham o mesmo
+    // marcador — o valor real não vai ao modelo que confere.
+    const known = (s: string) => (vault.size > 0 ? vault.tokenizeKnown(s) : s);
+    const contextJson = known(JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]));
+    const lookupTexts = lookupResultTexts(r.toolCalls).map(known);
     // Só o que é fonte de verdade. Com o prompt inteiro (guias, lista de
     // títulos de todos os materiais) qualquer palavra comum, como
     // "Documentos" ou "Solicitações", passava como se tivesse fonte.
@@ -1429,13 +1451,15 @@ export async function callV2LLM(args: {
       ...previousMessages.map((m) => m.content),
       ...prefetch.chunks.flatMap((c) => [c.docTitle, c.content]),
       ...knowledgeChunkTexts(r.toolCalls),
-      ...lookupResultTexts(r.toolCalls),
+      ...linkedChunks.flatMap((c) => [c.docTitle, c.content]),
+      allowedDomainsLine,
+      ...lookupTexts,
       args.themeInstructions ?? "",
       ...args.config.globalRules,
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       ...(args.config.calendar?.events ?? []).map((e) => e.title),
       ...messageModels.map((m) => m.name),
-      JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
+      contextJson,
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       // "Hoje é domingo", "o encontro de 19/09 já passou": vêm da data de hoje.
@@ -1476,8 +1500,10 @@ export async function callV2LLM(args: {
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       args.themeInstructions ?? "",
       ...args.config.globalRules,
-      JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
-      ...lookupResultTexts(r.toolCalls),
+      contextJson,
+      allowedDomainsLine,
+      ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
+      ...lookupTexts,
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);

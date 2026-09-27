@@ -222,6 +222,30 @@ export class SensitiveVault {
     return this.replaceTokens(text, (e) => partialMask(e.kind, e.value));
   }
 
+  /**
+   * Nas fontes da conferência (cadastro, consultas), o valor que o cliente
+   * digitou vira o mesmo marcador da conversa: a resposta que repete o
+   * marcador ("[E-MAIL 1]") passa a casar com a fonte, sem mandar o valor
+   * real ao modelo que confere. Documento vale com ou sem pontuação.
+   */
+  tokenizeKnown(text: string): string {
+    if (this.byToken.size === 0 || !text) return text;
+    let out = text;
+    for (const [token, entry] of this.byToken) {
+      const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (entry.kind === "email") {
+        out = out.replace(new RegExp(escape(entry.value), "gi"), token);
+        continue;
+      }
+      const digits = onlyDigits(entry.value);
+      const variants = new Set([entry.value, digits]);
+      if (digits.length === 11) variants.add(`${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`);
+      if (digits.length === 14) variants.add(`${digits.slice(0, 2)}.${digits.slice(2, 5)}.${digits.slice(5, 8)}/${digits.slice(8, 12)}-${digits.slice(12)}`);
+      for (const v of variants) if (v.length >= 5 && out.includes(v)) out = out.split(v).join(token);
+    }
+    return out;
+  }
+
   restoreDeep<T>(value: T): T {
     if (this.byToken.size === 0) return value;
     if (typeof value === "string") return this.restore(value) as unknown as T;

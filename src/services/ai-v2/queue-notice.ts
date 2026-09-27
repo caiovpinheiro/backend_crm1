@@ -37,6 +37,21 @@ export const QUEUE_NOTICES: Record<Exclude<QueueNoticeKind, "first">, string[]> 
 /** Mensagens neutras seguidas dentro disto não recebem aviso de novo. */
 export const QUEUE_NOTICE_QUIET_MS = 20_000;
 
+/** Aviso padrão para quem escreve enquanto espera na fila. */
+export const QUEUED_MESSAGE_DEFAULT = "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.";
+/** Fora do horário não se promete "em instantes": a equipe segue no próximo horário. */
+export const QUEUED_MESSAGE_OUTSIDE_HOURS = "Você já está na fila de atendimento. Sua mensagem fica registrada e alguém da equipe continua com você por aqui no próximo horário de atendimento.";
+
+/** Aviso configurado ou o padrão certo para o horário. */
+export function queuedMessageFor(configured: string | null | undefined, withinBusinessHours: boolean): string {
+  const custom = configured?.trim();
+  if (custom) return custom;
+  return withinBusinessHours ? QUEUED_MESSAGE_DEFAULT : QUEUED_MESSAGE_OUTSIDE_HOURS;
+}
+
+/** Promete atendimento imediato ("em instantes", "já já"): não cabe fora do horário. */
+const PROMISES_SOON = /\bem instantes\b|\bja ja\b|\bem (?:poucos|alguns) (?:minutos|instantes)\b|\bdaqui a pouco\b|\blogo mais\b/;
+
 export function queueNoticeKind(message: string): QueueNoticeKind {
   const m = fold(message).replace(/\s+/g, " ").trim();
   if (CANCEL.test(m)) return "cancel";
@@ -55,15 +70,19 @@ export function pickQueueNotice(args: {
   lastReply: string | null;
   lastReplyAt: Date | null;
   now?: Date;
+  /** Fora do horário: nenhuma variante que prometa "em instantes". */
+  outsideHours?: boolean;
 }): { text: string; kind: QueueNoticeKind } | null {
   const now = args.now ?? new Date();
   const repeats = (t: string) => !!args.lastReply && isNearDuplicateReply(t, args.lastReply);
-  const noticedBefore = !!args.lastReply && (repeats(args.configured) || Object.values(QUEUE_NOTICES).flat().some(repeats));
+  const allDefaults = [QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, ...Object.values(QUEUE_NOTICES).flat()];
+  const noticedBefore = !!args.lastReply && (repeats(args.configured) || allDefaults.some(repeats));
   if (!noticedBefore) return { text: args.configured, kind: "first" };
   const kind = queueNoticeKind(args.message);
   const recent = !!args.lastReplyAt && now.getTime() - args.lastReplyAt.getTime() < QUEUE_NOTICE_QUIET_MS;
   if (kind === "again" && recent) return null;
+  const fits = (t: string) => !repeats(t) && !(args.outsideHours && PROMISES_SOON.test(fold(t)));
   const options = [...QUEUE_NOTICES[kind === "first" ? "again" : kind], ...QUEUE_NOTICES.again, args.configured];
-  const text = options.find((t) => !repeats(t));
+  const text = options.find(fits);
   return text ? { text, kind } : null;
 }

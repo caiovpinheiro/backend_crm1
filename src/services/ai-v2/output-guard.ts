@@ -55,6 +55,22 @@ type ScrubContext = {
   citableDeal: Record<string, unknown> | null;
 };
 
+const SCRUB_MARKER = "[informação interna não compartilhada]";
+/** Valores de campo que são palavra comum, não dado interno. */
+const COMMON_VALUES = new Set(["sim", "nao", "não", "yes", "no", "true", "false", "ok", "n/a", "na", "null", "none", "ativo", "inativo", "aberto", "fechado", "pendente"]);
+
+/**
+ * Valor que não identifica nada: palavra comum ("Sim", "Não", "Ativo"),
+ * número pequeno ou booleano. Um campo só-leitura "Sim" mascarava o "Sim"
+ * com que a resposta começava. Nome curto ("Ana") continua sendo dado.
+ */
+export function isCommonFieldValue(value: string): boolean {
+  const v = value.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (COMMON_VALUES.has(v)) return true;
+  if (/^\d{1,4}$/.test(v)) return true;
+  return false;
+}
+
 function collectNonCitableValues(ctx: ScrubContext): string[] {
   const values = new Set<string>();
   function add(obj: Record<string, unknown> | null, exclude: Record<string, unknown> | null) {
@@ -63,12 +79,24 @@ function collectNonCitableValues(ctx: ScrubContext): string[] {
     for (const [k, v] of Object.entries(obj)) {
       if (excludeKeys.includes(k)) continue;
       const s = typeof v === "string" ? v.trim() : v !== null && v !== undefined ? String(v) : "";
-      if (s.length >= 2) values.add(s);
+      if (s.length >= 2 && !isCommonFieldValue(s)) values.add(s);
     }
   }
   add(ctx.contact, ctx.citableContact);
   add(ctx.selectedDeal, ctx.citableDeal);
   return Array.from(values).sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Marcador no começo de frase ou linha sai junto com a vírgula que o
+ * seguia ("[…], Ana! Vou te enviar" → "Ana! Vou te enviar"); no meio da
+ * frase ele fica, para a frase não mudar de sentido.
+ */
+function tidyScrubMarkers(text: string): string {
+  const marker = SCRUB_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text
+    .replace(new RegExp(`(^|\\n|[.!?]\\s+)${marker}[,;:]?\\s*(\\p{L})`, "gu"), (_m, before: string, next: string) => `${before}${next.toUpperCase()}`)
+    .replace(new RegExp(`(^|\\n|[.!?]\\s+)${marker}[,;:]?\\s*`, "gu"), "$1");
 }
 
 export function scrubNonCitableFields(
@@ -87,11 +115,11 @@ export function scrubNonCitableFields(
     let found = false;
     result = result.replace(re, () => {
       found = true;
-      return "[informação interna não compartilhada]";
+      return SCRUB_MARKER;
     });
     if (found) scrubbedFields.push(value);
   }
-  return { text: result, scrubbedFields };
+  return { text: scrubbedFields.length > 0 ? tidyScrubMarkers(result) : result, scrubbedFields };
 }
 
 export function guardV2Output(

@@ -86,3 +86,64 @@ export async function recentlySentMessageModels(conversationId: string, modelIds
   const sent = sentMessageModelIds(rows);
   return new Set(modelIds.filter((id) => sent.has(id)));
 }
+
+/** O cliente diz que o arquivo não chegou ("não recebi o vídeo", "cadê a imagem?"). */
+export function saysNotReceived(message: string): boolean {
+  const m = message.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const media = "(?:video|arquivo|imagem|foto|pdf|documento|material|anexo|audio|link|tutorial|nada)";
+  return (
+    /\bnao (?:recebi|chegou|veio|apareceu|baixou|abriu|carregou|consegui (?:ver|abrir|baixar))\b/.test(m) ||
+    new RegExp(`\\bcade (?:o |a )?${media}\\b|\\bnao (?:tem|ta|esta|veio) (?:o |a |nenhum |nenhuma )?${media}\\b|\\b${media} nao (?:chegou|veio|apareceu|abriu|carregou)\\b`).test(m)
+  );
+}
+
+export type MediaDelivery = { status: string | null; error: string | null; type: string; at: Date };
+const MEDIA_TYPES = ["image", "video", "audio", "ptt", "document", "file"];
+
+/** Anexos que o agente mandou nesta conversa desde `since`, com o que aconteceu no envio. */
+export async function recentMediaDeliveries(conversationId: string, since: Date): Promise<MediaDelivery[]> {
+  const { prisma } = await import("@/lib/prisma");
+  const rows = await prisma.message.findMany({
+    where: { conversationId, direction: "out", messageType: { in: MEDIA_TYPES }, createdAt: { gte: since } },
+    select: { sendStatus: true, sendError: true, messageType: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+  return rows.map((r) => ({ status: r.sendStatus ?? null, error: r.sendError ?? null, type: r.messageType, at: new Date(r.createdAt) }));
+}
+
+const MEDIA_LABEL: Record<string, string> = { image: "a imagem", video: "o vídeo", audio: "o áudio", ptt: "o áudio", document: "o arquivo", file: "o arquivo" };
+
+export type MediaResendPlan = { resend: boolean; handoff: boolean; reply: string; trace: string };
+
+/**
+ * O cliente diz que não recebeu o anexo. Decide com base no que saiu de
+ * fato: reenvia uma vez; se o envio falhou (ou já foi tentado duas vezes),
+ * diz a verdade e chama alguém da equipe — antes a resposta era "te enviei
+ * logo acima 👆" com a entrega marcada como falha.
+ */
+export function mediaResendPlan(deliveries: MediaDelivery[]): MediaResendPlan | null {
+  if (deliveries.length === 0) return null;
+  const last = deliveries[deliveries.length - 1];
+  const label = MEDIA_LABEL[last.type] ?? "o arquivo";
+  const failed = deliveries.filter((d) => (d.status ?? "").toLowerCase() === "failed").length;
+  const attempts = deliveries.length;
+  if (attempts >= 2) {
+    return {
+      resend: false,
+      handoff: true,
+      reply: failed > 0
+        ? `Não estou conseguindo enviar ${label} por aqui. Vou chamar alguém da equipe para te mandar por outro caminho.`
+        : `Já enviei ${label} duas vezes e ele não está chegando aí. Vou chamar alguém da equipe para te mandar por outro caminho.`,
+      trace: `Cliente diz que não recebeu ${label} (${attempts} envios, ${failed} com falha) → não reenvia; transfere`,
+    };
+  }
+  return {
+    resend: true,
+    handoff: false,
+    reply: failed > 0
+      ? `${label.charAt(0).toUpperCase()}${label.slice(1)} não saiu da primeira vez. Estou reenviando agora 👇 Se não chegar, me avisa que eu chamo alguém da equipe.`
+      : `Reenviei ${label} agora 👇 Se não aparecer, me avisa.`,
+    trace: `Cliente diz que não recebeu ${label} (${failed > 0 ? "o envio anterior falhou" : "o envio anterior consta como entregue"}) → reenvia só o anexo, uma vez`,
+  };
+}

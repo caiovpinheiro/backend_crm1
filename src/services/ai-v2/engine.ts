@@ -40,11 +40,11 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, recentlySentMessageModels } from "./sent-materials";
+import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
-import { pickQueueNotice } from "./queue-notice";
+import { pickQueueNotice, queuedMessageFor } from "./queue-notice";
 import {
   currentV2OnboardingStep,
   isV2OnboardingStepCompleted,
@@ -300,8 +300,6 @@ async function newerInboundArrived(conversationId: string, messageIds: string[] 
   }
 }
 
-/** Aviso padrão para quem escreve enquanto espera na fila. */
-const QUEUED_MESSAGE_DEFAULT = "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.";
 
 /** Conversa transferida esperando atendente (pendência de distribuição aberta). */
 async function isWaitingInQueue(conversationId: string): Promise<boolean> {
@@ -713,11 +711,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         }),
       )
       .catch(() => null);
+    // Fora do horário o aviso não promete "em instantes": o padrão muda e as
+    // variantes com essa promessa ficam de fora (antes saía "em instantes"
+    // seguido de "seguimos no próximo horário").
+    const queueWithinHours = isWithinV2BusinessHours(config);
     const picked = pickQueueNotice({
       message: input.userMessage,
-      configured: renderMessage(config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT, vars, defaultFormatter()),
+      configured: renderMessage(queuedMessageFor(config.handoff.queuedMessage, queueWithinHours), vars, defaultFormatter()),
       lastReply: last?.content ?? null,
       lastReplyAt: last?.createdAt ?? null,
+      outsideHours: !queueWithinHours,
     });
     const hoursNote = picked?.kind === "first" ? outsideHoursNote(config) : "";
     const notice = picked ? [picked.text, hoursNote].filter(Boolean).join("\n\n") : "";
@@ -1641,10 +1644,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // "Se continuar divergente, encaminho": a resposta condiciona a
   // transferência ao que o cliente vai conferir. Transferir já deixava o
   // cliente na fila sem ter conferido; ele responde e o próximo turno decide.
+  let conditionalWait = false;
   if (wantsHandoff && peekV2Fact("handoffCause") === "model" && !llmOutput.concluded && conditionalHandoff(llmOutput.reply)) {
     wantsHandoff = false;
     requestedDestination = undefined;
     llmOutput.handoff = false;
+    conditionalWait = true;
     traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
   }
 
@@ -1700,11 +1705,33 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (requestedModelIds.length > 0) {
     const alreadySent = await recentlySentMessageModels(input.conversationId, requestedModelIds).catch(() => new Set<string>());
     if (alreadySent.size > 0) {
-      outboundActions = outboundActions.filter((a) => !(a.type === "send_message_model" && alreadySent.has(a.modelId as string)));
-      traceStep("ações", `Mensagem pronta já enviada nesta conversa há pouco — não reenviada (${[...alreadySent].join(", ")})`);
-      // Resposta que só apresentava o material vira o aviso de que ele está acima.
-      if (!outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length <= 30) {
-        replyText = ALREADY_SENT_REPLY;
+      // "Não recebi o vídeo": decide pelo que saiu de fato (a entrega). Antes
+      // a resposta era "te enviei logo acima 👆" com o envio marcado como falha.
+      let plan: ReturnType<typeof mediaResendPlan> = null;
+      if (saysNotReceived(input.userMessage)) {
+        const since = resendWindowStart(Date.now(), await lastV2ResetAt(input.conversationId).catch(() => null));
+        plan = mediaResendPlan(await recentMediaDeliveries(input.conversationId, since).catch(() => []));
+      }
+      if (plan?.resend) {
+        outboundActions = outboundActions.map((a) =>
+          a.type === "send_message_model" && alreadySent.has(a.modelId as string) ? ({ ...a, mediaOnly: true } as V2Action) : a,
+        );
+        replyText = plan.reply;
+        traceStep("mídia", plan.trace);
+      } else {
+        outboundActions = outboundActions.filter((a) => !(a.type === "send_message_model" && alreadySent.has(a.modelId as string)));
+        traceStep("ações", `Mensagem pronta já enviada nesta conversa há pouco — não reenviada (${[...alreadySent].join(", ")})`);
+        if (plan) {
+          replyText = plan.reply;
+          traceStep("mídia", plan.trace);
+          if (plan.handoff) {
+            wantsHandoff = true;
+            noteV2Fact("handoffCause", "media_failed", { keepFirst: true });
+          }
+        } else if (!outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length <= 30) {
+          // Resposta que só apresentava o material vira o aviso de que ele está acima.
+          replyText = ALREADY_SENT_REPLY;
+        }
       }
     }
   }
@@ -1814,7 +1841,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const materialFollows = !stopLimits.blocksReply && outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_product" || a.type === "send_material_attachment");
   // A mensagem "sem material" não ganha fecho ("Posso ajudar em algo mais?"
   // colado em "não tenho essa informação").
-  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied;
+  // Transferência condicional ("se continuar diferente, encaminho"): a resposta
+  // já termina pedindo que o cliente confira e volte; o fecho de passo a passo
+  // com "Deu certo / Preciso de ajuda" contradizia o "posso encaminhar".
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait;
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
@@ -1958,7 +1988,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       }
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
-    const queuedMsg = waitingInQueue ? config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT : "";
+    const queuedMsg = waitingInQueue ? queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config)) : "";
+    // O cliente disse que não recebeu o anexo e não dá para reenviar: a
+    // explicação honesta sai antes do aviso de transferência.
+    if (cause === "media_failed" && !waitingInQueue && replyText.trim()) {
+      const answered = await sendReply(replyText);
+      if (answered.sent) {
+        sentReply = replyText;
+        announced = announcesTransfer(replyText);
+        traceStep("resposta", "Explica que o anexo não está chegando e chama a equipe");
+      }
+    }
     // Depois de uma orientação, o "não encontrei resposta segura" contradiz o
     // que o cliente acabou de ler: vale o aviso padrão de transferência.
     const afterAnswer = !!sentReply;

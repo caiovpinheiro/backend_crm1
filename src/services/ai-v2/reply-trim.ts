@@ -14,7 +14,8 @@ export type TrimResult = { reply: string; removed: string[] };
 const COURTESY = /^(?:oi|ol[aá]|bom dia|boa tarde|boa noite|tudo bem|obrigad|de nada|por nada|fico [àa] disposi|qualquer (?:d[úu]vida|coisa)|estou por aqui|[ée] s[óo] (?:me )?chamar|posso (?:te )?ajudar|precisa de (?:mais )?alguma coisa|se precisar|conte comigo|espero ter ajudado|disponha|entendi|entendo|perfeito|combinado|claro|certo)\b/i;
 /** Conector que fica órfão quando a frase anterior sai. */
 const ORPHAN_CONNECTOR = /^(?:al[ée]m disso|por isso|assim|dessa forma|desse modo|ou seja|tamb[ée]m|ent[ãa]o|por esse motivo|isso significa que|no entanto|mas|por[ée]m|e|sendo assim|nesse caso|com isso)[,:]?\s+/i;
-const LIST_ITEM = /^\s*(?:\d+[.)]|[-•*])\s+/;
+// Passo numerado: "1.", "1)", "1️⃣", "Passo 1:", marcador ou emoji de lista.
+const LIST_ITEM = /^\s*(?:\d+[.)]|\d️?⃣|(?:passo|etapa)\s+\d+\s*[:.)-]|[-•*▪➡👉✅📌]️?)\s*/iu;
 
 function norm(s: string): string {
   return s

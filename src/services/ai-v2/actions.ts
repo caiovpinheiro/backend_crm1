@@ -368,16 +368,18 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
 
     const vars = { ...ctx.llmOutput?.collected, ...messageVars(ctx), ...((action.variables as Record<string, string> | undefined) ?? {}) };
     let text = renderMessage(template.content ?? "", vars, defaultFormatter());
+    // Reenvio só do anexo (o cliente disse que não recebeu): o texto já chegou.
+    const mediaOnly = (action as { mediaOnly?: unknown }).mediaOnly === true;
     // "Adaptar": só com a opção ligada na config e o modelo pedindo.
-    if (action.adapt === true && ctx.config.messageModelAdapt === true && text.trim() && ctx.userMessage?.trim()) {
+    if (!mediaOnly && action.adapt === true && ctx.config.messageModelAdapt === true && text.trim() && ctx.userMessage?.trim()) {
       const adapted = await adaptMessageModelText({ agentId: ctx.agentId, config: ctx.config, text, clientMessage: ctx.userMessage });
       traceStep("ações", adapted.adapted
         ? `Mensagem pronta "${template.name}" adaptada à conversa`
-        : `Mensagem pronta "${template.name}" enviada sem adaptar (${adapted.reason ?? "motivo desconhecido"})`);
+        : `Mensagem pronta "${template.name}" enviada como está: a versão adaptada ${describeAdaptRejection(adapted.reason)}`);
       text = adapted.text;
     }
     // Mensagem pronta só com anexo (sem texto) é válida.
-    if (text.trim()) {
+    if (text.trim() && !mediaOnly) {
       const sent = await sendV2TextMessage({
         conversationId: ctx.conversationId,
         contactId: ctx.contactId,
@@ -414,21 +416,39 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
           agentUserId: ctx.agentUserId,
           attachments: media,
           ...(since ? { since } : {}),
+          ...(mediaOnly ? { ignoreRecent: true } : {}),
         });
         const { isOrgOwnedStorageUrl } = await import("@/lib/storage/read-for-send");
         const external = media.filter((m) => !isOrgOwnedStorageUrl(m.url));
         if (mediaSent > 0) for (const m of media) sentMediaNames(ctx).add(mediaKey(m.name ?? ""));
         traceStep("mídia", mediaSent > 0
-          ? `${mediaSent} anexo(s) de "${template.name}" na fila de envio ao WhatsApp: ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
+          ? `${mediaOnly ? "Reenvio a pedido do cliente: " : ""}${mediaSent} anexo(s) de "${template.name}" na fila de envio ao WhatsApp: ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
           : external.length === media.length
             ? `Anexos de "${template.name}" não enviados: são links externos, não arquivos enviados ao CRM (${external.map((m) => m.name ?? "arquivo").join(", ")})`
-            : `Anexos de "${template.name}" não enviados (já enviados nesta conversa depois do último #reset, nos últimos 7 dias, ou canal indisponível)`);
+            : `Anexos de "${template.name}" não enviados (já entregues nesta conversa dentro da trava de repetição, ou canal indisponível)`);
       }
     }
-    return { action, ok: true, modelId, text, mediaSent };
+    if (mediaOnly && mediaSent === 0) return { action, ok: false, modelId, error: "anexo não pôde ser reenviado" };
+    return { action, ok: true, modelId, text: mediaOnly ? "" : text, mediaSent };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Por que a versão adaptada da mensagem pronta foi descartada, em linguagem clara. */
+function describeAdaptRejection(reason: string | undefined): string {
+  const r = reason ?? "";
+  let m = r.match(/^perdeu o link (.+)$/);
+  if (m) return `tinha deixado de fora o link ${m[1]} do texto original`;
+  m = r.match(/^link novo (.+)$/);
+  if (m) return `trazia um link que não está no texto original (${m[1]})`;
+  m = r.match(/^perdeu "(.+)"$/);
+  if (m) return `tinha deixado de fora o número "${m[1]}" do texto original`;
+  m = r.match(/^número novo "(.+)"$/);
+  if (m) return `trazia um número que não está no texto original ("${m[1]}")`;
+  if (r === "vazia") return "veio vazia";
+  if (r === "muito maior que a original") return "ficou muito maior que o texto original";
+  return r ? `não passou na conferência (${r})` : "não passou na conferência";
 }
 
 /** Nome do arquivo sem extensão nem acento, para reconhecer o mesmo anexo. */

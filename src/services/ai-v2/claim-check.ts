@@ -144,7 +144,12 @@ export function notAFactClaim(claim: string): boolean {
   // "O material n\u00e3o traz esse encontro", "n\u00e3o consta", "n\u00e3o menciona": a
   // resposta diz que a fonte n\u00e3o tem a informa\u00e7\u00e3o \u2014 n\u00e3o afirma nada.
   if (/\bnao (?:traz|trazem|informa|informam|consta|constam|menciona|mencionam|inclui|incluem|aparece|aparecem|lista|listam|detalha|detalham|especifica|especificam|indica|indicam|mostra|mostram|cobre|cobrem)\b/.test(c)) return true;
-  if (/\b(?:vou|irei|vamos|posso) (?:te |lhe )?(?:encaminhar|transferir|direcionar|passar|chamar)\b|\b(?:encaminhar|transferir|direcionar) (?:seu|o seu|voce|o) (?:atendimento|caso|pedido)\b/.test(c)) return true;
+  if (/\b(?:vou|irei|vamos|posso) (?:te |lhe )?(?:encaminhar|transferir|direcionar|passar|chamar|pedir)\b|\b(?:encaminhar|transferir|direcionar) (?:seu|o seu|voce|o) (?:atendimento|caso|pedido)\b/.test(c)) return true;
+  // "preciso que um atendente analise a tela com você", "alguém da equipe vai
+  // conferir": também é aviso de transferência, não afirmação da empresa.
+  if (/\b(?:preciso|precisamos|vou precisar) que (?:um|uma|alguem|a equipe|o time|um atendente|uma pessoa|um consultor)\b|\b(?:um|uma) (?:atendente|pessoa|consultor\w*|colega|especialista)(?: da equipe| do time)? (?:vai|precisa|pode|ira) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b|\b(?:alguem|a equipe|o time) (?:da equipe |do time )?(?:vai|precisa|pode) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b/.test(c)) return true;
+  // Cortesia ("fico feliz em ajudar", "por nada"): o checador às vezes marca.
+  if (!/\d/.test(c) && c.split(/\s+/).length <= 12 && /\b(?:fico (?:muito )?feliz|feliz em ajudar|que bom|por nada|de nada|obrigad[oa]|disponha|conte comigo|espero ter ajudado|a disposicao|qualquer (?:duvida|coisa)|estou por aqui|e so (?:me )?chamar|bom dia|boa tarde|boa noite|tudo bem)\b/.test(c)) return true;
   if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
   // Motivo da transferência ("precisa ser tratado por uma pessoa da equipe").
   if (/\b(?:precisa|deve|tem que) ser (?:tratad|analisad|verificad|resolvid|feit|confirmad|avaliad)\w* (?:por|pela|pelo) (?:uma pessoa|alguem|a equipe|equipe|um atendente|atendente|setor|um consultor)/.test(c)) return true;
@@ -153,11 +158,14 @@ export function notAFactClaim(claim: string): boolean {
   return isVagueClaim(claim);
 }
 
-const VAGUE = /\b(?:depende|dependem|varia|variam|pode (?:variar|levar|demorar|mudar|ser diferente)|podem (?:variar|levar|demorar|mudar)|conforme (?:o|a|os|as|cada) |caso a caso|um pouco de tempo|algum tempo|fica confuso|e comum|e normal|nao e incomum)\b/;
+// "Depende de X" fica de fora: afirma uma regra (o avaliador conta como
+// invenção quando X não está nas fontes). Só o que não diz nada de
+// verificável: prazo indefinido, variação, "caso a caso", comentário.
+const VAGUE = /\b(?:depende (?:do caso|da situacao|de cada caso|de varios fatores)|varia|variam|pode (?:variar|levar|demorar|mudar|ser diferente)|podem (?:variar|levar|demorar|mudar)|caso a caso|um pouco de tempo|algum tempo|fica confuso|e comum|e normal|nao e incomum)\b/;
 
 /**
  * Frase vaga sem dado concreto ("o retorno pode levar um pouco de tempo",
- * "o valor depende do plano e da modalidade"): não traz número, data, link,
+ * "o prazo varia conforme a solicitação"): não traz número, data, link,
  * nem nome próprio no meio da frase. O cliente não tem o que usar como
  * verdade; barrar isso virava reescrita (outra frase vaga) e transferência.
  */

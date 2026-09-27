@@ -8,6 +8,7 @@ import {
   searchV2CrmRecords,
   searchV2Knowledge,
   listV2MessageModels,
+  knowledgeChunksContaining,
 } from "../tools";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 
@@ -37,6 +38,7 @@ vi.mock("../tools", () => ({
   searchV2Knowledge: vi.fn(),
   listV2MessageModels: vi.fn(),
   describeV2MessageModels: vi.fn().mockResolvedValue([]),
+  knowledgeChunksContaining: vi.fn(async () => []),
 }));
 
 function baseConfig(overrides: Partial<V2AgentConfig> = {}): V2AgentConfig {
@@ -1067,6 +1069,44 @@ describe("escopo e repetição", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
     expect(r.output.reply).toBe("Leve a nota fiscal na loja para agendar a instalação. Qualquer dúvida, é só chamar.");
     expect(r.output.handoff).toBe(false);
+  });
+
+  it("link citado fora dos trechos lidos: achado num material liberado ou em domínio liberado, não é barrado", async () => {
+    (knowledgeChunksContaining as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { docId: "d1", docTitle: "Acesso ao painel", content: "Para entrar, use o endereço https://painel.exemplo.com/entrar com o seu e-mail cadastrado." },
+    ]);
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para o primeiro acesso, entre em https://painel.exemplo.com/entrar e use o seu e-mail cadastrado.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["entre em https://painel.exemplo.com/entrar"]}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model", allowedDomains: ["painel.exemplo.com"] } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "como faço o primeiro acesso?", stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect((knowledgeChunksContaining as ReturnType<typeof vi.fn>).mock.calls[0][0].needles).toEqual(["https://painel.exemplo.com/entrar"]);
+    expect(calls[1][0].messages[0].content).toContain("Acesso ao painel");
+    expect(calls[1][0].messages[0].content).toContain("Endereços liberados pela empresa");
+    expect(r.output.reply).toContain("https://painel.exemplo.com/entrar");
+    expect(r.output.handoff).toBe(false);
+  });
+
+  it("dado que o cliente digitou: a fonte ganha o mesmo marcador e o valor real não vai ao modelo que confere", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Seu e-mail cadastrado é [E-MAIL 1]. Use ele para entrar no painel.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": []}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
+      context: { contact: { Nome: "Ana", "E-mail": "ana.lima@exemplo.com" }, citableContact: { Nome: "Ana", "E-mail": "ana.lima@exemplo.com" }, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "meu e-mail é ana.lima@exemplo.com, é esse que uso para entrar?", stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(2);
+    const checkInput = calls[1][0].messages[0].content as string;
+    expect(checkInput).not.toContain("ana.lima@exemplo.com");
+    expect(checkInput).toContain("\"E-mail\":\"[E-MAIL 1]\"");
+    expect(r.output.reply).toBe("Seu e-mail cadastrado é a***@exemplo.com. Use ele para entrar no painel.");
   });
 
   it("checagem por modelo: apresentação curta de mensagem pronta não é conferida", async () => {

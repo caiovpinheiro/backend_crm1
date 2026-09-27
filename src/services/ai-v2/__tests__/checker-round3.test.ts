@@ -9,7 +9,13 @@ describe("checagem — rodada 3: frase vaga, eco do cliente, fonte que 'não tra
   it("frase vaga sem dado concreto não é afirmação de fato", () => {
     expect(isVagueClaim("o retorno pode levar um pouco de tempo")).toBe(true);
     expect(isVagueClaim("O prazo de retorno pode variar conforme a solicitação")).toBe(true);
-    expect(isVagueClaim("O valor da entrega depende do bairro e da modalidade escolhida")).toBe(true);
+    // "Depende de X" afirma uma regra: continua conferido.
+    expect(isVagueClaim("O valor da entrega depende do bairro e da modalidade escolhida")).toBe(false);
+    expect(isVagueClaim("o prazo de análise depende do caso")).toBe(true);
+    // Cortesia e aviso de transferência em outras formas.
+    expect(notAFactClaim("Fico muito feliz em ajudar! 😊")).toBe(true);
+    expect(notAFactClaim("preciso que um atendente analise a tela com você")).toBe(true);
+    expect(notAFactClaim("alguém da equipe vai conferir o seu pedido")).toBe(true);
     expect(isVagueClaim("se o pedido é de seis meses, realmente fica confuso falar em cobranças depois")).toBe(true);
     expect(isVagueClaim("o prazo é de 5 dias úteis")).toBe(false);
     expect(isVagueClaim("O valor depende do plano Premium")).toBe(false);

@@ -607,8 +607,10 @@ export async function simulateV2Turn(
 
   // Igual à produção: resposta que condiciona a transferência ("se continuar
   // divergente, encaminho") espera o cliente responder.
+  let conditionalWait = false;
   if (handoff && handoffCauseNow() === "model" && !closed && conditionalHandoff(output.reply)) {
     handoff = false;
+    conditionalWait = true;
     traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
   }
 
@@ -654,7 +656,8 @@ export async function simulateV2Turn(
     // Com material a seguir, a produção manda o fecho depois dele; aqui a
     // apresentação fica sem fecho.
     const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product" || e.action.type === "send_material_attachment");
-    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows && !noSourceApplied) {
+    // Transferência condicional não ganha fecho (igual à produção).
+    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows && !noSourceApplied && !conditionalWait) {
       // Fecho configurado, igual à produção.
       const ending = applyReplyEnding({
         reply,

@@ -40,6 +40,8 @@ export async function sendAgentFollowUpMedia(args: {
   attachments: AgentFaqMedia[];
   /** Conta repetição só a partir daqui (ex.: último #reset do teste). */
   since?: Date;
+  /** Reenvio a pedido do cliente: ignora a trava de repetição. */
+  ignoreRecent?: boolean;
 }): Promise<number> {
   const orgId = getOrgIdOrThrow();
   const allowed = args.attachments.filter((att) => {
@@ -59,14 +61,20 @@ export async function sendAgentFollowUpMedia(args: {
   });
   if (allowed.length === 0) return 0;
 
-  const already = await prisma.message.findMany({
-    where: {
-      conversationId: args.conversationId,
-      mediaUrl: { in: allowed.map((a) => a.url) },
-      createdAt: { gte: new Date(Math.max(Date.now() - 7 * 24 * 60 * 60 * 1000, args.since?.getTime() ?? 0)) },
-    },
-    select: { mediaUrl: true },
-  });
+  // Só envio que não falhou conta como "já enviado": a entrega com falha
+  // ("Arquivo não encontrado no storage") travava o reenvio por 7 dias e o
+  // cliente ficava sem o arquivo.
+  const already = args.ignoreRecent
+    ? []
+    : await prisma.message.findMany({
+        where: {
+          conversationId: args.conversationId,
+          mediaUrl: { in: allowed.map((a) => a.url) },
+          createdAt: { gte: new Date(Math.max(Date.now() - 7 * 24 * 60 * 60 * 1000, args.since?.getTime() ?? 0)) },
+          sendStatus: { not: "failed" },
+        },
+        select: { mediaUrl: true },
+      });
   const sent = new Set(already.map((m) => m.mediaUrl).filter(Boolean));
   const pending = allowed.filter((a) => !sent.has(a.url));
   if (pending.length === 0) return 0;
