@@ -56,7 +56,7 @@ type ScrubContext = {
   /**
    * Textos que o modelo viu e não são dado interno: trechos dos materiais
    * lidos no turno e o que o cliente escreveu. Valor de campo só-leitura que
-   * aparece aqui é informação pública ("cursos de Graduação" no material), não
+   * aparece aqui é informação pública ("clientes do plano Premium" no material), não
    * vazamento do cadastro.
    */
   publicTexts?: string[];
@@ -97,7 +97,7 @@ function collectNonCitableValues(ctx: ScrubContext): string[] {
 /**
  * Marcador no começo de frase ou linha sai junto com a vírgula que o
  * seguia ("[…], Ana! Vou te enviar" → "Ana! Vou te enviar"). No meio da
- * frase o cliente via "cursos de [informação interna…] EaD": a frase inteira
+ * frase o cliente via "clientes do [informação interna…] têm frete grátis": a frase inteira
  * sai. Sobrando só marcador, a resposta fica vazia (o motor pergunta o que o
  * cliente precisa).
  */

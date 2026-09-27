@@ -138,8 +138,8 @@ export async function selectV2ThemeSemantic(args: {
   apiKey: string | null;
   /**
    * A última mensagem do agente era uma pergunta dele: a resposta do cliente
-   * fica no assunto atual. Antes, uma palavra da resposta ("me matricularam
-   * num lugar longe") casava o gatilho de outro assunto e o roteiro do
+   * fica no assunto atual. Antes, uma palavra da resposta ("o pedido foi
+   * para o endereço antigo") casava o gatilho de outro assunto e o roteiro do
    * assunto em andamento se perdia no meio.
    */
   answeringQuestion?: boolean;
