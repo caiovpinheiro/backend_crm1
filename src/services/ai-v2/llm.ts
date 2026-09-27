@@ -945,7 +945,7 @@ function buildV2SystemPrompt(
   if (humanWords.length > 0) {
     // As palavras da tela não tinham efeito: "pediu uma pessoa" dependia só
     // do modelo adivinhar.
-    lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido.`);
+    lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido. Vale só o pedido feito na mensagem atual: pedido de uma mensagem anterior já foi tratado — se a conversa segue com você, responda o que o cliente perguntou agora.`);
   }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
@@ -1438,6 +1438,8 @@ export async function callV2LLM(args: {
       JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
+      // "Hoje é domingo", "o encontro de 19/09 já passou": vêm da data de hoje.
+      currentDateLine(args.config.businessHours?.timezone),
     ];
     // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
     // prova que a coisa existe).

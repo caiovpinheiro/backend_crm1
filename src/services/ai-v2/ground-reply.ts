@@ -248,7 +248,11 @@ function dateKeys(sources: string): Set<string> {
  * conferidos e o resto chegava ao cliente.
  */
 export function unsupportedFacts(reply: string, sources: string[]): string[] {
-  const joined = sources.join(" ");
+  // "120h", "40 hs", "30min" nas fontes valem como "120 horas", "30 minutos".
+  const joined = sources
+    .join(" ")
+    .replace(/\b(\d+)\s*(?:h|hs|hrs?)\b/gi, "$1 horas")
+    .replace(/\b(\d+)\s*min\b/gi, "$1 minutos");
   const squash = (s: string) => normalize(s).replace(/\s+/g, "");
   const haystack = squash(joined);
   const digits = joined.replace(/\D/g, "");

@@ -129,6 +129,22 @@ export function claimFoundInSources(claim: string, sources: string[]): boolean {
   return false;
 }
 
+/**
+ * Marcação do checador que não é afirmação de fato da empresa:
+ *  - admitir que não sabe ("não consigo confirmar", "não tenho essa informação");
+ *  - avisar a transferência ("vou encaminhar ao setor…");
+ *  - repetir o que o cliente contou ("você enviou…", "você disse…").
+ * Barradas, viravam reescrita e depois transferência — o agente pedia ajuda
+ * à equipe justamente por dizer que não sabia.
+ */
+export function notAFactClaim(claim: string): boolean {
+  const c = claim.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (/\bnao (?:consigo|posso|sei|tenho|temos|encontrei|achei)\b|\bnao (?:esta|estao|foi|ha) (?:informad|disponivel|disponiveis|confirmad)|\bsem (?:essa |esta )?informacao\b|\bnao da para (?:confirmar|saber)\b/.test(c)) return true;
+  if (/\b(?:vou|irei|vamos|posso) (?:te |lhe )?(?:encaminhar|transferir|direcionar|passar|chamar)\b|\b(?:encaminhar|transferir|direcionar) (?:seu|o seu|voce|o) (?:atendimento|caso|pedido)\b/.test(c)) return true;
+  if (/^(?:entendi[,.]?\s*)?voce (?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
+  return false;
+}
+
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
 export async function checkClaimsWithModel(args: {
   model: string;
@@ -156,7 +172,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !claimFoundInSources(c, args.sources));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimFoundInSources(c, args.sources));
     if (unsupported.length < flagged.length) {
       console.info("[ai-v2] checagem por modelo: marcação descartada, está nas fontes:", flagged.filter((c) => !unsupported.includes(c)));
     }
