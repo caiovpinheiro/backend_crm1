@@ -13,11 +13,18 @@ import type { V2AgentConfig } from "@/lib/ai-v2/types";
 
 describe("transferência — um caminho só de mensagem", () => {
   it("explicação do modelo sem as frases de aviso; vazio quando a resposta só avisa ou é curta demais", () => {
-    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro.");
+    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir.");
     expect(handoffExplanation("Vou te passar para a equipe.")).toBe("");
     expect(handoffExplanation("Claro! Vou encaminhar.")).toBe("");
     expect(handoffExplanation("Resposta do agente.")).toBe("");
     expect(handoffExplanation("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.")).toBe("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.");
+  });
+
+  it("a frase que diz o que falta fica; só a oração de aviso sai; empatia sozinha não vai", () => {
+    expect(handoffExplanation("Ana, entendo a dúvida. O seu e-mail não está cadastrado aqui, e ele é necessário para o primeiro acesso, então vou chamar alguém da equipe para te orientar."))
+      .toBe("O seu e-mail não está cadastrado aqui, e ele é necessário para o primeiro acesso.");
+    expect(handoffExplanation("Ana, entendo a dúvida. Vou te passar para a equipe.")).toBe("");
+    expect(handoffExplanation("O código do seu pedido não consta no cadastro, por isso vou pedir para a equipe conferir.")).toBe("O código do seu pedido não consta no cadastro.");
   });
 });
 

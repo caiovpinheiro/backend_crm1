@@ -153,7 +153,31 @@ export type V2AgentDetail = {
   anthropicApiKeyHint: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Contador do rascunho: cada salvamento soma 1; quem salva manda o que carregou. */
+  draftVersion: number;
 };
+
+/**
+ * O rascunho mudou no servidor desde que a tela o carregou (outra aba ou
+ * janela salvou antes). Sem isto, o último a salvar sobrescrevia calado —
+ * uma alteração foi perdida assim antes de publicar.
+ */
+export class DraftConflictError extends Error {
+  readonly code = "DRAFT_CONFLICT";
+  constructor(readonly draftVersion: number) {
+    super("O rascunho foi alterado em outra janela ou aba desde que você o carregou. Recarregue para ver a versão mais nova.");
+  }
+}
+
+/** Versão atual do rascunho (0 quando a coluna ainda não existe). */
+async function currentDraftVersion(id: string): Promise<number> {
+  try {
+    const rows = await (prisma as any).$queryRawUnsafe(`SELECT "draftVersion" FROM "ai_agent_configs" WHERE id = $1`, id);
+    return Number(rows?.[0]?.draftVersion ?? 0) || 0;
+  } catch {
+    return 0;
+  }
+}
 
 function configsEqual(a: V2AgentConfig, b: V2AgentConfig): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -202,6 +226,7 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       anthropicApiKeyHint: row.anthropicApiKeyHint ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
+      draftVersion: await currentDraftVersion(id),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -328,8 +353,8 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
 export async function saveV2AgentDraft(
   id: string,
   organizationId: string,
-  input: { config?: unknown },
-): Promise<{ id: string; config: V2AgentConfig }> {
+  input: { config?: unknown; expectedDraftVersion?: number },
+): Promise<{ id: string; config: V2AgentConfig; draftVersion: number }> {
   let config: V2AgentConfig | undefined;
   if (input.config !== undefined) {
     const validated = validateV2Config(input.config);
@@ -337,22 +362,30 @@ export async function saveV2AgentDraft(
     config = validated.data;
   }
 
-  const data: Record<string, unknown> = {};
-  if (config) data.draftConfig = config as unknown as Record<string, unknown>;
-
   const existing = await (prisma as any).aIAgentConfig.findFirst({
     where: { id, organizationId, engine: "simple" },
     select: { id: true, draftConfig: true, simpleConfig: true },
   });
   if (!existing) throw new Error("Agente não encontrado.");
 
-  const row = await (prisma as any).aIAgentConfig.update({
-    where: { id },
-    data,
-  });
+  if (config) {
+    // Grava só se o rascunho ainda é o que a tela carregou (compare-and-set
+    // no contador): duas abas salvando não se sobrescrevem mais em silêncio.
+    const expected = typeof input.expectedDraftVersion === "number" ? input.expectedDraftVersion : undefined;
+    const changed: number = await (prisma as any).$executeRawUnsafe(
+      `UPDATE "ai_agent_configs" SET "draftConfig" = $1::jsonb, "draftVersion" = "draftVersion" + 1, "updatedAt" = NOW()
+        WHERE id = $2 AND "organizationId" = $3${expected !== undefined ? ` AND "draftVersion" = $4` : ""}`,
+      JSON.stringify(config),
+      id,
+      organizationId,
+      ...(expected !== undefined ? [expected] : []),
+    );
+    if (!changed) throw new DraftConflictError(await currentDraftVersion(id));
+  }
   return {
-    id: row.id,
-    config: config ?? normalizeV2Config(row.draftConfig ?? row.simpleConfig),
+    id: existing.id,
+    config: config ?? normalizeV2Config(existing.draftConfig ?? existing.simpleConfig),
+    draftVersion: await currentDraftVersion(id),
   };
 }
 

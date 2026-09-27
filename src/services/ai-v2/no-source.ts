@@ -117,10 +117,41 @@ export function announcesTransfer(reply: string): boolean {
 export function handoffExplanation(reply: string): string {
   const lines = reply
     .split(/\r?\n/)
-    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => s.trim() && !announcesTransfer(s)).join(" ").trim())
+    .map((line) =>
+      line
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => withoutTransferClause(s))
+        .filter((s) => s.trim() && !isEmpathyOnly(s))
+        .join(" ")
+        .trim(),
+    )
     .filter(Boolean);
   const text = lines.join("\n").trim();
   return text.split(/\s+/).filter(Boolean).length >= 4 ? text : "";
+}
+
+/** Oração que anuncia a transferência, ligada por vírgula/conector ("…, então vou chamar a equipe"). */
+const TRANSFER_CLAUSE = /,?\s*(?:e\s+)?(?:por isso|ent[ãa]o|assim|portanto|logo|dessa forma|por esse motivo)?\s*,?\s*(?:eu\s+)?(?:vou|irei|vamos|preciso|precisamos|posso)\s+(?:te\s+|lhe\s+)?(?:encaminhar|transferir|passar|chamar|direcionar|acionar|pedir)[^.!?]*[.!?]?\s*$/i;
+
+/**
+ * Tira da frase só a oração de aviso ("…, então vou chamar alguém da
+ * equipe"): a parte que diz O QUE falta ("seu e-mail não está cadastrado
+ * aqui, e ele é necessário para seguir") é a explicação e fica. Frase que é
+ * só o aviso sai inteira.
+ */
+export function withoutTransferClause(sentence: string): string {
+  const s = sentence.trim();
+  if (!announcesTransfer(s)) return s;
+  const cut = s.replace(TRANSFER_CLAUSE, "").trim();
+  if (!cut || announcesTransfer(cut) || cut.split(/\s+/).length < 3) return "";
+  return /[.!?]$/.test(cut) ? cut : `${cut}.`;
+}
+
+/** Frase só de empatia/cortesia, sem conteúdo ("Ana, entendo a dúvida."). */
+export function isEmpathyOnly(sentence: string): boolean {
+  const s = sentence.trim().replace(/^[\p{L}\s]{1,30}?[,!]\s*/u, "");
+  if (s.split(/\s+/).length > 7) return false;
+  return /^(?:entendo|entendi|compreendo|imagino|sinto muito|poxa|que pena|tudo bem|claro|certo|perfeito|ok|obrigad[oa]|sem problemas?)\b/i.test(s);
 }
 
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };

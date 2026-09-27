@@ -71,7 +71,7 @@ describe("fecho e transferência condicional (paridade produção × teste)", ()
     mocks.callV2LLMTest.mockResolvedValueOnce(llm("Não tenho o seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe.", true));
     const r = await simulateV2Turn("agent-1", cfg, "qual é o meu e-mail?", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
     expect(r.handoff).toBe(true);
-    expect(r.reply).toBe("Não tenho o seu e-mail no cadastro.\n\nVou transferir.");
+    expect(r.reply).toBe("Não tenho o seu e-mail no cadastro. Como ele é necessário para seguir.\n\nVou transferir.");
     mocks.callV2LLMTest.mockResolvedValueOnce(llm("Vou te passar para a equipe.", true));
     const only = await simulateV2Turn("agent-1", cfg, "qual é o meu e-mail?", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
     expect(only.reply).toBe("Vou transferir.");

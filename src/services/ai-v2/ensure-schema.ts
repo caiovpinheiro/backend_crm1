@@ -62,6 +62,13 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   if (anthropicResult[0]?.exists !== true) needs.push("anthropic key columns");
 
+  const draftVersionResult = await db.$queryRawUnsafe<
+    Array<{ exists: boolean }>
+  >(
+    `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_agent_configs' AND column_name = 'draftVersion') AS exists`,
+  );
+  if (draftVersionResult[0]?.exists !== true) needs.push("draftVersion column");
+
   if (needs.length === 0) {
     checked = true;
     return;
@@ -105,6 +112,10 @@ export async function ensureV2AgentSchema(): Promise<void> {
   );
   await (prismaBase as any).$executeRawUnsafe(
     `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "anthropicApiKeyHint" TEXT`,
+  );
+  // Contador do rascunho para o salvamento com versão esperada (409 se mudou).
+  await (prismaBase as any).$executeRawUnsafe(
+    `ALTER TABLE "ai_agent_configs" ADD COLUMN IF NOT EXISTS "draftVersion" INTEGER NOT NULL DEFAULT 0`,
   );
 
   checked = true;
