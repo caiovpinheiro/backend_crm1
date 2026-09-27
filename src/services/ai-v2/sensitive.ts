@@ -96,7 +96,7 @@ type Replacer = (kind: SensitiveKind, value: string) => string;
  * Ordem importa: senha antes (o valor pode ter dígitos), documentos com
  * rótulo antes dos soltos.
  */
-function scan(text: string, replace: Replacer): { text: string; kinds: Set<SensitiveKind> } {
+function scan(text: string, replace: Replacer, allowedSecrets?: Set<string>): { text: string; kinds: Set<SensitiveKind> } {
   const kinds = new Set<SensitiveKind>();
   const hit = (kind: SensitiveKind, value: string) => {
     kinds.add(kind);
@@ -111,6 +111,9 @@ function scan(text: string, replace: Replacer): { text: string; kinds: Set<Sensi
     // "senha incorreta", "senha do portal:" não são senha: sem separador, só
     // vale valor com dígito ou símbolo (pontuação no fim não conta).
     if (!sep && !/[\d_]|[^\p{L}\p{N}]/u.test(value.replace(/[.,!?:;)]+$/, ""))) return full;
+    // Valor que a configuração manda dizer a este cliente (ex.: senha
+    // provisória montada dos campos, marcada "pode dizer"): sai como está.
+    if (allowedSecrets?.has(value.replace(/[.,!?:;)*_]+$/, "").replace(/^[*_]+/, ""))) return full;
     return `${word}${quals}${sep ? ` ${sep.trim()} ` : " "}${hit("senha", value)}`;
   });
 
@@ -145,14 +148,14 @@ export function maskSensitive(text: string): { text: string; kinds: SensitiveKin
  * mascarado. E-mail passa (a resposta cita e-mail de atendimento do
  * material).
  */
-export function maskOutgoing(text: string): { text: string; kinds: SensitiveKind[] } {
+export function maskOutgoing(text: string, allowedSecrets?: Set<string>): { text: string; kinds: SensitiveKind[] } {
   if (!text) return { text, kinds: [] };
   const kinds = new Set<SensitiveKind>();
   const r = scan(text, (kind, value) => {
     if (kind === "email") return value;
     kinds.add(kind);
     return partialMask(kind, value);
-  });
+  }, allowedSecrets);
   return { text: r.text, kinds: [...kinds] };
 }
 

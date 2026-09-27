@@ -112,8 +112,17 @@ export function guardV2Output(
     }
   }
   // Senha/código e cartão não saem; documento sai mascarado — mesmo que
-  // venha do material, de uma ferramenta ou do próprio modelo.
-  const sensitive = maskOutgoing(replyText);
+  // venha do material, de uma ferramenta ou do próprio modelo. Exceção: o
+  // valor exato que a configuração marca "pode dizer" a este cliente
+  // (ex.: senha provisória montada dos campos dele).
+  const citable = new Set(
+    [ctx?.citableContact, ctx?.citableDeal]
+      .flatMap((o) => Object.values(o ?? {}))
+      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      .map((v) => String(v).trim())
+      .filter((v) => v.length >= 3),
+  );
+  const sensitive = maskOutgoing(replyText, citable);
   if (sensitive.kinds.length > 0) {
     replyText = sensitive.text;
     warnings.push(`Dado sensível removido/mascarado da resposta: ${sensitive.kinds.join(", ")}.`);
