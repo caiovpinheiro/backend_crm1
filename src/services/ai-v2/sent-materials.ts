@@ -21,6 +21,24 @@ export const ALREADY_SENT_REPLY =
 /** Fim da resposta longa que anunciava um anexo já enviado há pouco. */
 export const ATTACHMENT_ABOVE_NOTE = "O arquivo que mencionei já está logo acima na conversa 👆";
 
+/**
+ * Introdução da resposta quando uma mensagem pronta vem a seguir: o texto
+ * antes da primeira lista/quebra, até 2 frases e 35 palavras. Vazio quando
+ * a resposta já começa pelo conteúdo.
+ */
+export function introBeforeMaterial(reply: string): string {
+  const head = reply.split(/\n\s*(?:\d+[.)]|[-•*📌✅]|\S{1,2}\s)|\n{2,}/u)[0].trim().split("\n")[0].trim();
+  const sentences = head.split(/(?<=[.!?])\s+/).slice(0, 2);
+  let out = "";
+  for (const s of sentences) {
+    const next = out ? `${out} ${s}` : s;
+    if (next.split(/\s+/).length > 35) break;
+    out = next;
+  }
+  if (out && !/[.!?:]$/.test(out)) out = `${out}.`;
+  return out.split(/\s+/).length >= 3 ? out : "";
+}
+
 /** A resposta anuncia um envio ("segue o vídeo", "vou te mandar", "abaixo"). */
 export function announcesSending(reply: string): boolean {
   return /\b(?:segue|seguem|envio|enviei|enviando|mando|mandei|mandando|vou (?:te |lhe )?(?:enviar|mandar)|abaixo|anexo|anexei)\b/i.test(reply);

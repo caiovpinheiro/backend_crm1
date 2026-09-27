@@ -415,15 +415,33 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
           attachments: media,
           ...(since ? { since } : {}),
         });
+        const { isOrgOwnedStorageUrl } = await import("@/lib/storage/read-for-send");
+        const external = media.filter((m) => !isOrgOwnedStorageUrl(m.url));
+        if (mediaSent > 0) for (const m of media) sentMediaNames(ctx).add(mediaKey(m.name ?? ""));
         traceStep("mídia", mediaSent > 0
           ? `Enviou ${mediaSent} anexo(s) de "${template.name}": ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")}`
-          : `Anexos de "${template.name}" não enviados (já enviados nesta conversa nos últimos 7 dias, ou canal indisponível)`);
+          : external.length === media.length
+            ? `Anexos de "${template.name}" não enviados: são links externos, não arquivos enviados ao CRM (${external.map((m) => m.name ?? "arquivo").join(", ")})`
+            : `Anexos de "${template.name}" não enviados (já enviados nesta conversa depois do último #reset, nos últimos 7 dias, ou canal indisponível)`);
       }
     }
     return { action, ok: true, modelId, text, mediaSent };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Nome do arquivo sem extensão nem acento, para reconhecer o mesmo anexo. */
+function mediaKey(name: string): string {
+  return name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\.[a-z0-9]{2,5}$/, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** Arquivos enviados neste turno (mensagem pronta), para o anexo do material não repetir. */
+const SENT_MEDIA = new WeakMap<object, Set<string>>();
+function sentMediaNames(ctx: V2ActionContext): Set<string> {
+  let set = SENT_MEDIA.get(ctx);
+  if (!set) SENT_MEDIA.set(ctx, (set = new Set()));
+  return set;
 }
 
 /** Anexos dos materiais (vídeo, imagem, áudio, PDF), pelo mesmo envio das mensagens prontas. */
@@ -434,8 +452,13 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
   if (!ctx.contactId || !ctx.conversationId) return { action, ok: false, error: "No contact/conversation" };
   try {
     const { attachmentsByIds } = await import("./material-attachments");
-    const list = await attachmentsByIds(ctx.agentId, ids);
-    if (list.length === 0) return { action, ok: false, error: "Attachment not found" };
+    const found = await attachmentsByIds(ctx.agentId, ids);
+    if (found.length === 0) return { action, ok: false, error: "Attachment not found" };
+    // O mesmo arquivo já foi com a mensagem pronta deste turno (mesmo nome).
+    const already = sentMediaNames(ctx);
+    const list = found.filter((a) => !already.has(mediaKey(a.name)));
+    if (list.length < found.length) traceStep("mídia", `Não repetido (já foi com a mensagem pronta): ${found.filter((a) => already.has(mediaKey(a.name))).map((a) => a.name).join(", ")}`);
+    if (list.length === 0) return { action, ok: true, mediaSent: 0, text: "" };
     const text = list.map((a) => a.description || a.name).join("\n");
     if (ctx.autonomyMode === "DRAFT") {
       traceStep("mídia", `Anexos do material não enviados (modo sugestão): ${list.map((a) => a.name).join(", ")}`);

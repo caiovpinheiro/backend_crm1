@@ -184,6 +184,8 @@ export function mergeChunks(lists: PrefetchedChunk[][], limit: number): Prefetch
  * prazo, busca só com a frase original (que já está buscando em paralelo).
  */
 const REWRITE_TIMEOUT_MS = 3500;
+/** Trecho tão parecido com a pergunta que a reformulação não acrescenta. */
+const DIRECT_SEARCH_ENOUGH = 0.65;
 
 function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -247,7 +249,11 @@ async function prefetchKnowledge(args: {
     // A frase original já achou um trecho forte: não espera a reformulação.
     const direct = await original;
     const directBest = direct?.chunks.length ? Math.max(...direct.chunks.map((c) => 1 - c.distance)) : 0;
-    if (directBest >= MAIN_SOURCE_SIMILARITY) {
+    // Pergunta curta ("Primeiro acesso") ou trecho só razoável: a
+    // reformulação acha o material certo; com 0,50 ela era pulada e a
+    // resposta saía de um material vizinho.
+    const shortQuestion = args.userMessage.trim().split(/\s+/).length <= 3;
+    if (!shortQuestion && directBest >= DIRECT_SEARCH_ENOUGH) {
       traceStep("base", `A busca direta já achou trecho forte (${directBest.toFixed(2)}) — sem esperar a reformulação`);
     } else {
       try {

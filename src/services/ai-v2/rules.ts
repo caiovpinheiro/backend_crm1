@@ -45,6 +45,35 @@ export function businessHoursText(config: Pick<V2AgentConfig, "businessHours">):
     .join("\n");
 }
 
+/** "segunda a sexta, 08:00 às 18:00; sábado, 08:00 às 12:00". Vazio quando desligado. */
+export function businessHoursSummary(config: Pick<V2AgentConfig, "businessHours">): string {
+  const bh = config.businessHours;
+  if (!bh || !bh.enabled || bh.weekdays.length === 0) return "";
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  const slotOf = (day: number) => bh.weekdays.filter((s: V2BusinessHoursSlot) => s.day === day).map((s: V2BusinessHoursSlot) => `${s.start} às ${s.end}`).join(" e ");
+  const groups: Array<{ from: number; to: number; slot: string }> = [];
+  for (const day of order) {
+    const slot = slotOf(day);
+    if (!slot) continue;
+    const last = groups[groups.length - 1];
+    if (last && last.slot === slot && order.indexOf(day) === order.indexOf(last.to) + 1) last.to = day;
+    else groups.push({ from: day, to: day, slot });
+  }
+  const short = (d: number) => WEEKDAY_NAMES[d].replace("-feira", "");
+  return groups.map((g) => `${g.from === g.to ? short(g.from) : `${short(g.from)} a ${short(g.to)}`}, ${g.slot}`).join("; ");
+}
+
+/**
+ * Fora do horário configurado: frase para o aviso de transferência e o de
+ * fila ("nossa equipe atende… sua mensagem fica registrada"). Vazio dentro
+ * do horário ou sem horário configurado.
+ */
+export function outsideHoursNote(config: V2AgentConfig, now = new Date()): string {
+  const summary = businessHoursSummary(config);
+  if (!summary || isWithinV2BusinessHours(config, now)) return "";
+  return `Nossa equipe atende ${summary}. Sua mensagem fica registrada e seguimos com você no próximo horário.`;
+}
+
 export function isWithinV2BusinessHours(config: V2AgentConfig, now = new Date()): boolean {
   const bh = config.businessHours;
   if (!bh || !bh.enabled || bh.weekdays.length === 0) return true;

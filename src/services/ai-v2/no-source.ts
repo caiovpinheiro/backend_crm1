@@ -80,9 +80,27 @@ export function lacksInformation(reply: string): boolean {
  */
 export function answersBeforeHandoff(reply: string): boolean {
   const text = reply.trim();
-  if (text.split(/\s+/).length < 12 || lacksInformation(text)) return false;
-  const rest = text.split(/(?<=[.!?])\s+|\n+/).filter((s) => !announcesTransfer(s)).join(" ");
-  return rest.split(/\s+/).filter(Boolean).length >= 8;
+  if (text.split(/\s+/).length < 12) return false;
+  // Tirando o aviso de transferência e o "não tenho essa informação", sobra
+  // orientação? ("A DP é cobrada com desconto sobre a mensalidade; o valor
+  // exato eu não tenho" — a regra vale mandar.)
+  const rest = text.split(/(?<=[.!?])\s+|\n+/).filter((s) => !announcesTransfer(s) && !lacksInformation(s)).join(" ");
+  return rest.split(/\s+/).filter(Boolean).length >= 10;
+}
+
+const TRANSFER_WORD = /\b(?:encaminh\w*|transfer(?:ir|irei|imos|e|o|indo)\b|transfir\w*|repass\w*|chamar (?:algu[eé]m|uma pessoa|a equipe))/i;
+/** "se"/"caso" como condição: no começo da frase ou depois de vírgula, "e", "mas"… ("o seu caso" e "se aplica" não contam). */
+const CONDITION = /(?:^|[,;:(]\s*|\b(?:e|mas|ou|porém|porem|então|entao)\s+)(?:se|caso)(?![\p{L}])/iu;
+
+/**
+ * A resposta põe uma condição para transferir ("se o valor continuar
+ * diferente, encaminho ao financeiro"; "caso não apareça, te transfiro"):
+ * toda frase que fala em transferir é condicional. Transferir na hora
+ * deixava o cliente na fila sem ter conferido o que o agente pediu.
+ */
+export function conditionalHandoff(reply: string): boolean {
+  const sentences = reply.split(/(?<=[.!?])\s+|\n+/).filter((s) => TRANSFER_WORD.test(s));
+  return sentences.length > 0 && sentences.every((s) => CONDITION.test(s.trim()));
 }
 
 /** A resposta já avisa a transferência (não vale mandar antes do aviso). */

@@ -13,7 +13,7 @@ import { createDeal } from "@/services/deals";
 import { resolveV2AgentForConversation } from "./agent-resolver";
 import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, tryParseDealChoice, type V2LoadedContext } from "./context";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
-import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
+import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
@@ -34,13 +34,13 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, lacksInformation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, recentlySentMessageModels } from "./sent-materials";
+import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, recentlySentMessageModels } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -719,7 +719,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       lastReply: last?.content ?? null,
       lastReplyAt: last?.createdAt ?? null,
     });
-    const notice = picked?.text ?? "";
+    const hoursNote = picked?.kind === "first" ? outsideHoursNote(config) : "";
+    const notice = picked ? [picked.text, hoursNote].filter(Boolean).join("\n\n") : "";
     if (picked) traceStep("fila", `Aviso de fila (${picked.kind === "first" ? "primeiro" : picked.kind === "cancel" ? "pedido de cancelar" : picked.kind === "upset" ? "cliente insatisfeito" : picked.kind === "call" ? "cliente chamando" : "nova mensagem"})`);
     else traceStep("fila", "Mensagens seguidas em poucos segundos: o aviso anterior vale");
     const res = picked
@@ -1637,6 +1638,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
   }
 
+  // "Se continuar divergente, encaminho": a resposta condiciona a
+  // transferência ao que o cliente vai conferir. Transferir já deixava o
+  // cliente na fila sem ter conferido; ele responde e o próximo turno decide.
+  if (wantsHandoff && peekV2Fact("handoffCause") === "model" && !llmOutput.concluded && conditionalHandoff(llmOutput.reply)) {
+    wantsHandoff = false;
+    requestedDestination = undefined;
+    llmOutput.handoff = false;
+    traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
+  }
+
   // Sentimento
   const sentiment = detectV2Sentiment(config, input.userMessage);
   if (shouldActOnSentiment(config, sentiment)) {
@@ -1834,6 +1845,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     replyText = "";
   }
 
+  // Mensagem pronta a seguir: a resposta só apresenta. Resposta completa +
+  // mensagem pronta (adaptada) mandava o mesmo conteúdo duas vezes.
+  if (!anyHandoff && outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length > 40) {
+    const intro = introBeforeMaterial(replyText);
+    traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");
+    replyText = intro;
+  }
+
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions) : null;
@@ -1940,9 +1959,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
     const queuedMsg = waitingInQueue ? config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT : "";
+    // Depois de uma orientação, o "não encontrei resposta segura" contradiz o
+    // que o cliente acabou de ler: vale o aviso padrão de transferência.
+    const afterAnswer = !!sentReply;
+    const handoffNote = queuedMsg || (afterAnswer ? "" : noSourceMsg);
+    const hoursNote = outsideHoursNote(config);
     const sent = await performHandoff(
       requestedDestination ?? activeTheme?.handoffDestination,
-      announced ? { skipMessage: true } : queuedMsg || noSourceMsg ? { message: queuedMsg || noSourceMsg } : {},
+      announced
+        ? { skipMessage: true }
+        : handoffNote || hoursNote
+          ? { message: [handoffNote || renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter()), hoursNote].filter(Boolean).join("\n\n") }
+          : {},
     );
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
