@@ -9,7 +9,7 @@ import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2St
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
-import { HUMAN_REQUEST_ASK, actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy } from "./reply-format";
@@ -20,6 +20,7 @@ import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from 
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
+import { systemMessage } from "@/lib/ai-v2/system-messages";
 import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, type V2LoadedContext } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
@@ -434,7 +435,7 @@ export async function simulateV2Turn(
   let humanRequestWithQuestion = false;
   let ruleForTurn: V2Rule | null = rule;
   if (rule?.actions.some((a) => a.type === "handoff") && mentionsHumanRequest(config, userMessage)) {
-    const ask = renderMessage(HUMAN_REQUEST_ASK, vars, defaultFormatter());
+    const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
     if (humanRequestSubject(config, userMessage)) {
       humanRequestWithQuestion = true;
       ruleForTurn = { ...rule, actions: rule.actions.filter((a) => a.type !== "handoff") } as V2Rule;
@@ -556,7 +557,7 @@ export async function simulateV2Turn(
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
-  });
+  }, systemMessage(config, "returnPromiseHandoff"));
   output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
   // Igual à produção: pedido novo nesta mensagem não encerra.
   if (keepOpenOnNewRequest(config, userMessage, output)) {
@@ -682,7 +683,7 @@ export async function simulateV2Turn(
       if (ending.added) labels = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
     }
     if (labels.length > 0) {
-      const built = buildV2Interactive(reply, labels);
+      const built = buildV2Interactive(reply, labels, { prompt: systemMessage(config, "optionsPrompt"), button: systemMessage(config, "optionsButton") });
       interactive = built.payload
         ? { kind: built.payload.kind, body: reply.trim(), labels: built.labels, displayContent: built.payload.displayContent }
         : null;

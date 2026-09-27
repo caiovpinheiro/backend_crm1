@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { V2_MODELS } from "./models";
+import { SYSTEM_MESSAGE_KEYS } from "./system-messages";
 
 /** Modelos da tela (id + nome); detalhes em `./models`. */
 export const SUPPORTED_V2_MODELS = V2_MODELS.map((m) => ({ id: m.id, label: m.label }));
@@ -425,6 +426,11 @@ export const v2AgentConfigSchema = z.object({
   themeRecognition: themeRecognitionSchema,
   knowledgeSearch: z.object({ preset: z.enum(["all", "related", "close"]).optional() }).optional(),
   derivedFields: z.array(derivedFieldSchema).optional(),
+  // Textos que o motor escreve ao cliente (aviso de fila, reenvio de anexo…).
+  systemMessages: z
+    .object(Object.fromEntries(SYSTEM_MESSAGE_KEYS.map((k) => [k, optionalText])) as Record<string, typeof optionalText>)
+    .partial()
+    .optional(),
   businessHours: z
     .object({
       enabled: z.boolean().optional().default(false),

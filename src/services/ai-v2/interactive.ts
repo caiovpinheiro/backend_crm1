@@ -54,7 +54,13 @@ export type V2InteractivePayload = {
  * Resposta + opções → mensagem interativa e o texto numerado de reserva.
  * Sem opções válidas, `payload` é null e o texto é a própria resposta.
  */
-export function buildV2Interactive(reply: string, rawLabels: string[]): { payload: V2InteractivePayload | null; fallbackText: string; labels: string[] } {
+export function buildV2Interactive(
+  reply: string,
+  rawLabels: string[],
+  texts: { prompt?: string; button?: string } = {},
+): { payload: V2InteractivePayload | null; fallbackText: string; labels: string[] } {
+  const shortBody = texts.prompt?.trim() || SHORT_BODY;
+  const listButton = texts.button?.trim() || LIST_BUTTON;
   const seen = new Set<string>();
   const all: string[] = [];
   for (const raw of rawLabels) {
@@ -85,10 +91,10 @@ export function buildV2Interactive(reply: string, rawLabels: string[]): { payloa
     payload: {
       kind: format,
       ...(fits || !body ? {} : { leadText: body }),
-      body: fits ? body : SHORT_BODY,
+      body: fits ? body : shortBody,
       options,
-      listButton: LIST_BUTTON,
-      displayContent: `${body || SHORT_BODY}\n[${tag}: ${labels.join(", ")}]`,
+      listButton: listButton.slice(0, 20),
+      displayContent: `${body || shortBody}\n[${tag}: ${labels.join(", ")}]`,
     },
     fallbackText,
     labels,

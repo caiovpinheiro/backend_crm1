@@ -6,6 +6,7 @@
 
 import type { V2Action, V2AgentConfig } from "@/lib/ai-v2/types";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
+import { SYSTEM_MESSAGE_DEFAULTS } from "@/lib/ai-v2/system-messages";
 
 import { QUERY_TOOL_NAMES } from "./theme-prompt";
 
@@ -117,7 +118,7 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
 }
 
 /** Pergunta feita uma vez a quem pede uma pessoa sem dizer o assunto. */
-export const HUMAN_REQUEST_ASK = "Claro! Antes de te passar para a equipe, me conta em uma frase o que você precisa, para eu encaminhar certo.";
+export const HUMAN_REQUEST_ASK = SYSTEM_MESSAGE_DEFAULTS.humanRequestAsk;
 
 const HUMAN_FILLER = new Set(["quero", "queria", "gostaria", "preciso", "favor", "obrigado", "obrigada", "pessoa", "humano", "humana", "atendente", "alguem", "equipe", "consultor", "consultora", "urgente", "agora", "poderia", "pode", "possivel", "voce", "voces", "aqui", "para", "falar", "conversar", "ajuda", "atendimento", "alguma", "algum", "coisa"]);
 

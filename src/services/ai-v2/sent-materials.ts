@@ -6,6 +6,7 @@
  */
 
 import { prismaBase } from "@/lib/prisma-base";
+import { SYSTEM_MESSAGE_DEFAULTS, systemMessage, type SystemMessages } from "@/lib/ai-v2/system-messages";
 
 const db = prismaBase as unknown as {
   $queryRawUnsafe: <T = unknown>(q: string, ...v: unknown[]) => Promise<T>;
@@ -53,11 +54,10 @@ export function messageModelCoverage(reply: string, modelText: string): number {
 }
 
 /** Resposta quando o material pedido acabou de ser enviado. */
-export const ALREADY_SENT_REPLY =
-  "Te enviei esse material logo acima 👆 Se ficou alguma dúvida ou algo não funcionou, me conta que eu te ajudo.";
+export const ALREADY_SENT_REPLY = SYSTEM_MESSAGE_DEFAULTS.materialAlreadySent;
 
 /** Fim da resposta longa que anunciava um anexo já enviado há pouco. */
-export const ATTACHMENT_ABOVE_NOTE = "O arquivo que mencionei já está logo acima na conversa 👆";
+export const ATTACHMENT_ABOVE_NOTE = SYSTEM_MESSAGE_DEFAULTS.attachmentAbove;
 
 /**
  * Introdução da resposta quando uma mensagem pronta vem a seguir: o texto
@@ -160,7 +160,10 @@ export type MediaResendPlan = { resend: boolean; handoff: boolean; reply: string
  * diz a verdade e chama alguém da equipe — antes a resposta era "te enviei
  * logo acima 👆" com a entrega marcada como falha.
  */
-export function mediaResendPlan(deliveries: MediaDelivery[]): MediaResendPlan | null {
+export function mediaResendPlan(
+  deliveries: MediaDelivery[],
+  config?: { systemMessages?: SystemMessages | null } | null,
+): MediaResendPlan | null {
   if (deliveries.length === 0) return null;
   const last = deliveries[deliveries.length - 1];
   const label = MEDIA_LABEL[last.type] ?? "o arquivo";
@@ -170,18 +173,14 @@ export function mediaResendPlan(deliveries: MediaDelivery[]): MediaResendPlan | 
     return {
       resend: false,
       handoff: true,
-      reply: failed > 0
-        ? `Não estou conseguindo enviar ${label} por aqui. Vou chamar alguém da equipe para te mandar por outro caminho.`
-        : `Já enviei ${label} duas vezes e ele não está chegando aí. Vou chamar alguém da equipe para te mandar por outro caminho.`,
+      reply: systemMessage(config, failed > 0 ? "mediaCannotSend" : "mediaNotArriving", { anexo: label, Anexo: `${label.charAt(0).toUpperCase()}${label.slice(1)}` }),
       trace: `Cliente diz que não recebeu ${label} (${attempts} envios, ${failed} com falha) → não reenvia; transfere`,
     };
   }
   return {
     resend: true,
     handoff: false,
-    reply: failed > 0
-      ? `${label.charAt(0).toUpperCase()}${label.slice(1)} não saiu da primeira vez. Estou reenviando agora 👇 Se não chegar, me avisa que eu chamo alguém da equipe.`
-      : `Reenviei ${label} agora 👇 Se não aparecer, me avisa.`,
+    reply: systemMessage(config, failed > 0 ? "mediaResentAfterFailure" : "mediaResent", { anexo: label, Anexo: `${label.charAt(0).toUpperCase()}${label.slice(1)}` }),
     trace: `Cliente diz que não recebeu ${label} (${failed > 0 ? "o envio anterior falhou" : "o envio anterior consta como entregue"}) → reenvia só o anexo, uma vez`,
   };
 }

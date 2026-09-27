@@ -519,6 +519,8 @@ export interface V2AgentConfig {
   markMessagesRead?: boolean;
   costCap?: V2CostCap;
   dailyTokenCap?: number;
+  /** Textos que o motor escreve ao cliente; vazio usa o padrão. */
+  systemMessages?: import("./system-messages").SystemMessages;
   /** Tools habilitadas globalmente (usadas quando o tema não restringe). */
   enabledTools?: string[];
   /** O que as ações liberadas podem usar: etiquetas e etapas escolhidas na tela. */

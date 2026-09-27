@@ -126,6 +126,7 @@ export function guardV2Output(
   text: string,
   allowedDomains: string[],
   ctx?: ScrubContext,
+  returnPromiseText = "Preciso passar isso para um atendente da equipe que vai te ajudar agora.",
 ): { text: string; warnings: string[]; scrubbedFields?: string[]; forceHandoff?: boolean } {
   const warnings: string[] = [];
   let forceHandoff = false;
@@ -163,7 +164,7 @@ export function guardV2Output(
     // O texto dizia "vou passar para um atendente" mas ninguém transferia:
     // o motor precisa do sinal para fazer o handoff de verdade.
     warnings.push("Promessa de retorno detectada. Substituída por handoff.");
-    urlResult.text = "Preciso passar isso para um atendente da equipe que vai te ajudar agora.";
+    urlResult.text = returnPromiseText;
     forceHandoff = true;
   }
   return { text: urlResult.text, warnings, scrubbedFields, forceHandoff };

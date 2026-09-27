@@ -71,6 +71,9 @@ export function businessHoursSummary(config: Pick<V2AgentConfig, "businessHours"
 export function outsideHoursNote(config: V2AgentConfig, now = new Date()): string {
   const summary = businessHoursSummary(config);
   if (!summary || isWithinV2BusinessHours(config, now)) return "";
+  // Texto da empresa em "Horário de atendimento"; {{horario}} vira o resumo.
+  const custom = config.businessHours?.offHoursMessage?.trim();
+  if (custom) return custom.replace(/\{\{\s*horario\s*\}\}/g, summary);
   return `Nossa equipe atende ${summary}. Sua mensagem fica registrada e seguimos com você no próximo horário.`;
 }
 

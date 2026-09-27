@@ -23,10 +23,11 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { HUMAN_REQUEST_ASK, actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
+import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
@@ -40,7 +41,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -328,9 +329,7 @@ async function releaseToQueue(conversationId: string): Promise<void> {
 
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
 function stopWarning(config: V2AgentConfig, reason: string): string {
-  if (reason === "loop detectado") {
-    return "Recebi a mesma mensagem algumas vezes. Se precisar de algo diferente, me conta com outras palavras.";
-  }
+  if (reason === "loop detectado") return systemMessage(config, "loopWarning");
   return config.scope?.message || "Aqui eu só consigo ajudar com o atendimento. Quando precisar de algo sobre isso, é só me chamar.";
 }
 
@@ -594,6 +593,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   };
 
   const vars = { ...messageVariables(config, context) };
+  // Textos das mensagens com opções (lista/botões) definidos pela empresa.
+  const optionTexts = { prompt: systemMessage(config, "optionsPrompt"), button: systemMessage(config, "optionsButton") };
 
   // "?" ou "oi" mandado enquanto ele respondia a mensagem anterior: essa
   // resposta já saiu depois e cobre. Responder de novo duplicava tudo.
@@ -717,7 +718,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const queueWithinHours = isWithinV2BusinessHours(config);
     const picked = pickQueueNotice({
       message: input.userMessage,
-      configured: renderMessage(queuedMessageFor(config.handoff.queuedMessage, queueWithinHours), vars, defaultFormatter()),
+      configured: renderMessage(queuedMessageFor(config.handoff.queuedMessage, queueWithinHours, systemMessage(config, "queueOutsideHours")), vars, defaultFormatter()),
+      overrides: {
+        cancel: customSystemMessage(config, "queueCancel"),
+        upset: customSystemMessage(config, "queueUpset"),
+        call: customSystemMessage(config, "queueCall"),
+        again: customSystemMessage(config, "queueAgain"),
+      },
       lastReply: last?.content ?? null,
       lastReplyAt: last?.createdAt ?? null,
       outsideHours: !queueWithinHours,
@@ -899,7 +906,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       // Botões (ou opções numeradas onde não há botão); a resposta volta
       // pelas opções pendentes e decide o caso no próximo turno.
       const q = postCloseQuestion(config);
-      const built = buildV2Interactive(renderMessage(q.message, vars, defaultFormatter()), [q.yes, q.no]);
+      const built = buildV2Interactive(renderMessage(q.message, vars, defaultFormatter()), [q.yes, q.no], optionTexts);
       const reply = built.fallbackText;
       const sent = await sendV2TextMessage({
         conversationId: input.conversationId,
@@ -1138,7 +1145,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       } else if (!counters.humanRequestAsked) {
         counters.humanRequestAsked = true;
         traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
-        const ask = renderMessage(HUMAN_REQUEST_ASK, vars, defaultFormatter());
+        const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
         await sendReply(ask);
         await upsertV2ConversationState({
           organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
@@ -1290,7 +1297,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           }
           parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
         } else {
-          parts.push("Não encontrei um e-mail ou documento na sua mensagem. Pode me enviar o e-mail ou o documento usado no cadastro?");
+          parts.push(renderMessage(systemMessage(config, "identificationRetry"), vars, defaultFormatter()));
         }
         const identMsg = parts.filter(Boolean).join("\n\n");
         await sendReply(identMsg);
@@ -1708,7 +1715,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
-  });
+  }, systemMessage(config, "returnPromiseHandoff"));
   // Negrito conforme "Quem é o agente › Destaques em negrito".
   let replyText = applyBoldPolicy(guard.text, config.bold);
   if (guard.warnings.length > 0) traceStep("guarda", guard.warnings.join("; "));
@@ -1741,7 +1748,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       let plan: ReturnType<typeof mediaResendPlan> = null;
       if (saysNotReceived(input.userMessage)) {
         const since = resendWindowStart(Date.now(), await lastV2ResetAt(input.conversationId).catch(() => null));
-        plan = mediaResendPlan(await recentMediaDeliveries(input.conversationId, since).catch(() => []));
+        plan = mediaResendPlan(await recentMediaDeliveries(input.conversationId, since).catch(() => []), config);
       }
       if (plan?.resend) {
         outboundActions = outboundActions.map((a) =>
@@ -1761,7 +1768,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           }
         } else if (!outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length <= 30) {
           // Resposta que só apresentava o material vira o aviso de que ele está acima.
-          replyText = ALREADY_SENT_REPLY;
+          replyText = systemMessage(config, "materialAlreadySent");
         }
       }
     }
@@ -1810,7 +1817,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       traceStep("mídia", `Anexo(s) já enviado(s) nesta conversa dentro da trava de repetição — não reenviado(s) (${[...blocked].join(", ")})`);
       const nothingFollows = !outboundActions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment");
       if (nothingFollows && announcesSending(replyText)) {
-        replyText = replyText.trim().split(/\s+/).length <= 30 ? ALREADY_SENT_REPLY : `${replyText.trim()}\n\n${ATTACHMENT_ABOVE_NOTE}`;
+        replyText = replyText.trim().split(/\s+/).length <= 30 ? systemMessage(config, "materialAlreadySent") : `${replyText.trim()}\n\n${systemMessage(config, "attachmentAbove")}`;
       }
     }
   }
@@ -1943,7 +1950,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Envia reply se houver e não for handoff/close
   if (!anyHandoff && !anyClose && replyText.trim()) {
-    const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions) : null;
+    const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
     const outText = withOptions ? withOptions.fallbackText : replyText;
     // A saudação é conferida de novo depois do "digitando…".
     const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply });
@@ -1996,7 +2003,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       });
       if (ending.added) {
         const buttons = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
-        const built = buttons.length > 0 ? buildV2Interactive(ending.added, buttons) : null;
+        const built = buttons.length > 0 ? buildV2Interactive(ending.added, buttons, optionTexts) : null;
         const text = built ? built.fallbackText : ending.added;
         if ((await sendReply(text, built?.payload)).sent) {
           sentReply = [sentReply, text].filter(Boolean).join("\n\n");
@@ -2044,7 +2051,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       }
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
-    const queuedMsg = waitingInQueue ? queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config)) : "";
+    const queuedMsg = waitingInQueue ? queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config), systemMessage(config, "queueOutsideHours")) : "";
     const handoffNote = queuedMsg || noSourceMsg;
     const hoursNote = outsideHoursNote(config);
     const sent = await performHandoff(
