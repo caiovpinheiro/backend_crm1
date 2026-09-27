@@ -697,6 +697,8 @@ export async function sendV2TextMessage(args: {
   humanBehavior?: HumanBehaviorConfig;
   /** Botões/lista; `text` é a versão com as opções numeradas. */
   interactive?: V2InteractivePayload | null;
+  /** Quem chama já escolheu um texto que não repete o anterior (aviso de fila). */
+  bypassDuplicateGuard?: boolean;
 }): Promise<{ sent: boolean; reason?: string }> {
   if (!args.text.trim()) return { sent: false, reason: "empty" };
   const text = toWhatsAppText(args.text);
@@ -718,6 +720,7 @@ export async function sendV2TextMessage(args: {
     bypassAssigneeCheck: false,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
     ...(interactive ? { interactive } : {}),
+    ...(args.bypassDuplicateGuard ? { bypassDuplicateGuard: true } : {}),
   })) as { status?: string; reason?: string } | undefined;
   const preview = text.length > 90 ? `${text.slice(0, 90)}…` : text;
   if (result?.status === "skipped" && result.reason === "superseded") {

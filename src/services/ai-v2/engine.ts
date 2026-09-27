@@ -44,6 +44,7 @@ import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, anno
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
+import { pickQueueNotice } from "./queue-notice";
 import {
   currentV2OnboardingStep,
   isV2OnboardingStepCompleted,
@@ -700,16 +701,39 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Na fila, modo "avisar": responde só o aviso e devolve a conversa à fila.
   if (owner === "pessoa" && waitingInQueue) {
-    const notice = renderMessage(config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT, vars, defaultFormatter());
-    const res = await sendV2TextMessage({
-      conversationId: input.conversationId,
-      contactId,
-      agentUserId: resolved!.userId,
-      text: notice,
-      channel: input.channel,
-      autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-      humanBehavior,
+    // O aviso acompanha o que o cliente escreveu (cancelar, reclamação,
+    // "alô?") e nunca repete o anterior; antes só o primeiro saía e o resto
+    // era barrado pela trava anti-repetição, com o cliente sem resposta.
+    const last = await Promise.resolve()
+      .then(() =>
+        prisma.message.findFirst({
+          where: { conversationId: input.conversationId, direction: "out", isPrivate: false, messageType: { not: "note" } },
+          orderBy: { createdAt: "desc" },
+          select: { content: true, createdAt: true },
+        }),
+      )
+      .catch(() => null);
+    const picked = pickQueueNotice({
+      message: input.userMessage,
+      configured: renderMessage(config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT, vars, defaultFormatter()),
+      lastReply: last?.content ?? null,
+      lastReplyAt: last?.createdAt ?? null,
     });
+    const notice = picked?.text ?? "";
+    if (picked) traceStep("fila", `Aviso de fila (${picked.kind === "first" ? "primeiro" : picked.kind === "cancel" ? "pedido de cancelar" : picked.kind === "upset" ? "cliente insatisfeito" : picked.kind === "call" ? "cliente chamando" : "nova mensagem"})`);
+    else traceStep("fila", "Mensagens seguidas em poucos segundos: o aviso anterior vale");
+    const res = picked
+      ? await sendV2TextMessage({
+          conversationId: input.conversationId,
+          contactId,
+          agentUserId: resolved!.userId,
+          text: notice,
+          channel: input.channel,
+          autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+          humanBehavior,
+          bypassDuplicateGuard: picked.kind !== "first",
+        })
+      : { sent: false, reason: "queued_quiet" };
     await releaseToQueue(input.conversationId);
     await logV2Turn({
       organizationId: orgId,

@@ -102,6 +102,33 @@ export function parseClaimCheck(text: string, reply: string): string[] {
   )].slice(0, 5);
 }
 
+const STOP = new Set(["para", "como", "com", "sem", "pela", "pelo", "pelas", "pelos", "uma", "umas", "uns", "que", "voce", "seu", "sua", "seus", "suas", "este", "esta", "isso", "esse", "essa", "mais", "menos", "muito", "entao", "tambem", "depois", "antes", "quando", "onde", "aqui", "use", "usar", "entre", "entrar", "acesse", "acessar", "clique", "clicar", "digite", "informe", "coloque", "faca", "fazer", "abra", "abrir", "toque", "tocar", "selecione", "escolha", "depois"]);
+const foldText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/**
+ * A afirmação marcada está nas fontes: os links iguais e as palavras de
+ * conteúdo (radical de 6 letras) num mesmo trecho curto de uma fonte. O
+ * checador às vezes marcava o que o material diz com outras palavras (ex.:
+ * o endereço do portal) e o cliente era transferido.
+ */
+export function claimFoundInSources(claim: string, sources: string[]): boolean {
+  const c = foldText(claim);
+  const urls = [...c.matchAll(/https?:\/\/[^\s"'<>)]+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, ""));
+  const words = c.replace(/https?:\/\/\S+/g, " ").split(/[^a-z0-9]+/).filter((w) => (w.length >= 4 && !STOP.has(w)) || /^\d+$/.test(w));
+  if (urls.length === 0 && words.length < 3) return false;
+  for (const source of sources) {
+    const sentences = foldText(source).split(/(?<=[.!?])\s+|\n+/);
+    for (let i = 0; i < sentences.length; i += 1) {
+      const window = `${sentences[i]} ${sentences[i + 1] ?? ""} ${sentences[i + 2] ?? ""}`;
+      if (!urls.every((u) => window.includes(u))) continue;
+      const vocab = new Set(window.split(/[^a-z0-9]+/).filter(Boolean).map((w) => w.slice(0, 6)));
+      const hit = words.filter((w) => vocab.has(w.slice(0, 6))).length;
+      if (words.length === 0 || hit / words.length >= 0.8) return true;
+    }
+  }
+  return false;
+}
+
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
 export async function checkClaimsWithModel(args: {
   model: string;
@@ -128,7 +155,12 @@ export async function checkClaimsWithModel(args: {
         timer = setTimeout(() => reject(new Error("tempo esgotado")), CLAIM_CHECK_TIMEOUT_MS);
       }),
     ]);
-    return { unsupported: parseClaimCheck(res.text, args.reply), inputTokens: res.inputTokens, outputTokens: res.outputTokens, ok: true };
+    const flagged = parseClaimCheck(res.text, args.reply);
+    const unsupported = flagged.filter((c) => !claimFoundInSources(c, args.sources));
+    if (unsupported.length < flagged.length) {
+      console.info("[ai-v2] checagem por modelo: marcação descartada, está nas fontes:", flagged.filter((c) => !unsupported.includes(c)));
+    }
+    return { unsupported, inputTokens: res.inputTokens, outputTokens: res.outputTokens, ok: true };
   } catch (err) {
     console.warn("[ai-v2] checagem por modelo falhou:", err instanceof Error ? err.message : err);
     return { unsupported: [], inputTokens: 0, outputTokens: 0, ok: false };
