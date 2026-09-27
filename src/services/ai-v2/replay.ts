@@ -73,6 +73,9 @@ Critérios (ponto comparável):
 - assunto: rótulo curto do assunto do cliente (2 a 4 palavras).
 - explicacao: 1 ou 2 frases, objetivas.
 
+Textos fixos: os de TEXTOS FIXOS DA EMPRESA (aviso de transferência, de fila, de "sem material", fecho com prazo de encerramento, despedida) foram escritos pela empresa. Não são invenção nem erro de conteúdo: avalie só o que o agente disse além deles.
+Outro agente: "[passou para o agente de IA …]" quer dizer que outro agente de IA da empresa continua o atendimento; avalie a resposta dele como a do agente (não é transferência para pessoa).
+
 A pessoa é a referência do que a empresa faz, mas pode errar: se o agente estiver certo pelos trechos e a pessoa errada, diga isso na explicação.
 Responda só com JSON: {"comparavel","motivoNaoComparavel","desfecho","correto","inventou","invencao","humanoConsultouSistema","causa","tom","assunto","explicacao"}.`;
 
@@ -92,6 +95,7 @@ export function buildEvaluatorInput(args: {
   agentReply: string;
   agentHandoff: boolean;
   sources: V2TurnSource[];
+  fixedTexts?: string[];
 }): string {
   const hist = args.point.history.slice(-6).map((h) => `${h.role === "user" ? "Cliente" : "Atendimento"}: ${clip(h.content, 400)}`).join("\n");
   const src = args.sources.slice(0, 5).map((s, i) => `[${i + 1}] ${s.title}: ${clip(s.content, 700)}`).join("\n");
@@ -101,7 +105,45 @@ export function buildEvaluatorInput(args: {
     `Resposta da pessoa:\n${args.point.humanText}`,
     `Resposta do agente:\n${args.agentReply || "(sem texto)"}${args.agentHandoff ? "\n[o agente transferiu para uma pessoa]" : ""}`,
     `Trechos da base que o agente leu:\n${src || "(nenhum)"}`,
+    ...(args.fixedTexts?.length ? [`TEXTOS FIXOS DA EMPRESA:\n${args.fixedTexts.map((t) => `- ${clip(t, 300)}`).join("\n")}`] : []),
   ].join("\n\n");
+}
+
+/**
+ * Textos que a empresa configurou e o agente só repete: transferência,
+ * fila, "sem material", erro, despedida, fecho. O avaliador marcava como
+ * invenção ("time do …", "encerro em 30 minutos").
+ */
+export function configuredTexts(config: V2AgentConfig): string[] {
+  const out: string[] = [
+    config.handoff?.message,
+    config.handoff?.queuedMessage,
+    config.fallback?.noSource?.message,
+    config.fallback?.error?.message,
+    config.closure?.goodbyeMessage,
+    ...(config.themes ?? []).map((t) => t.handoffDestination?.message),
+  ].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+  const endings = [config.replyEnding, ...(config.themes ?? []).map((t) => (t as { replyEnding?: unknown }).replyEnding)];
+  for (const e of endings) {
+    for (const kind of ["procedure", "info"] as const) {
+      const rule = (e as Record<string, { phrases?: string[] }> | undefined)?.[kind];
+      for (const p of rule?.phrases ?? []) if (p.trim()) out.push(p);
+    }
+  }
+  return [...new Set(out.map((t) => t.trim()))];
+}
+
+/** A "invenção" apontada é um texto configurado pela empresa: não conta. */
+export function inventionIsConfigured(invencao: string, fixed: string[]): boolean {
+  const squash = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+  const inv = squash(invencao);
+  if (!inv) return false;
+  const words = inv.split(" ").filter((w) => w.length >= 4);
+  return fixed.some((t) => {
+    const f = squash(t);
+    if (f.includes(inv) || inv.includes(f)) return true;
+    return words.length > 0 && words.filter((w) => f.includes(w)).length / words.length >= 0.6;
+  });
 }
 
 export function parseVerdict(text: string): ReplayVerdict | null {
@@ -126,6 +168,7 @@ async function evaluate(args: {
   agentReply: string;
   agentHandoff: boolean;
   sources: V2TurnSource[];
+  fixedTexts?: string[];
 }): Promise<{ verdict: ReplayVerdict | null; inputTokens: number; outputTokens: number }> {
   const res = await generateWithTools({
     model: args.model,
@@ -517,7 +560,11 @@ export async function getReplayRun(organizationId: string, agentId: string, runI
     latencyMs: typeof r.latencyMs === "number" ? r.latencyMs : null,
   }));
   const run = toRun(runs[0]);
-  return { run, items: items.map((i) => ({ ...i, outcome: i.skipReason ? null : pointOutcome(i) })), summary: summarizeReplay(items) };
+  return {
+    run,
+    items: items.map((i, idx) => ({ ...i, outcome: i.skipReason ? null : pointOutcome(i), why: pointWhy(rows[idx]?.facts) })),
+    summary: summarizeReplay(items),
+  };
 }
 
 /** Interrompe uma comparação em andamento; os pontos já feitos ficam. */
@@ -874,6 +921,7 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
   let tokensOut = 0;
   let cost = 0;
   let fatal: Error | null = null;
+  const fixedTexts = configuredTexts(args.config);
 
   const processOne = async (w: (typeof queue)[number]) => {
     const { point } = w;
@@ -916,12 +964,37 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
         tokensIn += sim.inputTokens;
         tokensOut += sim.outputTokens;
         cost += estimateCost(args.config.model, sim.inputTokens, sim.outputTokens);
+        // Passou para outro agente de IA: em produção ele continua no mesmo
+        // turno. O comparador media só o aviso e contava "transferiu sem precisar".
+        const dest = sim.handoff ? sim.handoffDestination : null;
+        if (dest?.type === "ai_agent" && dest.id && dest.id !== args.agentId) {
+          const other = await getV2Agent(dest.id, args.organizationId).catch(() => null);
+          if (other) {
+            const otherSim = await withTimeout(
+              runWithV2Trace(() =>
+                simulateV2Turn(dest.id!, other.publishedConfig, point.clientText, point.history, args.organizationId, w.contactId ?? undefined, undefined, "active", undefined, { skipEntry: true }),
+              ),
+              POINT_TIMEOUT_MS,
+              "O agente de destino demorou demais para responder neste ponto.",
+            );
+            agentText = maskSensitive(`${sim.reply ?? ""}\n\n[passou para o agente de IA ${other.name}]\n${otherSim.reply ?? ""}`.trim()).text;
+            agentHandoff = otherSim.handoff;
+            sources = [...sourcesFromToolCalls(otherSim.toolCalls), ...sources].slice(0, 8);
+            tokensIn += otherSim.inputTokens;
+            tokensOut += otherSim.outputTokens;
+            cost += estimateCost(other.publishedConfig.model, otherSim.inputTokens, otherSim.outputTokens);
+            if (facts) facts = { ...facts, forwardedTo: other.name, forwardedReason: otherSim.reason };
+          }
+        }
         const ev = await withTimeout(
-          evaluate({ model: args.evalModel, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources }),
+          evaluate({ model: args.evalModel, apiKey: args.apiKey, point, agentReply: agentText, agentHandoff, sources, fixedTexts }),
           POINT_TIMEOUT_MS,
           "O avaliador demorou demais neste ponto.",
         );
         verdict = ev.verdict;
+        if (verdict?.inventou && inventionIsConfigured(verdict.invencao ?? "", fixedTexts)) {
+          verdict = { ...verdict, inventou: false, invencao: "" };
+        }
         tokensIn += ev.inputTokens;
         tokensOut += ev.outputTokens;
         cost += estimateCost(args.evalModel, ev.inputTokens, ev.outputTokens);
@@ -970,4 +1043,23 @@ async function executeReplayPoints(args: Parameters<typeof executeReplay>[0]): P
     `UPDATE "ai_simple_replay_runs" SET "status"='done', "summary"=$2::jsonb, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
     args.runId, summary ? JSON.stringify(summary) : null,
   );
+}
+
+/** O que levou o agente à resposta do ponto: decisão do modelo, causa da transferência e passos-chave. */
+export function pointWhy(facts: unknown): { reason: string | null; cause: string | null; forwardedTo: string | null; steps: string[] } | null {
+  if (!facts || typeof facts !== "object") return null;
+  const f = facts as { reason?: unknown; handoffCause?: unknown; forwardedTo?: unknown; trace?: unknown };
+  const KEY = new Set(["regra", "assunto", "base", "verificação", "llm", "transferência", "sentimento", "guarda", "resposta", "limites", "mídia", "fila"]);
+  const steps = Array.isArray(f.trace)
+    ? (f.trace as Array<{ step?: unknown; detail?: unknown }>)
+        .filter((s) => typeof s?.step === "string" && KEY.has(s.step))
+        .map((s) => `${s.step}: ${String(s.detail ?? "").slice(0, 240)}`)
+        .slice(0, 12)
+    : [];
+  return {
+    reason: typeof f.reason === "string" && f.reason.trim() ? f.reason.trim() : null,
+    cause: typeof f.handoffCause === "string" ? f.handoffCause : null,
+    forwardedTo: typeof f.forwardedTo === "string" ? f.forwardedTo : null,
+    steps,
+  };
 }

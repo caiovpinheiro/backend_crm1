@@ -140,6 +140,31 @@ describe("simulateV2Turn", () => {
     expect(result.crmContext.contact).toMatchObject({ Nome: "Marcelo" });
   });
 
+  it("paridade com a produção: transferência condicional espera; orientação sai antes do aviso", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    const { simulateV2Turn } = await import("../test-turn");
+    mocks.callV2LLMTest.mockResolvedValueOnce({
+      output: { reply: 'Confira o desconto no boleto. Se o valor continuar diferente do contratado, preciso encaminhar o caso ao financeiro.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
+      inputTokens: 10, outputTokens: 5, latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [{ docId: "d", docTitle: "T", content: "conteúdo", distance: 0.2 }] } }],
+      systemPrompt: "",
+    });
+    const cond = await simulateV2Turn("agent-1", baseConfig(), "meu boleto veio mais alto");
+    expect(cond.handoff).toBe(false);
+    expect(cond.reply).toContain("Confira o desconto no boleto");
+
+    mocks.callV2LLMTest.mockResolvedValueOnce({
+      output: { reply: 'A DP é cobrada só no mês em que for cursada, com desconto sobre a mensalidade cheia. O valor exato da sua eu não tenho aqui.', confirmed: null, handoff: true, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "r", actions: [] },
+      inputTokens: 10, outputTokens: 5, latencyMs: 100,
+      toolCalls: [{ toolName: "knowledge_search", args: { query: "x" }, result: { chunks: [{ docId: "d", docTitle: "T", content: "conteúdo", distance: 0.2 }] } }],
+      systemPrompt: "",
+    });
+    const oriented = await simulateV2Turn("agent-1", baseConfig(), "qual o valor da dp");
+    expect(oriented.handoff).toBe(true);
+    expect(oriented.reply).toBe("A DP é cobrada só no mês em que for cursada, com desconto sobre a mensalidade cheia. O valor exato da sua eu não tenho aqui.\n\nVou transferir.");
+    expect(oriented.handoffDestination).toEqual({ type: "department" });
+  });
+
   it("aplica mensagem de 'sem material' quando busca volta vazia e não há dados do cliente", async () => {
     mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
     mocks.callV2LLMTest.mockResolvedValue({

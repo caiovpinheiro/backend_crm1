@@ -5,7 +5,7 @@
  * fonte e o que o cliente receberia ao transferir.
  */
 
-import type { V2Action, V2AgentConfig, V2CRMContext, V2Rule, V2Stage } from "@/lib/ai-v2/types";
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2Stage } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours } from "./rules";
 import { getV2ThemeById } from "./themes";
 import { selectV2ThemeSemantic } from "./theme-semantic";
@@ -14,7 +14,7 @@ import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, lacksInformation, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -62,6 +62,8 @@ export type V2TestTurnResult = {
   interactive?: { kind: "buttons" | "list"; body: string; labels: string[]; displayContent: string } | null;
   /** Opção da mensagem anterior que a mensagem do cliente escolheu. */
   chosenOption?: string | null;
+  /** Para onde a conversa iria ao transferir (pedido do modelo > assunto > padrão). */
+  handoffDestination?: V2Destination | null;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -468,6 +470,7 @@ export async function simulateV2Turn(
       handoff: true,
       themeId: selectedTheme.id,
       themeName: selectedTheme.name,
+      handoffDestination: selectedTheme.handoffDestination ?? config.handoff.defaultDestination ?? null,
     });
   }
 
@@ -546,6 +549,9 @@ export async function simulateV2Turn(
   let handoff = output.handoff || !!guard.forceHandoff;
   let closed = output.concluded;
   if (output.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });
+  // Causa sem depender do rastro (a simulação também roda fora dele).
+  const causeByModel = output.handoff && !guard.forceHandoff && !mentionsHumanRequest(config, userMessage);
+  const handoffCauseNow = () => (peekV2Fact("handoffCause") as string | undefined) ?? (causeByModel ? "model" : undefined);
   if (guard.forceHandoff) noteV2Fact("handoffCause", "guard", { keepFirst: true });
 
   // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum
@@ -599,6 +605,13 @@ export async function simulateV2Turn(
     traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
   }
 
+  // Igual à produção: resposta que condiciona a transferência ("se continuar
+  // divergente, encaminho") espera o cliente responder.
+  if (handoff && handoffCauseNow() === "model" && !closed && conditionalHandoff(output.reply)) {
+    handoff = false;
+    traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
+  }
+
   // Sentimento, igual à produção.
   if (shouldActOnSentiment(config, detectV2Sentiment(config, userMessage)) && config.sentiment.action === "handoff") {
     handoff = true;
@@ -621,11 +634,15 @@ export async function simulateV2Turn(
   if (handoff) {
     // Mesma mensagem que a produção manda: "sem material" quando citava algo
     // sem fonte, senão a do destino do assunto, senão a padrão.
-    const cause = peekV2Fact("handoffCause");
+    const cause = handoffCauseNow();
     const noSourceMsg = cause === "verification" || cause === "no_source" || (cause === "model" && lacksInformation(output.reply))
       ? config.fallback?.noSource?.message?.trim() ?? ""
       : "";
-    reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    // Igual à produção: o modelo orientou e transferiu → a orientação sai
+    // antes do aviso (padrão, não o "sem material"); se ela já avisa, só ela.
+    const oriented = cause === "model" && answersBeforeHandoff(output.reply);
+    reply = renderMessage((oriented ? "" : noSourceMsg) || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    if (oriented) reply = announcesTransfer(output.reply) ? output.reply : `${output.reply}\n\n${reply}`;
     // Cliente irritado: a resposta do modelo sai antes do aviso, como na produção.
     if (cause === "sentiment" && output.reply.trim() && !announcesTransfer(output.reply)) reply = `${output.reply}\n\n${reply}`;
   } else if (closed && config.closure.goodbyeMessage) {
@@ -663,6 +680,13 @@ export async function simulateV2Turn(
     reply = renderMessage(config.entry.identificationMessage ?? "Entendi. Vou precisar confirmar seus dados. Qual o e-mail ou CPF?", vars, defaultFormatter());
     nextStage = "identifying";
   }
+
+  const requestedDest = (output.actions.find((a) => a.type === "handoff") as { destination?: V2Destination } | undefined)?.destination;
+  const handoffDestination: V2Destination | null = handoff
+    ? requestedDest && typeof requestedDest === "object" && typeof requestedDest.type === "string"
+      ? requestedDest
+      : activeTheme?.handoffDestination ?? config.handoff.defaultDestination ?? null
+    : null;
 
   // Extrai chunks do RAG dos toolCalls.
   const ragChunks: V2TestTurnResult["ragChunks"] = [];
@@ -708,6 +732,7 @@ export async function simulateV2Turn(
     stage: nextStage,
     interactive: nextStage === "identifying" ? null : interactive,
     chosenOption,
+    handoffDestination,
   };
 }
 
