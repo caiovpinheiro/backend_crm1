@@ -27,6 +27,24 @@ function weekdayFromString(s: string): number | undefined {
   return map[s];
 }
 
+const WEEKDAY_NAMES = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+
+/**
+ * Horário de atendimento configurado, em texto ("segunda-feira: 08:00 às
+ * 18:00"). Vazio quando desligado. Vai ao prompt e conta como fonte: antes
+ * o agente dizia que o horário "não está informado" e transferia.
+ */
+export function businessHoursText(config: Pick<V2AgentConfig, "businessHours">): string {
+  const bh = config.businessHours;
+  if (!bh || !bh.enabled || bh.weekdays.length === 0) return "";
+  return [1, 2, 3, 4, 5, 6, 0]
+    .map((day) => {
+      const slots = bh.weekdays.filter((s: V2BusinessHoursSlot) => s.day === day);
+      return `- ${WEEKDAY_NAMES[day]}: ${slots.length ? slots.map((s: V2BusinessHoursSlot) => `${s.start} às ${s.end}`).join(" e ") : "sem atendimento"}`;
+    })
+    .join("\n");
+}
+
 export function isWithinV2BusinessHours(config: V2AgentConfig, now = new Date()): boolean {
   const bh = config.businessHours;
   if (!bh || !bh.enabled || bh.weekdays.length === 0) return true;

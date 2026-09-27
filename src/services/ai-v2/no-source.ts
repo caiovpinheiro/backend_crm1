@@ -7,6 +7,7 @@
 
 import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types";
 import { calendarPromptSection } from "./calendar";
+import { businessHoursText } from "./rules";
 import { FACT_IN_SENTENCE, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedLongDates } from "./ground-reply";
 import { WEAK_MATCH_SIMILARITY } from "./similarity-presets";
 import { getV2ThemeById } from "./themes";
@@ -42,6 +43,7 @@ export function fixedSources(
     ...(config.globalRules ?? []),
     (themeId ? getV2ThemeById(config, themeId)?.instructions : undefined) ?? "",
     calendarPromptSection(config.calendar?.events, now, config.businessHours?.timezone || "America/Sao_Paulo"),
+    businessHoursText(config),
     ...lookupResultTexts(toolCalls),
   ].filter((s) => s.trim());
 }
@@ -70,6 +72,17 @@ export function mentionsClientData(reply: string, context: V2CRMContext): boolea
 /** O modelo diz que não tem a informação ("não tenho", "não encontrei", "não consigo confirmar"). */
 export function lacksInformation(reply: string): boolean {
   return /\bn[aã]o (?:tenho|encontrei|achei|sei|consigo (?:confirmar|informar|ver|verificar))\b|\bn[aã]o h[aá] (?:essa )?informa|\bsem (?:essa )?informa[cç]/i.test(reply);
+}
+
+/**
+ * Resposta que orienta o cliente além de avisar a transferência: vale
+ * mandar antes do aviso. Antes só o aviso chegava e a orientação se perdia.
+ */
+export function answersBeforeHandoff(reply: string): boolean {
+  const text = reply.trim();
+  if (text.split(/\s+/).length < 12 || lacksInformation(text)) return false;
+  const rest = text.split(/(?<=[.!?])\s+|\n+/).filter((s) => !announcesTransfer(s)).join(" ");
+  return rest.split(/\s+/).filter(Boolean).length >= 8;
 }
 
 /** A resposta já avisa a transferência (não vale mandar antes do aviso). */

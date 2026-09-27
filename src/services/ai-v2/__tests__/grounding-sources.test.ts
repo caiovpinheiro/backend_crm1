@@ -7,7 +7,9 @@ import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { v2FastAuxModel } from "@/lib/ai-v2/models";
 import { lookupResultTexts, unsupportedFigures, unsupportedLongDates } from "../ground-reply";
-import { applyNoSourceGuard, factsBackedBy, statesProcedure } from "../no-source";
+import { answersBeforeHandoff, applyNoSourceGuard, factsBackedBy, statesProcedure } from "../no-source";
+import { businessHoursText } from "../rules";
+import { isHumanRequestTheme } from "@/lib/ai-v2/config";
 import { parseClaimCheck, buildClaimCheckInput } from "../claim-check";
 import { evaluateV2Rules } from "../rules";
 import { announcesSending } from "../sent-materials";
@@ -113,5 +115,33 @@ describe("tarefas auxiliares e anexos", () => {
     expect(announcesSending("Segue o vídeo com o passo a passo.")).toBe(true);
     expect(announcesSending("Vou te enviar o material.")).toBe(true);
     expect(announcesSending("O prazo é de 3 dias.")).toBe(false);
+  });
+});
+
+describe("teste do agente pelo WhatsApp", () => {
+  it("valor que o cliente escreveu sem R$ pode ser repetido com R$", () => {
+    const client = ["Não entendi, falaram de 129 mas o boleto esta 1000"];
+    expect(unsupportedFigures("Você citou R$ 129 e o boleto veio R$ 1.000.", [], client)).toEqual([]);
+    expect(unsupportedFigures("Você citou R$ 129 e o boleto veio R$ 1.000.", [])).toEqual(["R$ 129", "R$ 1.000"]);
+    expect(unsupportedFigures("A taxa é R$ 50.", [], client)).toEqual(["R$ 50"]);
+  });
+
+  it("horário de atendimento configurado vira texto (prompt e fonte)", () => {
+    const text = businessHoursText({ businessHours: { enabled: true, timezone: "America/Sao_Paulo", weekdays: [1, 2, 3, 4, 5].map((day) => ({ day, start: "08:00", end: "18:00" })) } } as never);
+    expect(text).toContain("segunda-feira: 08:00 às 18:00");
+    expect(text).toContain("domingo: sem atendimento");
+    expect(businessHoursText({ businessHours: { enabled: false, timezone: "America/Sao_Paulo", weekdays: [] } } as never)).toBe("");
+  });
+
+  it("assunto que só repete o pedido de pessoa", () => {
+    const config = cfg({ handoff: { defaultDestination: { type: "department", id: "d" }, message: "x", humanRequestKeywords: ["atendente", "humano"] } });
+    expect(isHumanRequestTheme({ when: ["atendente", "humano", "falar com uma pessoa"] }, config)).toBe(true);
+    expect(isHumanRequestTheme({ when: ["boleto", "mensalidade", "atendente"] }, config)).toBe(false);
+  });
+
+  it("orientação antes da transferência só quando há conteúdo além do aviso", () => {
+    expect(answersBeforeHandoff("Vou te passar para o time do financeiro.")).toBe(false);
+    expect(answersBeforeHandoff("O boleto pode mostrar o valor integral antes dos descontos; confira o desconto e a data limite no corpo do boleto. Vou te encaminhar ao financeiro para conferir o seu caso.")).toBe(true);
+    expect(answersBeforeHandoff("Não tenho essa informação aqui, mas a equipe consegue te ajudar com isso rapidinho.")).toBe(false);
   });
 });

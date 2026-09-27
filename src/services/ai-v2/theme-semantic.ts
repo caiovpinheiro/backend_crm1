@@ -14,6 +14,7 @@
  */
 
 import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
+import { isHumanRequestTheme } from "@/lib/ai-v2/config";
 import { embedTexts } from "@/services/ai/provider";
 import { matchV2Theme, selectV2Theme } from "./themes";
 import { themeThresholdsFor, type ThemeThresholds } from "./similarity-presets";
@@ -104,9 +105,14 @@ export async function selectV2ThemeSemantic(args: {
   // Sem o assunto atual: `selectV2Theme` o mantém sempre que nenhum outro
   // gatilho casa, o que impediria o significado de trocar de assunto.
   const byTrigger = selectV2Theme(args.config, args.message);
-  const themes = args.config.themes ?? [];
   const th = themeThresholds(args.config);
+  // Pelo sentido, fica de fora o assunto que só repete o pedido de pessoa
+  // (vale só pelo gatilho); o que transfere direto exige sentido forte.
+  const themes = (args.config.themes ?? []).filter((t) => !isHumanRequestTheme(t, args.config));
+  const strongEnough = (t: V2Theme, sim: number) => !t.directHandoff || sim >= th.switchSimilarity;
   if (byTrigger) {
+    // Gatilho do assunto de pedido de pessoa: vale o gatilho (fora da conferência pelo sentido).
+    if (isHumanRequestTheme(byTrigger, args.config)) return { theme: byTrigger, method: "trigger" };
     // Palavra solta da lista ("empresa") levava "a empresa pediu um
     // comprovante" para o assunto que tinha essa palavra no gatilho. Com frase de verdade, confere
     // o sentido: se outro assunto é claramente mais próximo, ele vence.
@@ -125,7 +131,7 @@ export async function selectV2ThemeSemantic(args: {
           best = t;
         }
       });
-      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= th.switchSimilarity && bestSim >= triggerSim + 0.08) {
+      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= th.switchSimilarity && bestSim >= triggerSim + 0.08 && strongEnough(best, bestSim)) {
         return { theme: best, method: "semantic", similarity: bestSim };
       }
     } catch (err) {
@@ -165,7 +171,7 @@ export async function selectV2ThemeSemantic(args: {
     if (switching && (bestSim < th.switchSimilarity || bestSim < currentSim + th.switchMargin)) {
       return fallback(bestSim);
     }
-    if (best && bestSim >= th.minSimilarity) {
+    if (best && bestSim >= th.minSimilarity && strongEnough(best, bestSim)) {
       return { theme: best, method: "semantic", similarity: bestSim };
     }
     return fallback(bestSim);

@@ -9,7 +9,8 @@ import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
-import { statesProcedure } from "./no-source";
+import { answersBeforeHandoff, statesProcedure } from "./no-source";
+import { businessHoursText } from "./rules";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
 import { renderMessage } from "@/lib/ai-v2/message-render";
@@ -951,6 +952,8 @@ function buildV2SystemPrompt(
   const bold = boldInstruction(config.bold);
   if (bold) lines.push(`# Negrito\n${bold}`);
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
+  const hours = businessHoursText(config);
+  if (hours) lines.push(`# Horário de atendimento da equipe\n${hours}\nUse quando o cliente perguntar o horário. Fora dele, diga que a equipe responde no próximo horário.`);
   if (mediaNote) lines.push(mediaNote);
   if (stage === "confirming") {
     lines.push("# Confirmação de identidade\nVocê está confirmando a identidade do cliente. Se ele confirmar que é ele, devolva confirmed: true. Se negar ou pedir para falar de outra pessoa, confirmed: false. Se a resposta for irrelevante, confirmed: null. Se ele confirmar e, antes da confirmação, já tinha feito um pedido que ficou sem resposta (veja as mensagens anteriores), responda esse pedido agora, na mesma mensagem, em vez de perguntar como pode ajudar.");
@@ -1414,6 +1417,7 @@ export async function callV2LLM(args: {
       ...messageModels.map((m) => m.name),
       JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]),
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
+      businessHoursText(args.config),
     ];
     // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
     // prova que a coisa existe).
@@ -1429,7 +1433,7 @@ export async function callV2LLM(args: {
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`),
       ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => `"${t}"`),
       ...unsupportedMenuPaths(reply, sources, factSources).map((t) => `"${t}"`),
-      ...unsupportedFigures(reply, sources),
+      ...unsupportedFigures(reply, sources, clientTexts),
       ...unsupportedFacts(reply, sources),
       ...unsupportedHedges(reply, sources).map((h) => `"${h}" (palpite sem fonte)`),
     ];
@@ -1441,7 +1445,9 @@ export async function callV2LLM(args: {
     const claimSources = factSources;
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
     const modelClaims = async (output: V2LLMOutput): Promise<string[]> => {
-      if ((args.config.groundingCheck ?? "model") !== "model" || output.handoff || !worthClaimCheck(output.reply)) return [];
+      // Transferência só com o aviso não tem o que conferir; com orientação
+      // (que agora chega ao cliente antes do aviso), confere.
+      if ((args.config.groundingCheck ?? "model") !== "model" || (output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
       // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
       // material; a frase só anuncia o envio ("vou te orientar…"). Conferir
       // a frase barrava o envio e transferia o cliente.

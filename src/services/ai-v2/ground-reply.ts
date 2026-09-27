@@ -180,16 +180,22 @@ export function unsupportedHedges(reply: string, sources: string[]): string[] {
  * Percentual e valor em dinheiro na resposta que não aparecem em nenhuma
  * fonte. O modelo completava com "juros de 1% ao mês", "R$ 50 de taxa".
  */
-export function unsupportedFigures(reply: string, sources: string[]): string[] {
+export function unsupportedFigures(reply: string, sources: string[], clientTexts: string[] = []): string[] {
   const squash = (s: string) => s.replace(/\s+/g, "").replace(/\.(?=\d{3}\b)/g, "").toLowerCase();
   const haystack = squash(sources.join(" "));
+  // Valor que o cliente escreveu sem "R$" ("falaram de 129 mas veio 1000"):
+  // repetir como "R$ 129" é citar o cliente, não inventar.
+  const clientValues = new Set([...clientTexts.join(" ").matchAll(/\d[\d.]*(?:,\d{1,2})?/g)].map((m) => moneyValue(m[0])).filter((v): v is number => v !== null));
   const out = new Set<string>();
   const patterns = [/\d+(?:[.,]\d+)?\s?%/g, /R\$\s?\d[\d.]*(?:,\d{1,2})?/gi];
   for (const re of patterns) {
     for (const m of reply.matchAll(re)) {
       // "R$ 50." no fim da frase: o ponto é da frase, não do valor.
       const token = m[0].trim().replace(/[.,;:!?]+$/, "");
-      if (!haystack.includes(squash(token))) out.add(token);
+      if (haystack.includes(squash(token))) continue;
+      const value = /^R\$/i.test(token) ? moneyValue(token.replace(/^R\$\s?/i, "")) : null;
+      if (value !== null && clientValues.has(value)) continue;
+      out.add(token);
     }
   }
   // Por extenso: "50 por cento", "cinquenta por cento" (vale se a fonte
@@ -205,6 +211,14 @@ export function unsupportedFigures(reply: string, sources: string[]): string[] {
     if (!/metade|50\s?%|cinquenta por cento/.test(sources.join(" ").toLowerCase())) out.add(m[0].trim());
   }
   return [...out];
+}
+
+/** "1.000", "1000", "129,90" → número; formato brasileiro. */
+function moneyValue(raw: string): number | null {
+  const s = raw.trim().replace(/[.,]$/, "");
+  if (!/^\d/.test(s)) return null;
+  const n = Number(s.replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", "."));
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
 }
 
 const FACT_PATTERNS: Array<{ kind: "date" | "amount" | "phone" | "email"; re: RegExp }> = [

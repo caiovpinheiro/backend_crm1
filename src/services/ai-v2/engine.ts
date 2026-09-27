@@ -34,7 +34,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, lacksInformation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
@@ -1889,16 +1889,30 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       : "";
     // Cliente irritado: a resposta útil do modelo sai antes do aviso de
     // transferência (antes só o aviso chegava).
+    let announced = false;
     if (cause === "sentiment" && !waitingInQueue && replyText.trim() && !announcesTransfer(replyText)) {
       const answered = await sendReply(replyText);
       if (answered.sent) {
         sentReply = replyText;
         traceStep("resposta", "Cliente irritado: responde antes de transferir");
       }
+    } else if (cause === "model" && !waitingInQueue && answersBeforeHandoff(replyText)) {
+      // O modelo orientou e transferiu: a orientação chega ao cliente (já
+      // conferida contra os materiais). Se ela já avisa a transferência, o
+      // aviso padrão não se repete.
+      const answered = await sendReply(replyText);
+      if (answered.sent) {
+        sentReply = replyText;
+        announced = announcesTransfer(replyText);
+        traceStep("resposta", announced ? "Orientou e avisou a transferência na mesma mensagem" : "Orienta antes de transferir");
+      }
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
     const queuedMsg = waitingInQueue ? config.handoff.queuedMessage?.trim() || QUEUED_MESSAGE_DEFAULT : "";
-    const sent = await performHandoff(requestedDestination ?? activeTheme?.handoffDestination, queuedMsg || noSourceMsg ? { message: queuedMsg || noSourceMsg } : {});
+    const sent = await performHandoff(
+      requestedDestination ?? activeTheme?.handoffDestination,
+      announced ? { skipMessage: true } : queuedMsg || noSourceMsg ? { message: queuedMsg || noSourceMsg } : {},
+    );
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
   }

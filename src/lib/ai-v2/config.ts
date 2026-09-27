@@ -488,6 +488,21 @@ export function isHumanRequestRule(rule: { id: string; conditions: Array<{ type:
 }
 
 /** Palavras da tela + frases explícitas. */
+/**
+ * Assunto que só repete o pedido de pessoa (metade ou mais dos gatilhos são
+ * termos do pedido de pessoa). Escolhido pelo sentido, pegava perguntas
+ * comuns ("que horas funciona o atendimento?") e transferia.
+ */
+export function isHumanRequestTheme(theme: { when?: string[] }, config: Pick<V2AgentConfig, "handoff" | "rules">): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const ruleWords = (config.rules ?? [])
+    .filter((r) => isHumanRequestRule(r, config))
+    .flatMap((r) => r.conditions.flatMap((c) => (c.type === "keywords" ? c.values ?? [] : [])));
+  const terms = new Set([...humanRequestTerms(config), ...ruleWords].map(fold));
+  const when = (theme.when ?? []).map(fold).filter(Boolean);
+  return when.length > 0 && when.filter((w) => terms.has(w)).length >= Math.ceil(when.length / 2);
+}
+
 export function humanRequestTerms(config: Pick<V2AgentConfig, "handoff">): string[] {
   const own = (config.handoff?.humanRequestKeywords ?? []).map((w) => w.trim()).filter(Boolean);
   return [...new Set([...own, ...HUMAN_REQUEST_PHRASES])];
