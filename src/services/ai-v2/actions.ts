@@ -408,8 +408,9 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
       if (ctx.autonomyMode === "DRAFT") {
         traceStep("mídia", `Anexos de "${template.name}" não enviados (modo sugestão)`);
       } else {
-        const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
+        const { sendAgentFollowUpMedia, mediaNotSentTrace } = await import("@/services/ai/send-agent-media");
         const since = await lastV2ResetAt(ctx.conversationId).catch(() => null);
+        let report: Parameters<typeof mediaNotSentTrace>[1];
         mediaSent = await sendAgentFollowUpMedia({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
@@ -417,6 +418,9 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
           attachments: media,
           ...(since ? { since } : {}),
           ...(mediaOnly ? { ignoreRecent: true } : {}),
+          report: (r) => {
+            report = r;
+          },
         });
         const { isOrgOwnedStorageUrl } = await import("@/lib/storage/read-for-send");
         const external = media.filter((m) => !isOrgOwnedStorageUrl(m.url));
@@ -425,7 +429,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
           ? `${mediaOnly ? "Reenvio a pedido do cliente: " : ""}${mediaSent} anexo(s) de "${template.name}" na fila de envio ao WhatsApp: ${media.slice(0, mediaSent).map((m) => m.name ?? "arquivo").join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
           : external.length === media.length
             ? `Anexos de "${template.name}" não enviados: são links externos, não arquivos enviados ao CRM (${external.map((m) => m.name ?? "arquivo").join(", ")})`
-            : `Anexos de "${template.name}" não enviados (já entregues nesta conversa dentro da trava de repetição, ou canal indisponível)`);
+            : mediaNotSentTrace(`Anexos de "${template.name}"`, report));
       }
     }
     if (mediaOnly && mediaSent === 0) return { action, ok: false, modelId, error: "anexo não pôde ser reenviado" };
@@ -484,8 +488,9 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
       traceStep("mídia", `Anexos do material não enviados (modo sugestão): ${list.map((a) => a.name).join(", ")}`);
       return { action, ok: true, mediaSent: 0, text };
     }
-    const { sendAgentFollowUpMedia } = await import("@/services/ai/send-agent-media");
+    const { sendAgentFollowUpMedia, mediaNotSentTrace } = await import("@/services/ai/send-agent-media");
     const { resendSince } = await import("./material-attachments");
+    const reports: Array<{ otherOrg: string[]; alreadySent: string[] }> = [];
     const lastReset = await lastV2ResetAt(ctx.conversationId).catch(() => null);
     // A trava de repetição é de cada anexo ("7d" padrão; "always" sai sempre).
     let mediaSent = 0;
@@ -497,11 +502,12 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
         agentUserId: ctx.agentUserId,
         attachments: group.map((a) => ({ url: a.url, mimeType: a.mimeType, name: a.name })),
         since: resendSince(window, lastReset),
+        report: (r) => reports.push(r),
       });
     }
     traceStep("mídia", mediaSent > 0
       ? `${mediaSent} anexo(s) do material na fila de envio ao WhatsApp: ${list.slice(0, mediaSent).map((a) => a.name).join(", ")} — a entrega (enviada/falhou) aparece em “Entrega” no turno`
-      : `Anexos do material não enviados (já enviados nesta conversa dentro da trava de repetição, ou canal indisponível): ${list.map((a) => a.name).join(", ")}`);
+      : mediaNotSentTrace("Anexos do material", { otherOrg: reports.flatMap((r) => r.otherOrg), alreadySent: reports.flatMap((r) => r.alreadySent) }));
     return { action, ok: true, mediaSent, text };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };

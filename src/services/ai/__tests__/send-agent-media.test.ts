@@ -37,11 +37,15 @@ vi.mock("@/lib/storage/local", () => ({
   parseStoragePath: () => ({ orgId: "org-1", bucket: "attachments", fileName: "guia.mp4" }),
   resolveOutboundAttachmentMime: (o: { rawType?: string }) => o.rawType || "application/octet-stream",
 }));
-vi.mock("@/lib/storage/read-for-send", () => ({ isOrgOwnedStorageUrl: () => true, readStoredMediaForSend: mocks.read }));
+vi.mock("@/lib/storage/read-for-send", () => ({
+  isOrgOwnedStorageUrl: () => true,
+  isStorageUrlOfOrg: (url: string, org: string) => url.includes(`/${org}/`),
+  readStoredMediaForSend: mocks.read,
+}));
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: () => ({ configured: true, uploadMedia: mocks.upload }) }));
 vi.mock("@/jobs/whatsapp/meta-attach.job", () => ({ processMetaAttach: mocks.process }));
 
-import { sendAgentFollowUpMedia } from "../send-agent-media";
+import { mediaNotSentTrace, sendAgentFollowUpMedia, type MediaSendReport } from "../send-agent-media";
 
 const VIDEO = { url: "/api/storage/org-1/attachments/guia.mp4", mimeType: "video/mp4", name: "guia.mp4" };
 const AUDIO = { url: "/api/storage/org-1/attachments/guia.mp3", mimeType: "audio/mpeg", name: "guia.mp3" };
@@ -49,6 +53,34 @@ const AUDIO = { url: "/api/storage/org-1/attachments/guia.mp3", mimeType: "audio
 function send(att = VIDEO) {
   return sendAgentFollowUpMedia({ conversationId: "conv-1", contactId: "c-1", agentUserId: "u-1", attachments: [att] });
 }
+
+describe("anexo guardado em outra organização", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("não sai, não cria mensagem e o motivo vai para o rastro", async () => {
+    let report: MediaSendReport | undefined;
+    const other = { url: "/api/storage/org-2/attachments/tutorial.mp4", mimeType: "video/mp4", name: "tutorial.mp4" };
+    const sent = await sendAgentFollowUpMedia({
+      conversationId: "conv-1",
+      contactId: "c-1",
+      agentUserId: "u-1",
+      attachments: [other],
+      report: (r) => {
+        report = r;
+      },
+    });
+    expect(sent).toBe(0);
+    const { prisma } = await import("@/lib/prisma");
+    expect(prisma.message.create).not.toHaveBeenCalled();
+    expect(report).toEqual({ otherOrg: ["tutorial.mp4"], alreadySent: [] });
+    expect(mediaNotSentTrace("Anexos", report)).toContain("outra organização");
+  });
+
+  it("rastro diferencia trava de repetição e falta de canal", () => {
+    expect(mediaNotSentTrace("Anexos", { otherOrg: [], alreadySent: ["guia.mp4"] })).toContain("trava de repetição");
+    expect(mediaNotSentTrace("Anexos", { otherOrg: [], alreadySent: [] })).toContain("não tem canal");
+  });
+});
 
 describe("anexo do agente pelo canal Meta — upload onde o arquivo existe", () => {
   beforeEach(() => {

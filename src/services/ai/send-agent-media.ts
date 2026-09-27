@@ -10,8 +10,8 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
 import { isBaileysChannel, sendWhatsAppMedia } from "@/lib/send-whatsapp";
-import { parseStoragePath, resolveOutboundAttachmentMime } from "@/lib/storage/local";
-import { isOrgOwnedStorageUrl, readStoredMediaForSend } from "@/lib/storage/read-for-send";
+import { resolveOutboundAttachmentMime } from "@/lib/storage/local";
+import { isOrgOwnedStorageUrl, isStorageUrlOfOrg, readStoredMediaForSend } from "@/lib/storage/read-for-send";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
 import { traceStep } from "@/services/ai-v2/trace";
@@ -34,6 +34,20 @@ function mimeFromName(name: string | null, fallback: string | null): string {
   return fallback || "application/octet-stream";
 }
 
+/** Anexos que não saíram e por quê. */
+export type MediaSendReport = { otherOrg: string[]; alreadySent: string[] };
+
+/** Linha do rastro para anexos que não saíram, com o motivo real. */
+export function mediaNotSentTrace(what: string, report: MediaSendReport | undefined): string {
+  if (report?.otherOrg.length) {
+    return `${what} não enviados: o arquivo está guardado em outra organização e não existe aqui (${report.otherOrg.join(", ")}) — anexe o arquivo de novo`;
+  }
+  if (report?.alreadySent.length) {
+    return `${what} não enviados: já entregues nesta conversa dentro da trava de repetição (${report.alreadySent.join(", ")})`;
+  }
+  return `${what} não enviados: a conversa não tem canal para envio de arquivo`;
+}
+
 export async function sendAgentFollowUpMedia(args: {
   conversationId: string;
   contactId: string;
@@ -43,24 +57,17 @@ export async function sendAgentFollowUpMedia(args: {
   since?: Date;
   /** Reenvio a pedido do cliente: ignora a trava de repetição. */
   ignoreRecent?: boolean;
+  /** Por que um anexo não saiu (o rastro do turno mostra o motivo real). */
+  report?: (r: MediaSendReport) => void;
 }): Promise<number> {
   const orgId = getOrgIdOrThrow();
-  const allowed = args.attachments.filter((att) => {
-    if (!isOrgOwnedStorageUrl(att.url)) return false;
-    const parsed = parseStoragePath(
-      att.url.startsWith("http")
-        ? (() => {
-            try {
-              return new URL(att.url).pathname;
-            } catch {
-              return att.url;
-            }
-          })()
-        : att.url,
-    );
-    return !parsed || parsed.orgId === orgId;
-  });
-  if (allowed.length === 0) return 0;
+  const nameOf = (att: AgentFaqMedia) => att.name?.trim() || "arquivo";
+  const otherOrg = args.attachments.filter((att) => isOrgOwnedStorageUrl(att.url) && !isStorageUrlOfOrg(att.url, orgId)).map(nameOf);
+  const allowed = args.attachments.filter((att) => isStorageUrlOfOrg(att.url, orgId));
+  if (allowed.length === 0) {
+    args.report?.({ otherOrg, alreadySent: [] });
+    return 0;
+  }
 
   // Só envio que não falhou conta como "já enviado": a entrega com falha
   // ("Arquivo não encontrado no storage") travava o reenvio por 7 dias e o
@@ -78,6 +85,7 @@ export async function sendAgentFollowUpMedia(args: {
       });
   const sent = new Set(already.map((m) => m.mediaUrl).filter(Boolean));
   const pending = allowed.filter((a) => !sent.has(a.url));
+  args.report?.({ otherOrg, alreadySent: allowed.filter((a) => sent.has(a.url)).map(nameOf) });
   if (pending.length === 0) return 0;
 
   const conv = await prisma.conversation.findUnique({

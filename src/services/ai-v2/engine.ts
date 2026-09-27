@@ -40,7 +40,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
+import { ALREADY_SENT_REPLY, ATTACHMENT_ABOVE_NOTE, MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -1763,6 +1763,33 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           // Resposta que só apresentava o material vira o aviso de que ele está acima.
           replyText = ALREADY_SENT_REPLY;
         }
+      }
+    }
+  }
+  // Resposta completa + mensagem pronta de outro conteúdo: a resposta virava
+  // só a introdução e o cliente recebia a mensagem pronta no lugar do passo a
+  // passo que pediu. A troca só vale quando a mensagem pronta traz o que a
+  // resposta explica; senão sai a resposta completa, sem a mensagem pronta.
+  if (replyText.trim().split(/\s+/).length > 40) {
+    const modelActions = outboundActions.filter(
+      (a) => a.type === "send_message_model" && typeof a.modelId === "string" && (a as { mediaOnly?: unknown }).mediaOnly !== true,
+    );
+    if (modelActions.length > 0) {
+      const rows = await Promise.resolve()
+        .then(() =>
+          prisma.messageTemplate.findMany({
+            where: { id: { in: modelActions.map((a) => a.modelId as string) }, organizationId: orgId },
+            select: { id: true, name: true, content: true },
+          }),
+        )
+        .catch(() => [] as Array<{ id: string; name: string; content: string | null }>);
+      const offTopic = (rows ?? []).filter(
+        (r) => (r.content ?? "").trim() && messageModelCoverage(replyText, r.content ?? "") < MESSAGE_MODEL_MIN_COVERAGE,
+      );
+      if (offTopic.length > 0) {
+        const off = new Set(offTopic.map((r) => r.id));
+        outboundActions = outboundActions.filter((a) => !(a.type === "send_message_model" && off.has(a.modelId as string)));
+        traceStep("ações", `Mensagem pronta ${offTopic.map((r) => `"${r.name}"`).join(", ")} não traz o que a resposta explica — vai a resposta completa, sem a mensagem pronta`);
       }
     }
   }

@@ -108,6 +108,24 @@ describe("callV2LLM function calling", () => {
     expect(passedTools).toContain("search_products");
   });
 
+  it("consulta ao cadastro só é oferecida quando o cliente tem mais de um negócio", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    const config = baseConfig({ contextFields: { contact: [], deal: [{ key: "codigo", label: "Código", permissions: ["read", "cite"] }] } as any });
+    const run = (deals: Array<Record<string, unknown>>) =>
+      callV2LLM({
+        agentId: "agent-1",
+        config,
+        context: { contact: { name: "Ana" }, deals, selectedDeal: deals[0] ?? null, fields: config.contextFields },
+        userMessage: "qual o meu código?",
+        stage: "active",
+      });
+    await run([{ id: "d-1", codigo: "123" }]);
+    await run([{ id: "d-1", codigo: "123" }, { id: "d-2", codigo: "456" }]);
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(Object.keys(calls[0][0].tools)).not.toContain("search_crm_records");
+    expect(Object.keys(calls[1][0].tools)).toContain("search_crm_records");
+  });
+
   it("apenas tools permitidas pelo tema aparecem", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })),

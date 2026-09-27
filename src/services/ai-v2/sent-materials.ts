@@ -14,6 +14,44 @@ const db = prismaBase as unknown as {
 /** Janela em que a mesma mensagem pronta não é reenviada. */
 export const RESEND_WINDOW_MS = 30 * 60 * 1000;
 
+/** Abaixo disto a mensagem pronta não traz o que a resposta explica. */
+export const MESSAGE_MODEL_MIN_COVERAGE = 0.5;
+
+// Palavras de ligação: não dizem do que o texto trata.
+const FUNCTION_WORDS = new Set([
+  "para", "pela", "pelo", "pelas", "pelos", "como", "voce", "voces", "esta", "este", "estes", "estas",
+  "isso", "essa", "esse", "isto", "aqui", "mais", "muito", "quando", "depois", "antes", "sobre", "entre",
+  "onde", "qual", "quais", "seus", "suas", "meus", "minhas", "nosso", "nossa", "nossos", "nossas", "entao",
+  "tambem", "ainda", "apenas", "cada", "todo", "toda", "todos", "todas", "sera", "pode", "podem", "tudo",
+  "nada", "algo", "assim", "porque", "pois", "caso", "favor", "sempre", "agora", "hoje", "seja", "tenho",
+  "temos", "estao", "sendo", "fazer", "vamos", "claro", "certo", "qualquer", "duvida",
+]);
+
+function contentStems(text: string): Set<string> {
+  return new Set(
+    text
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 4 && !FUNCTION_WORDS.has(w))
+      .map((w) => w.slice(0, 5)),
+  );
+}
+
+/**
+ * Quanto do que a resposta explica (fora a introdução) a mensagem pronta
+ * traz, de 0 a 1. Compara o começo das palavras de conteúdo: "acesse" e
+ * "acessar" contam como a mesma.
+ */
+export function messageModelCoverage(reply: string, modelText: string): number {
+  const intro = contentStems(introBeforeMaterial(reply));
+  const body = [...contentStems(reply)].filter((w) => !intro.has(w));
+  if (body.length === 0) return 1;
+  const model = contentStems(modelText);
+  return body.filter((w) => model.has(w)).length / body.length;
+}
+
 /** Resposta quando o material pedido acabou de ser enviado. */
 export const ALREADY_SENT_REPLY =
   "Te enviei esse material logo acima 👆 Se ficou alguma dúvida ou algo não funcionou, me conta que eu te ajudo.";

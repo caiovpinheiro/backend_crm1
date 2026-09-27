@@ -12,7 +12,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 vi.mock("@/lib/request-context", () => ({ getOrgIdOrNull: () => "org-1", getOrgIdOrThrow: () => "org-1" }));
 vi.mock("@/services/ai/piloting-actions", () => ({ sendAgentMessage: mocks.sendAgentMessage }));
-vi.mock("@/services/ai/send-agent-media", () => ({ sendAgentFollowUpMedia: mocks.sendMedia }));
+vi.mock("@/services/ai/send-agent-media", () => ({ sendAgentFollowUpMedia: mocks.sendMedia, mediaNotSentTrace: (what: string) => `${what} não enviados` }));
 vi.mock("@/services/ai/message-models-retrieval", () => ({ mediaFromTemplateRow: mocks.mediaFromRow }));
 
 import { executeV2Actions } from "../actions";

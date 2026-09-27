@@ -118,3 +118,21 @@ export function isOrgOwnedStorageUrl(mediaUrl: string): boolean {
   if (trimmed.startsWith("/uploads/")) return true;
   return parseStoredMediaRef(trimmed) != null;
 }
+
+/**
+ * Arquivo do armazenamento DESTA organização. Modelo copiado de outra org
+ * guarda o endereço do arquivo de lá: aqui ele não existe e nunca sai.
+ */
+export function isStorageUrlOfOrg(mediaUrl: string, orgId: string): boolean {
+  if (!isOrgOwnedStorageUrl(mediaUrl)) return false;
+  let path = mediaUrl.trim();
+  if (path.startsWith("http")) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      /* mantém como veio */
+    }
+  }
+  const parsed = parseStoragePath(path);
+  return !parsed || parsed.orgId === orgId;
+}

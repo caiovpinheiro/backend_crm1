@@ -300,14 +300,18 @@ function mediaKindOf(mime: string | null, name: string | null): string {
 export async function describeV2MessageModels(ids: string[]): Promise<V2MessageModelSummary[]> {
   if (ids.length === 0) return [];
   const { mediaFromTemplateRow } = await import("@/services/ai/message-models-retrieval");
+  const { isStorageUrlOfOrg } = await import("@/lib/storage/read-for-send");
+  const orgId = getOrgIdOrThrow();
   const rows = await (prisma as any).messageTemplate.findMany({
-    where: { organizationId: getOrgIdOrThrow(), id: { in: ids.slice(0, 50) } },
+    where: { organizationId: orgId, id: { in: ids.slice(0, 50) } },
     select: { id: true, name: true, mediaUrl: true, mediaType: true, mediaName: true, attachments: true },
   });
   return (rows as Array<{ id: string; name: string; mediaUrl: string | null; mediaType: string | null; mediaName: string | null; attachments: unknown }>).map((r) => ({
     id: r.id,
     name: r.name,
-    mediaKinds: mediaFromTemplateRow(r).map((m) => mediaKindOf(m.mimeType, m.name)),
+    // Arquivo de outra organização não sai: anunciado, o modelo prometia
+    // "vou te enviar o vídeo" e nada chegava.
+    mediaKinds: mediaFromTemplateRow(r).filter((m) => isStorageUrlOfOrg(m.url, orgId)).map((m) => mediaKindOf(m.mimeType, m.name)),
   }));
 }
 

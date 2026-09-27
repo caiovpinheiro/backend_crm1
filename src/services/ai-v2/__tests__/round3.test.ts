@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { answersBeforeHandoff, conditionalHandoff } from "../no-source";
-import { introBeforeMaterial } from "../sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, introBeforeMaterial, messageModelCoverage } from "../sent-materials";
 import { businessHoursSummary, outsideHoursNote } from "../rules";
 
 describe("transferência condicional", () => {
@@ -58,5 +58,23 @@ describe("horário de atendimento", () => {
     expect(outsideHoursNote(config, sunday)).toContain("segunda a sexta, 08:00 às 18:00");
     expect(outsideHoursNote(config, monday)).toBe("");
     expect(outsideHoursNote({ businessHours: { enabled: false, timezone: "America/Sao_Paulo", weekdays: [] } } as never, sunday)).toBe("");
+  });
+});
+
+describe("mensagem pronta só substitui a resposta quando traz o que ela explica", () => {
+  const model = "📦 Como trocar um produto\n1️⃣ Abra o aplicativo e toque em Pedidos.\n2️⃣ Escolha o pedido e toque em Trocar.\n3️⃣ Imprima a etiqueta e leve à agência.";
+
+  it("resposta que repete a mensagem pronta: coberta", () => {
+    const reply = "Claro, Ana! Vou te explicar. Para trocar o produto, abra o aplicativo e toque em Pedidos. Depois escolha o pedido e toque em Trocar. Por fim, imprima a etiqueta e leve até a agência.";
+    expect(messageModelCoverage(reply, model)).toBeGreaterThanOrEqual(MESSAGE_MODEL_MIN_COVERAGE);
+  });
+
+  it("resposta sobre outro procedimento: não coberta", () => {
+    const reply = "Ana, para entrar na sua conta pela primeira vez, acesse o site da loja e faça login com seu e-mail e a senha provisória. Se pedir verificação, informe o código recebido por SMS e confirme o telefone cadastrado.";
+    expect(messageModelCoverage(reply, model)).toBeLessThan(MESSAGE_MODEL_MIN_COVERAGE);
+  });
+
+  it("variações da mesma palavra contam como a mesma", () => {
+    expect(messageModelCoverage("Oi! Acesse a área de pedidos e confirme a troca.", "Acessar a área de pedido e confirmar a troca")).toBe(1);
   });
 });

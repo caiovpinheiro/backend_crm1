@@ -524,7 +524,11 @@ export function buildV2ToolSet(args: {
       .filter((f) => f.permissions.includes("read") || f.permissions.includes("cite"))
       .map((f) => `deal.${f.key}`),
   ];
-  const searchCrm = wrapTool(
+  // Cliente com um negócio só (ou nenhum): o cadastro e o negócio já estão no
+  // contexto e a consulta devolveria o mesmo. Oferecida, o modelo consultava a
+  // cada mensagem com termos soltos e somava uma ida e volta (segundos).
+  const crmAlreadyInContext = (args.context.deals?.length ?? 0) <= 1;
+  const searchCrm = crmAlreadyInContext ? undefined : wrapTool(
     "search_crm_records",
     "Consulta o cadastro do cliente desta conversa e os negócios dele. Não busca outras pessoas.",
     z.object({
