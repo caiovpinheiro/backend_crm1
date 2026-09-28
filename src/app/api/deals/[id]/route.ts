@@ -244,12 +244,13 @@ export async function PUT(request: Request, context: RouteContext) {
         "deal:transfer_owner",
       );
       if (transferDenied) {
-        // `deal:transfer_owner` cobre "mexer no responsável de qualquer
-        // negócio". Sem ela, quem tem `deal:edit` ainda entrega um negócio
-        // próprio (ou sem dono) — é o que o preset Operador sempre permitiu.
-        const ownOrUnassigned = !currentOwnerId || currentOwnerId === authResult.user.id;
+        // Sem `deal:transfer_owner` não tira o negócio de quem já é dono
+        // nem entrega para outra pessoa. `deal:edit` só assume um card
+        // que ainda não tem responsável.
+        const claimingSelf =
+          !currentOwnerId && payload.ownerId === authResult.user.id;
         const editDenied = await requirePermissionForUser(authResult.user, "deal:edit");
-        if (!ownOrUnassigned || editDenied) return transferDenied;
+        if (!claimingSelf || editDenied) return transferDenied;
       }
     }
 
