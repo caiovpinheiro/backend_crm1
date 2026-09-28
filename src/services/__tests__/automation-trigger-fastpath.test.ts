@@ -273,7 +273,12 @@ describe("fireTrigger fast-path", () => {
 
     await fireTrigger("message_received", {
       contactId: "c1",
-      data: { channel: "WhatsApp", conversationId: "conv-1" },
+      data: {
+        channel: "WhatsApp",
+        channelId: "ch-1",
+        conversationId: "conv-1",
+        content: "quero informações do curso",
+      },
     });
 
     expect(enqueueAutomation).toHaveBeenCalledWith(
