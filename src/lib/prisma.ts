@@ -84,6 +84,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   // Cotas de desconto (PRD Cotas — Fase 1). Todos tenant-scoped.
   "DiscountCategory",
   "DiscountQuota",
+  "ProductMessageTemplate",
   "QuotaConsumptionPolicy",
   "DealQuota",
   "QuotaMovement",
