@@ -60,6 +60,14 @@ describe("fecho x pedido ao cliente", () => {
     expect(asksClient("Me diga o número do pedido.")).toBe(true);
   });
 
+  it("pedido direto de um dado, sem pergunta, também não recebe fecho; passo de lista sim", () => {
+    const reply = "Para eu orientar sobre o prazo e a troca, informe o *número do pedido*, por favor.";
+    expect(asksClient(reply)).toBe(true);
+    expect(applyReplyEnding({ reply, ending }).added).toBeNull();
+    expect(asksClient("Preciso do número do pedido antes de explicar as condições.")).toBe(true);
+    expect(asksClient("Para trocar:\n1. Abra Pedidos.\n2. Informe o motivo e confirme o endereço.")).toBe(false);
+  });
+
   it("informação sem pedido recebe o fecho", () => {
     const reply = "O prazo é de 5 dias úteis.";
     expect(asksClient(reply)).toBe(false);

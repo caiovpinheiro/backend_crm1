@@ -27,7 +27,15 @@ const PROCEDURE_WORDS = /\bpasso a passo\b|\btutorial\b|\bsiga (?:as instru[çc]
 
 /** Pedido de informação ao cliente sem ponto de interrogação. */
 const ASKS_CLIENT =
-  /\b(?:preciso (?:saber|que voc[eê]|confirmar)|me (?:diga|diz|informe|informa|conte|conta|envie|envia|mande|manda|passe|passa)|pode(?:ria)? me (?:dizer|informar|enviar|mandar|contar|passar)|qual (?:[ée]|seria) (?:a|o|sua|seu)\b)/i;
+  /\b(?:preciso (?:saber|que voc[eê]|confirmar|do|da|dos|das)\b|me (?:diga|diz|informe|informa|conte|conta|envie|envia|mande|manda|passe|passa)|pode(?:ria)? me (?:dizer|informar|enviar|mandar|contar|passar)|qual (?:[ée]|seria) (?:a|o|sua|seu)\b)/i;
+
+/**
+ * Pedido direto de um dado ("informe o número do pedido", "por favor, envie
+ * a foto"): fora de lista de passos, é o agente esperando a resposta. O fecho
+ * "Posso ajudar em mais alguma coisa?" com botões saía junto e o cliente
+ * recebia duas perguntas.
+ */
+const REQUESTS_DATA = /\b(?:informe|envie|mande|digite|confirme)\s+(?:o|a|os|as|seu|sua|seus|suas)\b/i;
 
 /** A resposta termina com pergunta ou o último parágrafo pede algo ao cliente. */
 export function asksClient(reply: string): boolean {
@@ -35,7 +43,8 @@ export function asksClient(reply: string): boolean {
   const last = paragraphs[paragraphs.length - 1] ?? "";
   // Pergunta no fim ou no meio do último parágrafo ("Qual solicitação? Assim indico…").
   if (last.includes("?")) return true;
-  return ASKS_CLIENT.test(last);
+  if (ASKS_CLIENT.test(last)) return true;
+  return REQUESTS_DATA.test(last) && !last.split(/\n/).some((l) => STEP_LINE.test(l));
 }
 
 /**
