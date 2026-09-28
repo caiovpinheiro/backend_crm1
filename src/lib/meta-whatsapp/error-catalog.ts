@@ -65,6 +65,22 @@ export function isMetaNonConversationErrorCode(
   return typeof code === "number" && META_NON_CONVERSATION_ERROR_CODES.has(code);
 }
 
+/**
+ * `error_subcode` ainda aparece em rejeições de template/WABA (v21).
+ * Catalogar aqui quando o `code` genérico (ex.: 100 Invalid parameter)
+ * não distingue o motivo real.
+ */
+const SUBCODE_CATALOG: Record<number, MetaErrorInfo> = {
+  // OAuthException + "WhatsApp accounts cannot be used with this API."
+  // Listar templates na WABA pode funcionar; criar/alterar pela Graph não.
+  2388339: {
+    reason:
+      "A Meta recusou criar/alterar template nesta WABA (Invalid WhatsApp account usage).",
+    action:
+      "GET (listar) nesta WABA funciona; POST (criar/alterar) pela Graph é recusado pela Meta — inclusive no Graph Explorer com o app inscrito. Não é falha do CRM. Crie o template no WhatsApp Manager e envie pelo CRM. Ticket Meta com o fbtrace_id da resposta.",
+  },
+};
+
 const CATALOG: Record<number, MetaErrorInfo> = {
   // ── Genéricos / infra ───────────────────────────────────────
   1: {
@@ -246,7 +262,14 @@ const CATALOG: Record<number, MetaErrorInfo> = {
  * Retorna a explicação PT-BR de um código de erro da Meta, ou `null` se
  * o código não estiver catalogado.
  */
-export function describeMetaError(code: number | null | undefined): MetaErrorInfo | null {
+export function describeMetaError(
+  code: number | null | undefined,
+  subcode?: number | null,
+): MetaErrorInfo | null {
+  if (typeof subcode === "number") {
+    const bySub = SUBCODE_CATALOG[subcode];
+    if (bySub) return bySub;
+  }
   if (typeof code !== "number") return null;
   return CATALOG[code] ?? null;
 }
@@ -257,8 +280,11 @@ export function describeMetaError(code: number | null | undefined): MetaErrorInf
  *       Adicione um cartão no Billing Hub da Meta..."
  * Retorna string vazia quando o código não está catalogado.
  */
-export function metaErrorReason(code: number | null | undefined): string {
-  const info = describeMetaError(code);
+export function metaErrorReason(
+  code: number | null | undefined,
+  subcode?: number | null,
+): string {
+  const info = describeMetaError(code, subcode);
   if (!info) return "";
   return info.action ? `${info.reason} ${info.action}` : info.reason;
 }

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
-import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
+import { httpStatusForMetaGraphError, isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -75,7 +75,7 @@ export async function DELETE(request: Request, context: RouteContext) {
             subcode: e.subcode,
             fbtraceId: e.fbtraceId,
           },
-          { status: 502 },
+          { status: httpStatusForMetaGraphError(e) },
         );
       }
       const msg = e instanceof Error ? e.message : "Erro ao excluir template na Meta.";
