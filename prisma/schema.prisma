@@ -164,6 +164,7 @@ model Organization {
   // Cotas de desconto (PRD Cotas de Desconto — Fase 1).
   discountCategories       DiscountCategory[]
   discountQuotas           DiscountQuota[]
+  productMessageTemplates  ProductMessageTemplate[]
   quotaPolicies            QuotaConsumptionPolicy[]
   dealQuotas               DealQuota[]
   quotaMovements           QuotaMovement[]
@@ -2449,6 +2450,25 @@ model DiscountCategory {
   @@index([organizationId, active])
   @@index([productId])
   @@map("discount_categories")
+}
+
+/// Texto padrão enviado ao encaminhar um produto no chat.
+/// Escopo: `kind` + `courseLevel` (null = qualquer nível daquele tipo).
+/// O conteúdo usa `{{variavel}}` resolvido na hora do envio.
+model ProductMessageTemplate {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  kind           ProductKind
+  courseLevel    CourseLevel?
+  content        String       @db.Text
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, kind, active])
+  @@map("product_message_templates")
 }
 
 /// Cota de desconto (cupom): valor % ou fixo, com estoque opcional, vigência,
