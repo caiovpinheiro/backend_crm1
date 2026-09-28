@@ -43,7 +43,7 @@ export async function userHasConversationAccess(
 ): Promise<boolean> {
   const conv = await prisma.conversation.findFirst({
     where: { id: conversationId },
-    select: { id: true, assignedToId: true, channelId: true },
+    select: { id: true, assignedToId: true, channelId: true, contactId: true },
   });
   if (!conv) return false;
 
@@ -65,6 +65,17 @@ export async function userHasConversationAccess(
   // / fila compartilhada da listagem estiver mais estreito que o GET :id.
   // Funil/etapa bloqueados continuam inacessíveis mesmo para o responsável.
   if (conv.assignedToId === user.id) return true;
+
+  // Dono do negócio abre o card no pipeline e a aba Conversa pede as
+  // mensagens. O assignee do ticket pode ser outra pessoa (transferência
+  // só do deal, ou o chat ficou com o atendente anterior). Sem isto o
+  // GET /messages devolve 404 e a aba fica em "Não foi possível carregar".
+  if (conv.contactId) {
+    const ownsDeal = await prisma.deal.count({
+      where: { contactId: conv.contactId, ownerId: user.id },
+    });
+    if (ownsDeal > 0) return true;
+  }
 
   const { conversationWhere, includeUnassigned } = await getVisibilityFilter(user);
   let where = conversationWhere;
