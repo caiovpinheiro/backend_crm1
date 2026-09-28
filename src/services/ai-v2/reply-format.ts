@@ -71,3 +71,18 @@ export function boldInstruction(mode: "auto" | "key" | "off" | undefined): strin
   if (mode === "off") return "Não use negrito nem asteriscos para destacar texto.";
   return null;
 }
+
+/**
+ * Markdown do modelo → formatação do WhatsApp. O WhatsApp não tem link com
+ * texto: `[aqui](https://x)` chegava cru ao cliente. Negrito é `*x*`,
+ * itálico `_x_`; títulos `#` não existem.
+ */
+export function toWhatsAppText(raw: string): string {
+  return raw
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) =>
+      label.trim() === url || /^https?:\/\//.test(label.trim()) ? url : `${label.trim()}: ${url}`,
+    )
+    .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
+    .replace(/__([^_\n]+)__/g, "_$1_")
+    .replace(/^#{1,6}\s+/gm, "");
+}

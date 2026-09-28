@@ -3,6 +3,7 @@
  * Nenhum domínio de cliente.
  */
 
+import { toWhatsAppText } from "./reply-format";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -724,20 +725,8 @@ export function v2HumanBehavior(config: {
  */
 export const V2_MAX_TYPING_MS = 8000;
 
-/**
- * Markdown do modelo → formatação do WhatsApp. O WhatsApp não tem link com
- * texto: `[aqui](https://x)` chegava cru ao cliente. Negrito é `*x*`,
- * itálico `_x_`; títulos `#` não existem.
- */
-export function toWhatsAppText(raw: string): string {
-  return raw
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) =>
-      label.trim() === url || /^https?:\/\//.test(label.trim()) ? url : `${label.trim()}: ${url}`,
-    )
-    .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
-    .replace(/__([^_\n]+)__/g, "_$1_")
-    .replace(/^#{1,6}\s+/gm, "");
-}
+
+export { toWhatsAppText };
 
 /** Envia mensagem de texto simples via sendAgentMessage. */
 export async function sendV2TextMessage(args: {

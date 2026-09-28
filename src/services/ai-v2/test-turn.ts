@@ -13,7 +13,7 @@ import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
-import { applyBoldPolicy } from "./reply-format";
+import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
@@ -585,7 +585,8 @@ export async function simulateV2Turn(
       ...(await chosenModelTexts(output.actions ?? [], organizationId, /https?:\/\//i.test(output.reply) ? allowedMessageModelIdsFor(config, getV2ThemeById(config, themeId ?? undefined)) : [])),
     ],
   }, systemMessage(config, "returnPromiseHandoff"));
-  output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
+  // Como sai no WhatsApp: link em Markdown vira "texto: link" (igual ao envio).
+  output = { ...output, reply: toWhatsAppText(applyBoldPolicy(guard.text, config.bold)) };
   // Igual à produção: pedido novo nesta mensagem não encerra.
   if (keepOpenOnNewRequest(config, userMessage, output)) {
     output = { ...output, reason: `${output.reason} (não encerrou: o cliente fez um pedido nesta mensagem)`.trim() };
