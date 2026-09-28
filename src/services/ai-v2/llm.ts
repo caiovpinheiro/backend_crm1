@@ -49,7 +49,7 @@ import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
-import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
+import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check";
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
@@ -1605,9 +1605,26 @@ export async function callV2LLM(args: {
       // a frase barrava o envio e transferia o cliente.
       const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
-      const res = await checkClaimsWithModel({ model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues });
+      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues };
+      const res = await checkClaimsWithModel(checkArgs);
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
+      // Segunda leitura quando a primeira marca algo: o checador varia de uma
+      // chamada para outra e barrava, uma vez em cinco, o passo que o material
+      // traz com outras palavras — a mesma pergunta ora respondia, ora
+      // transferia. Fica marcado só o que as duas leituras apontam.
+      if (res.ok && res.unsupported.length > 0) {
+        const again = await checkClaimsWithModel(checkArgs);
+        r.inputTokens += again.inputTokens;
+        r.outputTokens += again.outputTokens;
+        if (again.ok) {
+          const confirmed = res.unsupported.filter((c) => again.unsupported.some((d) => sameClaim(c, d)));
+          if (confirmed.length < res.unsupported.length) {
+            traceStep("verificação", `Segunda leitura não confirmou ${res.unsupported.length - confirmed.length} marcação(ões) — ${res.unsupported.filter((c) => !confirmed.includes(c)).map((c) => `"${c}"`).join(", ")}`);
+          }
+          res.unsupported = confirmed;
+        }
+      }
       // Checagem indisponível (erro ou tempo): passo a passo, caminho de tela
       // ou link não conferido não sai — as regras fixas não pegam esses.
       if (!res.ok && statesProcedure(output.reply)) {

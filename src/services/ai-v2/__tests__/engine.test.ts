@@ -1248,6 +1248,24 @@ describe("processV2Turn — correções do motor", () => {
     expect(texts.some((t) => t.includes("Quando conseguir, me avise se deu certo."))).toBe(true);
   });
 
+  it("link de mensagem pronta liberada sai mesmo sem o envio dela; link que não está em conteúdo da empresa, não", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"], allowedDomains: ["loja.exemplo.com"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.templateFindMany.mockResolvedValue([{ id: "mm-1", name: "App", content: "Baixe o app: https://apps.outra.com/app?id=br.exemplo.app" }]);
+    const texts: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { texts.push(a.text); return { sent: true }; });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Baixe o app pelo link https://apps.outra.com/app?id=br.exemplo.app e entre com seu e-mail. Mais detalhes em https://golpe.exemplo.net/x",
+      actions: [],
+    }));
+
+    await run("onde baixo o aplicativo?");
+
+    const all = texts.join("\n");
+    expect(all).toContain("https://apps.outra.com/app?id=br.exemplo.app");
+    expect(all).not.toContain("golpe.exemplo.net");
+  });
+
   it("send_message_model com modelo fora da lista liberada é descartado", async () => {
     const config = baseConfig({ allowedMessageModelIds: ["mm-ok"] } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

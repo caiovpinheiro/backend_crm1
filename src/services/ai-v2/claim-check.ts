@@ -107,6 +107,25 @@ const STOP = new Set(["para", "como", "com", "sem", "pela", "pelo", "pelas", "pe
 const foldText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 /**
+ * Duas marca\u00e7\u00f5es do checador apontam a mesma afirma\u00e7\u00e3o: uma cont\u00e9m o come\u00e7o
+ * da outra, ou a maior parte das palavras de conte\u00fado da menor est\u00e1 na maior
+ * (cada leitura recorta o trecho da resposta de um jeito).
+ */
+export function sameClaim(a: string, b: string): boolean {
+  const fold = (s: string) => foldText(s).replace(/[*_~`"\u201c\u201d]/g, "").replace(/\s+/g, " ").trim();
+  const fa = fold(a);
+  const fb = fold(b);
+  if (!fa || !fb) return false;
+  if (fa.includes(fb.slice(0, 30)) || fb.includes(fa.slice(0, 30))) return true;
+  const words = (s: string) => new Set(s.split(/[^a-z0-9]+/).filter((w) => w.length >= 4 || /^\d+$/.test(w)).map((w) => w.slice(0, 6)));
+  const wa = words(fa);
+  const wb = words(fb);
+  const [small, big] = wa.size <= wb.size ? [wa, wb] : [wb, wa];
+  if (small.size === 0) return false;
+  return [...small].filter((w) => big.has(w)).length / small.size >= 0.6;
+}
+
+/**
  * A afirmação marcada está nas fontes: os links iguais e as palavras de
  * conteúdo (radical de 6 letras) num mesmo trecho curto de uma fonte. O
  * checador às vezes marcava o que o material diz com outras palavras (ex.:

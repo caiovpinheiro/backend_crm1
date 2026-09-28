@@ -1787,14 +1787,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // A resposta do modelo não é mais trocada por trecho cru da base quando
   // "não cita o material": isso mandava ao cliente o material bruto em vez
   // da resposta. Invenção é tratada na checagem de nomes/valores/palpites.
-  // Conteúdo da empresa que a resposta pode citar: trechos lidos e o texto da
-  // mensagem pronta escolhida (links dela saem mesmo fora dos endereços liberados).
+  // Conteúdo da empresa que a resposta pode citar: trechos lidos e o texto das
+  // mensagens prontas (links delas saem mesmo fora dos endereços liberados) —
+  // a escolhida e, quando a resposta traz link, as liberadas no assunto: o
+  // modelo vê o texto delas e às vezes o copia sem pedir o envio ou com o id
+  // errado; o link saía como não liberado e sobrava "Android:" vazio.
   const chosenModelIds = (llmOutput.actions ?? [])
     .filter((a) => a.type === "send_message_model" && typeof a.modelId === "string")
     .map((a) => a.modelId as string);
-  const chosenModelTexts = chosenModelIds.length > 0
+  const ownerModelIds = [...new Set([...chosenModelIds, ...(/https?:\/\//i.test(llmOutput.reply) ? allowedModelIds : [])])];
+  const chosenModelTexts = ownerModelIds.length > 0
     ? ((await Promise.resolve()
-        .then(() => prisma.messageTemplate.findMany({ where: { id: { in: chosenModelIds }, organizationId: orgId }, select: { content: true } }))
+        .then(() => prisma.messageTemplate.findMany({ where: { id: { in: ownerModelIds }, organizationId: orgId }, select: { content: true } }))
         .catch(() => [])) ?? []).map((r) => r.content ?? "")
     : [];
   const guard = guardV2Output(llmOutput.reply, config.allowedDomains, {

@@ -145,9 +145,12 @@ function renderConfirmationText(config: V2AgentConfig, context: V2CRMContext, va
   }));
 }
 
-/** Texto das mensagens prontas escolhidas pelo modelo (links delas saem no filtro). */
-async function chosenModelTexts(actions: Array<{ type: string; modelId?: unknown }>, organizationId: string | null | undefined): Promise<string[]> {
-  const ids = actions.filter((a) => a.type === "send_message_model" && typeof a.modelId === "string").map((a) => a.modelId as string);
+/**
+ * Texto das mensagens prontas cujos links saem no filtro: as escolhidas pelo
+ * modelo e, quando a resposta traz link, as liberadas no assunto (igual à produção).
+ */
+async function chosenModelTexts(actions: Array<{ type: string; modelId?: unknown }>, organizationId: string | null | undefined, extraIds: string[] = []): Promise<string[]> {
+  const ids = [...new Set([...actions.filter((a) => a.type === "send_message_model" && typeof a.modelId === "string").map((a) => a.modelId as string), ...extraIds])];
   if (ids.length === 0 || !organizationId) return [];
   try {
     const { prisma } = await import("@/lib/prisma");
@@ -577,7 +580,10 @@ export async function simulateV2Turn(
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
     publicTexts: [userMessage],
-    ownerTexts: [...knowledgeChunkTexts(llmResult.toolCalls), ...(await chosenModelTexts(output.actions ?? [], organizationId))],
+    ownerTexts: [
+      ...knowledgeChunkTexts(llmResult.toolCalls),
+      ...(await chosenModelTexts(output.actions ?? [], organizationId, /https?:\/\//i.test(output.reply) ? allowedMessageModelIdsFor(config, getV2ThemeById(config, themeId ?? undefined)) : [])),
+    ],
   }, systemMessage(config, "returnPromiseHandoff"));
   output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
   // Igual à produção: pedido novo nesta mensagem não encerra.

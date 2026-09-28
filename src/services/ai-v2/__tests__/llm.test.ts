@@ -1013,7 +1013,9 @@ describe("escopo e repetição", () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Pode ficar tranquilo, a instalação é gratuita para todos os planos.", actions: [] })))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["a instalação é gratuita para todos os planos"]}'))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["a instalação é gratuita para todos os planos"]}'))
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "A instalação é gratuita, sim.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A instalação é gratuita"]}'))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A instalação é gratuita"]}'));
     const r = await callV2LLM({
       agentId: "agent-1", config: baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Essa informação eu não tenho por aqui." } } } as Partial<V2AgentConfig>),
@@ -1022,7 +1024,8 @@ describe("escopo e repetição", () => {
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls[1][0].system).toContain("sustentada pelas fontes");
-    expect(calls[2][0].system).toContain("a instalação é gratuita para todos os planos");
+    expect(calls[2][0].system).toContain("sustentada pelas fontes");
+    expect(calls[3][0].system).toContain("a instalação é gratuita para todos os planos");
     expect(r.output.handoff).toBe(true);
     expect(r.output.reply).toBe("Essa informação eu não tenho por aqui.");
   });
@@ -1043,23 +1046,41 @@ describe("escopo e repetição", () => {
     expect(r.output.handoff).toBe(false);
   });
 
-  it("checagem por modelo marca uma frase: ela é retirada sem reescrita nem nova checagem", async () => {
+  it("checagem por modelo marca uma frase e a segunda leitura confirma: ela é retirada sem reescrita", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "A troca é feita na loja com a nota fiscal. A garantia estendida cobre qualquer defeito de fábrica. Leve também o documento com foto.", actions: [] })))
-      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A garantia estendida cobre qualquer defeito de fábrica"]}'));
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A garantia estendida cobre qualquer defeito de fábrica"]}'))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["garantia estendida cobre qualquer defeito"]}'));
     const r = await callV2LLM({
       agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
       context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
       userMessage: "como faço a troca?", stage: "active",
     });
-    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3);
     expect(r.output.reply).toBe("A troca é feita na loja com a nota fiscal. Leve também o documento com foto.");
+    expect(r.output.handoff).toBe(false);
+  });
+
+  it("segunda leitura não confirma a marcação: a resposta sai inteira, sem reescrita nem transferência", async () => {
+    const reply = "A troca é feita na loja com a nota fiscal. Se aparecer a tela de confirmação, toque em Avançar. Leve também o documento com foto.";
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply, actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["Se aparecer a tela de confirmação, toque em Avançar"]}'))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": []}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "como faço a troca?", stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3);
+    expect(r.output.reply).toBe(reply);
     expect(r.output.handoff).toBe(false);
   });
 
   it("passo de lista sem fonte: reescrita que só tira o passo sai sem segunda checagem", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Peça o reembolso em dinheiro na hora.\n3. Guarde o comprovante.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["Peça o reembolso em dinheiro na hora"]}'))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["Peça o reembolso em dinheiro na hora"]}'))
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Guarde o comprovante.", actions: [] })));
     const r = await callV2LLM({
@@ -1068,8 +1089,8 @@ describe("escopo e repetição", () => {
       userMessage: "como faço a troca?", stage: "active",
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toHaveLength(3);
-    expect(calls[2][0].system).toContain("Tire essas afirmações da resposta");
+    expect(calls).toHaveLength(4);
+    expect(calls[3][0].system).toContain("Tire essas afirmações da resposta");
     expect(r.output.reply).toBe("Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Guarde o comprovante.");
     expect(r.output.handoff).toBe(false);
   });
@@ -1078,14 +1099,16 @@ describe("escopo e repetição", () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Pode ficar tranquilo. A instalação é gratuita para todos os planos. Leve a nota fiscal na loja para agendar.", actions: [] })))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A instalação é gratuita para todos os planos"]}'))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A instalação é gratuita para todos os planos"]}'))
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Leve a nota fiscal na loja para agendar a instalação. A visita do técnico é sempre no período da manhã. Qualquer dúvida, é só chamar.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A visita do técnico é sempre no período da manhã"]}'))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["A visita do técnico é sempre no período da manhã"]}'));
     const r = await callV2LLM({
       agentId: "agent-1", config: baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Essa informação eu não tenho por aqui." } } } as Partial<V2AgentConfig>),
       context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
       userMessage: "a instalação é paga?", stage: "active",
     });
-    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(6);
     expect(r.output.reply).toBe("Leve a nota fiscal na loja para agendar a instalação. Qualquer dúvida, é só chamar.");
     expect(r.output.handoff).toBe(false);
   });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { standaloneClause, trimUnsupportedSentences } from "../reply-trim";
 import { handoffExplanation, withoutTransferClause } from "../no-source";
-import { claimFoundInSources } from "../claim-check";
+import { claimFoundInSources, sameClaim } from "../claim-check";
 
 describe("o que sobra de uma frase cortada fica de pé", () => {
   it("oração de causa perde o conector; finalidade, condição e tempo sozinhas saem; com vírgula dentro, fica", () => {
@@ -46,5 +46,13 @@ describe("checagem por modelo — nome de tela ou botão que está na fonte", ()
     expect(claimFoundInSources("Toque em *Emitir Carnê*.", sources)).toBe(false);
     expect(claimFoundInSources("Toque em *Fatura Pagar*.", sources)).toBe(false);
     expect(claimFoundInSources("Não há taxa de cancelamento.", sources)).toBe(false);
+  });
+});
+
+describe("segunda leitura da checagem — mesma afirmação recortada de outro jeito", () => {
+  it("reconhece o mesmo trecho com recorte diferente; afirmações diferentes não casam", () => {
+    expect(sameClaim("Se aparecer uma solicitação de segurança, clique em *Avançar*.", "clique em Avançar")).toBe(true);
+    expect(sameClaim("A garantia estendida cobre qualquer defeito de fábrica", "garantia estendida cobre defeitos")).toBe(true);
+    expect(sameClaim("A garantia estendida cobre qualquer defeito de fábrica", "O reembolso cai em 5 dias úteis")).toBe(false);
   });
 });
