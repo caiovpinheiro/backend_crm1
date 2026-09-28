@@ -145,6 +145,19 @@ function renderConfirmationText(config: V2AgentConfig, context: V2CRMContext, va
   }));
 }
 
+/** Texto das mensagens prontas escolhidas pelo modelo (links delas saem no filtro). */
+async function chosenModelTexts(actions: Array<{ type: string; modelId?: unknown }>, organizationId: string | null | undefined): Promise<string[]> {
+  const ids = actions.filter((a) => a.type === "send_message_model" && typeof a.modelId === "string").map((a) => a.modelId as string);
+  if (ids.length === 0 || !organizationId) return [];
+  try {
+    const { prisma } = await import("@/lib/prisma");
+    const rows: Array<{ content: string | null }> = await (prisma as any).messageTemplate.findMany({ where: { id: { in: ids }, organizationId }, select: { content: true } });
+    return (rows ?? []).map((r) => r.content ?? "");
+  } catch {
+    return [];
+  }
+}
+
 export async function simulateV2Turn(
   agentId: string,
   config: V2AgentConfig,
@@ -563,7 +576,8 @@ export async function simulateV2Turn(
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
-    publicTexts: [userMessage, ...knowledgeChunkTexts(llmResult.toolCalls)],
+    publicTexts: [userMessage],
+    ownerTexts: [...knowledgeChunkTexts(llmResult.toolCalls), ...(await chosenModelTexts(output.actions ?? [], organizationId))],
   }, systemMessage(config, "returnPromiseHandoff"));
   output = { ...output, reply: applyBoldPolicy(guard.text, config.bold) };
   // Igual à produção: pedido novo nesta mensagem não encerra.

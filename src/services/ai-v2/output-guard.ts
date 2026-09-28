@@ -5,7 +5,17 @@
 
 import { maskOutgoing } from "./sensitive";
 
-const URL_RE = /https?:\/\/[^\s)\]>,;!?]+/gi;
+// O endereço inteiro, com ?parâmetros; a pontuação final da frase fica fora
+// (splitUrl). Antes o "?" cortava o link e sobrava "?id=…" no texto.
+const URL_RE = /https?:\/\/[^\s<>"'`)\]]+/gi;
+const URL_TRAILING = /[.,;:!?]+$/;
+
+function splitUrl(raw: string): [string, string] {
+  const m = raw.match(URL_TRAILING);
+  return m ? [raw.slice(0, -m[0].length), m[0]] : [raw, ""];
+}
+
+const sameUrl = (u: string) => u.replace(/\/+$/, "").toLowerCase();
 
 const RETURN_PROMISE_PATTERNS = [
   /vou (verificar|confirmar|analisar|consultar|checar) e (volto|retorno|te respondo|te aviso)/i,
@@ -16,7 +26,7 @@ const RETURN_PROMISE_PATTERNS = [
 ];
 
 export function extractUrls(text: string): string[] {
-  return text.match(URL_RE) ?? [];
+  return (text.match(URL_RE) ?? []).map((u) => splitUrl(u)[0]);
 }
 
 export function isUrlAllowed(url: string, allowedDomains: string[]): boolean {
@@ -29,15 +39,22 @@ export function isUrlAllowed(url: string, allowedDomains: string[]): boolean {
   }
 }
 
-export function removeUnauthorizedUrls(text: string, allowedDomains: string[]): { text: string; removed: string[] } {
+/**
+ * `trustedUrls`: links do conteúdo da empresa lido no turno (materiais,
+ * mensagem pronta). A loja de aplicativos citada numa mensagem pronta não
+ * precisa estar em "Endereços liberados" para sair.
+ */
+export function removeUnauthorizedUrls(text: string, allowedDomains: string[], trustedUrls: string[] = []): { text: string; removed: string[] } {
   if (allowedDomains.length === 0) return { text, removed: [] };
+  const trusted = new Set(trustedUrls.map(sameUrl));
   const removed: string[] = [];
-  const cleaned = text.replace(URL_RE, (url) => {
-    if (!isUrlAllowed(url, allowedDomains)) {
+  const cleaned = text.replace(URL_RE, (raw) => {
+    const [url, tail] = splitUrl(raw);
+    if (!isUrlAllowed(url, allowedDomains) && !trusted.has(sameUrl(url))) {
       removed.push(url);
-      return "";
+      return tail;
     }
-    return url;
+    return raw;
   });
   // Só espaços em sequência: juntar tudo com \s+ colava as linhas e
   // desmontava passo a passo e listas quando havia domínio liberado.
@@ -60,6 +77,8 @@ type ScrubContext = {
    * vazamento do cadastro.
    */
   publicTexts?: string[];
+  /** Conteúdo da empresa lido no turno (materiais, mensagem pronta): links dele saem. */
+  ownerTexts?: string[];
 };
 
 const SCRUB_MARKER = "[informação interna não compartilhada]";
@@ -129,7 +148,7 @@ export function scrubNonCitableFields(
   text: string,
   ctx: ScrubContext,
 ): { text: string; scrubbedFields: string[] } {
-  const publicText = (ctx.publicTexts ?? []).join("\n");
+  const publicText = [...(ctx.publicTexts ?? []), ...(ctx.ownerTexts ?? [])].join("\n");
   const values = collectNonCitableValues(ctx).filter((v) => !publicText.includes(v));
   const scrubbedFields: string[] = [];
   let result = text;
@@ -183,7 +202,7 @@ export function guardV2Output(
     replyText = sensitive.text;
     warnings.push(`Dado sensível removido/mascarado da resposta: ${sensitive.kinds.join(", ")}.`);
   }
-  const urlResult = removeUnauthorizedUrls(replyText, allowedDomains);
+  const urlResult = removeUnauthorizedUrls(replyText, allowedDomains, (ctx?.ownerTexts ?? []).flatMap(extractUrls));
   if (urlResult.removed.length > 0) {
     warnings.push(`URLs removidas por domínio não autorizado: ${urlResult.removed.join(", ")}`);
   }

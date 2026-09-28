@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { guardV2Output, scrubNonCitableFields } from "@/services/ai-v2/output-guard";
+import { guardV2Output, removeUnauthorizedUrls, scrubNonCitableFields } from "@/services/ai-v2/output-guard";
 
 describe("guardV2Output — scrub de campos só 'Ler'", () => {
   it("remove valor de campo não citável da resposta e registra aviso", () => {
@@ -80,3 +80,30 @@ describe("campo só-leitura — informação pública e marcador nunca visível"
     expect(out.scrubbedFields).toEqual(["X9-771"]);
   });
 });
+
+describe("filtro de links — endereço inteiro e conteúdo da empresa", () => {
+  const allowed = ["loja.exemplo.com"];
+
+  it("link não liberado sai inteiro, com os parâmetros; a pontuação da frase fica", () => {
+    const r = removeUnauthorizedUrls("Baixe em https://apps.outra.com/app?id=br.exemplo.app. Depois entre.", allowed);
+    expect(r.text).toBe("Baixe em . Depois entre.");
+    expect(r.removed).toEqual(["https://apps.outra.com/app?id=br.exemplo.app"]);
+  });
+
+  it("link liberado com parâmetros não é cortado no '?'", () => {
+    const r = removeUnauthorizedUrls("Acesse https://loja.exemplo.com/p?x=1&y=2!", allowed);
+    expect(r.text).toBe("Acesse https://loja.exemplo.com/p?x=1&y=2!");
+  });
+
+  it("link que está no conteúdo da empresa (mensagem pronta, material) sai mesmo fora dos endereços liberados", () => {
+    const out = guardV2Output(
+      "Android: https://apps.outra.com/app?id=br.exemplo.app\niPhone: https://store.outra.com/app/id123",
+      allowed,
+      { contact: null, citableContact: null, selectedDeal: null, citableDeal: null, ownerTexts: ["Android: https://apps.outra.com/app?id=br.exemplo.app / iPhone: https://store.outra.com/app/id123"] },
+    );
+    expect(out.text).toContain("https://apps.outra.com/app?id=br.exemplo.app");
+    expect(out.text).toContain("https://store.outra.com/app/id123");
+    expect(out.warnings.some((w) => w.includes("URLs removidas"))).toBe(false);
+  });
+});
+

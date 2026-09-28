@@ -1787,12 +1787,23 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // A resposta do modelo não é mais trocada por trecho cru da base quando
   // "não cita o material": isso mandava ao cliente o material bruto em vez
   // da resposta. Invenção é tratada na checagem de nomes/valores/palpites.
+  // Conteúdo da empresa que a resposta pode citar: trechos lidos e o texto da
+  // mensagem pronta escolhida (links dela saem mesmo fora dos endereços liberados).
+  const chosenModelIds = (llmOutput.actions ?? [])
+    .filter((a) => a.type === "send_message_model" && typeof a.modelId === "string")
+    .map((a) => a.modelId as string);
+  const chosenModelTexts = chosenModelIds.length > 0
+    ? ((await Promise.resolve()
+        .then(() => prisma.messageTemplate.findMany({ where: { id: { in: chosenModelIds }, organizationId: orgId }, select: { content: true } }))
+        .catch(() => [])) ?? []).map((r) => r.content ?? "")
+    : [];
   const guard = guardV2Output(llmOutput.reply, config.allowedDomains, {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
-    publicTexts: [input.userMessage, ...knowledgeChunkTexts(toolCalls)],
+    publicTexts: [input.userMessage],
+    ownerTexts: [...knowledgeChunkTexts(toolCalls), ...chosenModelTexts],
   }, systemMessage(config, "returnPromiseHandoff"));
   // Negrito conforme "Quem é o agente › Destaques em negrito".
   let replyText = applyBoldPolicy(guard.text, config.bold);
@@ -2092,13 +2103,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .filter((r) => r.ok && typeof r.text === "string")
       .map((r) => r.text as string)
       .join("\n\n");
-    if (endingAllowed && materialFollows && !anyHandoff && material.trim()) {
+    // "Só a resposta"/"combinar": da mensagem pronta saíram só arquivos; o fecho
+    // vem depois deles, pelo tipo da resposta (antes ficava sem fecho nem botões).
+    const filesOnlySent = outRes.results.some((r) => r.ok && r.action.type === "send_message_model" && (r.action as { filesOnly?: unknown }).filesOnly === true);
+    if (endingAllowed && materialFollows && !anyHandoff && (material.trim() || filesOnlySent)) {
       // O tipo de fecho vem do conjunto que o cliente recebeu (a introdução
       // "siga as instruções abaixo" + a mensagem pronta), não só do texto dela.
       const ending = applyReplyEnding({
-        reply: material,
+        reply: material.trim() ? material : replyText,
         ending: effectiveReplyEnding(config, activeTheme),
-        lastAgentMessage: replyText,
+        lastAgentMessage: material.trim() ? replyText : null,
         turnSeed: historyLength,
         kindFrom: `${replyText}\n\n${material}`,
       });

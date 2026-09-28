@@ -1221,6 +1221,33 @@ describe("processV2Turn — correções do motor", () => {
     expect(executed.find((a) => a.type === "send_message_model")?.filesOnly).toBeUndefined();
   });
 
+  it("modo 'combinar': saem só os arquivos da mensagem pronta e o fecho vem depois deles", async () => {
+    const config = baseConfig({
+      allowedMessageModelIds: ["mm-1"],
+      messageModelMode: "combine",
+      replyEnding: { procedure: { enabled: true, phrases: ["Quando conseguir, me avise se deu certo."] }, info: { enabled: true, phrases: ["Posso ajudar em algo mais?"] } },
+    } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.templateFindMany.mockResolvedValue([{ id: "mm-1", name: "Troca", content: "Veja o vídeo com o passo a passo." }]);
+    const texts: string[] = [];
+    let executed: Array<Record<string, unknown>> = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { texts.push(a.text); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<Record<string, unknown>>) => {
+      executed = actions;
+      return { results: actions.map((a) => ({ action: a, ok: true, text: "", mediaSent: 1 })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Ana, para trocar o produto:\n1. Abra Pedidos.\n2. Toque em Trocar.\nVeja o vídeo com o passo a passo.",
+      actions: [{ type: "send_message_model", modelId: "mm-1" }] as any,
+    }));
+
+    await run("como troco o produto?");
+
+    expect(executed.find((a) => a.type === "send_message_model")?.filesOnly).toBe(true);
+    expect(texts.some((t) => t.includes("Abra Pedidos"))).toBe(true);
+    expect(texts.some((t) => t.includes("Quando conseguir, me avise se deu certo."))).toBe(true);
+  });
+
   it("send_message_model com modelo fora da lista liberada é descartado", async () => {
     const config = baseConfig({ allowedMessageModelIds: ["mm-ok"] } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

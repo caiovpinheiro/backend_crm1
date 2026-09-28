@@ -1538,6 +1538,8 @@ export async function callV2LLM(args: {
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       ...(args.config.calendar?.events ?? []).map((e) => e.title),
       ...messageModels.map((m) => m.name),
+      // Modo "combinar": o texto da mensagem pronta mostrado ao modelo é fonte.
+      ...messageModels.map((m) => m.content ?? "").filter((t) => t.trim()),
       contextJson,
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
@@ -1582,6 +1584,7 @@ export async function callV2LLM(args: {
       contextJson,
       allowedDomainsLine,
       ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
+      ...messageModels.filter((m) => m.content?.trim()).map((m) => `${m.name}\n${m.content}`),
       ...lookupTexts,
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
