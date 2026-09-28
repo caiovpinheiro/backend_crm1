@@ -35,6 +35,32 @@ export function allowedMessageModelIdsFor(config: V2AgentConfig, theme: Theme): 
   return config.allowedMessageModelIds ?? [];
 }
 
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const up = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return prev[b.length];
+}
+
+/**
+ * Id de mensagem pronta copiado com erro pelo modelo (ids longos: uma letra a
+ * mais, trocada ou a menos). A mensagem era descartada como não liberada e o
+ * cliente, transferido com a resposta certa na mão. Vira o id liberado quando
+ * só um fica a até 2 letras de distância; senão fica como veio.
+ */
+export function repairMessageModelId(id: string, allowed: string[]): string {
+  if (!id || allowed.includes(id)) return id;
+  const near = allowed.filter((a) => Math.abs(a.length - id.length) <= 2 && editDistance(a, id) <= 2);
+  return near.length === 1 ? near[0] : id;
+}
+
 /** Ações que o modelo pode devolver em `actions` (handoff é tratado à parte). */
 export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<string> {
   const restriction = themeToolRestriction(theme);

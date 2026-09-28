@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { standaloneClause, trimUnsupportedSentences } from "../reply-trim";
 import { handoffExplanation, withoutTransferClause } from "../no-source";
 import { claimFoundInSources, sameClaim } from "../claim-check";
+import { repairMessageModelId } from "../action-policy";
 
 describe("o que sobra de uma frase cortada fica de pé", () => {
   it("oração de causa perde o conector; finalidade, condição e tempo sozinhas saem; com vírgula dentro, fica", () => {
@@ -72,6 +73,22 @@ describe("checagem por modelo — afirmação em várias frases e passo de uma p
     expect(claimFoundInSources("Escolha *Telefone*.", sources)).toBe(true);
     expect(claimFoundInSources("Toque em *Telefone*.", sources)).toBe(false);
     expect(claimFoundInSources("Escolha *Boleto*.", sources)).toBe(false);
+  });
+});
+
+describe("id de mensagem pronta copiado com erro", () => {
+  const allowed = ["cmaaa11bbb0055xx01po81pgsw", "cmaaa11ccc0057xx01zz99qqrt"];
+
+  it("uma letra a mais, a menos ou trocada vira o id liberado", () => {
+    expect(repairMessageModelId("cmaaa11gbbb0055xx01po81pgsw", allowed)).toBe("cmaaa11bbb0055xx01po81pgsw");
+    expect(repairMessageModelId("cmaaa11bb0055xx01po81pgsw", allowed)).toBe("cmaaa11bbb0055xx01po81pgsw");
+    expect(repairMessageModelId("cmaaa11bbb0055xx01po81pgsx", allowed)).toBe("cmaaa11bbb0055xx01po81pgsw");
+  });
+
+  it("id liberado fica; id distante ou perto de dois liberados não é trocado", () => {
+    expect(repairMessageModelId("cmaaa11ccc0057xx01zz99qqrt", allowed)).toBe("cmaaa11ccc0057xx01zz99qqrt");
+    expect(repairMessageModelId("cmzzz99yyy0000zz00aa00aaaa", allowed)).toBe("cmzzz99yyy0000zz00aa00aaaa");
+    expect(repairMessageModelId("abc1", ["abc2", "abc3"])).toBe("abc1");
   });
 });
 

@@ -53,7 +53,7 @@ import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check"
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
-import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, themeToolRestriction } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -1459,6 +1459,15 @@ export async function callV2LLM(args: {
         ...output.actions,
       ];
     }
+    // Id copiado com erro de digitação vira o da lista mostrada ao modelo.
+    const shownModelIds = messageModels.map((m) => m.id);
+    output.actions = output.actions.map((a) => {
+      if (a.type !== "send_message_model" || typeof a.modelId !== "string") return a;
+      const fixed = repairMessageModelId(a.modelId, shownModelIds);
+      if (fixed === a.modelId) return a;
+      traceStep("mensagem pronta", `Id "${a.modelId}" corrigido para "${fixed}" (erro de cópia do modelo)`);
+      return { ...a, modelId: fixed };
+    });
 
     // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
