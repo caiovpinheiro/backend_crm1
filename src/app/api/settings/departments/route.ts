@@ -98,7 +98,12 @@ export async function POST(request: Request) {
     }
     try {
       const department = await prisma.department.create({
-        data: withOrgFromCtx({ ...parsed.data }),
+        data: withOrgFromCtx({
+          ...parsed.data,
+          // Departamento novo já entra na Distribuição Inteligente.
+          // O admin desliga no cadastro se quiser fila manual.
+          distributionEnabled: true,
+        }),
       });
       await prisma.auditLog.create({
         data: {

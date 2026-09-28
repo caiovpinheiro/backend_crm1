@@ -1,10 +1,13 @@
 /**
  * Garante roster acadêmico de departamentos + membros (idempotente).
  *
- * O mapa de e-mails abaixo é só SEED inicial: aplica se o consultor
- * ainda não tem nenhum departamento acadêmico. Quem já foi editado na
- * tela (ex.: Danúbia só em Acolhimento) NÃO é reescrito — senão o
- * handoff / sync de 5 min devolvia Retenção.
+ * O mapa de e-mails (OrganizationSetting `vertical.academic.deptRoster`)
+ * é só SEED inicial: aplica se o consultor ainda não tem nenhum
+ * departamento acadêmico. Quem já foi editado na tela NÃO é reescrito —
+ * senão o handoff / sync de 5 min devolve o conjunto antigo.
+ *
+ * Regra atual do roster: Danúbia e Marília só Acolhimento, Wesley só
+ * Retenção, demais só Atendimento.
  *
  * Também liga `distributionEnabled` nos 3 departamentos para o motor
  * filtrar por dept no handoff da IA.
@@ -81,7 +84,10 @@ async function ensureDeptMap(
       const dn = normalizeDeptName(d.name);
       return def.names.some((n) => {
         const nn = normalizeDeptName(n);
-        return dn === nn || dn.includes(nn) || nn.includes(dn);
+        // O nome do departamento precisa conter o alias. O inverso
+        // ("atendimento - sac".includes("sac")) fazia o dept "SAC"
+        // virar o Atendimento e a distribuição cair no time errado.
+        return dn === nn || dn.includes(nn);
       });
     });
 

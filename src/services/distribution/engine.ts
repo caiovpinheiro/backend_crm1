@@ -14,7 +14,6 @@
 import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
-import { getOrgSetting, getOrgSettingBool } from "@/lib/org-settings";
 import { isDistributionEnabled } from "./enabled";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -107,12 +106,11 @@ export interface ExecuteDistributionInput {
 
 /**
  * Escopo resolvido para uma distribuição:
- *  - `org-wide`: nenhum departamento da org opta por distribuição automática
- *    (feature não adotada) → comportamento clássico (todos os elegíveis).
- *  - `department`: o lead foi roteado a um departamento COM `distributionEnabled`
- *    → só membros desse departamento entram na disputa.
- *  - `blocked`: a org usa o recurso, mas este lead não está em um departamento
- *    habilitado (ou não tem departamento) → não distribui, vai pra fila.
+ *  - `org-wide`: o lead não tem departamento → qualquer elegível.
+ *    Quem recebe é que classifica o assunto.
+ *  - `department`: o lead está num departamento com distribuição ligada
+ *    → só os membros desse departamento, qualquer que seja o nome.
+ *  - `blocked`: departamento em modo leads, ou com distribuição desligada.
  */
 type DepartmentScope =
   | { mode: "org-wide"; departmentId: null }
@@ -120,32 +118,18 @@ type DepartmentScope =
   | { mode: "blocked"; departmentId: string | null };
 
 /**
- * Resolve o escopo de departamento. A distribuição por departamento é POR
- * DEPARTAMENTO (`Department.distributionEnabled`), não um toggle global: cada
- * departamento decide se usa distribuição automática entre seus membros. Se
- * NENHUM departamento da org habilitou, mantém o comportamento org-wide
- * (retrocompatível). A regra individual de cada responsável continua valendo.
+ * Resolve o escopo de departamento. O departamento do lead (explícito ou
+ * já gravado na conversa) manda: a distribuição sai só entre os membros
+ * daquele departamento, seja ele qual for — inclusive um criado depois.
+ * Sem departamento no lead, o pool é qualquer elegível — não há
+ * departamento de destino fixo. `distributionEnabled = false` é
+ * opt-out daquele departamento.
  */
 async function resolveDepartmentScope(
   input: Pick<ExecuteDistributionInput, "conversationId" | "departmentId">,
 ): Promise<DepartmentScope> {
-  // Opção da org (default DESLIGADO): só respeita o departamento da conversa
-  // quando ligado. Desligado = distribuição CLÁSSICA org-wide (todos os
-  // elegíveis), ignorando departamento — evita que conversas sem roteamento
-  // fiquem presas na fila. Ligue quando existirem regras claras de roteamento.
-  const respectDepartment = await getOrgSettingBool(
-    "distribution.respectDepartment",
-    false,
-  );
-  if (!respectDepartment) return { mode: "org-wide", departmentId: null };
-
-  // Feature em uso? Só quando ao menos 1 departamento opta por distribuição.
-  const enabledCount = await prisma.department.count({
-    where: { distributionEnabled: true },
-  });
-  if (enabledCount === 0) return { mode: "org-wide", departmentId: null };
-
-  // Resolve o departamento-alvo: explícito > conversa.
+  // Departamento do lead: explícito > conversa. Não depende de lista
+  // de nomes nem do interruptor global `respectDepartment`.
   let departmentId = input.departmentId ?? null;
   if (!departmentId && input.conversationId) {
     const conv = await prisma.conversation.findUnique({
@@ -155,26 +139,9 @@ async function resolveDepartmentScope(
     departmentId = conv?.departmentId ?? null;
   }
   if (!departmentId) {
-    // Departamento de destino para quem chega SEM roteamento (config da org).
-    // Vazio = comportamento clássico: distribui para todos os elegíveis.
-    // Definido = fronteira estrita, só os membros dele; se nenhum estiver
-    // elegível o lead espera na fila do departamento.
-    const fallbackId = await getOrgSetting("distribution.fallbackDepartmentId");
-    if (!fallbackId) return { mode: "org-wide", departmentId: null };
-    const fallback = await prisma.department.findUnique({
-      where: { id: fallbackId },
-      select: { id: true, distributionEnabled: true, distributionMode: true },
-    });
-    // Departamento apagado ou com distribuição desligada: volta ao clássico em
-    // vez de congelar na fila todo lead sem departamento.
-    if (!fallback?.distributionEnabled) {
-      return { mode: "org-wide", departmentId: null };
-    }
-    // Departamento no modo leads: o smart se abstém.
-    if ((fallback as { distributionMode?: string }).distributionMode === "leads") {
-      return { mode: "blocked", departmentId: fallback.id };
-    }
-    return { mode: "department", departmentId: fallback.id };
+    // Sem departamento: qualquer pessoa elegível, de qualquer
+    // departamento. Quem recebe classifica o assunto.
+    return { mode: "org-wide", departmentId: null };
   }
 
   const dept = await prisma.department.findUnique({

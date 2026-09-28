@@ -71,12 +71,12 @@ const DEPARTMENTS = [
 ];
 
 // Regras de departamento (produção):
-//  - Wesley + Danubia -> Acolhimento + Retencao
-//  - Marilia -> Acolhimento
+//  - Danubia + Marilia -> somente Acolhimento
+//  - Wesley -> somente Retencao
 //  - Demais consultores -> Atendimento ("Atendimento - SAC")
 const CONSULTORES = [
-  { name: "Wesley Guerreiro", email: "wesley.guerreiro@cruzeiroead.com.br", depts: ["acolhimento", "retencao"] },
-  { name: "Danubia", email: "danubia.sousa@cruzeiroead.com.br", depts: ["acolhimento", "retencao"] },
+  { name: "Wesley Guerreiro", email: "wesley.guerreiro@cruzeiroead.com.br", depts: ["retencao"] },
+  { name: "Danubia", email: "danubia.sousa@cruzeiroead.com.br", depts: ["acolhimento"] },
   { name: "Marilia Souza", email: "marilia.nascimento@cruzeiroead.com.br", depts: ["acolhimento"] },
   { name: "Beatriz", email: "beatriz.andrade@cruzeiroead.com.br", depts: ["atendimento"] },
   { name: "Breno", email: "breno.silva@cruzeiroead.com.br", depts: ["atendimento"] },
@@ -243,7 +243,17 @@ async function main() {
       });
     }
 
-    // DepartmentMember (vinculo organizacional) — idempotente.
+    // DepartmentMember: o conjunto acadêmico é substituído (não só somado).
+    // Sem o delete, re-rodar o seed deixava Danúbia em Retenção e Wesley
+    // em Acolhimento depois da regra ter mudado.
+    const academicIds = Object.values(deptMap);
+    await prisma.departmentMember.deleteMany({
+      where: {
+        organizationId: orgId,
+        userId: user.id,
+        departmentId: { in: academicIds.filter((id) => !deptIds.includes(id)) },
+      },
+    });
     for (const depId of deptIds) {
       await prisma.departmentMember.upsert({
         where: { departmentId_userId: { departmentId: depId, userId: user.id } },

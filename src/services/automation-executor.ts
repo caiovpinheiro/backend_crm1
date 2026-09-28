@@ -2408,9 +2408,10 @@ async function executeStep(
         triggerSource: "AUTOMATION",
         distributionType,
         departmentIds: scope.departmentIds,
-        // Herdado é palpite: pool sem elegível cai para org-wide. Escolhido
-        // pelo operador é regra: espera na fila do departamento.
-        allowOrgWideFallback: scope.origin === "inherited",
+        // Lead com departamento fica no pool dos membros dele. Sem
+        // ninguém elegível, espera na fila — não vaza para outro
+        // departamento. Vale para departamento novo também.
+        allowOrgWideFallback: false,
       });
 
       if (result.success) {
