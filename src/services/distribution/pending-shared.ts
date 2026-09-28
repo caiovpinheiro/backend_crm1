@@ -12,9 +12,8 @@
  * confere o teto em `capacity_released` e drena. Fallback síncrono
  * só em test/dev se Redis estiver down.
  * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
- * elegível abre a fila dos seus depts; o reprocesso manual/cron também
- * tenta os depts que já têm gente na espera — o motor decide se o
- * pool é o depto ou org-wide (`respectDepartment`).
+ * elegível abre a fila dos seus departamentos; lead com departamento
+ * só sai para membro daquele departamento.
  *
  * Import unidirecional: pending → engine (evita ciclo de import).
  * O engine agenda drenagem via import dinâmico.
@@ -633,12 +632,7 @@ export async function explainEmptyDrain(opts: {
     if (info.enabled === false) disabledNames.push(info.name);
   }
 
-  const respectDepartment = await getOrgSettingBool(
-    "distribution.respectDepartment",
-    false,
-  );
-
-  if (respectDepartment && unmatchedNames.length > 0) {
+  if (unmatchedNames.length > 0) {
     const label = uniqueDeptNames(unmatchedNames);
     return {
       skipReason: "NO_ELIGIBLE_IN_DEPARTMENT",
@@ -646,7 +640,7 @@ export async function explainEmptyDrain(opts: {
     };
   }
 
-  if (respectDepartment && disabledNames.length > 0) {
+  if (disabledNames.length > 0) {
     const label = uniqueDeptNames(disabledNames);
     return {
       skipReason: "NO_DEPARTMENT",

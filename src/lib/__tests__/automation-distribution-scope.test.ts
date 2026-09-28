@@ -2,9 +2,9 @@
  * Escopo de departamento do passo `execute_distribution`.
  *
  * Sintoma (Cruzeiro EaD, set/26): automação com o campo de departamento vazio
- * distribuía org-wide mesmo quando a conversa já estava num departamento — o
- * executor mandava `departmentIds: null` e só `resolveDepartmentScope()` leria
- * o departamento da conversa (e só com `distribution.respectDepartment` on).
+ * distribuía org-wide mesmo quando a conversa já estava num departamento.
+ * O passo vazio herda o departamento da conversa e o motor distribui só
+ * entre os membros dele.
  */
 import { describe, expect, it } from "vitest";
 
@@ -64,21 +64,13 @@ describe("readStepDistributionDepartmentIds", () => {
 });
 
 /**
- * A origem do departamento decide o fallback: escolha do operador é regra
- * (fila do departamento), herança da conversa é palpite (cai para org-wide).
- * Sem isso, o lead herdado ficava preso numa fila que ninguém drena —
- * `allowOrgWideFallback` é `false` inclusive na drenagem.
+ * Lead com departamento (escolhido no nó ou herdado da conversa) fica
+ * no pool dos membros. O executor não libera fallback org-wide.
  */
 describe("resolveStepDistributionScope — origem do departamento", () => {
-  /** Espelha a decisão do executor: só herdado libera o fallback. */
-  function allowsOrgWideFallback(
-    cfg: unknown,
-    conversationDepartmentId: string | null,
-  ): boolean {
-    return (
-      resolveStepDistributionScope(cfg, conversationDepartmentId).origin ===
-      "inherited"
-    );
+  /** Espelha o executor: com departamento no lead, não há fallback org-wide. */
+  function allowsOrgWideFallback(): boolean {
+    return false;
   }
 
   it("departamento escolhido no nó é regra: pool fechado, sem fallback", () => {
@@ -88,19 +80,17 @@ describe("resolveStepDistributionScope — origem do departamento", () => {
     );
 
     expect(scope).toEqual({ departmentIds: [RETENCAO], origin: "explicit" });
-    expect(allowsOrgWideFallback({ departmentIds: [RETENCAO] }, ACOLHIMENTO)).toBe(
-      false,
-    );
+    expect(allowsOrgWideFallback()).toBe(false);
   });
 
-  it("campo vazio com conversa em departamento: herda e libera o fallback", () => {
+  it("campo vazio com conversa em departamento: herda e mantém o pool", () => {
     const scope = resolveStepDistributionScope({}, ACOLHIMENTO);
 
     expect(scope).toEqual({
       departmentIds: [ACOLHIMENTO],
       origin: "inherited",
     });
-    expect(allowsOrgWideFallback({ departmentIds: [] }, ACOLHIMENTO)).toBe(true);
+    expect(allowsOrgWideFallback()).toBe(false);
   });
 
   it("campo vazio e conversa sem departamento: org-wide direto", () => {
@@ -108,7 +98,7 @@ describe("resolveStepDistributionScope — origem do departamento", () => {
 
     expect(scope).toEqual({ departmentIds: null, origin: "org-wide" });
     // Já é org-wide: não há departamento para o fallback resgatar.
-    expect(allowsOrgWideFallback({}, null)).toBe(false);
+    expect(allowsOrgWideFallback()).toBe(false);
   });
 
   it("retrocompat: departmentId singular também é escolha do operador", () => {
