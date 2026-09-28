@@ -1079,10 +1079,10 @@ describe("escopo e repetição", () => {
 
   it("passo de lista sem fonte: reescrita que só tira o passo sai sem segunda checagem", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Peça o reembolso em dinheiro na hora.\n3. Guarde o comprovante.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja.\n2. Peça o reembolso em dinheiro na hora.", actions: [] })))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["Peça o reembolso em dinheiro na hora"]}'))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["Peça o reembolso em dinheiro na hora"]}'))
-      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Guarde o comprovante.", actions: [] })));
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Para trocar:\n1. Vá até a loja.", actions: [] })));
     const r = await callV2LLM({
       agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
       context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
@@ -1091,7 +1091,7 @@ describe("escopo e repetição", () => {
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls).toHaveLength(4);
     expect(calls[3][0].system).toContain("Tire essas afirmações da resposta");
-    expect(r.output.reply).toBe("Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Guarde o comprovante.");
+    expect(r.output.reply).toBe("Para trocar:\n1. Vá até a loja.");
     expect(r.output.handoff).toBe(false);
   });
 

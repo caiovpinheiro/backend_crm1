@@ -5,8 +5,10 @@
  * sem a parte da resposta que estava certa. Aqui só o que foi marcado sai e
  * o resto segue, sem nova chamada ao modelo, desde que o que sobra ainda
  * responda e não fique mutilado (sem abertura, sem o link, começando por
- * "Se aparecer…"). Passo de lista numerada não é cortado (quebraria o
- * procedimento): nesse caso o corte não se aplica. Nenhum domínio de cliente.
+ * "Se aparecer…"). Passo de lista sai inteiro, nunca pela metade, e só
+ * quando a lista fica com dois passos ou mais; os que sobram são
+ * renumerados (antes o passo inventado levava a resposta inteira embora e o
+ * cliente era transferido). Nenhum domínio de cliente.
  */
 
 export type TrimResult = { reply: string; removed: string[] };
@@ -170,9 +172,10 @@ export function isMutilated(original: string, trimmed: string, flagged: string[]
 /**
  * Tira da resposta o que foi marcado: só o trecho, quando a marcação é uma
  * oração dentro de uma frase maior; a frase inteira quando ela é a própria
- * marcação. `null` quando o corte não se aplica: marcação não localizada,
- * marcação num passo de lista, resposta mutilada ou o que sobra não
- * responde mais (aí vale a reescrita pelo modelo).
+ * marcação; o passo de lista inteiro, com os outros renumerados. `null`
+ * quando o corte não se aplica: marcação não localizada, lista que ficaria
+ * com menos de dois passos, resposta mutilada ou o que sobra não responde
+ * mais (aí vale a reescrita pelo modelo).
  */
 export function trimUnsupportedSentences(reply: string, flagged: string[]): TrimResult | null {
   const texts = flagged.map((f) => f.trim()).filter(Boolean);
@@ -185,14 +188,15 @@ export function trimUnsupportedSentences(reply: string, flagged: string[]): Trim
     units.forEach((u, i) => {
       if (!unitMatches(norm(u.text), f)) return;
       found = true;
-      const rest = removeSpan(replaced.get(i) ?? u.text, f);
+      const rest = u.listItem ? null : removeSpan(replaced.get(i) ?? u.text, f);
       if (rest !== null) replaced.set(i, rest);
       else drop.add(i);
     });
     if (!found) return null;
   }
   for (const i of replaced.keys()) if (drop.has(i)) replaced.delete(i);
-  if ([...drop, ...replaced.keys()].some((i) => units[i].listItem)) return null;
+  const droppedSteps = [...drop].filter((i) => units[i].listItem).length;
+  if (droppedSteps > 0 && units.filter((u, i) => u.listItem && !drop.has(i)).length < 2) return null;
   if (drop.size + replaced.size === 0 || drop.size === units.length) return null;
 
   const kept: Unit[] = [];
@@ -222,7 +226,8 @@ export function trimUnsupportedSentences(reply: string, flagged: string[]): Trim
     out.push(u.text.trim());
     lastLine = u.line;
   }
-  const result = out.join("\n").trim();
+  const joined = out.join("\n").trim();
+  const result = droppedSteps > 0 ? renumberSteps(joined) : joined;
   if (isMutilated(reply, result, texts)) return null;
   const removed = [...drop].sort((a, b) => a - b).map((i) => units[i].text.trim());
   for (const [i, rest] of replaced) removed.push(`${units[i].text.trim()} → ${rest}`);
@@ -255,3 +260,30 @@ export function onlyKeptSentences(rewritten: string, original: string, removed: 
   };
   return newUnits.every((n) => keptNorm.some((k) => sameSentence(n, k)));
 }
+
+/** Número do passo: "1.", "1)", "Passo 1:" ou o emoji "1️⃣". */
+const STEP_NUMBER = /^(\s*(?:(?:passo|etapa)\s+)?)(\d{1,2})(\uFE0F?\u20E3|\s*[.):-])/i;
+
+/**
+ * Renumera cada lista numerada depois de um passo retirado ("1, 3, 4" vira
+ * "1, 2, 3"), mantendo o estilo do número. Linha de texto entre passos
+ * começa outra lista; linha em branco não.
+ */
+export function renumberSteps(text: string): string {
+  let n = 0;
+  return text
+    .split("\n")
+    .map((line) => {
+      const m = line.match(STEP_NUMBER);
+      if (!m) {
+        if (line.trim()) n = 0;
+        return line;
+      }
+      n += 1;
+      const keycap = m[3].includes("\u20E3");
+      const mark = keycap ? (n <= 9 ? `${n}\uFE0F\u20E3` : `${n}.`) : `${n}${m[3]}`;
+      return `${m[1]}${mark}${line.slice(m[0].length)}`;
+    })
+    .join("\n");
+}
+

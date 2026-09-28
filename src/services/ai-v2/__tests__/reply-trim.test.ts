@@ -16,9 +16,18 @@ describe("corte de frase sem fonte", () => {
     expect(r?.reply).toBe("Você pode trocar o produto na loja.\n\nA nota fiscal precisa estar no nome de quem comprou.");
   });
 
-  it("não corta passo de lista numerada nem frase que não localiza", () => {
-    const steps = "Para trocar:\n1. Vá até a loja com a nota fiscal.\n2. Peça o reembolso em dinheiro na hora.\n3. Guarde o comprovante.";
-    expect(trimUnsupportedSentences(steps, ["Peça o reembolso em dinheiro na hora"])).toBeNull();
+  it("passo de lista sem fonte sai inteiro e os outros são renumerados", () => {
+    const steps = "Para trocar o produto:\n1. Vá até a loja com a nota fiscal e o produto na embalagem.\n2. Peça o reembolso em dinheiro na hora.\n3. Guarde o comprovante que o atendente entregar.";
+    const r = trimUnsupportedSentences(steps, ["Peça o reembolso em dinheiro na hora"]);
+    expect(r?.reply).toBe("Para trocar o produto:\n1. Vá até a loja com a nota fiscal e o produto na embalagem.\n2. Guarde o comprovante que o atendente entregar.");
+    const keycaps = "Para entrar no aplicativo:\n1️⃣ Acesse o aplicativo da loja com o seu e-mail.\n2️⃣ Informe seus dados de acesso.\n3️⃣ Toque em Avançar e confirme o código que chegar por SMS.\n4️⃣ Crie uma senha nova com oito caracteres.";
+    expect(trimUnsupportedSentences(keycaps, ["Informe seus dados de acesso."])?.reply)
+      .toBe("Para entrar no aplicativo:\n1️⃣ Acesse o aplicativo da loja com o seu e-mail.\n2️⃣ Toque em Avançar e confirme o código que chegar por SMS.\n3️⃣ Crie uma senha nova com oito caracteres.");
+  });
+
+  it("não corta quando a lista ficaria com um passo só, nem frase que não localiza", () => {
+    const two = "Para trocar o produto na loja física:\n1. Vá até a loja com a nota fiscal e o produto.\n2. Peça o reembolso em dinheiro na hora.";
+    expect(trimUnsupportedSentences(two, ["Peça o reembolso em dinheiro na hora"])).toBeNull();
     expect(trimUnsupportedSentences("A troca é feita na loja com a nota fiscal. Leve o documento com foto.", ["prazo de 30 dias"])).toBeNull();
   });
 

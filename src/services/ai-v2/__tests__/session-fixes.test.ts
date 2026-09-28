@@ -118,10 +118,12 @@ describe("cliente diz que não recebeu o anexo", () => {
 });
 
 describe("corte — passos com emoji numérico", () => {
-  it("não corta passo marcado com 1️⃣ nem com 'Passo 1:'", () => {
+  it("passo marcado com 1️⃣ ou 'Passo 1:' sai inteiro e os outros são renumerados", () => {
     const keycaps = "Para trocar:\n1️⃣ Vá até a loja com a nota fiscal.\n2️⃣ Peça o reembolso em dinheiro na hora.\n3️⃣ Guarde o comprovante.";
-    expect(trimUnsupportedSentences(keycaps, ["Peça o reembolso em dinheiro na hora"])).toBeNull();
+    expect(trimUnsupportedSentences(keycaps, ["Peça o reembolso em dinheiro na hora"])?.reply)
+      .toBe("Para trocar:\n1️⃣ Vá até a loja com a nota fiscal.\n2️⃣ Guarde o comprovante.");
     const labeled = "Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Peça o reembolso em dinheiro na hora.\nPasso 3: Guarde o comprovante.";
-    expect(trimUnsupportedSentences(labeled, ["Peça o reembolso em dinheiro na hora"])).toBeNull();
+    expect(trimUnsupportedSentences(labeled, ["Peça o reembolso em dinheiro na hora"])?.reply)
+      .toBe("Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Guarde o comprovante.");
   });
 });

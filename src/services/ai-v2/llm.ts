@@ -1606,9 +1606,16 @@ export async function callV2LLM(args: {
       const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
       const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues };
-      const res = await checkClaimsWithModel(checkArgs);
+      let res = await checkClaimsWithModel(checkArgs);
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
+      // Checagem que falhou (erro ou tempo) tenta mais uma vez: sem ela, o
+      // passo a passo não conferido virava transferência.
+      if (!res.ok) {
+        res = await checkClaimsWithModel(checkArgs);
+        r.inputTokens += res.inputTokens;
+        r.outputTokens += res.outputTokens;
+      }
       // Segunda leitura quando a primeira marca algo: o checador varia de uma
       // chamada para outra e barrava, uma vez em cinco, o passo que o material
       // traz com outras palavras — a mesma pergunta ora respondia, ora
