@@ -2,16 +2,47 @@ import { EMPTY_DOC, type KeepDoc, type KeepMark, type KeepNode } from "./doc";
 
 const SKIP_TAGS = new Set(["script", "style", "iframe", "object", "noscript", "head", "meta", "link"]);
 
+/**
+ * Entidades nomeadas HTML 4 (Latin-1 completo + tipografia comum). O export
+ * do Google Keep grava acentos como `&iacute;`, `&ccedil;` etc.; sem esta
+ * tabela o texto era salvo com a entidade literal.
+ */
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: "\u00a0", iexcl: "¡", cent: "¢", pound: "£", curren: "¤", yen: "¥", brvbar: "¦", sect: "§",
+  uml: "¨", copy: "©", ordf: "ª", laquo: "«", not: "¬", shy: "\u00ad", reg: "®", macr: "¯",
+  deg: "°", plusmn: "±", sup2: "²", sup3: "³", acute: "´", micro: "µ", para: "¶", middot: "·",
+  cedil: "¸", sup1: "¹", ordm: "º", raquo: "»", frac14: "¼", frac12: "½", frac34: "¾", iquest: "¿",
+  Agrave: "À", Aacute: "Á", Acirc: "Â", Atilde: "Ã", Auml: "Ä", Aring: "Å", AElig: "Æ", Ccedil: "Ç",
+  Egrave: "È", Eacute: "É", Ecirc: "Ê", Euml: "Ë", Igrave: "Ì", Iacute: "Í", Icirc: "Î", Iuml: "Ï",
+  ETH: "Ð", Ntilde: "Ñ", Ograve: "Ò", Oacute: "Ó", Ocirc: "Ô", Otilde: "Õ", Ouml: "Ö", times: "×",
+  Oslash: "Ø", Ugrave: "Ù", Uacute: "Ú", Ucirc: "Û", Uuml: "Ü", Yacute: "Ý", THORN: "Þ", szlig: "ß",
+  agrave: "à", aacute: "á", acirc: "â", atilde: "ã", auml: "ä", aring: "å", aelig: "æ", ccedil: "ç",
+  egrave: "è", eacute: "é", ecirc: "ê", euml: "ë", igrave: "ì", iacute: "í", icirc: "î", iuml: "ï",
+  eth: "ð", ntilde: "ñ", ograve: "ò", oacute: "ó", ocirc: "ô", otilde: "õ", ouml: "ö", divide: "÷",
+  oslash: "ø", ugrave: "ù", uacute: "ú", ucirc: "û", uuml: "ü", yacute: "ý", thorn: "þ", yuml: "ÿ",
+  OElig: "Œ", oelig: "œ", Scaron: "Š", scaron: "š", Yuml: "Ÿ", fnof: "ƒ", circ: "ˆ", tilde: "˜",
+  ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200c", zwj: "\u200d", lrm: "\u200e", rlm: "\u200f",
+  ndash: "–", mdash: "—", lsquo: "‘", rsquo: "’", sbquo: "‚", ldquo: "“", rdquo: "”", bdquo: "„",
+  dagger: "†", Dagger: "‡", bull: "•", hellip: "…", permil: "‰", prime: "′", Prime: "″",
+  lsaquo: "‹", rsaquo: "›", oline: "‾", euro: "€", trade: "™", larr: "←", uarr: "↑", rarr: "→", darr: "↓",
+  harr: "↔", hearts: "♥", apos: "'", quot: '"', lt: "<", gt: ">",
+};
+
 function decodeEntities(raw: string): string {
-  return raw
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+  return (
+    raw
+      // Nomeadas primeiro (case-sensitive: `&Aacute;` ≠ `&aacute;`); `&amp;` fica por último
+      // para não reinterpretar `&amp;lt;` como `<`.
+      .replace(/&([a-zA-Z][a-zA-Z0-9]{1,7});/g, (m, name: string) => {
+        if (name === "amp") return m;
+        const hit = NAMED_ENTITIES[name];
+        return hit !== undefined ? hit : m;
+      })
+      .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+      .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+      .replace(/&amp;/gi, "&")
+      .replace(/\u00a0/g, " ")
+  );
 }
 
 function parseAttrs(raw: string): Record<string, string> {
