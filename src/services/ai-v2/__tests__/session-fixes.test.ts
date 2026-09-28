@@ -13,7 +13,7 @@ import type { V2AgentConfig } from "@/lib/ai-v2/types";
 
 describe("transferência — um caminho só de mensagem", () => {
   it("explicação do modelo sem as frases de aviso; vazio quando a resposta só avisa ou é curta demais", () => {
-    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir.");
+    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro. Ele é necessário para seguir.");
     expect(handoffExplanation("Vou te passar para a equipe.")).toBe("");
     expect(handoffExplanation("Claro! Vou encaminhar.")).toBe("");
     expect(handoffExplanation("Resposta do agente.")).toBe("");

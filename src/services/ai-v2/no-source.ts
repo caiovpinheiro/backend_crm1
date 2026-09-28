@@ -9,6 +9,7 @@ import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types
 import { calendarPromptSection } from "./calendar";
 import { businessHoursText } from "./rules";
 import { FACT_IN_SENTENCE, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedLongDates } from "./ground-reply";
+import { standaloneClause } from "./reply-trim";
 import { WEAK_MATCH_SIMILARITY } from "./similarity-presets";
 import { getV2ThemeById } from "./themes";
 
@@ -105,7 +106,9 @@ export function conditionalHandoff(reply: string): boolean {
 
 /** A resposta já avisa a transferência (não vale mandar antes do aviso). */
 export function announcesTransfer(reply: string): boolean {
-  return /\b(?:transfer|encaminh|chamar (?:algu[eé]m|uma pessoa)|atendente|equipe)\w*/i.test(reply);
+  return /\b(?:transfer|encaminh|chamar (?:algu[eé]m|uma pessoa)|atendente|equipe)\w*/i.test(reply) ||
+    // "vou te passar para o time…" (e não "vou te passar o link").
+    /\b(?:vou|irei|vamos|posso)\s+(?:te\s+|lhe\s+)?passar\s+(?:voc[eê]\s+)?(?:para|pra)\b/i.test(reply);
 }
 
 /**
@@ -142,7 +145,8 @@ const TRANSFER_CLAUSE = /,?\s*(?:e\s+)?(?:por isso|ent[ãa]o|assim|portanto|logo
 export function withoutTransferClause(sentence: string): string {
   const s = sentence.trim();
   if (!announcesTransfer(s)) return s;
-  const cut = s.replace(TRANSFER_CLAUSE, "").trim();
+  // "…online; vou te passar…" deixava "online;." e "Como X, vou chamar…" deixava "Como X.".
+  const cut = standaloneClause(s.replace(TRANSFER_CLAUSE, "").trim().replace(/[,;:\s]+$/, ""));
   if (!cut || announcesTransfer(cut) || cut.split(/\s+/).length < 3) return "";
   return /[.!?]$/.test(cut) ? cut : `${cut}.`;
 }

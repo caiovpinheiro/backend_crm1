@@ -116,6 +116,14 @@ export function claimFoundInSources(claim: string, sources: string[]): boolean {
   const c = foldText(claim);
   const urls = [...c.matchAll(/https?:\/\/[^\s"'<>)]+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, ""));
   const words = c.replace(/https?:\/\/\S+/g, " ").split(/[^a-z0-9]+/).filter((w) => (w.length >= 4 && !STOP.has(w)) || /^\d+$/.test(w));
+  // Nome de tela ou botão ("Toque em *Pagar Fatura*"): duas palavras não
+  // bastavam para a conferência por trecho e o passo certo do material era
+  // barrado. Vale quando as duas aparecem juntas numa fonte, na mesma ordem —
+  // nunca com negação ("não há taxa de cancelamento" contradiz a fonte).
+  if (urls.length === 0 && words.length === 2 && !/\b(?:nao|nunca|sem|nem|nenhum|nenhuma|gratis|gratuit\w*|isent\w*)\b/.test(c)) {
+    const phrase = new RegExp(`\\b${words[0]}(?:\\s+[a-z]{1,3}){0,2}\\s+${words[1]}\\b`);
+    return sources.some((source) => phrase.test(foldText(source).replace(/[*_~`"“”]/g, "").replace(/\s+/g, " ")));
+  }
   if (urls.length === 0 && words.length < 3) return false;
   for (const source of sources) {
     const sentences = foldText(source).split(/(?<=[.!?])\s+|\n+/);

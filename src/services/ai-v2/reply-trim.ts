@@ -22,6 +22,29 @@ const LIST_ITEM = /^\s*(?:\d+[.)]|\d️?⃣|(?:passo|etapa)\s+\d+\s*[:.)-]|[-•
 const URL_RE = /https?:\/\/[^\s"'<>)\]]+/g;
 /** Fim de frase, ou link seguido de espaço e maiúscula (link não termina com ponto). */
 const SENTENCE_BOUNDARY = /(?<=[.!?])\s+|(?<=https?:\/\/[^\s]+)\s+(?=\p{Lu})/u;
+/** Oração de causa no começo ("Como ele é necessário para seguir, …"). */
+const CAUSAL_START = /^(?:como|j[áa] que|uma vez que|visto que|dado que|pois|porque)\s+/i;
+/** Oração que sozinha não é frase: finalidade, condição, tempo ("Para o primeiro acesso, …"). */
+const DEPENDENT_START = /^(?:para|pra|se|caso|quando|assim que|antes de|depois de|ap[óo]s|at[ée] que|enquanto|embora|mesmo que|apesar de|conforme)\s/i;
+
+/**
+ * O que sobra de uma frase depois de tirar a oração principal (o aviso de
+ * transferência, o trecho sem fonte) precisa ficar de pé. Sem vírgula
+ * dentro, o que sobrou é só a oração que abria a frase: a de causa perde o
+ * conector ("Como ele é necessário." → "Ele é necessário."); a de
+ * finalidade, condição ou tempo sai ("Para o primeiro acesso." não diz
+ * nada). Vazio quando não sobra frase.
+ */
+export function standaloneClause(clause: string): string {
+  const s = clause.trim();
+  if (s.includes(",")) return s;
+  const causal = s.match(CAUSAL_START);
+  if (causal) {
+    const rest = s.slice(causal[0].length);
+    return rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
+  return DEPENDENT_START.test(s) ? "" : s;
+}
 
 function norm(s: string): string {
   return s
@@ -106,6 +129,12 @@ function removeSpan(unitText: string, flagged: string): string | null {
     .replace(/\s{2,}/g, " ")
     .replace(/(?:^|\s)(?:e|ou|mas)\s*([.!?])?\s*$/i, "$1")
     .trim();
+  // Marcação no fim da frase: o que sobra é o começo dela, que precisa ficar de pé.
+  if (!/\p{L}/u.test(unitText.slice(end))) {
+    const head = standaloneClause(rest.replace(/[,;:.!?\s]+$/, ""));
+    if (!head) return null;
+    rest = head;
+  }
   if (wordCount(rest.replace(URL_RE, "link")) < 4 && !URL_RE.test(rest)) return null;
   if (!/[.!?]$/.test(rest) && /[.!?]$/.test(unitText.trim())) rest = `${rest}.`;
   return rest;
