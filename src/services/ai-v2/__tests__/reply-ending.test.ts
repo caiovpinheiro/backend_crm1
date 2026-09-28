@@ -37,3 +37,23 @@ describe("fecho das respostas", () => {
     expect(hasReplyEnding(ending as never)).toBe(true);
   });
 });
+
+describe("tipo de fecho — tutorial sem lista numerada e material que segue a resposta", () => {
+  const ending = {
+    procedure: { enabled: true, phrases: ["Quando conseguir, me avise se deu certo."] },
+    info: { enabled: true, phrases: ["Posso ajudar em algo mais?"] },
+  } as never;
+
+  it("tutorial ou passo a passo em vídeo conta como procedimento", () => {
+    expect(classifyReply("Assista ao vídeo com o passo a passo para criar sua conta.")).toBe("procedure");
+    expect(classifyReply("Veja o tutorial abaixo.")).toBe("procedure");
+    expect(classifyReply("Seu pedido chega amanhã.")).toBe("info");
+  });
+
+  it("o tipo vem do conjunto (introdução + mensagem pronta) quando indicado", () => {
+    const r = applyReplyEnding({ reply: "Links do aplicativo: loja A e loja B.", ending, kindFrom: "Siga as instruções do material abaixo.\n\nLinks do aplicativo: loja A e loja B." });
+    expect(r.kind).toBe("procedure");
+    expect(r.added).toBe("Quando conseguir, me avise se deu certo.");
+  });
+});
+

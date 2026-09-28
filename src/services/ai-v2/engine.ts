@@ -2093,11 +2093,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .map((r) => r.text as string)
       .join("\n\n");
     if (endingAllowed && materialFollows && !anyHandoff && material.trim()) {
+      // O tipo de fecho vem do conjunto que o cliente recebeu (a introdução
+      // "siga as instruções abaixo" + a mensagem pronta), não só do texto dela.
       const ending = applyReplyEnding({
         reply: material,
         ending: effectiveReplyEnding(config, activeTheme),
         lastAgentMessage: replyText,
         turnSeed: historyLength,
+        kindFrom: `${replyText}\n\n${material}`,
       });
       if (ending.added) {
         const buttons = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);

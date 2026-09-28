@@ -22,6 +22,9 @@ const fold = (s: string) =>
 /** Linha de passo: "1.", "2)", "1️⃣", "Passo 3". */
 const STEP_LINE = /^\s*(?:\d{1,2}\s*[.)-]|\d️?⃣|passo\s+\d)/i;
 
+/** Tutorial ou passo a passo sem lista numerada ("assista ao vídeo com o passo a passo"). */
+const PROCEDURE_WORDS = /\bpasso a passo\b|\btutorial\b|\bsiga (?:as instru[çc][õo]es|os passos|as etapas|este caminho)\b/i;
+
 /** Pedido de informação ao cliente sem ponto de interrogação. */
 const ASKS_CLIENT =
   /\b(?:preciso (?:saber|que voc[eê]|confirmar)|me (?:diga|diz|informe|informa|conte|conta|envie|envia|mande|manda|passe|passa)|pode(?:ria)? me (?:dizer|informar|enviar|mandar|contar|passar)|qual (?:[ée]|seria) (?:a|o|sua|seu)\b)/i;
@@ -57,7 +60,7 @@ const FUTURE_AVAILABILITY =
 export function classifyReply(reply: string): V2ReplyKind {
   if (FUTURE_AVAILABILITY.test(reply)) return "info";
   const steps = reply.split(/\n+/).filter((l) => STEP_LINE.test(l)).length;
-  return steps >= 2 ? "procedure" : "info";
+  return steps >= 2 || PROCEDURE_WORDS.test(reply) ? "procedure" : "info";
 }
 
 /** Regras valendo: as do assunto quando ele tem as próprias, senão as do agente. */
@@ -81,10 +84,12 @@ export function applyReplyEnding(args: {
   lastAgentMessage?: string | null;
   /** Número que muda a cada turno (ex.: tamanho do histórico), para alternar as frases. */
   turnSeed?: number;
+  /** Texto que decide o tipo de fecho (padrão: a própria resposta). */
+  kindFrom?: string;
 }): { text: string; added: string | null; kind: V2ReplyKind | null } {
   const reply = args.reply.trimEnd();
   if (!reply.trim() || !args.ending) return { text: args.reply, added: null, kind: null };
-  const kind = classifyReply(reply);
+  const kind = classifyReply(args.kindFrom ?? reply);
   const rule = args.ending[kind];
   const phrases = (rule?.enabled ? rule.phrases : []).map((p) => p.trim()).filter(Boolean);
   if (phrases.length === 0) return { text: args.reply, added: null, kind };
