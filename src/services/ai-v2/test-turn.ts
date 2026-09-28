@@ -654,10 +654,11 @@ export async function simulateV2Turn(
 
   // Em produção, ao transferir o cliente recebe a mensagem de transferência,
   // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
-  // Mensagem pronta, igual à produção: com a resposta longa, a mensagem pronta
-  // só sai se cobre o que a resposta explica (aí a resposta vira só a
-  // introdução); senão vai a resposta completa, sem ela. O texto da mensagem
-  // pronta entra no resultado — é o que o cliente recebe e o que o comparador mede.
+  // Mensagem pronta, igual à produção: com a resposta longa, se a mensagem
+  // pronta cobre o que a resposta explica, a resposta vira só a introdução;
+  // se traz outro conteúdo, saem as duas (resposta completa e depois a
+  // mensagem pronta). O texto da mensagem pronta entra no resultado — é o que
+  // o cliente recebe e o que o comparador mede.
   let materialText = "";
   const modelActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_message_model" && typeof e.action.modelId === "string");
   if (modelActions.length > 0 && organizationId) {
@@ -668,25 +669,16 @@ export async function simulateV2Turn(
         select: { id: true, name: true, content: true },
       });
       const long = output.reply.trim().split(/\s+/).length > 40;
-      const kept: typeof rows = [];
-      for (const r of rows ?? []) {
-        if (long && (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") < MESSAGE_MODEL_MIN_COVERAGE) {
-          const idx = executedActions.findIndex((e) => e.action.type === "send_message_model" && e.action.modelId === r.id);
-          if (idx >= 0) {
-            discardedActions.push({ ...executedActions[idx], reason: "A mensagem pronta não traz o que a resposta explica: vai a resposta completa, sem ela." });
-            executedActions.splice(idx, 1);
-          }
-          traceStep("ações", `Mensagem pronta "${r.name}" não traz o que a resposta explica — vai a resposta completa, sem a mensagem pronta`);
-        } else {
-          kept.push(r);
-        }
-      }
-      if (kept.length > 0) {
-        materialText = kept.map((r) => renderMessage(r.content ?? "", vars, defaultFormatter())).filter((t) => t.trim()).join("\n\n");
-        if (long) {
+      const all = rows ?? [];
+      if (all.length > 0) {
+        materialText = all.map((r) => renderMessage(r.content ?? "", vars, defaultFormatter())).filter((t) => t.trim()).join("\n\n");
+        const covers = all.some((r) => (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") >= MESSAGE_MODEL_MIN_COVERAGE);
+        if (long && covers) {
           const intro = introBeforeMaterial(output.reply);
           traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");
           output = { ...output, reply: intro };
+        } else if (long) {
+          traceStep("ações", `Mensagem pronta ${all.map((r) => `"${r.name}"`).join(", ")} traz outro conteúdo — vai a resposta completa e, em seguida, a mensagem pronta`);
         }
       }
     } catch {

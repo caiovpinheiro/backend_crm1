@@ -1850,10 +1850,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       }
     }
   }
-  // Resposta completa + mensagem pronta de outro conteúdo: a resposta virava
-  // só a introdução e o cliente recebia a mensagem pronta no lugar do passo a
-  // passo que pediu. A troca só vale quando a mensagem pronta traz o que a
-  // resposta explica; senão sai a resposta completa, sem a mensagem pronta.
+  // Resposta longa + mensagem pronta escolhida pelo modelo:
+  // - a mensagem pronta traz o que a resposta explica → a resposta vira só a
+  //   introdução (o cliente não lê o mesmo conteúdo duas vezes);
+  // - traz outra coisa (ou é só arquivo) → saem as duas: a resposta completa e,
+  //   depois, a mensagem pronta. Antes a resposta virava "Faça assim:" com um
+  //   conteúdo que não era o pedido; depois a mensagem pronta era descartada e
+  //   o vídeo configurado não chegava.
+  let messageModelCoversReply = false;
   if (replyText.trim().split(/\s+/).length > 40) {
     const modelActions = outboundActions.filter(
       (a) => a.type === "send_message_model" && typeof a.modelId === "string" && (a as { mediaOnly?: unknown }).mediaOnly !== true,
@@ -1867,13 +1871,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           }),
         )
         .catch(() => [] as Array<{ id: string; name: string; content: string | null }>);
-      const offTopic = (rows ?? []).filter(
-        (r) => (r.content ?? "").trim() && messageModelCoverage(replyText, r.content ?? "") < MESSAGE_MODEL_MIN_COVERAGE,
+      messageModelCoversReply = (rows ?? []).some(
+        (r) => (r.content ?? "").trim() && messageModelCoverage(replyText, r.content ?? "") >= MESSAGE_MODEL_MIN_COVERAGE,
       );
-      if (offTopic.length > 0) {
-        const off = new Set(offTopic.map((r) => r.id));
-        outboundActions = outboundActions.filter((a) => !(a.type === "send_message_model" && off.has(a.modelId as string)));
-        traceStep("ações", `Mensagem pronta ${offTopic.map((r) => `"${r.name}"`).join(", ")} não traz o que a resposta explica — vai a resposta completa, sem a mensagem pronta`);
+      if (!messageModelCoversReply && (rows ?? []).length > 0) {
+        traceStep("ações", `Mensagem pronta ${(rows ?? []).map((r) => `"${r.name}"`).join(", ")} traz outro conteúdo — vai a resposta completa e, em seguida, a mensagem pronta`);
       }
     }
   }
@@ -2026,7 +2028,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Mensagem pronta a seguir: a resposta só apresenta. Resposta completa +
   // mensagem pronta (adaptada) mandava o mesmo conteúdo duas vezes.
-  if (!anyHandoff && outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length > 40) {
+  if (!anyHandoff && messageModelCoversReply && outboundActions.some((a) => a.type === "send_message_model") && replyText.trim().split(/\s+/).length > 40) {
     const intro = introBeforeMaterial(replyText);
     traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");
     replyText = intro;

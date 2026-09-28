@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   createDeal: vi.fn(),
   attendanceEnabled: vi.fn(),
   messageFindMany: vi.fn(),
+  templateFindMany: vi.fn(),
   findInherited: vi.fn(),
   resolveInline: vi.fn(),
   distributeNewInbound: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("@/lib/prisma", () => ({
     conversation: { findUnique: mocks.prismaConversationFindUnique, updateMany: mocks.conversationUpdateMany },
     distributionPending: { findFirst: mocks.pendingFindFirst },
     message: { findMany: mocks.messageFindMany, findFirst: mocks.messageFindFirst },
+    messageTemplate: { findMany: mocks.templateFindMany },
     conversationTurn: { findUnique: mocks.turnFindUnique },
   },
 }));
@@ -1153,6 +1155,39 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.distributeNewInbound).toHaveBeenCalled();
     expect(mocks.sendText).not.toHaveBeenCalled();
     expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("resposta longa + mensagem pronta: se a mensagem cobre a resposta, a resposta vira introdução; se traz outra coisa, saem as duas", async () => {
+    const config = baseConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const texts: string[] = [];
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { texts.push(a.text); order.push("texto"); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    const steps = [
+      "Ana, para trocar o produto faça assim.",
+      "Abra o aplicativo da loja e toque em Pedidos, escolha o pedido desejado e toque em Trocar.",
+      "Confirme o endereço de coleta, imprima a etiqueta gerada, embale bem o produto e leve até a agência mais próxima da sua casa.",
+      "Depois acompanhe a troca pela aba Pedidos do aplicativo, onde aparece cada etapa até a entrega do novo produto.",
+    ].join(" ");
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: steps, actions: [{ type: "send_message_model", modelId: "mm-1" }] as any }));
+
+    // Mensagem pronta de outro conteúdo (vídeo sobre cadastro): saem as duas.
+    mocks.templateFindMany.mockResolvedValue([{ id: "mm-1", name: "Cadastro - vídeo", content: "Veja no vídeo como criar sua conta e cadastrar a senha." }]);
+    await run("como troco o produto?");
+    expect(texts.some((t) => t.includes("imprima a etiqueta"))).toBe(true);
+    expect(order).toContain("ações:send_message_model");
+
+    // Mensagem pronta com o mesmo passo a passo: a resposta vira só a introdução.
+    texts.length = 0;
+    order.length = 0;
+    mocks.templateFindMany.mockResolvedValue([{ id: "mm-1", name: "Troca", content: "Abra o aplicativo da loja, toque em Pedidos, escolha o pedido desejado, toque em Trocar, confirme o endereço de coleta, imprima a etiqueta gerada, embale o produto e leve até a agência. Acompanhe a troca pela aba Pedidos do aplicativo até a entrega do novo produto." }]);
+    await run("como troco o produto?");
+    expect(texts.some((t) => t.includes("imprima a etiqueta"))).toBe(false);
+    expect(order).toContain("ações:send_message_model");
   });
 
   it("send_message_model com modelo fora da lista liberada é descartado", async () => {
