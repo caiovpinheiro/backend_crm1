@@ -103,12 +103,19 @@ export function parseClaimCheck(text: string, reply: string): string[] {
   )].slice(0, 5);
 }
 
-const STOP = new Set(["para", "como", "com", "sem", "pela", "pelo", "pelas", "pelos", "uma", "umas", "uns", "que", "voce", "seu", "sua", "seus", "suas", "este", "esta", "isso", "esse", "essa", "mais", "menos", "muito", "entao", "tambem", "depois", "antes", "quando", "onde", "aqui", "use", "usar", "entre", "entrar", "acesse", "acessar", "clique", "clicar", "digite", "informe", "coloque", "faca", "fazer", "abra", "abrir", "toque", "tocar", "selecione", "escolha", "depois"]);
+const STOP = new Set(["para", "como", "com", "sem", "pela", "pelo", "pelas", "pelos", "uma", "umas", "uns", "que", "voce", "seu", "sua", "seus", "suas", "este", "esta", "isso", "esse", "essa", "mais", "menos", "muito", "entao", "tambem", "depois", "antes", "quando", "onde", "aqui", "use", "usar", "entre", "entrar", "acesse", "acessar", "clique", "clicar", "digite", "informe", "coloque", "faca", "fazer", "abra", "abrir", "toque", "tocar", "selecione", "escolha", "disso", "disto", "nisso", "pode", "podem", "podera", "voces"]);
 const foldText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+/** Verbo do passo ("escolha", "toque"): a opção só vale com o mesmo verbo na fonte. */
+const ACTION_VERBS = new Set(["acesse", "clique", "digite", "informe", "coloque", "abra", "toque", "selecione", "escolha", "entre", "use", "marque", "confirme", "envie"]);
+
+/** Palavras de conteúdo da afirmação (sem link, sem as que só ligam a frase). */
+function contentWordsOf(folded: string): string[] {
+  return folded.replace(/https?:\/\/\S+/g, " ").split(/[^a-z0-9]+/).filter((w) => (w.length >= 4 && !STOP.has(w)) || /^\d+$/.test(w));
+}
 
 /**
- * Duas marca\u00e7\u00f5es do checador apontam a mesma afirma\u00e7\u00e3o: uma cont\u00e9m o come\u00e7o
- * da outra, ou a maior parte das palavras de conte\u00fado da menor est\u00e1 na maior
+ * Duas marcações do checador apontam a mesma afirmação: uma contém o começo
+ * da outra, ou a maior parte das palavras de conteúdo da menor está na maior
  * (cada leitura recorta o trecho da resposta de um jeito).
  */
 export function sameClaim(a: string, b: string): boolean {
@@ -132,16 +139,34 @@ export function sameClaim(a: string, b: string): boolean {
  * o endereço do portal) e o cliente era transferido.
  */
 export function claimFoundInSources(claim: string, sources: string[]): boolean {
+  // Marcação com mais de uma frase ("Depois disso, sua conta fica pronta.
+  // Pelo celular, use o aplicativo."): cada frase pode vir de um trecho
+  // diferente; vale quando todas estão nas fontes.
+  const parts = claim.split(/(?<=[.!?])\s+/).filter((p) => contentWordsOf(foldText(p)).length > 0 || /https?:\/\//i.test(p));
+  if (parts.length > 1) return parts.every((p) => claimFoundInSources(p, sources));
   const c = foldText(claim);
   const urls = [...c.matchAll(/https?:\/\/[^\s"'<>)]+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, ""));
-  const words = c.replace(/https?:\/\/\S+/g, " ").split(/[^a-z0-9]+/).filter((w) => (w.length >= 4 && !STOP.has(w)) || /^\d+$/.test(w));
+  const words = contentWordsOf(c);
+  const negated = /\b(?:nao|nunca|sem|nem|nenhum|nenhuma|gratis|gratuit\w*|isent\w*)\b/.test(c);
+  const plain = (source: string) => foldText(source).replace(/[*_~`"“”]/g, "").replace(/\s+/g, " ");
   // Nome de tela ou botão ("Toque em *Pagar Fatura*"): duas palavras não
   // bastavam para a conferência por trecho e o passo certo do material era
   // barrado. Vale quando as duas aparecem juntas numa fonte, na mesma ordem —
   // nunca com negação ("não há taxa de cancelamento" contradiz a fonte).
-  if (urls.length === 0 && words.length === 2 && !/\b(?:nao|nunca|sem|nem|nenhum|nenhuma|gratis|gratuit\w*|isent\w*)\b/.test(c)) {
+  if (urls.length === 0 && words.length === 2 && !negated) {
     const phrase = new RegExp(`\\b${words[0]}(?:\\s+[a-z]{1,3}){0,2}\\s+${words[1]}\\b`);
-    return sources.some((source) => phrase.test(foldText(source).replace(/[*_~`"“”]/g, "").replace(/\s+/g, " ")));
+    return sources.some((source) => phrase.test(plain(source)));
+  }
+  // Passo de uma palavra ("Escolha *Telefone*."): vale quando a mesma frase
+  // de uma fonte traz a opção e o mesmo verbo de ação ("Escolha a opção Telefone").
+  if (urls.length === 0 && words.length === 1 && !negated) {
+    const verbs = c.split(/[^a-z0-9]+/).filter((w) => ACTION_VERBS.has(w)).map((w) => w.slice(0, 5));
+    if (verbs.length === 0) return false;
+    const word = new RegExp(`\\b${words[0]}\\b`);
+    return sources.some((source) =>
+      foldText(source).replace(/[*_~`"“”]/g, "").split(/(?<=[.!?])\s+|\n+/)
+        .some((s) => word.test(s) && s.split(/[^a-z0-9]+/).some((w) => verbs.includes(w.slice(0, 5)))),
+    );
   }
   if (urls.length === 0 && words.length < 3) return false;
   for (const source of sources) {

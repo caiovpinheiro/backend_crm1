@@ -56,3 +56,22 @@ describe("segunda leitura da checagem — mesma afirmação recortada de outro j
     expect(sameClaim("A garantia estendida cobre qualquer defeito de fábrica", "O reembolso cai em 5 dias úteis")).toBe(false);
   });
 });
+
+describe("checagem por modelo — afirmação em várias frases e passo de uma palavra", () => {
+  const sources = [
+    "1. Toque em Primeiro acesso\n2. Quando pedir segurança, clique em Avançar\n3. Escolha a opção Telefone\nPronto! Sua conta estará configurada para acesso.",
+    "Acesso pelo celular\nPara facilitar, recomendamos utilizar o aplicativo Exemplo.",
+  ];
+
+  it("cada frase vem de um trecho diferente: sustentada quando todas estão nas fontes", () => {
+    expect(claimFoundInSources("Depois disso, sua conta estará configurada para acesso. Pelo celular, você também pode usar o aplicativo Exemplo.", sources)).toBe(true);
+    expect(claimFoundInSources("Depois disso, sua conta estará configurada para acesso. O acesso expira em 30 dias corridos.", sources)).toBe(false);
+  });
+
+  it("passo de uma palavra: vale com o mesmo verbo na mesma frase da fonte", () => {
+    expect(claimFoundInSources("Escolha *Telefone*.", sources)).toBe(true);
+    expect(claimFoundInSources("Toque em *Telefone*.", sources)).toBe(false);
+    expect(claimFoundInSources("Escolha *Boleto*.", sources)).toBe(false);
+  });
+});
+
