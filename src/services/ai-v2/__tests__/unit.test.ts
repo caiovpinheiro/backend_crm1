@@ -127,6 +127,17 @@ describe("sentiment", () => {
     expect(detectV2Sentiment(config, "Isso é péssimo, estou horrível")).toBe("angry");
   });
 
+  it("pedido de cancelamento, pergunta de prazo e palavra dentro de outra não são humor", () => {
+    const config = baseConfig();
+    config.sentiment = { enabled: true, threshold: "dissatisfied", action: "handoff" };
+    expect(detectV2Sentiment(config, "quero cancelar minha compra")).toBe("neutral");
+    expect(detectV2Sentiment(config, "e quanto tempo demora a entrega?")).toBe("neutral");
+    expect(detectV2Sentiment(config, "meu computador não abre o site")).toBe("neutral");
+    expect(detectV2Sentiment(config, "tudo certo, sem problemas")).toBe("neutral");
+    expect(detectV2Sentiment(config, "o pedido está demorando demais")).toBe("dissatisfied");
+    expect(detectV2Sentiment(config, "que atendimento horrível")).toBe("angry");
+  });
+
   it("triggers handoff for angry when configured", () => {
     const config = baseConfig();
     config.sentiment = { enabled: true, threshold: "angry", action: "handoff" };

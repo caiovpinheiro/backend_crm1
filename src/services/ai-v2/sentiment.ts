@@ -10,23 +10,36 @@ const ANGRY_WORDS = [
   "péssimo", "horrível", "terrível", "nojo", "ódio", "raiva", "puto", "puta", "revoltado",
 ];
 
+// Pedido de cancelamento é assunto, não humor: "quero cancelar" transferia
+// quem só pedia informação. "Demora" sozinha também ("quanto tempo demora a
+// entrega?"); vale a queixa ("está demorando", "que demora").
 const DISSATISFIED_WORDS = [
-  "ruim", "péssimo", "horrível", "terrível", "decepcionado", "frustrado", "insatisfeito",
-  "problema", "erro", "falha", "demora", "lento", "não resolveu", "não funciona",
-  "quero cancelar", "quero reclamar", "reclamação", "cancelar",
+  "ruim", "péssimo", "horrível", "terrível", "decepcionado", "decepcionada", "frustrado", "frustrada",
+  "insatisfeito", "insatisfeita", "problema", "erro", "falha", "lento", "não resolveu", "não resolve",
+  "não funciona", "quero reclamar", "reclamação", "demorando", "que demora", "muita demora",
+  "demorou muito", "demora demais", "absurdo", "descaso",
 ];
+
+/** "Sem problema", "nenhum problema": o cliente diz que está tudo bem. */
+const NOT_A_COMPLAINT = /\b(?:sem|nenhum|nao tem|nao ha|nao teve) problemas?\b/g;
 
 function normalize(s: string): string {
   return s
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]/g, " ");
+    .replace(/[^a-z0-9]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
+/**
+ * Palavra ou expressão inteira: por trecho, "computador" contava como
+ * xingamento e "cancelaria" como reclamação.
+ */
 function scoreWords(message: string, words: string[]): number {
-  const nm = normalize(message);
-  return words.reduce((acc, w) => (nm.includes(normalize(w)) ? acc + 1 : acc), 0);
+  const nm = ` ${normalize(message).replace(NOT_A_COMPLAINT, " ")} `;
+  return words.reduce((acc, w) => (nm.includes(` ${normalize(w)} `) ? acc + 1 : acc), 0);
 }
 
 export function detectV2Sentiment(
