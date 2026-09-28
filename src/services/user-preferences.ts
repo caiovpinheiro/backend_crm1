@@ -206,9 +206,8 @@ async function readUserSidebarOverlay(
 /**
  * Aplica o overlay pessoal por cima do teto do papel:
  *  - ordem do usuario primeiro, depois itens novos do papel;
- *  - usuario pode ocultar (exceto locked);
- *  - se o papel omitiu/desligou um item que a permissão ainda libera,
- *    o overlay pessoal pode religar (ex.: Bwipo Chat em menu antigo).
+ *  - usuario pode ocultar item que o papel liberou (exceto locked);
+ *  - item desligado no papel permanece desligado. O perfil nao religa.
  */
 export function applyUserSidebarOverlay(
   rolePrefs: SidebarPreferences,
@@ -239,7 +238,7 @@ export function applyUserSidebarOverlay(
         : roleEnabled;
       return {
         key,
-        enabled: locked ? true : userEnabled,
+        enabled: locked ? true : roleEnabled && userEnabled,
         order: idx + 1,
       };
     }),
