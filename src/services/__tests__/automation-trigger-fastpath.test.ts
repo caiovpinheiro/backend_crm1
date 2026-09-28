@@ -252,20 +252,20 @@ describe("fireTrigger fast-path", () => {
     );
   });
 
-  it("message_received não dispara quando suppressAutomation está ligado", async () => {
+  it("message_received dispara mesmo com responsável no ticket", async () => {
     vi.mocked(getHumanAttendanceForContact).mockResolvedValue({
       conversationId: "conv-1",
-      hasHumanReply: false,
-      assignedToId: "ai-1",
-      assigneeType: "AI",
-      humanAttending: false,
+      hasHumanReply: true,
+      assignedToId: "human-1",
+      assigneeType: "HUMAN",
+      humanAttending: true,
       suppressAutomation: true,
     });
-    prismaMock.automation.findFirst.mockResolvedValue({ id: "pipe" });
+    prismaMock.automation.findFirst.mockResolvedValue({ id: "move" });
     prismaMock.automation.findMany.mockResolvedValue([
       {
-        id: "pipe",
-        name: "inicio - pipe",
+        id: "move",
+        name: "mensagem recebida move etapa",
         triggerType: "message_received",
         triggerConfig: {},
       },
@@ -276,6 +276,9 @@ describe("fireTrigger fast-path", () => {
       data: { channel: "WhatsApp", conversationId: "conv-1" },
     });
 
-    expect(enqueueAutomation).not.toHaveBeenCalled();
+    expect(enqueueAutomation).toHaveBeenCalledWith(
+      "move",
+      expect.objectContaining({ contactId: "c1", event: "message_received" }),
+    );
   });
 });
