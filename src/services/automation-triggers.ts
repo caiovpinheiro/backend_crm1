@@ -6,7 +6,6 @@ import {
   recordBlockedEffect,
 } from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 import { getActiveContext } from "@/services/automation-context";
 
 import {
@@ -695,24 +694,10 @@ export async function fireTrigger(  event: string,
     }
   }
 
-  // Guarda só no INBOUND: não responder por cima de atendimento humano.
-  // message_sent é ação do agente e não pode ser suprimido por ela.
-  if (event === "message_received" && context.contactId) {
-    try {
-      const snap = await getHumanAttendanceForContact(context.contactId);
-      if (snap?.suppressAutomation) {
-        console.info(
-          `[fireTrigger] skip ${event} — atendimento ativo (contact=${context.contactId} conv=${snap.conversationId} assignee=${snap.assignedToId ?? "-"} humanReply=${snap.hasHumanReply})`,
-        );
-        return;
-      }
-    } catch (err) {
-      console.warn(
-        "[fireTrigger] human attendance check failed:",
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+  // Responsável no deal/conversa NÃO cancela `message_received`.
+  // O card pode estar em "Aguardando" com o consultor já atribuído; a
+  // mensagem do cliente é o que move para "Em atendimento". O robô
+  // pausado continua com o guarda próprio em `processIncomingMessage`.
 
   let automations;
   try {
