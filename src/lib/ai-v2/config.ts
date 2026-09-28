@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { V2_MODELS } from "./models";
 import { SYSTEM_MESSAGE_KEYS } from "./system-messages";
+import { MESSAGE_MODEL_MODES } from "./message-model-mode";
 
 /** Modelos da tela (id + nome); detalhes em `./models`. */
 export const SUPPORTED_V2_MODELS = V2_MODELS.map((m) => ({ id: m.id, label: m.label }));
@@ -114,6 +115,8 @@ const themeSchema = z.object({
   maxTurns: z.number().int().min(0).optional(),
   answerBy: z.enum(["self"]).or(z.string()).optional().default("self"),
   replyEnding: replyEndingSchema.optional(),
+  /** Material + mensagem pronta neste assunto (vazio = o do agente). */
+  messageModelMode: z.enum(MESSAGE_MODEL_MODES).optional(),
 });
 
 const ruleConditionSchema = z.object({
@@ -418,6 +421,8 @@ export const v2AgentConfigSchema = z.object({
   replyEnding: replyEndingSchema.optional(),
   /** Mensagens prontas: o modelo pode pedir para ajustar o texto à conversa. */
   messageModelAdapt: z.boolean().optional().default(false),
+  /** Material + mensagem pronta no mesmo turno: o que o cliente recebe. */
+  messageModelMode: z.enum(MESSAGE_MODEL_MODES).optional(),
   // "model" (padrão): além das regras, um modelo confere cada afirmação da
   // resposta contra os materiais. "rules": só as regras fixas.
   groundingCheck: z.enum(["model", "rules"]).optional(),

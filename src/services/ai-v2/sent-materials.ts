@@ -40,6 +40,12 @@ function contentStems(text: string): Set<string> {
   );
 }
 
+/** Quantas palavras de conteúdo (pelo começo) dois textos têm em comum. */
+export function sharedContentWords(a: string, b: string): number {
+  const other = contentStems(b);
+  return [...contentStems(a)].filter((w) => other.has(w)).length;
+}
+
 /**
  * Quanto do que a resposta explica (fora a introdução) a mensagem pronta
  * traz, de 0 a 1. Compara o começo das palavras de conteúdo: "acesse" e

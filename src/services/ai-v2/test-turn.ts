@@ -23,6 +23,7 @@ import { callV2LLMTest } from "./llm";
 import { guardV2Output } from "./output-guard";
 import { knowledgeChunkTexts } from "./ground-reply";
 import { systemMessage } from "@/lib/ai-v2/system-messages";
+import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, type V2LoadedContext } from "./context";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
@@ -670,9 +671,12 @@ export async function simulateV2Turn(
       });
       const long = output.reply.trim().split(/\s+/).length > 40;
       const all = rows ?? [];
-      if (all.length > 0) {
+      const mode = messageModelModeFor(config, themeId);
+      if (all.length > 0 && messageModelFilesOnly(mode)) {
+        traceStep("ações", mode === "combine" ? "Mensagem pronta combinada na resposta; dela seguem só os arquivos" : "Modo “só a resposta”: da mensagem pronta seguem só os arquivos");
+      } else if (all.length > 0) {
         materialText = all.map((r) => renderMessage(r.content ?? "", vars, defaultFormatter())).filter((t) => t.trim()).join("\n\n");
-        const covers = all.some((r) => (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") >= MESSAGE_MODEL_MIN_COVERAGE);
+        const covers = mode === "message_model" || (mode === "auto" && all.some((r) => (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") >= MESSAGE_MODEL_MIN_COVERAGE));
         if (long && covers) {
           const intro = introBeforeMaterial(output.reply);
           traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");

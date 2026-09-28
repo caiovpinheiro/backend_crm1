@@ -13,6 +13,8 @@ import { answersBeforeHandoff, statesProcedure } from "./no-source";
 import { businessHoursText } from "./rules";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
+import { messageModelModeFor, messageModelPromptRule } from "@/lib/ai-v2/message-model-mode";
+import { sharedContentWords } from "./sent-materials";
 import { renderMessage } from "@/lib/ai-v2/message-render";
 import {
   ToolCallGovernor,
@@ -1101,12 +1103,13 @@ function buildV2SystemPrompt(
   }
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
-    lines.push("Para enviar uma, devolva messageModel: { \"id\": \"<id>\" }. Ela chega ao cliente depois da sua reply, com os anexos (imagem, vídeo, áudio, documento). Use quando a mensagem pronta atende ao que o cliente pediu — principalmente quando ele precisa ver algo. Ao usar, a reply deve ser só uma frase curta de introdução: não repita o conteúdo da mensagem pronta nem descreva o anexo.");
+    lines.push(`Para enviar uma, devolva messageModel: { "id": "<id>" }. ${messageModelPromptRule(messageModelModeFor(config, themeId))}`);
     if (config.messageModelAdapt) {
       lines.push("Se o texto da mensagem pronta precisar se encaixar na conversa (tratamento, responder primeiro o ponto que o cliente perguntou), devolva também \"adapt\": true. O conteúdo não muda: links, números, datas e passos ficam iguais.");
     }
     for (const m of messageModels) {
       lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
+      if (m.content?.trim()) lines.push(`  Texto: ${m.content.trim().replace(/\s*\n\s*/g, " / ")}`);
     }
   }
   if (attachmentsSection) lines.push(attachmentsSection);
@@ -1232,6 +1235,20 @@ export async function callV2LLM(args: {
     actionStageNames(args.config, promptTheme),
   ]);
   const knowledgeDocTitles = promptDocIds.map((id) => docTitleMap.get(id)).filter((t): t is string => Boolean(t));
+  // Texto das mensagens prontas só no modo "combinar" e só das 3 mais ligadas à
+  // mensagem do cliente (todas iriam inchar o prompt); nos outros modos o
+  // modelo escolhe pelo nome.
+  const combineModels = messageModelModeFor(args.config, promptTheme?.id) === "combine"
+    ? new Set(
+        [...messageModels]
+          .map((m) => ({ id: m.id, score: sharedContentWords(args.userMessage, `${m.name} ${m.content ?? ""}`) }))
+          .filter((m) => m.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3)
+          .map((m) => m.id),
+      )
+    : new Set<string>();
+  for (const m of messageModels) if (!combineModels.has(m.id)) delete m.content;
   // Documento e e-mail digitados pelo cliente vão ao modelo como marcador
   // ("[CPF 1]"); senha e cartão são removidos. O valor real só volta onde
   // precisa (ferramenta, variável coletada, ação).

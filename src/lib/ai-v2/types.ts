@@ -198,6 +198,8 @@ export interface V2Theme {
   handoffDestination?: V2Destination;
   /** Assunto que vai direto para o destino, sem resposta do agente. */
   directHandoff?: boolean;
+  /** Material + mensagem pronta neste assunto (vazio = o do agente). */
+  messageModelMode?: import("./message-model-mode").MessageModelMode;
   /** Tabulação sugerida ao encerrar/transferir por este tema. */
   tabulationId?: string;
   /** Máximo de turnos neste tema antes de handoff (0 = sem limite). */
@@ -556,6 +558,8 @@ export interface V2AgentConfig {
   replyEnding?: V2ReplyEnding;
   /** Mensagens prontas: permite ajustar o texto à conversa (links e números ficam iguais). */
   messageModelAdapt?: boolean;
+  /** Material + mensagem pronta no mesmo turno: o que o cliente recebe. */
+  messageModelMode?: import("./message-model-mode").MessageModelMode;
   /**
    * Conferência das respostas contra os materiais: "model" (padrão) usa um
    * modelo para cada afirmação, além das regras; "rules" só as regras fixas.

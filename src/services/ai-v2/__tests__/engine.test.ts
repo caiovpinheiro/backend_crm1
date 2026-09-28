@@ -1190,6 +1190,37 @@ describe("processV2Turn — correções do motor", () => {
     expect(order).toContain("ações:send_message_model");
   });
 
+  it("modo da mensagem pronta: 'só a resposta' manda só os arquivos; 'só a mensagem pronta' reduz a resposta à introdução", async () => {
+    const steps = [
+      "Ana, para trocar o produto faça assim.",
+      "Abra o aplicativo da loja e toque em Pedidos, escolha o pedido desejado e toque em Trocar.",
+      "Confirme o endereço de coleta, imprima a etiqueta gerada, embale bem o produto e leve até a agência mais próxima da sua casa.",
+      "Depois acompanhe a troca pela aba Pedidos do aplicativo, onde aparece cada etapa até a entrega do novo produto.",
+    ].join(" ");
+    const texts: string[] = [];
+    let executed: Array<Record<string, unknown>> = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { texts.push(a.text); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<Record<string, unknown>>) => {
+      executed = actions;
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.templateFindMany.mockResolvedValue([{ id: "mm-1", name: "Cadastro - vídeo", content: "Veja no vídeo como criar sua conta." }]);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: steps, actions: [{ type: "send_message_model", modelId: "mm-1" }] as any }));
+
+    const answerOnly = baseConfig({ allowedMessageModelIds: ["mm-1"], messageModelMode: "answer" } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: answerOnly, active: true });
+    await run("como troco o produto?");
+    expect(texts.some((t) => t.includes("imprima a etiqueta"))).toBe(true);
+    expect(executed.find((a) => a.type === "send_message_model")?.filesOnly).toBe(true);
+
+    texts.length = 0;
+    const modelOnly = baseConfig({ allowedMessageModelIds: ["mm-1"], messageModelMode: "message_model" } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: modelOnly, active: true });
+    await run("como troco o produto?");
+    expect(texts.some((t) => t.includes("imprima a etiqueta"))).toBe(false);
+    expect(executed.find((a) => a.type === "send_message_model")?.filesOnly).toBeUndefined();
+  });
+
   it("send_message_model com modelo fora da lista liberada é descartado", async () => {
     const config = baseConfig({ allowedMessageModelIds: ["mm-ok"] } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

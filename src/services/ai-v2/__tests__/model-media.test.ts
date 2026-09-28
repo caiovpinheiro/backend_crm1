@@ -73,4 +73,17 @@ describe("send_message_model com anexos", () => {
     expect(mocks.sendAgentMessage).not.toHaveBeenCalled();
     expect(mocks.sendMedia).toHaveBeenCalledTimes(1);
   });
+
+  it("modo 'só a resposta'/'combinar': da mensagem pronta saem só os arquivos, respeitando a trava de repetição", async () => {
+    mocks.templateFindFirst.mockResolvedValue({ id: "mm-1", name: "Tutorial", content: "Veja o passo a passo:", mediaUrl: VIDEO.url });
+    mocks.mediaFromRow.mockReturnValue([VIDEO]);
+
+    const r = await executeV2Actions([{ type: "send_message_model", modelId: "mm-1", filesOnly: true } as any], ctx());
+
+    expect(mocks.sendAgentMessage).not.toHaveBeenCalled();
+    expect(mocks.sendMedia).toHaveBeenCalledTimes(1);
+    expect(mocks.sendMedia.mock.calls[0][0].ignoreRecent).toBeUndefined();
+    expect(r.results[0]).toMatchObject({ ok: true, text: "" });
+  });
 });
+

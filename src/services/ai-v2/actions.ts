@@ -370,8 +370,11 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     let text = renderMessage(template.content ?? "", vars, defaultFormatter());
     // Reenvio só do anexo (o cliente disse que não recebeu): o texto já chegou.
     const mediaOnly = (action as { mediaOnly?: unknown }).mediaOnly === true;
+    // Modo "só a resposta"/"combinar": da mensagem pronta só saem os arquivos.
+    const filesOnly = (action as { filesOnly?: unknown }).filesOnly === true;
+    const skipText = mediaOnly || filesOnly;
     // "Adaptar": só com a opção ligada na config e o modelo pedindo.
-    if (!mediaOnly && action.adapt === true && ctx.config.messageModelAdapt === true && text.trim() && ctx.userMessage?.trim()) {
+    if (!skipText && action.adapt === true && ctx.config.messageModelAdapt === true && text.trim() && ctx.userMessage?.trim()) {
       const adapted = await adaptMessageModelText({ agentId: ctx.agentId, config: ctx.config, text, clientMessage: ctx.userMessage });
       traceStep("ações", adapted.adapted
         ? `Mensagem pronta "${template.name}" adaptada à conversa`
@@ -379,7 +382,8 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
       text = adapted.text;
     }
     // Mensagem pronta só com anexo (sem texto) é válida.
-    if (text.trim() && !mediaOnly) {
+    if (filesOnly) traceStep("ações", `Mensagem pronta "${template.name}": só os arquivos (o texto não vai, pelo modo escolhido)`);
+    if (text.trim() && !skipText) {
       const sent = await sendV2TextMessage({
         conversationId: ctx.conversationId,
         contactId: ctx.contactId,
@@ -433,7 +437,7 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
       }
     }
     if (mediaOnly && mediaSent === 0) return { action, ok: false, modelId, error: "anexo não pôde ser reenviado" };
-    return { action, ok: true, modelId, text: mediaOnly ? "" : text, mediaSent };
+    return { action, ok: true, modelId, text: skipText ? "" : text, mediaSent };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }

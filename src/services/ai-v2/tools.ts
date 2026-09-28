@@ -281,7 +281,7 @@ export async function searchV2Knowledge(args: {
   };
 }
 
-export type V2MessageModelSummary = { id: string; name: string; mediaKinds: string[] };
+export type V2MessageModelSummary = { id: string; name: string; mediaKinds: string[]; content?: string };
 
 function mediaKindOf(mime: string | null, name: string | null): string {
   const t = (mime ?? "").toLowerCase();
@@ -304,11 +304,12 @@ export async function describeV2MessageModels(ids: string[]): Promise<V2MessageM
   const orgId = getOrgIdOrThrow();
   const rows = await (prisma as any).messageTemplate.findMany({
     where: { organizationId: orgId, id: { in: ids.slice(0, 50) } },
-    select: { id: true, name: true, mediaUrl: true, mediaType: true, mediaName: true, attachments: true },
+    select: { id: true, name: true, content: true, mediaUrl: true, mediaType: true, mediaName: true, attachments: true },
   });
-  return (rows as Array<{ id: string; name: string; mediaUrl: string | null; mediaType: string | null; mediaName: string | null; attachments: unknown }>).map((r) => ({
+  return (rows as Array<{ id: string; name: string; content: string | null; mediaUrl: string | null; mediaType: string | null; mediaName: string | null; attachments: unknown }>).map((r) => ({
     id: r.id,
     name: r.name,
+    content: (r.content ?? "").slice(0, 1500),
     // Arquivo de outra organização não sai: anunciado, o modelo prometia
     // "vou te enviar o vídeo" e nada chegava.
     mediaKinds: mediaFromTemplateRow(r).filter((m) => isStorageUrlOfOrg(m.url, orgId)).map((m) => mediaKindOf(m.mimeType, m.name)),

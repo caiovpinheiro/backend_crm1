@@ -27,6 +27,7 @@ import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, huma
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
+import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -1857,8 +1858,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   //   depois, a mensagem pronta. Antes a resposta virava "Faça assim:" com um
   //   conteúdo que não era o pedido; depois a mensagem pronta era descartada e
   //   o vídeo configurado não chegava.
-  let messageModelCoversReply = false;
-  if (replyText.trim().split(/\s+/).length > 40) {
+  // O administrador escolhe o que vale (Mensagens prontas › quando também há
+  // material; exceção por assunto): automático, as duas, só uma ou combinar.
+  const mmMode = messageModelModeFor(config, themeId);
+  if (messageModelFilesOnly(mmMode) && outboundActions.some((a) => a.type === "send_message_model")) {
+    outboundActions = outboundActions.map((a) =>
+      a.type === "send_message_model" && (a as { mediaOnly?: unknown }).mediaOnly !== true ? ({ ...a, filesOnly: true } as V2Action) : a,
+    );
+    traceStep("ações", mmMode === "combine"
+      ? "Mensagem pronta combinada na resposta; dela seguem só os arquivos"
+      : "Modo “só a resposta”: da mensagem pronta seguem só os arquivos");
+  }
+  let messageModelCoversReply = mmMode === "message_model";
+  if (mmMode === "auto" && replyText.trim().split(/\s+/).length > 40) {
     const modelActions = outboundActions.filter(
       (a) => a.type === "send_message_model" && typeof a.modelId === "string" && (a as { mediaOnly?: unknown }).mediaOnly !== true,
     );
