@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { ARCHETYPE_MAP } from "@/lib/ai-agents/archetypes";
 import {
   conversationHasAttendanceDemand,
   conversationHasRealAttendance,
@@ -271,18 +270,5 @@ describe("formatTabulationCatalogText", () => {
     expect(text).toContain("Departamento da conversa (preferido)");
     expect(text).not.toMatch(/fallback de encerramento:/i);
     expect(text).not.toContain("Fallback (baixa confiança");
-  });
-});
-
-describe("arquétipo TABULACAO", () => {
-  it("só tabula com atendimento real, não encerra e ignora cadastro", () => {
-    const prompt = ARCHETYPE_MAP.TABULACAO.systemPromptTemplate;
-    expect(prompt).toMatch(/atendimento real/i);
-    expect(prompt).toMatch(/NÃO encerra/i);
-    expect(prompt).toMatch(/dados de cadastro/i);
-    expect(prompt).not.toMatch(/polo/i);
-    expect(ARCHETYPE_MAP.TABULACAO.defaultTools).not.toContain(
-      "close_conversation",
-    );
   });
 });

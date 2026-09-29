@@ -15,7 +15,6 @@
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
-import { resolveAgentVerticalForConversation } from "@/services/ai/agent-vertical";
 import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
 
 export const STUCK_INBOUND_MS = 15 * 60 * 1000;
@@ -210,16 +209,8 @@ export async function distributeStuckInbound(
     }
 
     try {
-      // Pack do agente da conversa (pode não ter): a rede de segurança
-      // é genérica — enfileirar/distribuir não é regra de vertical.
-      const agent = await resolveAgentVerticalForConversation(
-        row.conversation_id,
-        row.organization_id,
-      );
       const result = await withSystemContext(row.organization_id, () =>
         executeDepartmentHandoff({
-          ops: agent.ops,
-          policy: agent.inboxPolicy,
           conversationId: row.conversation_id,
           contactId: row.contact_id,
           reason: `IA sem responder há ${idleMinutes} min — distribuição de segurança`,

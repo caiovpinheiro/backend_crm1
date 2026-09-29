@@ -8,10 +8,14 @@
  */
 
 import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { v2ModelInfo } from "@/lib/ai-v2/models";
 import {
   embedMany,
+  experimental_transcribe as transcribe,
   generateText,
   stepCountIs,
+  wrapLanguageModel,
   type LanguageModel,
   type ModelMessage,
   type ToolSet,
@@ -46,11 +50,49 @@ export function resetAIProviderCache(): void {
   clientByKey.clear();
 }
 
+const anthropicByKey = new Map<string, ReturnType<typeof createAnthropic>>();
+
+/**
+ * Modelo pelo id: `claude-*` vai para a Anthropic (a chave passada tem de
+ * ser a Anthropic do agente); o resto, para a OpenAI.
+ */
 export function getModel(
   modelName: string,
   apiKey: string | null | undefined,
 ): LanguageModel {
+  if (modelName.startsWith("claude-")) {
+    const key = (apiKey ?? "").trim();
+    if (!key) throw new Error("NO_ANTHROPIC_KEY");
+    let client = anthropicByKey.get(key);
+    if (!client) {
+      client = createAnthropic({ apiKey: key });
+      anthropicByKey.set(key, client);
+    }
+    return client(modelName);
+  }
   return getOpenAI(apiKey)(modelName);
+}
+
+/** Folga no limite de tokens para o raciocínio dos modelos que pensam antes. */
+const REASONING_HEADROOM = 4000;
+
+/**
+ * O que cada modelo aceita: modelos que raciocinam recusam temperatura e
+ * gastam tokens pensando (sem folga, a resposta saía vazia); Claude não tem
+ * modo JSON sem esquema (o prompt já exige JSON e quem chama extrai).
+ */
+function modelCallOptions(modelName: string, args: { temperature?: number; maxOutputTokens?: number; jsonMode?: boolean }) {
+  const info = v2ModelInfo(modelName);
+  const isClaude = modelName.startsWith("claude-");
+  const reasoning = info?.reasoning ?? false;
+  const temperature = info && !info.temperature ? undefined : (args.temperature ?? 0.7);
+  const maxOutputTokens = reasoning && args.maxOutputTokens ? args.maxOutputTokens + REASONING_HEADROOM : args.maxOutputTokens;
+  const providerOptions = reasoning
+    ? isClaude
+      ? { anthropic: { effort: "low" } }
+      : { openai: { reasoningEffort: "low", forceReasoning: true } }
+    : undefined;
+  return { temperature, maxOutputTokens, jsonMode: args.jsonMode && !isClaude, providerOptions };
 }
 
 export const DEFAULT_CHAT_MODEL =
@@ -71,12 +113,18 @@ export type GenerateArgs = {
   /// Limite de passos (tool loop). Default 8.
   maxSteps?: number;
   toolChoice?: "auto" | "required" | "none" | { type: "tool"; toolName: string };
+  /// Modo JSON da API: a resposta final é sempre um objeto JSON válido
+  /// (o formato dos campos continua validado por quem chama).
+  jsonMode?: boolean;
+  /// Limite por tentativa (ms). Padrão: AI_LLM_TIMEOUT_MS (60 s).
+  timeoutMs?: number;
 };
 
 export type GenerateResult = {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  finishReason?: string;
   toolCalls: Array<{
     toolName: string;
     args: unknown;
@@ -85,10 +133,26 @@ export type GenerateResult = {
   steps: number;
 };
 
+/**
+ * Pede à API resposta em JSON sem usar o `output` do SDK: ele valida o
+ * texto por conta própria e lança erro antes de quem chama poder tratar.
+ */
+function withJsonMode(model: LanguageModel): LanguageModel {
+  return wrapLanguageModel({
+    model: model as Parameters<typeof wrapLanguageModel>[0]["model"],
+    middleware: {
+      specificationVersion: "v3",
+      transformParams: async ({ params }) => ({ ...params, responseFormat: { type: "json" } }),
+    },
+  });
+}
+
 export async function generateWithTools(
   args: GenerateArgs,
 ): Promise<GenerateResult> {
-  const model = getModel(args.model, args.apiKey);
+  const base = getModel(args.model, args.apiKey);
+  const opts = modelCallOptions(args.model, args);
+  const model = opts.jsonMode ? withJsonMode(base) : base;
   // `maxRetries: 0` desliga o retry interno do SDK de propósito: ele não
   // conhece o nosso timeout (retentaria por dentro de uma tentativa que já
   // deveria ter sido abortada) e não loga nada. Quem retenta é
@@ -103,14 +167,15 @@ export async function generateWithTools(
         system: args.system,
         messages: args.messages,
         tools: args.tools,
-        temperature: args.temperature ?? 0.7,
-        maxOutputTokens: args.maxOutputTokens,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        maxOutputTokens: opts.maxOutputTokens,
+        ...(opts.providerOptions ? { providerOptions: opts.providerOptions as never } : {}),
         stopWhen: stepCountIs(args.maxSteps ?? 8),
         abortSignal,
         maxRetries: 0,
         ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
       }),
-    { label: `generateText ${args.model}` },
+    { label: `generateText ${args.model}`, ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
   );
 
   const toolCalls: GenerateResult["toolCalls"] = [];
@@ -137,9 +202,37 @@ export async function generateWithTools(
     text: result.text ?? "",
     inputTokens: result.usage?.inputTokens ?? 0,
     outputTokens: result.usage?.outputTokens ?? 0,
+    finishReason: result.finishReason,
     toolCalls,
     steps: result.steps.length,
   };
+}
+
+/**
+ * Transcrição de áudio com a chave OpenAI do agente (a mesma conta que ele
+ * já usa para responder).
+ */
+export async function transcribeWithOpenAI(apiKey: string, audio: Uint8Array): Promise<string> {
+  const openai = getOpenAI(apiKey);
+  const result = await transcribe({
+    model: openai.transcription(process.env.AI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe"),
+    audio,
+    providerOptions: { openai: { language: "pt" } },
+    abortSignal: AbortSignal.timeout(90_000),
+  });
+  return (result.text ?? "").trim();
+}
+
+// Vetor por texto, por pouco tempo: num turno a mesma mensagem do cliente
+// era embedada duas vezes em série (escolha do assunto e busca na base).
+// O vetor de um texto não muda para o mesmo modelo.
+const EMBED_CACHE_MAX = 300;
+const EMBED_CACHE_TTL_MS = 10 * 60 * 1000;
+const embedCache = new Map<string, { at: number; vector: number[] }>();
+
+/** Limpa o cache de vetores (testes). */
+export function clearEmbedCache(): void {
+  embedCache.clear();
 }
 
 export async function embedTexts(
@@ -149,21 +242,36 @@ export async function embedTexts(
   embeddings: number[][];
   inputTokens: number;
 }> {
-  const openai = getOpenAI(apiKey);
-  // Mesmo tratamento do generateText: embedding entra no caminho de
-  // retrieval do inbound, então pendurar aqui também segura o worker.
-  const result = await callLlmWithRetry(
-    (abortSignal) =>
-      embedMany({
-        model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
-        values: texts,
-        abortSignal,
-        maxRetries: 0,
-      }),
-    { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
-  );
+  const now = Date.now();
+  const keyOf = (t: string) => `${DEFAULT_EMBEDDING_MODEL}\u0000${t}`;
+  const cached = texts.map((t) => {
+    const hit = embedCache.get(keyOf(t));
+    return hit && now - hit.at <= EMBED_CACHE_TTL_MS ? hit.vector : undefined;
+  });
+  const missing = [...new Set(texts.filter((_, i) => !cached[i]))];
+  let fresh = new Map<string, number[]>();
+  let inputTokens = 0;
+  if (missing.length > 0) {
+    const openai = getOpenAI(apiKey);
+    // Mesmo tratamento do generateText: embedding entra no caminho de
+    // retrieval do inbound, então pendurar aqui também segura o worker.
+    const result = await callLlmWithRetry(
+      (abortSignal) =>
+        embedMany({
+          model: openai.textEmbeddingModel(DEFAULT_EMBEDDING_MODEL),
+          values: missing,
+          abortSignal,
+          maxRetries: 0,
+        }),
+      { label: `embedMany ${DEFAULT_EMBEDDING_MODEL}` },
+    );
+    inputTokens = result.usage?.tokens ?? 0;
+    fresh = new Map(missing.map((t, i) => [t, result.embeddings[i]]));
+    if (embedCache.size + fresh.size > EMBED_CACHE_MAX) embedCache.clear();
+    for (const [t, vector] of fresh) if (vector) embedCache.set(keyOf(t), { at: now, vector });
+  }
   return {
-    embeddings: result.embeddings,
-    inputTokens: result.usage?.tokens ?? 0,
+    embeddings: texts.map((t, i) => cached[i] ?? fresh.get(t) ?? []),
+    inputTokens,
   };
 }

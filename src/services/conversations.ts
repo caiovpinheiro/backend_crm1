@@ -2391,7 +2391,7 @@ const ASSIGN_CONVERSATION_SELECT = {
     select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
   },
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, type: true, aiAgentConfig: { select: { id: true, engine: true } } },
   },
 } as const;
 
@@ -2762,33 +2762,6 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
-/**
- * Devolve o deal do funil Atendimento à origem acadêmica. Sem vertical
- * no agente/org, é no-op. Encerrar conversa (humano, lote, automação, IA)
- * tem que limpar a fila — não só o close da IA.
- */
-async function restoreDealAfterConversationResolved(args: {
-  conversationId: string;
-  contactId: string | null;
-  organizationId: string | null;
-}): Promise<void> {
-  if (!args.contactId || !args.organizationId) return;
-  try {
-    const { resolveAgentVerticalForConversation } = await import(
-      "@/services/ai/agent-vertical"
-    );
-    const agent = await resolveAgentVerticalForConversation(
-      args.conversationId,
-      args.organizationId,
-    );
-    await agent.ops.restoreDealToAcademicOrigin?.({
-      contactId: args.contactId,
-    });
-  } catch (e) {
-    console.warn("[conversations] restoreDeal after close failed", e);
-  }
-}
-
 export async function updateConversationStatusInTx(
   _tx: ScopedTx,
   id: string,
@@ -2863,12 +2836,7 @@ export async function updateConversationStatusInDb(
 
   // Snapshot ANTES do update: precisamos de quem era o atendente para
   // logar a remoção e limpar deal/contato (abaixo).
-  let clearedAssignee: {
-    id: string;
-    name: string | null;
-    archetype?: string | null;
-    enabledTools?: string[] | null;
-  } | null = null;
+  let clearedAssignee: { id: string; name: string | null } | null = null;
   let closeContactId: string | null = null;
   if (status === "RESOLVED" && extra?.clearAssignedTo) {
     const prev = await prisma.conversation.findUnique({
@@ -2876,20 +2844,13 @@ export async function updateConversationStatusInDb(
       select: {
         assignedToId: true,
         contactId: true,
-        assignedTo: {
-          select: {
-            name: true,
-            aiAgentConfig: { select: { archetype: true, enabledTools: true } },
-          },
-        },
+        assignedTo: { select: { name: true } },
       },
     });
     if (prev?.assignedToId) {
       clearedAssignee = {
         id: prev.assignedToId,
         name: prev.assignedTo?.name ?? null,
-        archetype: prev.assignedTo?.aiAgentConfig?.archetype ?? null,
-        enabledTools: prev.assignedTo?.aiAgentConfig?.enabledTools ?? null,
       };
       closeContactId = prev.contactId ?? null;
     }
@@ -2949,50 +2910,30 @@ export async function updateConversationStatusInDb(
   // deals.ts é pesado e este arquivo é importado por webhooks quentes.
   if (clearedAssignee) {
     const orgId = getOrgIdOrNull();
-    const { isTabulationClassifier } = await import(
-      "@/lib/ai-agents/tabulation-classifier"
-    );
-    const { isFarewellCloser } = await import(
-      "@/lib/ai-agents/farewell-closer"
-    );
-    // Classificador / despedida só carimbam. O Encerrar tira o responsável
-    // e o log "X removida da conversa" parece que a ação caiu.
-    const skipUnassignLog =
-      isTabulationClassifier({
-        archetype: clearedAssignee.archetype,
-        enabledTools: clearedAssignee.enabledTools,
-        name: clearedAssignee.name,
-      }) ||
-      isFarewellCloser({
-        archetype: clearedAssignee.archetype,
-        name: clearedAssignee.name,
-      });
-    if (!skipUnassignLog) {
-      await logEvent({
-        type: "ASSIGNEE_CHANGED",
-        entityType: "CONVERSATION",
-        entityId: id,
-        entityLabel: updated.externalId ?? null,
+    await logEvent({
+      type: "ASSIGNEE_CHANGED",
+      entityType: "CONVERSATION",
+      entityId: id,
+      entityLabel: updated.externalId ?? null,
+      conversationId: id,
+      contactId: closeContactId,
+      field: "assignedTo",
+      oldValue: clearedAssignee.name,
+      newValue: null,
+      meta: {
+        fromUserId: clearedAssignee.id,
+        toUserId: null,
+        reason: "conversation_closed",
+      },
+    });
+    try {
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId: orgId,
         conversationId: id,
-        contactId: closeContactId,
-        field: "assignedTo",
-        oldValue: clearedAssignee.name,
-        newValue: null,
-        meta: {
-          fromUserId: clearedAssignee.id,
-          toUserId: null,
-          reason: "conversation_closed",
-        },
+        type: "ASSIGNEE_CHANGED",
       });
-      try {
-        sseBus.publish("conversation_timeline_updated", {
-          organizationId: orgId,
-          conversationId: id,
-          type: "ASSIGNEE_CHANGED",
-        });
-      } catch {
-        /* best-effort */
-      }
+    } catch {
+      /* best-effort */
     }
     if (closeContactId) {
       const { clearContactOwnershipOnClose } = await import("@/services/deals");
@@ -3002,14 +2943,6 @@ export async function updateConversationStatusInDb(
         actorUserId: userIdForFk(getRequestContext()?.userId),
       }).catch(() => {});
     }
-  }
-
-  if (status === "RESOLVED" && !followUp) {
-    await restoreDealAfterConversationResolved({
-      conversationId: id,
-      contactId: updated.contactId ?? updated.contact?.id ?? closeContactId,
-      organizationId: updated.organizationId,
-    });
   }
 
   return updated;
@@ -3203,14 +3136,6 @@ export async function resolveConversationsInline(params: {
       data: closePatch,
     });
     updated += toResolve.length;
-
-    for (const conv of toResolve) {
-      await restoreDealAfterConversationResolved({
-        conversationId: conv.id,
-        contactId: conv.contactId,
-        organizationId: conv.organizationId,
-      });
-    }
 
     if (!params.keepAgent) {
       const pairs = new Map<string, { contactId: string; userId: string }>();

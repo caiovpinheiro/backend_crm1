@@ -1,0 +1,129 @@
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
+
+import { guardV2Output, isCommonFieldValue } from "../output-guard";
+import { QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, QUEUE_NOTICES, pickQueueNotice, queuedMessageFor } from "../queue-notice";
+import { mediaResendPlan, saysNotReceived } from "../sent-materials";
+import { trimUnsupportedSentences } from "../reply-trim";
+import { handoffExplanation } from "../no-source";
+import { classifyReply } from "../reply-ending";
+import { humanRequestSubject } from "../action-policy";
+import type { V2AgentConfig } from "@/lib/ai-v2/types";
+
+describe("transferência — um caminho só de mensagem", () => {
+  it("explicação do modelo sem as frases de aviso; vazio quando a resposta só avisa ou é curta demais", () => {
+    expect(handoffExplanation("Não tenho seu e-mail no cadastro. Como ele é necessário para seguir, vou chamar alguém da equipe para te orientar.")).toBe("Não tenho seu e-mail no cadastro. Ele é necessário para seguir.");
+    expect(handoffExplanation("Vou te passar para a equipe.")).toBe("");
+    expect(handoffExplanation("Claro! Vou encaminhar.")).toBe("");
+    expect(handoffExplanation("Resposta do agente.")).toBe("");
+    expect(handoffExplanation("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.")).toBe("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.");
+  });
+
+  it("a frase que diz o que falta fica; só a oração de aviso sai; empatia sozinha não vai", () => {
+    expect(handoffExplanation("Ana, entendo a dúvida. O seu e-mail não está cadastrado aqui, e ele é necessário para o primeiro acesso, então vou chamar alguém da equipe para te orientar."))
+      .toBe("O seu e-mail não está cadastrado aqui, e ele é necessário para o primeiro acesso.");
+    expect(handoffExplanation("Ana, entendo a dúvida. Vou te passar para a equipe.")).toBe("");
+    expect(handoffExplanation("O código do seu pedido não consta no cadastro, por isso vou pedir para a equipe conferir.")).toBe("O código do seu pedido não consta no cadastro.");
+  });
+});
+
+describe("fecho — algo que ainda não está disponível", () => {
+  it("resposta que diz que só fica disponível numa data recebe o fecho de informação, não o de passo a passo", () => {
+    expect(classifyReply("O pedido ainda não está disponível. Será liberado em 01/10.\n1. Abra o app.\n2. Veja o pedido.")).toBe("info");
+    expect(classifyReply("A consulta fica disponível a partir do dia 5.\n1. Abra o app.\n2. Veja o pedido.")).toBe("info");
+    expect(classifyReply("1. Abra o app.\n2. Veja o pedido.")).toBe("procedure");
+  });
+});
+
+describe("pedido de pessoa — com ou sem assunto", () => {
+  const cfg = { handoff: { humanRequestKeywords: ["falar com atendente", "quero falar com alguém"] } } as unknown as V2AgentConfig;
+  it("reconhece quando a mensagem traz pergunta ou assunto além do pedido", () => {
+    expect(humanRequestSubject(cfg, "quero falar com atendente")).toBe(false);
+    expect(humanRequestSubject(cfg, "Quero falar com alguém, por favor")).toBe(false);
+    expect(humanRequestSubject(cfg, "quero falar com atendente, meu pedido não chegou")).toBe(true);
+    expect(humanRequestSubject(cfg, "falar com atendente sobre a fatura?")).toBe(true);
+  });
+});
+
+describe("guarda de saída — campo só-leitura com valor comum", () => {
+  it("não mascara 'Sim'/'Não', número pequeno nem palavra curta", () => {
+    expect(isCommonFieldValue("Sim")).toBe(true);
+    expect(isCommonFieldValue("Não")).toBe(true);
+    expect(isCommonFieldValue("12")).toBe(true);
+    expect(isCommonFieldValue("Ativo")).toBe(true);
+    expect(isCommonFieldValue("R$ 1.234,56")).toBe(false);
+    expect(isCommonFieldValue("Plano Ouro Especial")).toBe(false);
+    const ctx = { contact: null, citableContact: null, selectedDeal: { pendencia: "Sim", saldo: "R$ 1.234,56" }, citableDeal: null };
+    const r = guardV2Output("Sim, Ana! Vou te enviar o tutorial em vídeo agora.", [], ctx);
+    expect(r.text).toBe("Sim, Ana! Vou te enviar o tutorial em vídeo agora.");
+    expect(r.scrubbedFields).toBeUndefined();
+  });
+
+  it("valor interno no começo da frase sai junto com a vírgula; no meio, a frase sai inteira", () => {
+    const ctx = { contact: null, citableContact: null, selectedDeal: { plano: "Plano Ouro Especial" }, citableDeal: null };
+    expect(guardV2Output("Plano Ouro Especial, Ana! Vou te enviar o tutorial.", [], ctx).text).toBe("Ana! Vou te enviar o tutorial.");
+    expect(guardV2Output("Você está no Plano Ouro Especial desde março. Posso ajudar em algo mais?", [], ctx).text).toBe("Posso ajudar em algo mais?");
+  });
+});
+
+describe("aviso de fila fora do horário", () => {
+  it("padrão fora do horário não promete 'em instantes'; o configurado vale sempre", () => {
+    expect(queuedMessageFor(null, true)).toBe(QUEUED_MESSAGE_DEFAULT);
+    expect(queuedMessageFor("", false)).toBe(QUEUED_MESSAGE_OUTSIDE_HOURS);
+    expect(QUEUED_MESSAGE_OUTSIDE_HOURS).not.toMatch(/em instantes/i);
+    expect(queuedMessageFor("Texto da empresa", false)).toBe("Texto da empresa");
+  });
+
+  it("variantes com 'em instantes' ficam de fora quando fora do horário", () => {
+    const now = new Date("2026-09-27T00:30:00Z");
+    const r = pickQueueNotice({
+      message: "ninguém resolve nada",
+      configured: QUEUED_MESSAGE_OUTSIDE_HOURS,
+      lastReply: QUEUED_MESSAGE_OUTSIDE_HOURS,
+      lastReplyAt: new Date(now.getTime() - 30_000),
+      now,
+      outsideHours: true,
+    });
+    expect(r?.kind).toBe("upset");
+    expect(r?.text).toBe(QUEUE_NOTICES.upset[1]);
+    expect(r?.text).not.toMatch(/em instantes/i);
+  });
+});
+
+describe("cliente diz que não recebeu o anexo", () => {
+  it("reconhece a reclamação", () => {
+    expect(saysNotReceived("Não veio o vídeo")).toBe(true);
+    expect(saysNotReceived("não recebi nada")).toBe(true);
+    expect(saysNotReceived("cadê a imagem?")).toBe(true);
+    expect(saysNotReceived("O vídeo não abriu aqui")).toBe(true);
+    expect(saysNotReceived("recebi, obrigado")).toBe(false);
+    expect(saysNotReceived("não entendi o passo 2")).toBe(false);
+  });
+
+  it("reenvia uma vez e diz a verdade quando o envio falhou; na segunda vez chama a equipe", () => {
+    const at = new Date();
+    expect(mediaResendPlan([])).toBeNull();
+    const failedOnce = mediaResendPlan([{ status: "failed", error: "Arquivo não encontrado no storage", type: "video", at }]);
+    expect(failedOnce).toMatchObject({ resend: true, handoff: false });
+    expect(failedOnce!.reply).toMatch(/não saiu da primeira vez/);
+    expect(failedOnce!.reply).not.toMatch(/logo acima/);
+    const sentOnce = mediaResendPlan([{ status: "read", error: null, type: "image", at }]);
+    expect(sentOnce).toMatchObject({ resend: true, handoff: false });
+    expect(sentOnce!.reply).toMatch(/Reenviei a imagem/);
+    const twice = mediaResendPlan([{ status: "failed", error: "x", type: "video", at }, { status: "failed", error: "x", type: "video", at }]);
+    expect(twice).toMatchObject({ resend: false, handoff: true });
+    expect(twice!.reply).toMatch(/Não estou conseguindo enviar o vídeo/);
+  });
+});
+
+describe("corte — passos com emoji numérico", () => {
+  it("passo marcado com 1️⃣ ou 'Passo 1:' sai inteiro e os outros são renumerados", () => {
+    const keycaps = "Para trocar:\n1️⃣ Vá até a loja com a nota fiscal.\n2️⃣ Peça o reembolso em dinheiro na hora.\n3️⃣ Guarde o comprovante.";
+    expect(trimUnsupportedSentences(keycaps, ["Peça o reembolso em dinheiro na hora"])?.reply)
+      .toBe("Para trocar:\n1️⃣ Vá até a loja com a nota fiscal.\n2️⃣ Guarde o comprovante.");
+    const labeled = "Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Peça o reembolso em dinheiro na hora.\nPasso 3: Guarde o comprovante.";
+    expect(trimUnsupportedSentences(labeled, ["Peça o reembolso em dinheiro na hora"])?.reply)
+      .toBe("Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Guarde o comprovante.");
+  });
+});

@@ -2447,14 +2447,7 @@ async function executeStep(
         select: {
           id: true,
           type: true,
-          name: true,
-          aiAgentConfig: {
-            select: {
-              active: true,
-              archetype: true,
-              enabledTools: true,
-            },
-          },
+          aiAgentConfig: { select: { active: true } },
         },
       });
       if (!agentUser || agentUser.type !== "AI") {
@@ -2498,9 +2491,8 @@ async function executeStep(
 
       // Saudação proativa: dispara imediatamente após a atribuição,
       // sem esperar o cliente mandar mensagem. Isso resolve o caso de
-      // automações cujo trigger é "Negócio criado" / etc. — antes, o
-      // agente ficava mudo porque `maybeReplyAsAIAgent` só roda em
-      // inbound. Idempotente via `Conversation.aiGreetedAt`, então
+      // automações cujo trigger é "Negócio criado" / etc. — o agente
+      // só responde a inbound. Idempotente via `Conversation.aiGreetedAt`, então
       // se o cliente mandar algo depois, a saudação não repete.
       //
       // Falhas aqui não podem derrubar o passo da automação: o log do
@@ -2508,59 +2500,23 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        const { isTabulationClassifier } = await import(
-          "@/lib/ai-agents/tabulation-classifier"
-        );
-        if (
-          isTabulationClassifier({
-            ...agentUser.aiAgentConfig,
-            name: agentUser.name,
-          })
-        ) {
-          const { triggerTabulationClassifyForContact } = await import(
-            "@/services/ai/tabulation-classify"
-          );
-          const classified = await triggerTabulationClassifyForContact({
+        try {
+          const opening = await triggerAgentOpeningForContact({
             contactId: contactForOpening,
             agentUserId,
+            channel: "meta",
           });
-          if (classified.status === "failed") {
-            throw new Error(
-              `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
-            );
-          }
-          if (classified.status === "skipped") {
+          if (opening.status === "skipped") {
             log.info(
-              `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
+              `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
             );
-            return { note: `classificação pulada (${classified.reason})` };
+          } else {
+            log.info(
+              `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+            );
           }
-          const label = classified.tabulationName ?? classified.tabulationId;
-          log.info(
-            `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
-          );
-          return {
-            note: `tabulou: ${label}`,
-          };
-        } else {
-          try {
-            const opening = await triggerAgentOpeningForContact({
-              contactId: contactForOpening,
-              agentUserId,
-              channel: "meta",
-            });
-            if (opening.status === "skipped") {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
-              );
-            } else {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
-              );
-            }
-          } catch (err) {
-            log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
-          }
+        } catch (err) {
+          log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
         }
       }
       return {};
@@ -4618,62 +4574,8 @@ async function executeStep(
     }
 
     case "ask_ai_agent": {
-      // Chama um agente de IA com o prompt configurado (interpolando
-      // variáveis) e salva a resposta como variável de contexto pra
-      // usar nos próximos passos (ex: condition, send_whatsapp_message).
-      const agentId = readString(cfg, "agentId");
-      if (!agentId) throw new Error("ask_ai_agent: agentId não configurado");
-      const promptTemplate = readString(cfg, "promptTemplate") ?? "";
-      const variableName = readString(cfg, "saveToVariable") ?? "ai_response";
-
-      const vars = (cfg as Record<string, unknown>)["__variables"] as
-        | Record<string, unknown>
-        | undefined;
-      const prompt = vars
-        ? interpolateVariables(promptTemplate, vars)
-        : promptTemplate;
-      if (!prompt.trim()) throw new Error("ask_ai_agent: prompt vazio");
-
-      // import dinâmico pra evitar ciclo (runner → prisma → services).
-      const { runAgent } = await import("@/services/ai/runner");
-      const openDeal = rt.contactId
-        ? await prisma.deal.findFirst({
-            where: { contactId: rt.contactId, status: "OPEN" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-      const conv = rt.contactId
-        ? await prisma.conversation.findFirst({
-            where: { contactId: rt.contactId, channel: "whatsapp" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-
-      const result = await runAgent({
-        agentId,
-        source: "automation",
-        userMessage: prompt,
-        conversationId: conv?.id ?? null,
-        contactId: rt.contactId ?? null,
-        dealId: openDeal?.id ?? null,
-      });
-      if (result.status === "FAILED") {
-        throw new Error(`ask_ai_agent: ${result.error ?? "falha no agente"}`);
-      }
-
-      // Persiste a variável no contexto da automation (mesma lógica
-      // usada por `set_variable`).
-      if (rt.contactId) {
-        const ctx = await getActiveContext(rt.automationId, rt.contactId);
-        if (ctx) {
-          const next = { ...((ctx.variables as Record<string, unknown>) ?? {}) };
-          next[variableName] = result.text;
-          await advanceContext(ctx.id, ctx.currentStepId, next);
-        }
-      }
-      return {};
+      // Rodava o motor antigo de agente, que foi removido.
+      throw new Error("ask_ai_agent: passo descontinuado");
     }
 
     case "business_hours": {

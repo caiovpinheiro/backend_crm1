@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tipos e helpers para os controles operacionais ("piloting") do
  * agente de IA — ficam acima do prompt LLM e não dependem dele pra
  * serem respeitados.
@@ -52,6 +52,24 @@ export function computeTypingDelayMs(textLength: number, perCharMs: number): num
   const normalizedPerChar = Math.max(0, Math.min(perCharMs, 200));
   const raw = base + Math.max(0, textLength) * normalizedPerChar;
   return Math.min(Math.max(base, Math.round(raw)), 25_000);
+}
+
+/** Menor "digitando…" visível quando o turno já demorou. */
+export const MIN_TYPING_MS = 800;
+
+/**
+ * "Digitando…" dentro do orçamento: no máximo `maxTypingMs` e descontando o
+ * que o turno já levou desde `turnStartedAt` (o cliente já esperou esse
+ * tempo pensando). Nunca menos que MIN_TYPING_MS.
+ */
+export function typingDelayWithinBudget(
+  delayMs: number,
+  opts: { maxTypingMs?: number; turnStartedAt?: number },
+  now: number = Date.now(),
+): number {
+  let ms = opts.maxTypingMs && opts.maxTypingMs > 0 ? Math.min(delayMs, opts.maxTypingMs) : delayMs;
+  if (opts.turnStartedAt) ms -= Math.max(0, now - opts.turnStartedAt);
+  return Math.max(Math.min(MIN_TYPING_MS, delayMs), Math.round(ms));
 }
 
 // ── Qualification questions ───────────────────────────────────
@@ -303,19 +321,19 @@ export function buildAutoClosePromptBlock(policy: AutoClosePolicy): string {
     return [
       "ENCERRAMENTO AUTOMÁTICO (pilotagem): DESLIGADO.",
       "NÃO chame `close_conversation`. Nunca encerre o ticket.",
-      "Se o aluno se despedir, responda com educação e continue disponível.",
+      "Se o contato se despedir, responda com educação e continue disponível.",
     ].join("\n");
   }
   if (policy.mode === "explicit") {
     return [
       "ENCERRAMENTO AUTOMÁTICO (pilotagem): só pedido explícito.",
-      "NÃO chame `close_conversation`. O sistema encerra sozinho quando o aluno pedir para encerrar/finalizar ou usar uma palavra-chave configurada.",
+      "NÃO chame `close_conversation`. O sistema encerra sozinho quando o contato pedir para encerrar/finalizar ou usar uma palavra-chave configurada.",
       "Não interprete \"obrigado\", \"boa noite\" ou \"qualquer dúvida eu pergunto\" como encerramento.",
     ].join("\n");
   }
   return [
     "ENCERRAMENTO AUTOMÁTICO (pilotagem): a IA pode encerrar.",
-    "Chame `close_conversation` quando entender que o aluno concluiu (não precisa mais, despedida clara, \"era só isso\") e AINDA NÃO houve consultor humano.",
+    "Chame `close_conversation` quando entender que o contato concluiu (não precisa mais, despedida clara, \"era só isso\") e AINDA NÃO houve consultor humano.",
     "NÃO encerre só por \"obrigado\", \"ok\" ou \"boa noite\" se o assunto ainda estiver aberto.",
     "Não peça confirmação extra se a intenção de encerrar estiver clara.",
   ].join("\n");

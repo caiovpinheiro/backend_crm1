@@ -43,6 +43,7 @@ import {
   cancelAiReplyDebounce,
   kickAiAfterInboxAssign,
 } from "@/services/ai/inbound-debounce";
+import { resetV2ConversationStateOwner } from "@/services/ai-v2/state";
 
 async function resolveConversationAssignFlags(user: {
   id: string;
@@ -256,6 +257,11 @@ export async function POST(request: Request, context: RouteContext) {
             result.conversation.assignedTo?.type === "AI" &&
             result.conversation.contactId
           ) {
+            // Se for agente v2 (motor simples), reseta o estado para o agente
+            // poder responder — evita owner="pessoa" herdado de atendimento humano.
+            if (result.conversation.assignedTo?.aiAgentConfig?.engine === "simple") {
+              void resetV2ConversationStateOwner(id);
+            }
             kickAiAfterInboxAssign({
               conversationId: id,
               contactId: result.conversation.contactId,
@@ -371,6 +377,11 @@ export async function POST(request: Request, context: RouteContext) {
               result.conversation.assignedTo?.type === "AI" &&
               result.conversation.contactId
             ) {
+              // Se for agente v2 (motor simples), reseta o estado para o agente
+              // poder responder — evita owner="pessoa" herdado de atendimento humano.
+              if (result.conversation.assignedTo?.aiAgentConfig?.engine === "simple") {
+                void resetV2ConversationStateOwner(id);
+              }
               kickAiAfterInboxAssign({
                 conversationId: id,
                 contactId: result.conversation.contactId,

@@ -1092,8 +1092,6 @@ export async function executeDistribution(
   );
 
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
-  // Await: o card precisa estar no funil operacional assim que o consultor
-  // humano for responsável (fire-and-forget perdia corridas com o inbox).
   let selectedIsHuman = false;
   try {
     const assigneeType = await prisma.user.findUnique({
@@ -1103,30 +1101,6 @@ export async function executeDistribution(
     selectedIsHuman = assigneeType?.type === "HUMAN";
   } catch {
     selectedIsHuman = false;
-  }
-
-  if (
-    selectedIsHuman &&
-    (input.triggerSource === "AI_AGENT" ||
-      (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
-  ) {
-    try {
-      // Funil operacional é refino de vertical: quem define é o pack do
-      // agente da conversa. Sem pack, o card não muda de etapa — nunca
-      // aplicamos o funil de uma organização em outra.
-      const { resolveAgentVerticalForConversation } = await import(
-        "@/services/ai/agent-vertical"
-      );
-      const { ops } = await resolveAgentVerticalForConversation(
-        input.conversationId ?? null,
-      );
-      await ops.moveOpenDealToEmAtendimento?.({
-        dealId: assignedDealId,
-        contactId: input.contactId ?? null,
-      });
-    } catch (e) {
-      console.error("[distribution] moveOpenDealToEmAtendimento failed", e);
-    }
   }
 
   // Saudação pós-distribuição (`lead_distributed`): HUMAN assumindo vindo
