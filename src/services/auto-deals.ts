@@ -30,6 +30,7 @@
  * a algum deal) e scripts de backfill manual.
  */
 
+import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -255,6 +256,10 @@ export async function ensureOpenDealForContact(
   if (!deal) {
     throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
   }
+
+  // O `new_message` só purga os pipelines onde o contato já tem deal, e
+  // este deal nasce em paralelo à mensagem — o card novo entra por aqui.
+  scheduleBoardInvalidation(getOrgIdOrThrow(), pipeline.id);
 
   fireTrigger("deal_created", {
     dealId: deal.id,

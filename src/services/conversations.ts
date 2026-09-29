@@ -4,7 +4,12 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
-import { inboxTabCountsKey, invalidateInboxTabCounts } from "@/lib/cache/keys";
+import {
+  INBOX_TAB_COUNTS_FP_LENGTH,
+  inboxTabCountsHistKey,
+  inboxTabCountsKey,
+  invalidateInboxTabCounts,
+} from "@/lib/cache/keys";
 import {
   resolveConversationId,
   userHasConversationAccess,
@@ -51,6 +56,13 @@ import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/servic
  * 90s é rede de segurança se a invalidação falhar.
  */
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
+
+/**
+ * Abas históricas (todos/resolvidos/finalizados) varrem todas as conversas
+ * da org, inclusive fechadas (~620 ms). Cache próprio (`:hist`), fora da
+ * invalidação por mudança de aba: podem ficar até 10 min desatualizadas.
+ */
+const TAB_COUNTS_HIST_CACHE_TTL_SEC = 600;
 
 /**
  * 1ª página de Encerradas: em vez de DISTINCT ON em todo o histórico
@@ -1924,7 +1936,7 @@ function inboxTabCountsScopeFp(args: {
         }),
       )
       .digest("hex")
-      .slice(0, 20);
+      .slice(0, INBOX_TAB_COUNTS_FP_LENGTH);
   } catch {
     return null;
   }
@@ -2002,6 +2014,7 @@ export async function getTabCounts(
       filterConditions,
       search,
       collapseByContact,
+      inboxTabCountsHistKey(orgId, scopeFp),
     ),
   );
 }
@@ -2013,7 +2026,28 @@ function tabCountExpr(tabCond: Prisma.Sql, collapse: boolean): Prisma.Sql {
   return Prisma.sql`COUNT(*) FILTER (WHERE ${tabCond})::int`;
 }
 
-async function tryComputeTabCountsOneSql(args: {
+/** Consulta histórica: todas as conversas do escopo, inclusive fechadas. */
+type HistTabCounts = {
+  /** Só MEMBER (OR das categorias). ADMIN soma abertas + resolvidos + finalizados. */
+  todos: number | null;
+  resolvidos: number;
+  finalizados: number;
+};
+
+/** Consulta ativa: só conversas abertas (closedAt e followUpAt nulos). */
+type ActiveTabCounts = Record<
+  | "entrada"
+  | "esperando"
+  | "respondidas"
+  | "agente_ia"
+  | "automacao"
+  | "erro"
+  | "abertas"
+  | "ligar",
+  number
+>;
+
+type TabCountsScope = {
   visibilityCollapsed?: Prisma.ConversationWhereInput;
   todosMemberCategoryTabs?: InboxCategoryTab[] | null;
   allowedChannelIds?: string[] | null;
@@ -2021,217 +2055,176 @@ async function tryComputeTabCountsOneSql(args: {
   searchWhere: Prisma.ConversationWhereInput | null;
   countAgentReply: boolean;
   collapseByContact: boolean;
-}): Promise<Record<InboxTab, number> | null> {
+  assigneeIdsByType: AssigneeIdsByType;
+};
+
+function tabCountsSharedWhere(
+  scope: TabCountsScope,
+  orgId: string,
+): Prisma.ConversationWhereInput[] {
+  const shared: Prisma.ConversationWhereInput[] = [{ organizationId: orgId }];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    shared.push(scope.visibilityCollapsed);
+  }
+  if (scope.allowedChannelIds) {
+    shared.push({ channelId: { in: scope.allowedChannelIds } });
+  }
+  if (scope.extra.length > 0) shared.push(...scope.extra);
+  if (scope.searchWhere) shared.push(scope.searchWhere);
+  return shared;
+}
+
+function memberTodosTabs(scope: TabCountsScope): InboxCategoryTab[] | null {
+  return scope.todosMemberCategoryTabs && scope.todosMemberCategoryTabs.length > 0
+    ? scope.todosMemberCategoryTabs
+    : null;
+}
+
+// Encerradas / Resolvendo: DISTINCT contato+canal (sem channelId).
+// Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
+// MEMBER = COUNT das filas permitidas. Varre todas as conversas da org.
+async function tryComputeHistTabCountsOneSql(
+  scope: TabCountsScope,
+): Promise<HistTabCounts | null> {
   const orgId = getOrgIdOrNull();
   if (!orgId) return null;
 
-  const shared: Prisma.ConversationWhereInput[] = [{ organizationId: orgId }];
-  if (args.visibilityCollapsed && Object.keys(args.visibilityCollapsed).length > 0) {
-    shared.push(args.visibilityCollapsed);
-  }
-  if (args.allowedChannelIds) {
-    shared.push({ channelId: { in: args.allowedChannelIds } });
-  }
-  if (args.extra.length > 0) shared.push(...args.extra);
-  if (args.searchWhere) shared.push(args.searchWhere);
-
-  const sharedSql = sqlConversationWhere({ AND: shared }, orgId);
-  if (!sharedSql) return null;
-
-  const tabSql = (where: Prisma.ConversationWhereInput): Prisma.Sql | null =>
-    sqlConversationWhere(where, orgId);
-
-  const entrada = tabSql(tabToWhere("entrada", args.countAgentReply));
-  const esperando = tabSql(tabToWhere("esperando", args.countAgentReply));
-  const respondidas = tabSql(tabToWhere("respondidas", args.countAgentReply));
-  const agenteIa = tabSql(tabToWhere("agente_ia", args.countAgentReply));
-  const automacao = tabSql(tabToWhere("automacao", args.countAgentReply));
-  const resolvidos = tabSql(tabToWhere("resolvidos", args.countAgentReply));
-  const finalizados = tabSql(tabToWhere("finalizados", args.countAgentReply));
-  const erro = tabSql(tabToWhere("erro", args.countAgentReply));
-  const abertas = tabSql(activeInboxQueueGuardWhere());
-  const ligar = tabSql(ligarTabWhere());
-  const todosWhere =
-    args.todosMemberCategoryTabs && args.todosMemberCategoryTabs.length > 0
-      ? {
-          OR: args.todosMemberCategoryTabs.map((t) =>
-            tabToWhere(t, args.countAgentReply),
-          ),
-        }
-      : null;
-  const todos = todosWhere ? tabSql(todosWhere) : Prisma.sql`TRUE`;
-
-  if (
-    !entrada ||
-    !esperando ||
-    !respondidas ||
-    !agenteIa ||
-    !automacao ||
-    !resolvidos ||
-    !finalizados ||
-    !erro ||
-    !abertas ||
-    !ligar ||
-    !todos
-  ) {
-    return null;
-  }
-
-  const collapse = args.collapseByContact;
-  const openSql = sqlConversationWhere(
-    { AND: [...shared, { closedAt: null, followUpAt: null }] },
+  const sharedSql = sqlConversationWhere(
+    { AND: tabCountsSharedWhere(scope, orgId) },
     orgId,
   );
-  if (!openSql) return null;
+  if (!sharedSql) return null;
 
-  // Encerradas / Resolvendo: DISTINCT contato+canal (sem channelId).
-  // Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
-  // MEMBER = COUNT das filas permitidas. Abas OPEN usam o índice
-  // parcial conversations_inbox_open_idx (closedAt/followUpAt nulos).
+  const resolvidos = sqlConversationWhere(
+    tabToWhere("resolvidos", scope.countAgentReply),
+    orgId,
+  );
+  const finalizados = sqlConversationWhere(
+    tabToWhere("finalizados", scope.countAgentReply),
+    orgId,
+  );
+  const memberTabs = memberTodosTabs(scope);
+  const todos = memberTabs
+    ? sqlConversationWhere(
+        { OR: memberTabs.map((t) => tabToWhere(t, scope.countAgentReply)) },
+        orgId,
+      )
+    : Prisma.sql`TRUE`;
+  if (!resolvidos || !finalizados || !todos) return null;
+
+  const collapse = scope.collapseByContact;
   try {
-    const [allRows, openRows] = await Promise.all([
-      prisma.$queryRaw<
-        [{ todos: number; resolvidos: number; finalizados: number }]
-      >`
-        SELECT
-          ${
-            args.todosMemberCategoryTabs?.length
-              ? Prisma.sql`${tabCountExpr(todos, false)} AS todos`
-              : Prisma.sql`COUNT(*)::int AS todos`
-          },
-          ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
-          ${tabCountExpr(finalizados, collapse)} AS finalizados
-        FROM conversations c
-        WHERE ${sharedSql}
-      `,
-      prisma.$queryRaw<
-        [{
-          entrada: number;
-          esperando: number;
-          respondidas: number;
-          agente_ia: number;
-          automacao: number;
-          erro: number;
-          abertas: number;
-          ligar: number;
-        }]
-      >`
-        SELECT
-          ${tabCountExpr(entrada, false)} AS entrada,
-          ${tabCountExpr(esperando, false)} AS esperando,
-          ${tabCountExpr(respondidas, false)} AS respondidas,
-          ${tabCountExpr(agenteIa, false)} AS agente_ia,
-          ${tabCountExpr(automacao, false)} AS automacao,
-          ${tabCountExpr(erro, false)} AS erro,
-          ${tabCountExpr(abertas, false)} AS abertas,
-          ${tabCountExpr(ligar, false)} AS ligar
-        FROM conversations c
-        WHERE ${openSql}
-      `,
-    ]);
-    const all = allRows[0];
-    const open = openRows[0];
-    if (!all || !open) return null;
+    const rows = await prisma.$queryRaw<
+      [{ todos: number; resolvidos: number; finalizados: number }]
+    >`
+      SELECT
+        ${
+          memberTabs
+            ? Prisma.sql`${tabCountExpr(todos, false)} AS todos`
+            : Prisma.sql`COUNT(*)::int AS todos`
+        },
+        ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
+        ${tabCountExpr(finalizados, collapse)} AS finalizados
+      FROM conversations c
+      WHERE ${sharedSql}
+    `;
+    const row = rows[0];
+    if (!row) return null;
     return {
-      entrada: open.entrada ?? 0,
-      esperando: open.esperando ?? 0,
-      respondidas: open.respondidas ?? 0,
-      agente_ia: open.agente_ia ?? 0,
-      automacao: open.automacao ?? 0,
-      resolvidos: all.resolvidos ?? 0,
-      finalizados: all.finalizados ?? 0,
-      erro: open.erro ?? 0,
-      todos: args.todosMemberCategoryTabs?.length
-        ? (all.todos ?? 0)
-        : (open.abertas ?? 0) + (all.resolvidos ?? 0) + (all.finalizados ?? 0),
-      abertas: open.abertas ?? 0,
-      ligar: open.ligar ?? 0,
+      todos: memberTabs ? (row.todos ?? 0) : null,
+      resolvidos: row.resolvidos ?? 0,
+      finalizados: row.finalizados ?? 0,
     };
   } catch (err) {
     getLogger("conversations").warn(
-      { err },
+      { err, part: "hist" },
       "tab counts one-SQL failed — falling back to sequential COUNT",
     );
     return null;
   }
 }
 
-async function computeTabCounts(
-  visibilityWhere?: Prisma.ConversationWhereInput,
-  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
-  allowedChannelIds?: string[] | null,
-  filterConditions?: Prisma.ConversationWhereInput[],
-  search?: string | null,
-  collapseByContact = true,
-): Promise<Record<InboxTab, number>> {
-  const extra = filterConditions ?? [];
-  const searchWhere = await buildConversationSearchWhere(search);
-  const [countAgentReply, assigneeIdsByType] = await Promise.all([
-    countAgentReplyAsAnswered(),
-    loadAssigneeIdsByType(),
-  ]);
-  const visibilityCollapsed =
-    visibilityWhere && Object.keys(visibilityWhere).length > 0
-      ? rewriteAssignedToType(visibilityWhere, assigneeIdsByType)
-      : visibilityWhere;
+// Abas OPEN usam o índice parcial conversations_inbox_open_idx
+// (closedAt/followUpAt nulos).
+async function tryComputeActiveTabCountsOneSql(
+  scope: TabCountsScope,
+): Promise<ActiveTabCounts | null> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return null;
 
-  const oneSql = await tryComputeTabCountsOneSql({
-    visibilityCollapsed,
-    todosMemberCategoryTabs,
-    allowedChannelIds,
-    extra,
-    searchWhere,
-    countAgentReply,
-    collapseByContact,
+  const tabSql = (where: Prisma.ConversationWhereInput): Prisma.Sql | null =>
+    sqlConversationWhere(where, orgId);
+
+  const entrada = tabSql(tabToWhere("entrada", scope.countAgentReply));
+  const esperando = tabSql(tabToWhere("esperando", scope.countAgentReply));
+  const respondidas = tabSql(tabToWhere("respondidas", scope.countAgentReply));
+  const agenteIa = tabSql(tabToWhere("agente_ia", scope.countAgentReply));
+  const automacao = tabSql(tabToWhere("automacao", scope.countAgentReply));
+  const erro = tabSql(tabToWhere("erro", scope.countAgentReply));
+  const abertas = tabSql(activeInboxQueueGuardWhere());
+  const ligar = tabSql(ligarTabWhere());
+  if (
+    !entrada ||
+    !esperando ||
+    !respondidas ||
+    !agenteIa ||
+    !automacao ||
+    !erro ||
+    !abertas ||
+    !ligar
+  ) {
+    return null;
+  }
+
+  const openSql = tabSql({
+    AND: [...tabCountsSharedWhere(scope, orgId), { closedAt: null, followUpAt: null }],
   });
-  if (oneSql) return oneSql;
+  if (!openSql) return null;
 
-  // Fallback: where não traduziu (filtro raro). Paraleliza COUNT se o
-  // pool (DB_POOL_MAX) couber; senão sequencial — a agregada (oneSql)
-  // já foi tentada acima e falhou por where não traduzível.
-  const lightTabs = TAB_LIST.filter(
-    (t) => t !== "finalizados" && t !== "resolvidos",
-  );
-  const countTab = async (tab: InboxCategoryTab) => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(tabToWhere(tab, countAgentReply));
-    if (allowedChannelIds) {
-      conditions.push({ channelId: { in: allowedChannelIds } });
-    }
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(
-      conditions,
-      collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
-      assigneeIdsByType,
+  try {
+    const rows = await prisma.$queryRaw<[ActiveTabCounts]>`
+      SELECT
+        ${tabCountExpr(entrada, false)} AS entrada,
+        ${tabCountExpr(esperando, false)} AS esperando,
+        ${tabCountExpr(respondidas, false)} AS respondidas,
+        ${tabCountExpr(agenteIa, false)} AS agente_ia,
+        ${tabCountExpr(automacao, false)} AS automacao,
+        ${tabCountExpr(erro, false)} AS erro,
+        ${tabCountExpr(abertas, false)} AS abertas,
+        ${tabCountExpr(ligar, false)} AS ligar
+      FROM conversations c
+      WHERE ${openSql}
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      entrada: row.entrada ?? 0,
+      esperando: row.esperando ?? 0,
+      respondidas: row.respondidas ?? 0,
+      agente_ia: row.agente_ia ?? 0,
+      automacao: row.automacao ?? 0,
+      erro: row.erro ?? 0,
+      abertas: row.abertas ?? 0,
+      ligar: row.ligar ?? 0,
+    };
+  } catch (err) {
+    getLogger("conversations").warn(
+      { err, part: "active" },
+      "tab counts one-SQL failed — falling back to sequential COUNT",
     );
-  };
-  const countAbertas = () => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(activeInboxQueueGuardWhere());
-    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  };
-  const countLigar = () => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(ligarTabWhere());
-    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  };
+    return null;
+  }
+}
 
+// ── Fallback: where não traduziu para SQL (filtro raro) ────────────
+//
+// Paraleliza COUNT se o pool (DB_POOL_MAX) couber; senão sequencial.
+
+const TAB_COUNTS_LIGHT_TABS = TAB_LIST.filter(
+  (t) => t !== "finalizados" && t !== "resolvidos",
+);
+
+function tabCountsRunSequential(): boolean {
   // Mirror de defaultPoolMax em prisma-base (api=20) — sem export novo.
   const poolMax = (() => {
     const raw = process.env.DB_POOL_MAX?.trim();
@@ -2250,58 +2243,172 @@ async function computeTabCounts(
     if (mode === "worker-automation") return 6;
     return 4;
   })();
-  const parallelBudget = lightTabs.length + 4; // +resolvidos +finalizados +abertas +ligar
+  const parallelBudget = TAB_COUNTS_LIGHT_TABS.length + 4; // +resolvidos +finalizados +abertas +ligar
+  return poolMax < parallelBudget;
+}
 
-  let lightResults: Array<readonly [InboxCategoryTab, number]>;
+function countTabFallback(scope: TabCountsScope, tab: InboxCategoryTab): Promise<number> {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    conditions.push(scope.visibilityCollapsed);
+  }
+  conditions.push(tabToWhere(tab, scope.countAgentReply));
+  if (scope.allowedChannelIds) {
+    conditions.push({ channelId: { in: scope.allowedChannelIds } });
+  }
+  if (scope.extra.length > 0) conditions.push(...scope.extra);
+  if (scope.searchWhere) conditions.push(scope.searchWhere);
+  return countConversationsLikeList(
+    conditions,
+    scope.collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
+    scope.assigneeIdsByType,
+  );
+}
+
+/** `abertas` / `ligar`: guard da fila no lugar da aba. */
+function countGuardFallback(
+  scope: TabCountsScope,
+  guard: Prisma.ConversationWhereInput,
+): Promise<number> {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    conditions.push(scope.visibilityCollapsed);
+  }
+  conditions.push(guard);
+  if (scope.allowedChannelIds) conditions.push({ channelId: { in: scope.allowedChannelIds } });
+  if (scope.extra.length > 0) conditions.push(...scope.extra);
+  if (scope.searchWhere) conditions.push(scope.searchWhere);
+  return countConversationsLikeList(conditions, false, scope.assigneeIdsByType);
+}
+
+async function computeHistTabCountsFallback(scope: TabCountsScope): Promise<HistTabCounts> {
   let resolvidos: number;
   let finalizados: number;
+  if (tabCountsRunSequential()) {
+    resolvidos = await countTabFallback(scope, "resolvidos");
+    finalizados = await countTabFallback(scope, "finalizados");
+  } else {
+    [resolvidos, finalizados] = await Promise.all([
+      countTabFallback(scope, "resolvidos"),
+      countTabFallback(scope, "finalizados"),
+    ]);
+  }
+  const memberTabs = memberTodosTabs(scope);
+  const todos = memberTabs
+    ? await countTodosTab(
+        scope.visibilityCollapsed,
+        memberTabs,
+        scope.allowedChannelIds,
+        scope.extra,
+        scope.searchWhere,
+        scope.countAgentReply,
+        false,
+        scope.assigneeIdsByType,
+      )
+    : null;
+  return { todos, resolvidos, finalizados };
+}
+
+async function computeActiveTabCountsFallback(
+  scope: TabCountsScope,
+): Promise<ActiveTabCounts> {
+  let lightResults: Array<readonly [InboxCategoryTab, number]>;
   let abertas: number;
   let ligar: number;
 
-  if (poolMax < parallelBudget) {
+  if (tabCountsRunSequential()) {
     lightResults = [];
-    for (const tab of lightTabs) {
-      lightResults.push([tab, await countTab(tab)]);
+    for (const tab of TAB_COUNTS_LIGHT_TABS) {
+      lightResults.push([tab, await countTabFallback(scope, tab)]);
     }
-    resolvidos = await countTab("resolvidos");
-    finalizados = await countTab("finalizados");
-    abertas = await countAbertas();
-    ligar = await countLigar();
+    abertas = await countGuardFallback(scope, activeInboxQueueGuardWhere());
+    ligar = await countGuardFallback(scope, ligarTabWhere());
   } else {
-    const [light, res, fin, ab, lig] = await Promise.all([
+    const [light, ab, lig] = await Promise.all([
       Promise.all(
-        lightTabs.map(async (tab) => [tab, await countTab(tab)] as const),
+        TAB_COUNTS_LIGHT_TABS.map(
+          async (tab) => [tab, await countTabFallback(scope, tab)] as const,
+        ),
       ),
-      countTab("resolvidos"),
-      countTab("finalizados"),
-      countAbertas(),
-      countLigar(),
+      countGuardFallback(scope, activeInboxQueueGuardWhere()),
+      countGuardFallback(scope, ligarTabWhere()),
     ]);
     lightResults = light;
-    resolvidos = res;
-    finalizados = fin;
     abertas = ab;
     ligar = lig;
   }
 
-  const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
-  record.resolvidos = resolvidos;
-  record.finalizados = finalizados;
-  record.todos = todosMemberCategoryTabs?.length
-    ? await countTodosTab(
-        visibilityCollapsed,
-        todosMemberCategoryTabs,
-        allowedChannelIds,
-        extra,
-        searchWhere,
-        countAgentReply,
-        false,
-        assigneeIdsByType,
-      )
-    : abertas + resolvidos + finalizados;
-  record.abertas = abertas;
-  record.ligar = ligar;
-  return record;
+  const light = Object.fromEntries(lightResults) as Omit<ActiveTabCounts, "abertas" | "ligar">;
+  return { ...light, abertas, ligar };
+}
+
+/**
+ * As duas consultas rodam em paralelo. A histórica (~620 ms) tem cache
+ * próprio em `histCacheKey` (TTL 10 min): quando só a ativa expira, roda
+ * apenas a consulta das abertas (~95 ms). Cada parte cai no COUNT
+ * sequencial sozinha se o where dela não traduzir para SQL.
+ */
+async function computeTabCounts(
+  visibilityWhere?: Prisma.ConversationWhereInput,
+  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
+  allowedChannelIds?: string[] | null,
+  filterConditions?: Prisma.ConversationWhereInput[],
+  search?: string | null,
+  collapseByContact = true,
+  /** Sem chave (escopo sem hash), calcula a histórica sem cache. */
+  histCacheKey?: string,
+): Promise<Record<InboxTab, number>> {
+  const extra = filterConditions ?? [];
+  const searchWhere = await buildConversationSearchWhere(search);
+  const [countAgentReply, assigneeIdsByType] = await Promise.all([
+    countAgentReplyAsAnswered(),
+    loadAssigneeIdsByType(),
+  ]);
+  const visibilityCollapsed =
+    visibilityWhere && Object.keys(visibilityWhere).length > 0
+      ? rewriteAssignedToType(visibilityWhere, assigneeIdsByType)
+      : visibilityWhere;
+
+  const scope: TabCountsScope = {
+    visibilityCollapsed,
+    todosMemberCategoryTabs,
+    allowedChannelIds,
+    extra,
+    searchWhere,
+    countAgentReply,
+    collapseByContact,
+    assigneeIdsByType,
+  };
+
+  const computeHist = async () =>
+    (await tryComputeHistTabCountsOneSql(scope)) ??
+    computeHistTabCountsFallback(scope);
+  const computeActive = async () =>
+    (await tryComputeActiveTabCountsOneSql(scope)) ??
+    computeActiveTabCountsFallback(scope);
+
+  const [hist, active] = await Promise.all([
+    histCacheKey
+      ? cache.wrap(histCacheKey, TAB_COUNTS_HIST_CACHE_TTL_SEC, computeHist)
+      : computeHist(),
+    computeActive(),
+  ]);
+
+  return {
+    entrada: active.entrada,
+    esperando: active.esperando,
+    respondidas: active.respondidas,
+    agente_ia: active.agente_ia,
+    automacao: active.automacao,
+    resolvidos: hist.resolvidos,
+    finalizados: hist.finalizados,
+    erro: active.erro,
+    todos: memberTodosTabs(scope)
+      ? (hist.todos ?? 0)
+      : active.abertas + hist.resolvidos + hist.finalizados,
+    abertas: active.abertas,
+    ligar: active.ligar,
+  };
 }
 
 export async function linkContactToConversation(conversationId: string, contactId: string) {
