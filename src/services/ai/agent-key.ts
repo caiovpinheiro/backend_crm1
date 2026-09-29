@@ -66,6 +66,55 @@ export async function getAgentApiKey(agentId: string): Promise<string> {
   return key;
 }
 
+/** Chave Anthropic colada com lixo (aspas, "Bearer", espaços): limpa. */
+export function sanitizeAnthropicApiKey(raw: string): string {
+  return raw
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim()
+    .replace(/^(?:Bearer\s+|ANTHROPIC_API_KEY\s*=\s*)/i, "")
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\s\r\n]+/g, "");
+}
+
+export function looksLikeAnthropicApiKey(raw: string): boolean {
+  return /^sk-ant-[A-Za-z0-9_-]{10,}$/.test(sanitizeAnthropicApiKey(raw));
+}
+
+/** Chave Anthropic do agente (modelos Claude). Lança se não houver. */
+export async function getAgentAnthropicKey(agentId: string): Promise<string> {
+  const row = (await prismaBase.aIAgentConfig.findUnique({
+    where: { id: agentId },
+    select: { anthropicApiKeyEnc: true } as never,
+  })) as { anthropicApiKeyEnc?: string | null } | null;
+  if (!row?.anthropicApiKeyEnc) throw new Error("NO_ANTHROPIC_KEY");
+  let key: string;
+  try {
+    key = decryptSecret(row.anthropicApiKeyEnc).trim();
+  } catch {
+    throw new Error("A chave Anthropic deste agente não pôde ser lida. Cadastre a chave de novo na tela do agente.");
+  }
+  if (!key) throw new Error("NO_ANTHROPIC_KEY");
+  return key;
+}
+
+export async function tryGetAgentAnthropicKey(agentId: string): Promise<string | null> {
+  try {
+    return await getAgentAnthropicKey(agentId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Chave para responder ao cliente com `model`: Claude usa a da Anthropic; os
+ * demais, a da OpenAI (`openaiKey`, quando já carregada).
+ */
+export async function getAgentChatKey(agentId: string, model: string, openaiKey?: string): Promise<string> {
+  if (model.startsWith("claude-")) return getAgentAnthropicKey(agentId);
+  return openaiKey ?? getAgentApiKey(agentId);
+}
+
 /** Variante que não lança — pra checagens de "está configurado?". */
 export async function tryGetAgentApiKey(
   agentId: string,

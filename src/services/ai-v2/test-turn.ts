@@ -1,0 +1,856 @@
+/**
+ * Simulação de turno v2 para a aba Testar (e o comparador).
+ * Não persiste estado nem executa ações reais, mas decide como a produção:
+ * mesma escolha de assunto, regras terminais, política de ações, guarda de
+ * fonte e o que o cliente receberia ao transferir.
+ */
+
+import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2Stage } from "@/lib/ai-v2/types";
+import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
+import { MESSAGE_MODEL_MIN_COVERAGE, introBeforeMaterial, messageModelCoverage } from "./sent-materials";
+import { getV2ThemeById } from "./themes";
+import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
+import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
+import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
+import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
+import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
+import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
+import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
+import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
+import { callV2LLMTest } from "./llm";
+import { guardV2Output } from "./output-guard";
+import { knowledgeChunkTexts } from "./ground-reply";
+import { systemMessage } from "@/lib/ai-v2/system-messages";
+import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
+import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, type V2LoadedContext } from "./context";
+import { tryGetAgentApiKey } from "@/services/ai/agent-key";
+import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
+import { fieldMasks } from "@/lib/ai-v2/field-mask";
+import { getRequestContext, enterRequestContext } from "@/lib/request-context";
+
+export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
+
+export type V2TestTurnResult = {
+  userMessage: string;
+  appliedRuleId: string | null;
+  appliedRuleName: string | null;
+  themeId: string | null;
+  themeName: string | null;
+  reply: string;
+  reason: string;
+  handoff: boolean;
+  closed: boolean;
+  toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>;
+  ragChunks: Array<{ docId?: string; docTitle?: string; text?: string; score?: number }>;
+  executedActions: Array<{ action: V2Action; label: string }>;
+  discardedActions: Array<{ action: V2Action; label: string; reason: string }>;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  tone: string;
+  responseLength: string;
+  globalRules: string[];
+  systemPrompt: string;
+  expandedByLength?: boolean;
+  crmContext: V2CRMContext;
+  dealSelectionReason: string;
+  scrubbedFields?: string[];
+  /** Estágio da conversa após este turno (para simulação multi-turno). */
+  stage?: V2Stage;
+  /**
+   * Botões/lista que a produção mandaria. `reply` segue com as opções
+   * numeradas (o que vai quando o canal não aceita botões).
+   */
+  interactive?: { kind: "buttons" | "list"; body: string; labels: string[]; displayContent: string } | null;
+  /** Opção da mensagem anterior que a mensagem do cliente escolheu. */
+  chosenOption?: string | null;
+  /** Para onde a conversa iria ao transferir (pedido do modelo > assunto > padrão). */
+  handoffDestination?: V2Destination | null;
+  /** Texto da mensagem pronta que sairia depois da resposta (o cliente recebe os dois). */
+  materialText?: string;
+};
+
+const ACTION_LABELS: Record<string, string> = {
+  add_tag: "Adicionar etiqueta",
+  update_field: "Atualizar campo",
+  add_note: "Registrar anotação",
+  create_deal: "Criar negócio",
+  move_stage: "Mover etapa do negócio",
+  create_activity: "Criar atividade",
+  send_message_model: "Enviar mensagem pronta",
+  send_product: "Enviar produto",
+  send_whatsapp_template: "Enviar template oficial",
+  send_material_attachment: "Enviar anexo do material",
+  ask_with_options: "Perguntar com opções",
+  close_conversation: "Encerrar conversa",
+  tabulate_conversation: "Classificar atendimento",
+  handoff: "Passar para uma pessoa",
+  set_theme: "Definir assunto",
+  set_variable: "Definir variável",
+  record_knowledge_gap: "Registrar dúvida sem resposta",
+  start_survey: "Iniciar pesquisa de satisfação",
+  send_message: "Enviar mensagem",
+};
+
+function actionLabel(type: string): string {
+  return ACTION_LABELS[type] ?? type;
+}
+
+const QUERY_TOOL_NAMES = new Set([
+  "search_products",
+  "search_crm_records",
+  "knowledge_search",
+  "list_message_models",
+]);
+
+function isEmptyQueryResult(result: unknown): boolean {
+  if (result === null || result === undefined) return true;
+  if (typeof result !== "object") return false;
+  const r = result as Record<string, unknown>;
+  if ("total" in r && typeof r.total === "number") return r.total === 0;
+  if ("products" in r && Array.isArray(r.products)) return r.products.length === 0;
+  if ("contacts" in r || "deals" in r) {
+    return (
+      (!Array.isArray(r.contacts) || r.contacts.length === 0) &&
+      (!Array.isArray(r.deals) || r.deals.length === 0)
+    );
+  }
+  if ("chunks" in r && Array.isArray(r.chunks)) return r.chunks.length === 0;
+  if ("models" in r && Array.isArray(r.models)) return r.models.length === 0;
+  return false;
+}
+
+function allQueryToolResultsEmpty(
+  toolCalls: Array<{ toolName: string; result: unknown }> | undefined,
+): boolean {
+  if (!toolCalls || toolCalls.length === 0) return false;
+  const queryCalls = toolCalls.filter((c) => QUERY_TOOL_NAMES.has(c.toolName));
+  if (queryCalls.length === 0) return false;
+  return queryCalls.every((c) => isEmptyQueryResult(c.result));
+}
+
+function renderConfirmationText(config: V2AgentConfig, context: V2CRMContext, vars: Record<string, unknown>): string {
+  const rendered = renderMessage(
+    config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
+    vars,
+    defaultFormatter(),
+  );
+  return applyConfirmationIdentity(rendered, confirmationIdentityValues({
+    fieldKeys: config.entry.confirmationFields ?? [],
+    fieldLabels: [...config.contextFields.contact, ...config.contextFields.deal],
+    sources: [context.contactRaw, context.selectedDealRaw, context.contact, context.selectedDeal],
+    masks: fieldMasks(config),
+  }));
+}
+
+/**
+ * Texto das mensagens prontas cujos links saem no filtro: as escolhidas pelo
+ * modelo e, quando a resposta traz link, as liberadas no assunto (igual à produção).
+ */
+async function chosenModelTexts(actions: Array<{ type: string; modelId?: unknown }>, organizationId: string | null | undefined, extraIds: string[] = []): Promise<string[]> {
+  const ids = [...new Set([...actions.filter((a) => a.type === "send_message_model" && typeof a.modelId === "string").map((a) => a.modelId as string), ...extraIds])];
+  if (ids.length === 0 || !organizationId) return [];
+  try {
+    const { prisma } = await import("@/lib/prisma");
+    const rows: Array<{ content: string | null }> = await (prisma as any).messageTemplate.findMany({ where: { id: { in: ids }, organizationId }, select: { content: true } });
+    return (rows ?? []).map((r) => r.content ?? "");
+  } catch {
+    return [];
+  }
+}
+
+export async function simulateV2Turn(
+  agentId: string,
+  config: V2AgentConfig,
+  userMessage: string,
+  history: V2TestTurnHistoryItem[] = [],
+  organizationId?: string,
+  contactId?: string,
+  selectedDealId?: string,
+  stage: V2Stage = "active",
+  /** Assunto do turno anterior, para manter o assunto como em produção. */
+  currentThemeId?: string | null,
+  /**
+   * Comparador: o ponto é o meio de uma conversa real, mesmo sem histórico.
+   * Sem isto, o 1º ponto virava boas-vindas/confirmação e era comparado com a
+   * resposta da pessoa.
+   */
+  opts: { skipEntry?: boolean } = {},
+): Promise<V2TestTurnResult> {
+  // Clique/número na opção da mensagem anterior vira o rótulo, como na produção.
+  const lastAgent = [...history].reverse().find((h) => h.role === "assistant")?.content ?? null;
+  const chosenOption = matchPendingOption(optionsFromAgentMessage(lastAgent), userMessage);
+  if (chosenOption && chosenOption !== userMessage.trim()) {
+    traceStep("opções", `Cliente escolheu a opção "${chosenOption}"`);
+    userMessage = chosenOption;
+  }
+  // Garante contexto de tenant para as tools do motor no ambiente de teste.
+  if (organizationId && !getRequestContext()) {
+    enterRequestContext({
+      organizationId,
+      userId: "test-simulation",
+      isSuperAdmin: false,
+      actor: { type: "AI", label: "Agente v2 (teste)", ref: agentId },
+    });
+  }
+
+  let context: V2CRMContext;
+  if (organizationId) {
+    context = await loadV2Context({
+      organizationId,
+      config,
+      contactId,
+      selectedDealId,
+    });
+    traceStep("dados", describeV2ContextForTrace(config, context as V2LoadedContext));
+  } else {
+    context = { contact: null, deals: [], selectedDeal: null, fields: config.contextFields };
+  }
+
+  // Fluxo de entrada na primeira mensagem da simulação.
+  // Reproduz boas-vindas + confirmação/identificação antes de chamar o modelo.
+  const effectiveStage: V2Stage = history.length === 0 && !opts.skipEntry ? "idle" : stage;
+  if (effectiveStage === "idle") {
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
+    if (!context.selectedDeal) {
+      if (config.entry.onDealNotFound === "ask_identification") {
+        const parts: string[] = [];
+        if (config.entry.openingEnabled && config.entry.openingMessage) {
+          parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+        }
+        parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
+        const identReply = parts.filter(Boolean).join("\n\n");
+        return {
+          userMessage,
+          appliedRuleId: null,
+          appliedRuleName: null,
+          themeId: null,
+          themeName: null,
+          reply: identReply,
+          reason: "Primeira mensagem: fluxo de entrada (identificação).",
+          handoff: false,
+          closed: false,
+          toolCalls: [],
+          ragChunks: [],
+          executedActions: [],
+          discardedActions: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 0,
+          tone: config.tone ?? "",
+          responseLength: config.responseLength ?? "medium",
+          globalRules: config.globalRules,
+          systemPrompt: "",
+          crmContext: context,
+          dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+          stage: "identifying",
+        };
+      }
+    } else if (config.entry.confirmContact) {
+      const mode = config.entry.confirmationMode ?? "combined";
+      if (mode === "separate_turn") {
+        const welcomeMsg = config.entry.openingEnabled && config.entry.openingMessage
+          ? renderMessage(config.entry.openingMessage, vars, defaultFormatter())
+          : "";
+        return {
+          userMessage,
+          appliedRuleId: null,
+          appliedRuleName: null,
+          themeId: null,
+          themeName: null,
+          reply: welcomeMsg,
+          reason: "Primeira mensagem: boas-vindas. A confirmação será perguntada no próximo turno.",
+          handoff: false,
+          closed: false,
+          toolCalls: [],
+          ragChunks: [],
+          executedActions: [],
+          discardedActions: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 0,
+          tone: config.tone ?? "",
+          responseLength: config.responseLength ?? "medium",
+          globalRules: config.globalRules,
+          systemPrompt: "",
+          crmContext: context,
+          dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+          stage: "confirming",
+        };
+      }
+
+      const parts: string[] = [];
+      if (config.entry.openingEnabled && config.entry.openingMessage) {
+        parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+      }
+      parts.push(renderConfirmationText(config, context, vars));
+      const entryReply = parts.filter(Boolean).join("\n\n");
+      return {
+        userMessage,
+        appliedRuleId: null,
+        appliedRuleName: null,
+        themeId: null,
+        themeName: null,
+        reply: entryReply,
+        reason: "Primeira mensagem: fluxo de entrada (boas-vindas / confirmação).",
+        handoff: false,
+        closed: false,
+        toolCalls: [],
+        ragChunks: [],
+        executedActions: [],
+        discardedActions: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        tone: config.tone ?? "",
+        responseLength: config.responseLength ?? "medium",
+        globalRules: config.globalRules,
+        systemPrompt: "",
+        crmContext: context,
+        dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+        stage: "confirming",
+      };
+    } else if (config.entry.openingEnabled && config.entry.openingMessage?.trim() && isGreetingOnlyMessage(userMessage)) {
+      // Sem confirmação: boas-vindas quando a primeira mensagem é só cumprimento (igual à produção).
+      return {
+        userMessage,
+        appliedRuleId: null,
+        appliedRuleName: null,
+        themeId: null,
+        themeName: null,
+        reply: renderMessage(config.entry.openingMessage, vars, defaultFormatter()),
+        reason: "Primeira mensagem só com cumprimento: boas-vindas configuradas.",
+        handoff: false,
+        closed: false,
+        toolCalls: [],
+        ragChunks: [],
+        executedActions: [],
+        discardedActions: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        tone: config.tone ?? "",
+        responseLength: config.responseLength ?? "medium",
+        globalRules: config.globalRules,
+        systemPrompt: "",
+        crmContext: context,
+        dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+        stage: "active",
+      };
+    }
+  }
+
+  // Turno seguinte às boas-vindas no modo separate_turn: envia a confirmação.
+  if (effectiveStage === "confirming" && config.entry.confirmContact && (config.entry.confirmationMode ?? "combined") === "separate_turn") {
+    const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
+    const confirmMsg = renderConfirmationText(config, context, vars);
+    return {
+      userMessage,
+      appliedRuleId: null,
+      appliedRuleName: null,
+      themeId: null,
+      themeName: null,
+      reply: confirmMsg,
+      reason: "Confirmação de identidade no turno seguinte.",
+      handoff: false,
+      closed: false,
+      toolCalls: [],
+      ragChunks: [],
+      executedActions: [],
+      discardedActions: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      tone: config.tone ?? "",
+      responseLength: config.responseLength ?? "medium",
+      globalRules: config.globalRules,
+      systemPrompt: "",
+      crmContext: context,
+      dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+      stage: "confirming",
+    };
+  }
+
+  // Se há vários negócios abertos e o operador configurou "perguntar",
+  // o teste mostra a pergunta sem gastar chamada de modelo.
+  if (config.dealSelection === "ask" && context.deals && context.deals.length > 1 && !context.selectedDeal) {
+    const askMessage = buildAskDealMessage(context.deals, config);
+    return {
+      userMessage,
+      appliedRuleId: null,
+      appliedRuleName: null,
+      themeId: null,
+      themeName: null,
+      reply: askMessage,
+      reason: "Vários negócios abertos — perguntando qual tratar.",
+      handoff: false,
+      closed: false,
+      toolCalls: [],
+      ragChunks: [],
+      executedActions: [],
+      discardedActions: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      tone: config.tone ?? "",
+      responseLength: config.responseLength ?? "medium",
+      globalRules: config.globalRules,
+      systemPrompt: "",
+      crmContext: context,
+      dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+      stage: "active",
+    };
+  }
+
+  const apiKey = await tryGetAgentApiKey(agentId);
+  if (!apiKey) {
+    throw new Error("NO_OPENAI_KEY");
+  }
+
+  const rule = evaluateV2Rules(
+    config,
+    {
+      userMessage,
+      isFirstMessage: history.length === 0,
+      withinBusinessHours: isWithinV2BusinessHours(config),
+      // Como em produção: etiquetas do cliente e etapa do negócio carregados.
+      contactTags: (context.contactRaw?.tags as string[] | undefined) ?? [],
+      dealStageName: context.selectedDealRaw?.stageName as string | undefined,
+      mediaKinds: ["text"],
+    },
+    context,
+  );
+  const appliedRuleId = rule?.id ?? null;
+  const vars = buildVariableMap(config.variables, context.contact, context.selectedDeal, context.contactRaw, context.selectedDealRaw, config);
+
+  const quickResult = (partial: Partial<V2TestTurnResult> & { reply: string; reason: string }): V2TestTurnResult => ({
+    userMessage,
+    appliedRuleId,
+    appliedRuleName: rule?.name ?? null,
+    themeId: null,
+    themeName: null,
+    handoff: false,
+    closed: false,
+    toolCalls: [],
+    ragChunks: [],
+    executedActions: [],
+    discardedActions: [],
+    inputTokens: 0,
+    outputTokens: 0,
+    latencyMs: 0,
+    tone: config.tone ?? "",
+    responseLength: config.responseLength ?? "medium",
+    globalRules: config.globalRules,
+    systemPrompt: "",
+    crmContext: context,
+    dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+    stage: "active",
+    ...partial,
+  });
+
+  // Pedido de pessoa, igual à produção: com pergunta junto, responde primeiro;
+  // sem assunto, pergunta uma vez (se a última mensagem do agente já foi a
+  // pergunta, transfere).
+  let humanRequestWithQuestion = false;
+  let ruleForTurn: V2Rule | null = rule;
+  if (rule?.actions.some((a) => a.type === "handoff") && mentionsHumanRequest(config, userMessage)) {
+    const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
+    if (humanRequestSubject(config, userMessage)) {
+      humanRequestWithQuestion = true;
+      ruleForTurn = { ...rule, actions: rule.actions.filter((a) => a.type !== "handoff") } as V2Rule;
+      traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
+    } else if (!history.some((h) => h.role === "assistant" && h.content.trim() === ask)) {
+      traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
+      return quickResult({ reply: ask, reason: "Pedido de pessoa sem assunto: pergunta uma vez o que precisa e transfere na próxima mensagem." });
+    }
+  }
+  // Regra com ação terminal: em produção o turno acaba ali, sem modelo.
+  // Antes o teste seguia para o modelo e mostrava outra resposta.
+  const ruleTurn = ruleForTurn ? simulateTerminalRule(config, ruleForTurn, vars) : null;
+  if (ruleTurn) {
+    if (ruleTurn.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "rule", { keepFirst: true });
+    return quickResult({
+      reply: ruleTurn.reply,
+      reason: `Regra "${rule!.name}" respondeu sem chamar o modelo.`,
+      handoff: ruleTurn.handoff,
+      closed: ruleTurn.closed,
+      executedActions: ruleTurn.executed,
+    });
+  }
+
+  // Tema escolhido pela regra ou, como em produção: gatilho > significado >
+  // assunto atual da conversa. Antes o teste usava só gatilhos e não
+  // lembrava o assunto entre mensagens.
+  let themeId: string | null = null;
+  if (rule?.actions.some((a) => a.type === "set_theme" && a.themeId)) {
+    themeId = rule.actions.find((a) => a.type === "set_theme")?.themeId ?? null;
+  }
+  if (!themeId) {
+    const selection = await selectV2ThemeSemantic({
+      config,
+      message: userMessage,
+      currentThemeId: currentThemeId ?? undefined,
+      apiKey,
+      answeringQuestion: agentAskedQuestion(lastAgent, config),
+    });
+    themeId = selection.theme?.id ?? currentThemeId ?? null;
+    noteV2Fact("theme", { method: selection.method, themeId: selection.theme?.id ?? null, similarity: selection.similarity ?? null });
+  } else {
+    noteV2Fact("theme", { method: "rule", themeId, similarity: null });
+  }
+  const selectedTheme = getV2ThemeById(config, themeId ?? undefined);
+  if (selectedTheme?.directHandoff) {
+    noteV2Fact("handoffCause", "direct_theme", { keepFirst: true });
+    return quickResult({
+      reply: renderMessage(selectedTheme.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter()),
+      reason: `Assunto "${selectedTheme.name}" vai direto para o destino, sem resposta do agente.`,
+      handoff: true,
+      themeId: selectedTheme.id,
+      themeName: selectedTheme.name,
+      handoffDestination: selectedTheme.handoffDestination ?? config.handoff.defaultDestination ?? null,
+    });
+  }
+
+  let llmResult: Awaited<ReturnType<typeof callV2LLMTest>>;
+  try {
+    llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId, effectiveStage === "idle" ? "active" : effectiveStage, { humanRequestWithQuestion });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[simulateV2Turn] LLM failed:", msg);
+    noteV2Fact("handoffCause", "error", { keepFirst: true });
+    llmResult = {
+      output: {
+        reply: config.fallback?.error?.message?.trim() || config.handoff.message,
+        handoff: true,
+        concluded: false,
+        confirmed: null,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: `Falha na chamada LLM: ${msg}`,
+        actions: [{ type: "handoff" }],
+      },
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: 0,
+      governorStats: { totalCalls: 0, replays: 0, denials: 0, limitHit: false },
+      toolCalls: [],
+      wasExpanded: false,
+      systemPrompt: "",
+    };
+  }
+  let output = llmResult.output;
+
+  // Guarda "sem material", a mesma da produção.
+  const noClientData = !context.contact && !context.selectedDeal;
+  const emptyQueries = allQueryToolResultsEmpty(llmResult.toolCalls);
+  const governorBlind = llmResult.governorStats?.limitHit && (!llmResult.toolCalls?.length || emptyQueries);
+  let noSourceApplied = false;
+  output = { ...output };
+  const guarded = applyNoSourceGuard({
+    config,
+    output,
+    context,
+    toolCalls: llmResult.toolCalls,
+    queriedEmpty: emptyQueries || !!governorBlind,
+    prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
+    themeId,
+  });
+  if (guarded.applied) {
+    noSourceApplied = !guarded.handoff;
+    if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
+    traceStep("verificação", guarded.handoff
+      ? "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → transfere"
+      : "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → mensagem \"sem material\"");
+  } else if (!output.handoff && !output.concluded && noClientData && governorBlind) {
+    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    output = noSourceMessage
+      ? { ...output, handoff: false, reply: noSourceMessage }
+      : { ...output, handoff: true, reply: config.handoff.message };
+    noSourceApplied = !!noSourceMessage;
+    if (!noSourceMessage) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
+  }
+
+  // Guarda de saída, como em produção.
+  const guard = guardV2Output(output.reply, config.allowedDomains, {
+    contact: context.contact,
+    citableContact: context.citableContact ?? null,
+    selectedDeal: context.selectedDeal,
+    citableDeal: context.citableDeal ?? null,
+    publicTexts: [userMessage],
+    ownerTexts: [
+      ...knowledgeChunkTexts(llmResult.toolCalls),
+      ...(await chosenModelTexts(output.actions ?? [], organizationId, /https?:\/\//i.test(output.reply) ? allowedMessageModelIdsFor(config, getV2ThemeById(config, themeId ?? undefined)) : [])),
+    ],
+  }, systemMessage(config, "returnPromiseHandoff"));
+  // Como sai no WhatsApp: link em Markdown vira "texto: link" (igual ao envio).
+  output = { ...output, reply: toWhatsAppText(applyBoldPolicy(guard.text, config.bold)) };
+  // Igual à produção: pedido novo nesta mensagem não encerra.
+  if (keepOpenOnNewRequest(config, userMessage, output)) {
+    output = { ...output, reason: `${output.reason} (não encerrou: o cliente fez um pedido nesta mensagem)`.trim() };
+  }
+  let handoff = output.handoff || !!guard.forceHandoff;
+  let closed = output.concluded;
+  if (output.handoff) noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });
+  // Causa sem depender do rastro (a simulação também roda fora dele).
+  const causeByModel = output.handoff && !guard.forceHandoff && !mentionsHumanRequest(config, userMessage);
+  const handoffCauseNow = () => (peekV2Fact("handoffCause") as string | undefined) ?? (causeByModel ? "model" : undefined);
+  if (guard.forceHandoff) noteV2Fact("handoffCause", "guard", { keepFirst: true });
+
+  // O assunto escolhido pelas frases vale. O tema do modelo só entra se nenhum
+  // casou e se existe (igual à produção).
+  if (!themeId && output.theme && config.themes.some((t) => t.id === output.theme)) {
+    themeId = output.theme;
+    noteV2Fact("theme", { method: "model", themeId, similarity: null });
+  }
+
+  // Mesma política de ações da produção (action-policy).
+  const activeTheme = getV2ThemeById(config, themeId ?? undefined);
+  const allowedTools = allowedActionTypes(config, activeTheme);
+  const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  const executedActions: V2TestTurnResult["executedActions"] = [];
+  const discardedActions: V2TestTurnResult["discardedActions"] = [];
+  for (const action of output.actions) {
+    if (action.type === "handoff") {
+      handoff = true;
+      noteV2Fact("handoffCause", mentionsHumanRequest(config, userMessage) ? "human_request" : "model", { keepFirst: true });
+      executedActions.push({ action, label: actionLabel(action.type) });
+      continue;
+    }
+    const modelNotAllowed = action.type === "send_message_model" && !allowedModelIds.includes(String((action as { modelId?: unknown }).modelId ?? ""));
+    const valueNotAllowed = !actionValueAllowed(config, action);
+    if (allowedTools.has(action.type) && !modelNotAllowed && !valueNotAllowed) {
+      executedActions.push({ action, label: actionLabel(action.type) });
+    } else {
+      discardedActions.push({
+        action,
+        label: actionLabel(action.type),
+        reason: modelNotAllowed
+          ? "Esta mensagem pronta não está liberada para o agente/assunto."
+          : valueNotAllowed
+            ? "Etiqueta ou etapa fora das escolhidas em “O que ele pode fazer”."
+            : "A configuração do agente não libera esta ação.",
+      });
+    }
+  }
+  if (output.actions.some((a) => a.type === "close_conversation") && allowedTools.has("close_conversation")) closed = true;
+
+  // Cliente confuso ("?", "estou confusa"), igual à produção: refaz em vez de transferir.
+  if (
+    handoff &&
+    (config.fallback?.confusion?.action ?? "rephrase") === "rephrase" &&
+    peekV2Fact("handoffCause") === "model" &&
+    isConfusionMessage(userMessage)
+  ) {
+    handoff = false;
+    output = { ...output, handoff: false, reply: rephraseAfterConfusion(lastAgent, config), actions: output.actions.filter((a) => a.type !== "handoff") };
+    for (let i = executedActions.length - 1; i >= 0; i--) if (executedActions[i].action.type === "handoff") executedActions.splice(i, 1);
+    traceStep("resposta", "Cliente mostrou que não entendeu → refaz a pergunta em vez de transferir");
+  }
+
+  // Igual à produção: resposta que condiciona a transferência ("se continuar
+  // divergente, encaminho") espera o cliente responder.
+  let conditionalWait = false;
+  if (handoff && handoffCauseNow() === "model" && !closed && conditionalHandoff(output.reply)) {
+    handoff = false;
+    conditionalWait = true;
+    traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
+  }
+
+  // Sentimento, igual à produção.
+  if (shouldActOnSentiment(config, detectV2Sentiment(config, userMessage)) && config.sentiment.action === "handoff") {
+    handoff = true;
+    noteV2Fact("handoffCause", "sentiment", { keepFirst: true });
+  }
+  // Mensagem pronta anunciada e não liberada: produção transfere.
+  if (
+    discardedActions.some((d) => d.action.type === "send_message_model") &&
+    !executedActions.some((e) => e.action.type === "send_message_model")
+  ) {
+    handoff = true;
+    noteV2Fact("handoffCause", "message_model_not_allowed", { keepFirst: true });
+  }
+  if (handoff && closed) closed = false;
+
+  // Em produção, ao transferir o cliente recebe a mensagem de transferência,
+  // não a resposta do modelo; ao encerrar, a despedida (quando configurada).
+  // Mensagem pronta, igual à produção: com a resposta longa, se a mensagem
+  // pronta cobre o que a resposta explica, a resposta vira só a introdução;
+  // se traz outro conteúdo, saem as duas (resposta completa e depois a
+  // mensagem pronta). O texto da mensagem pronta entra no resultado — é o que
+  // o cliente recebe e o que o comparador mede.
+  let materialText = "";
+  const modelActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_message_model" && typeof e.action.modelId === "string");
+  if (modelActions.length > 0 && organizationId) {
+    try {
+      const { prisma } = await import("@/lib/prisma");
+      const rows: Array<{ id: string; name: string; content: string | null }> = await (prisma as any).messageTemplate.findMany({
+        where: { id: { in: modelActions.map((e) => e.action.modelId as string) }, organizationId },
+        select: { id: true, name: true, content: true },
+      });
+      const long = output.reply.trim().split(/\s+/).length > 40;
+      const all = rows ?? [];
+      const mode = messageModelModeFor(config, themeId);
+      if (all.length > 0 && messageModelFilesOnly(mode)) {
+        traceStep("ações", mode === "combine" ? "Mensagem pronta combinada na resposta; dela seguem só os arquivos" : "Modo “só a resposta”: da mensagem pronta seguem só os arquivos");
+      } else if (all.length > 0) {
+        materialText = all.map((r) => renderMessage(r.content ?? "", vars, defaultFormatter())).filter((t) => t.trim()).join("\n\n");
+        const covers = mode === "message_model" || (mode === "auto" && all.some((r) => (r.content ?? "").trim() && messageModelCoverage(output.reply, r.content ?? "") >= MESSAGE_MODEL_MIN_COVERAGE));
+        if (long && covers) {
+          const intro = introBeforeMaterial(output.reply);
+          traceStep("resposta", intro ? `Mensagem pronta a seguir: a resposta vira só a introdução (“${intro.slice(0, 80)}”)` : "Mensagem pronta a seguir: a resposta completa não sai (o material já responde)");
+          output = { ...output, reply: intro };
+        } else if (long) {
+          traceStep("ações", `Mensagem pronta ${all.map((r) => `"${r.name}"`).join(", ")} traz outro conteúdo — vai a resposta completa e, em seguida, a mensagem pronta`);
+        }
+      }
+    } catch {
+      // Sem banco (teste unitário): segue com a resposta como está.
+    }
+  }
+
+  let reply = output.reply;
+  let interactive: V2TestTurnResult["interactive"] = null;
+  if (handoff) {
+    // Mesma mensagem que a produção manda: "sem material" quando citava algo
+    // sem fonte, senão a do destino do assunto, senão a padrão.
+    const cause = handoffCauseNow();
+    // Igual à produção, um caminho só: explicação do modelo (sem as frases de
+    // aviso) + mensagem configurada; "sem material" só sem resposta validada.
+    const fallbackOnly = cause === "verification" || cause === "no_source";
+    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    const explanation = fallbackOnly ? "" : handoffExplanation(output.reply);
+    reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    if (explanation) reply = `${explanation}\n\n${reply}`;
+    // Fora do horário, a produção acrescenta o aviso de horário à mensagem de transferência.
+    const hoursNote = outsideHoursNote(config);
+    if (hoursNote) reply = `${reply}\n\n${hoursNote}`;
+  } else if (closed && config.closure.goodbyeMessage) {
+    reply = renderMessage(config.closure.goodbyeMessage, vars, defaultFormatter());
+  } else {
+    const askAction = executedActions.find((e) => e.action.type === "ask_with_options");
+    const options = normalizeAskOptions((askAction?.action as { options?: unknown[] } | undefined)?.options);
+    let labels = options.map((o) => o.label);
+    // Com material a seguir, a produção manda o fecho depois dele; aqui a
+    // apresentação fica sem fecho.
+    const materialFollows = executedActions.some((e) => e.action.type === "send_message_model" || e.action.type === "send_product" || e.action.type === "send_material_attachment");
+    // Transferência condicional não ganha fecho (igual à produção).
+    if (options.length === 0 && effectiveStage !== "confirming" && !output.outOfScope && !materialFollows && !noSourceApplied && !conditionalWait) {
+      // Fecho configurado, igual à produção.
+      const ending = applyReplyEnding({
+        reply,
+        ending: effectiveReplyEnding(config, activeTheme),
+        lastAgentMessage: lastAgent,
+        turnSeed: history.length,
+      });
+      reply = ending.text;
+      if (ending.added) labels = replyEndingButtons(effectiveReplyEnding(config, activeTheme), ending.kind);
+    }
+    if (labels.length > 0) {
+      const built = buildV2Interactive(reply, labels, { prompt: systemMessage(config, "optionsPrompt"), button: systemMessage(config, "optionsButton") });
+      interactive = built.payload
+        ? { kind: built.payload.kind, body: reply.trim(), labels: built.labels, displayContent: built.payload.displayContent }
+        : null;
+      reply = built.fallbackText;
+    }
+  }
+
+  // Confirmação negativa: produção volta a pedir identificação.
+  let nextStage: V2Stage = "active";
+  if (effectiveStage === "confirming" && output.confirmed === false && !handoff) {
+    reply = renderMessage(config.entry.identificationMessage ?? "Entendi. Vou precisar confirmar seus dados. Qual o e-mail ou CPF?", vars, defaultFormatter());
+    nextStage = "identifying";
+  }
+
+  const requestedDest = (output.actions.find((a) => a.type === "handoff") as { destination?: V2Destination } | undefined)?.destination;
+  const handoffDestination: V2Destination | null = handoff
+    ? requestedDest && typeof requestedDest === "object" && typeof requestedDest.type === "string"
+      ? requestedDest
+      : activeTheme?.handoffDestination ?? config.handoff.defaultDestination ?? null
+    : null;
+
+  // Extrai chunks do RAG dos toolCalls.
+  const ragChunks: V2TestTurnResult["ragChunks"] = [];
+  for (const call of llmResult.toolCalls ?? []) {
+    const result = call.result as Record<string, unknown> | undefined;
+    if (call.toolName === "knowledge_search" && result && Array.isArray(result.chunks)) {
+      for (const chunk of result.chunks as Array<Record<string, unknown>>) {
+        ragChunks.push({
+          docId: typeof chunk.docId === "string" ? chunk.docId : undefined,
+          docTitle: typeof chunk.docTitle === "string" ? chunk.docTitle : undefined,
+          text: typeof chunk.content === "string" ? chunk.content : undefined,
+          score: typeof chunk.distance === "number" ? chunk.distance : undefined,
+        });
+      }
+    }
+  }
+
+  return {
+    userMessage,
+    appliedRuleId,
+    appliedRuleName: rule?.name ?? null,
+    themeId,
+    themeName: activeTheme?.name ?? null,
+    reply,
+    reason: output.reason,
+    handoff,
+    closed,
+    toolCalls: llmResult.toolCalls ?? [],
+    ragChunks,
+    executedActions,
+    discardedActions,
+    inputTokens: llmResult.inputTokens,
+    outputTokens: llmResult.outputTokens,
+    latencyMs: llmResult.latencyMs,
+    tone: config.tone ?? "",
+    responseLength: config.responseLength ?? "medium",
+    globalRules: config.globalRules,
+    systemPrompt: llmResult.systemPrompt,
+    expandedByLength: llmResult.wasExpanded,
+    crmContext: context,
+    dealSelectionReason: context.dealSelectionReason ?? "Nenhum negócio carregado.",
+    scrubbedFields: guard.scrubbedFields,
+    stage: nextStage,
+    interactive: nextStage === "identifying" ? null : interactive,
+    chosenOption,
+    handoffDestination,
+    ...(materialText ? { materialText } : {}),
+  };
+}
+
+/**
+ * Ações terminais da regra, simuladas. Como em produção, só encerram o
+ * turno quando dariam certo: ação salva sem o parâmetro segue para o modelo.
+ */
+function simulateTerminalRule(
+  config: V2AgentConfig,
+  rule: V2Rule,
+  vars: Record<string, unknown>,
+): { reply: string; handoff: boolean; closed: boolean; executed: V2TestTurnResult["executedActions"] } | null {
+  const executed: V2TestTurnResult["executedActions"] = [];
+  const replies: string[] = [];
+  let handoff = false;
+  let closed = false;
+  let terminal = false;
+  for (const a of rule.actions) {
+    const action = a as unknown as V2Action;
+    if (a.type === "send_message" && a.message?.trim()) {
+      replies.push(renderMessage(a.message, vars, defaultFormatter()));
+    } else if ((a.type === "send_message_model" || a.type === "send_whatsapp_template") && a.modelId) {
+      replies.push(`(${actionLabel(a.type)}: ${a.modelId})`);
+    } else if (a.type === "handoff") {
+      handoff = true;
+    } else if (a.type === "close_conversation") {
+      closed = true;
+    } else if (a.type !== "no_reply") {
+      continue;
+    }
+    terminal = true;
+    executed.push({ action, label: actionLabel(a.type) });
+  }
+  if (!terminal) return null;
+  if (handoff && replies.length === 0) replies.push(renderMessage(config.handoff.message, vars, defaultFormatter()));
+  return { reply: replies.join("\n\n"), handoff, closed: closed && !handoff, executed };
+}

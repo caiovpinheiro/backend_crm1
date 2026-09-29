@@ -2391,7 +2391,7 @@ const ASSIGN_CONVERSATION_SELECT = {
     select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
   },
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, type: true, aiAgentConfig: { select: { id: true, engine: true } } },
   },
 } as const;
 

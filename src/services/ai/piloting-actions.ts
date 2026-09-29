@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Ações operacionais do agente de IA ("piloting") — lado do servidor.
  *
  * Reúnem duas primitivas compartilhadas entre o `inbox-handler`
@@ -20,14 +20,27 @@ import type { AIAgentAutonomy } from "@prisma/client";
 
 import {
   computeTypingDelayMs,
+  typingDelayWithinBudget,
   renderTemplate,
 } from "@/lib/ai-agents/piloting";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
+
+async function aiSenderName(agentUserId: string): Promise<string> {
+  const u = await prisma.user.findUnique({
+    where: { id: agentUserId },
+    select: { name: true },
+  });
+  return u?.name?.trim() || "Agente IA";
+}
 import { createActivity } from "@/services/activities";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
@@ -63,7 +76,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Despedida enviada → encerra o atendimento se o aluno já havia fechado o
+ * Despedida enviada → encerra o atendimento se o contato já havia fechado o
  * assunto. Fica aqui (e não só no inbox) porque a resposta pode sair pela
  * tool `send_message` ou pelo follow-up — todas passam por este envio.
  * Saudação e aviso de fora de horário nunca encerram.
@@ -114,10 +127,35 @@ export type SendAgentMessageResult =
  * fora do escopo do usuário logado — seria necessário resolver a
  * sessão Baileys correta por tenant, o que é escopo futuro).
  */
+/**
+ * Botões/lista do WhatsApp. `text` continua sendo a versão em texto
+ * (opções numeradas): vale fora da Meta, em rascunho e se o envio
+ * interativo for recusado.
+ */
+export type AgentInteractiveMessage = {
+  kind: "buttons" | "list";
+  /** Enviado antes, quando a resposta não cabe no corpo interativo. */
+  leadText?: string;
+  body: string;
+  options: Array<{ id: string; title: string; description?: string }>;
+  listButton: string;
+  /** Conteúdo registrado na conversa. */
+  displayContent: string;
+};
+
 export type HumanBehaviorConfig = {
   simulateTyping: boolean;
   typingPerCharMs: number;
   markMessagesRead: boolean;
+  /** Teto do "digitando…" (ms). Sem valor: o da fórmula (até 25 s). */
+  maxTypingMs?: number;
+  /** Início do turno (epoch ms): o tempo já gasto sai do "digitando…". */
+  turnStartedAt?: number;
+  /**
+   * Conferido depois do "digitando…": true → não envia (motivo
+   * "superseded"). Ex.: saudação quando o cliente já mandou o pedido.
+   */
+  abortIf?: () => Promise<boolean>;
 };
 
 export async function sendAgentMessage(args: {
@@ -136,7 +174,7 @@ export async function sendAgentMessage(args: {
   /**
    * Após handoff a tool já limpa o assignee. Sem este bypass a mensagem
    * de "vou te transferir" morre no assertAiStillAuthorized (unassigned)
-   * e o aluno fica sem resposta.
+   * e o contato fica sem resposta.
    */
   bypassAssigneeCheck?: boolean;
   /**
@@ -146,9 +184,19 @@ export async function sendAgentMessage(args: {
    * segunda confirmação (que só muda o horário) morre como near-duplicate.
    */
   bypassDuplicateGuard?: boolean;
+  interactive?: AgentInteractiveMessage;
 }): Promise<SendAgentMessageResult> {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
   if (!text) return { status: "skipped", reason: "empty" };
+
+  // Replay com handoff real: a mensagem fica só como rascunho na conversa
+  // de sandbox (apagada no fim); nenhum provedor é chamado. Antes de
+  // qualquer checagem de canal, para não depender de o sandbox estar
+  // desconectado por acaso.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
+    return saveDraft(args.conversationId, args.agentUserId, text);
+  }
 
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
@@ -243,7 +291,7 @@ export async function sendAgentMessage(args: {
   const isBaileys = args.channel === "baileys";
 
   // Resolve cliente Meta DESTE canal (token/phoneId do tenant). Sem isso,
-  // o agente IA da DNA enviava via numero da Eduit (singleton global env).
+  // o agente IA de uma org enviava pelo número de outra (singleton global env).
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
     select: {
@@ -275,7 +323,10 @@ export async function sendAgentMessage(args: {
 
       if (inboundWamid && simulateTyping) {
         await metaClient.sendTypingIndicator(inboundWamid);
-        const delayMs = computeTypingDelayMs(text.length, typingPerCharMs);
+        const delayMs = typingDelayWithinBudget(
+          computeTypingDelayMs(text.length, typingPerCharMs),
+          args.humanBehavior,
+        );
         await sleep(delayMs);
       } else if (inboundWamid && markMessagesRead) {
         try {
@@ -287,6 +338,16 @@ export async function sendAgentMessage(args: {
           );
         }
       }
+    }
+
+    if (args.humanBehavior?.abortIf) {
+      let abort = false;
+      try {
+        abort = await args.humanBehavior.abortIf();
+      } catch {
+        abort = false;
+      }
+      if (abort) return { status: "skipped", reason: "superseded" };
     }
 
     if (!args.bypassAssigneeCheck) {
@@ -304,26 +365,63 @@ export async function sendAgentMessage(args: {
     }
 
     let externalId: string | null = null;
-    try {
-      const send = await metaClient.sendText(contact.phone, text);
-      externalId = send.messages?.[0]?.id ?? null;
-    } catch (err) {
-      console.error(
-        `[ai-piloting] envio autônomo falhou conv=${args.conversationId}: ${err}. Gravando rascunho.`,
-      );
-      return saveDraft(args.conversationId, args.agentUserId, text);
+    let sentInteractive = false;
+    let leadSent = false;
+    const iv = args.interactive;
+    if (iv) {
+      try {
+        if (iv.leadText) {
+          await metaClient.sendText(contact.phone, iv.leadText);
+          leadSent = true;
+        }
+        const send =
+          iv.kind === "buttons"
+            ? await metaClient.sendInteractiveButtons(
+                contact.phone,
+                iv.body,
+                iv.options.map((o) => ({ id: o.id, title: o.title })),
+              )
+            : await metaClient.sendInteractiveList(contact.phone, iv.body, iv.listButton, [
+                { rows: iv.options },
+              ]);
+        externalId = send.messages?.[0]?.id ?? null;
+        sentInteractive = true;
+      } catch (err) {
+        // Recusado (janela, formato): as opções seguem numeradas no texto.
+        console.warn(
+          `[ai-piloting] envio interativo falhou conv=${args.conversationId}: ${err}. Enviando como texto.`,
+        );
+      }
     }
+    if (!sentInteractive) {
+      try {
+        const send = await metaClient.sendText(
+          contact.phone,
+          // O texto do corpo já saiu antes da falha: manda só as opções.
+          leadSent && iv?.leadText && text.startsWith(iv.leadText)
+            ? text.slice(iv.leadText.length).trim() || text
+            : text,
+        );
+        externalId = send.messages?.[0]?.id ?? null;
+      } catch (err) {
+        console.error(
+          `[ai-piloting] envio autônomo falhou conv=${args.conversationId}: ${err}. Gravando rascunho.`,
+        );
+        return saveDraft(args.conversationId, args.agentUserId, text);
+      }
+    }
+    const savedContent = sentInteractive && iv ? iv.displayContent : text;
 
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: args.conversationId,
         channelId: conv?.channelRef?.id ?? undefined,
-        content: text,
+        content: savedContent,
         direction: "out",
-        messageType: "text",
+        messageType: sentInteractive ? "interactive" : "text",
         authorType: "bot",
         aiAgentUserId: args.agentUserId,
-        senderName: "Agente IA",
+        senderName: await aiSenderName(args.agentUserId),
         externalId,
         sendStatus: "sent",
       }),
@@ -342,7 +440,7 @@ export async function sendAgentMessage(args: {
       conversationId: args.conversationId,
       contactId: args.contactId,
       direction: "out",
-      content: text,
+      content: savedContent,
       timestamp: saved.createdAt,
     });
     await closeAttendanceIfFarewell({
@@ -392,7 +490,7 @@ export async function sendAgentMessage(args: {
           messageType: "text",
           authorType: "bot",
           aiAgentUserId: args.agentUserId,
-          senderName: "Agente IA",
+          senderName: await aiSenderName(args.agentUserId),
           sendStatus: "pending",
         }),
       });
@@ -568,10 +666,12 @@ export type TriggerOpeningResult =
         | "agent_inactive"
         | "no_opening_message"
         | "already_greeted"
+        | "attendance_in_progress"
         | "off_hours"
         | "no_contact"
         | "tabulation_classifier"
-        | "farewell_closer";
+        | "farewell_closer"
+        | "replay_sandbox";
     };
 
 /**
@@ -596,7 +696,18 @@ export async function triggerAgentOpeningForContact(args: {
   /// Após transferência entre IAs: não trate o aviso do orquestrador
   /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
   ignorePriorBotOutbound?: boolean;
+  /// Instante em que o handoff começou. Se o bot já tinha falado ANTES
+  /// disso, o atendimento estava em curso e quem recebe não se apresenta:
+  /// `ignorePriorBotOutbound` existe para não contar o aviso da própria
+  /// transferência, mas acabava liberando saudação no meio da conversa.
+  handoffStartedAt?: Date | null;
 }): Promise<TriggerOpeningResult> {
+  // Replay com handoff real: a saudação do agente que recebeu o handoff
+  // sairia pelo canal do contato.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `agent_opening:${args.contactId}`);
+    return { status: "skipped", reason: "replay_sandbox" };
+  }
   // Usa a conversa aberta mais recente do contato. Na prática, o CRM
   // mantém 1 conversa por contato para canais (Meta/Baileys), então
   // isso resolve ao único canal ativo dele.
@@ -655,6 +766,22 @@ export async function triggerAgentOpeningForContact(args: {
     ignorePriorBotOutbound: Boolean(args.ignorePriorBotOutbound),
   })) {
     return { status: "skipped", reason: "already_greeted" };
+  }
+  if (args.handoffStartedAt) {
+    const spokeBefore = await prisma.message.findFirst({
+      where: {
+        conversationId: conversation.id,
+        direction: "out",
+        authorType: "bot",
+        isPrivate: false,
+        messageType: { not: "note" },
+        createdAt: { lt: args.handoffStartedAt },
+      },
+      select: { id: true },
+    });
+    if (spokeBefore) {
+      return { status: "skipped", reason: "attendance_in_progress" };
+    }
   }
 
   // Business hours gate — se fora, não dispara a saudação proativa.

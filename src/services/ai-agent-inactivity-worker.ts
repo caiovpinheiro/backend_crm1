@@ -169,6 +169,7 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
     ) last_in ON true
     WHERE u.type = 'AI'
       AND a.active = true
+      AND (a."engine" IS NULL OR a."engine" <> 'simple')
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
       AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
@@ -315,6 +316,15 @@ async function processIdleAiOnly(
 export async function tickOnce(now: Date = new Date()) {
   const { closed } = await processIdleAiOnly(now);
 
+  // Agentes v2 (engine "simple"): aviso e encerramento pela config de cada
+  // agente ("Começo e fim › Cliente sem responder"). A consulta acima os
+  // exclui de propósito.
+  await import("@/services/ai-v2/inactivity")
+    .then(({ processIdleV2 }) => processIdleV2(now))
+    .catch((err) =>
+      console.warn("[ai-inactivity] v2 falhou:", err instanceof Error ? err.message : err),
+    );
+
   // Aluno escreveu e a IA nunca respondeu (timer do debounce morreu num
   // restart de container, ou o flush estourou). Reprocessa ANTES da
   // distribuição de segurança, pra IA atender em vez de jogar o aluno na
@@ -376,6 +386,7 @@ export async function tickOnce(now: Date = new Date()) {
     JOIN "ai_agent_configs" a ON a."userId" = u.id
     WHERE u.type = 'AI'
       AND a.active = true
+      AND (a."engine" IS NULL OR a."engine" <> 'simple')
       AND a."inactivityTimerMs" > 0
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = true

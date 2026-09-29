@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Recuperação semântica (RAG) nos documentos de conhecimento
  * indexados do agente.
  *
@@ -14,6 +14,7 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts } from "@/services/ai/provider";
+import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
 
 export type RetrievedChunk = {
   id: string;
@@ -42,7 +43,41 @@ export type KnowledgeRetrieval = {
 
 const MIN_SIMILARITY = 0.6; // distance <= 0.4 ≈ bem relevante. Mantemos folgado.
 
+const LEXICAL_STOP = new Set([
+  "para", "como", "sobre", "pelo", "pela", "pelos", "pelas",
+  "uma", "uns", "umas", "que", "com", "sem", "por",
+  "dos", "das", "nos", "nas", "num", "numa",
+  "ao", "aos", "de", "da", "do", "em", "no", "na",
+  "os", "as", "um", "ou", "se", "eu", "me",
+]);
+
+function normalizeKnowledgeText(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, " ");
+}
+
+/** Título ou conteúdo contém os termos da pergunta. Cobre o corte de distância. */
+function knowledgeTextMatches(title: string, content: string, query: string): boolean {
+  const tokens = normalizeKnowledgeText(query)
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && !LEXICAL_STOP.has(word));
+  if (tokens.length === 0) return false;
+  const haystack = normalizeKnowledgeText(`${title}\n${content}`);
+  const hits = tokens.filter((token) => haystack.includes(token));
+  if (tokens.length <= 2) return hits.length === tokens.length;
+  return hits.length >= 2 && hits.length * 2 >= tokens.length;
+}
+
 const EMPTY: KnowledgeRetrieval = { chunks: [], expired: [] };
+
+function buildAllowedIdsClause(allowedDocIds: string[] | undefined, startParam: number): { clause: string; values: string[] } {
+  if (!allowedDocIds || allowedDocIds.length === 0) return { clause: "", values: [] };
+  const placeholders = allowedDocIds.map((_, i) => `$${startParam + i}`).join(",");
+  return { clause: ` AND d.id IN (${placeholders})`, values: allowedDocIds };
+}
 
 export async function retrieveAgentKnowledge(
   agentId: string,
@@ -50,11 +85,15 @@ export async function retrieveAgentKnowledge(
   apiKey: string,
   topK = 4,
   now: Date = new Date(),
+  allowedDocIds?: string[],
 ): Promise<KnowledgeRetrieval> {
   const text = query.trim();
   if (!text) return EMPTY;
 
   const orgId = getOrgIdOrThrow();
+
+  // Se a lista permitida é explicitamente vazia, não busca nada.
+  if (allowedDocIds !== undefined && allowedDocIds.length === 0) return EMPTY;
 
   // Checa rapidamente se o agente tem algo indexado antes de gastar
   // um embedding; evita chamadas à OpenAI quando não há docs. Como
@@ -64,8 +103,12 @@ export async function retrieveAgentKnowledge(
   // O `orderBy validUntil asc` aproveita a mesma ida ao banco para saber se
   // existe documento vencido: no Postgres ASC manda NULL para o fim, então
   // se a primeira linha não tem validade vencida, nenhuma tem.
+  const probeWhere: Record<string, unknown> = { agentId, status: "READY", chunkCount: { gt: 0 } };
+  if (allowedDocIds !== undefined && allowedDocIds.length > 0) {
+    probeWhere.id = { in: allowedDocIds };
+  }
   const probe = await prisma.aIAgentKnowledgeDoc.findFirst({
-    where: { agentId, status: "READY", chunkCount: { gt: 0 } },
+    where: probeWhere,
     orderBy: { validUntil: "asc" },
     select: { validUntil: true },
   });
@@ -87,6 +130,7 @@ export async function retrieveAgentKnowledge(
   // O corte por validade e parte do WHERE, nao um filtro posterior: doc
   // fora da janela nem disputa as `topK` vagas, senao um doc vencido
   // relevante roubaria o lugar de um doc valido.
+  const { clause: allowedClause, values: allowedValues } = buildAllowedIdsClause(allowedDocIds, 6);
   const rows = await prisma.$queryRawUnsafe<
     Array<{
       id: string;
@@ -106,7 +150,7 @@ export async function retrieveAgentKnowledge(
         AND d."organizationId" = $4
         AND c."organizationId" = $4
         AND (d."validFrom" IS NULL OR d."validFrom" <= $5)
-        AND (d."validUntil" IS NULL OR d."validUntil" >= $5)
+        AND (d."validUntil" IS NULL OR d."validUntil" >= $5)${allowedClause}
       ORDER BY c.embedding <=> $1::vector
       LIMIT $3`,
     vectorLiteral,
@@ -114,23 +158,29 @@ export async function retrieveAgentKnowledge(
     topK,
     orgId,
     now,
+    ...allowedValues,
   );
 
-  const chunks = rows
-    .filter((r) => r.distance <= MIN_SIMILARITY)
-    .map((r) => ({
-      id: r.id,
-      docId: r.docId,
-      docTitle: r.title,
-      content: r.content,
-      distance: Number(r.distance),
-    }));
+  const byDistance = rows.filter((r) => r.distance <= MIN_SIMILARITY);
+  const picked = byDistance.length > 0
+    ? byDistance
+    : rows.filter((r) => knowledgeTextMatches(r.title, r.content, text));
+  const chunks = picked.map((r) => ({
+    id: r.id,
+    docId: r.docId,
+    docTitle: r.title,
+    // Materiais já indexados no formato de payload do WhatsApp chegam aqui
+    // em JSON; o agente (e o cliente) precisam do texto.
+    content: unwrapMessagePayloadText(r.content),
+    distance: Number(r.distance),
+  }));
 
   if (!hasExpired) return { chunks, expired: [] };
 
   // Segunda consulta, mesmo embedding: quais documentos VENCIDOS seriam
   // relevantes para esta pergunta. Só os que o operador marcou para
   // orientar o agente — `silent` apenas para de ser servido.
+  const { clause: expiredAllowedClause, values: expiredAllowedValues } = buildAllowedIdsClause(allowedDocIds, 6);
   const expiredRows = await prisma.$queryRawUnsafe<
     Array<{
       docId: string;
@@ -150,7 +200,7 @@ export async function retrieveAgentKnowledge(
         AND c."organizationId" = $4
         AND d."expiredBehavior" = 'instruct'
         AND d."validUntil" IS NOT NULL
-        AND d."validUntil" < $5
+        AND d."validUntil" < $5${expiredAllowedClause}
       GROUP BY d.id, d.title, d."expiredInstruction"
       ORDER BY MIN(c.embedding <=> $1::vector)
       LIMIT $3`,
@@ -159,6 +209,7 @@ export async function retrieveAgentKnowledge(
     topK,
     orgId,
     now,
+    ...expiredAllowedValues,
   );
 
   const expired = expiredRows
@@ -229,7 +280,7 @@ export function formatRetrievalBlock(chunks: RetrievedChunk[]): string {
   return [
     "",
     // O [N] numera os trechos só para o modelo se orientar. Mandar "cite [N]"
-    // fazia o índice do chunk chegar no WhatsApp do aluno.
+    // fazia o índice do chunk chegar no WhatsApp do contato.
     "BASE DE CONHECIMENTO (use para fundamentar respostas). O [N] é índice interno: PROIBIDO escrever [1], [2] ou qualquer marcador de fonte na resposta ao cliente.",
     sections,
     KNOWLEDGE_ANSWER_RULES,

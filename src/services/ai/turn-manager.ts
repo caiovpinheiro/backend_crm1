@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Turn Manager — agrupamento persistente de inbound para o Agente IA.
  *
- * O cliente manda "Oi" / "preciso" / "de ajuda" / "com minha matrícula" em
+ * O cliente manda "Oi" / "preciso" / "de ajuda" / "com minha cadastro" em
  * quatro bolhas. Cada bolha continua sendo uma `Message` própria no banco
  * (nada é fundido, nada é sobrescrito); o `ConversationTurn` só REFERENCIA
  * os ids e materializa o texto concatenado quando o turno estabiliza. A IA
@@ -27,9 +27,11 @@ import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { llmMaxAttempts, llmTimeoutMs } from "@/services/ai/llm-retry";
 import {
   handleAiTestCommand,
   parseAiTestCommand,
@@ -88,9 +90,14 @@ export function isTurnManagerEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "on";
 }
 
-/** Teto de tempo em PROCESSING antes do turno ser considerado travado. */
+/**
+ * Teto de tempo em PROCESSING antes do turno ser considerado travado. Padrão:
+ * o pior caso do modelo (tentativas × tempo de cada uma) + 60 s de checagem,
+ * envio e digitação. Com 120 s fixos, um turno lento (3×60 s) era retomado
+ * por outro processo enquanto o primeiro ainda respondia.
+ */
 export function turnStaleMs(): number {
-  return envInt("AI_TURN_STALE_MS", 120_000);
+  return envInt("AI_TURN_STALE_MS", llmMaxAttempts() * llmTimeoutMs() + 60_000);
 }
 
 /** Tentativas de processamento antes do turno virar FAILED. */
@@ -320,6 +327,23 @@ export async function onInboundMessageForAi(
   // Messenger/Instagram, e vale mesmo quando a conversa ainda não é da IA.
   // Telefone não autorizado devolve `false` e a mensagem segue o fluxo
   // normal: nada na resposta revela que o comando existe.
+  // `#reset` (motor v2): recomeça o atendimento para quem está testando.
+  // Mesmo sigilo dos comandos de teste: número não autorizado segue normal.
+  const { isV2ResetCommand } = await import("@/services/ai-v2/reset");
+  if (isV2ResetCommand(input.userMessage)) {
+    const { handleV2ResetCommand } = await import("@/services/ai-v2/reset");
+    const consumed = await handleV2ResetCommand({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      messageId: input.messageId,
+      channel: input.channel,
+    }).catch((err) => {
+      console.error("[ai-v2] #reset falhou", err);
+      return false;
+    });
+    if (consumed) return;
+  }
+
   const testCommand = parseAiTestCommand(input.userMessage);
   if (testCommand) {
     const consumed = await handleAiTestCommand({
@@ -358,16 +382,13 @@ export async function onInboundMessageForAi(
     }
   }
 
-  if (!isTurnManagerEnabled()) {
-    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
-    await scheduleAiReply(input);
-    return;
-  }
-
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
 
-  // Allowlist (defesa em profundidade — o inbox-handler checa de novo).
+  // Allowlist ANTES de resolver o agente v2: o resolver atribui a conversa
+  // à IA, e um contato fora da allowlist ficava preso num agente que nunca
+  // responde. Os dois caminhos (turno e debounce antigo) já descartavam
+  // esse contato, então sair aqui não muda o que a IA responde.
   try {
     const allowed = await isContactAllowedForAi(input.contactId);
     if (!allowed) {
@@ -379,6 +400,17 @@ export async function onInboundMessageForAi(
     }
   } catch (e) {
     console.error("[ai-turn] phone allowlist check failed — blocking", e);
+    return;
+  }
+
+  const simpleAgent = await resolveV2AgentForConversation(
+    input.conversationId,
+  );
+  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
+
+  if (!useTurnManager) {
+    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
+    await scheduleAiReply(input);
     return;
   }
 
@@ -397,7 +429,9 @@ export async function onInboundMessageForAi(
   // promova mesmo em ambiente que não sobe worker dedicado (DEV com só
   // `APP_MODE=api`). Import dinâmico: o sweeper importa este módulo.
   void import("@/services/ai/turn-sweeper")
-    .then(({ startAiTurnSweeper }) => startAiTurnSweeper())
+    .then(({ startAiTurnSweeper }) =>
+      startAiTurnSweeper({ force: Boolean(simpleAgent) }),
+    )
     .catch(() => {
       /* fast path + cron cobrem */
     });
@@ -446,6 +480,34 @@ export function armFastPath(turnId: string, dueAt: number): void {
 export function clearFastPathTimers(): void {
   for (const timer of fastPathTimers.values()) clearTimeout(timer);
   fastPathTimers.clear();
+}
+
+/**
+ * Verifica se a conversa está atribuída a um agente que usa o motor
+ * simples (v2). Se não houver assignee, a v1 continua responsável.
+ */
+async function isSimpleEngineTurn(conversationId: string): Promise<boolean> {
+  try {
+    const conv = (await (prismaBase as unknown as {
+      conversation: { findUnique: (args: unknown) => Promise<unknown> };
+    }).conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        assignedTo: {
+          select: {
+            aiAgentConfig: { select: { engine: true } },
+          },
+        },
+      },
+    })) as { assignedTo?: { aiAgentConfig?: { engine?: string } } } | null;
+    return conv?.assignedTo?.aiAgentConfig?.engine === "simple";
+  } catch (err) {
+    console.error("[ai-turn] isSimpleEngineTurn falhou", {
+      conversationId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 // ── Promoção / claim / processamento ────────────────────────
@@ -549,6 +611,23 @@ export async function buildAggregatedText(
 }
 
 /**
+ * Tipo da última bolha do turno (texto, áudio, imagem…). O motor v2 decide
+ * a política de mídia por ele — sem isso "áudio → transferir" nunca disparava.
+ */
+async function lastMessageType(
+  organizationId: string,
+  messageIds: string[],
+): Promise<string | undefined> {
+  const lastId = messageIds[messageIds.length - 1];
+  if (!lastId) return undefined;
+  const row = await prismaBase.message.findFirst({
+    where: { organizationId, id: lastId },
+    select: { messageType: true },
+  });
+  return row?.messageType ?? undefined;
+}
+
+/**
  * Claim atômico READY → PROCESSING. `updateMany` + checagem de count é o
  * equivalente Prisma do `UPDATE ... WHERE status='READY' RETURNING *`:
  * o Postgres serializa os dois UPDATEs na mesma linha e o perdedor vê
@@ -563,6 +642,22 @@ export async function claimTurn(
   organizationId: string,
   claimedBy = workerIdentity(),
 ): Promise<ConversationTurn | null> {
+  // Um turno por vez em cada conversa: o turno aberto durante PROCESSING
+  // fica READY (e continua juntando bolhas) até o anterior terminar. Antes
+  // os dois rodavam juntos, ambos como "primeiro turno", e o cliente
+  // recebia duas respostas e o mesmo material duas vezes.
+  const pending = await prismaBase.conversationTurn.findUnique({
+    where: { id: turnId },
+  });
+  if (!pending || pending.status !== "READY") {
+    logTurn("claim_lost", { turnId, claimedBy });
+    return null;
+  }
+  if ((await otherLiveTurns(pending.conversationId, turnId)).length > 0) {
+    logTurn("claim_deferred", { turnId, conversationId: pending.conversationId });
+    return null;
+  }
+
   const res = await prismaBase.conversationTurn.updateMany({
     where: { id: turnId, organizationId, status: "READY" },
     data: {
@@ -579,8 +674,80 @@ export async function claimTurn(
   const turn = await prismaBase.conversationTurn.findUnique({
     where: { id: turnId },
   });
+  // Dois claims da mesma conversa ao mesmo tempo: quem gravou por último vê
+  // o outro. Fica o turno mais antigo; o mais novo volta a READY.
+  if (turn) {
+    const rivals = await otherLiveTurns(turn.conversationId, turnId);
+    if (rivals.some((r) => r.createdAt.getTime() < turn.createdAt.getTime() || (r.createdAt.getTime() === turn.createdAt.getTime() && r.id < turn.id))) {
+      await prismaBase.conversationTurn.updateMany({
+        where: { id: turnId, organizationId, status: "PROCESSING", claimedBy },
+        data: { status: "READY", claimedBy: null, claimedAt: null, openKey: turn.conversationId },
+      });
+      logTurn("claim_deferred", { turnId, conversationId: turn.conversationId });
+      return null;
+    }
+  }
   if (turn) logTurn("claimed", { turnId, claimedBy });
   return turn;
+}
+
+/** Outros turnos da conversa em PROCESSING e ainda vivos (dentro do teto). */
+async function otherLiveTurns(
+  conversationId: string,
+  turnId: string,
+): Promise<Array<{ id: string; createdAt: Date }>> {
+  const cutoff = Date.now() - turnStaleMs();
+  const rows = await prismaBase.conversationTurn.findMany({
+    where: { conversationId, status: "PROCESSING" },
+    select: { id: true, createdAt: true, claimedAt: true },
+  });
+  return rows.filter(
+    (r) => r.id !== turnId && r.claimedAt != null && new Date(r.claimedAt).getTime() >= cutoff,
+  );
+}
+
+/**
+ * A conversa passou para outro agente de IA no meio do turno: as mesmas
+ * mensagens viram um turno novo, pronto, para o novo responsável responder
+ * sem o cliente precisar escrever de novo. Roda quando o turno atual
+ * terminar (um por vez na conversa). Devolve o id do turno novo.
+ */
+export async function requeueTurnForAssignee(turnId: string): Promise<string | null> {
+  const t = await prismaBase.conversationTurn.findUnique({ where: { id: turnId } });
+  if (!t) return null;
+  const now = new Date();
+  const created = await prismaBase.conversationTurn.create({
+    data: {
+      organizationId: t.organizationId,
+      conversationId: t.conversationId,
+      contactId: t.contactId,
+      channel: t.channel,
+      status: "READY",
+      // Fora do "acumulando": não disputa o turno que o cliente abrir agora.
+      openKey: null,
+      messageIds: t.messageIds as Prisma.InputJsonValue,
+      aggregatedText: t.aggregatedText,
+      debounceMs: t.debounceMs,
+      maxWaitMs: t.maxWaitMs,
+      firstMessageAt: t.firstMessageAt,
+      lastMessageAt: t.lastMessageAt,
+      readyAt: now,
+    },
+  });
+  logTurn("requeued_for_assignee", { turnId: created.id, fromTurnId: turnId, conversationId: t.conversationId });
+  return created.id;
+}
+
+/** Turno que esperou o anterior terminar: despacha agora. */
+async function dispatchDeferredTurn(conversationId: string, finishedTurnId: string): Promise<void> {
+  const ready = await prismaBase.conversationTurn.findMany({
+    where: { conversationId, status: "READY" },
+    orderBy: { createdAt: "asc" },
+  });
+  const next = ready.find((t) => t.id !== finishedTurnId);
+  if (!next) return;
+  // Chegou bolha depois do READY: a janela reinicia (o sweeper pega depois).
+  await dispatchReadyTurn(next.id, next.organizationId);
 }
 
 /** Claim + execução do agente sobre o texto agregado. */
@@ -608,6 +775,8 @@ export async function runTurn(turn: {
   aggregatedText: string | null;
   messageIds: Prisma.JsonValue;
   attempts: number;
+  /** Momento do claim: o motor confere que ainda é o dono antes de cada envio. */
+  claimedAt?: Date | null;
 }): Promise<void> {
   const startedAt = Date.now();
   const messageIds = readMessageIds(turn.messageIds);
@@ -634,17 +803,35 @@ export async function runTurn(turn: {
           return;
         }
 
-        const { maybeReplyAsAIAgent } = await import(
-          "@/services/ai/inbox-handler"
-        );
-        await maybeReplyAsAIAgent({
-          conversationId: turn.conversationId,
-          contactId: turn.contactId ?? "",
-          userMessage: text,
-          channel: turn.channel === "baileys" ? "baileys" : "meta",
-          inboundMessageIds: messageIds,
-          turnId: turn.id,
-        });
+        const simple = await isSimpleEngineTurn(turn.conversationId);
+        if (simple) {
+          const { processV2Turn } = await import("@/services/ai-v2/engine");
+          await processV2Turn({
+            conversationId: turn.conversationId,
+            channel: turn.channel === "baileys" ? "baileys" : "meta",
+            userMessage: text,
+            messageType: await lastMessageType(turn.organizationId, messageIds),
+            turnId: turn.id,
+            messageIds,
+            // Nova tentativa depois de falha: o motor não responde de novo se a
+            // anterior já respondeu. Posse: turno retomado pelo sweeper (passou
+            // do teto) não pode continuar enviando em dois processos.
+            attempt: turn.attempts,
+            claimedAt: turn.claimedAt ?? null,
+          });
+        } else {
+          const { maybeReplyAsAIAgent } = await import(
+            "@/services/ai/inbox-handler"
+          );
+          await maybeReplyAsAIAgent({
+            conversationId: turn.conversationId,
+            contactId: turn.contactId ?? "",
+            userMessage: text,
+            channel: turn.channel === "baileys" ? "baileys" : "meta",
+            inboundMessageIds: messageIds,
+            turnId: turn.id,
+          });
+        }
 
         await completeTurn(turn.id, turn.organizationId);
         logTurn("completed", {
@@ -660,7 +847,15 @@ export async function runTurn(turn: {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[ai-turn] runTurn falhou", { turnId: turn.id, err: message });
     await failOrRetryTurn(turn.id, turn.organizationId, message);
+    // Falhou: o retry e o turno seguinte ficam com o sweeper.
+    return;
   }
+  void dispatchDeferredTurn(turn.conversationId, turn.id).catch((err) => {
+    console.error("[ai-turn] turno seguinte falhou", {
+      conversationId: turn.conversationId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  });
 }
 
 /** PROCESSING → COMPLETED. */

@@ -195,6 +195,7 @@ model Organization {
 
   @@index([status])
   @@map("organizations")
+  aiAgentConfigVersions    AIAgentConfigVersion[]
 }
 
 /// Feature flags por organizacao (PR 5.4).
@@ -5104,6 +5105,13 @@ model AIAgentConfig {
   @@index([archetype])
   @@index([templateId])
   @@map("ai_agent_configs")
+  responseBehavior     String           @default("balanced")
+  anthropicApiKeyEnc  String?
+  anthropicApiKeyHint String?
+  engine String? @default("legacy")
+  simpleConfig Json?
+  draftConfig Json?
+  versions      AIAgentConfigVersion[]
 }
 
 /// Molde reutilizável de agente (sistema ou por org). Dual-write com
@@ -5208,6 +5216,7 @@ model AIAgentKnowledgeDoc {
   @@index([agentId, status])
   @@index([agentId, validUntil])
   @@map("ai_agent_knowledge_docs")
+  themeIds       String[]              @default([])
 }
 
 enum AIAgentKnowledgeStatus {
@@ -6648,4 +6657,137 @@ model OrgNumberCounter {
 
   @@id([organizationId, model])
   @@map("org_number_counters")
+}
+
+/// Versão publicada da configuração de um agente v2.
+model AIAgentConfigVersion {
+  id              String          @id @default(cuid())
+  organizationId  String
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agentId         String
+  agent           AIAgentConfig   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  versionNumber   Int
+  config          Json
+  comment         String?         @db.Text
+  createdById     String?
+  createdAt       DateTime        @default(now())
+
+  @@unique([agentId, versionNumber])
+  @@index([organizationId])
+  @@index([agentId, createdAt])
+  @@map("ai_agent_config_versions")
+}
+
+model AIAgentSurveyResponse {
+  id             String   @id @default(cuid())
+  organizationId String
+  contactId      String
+  dealId         String?
+  agentId        String
+  score          Int
+  reason         String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId, createdAt])
+  @@index([contactId])
+  @@map("ai_agent_survey_responses")
+}
+
+model AISimpleConversationState {
+  id                     String       @id @default(cuid())
+  organizationId         String
+  conversationId         String       @unique
+  agentId                String
+  stage                  String        @default("new")
+  mode                   String?
+  themeId                String?
+  humanActive            Boolean       @default(false)
+  owner                  String        @default("agente")
+  originStageId          String?
+  postCloseWindowEndAt   DateTime?
+  closeReason            String?
+  versionId                String?
+  selectedDealId           String?
+  entryConfirmationPending Boolean       @default(false)
+  identificationAttempts   Int           @default(0)
+  counters                 Json          @default("{}")
+  /// Variáveis coletadas pelo agente (`collected`, `set_variable`) e estado
+  /// do onboarding. Persistem entre turnos da mesma conversa.
+  collectedVariables       Json          @default("{}")
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@index([conversationId])
+  @@map("ai_simple_conversation_states")
+}
+
+model AISimpleTurnLog {
+  id                String        @id @default(cuid())
+  organizationId    String
+  conversationId    String
+  agentId           String
+  turnId            String?
+  inboundText       String        @db.Text
+  contextSnapshot   Json          @default("{}")
+  prompt            String        @db.Text
+  llmOutput         Json?
+  discardedActions  Json          @default("[]")
+  executedActions   Json          @default("[]")
+  reply             String?       @db.Text
+  handoff           Boolean       @default(false)
+  error             String?       @db.Text
+  latencyMs         Int?
+  inputTokens       Int           @default(0)
+  outputTokens      Int           @default(0)
+  /// "Onde o agente errou" marcado na tela de conversas de teste + o
+  /// diagnóstico gerado (o que corrigir na config ou pedir ao dev).
+  feedback          Json?
+  createdAt         DateTime      @default(now())
+
+  @@index([organizationId])
+  @@index([conversationId])
+  @@index([agentId])
+  @@index([turnId])
+  @@map("ai_simple_turn_logs")
+}
+
+model AIV2KnowledgeGap {
+  id             String   @id @default(cuid())
+  organizationId String
+  agentId        String
+  themeId        String?
+  question       String
+  frequency      Int      @default(1)
+  status         String   @default("pending")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([agentId, status])
+  @@index([updatedAt])
+  @@map("ai_v2_knowledge_gaps")
+}
+
+model AIV2PendingInteractive {
+  id              String    @id @default(cuid())
+  organizationId  String
+  conversationId  String
+  turnId          String?
+  messageId       String?
+  validUntil      DateTime
+  options         Json      @default("[]")
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  resolvedTarget  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([organizationId])
+  @@index([conversationId])
+  @@index([validUntil])
+  @@map("ai_v2_pending_interactives")
 }

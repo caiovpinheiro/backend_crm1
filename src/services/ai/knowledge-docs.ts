@@ -20,6 +20,7 @@ import {
   humanQueueContextFromAgent,
   resolveAgentTimezone,
 } from "@/services/ai/human-queue-policy";
+import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
 
 export const MAX_CONTENT_CHARS = 500_000;
 export const MAX_TITLE_CHARS = 200;
@@ -203,9 +204,10 @@ export function normalizeTitle(input: unknown): string {
 }
 
 export function normalizeContent(input: unknown): string {
-  // `\0` derruba o insert no Postgres e `\r\n` bagunca o chunking.
+  // `\0` derruba o insert no Postgres e `\r\n` bagunca o chunking. Payload
+  // de modelo de mensagem (`{"type":"text","body":…}`) vira o texto do body.
   return typeof input === "string"
-    ? input.replace(/\u0000/g, "").replace(/\r\n/g, "\n").trim()
+    ? unwrapMessagePayloadText(input.replace(/\u0000/g, "").replace(/\r\n/g, "\n")).trim()
     : "";
 }
 
@@ -413,10 +415,59 @@ export async function updateKnowledgeDoc(
   return withValidityView(doc, timezone);
 }
 
+/**
+ * Títulos dos materiais liberados, sem paginação. `listKnowledgeDocs` é
+ * paginada (25 por página): agente com mais materiais que isso perdia
+ * títulos no prompt.
+ */
+export async function knowledgeDocTitlesByIds(agentId: string, ids: string[]): Promise<string[]> {
+  const byId = await knowledgeDocTitleMapByIds(agentId, ids);
+  return ids.map((id) => byId.get(id)).filter((t): t is string => Boolean(t));
+}
+
+/** id → título dos materiais pedidos (só os que existem para o agente). */
+export async function knowledgeDocTitleMapByIds(agentId: string, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const docs = await prisma.aIAgentKnowledgeDoc.findMany({
+    where: { agentId, id: { in: ids } },
+    select: { id: true, title: true },
+  });
+  return new Map(docs.map((d) => [d.id, d.title]));
+}
+
+// Agentes já verificados neste processo (a correção roda uma vez).
+const healedAgents = new Set<string>();
+
+/**
+ * Materiais antigos salvos como payload de modelo de mensagem
+ * (`{"type":"text","body":…}`) foram indexados sobre o JSON: a busca por
+ * significado quase não os encontra. Reindexar grava o texto limpo e refaz
+ * os vetores. Roda em segundo plano, uma vez por agente por processo;
+ * depois de reindexado o material não casa mais com o filtro.
+ */
+export async function healLegacyKnowledgeDocs(agentId: string): Promise<number> {
+  if (healedAgents.has(agentId)) return 0;
+  healedAgents.add(agentId);
+  const legacy = await prisma.aIAgentKnowledgeDoc.findMany({
+    where: { agentId, status: "READY", content: { startsWith: '{"type"' } },
+    select: { id: true },
+    take: 200,
+  });
+  for (const doc of legacy) {
+    await reindexKnowledgeDoc(agentId, doc.id).catch((err) => {
+      console.warn(`[ai] autocorreção de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+    });
+  }
+  if (legacy.length > 0) console.info(`[ai] ${legacy.length} material(is) em JSON reindexado(s) agent=${agentId}`);
+  return legacy.length;
+}
+
 /** Reindexa sem alterar o conteudo — usado para destravar doc FAILED. */
 export async function reindexKnowledgeDoc(agentId: string, docId: string) {
   const current = await getKnowledgeDoc(agentId, docId);
-  const content = current.content ?? "";
+  // Reindexar também limpa material antigo salvo como payload JSON.
+  const content = normalizeContent(current.content ?? "");
+  const contentCleaned = content !== (current.content ?? "");
   if (!content) {
     throw new KnowledgeDocError(
       "Documento sem texto para reindexar. Edite o conteúdo e salve.",
@@ -429,7 +480,9 @@ export async function reindexKnowledgeDoc(agentId: string, docId: string) {
       status: "PENDING" as const,
       errorMessage: null,
       // Doc antigo: aproveita a remontagem para gravar `content`.
-      ...(current.contentReconstructed ? { content } : {}),
+      ...(current.contentReconstructed || contentCleaned
+        ? { content, sizeBytes: Buffer.byteLength(content, "utf8") }
+        : {}),
     },
     select: DOC_LIST_SELECT,
   });

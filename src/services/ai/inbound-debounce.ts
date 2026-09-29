@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Debounce de mensagens inbound para o Agente IA — CAMINHO LEGADO.
  *
  * APOSENTADO pelo `turn-manager.ts` (Fase 1 do runtime de IA). Com
@@ -150,6 +150,10 @@ export async function scheduleAiReply(
 ): Promise<void> {
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
+
+  // Não processa via debounce se a conversa pertence ao motor v2.
+  const { isSimpleEngineConversation } = await import("@/services/ai-v2/agent-resolver");
+  if (await isSimpleEngineConversation(input.conversationId)) return;
 
   // Allowlist (default aberto em produção). Se restricted, bloqueia.
   try {
@@ -306,7 +310,7 @@ async function flushDebounce(
 
 /**
  * Depois de atribuir/transferir no inbox para um User type=AI: responde
- * inbound sem resposta, ou manda a saudação se o aluno ainda não falou.
+ * inbound sem resposta, ou manda a saudação se o contato ainda não falou.
  * Fire-and-forget — o HTTP do assign não espera o LLM.
  */
 export function kickAiAfterInboxAssign(args: {
