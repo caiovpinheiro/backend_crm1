@@ -1,6 +1,8 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -9,6 +11,78 @@ import {
   parseProductWhatsAppSendMode,
   PRODUCT_WHATSAPP_SEND_MODE_KEY,
 } from "@/lib/product-whatsapp-send-mode";
+
+const ACCENT_FROM = "áàâãäåéèêëíìîïóòôõöúùûüýÿçñ";
+const ACCENT_TO = "aaaaaaeeeeiiiiooooouuuuyycn";
+
+function foldSearch(raw: string): string {
+  return raw
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[%_\\]/g, "");
+}
+
+/** Busca sem acento. Graduação primeiro, depois pós; cada grupo em ordem alfabética. */
+async function searchProductIds(args: {
+  search: string;
+  activeOnly: boolean;
+  typeFilter: string;
+  kindFilter: string;
+  catalogId: string;
+  skip: number;
+  take: number;
+}): Promise<{ ids: string[]; total: number }> {
+  const folded = foldSearch(args.search);
+  if (!folded) return { ids: [], total: 0 };
+  const orgId = getOrgIdOrThrow();
+  const pattern = `%${folded}%`;
+  const filters: Prisma.Sql[] = [Prisma.sql`p."organizationId" = ${orgId}`];
+  if (args.activeOnly) filters.push(Prisma.sql`p."isActive" = true`);
+  if (args.typeFilter === "PRODUCT" || args.typeFilter === "SERVICE") {
+    filters.push(Prisma.sql`p.type = ${args.typeFilter}`);
+  }
+  if (
+    args.kindFilter === "PHYSICAL" ||
+    args.kindFilter === "SERVICE" ||
+    args.kindFilter === "COURSE" ||
+    args.kindFilter === "JOB_OPENING"
+  ) {
+    filters.push(Prisma.sql`p.kind::text = ${args.kindFilter}`);
+  }
+  if (args.catalogId) filters.push(Prisma.sql`p."catalogId" = ${args.catalogId}`);
+  filters.push(Prisma.sql`(
+    translate(lower(p.name), ${ACCENT_FROM}, ${ACCENT_TO}) LIKE ${pattern}
+    OR translate(lower(coalesce(p.sku, '')), ${ACCENT_FROM}, ${ACCENT_TO}) LIKE ${pattern}
+  )`);
+  const where = Prisma.join(filters, " AND ");
+  const [idRows, countRows] = await Promise.all([
+    prisma.$queryRaw<{ id: string }[]>`
+      SELECT p.id
+      FROM products p
+      LEFT JOIN course_configs cc ON cc."productId" = p.id
+      WHERE ${where}
+      ORDER BY
+        CASE cc.level::text
+          WHEN 'GRADUATION' THEN 0
+          WHEN 'POSTGRADUATE' THEN 1
+          ELSE 2
+        END,
+        translate(lower(p.name), ${ACCENT_FROM}, ${ACCENT_TO})
+      LIMIT ${args.take}
+      OFFSET ${args.skip}
+    `,
+    prisma.$queryRaw<{ total: number }[]>`
+      SELECT count(*)::int AS total
+      FROM products p
+      WHERE ${where}
+    `,
+  ]);
+  return {
+    ids: idRows.map((r) => r.id),
+    total: Number(countRows[0]?.total ?? 0),
+  };
+}
 
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -39,11 +113,19 @@ export async function GET(request: Request) {
     where.kind = kindFilter;
   }
   if (catalogId) where.catalogId = catalogId;
-  if (search) {
-    where.OR = [
-      { name: { contains: search, mode: "insensitive" } },
-      { sku: { contains: search, mode: "insensitive" } },
-    ];
+  const searched = search
+    ? await searchProductIds({
+        search,
+        activeOnly,
+        typeFilter,
+        kindFilter,
+        catalogId,
+        skip: (page - 1) * perPage,
+        take: perPage,
+      })
+    : null;
+  if (searched) {
+    where.id = { in: searched.ids.length > 0 ? searched.ids : ["__none__"] };
   }
 
   const productInclude = {
@@ -63,37 +145,45 @@ export async function GET(request: Request) {
 
   try {
     let products;
+    const listSkip = searched ? 0 : (page - 1) * perPage;
+    const listTake = searched ? Math.max(searched.ids.length, 1) : perPage;
+    const orderBy = searched ? undefined : ({ name: "asc" } as const);
+    function sortSearched<T extends { id: string }>(rows: T[]): T[] {
+      if (!searched) return rows;
+      const rank = new Map(searched.ids.map((id, i) => [id, i]));
+      return [...rows].sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+    }
     try {
       const [rows, total] = await Promise.all([
         prisma.product.findMany({
           where,
-          orderBy: { name: "asc" },
-          skip: (page - 1) * perPage,
-          take: perPage,
+          orderBy,
+          skip: listSkip,
+          take: listTake,
           include: productInclude,
         }),
-        prisma.product.count({ where }),
+        searched ? Promise.resolve(searched.total) : prisma.product.count({ where }),
       ]);
-      products = { rows, total };
+      products = { rows: sortSearched(rows), total };
     } catch (inner) {
       const raw = inner instanceof Error ? inner.message : "";
       if (!raw.includes("product_meta_links")) throw inner;
       const [rows, total] = await Promise.all([
         prisma.product.findMany({
           where,
-          orderBy: { name: "asc" },
-          skip: (page - 1) * perPage,
-          take: perPage,
+          orderBy,
+          skip: listSkip,
+          take: listTake,
           include: {
             courseConfig: {
               select: { level: true, mode: true, semester: true },
             },
           },
         }),
-        prisma.product.count({ where }),
+        searched ? Promise.resolve(searched.total) : prisma.product.count({ where }),
       ]);
       products = {
-        rows: rows.map((p) => ({ ...p, metaLinks: [] })),
+        rows: sortSearched(rows.map((p) => ({ ...p, metaLinks: [] }))),
         total,
       };
     }
