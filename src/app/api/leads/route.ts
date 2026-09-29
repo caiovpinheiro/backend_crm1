@@ -6,7 +6,7 @@ import {
   requirePermissionForUser,
   requireStageScope,
 } from "@/lib/authz/resource-policy";
-import { parseContactPhoneInput } from "@/lib/phone";
+import { parseContactPhoneInput, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -112,16 +112,20 @@ async function findExistingContact(input: {
 
   const phoneRaw = input.phone?.trim();
   if (phoneRaw) {
+    // Celular BR com e sem o 9 depois do DDD é a mesma linha. O WhatsApp
+    // manda sem o 9; formulário/Kommo manda com o 9. Sem as duas formas,
+    // o lead vira outro contato e outro card.
+    const variants = phoneMatchVariants(phoneRaw);
     const digits = phoneRaw.replace(/\D/g, "");
-    const conditions: Array<{ phone?: { equals?: string; endsWith?: string } }> = [
-      { phone: { equals: phoneRaw } },
-    ];
-    if (digits.length >= 8) {
-      conditions.push({ phone: { endsWith: digits } });
-    }
     const byPhone = await prisma.contact.findFirst({
-      where: { OR: conditions },
-      orderBy: { createdAt: "desc" },
+      where: {
+        OR: [
+          ...(variants.length > 0 ? [{ phone: { in: variants } }] : []),
+          { phone: { equals: phoneRaw } },
+          ...(digits.length >= 8 ? [{ phone: { endsWith: digits } }] : []),
+        ],
+      },
+      orderBy: { createdAt: "asc" },
       select: { id: true },
     });
     if (byPhone) return byPhone;

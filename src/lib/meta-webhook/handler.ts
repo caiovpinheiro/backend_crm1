@@ -616,6 +616,7 @@ async function resolveWebhookContact(
     byPh = await prisma.contact.findFirst({
       where: variants.length > 0 ? { phone: { in: variants } } : { phone },
       select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
+      orderBy: { createdAt: "asc" },
     });
   }
 
@@ -625,8 +626,21 @@ async function resolveWebhookContact(
     if (byBs.id === byPh.id) {
       contactRow = byBs;
     } else {
-      log.warn(`BSUID e telefone em contatos diferentes — priorizando BSUID (${bsuid})`);
-      contactRow = byBs;
+      const sameLine =
+        !!byBs.phone &&
+        !!byPh.phone &&
+        phoneMatchVariants(byBs.phone).some((v) =>
+          phoneMatchVariants(byPh.phone).includes(v),
+        );
+      if (sameLine) {
+        log.warn(
+          `mesmo celular com e sem o 9 — usando o contato mais antigo ${byPh.id} (bsuid estava em ${byBs.id})`,
+        );
+        contactRow = byPh;
+      } else {
+        log.warn(`BSUID e telefone em contatos diferentes — priorizando BSUID (${bsuid})`);
+        contactRow = byBs;
+      }
     }
   } else if (byBs) {
     contactRow = byBs;
