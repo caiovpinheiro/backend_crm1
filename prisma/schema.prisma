@@ -1001,6 +1001,12 @@ model Role {
   /// flag `rbac_granular_scope_v1`; efetivo do user = uniao (OR) entre papeis.
   sharedInbox    Boolean      @default(true)
   mediaAccess    Boolean      @default(true)
+  /// Papel personalizado enxerga conversas e negócios de toda a equipe.
+  /// OR entre papéis, por cima da visibilidade do papel legado (MEMBER/MANAGER).
+  /// Presets do sistema continuam em OrganizationSetting `visibility.*`.
+  seeTeam        Boolean      @default(false)
+  /// Papel personalizado enxerga o pool sem responsável. OR entre papéis.
+  seeUnassigned  Boolean      @default(false)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
