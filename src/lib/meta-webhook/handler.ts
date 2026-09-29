@@ -411,6 +411,36 @@ function isStaleMetaInbound(timestamp: Date): boolean {
   return Number.isFinite(age) && age > staleInboundMaxAgeMs();
 }
 
+function samePhoneDigits(a: string, b: string): boolean {
+  if (a.length < 8 || b.length < 8) return false;
+  return a === b || a.endsWith(b) || b.endsWith(a);
+}
+
+/**
+ * Cópia do que aconteceu no outro app licenciado no mesmo número
+ * (`smb_message_echoes` / `message_echoes`). A Meta manda `from` = quem
+ * falou e `to` = o outro lado. Reescreve `messages` para o laço normal:
+ * cliente falou → inbound; o outro sistema falou → outbound.
+ */
+function absorbMessageEchoField(
+  field: string,
+  value: Record<string, unknown>,
+  metadata: Record<string, unknown>,
+): boolean {
+  if (field !== "smb_message_echoes" && field !== "message_echoes") return false;
+  const business = str(metadata.display_phone_number).replace(/\D/g, "");
+  value.messages = arr(value.message_echoes).map((raw) => {
+    const echo = obj(raw);
+    const fromDigits = str(echo.from).replace(/\D/g, "");
+    const to = str(echo.to);
+    if (to && samePhoneDigits(fromDigits, business)) {
+      return { ...echo, from: to, _bwipoDirection: "out" };
+    }
+    return { ...echo, _bwipoDirection: "in" };
+  });
+  return true;
+}
+
 async function isKnownPhoneNumberId(phoneNumberId: string): Promise<boolean> {
   const envPhoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID?.trim();
   if (envPhoneId && phoneNumberId === envPhoneId) return true;
@@ -2708,7 +2738,8 @@ export async function processMetaWebhookPayload(
         continue;
       }
 
-      if (field !== "messages") continue;
+      const isEchoField = absorbMessageEchoField(field, value, metadata);
+      if (!isEchoField && field !== "messages") continue;
 
       const contacts = arr(value.contacts);
       const messages = arr(value.messages);
@@ -2767,6 +2798,7 @@ export async function processMetaWebhookPayload(
 
         const parsed = parseMessage(m);
         if (!parsed) continue;
+        const echoOut = str(m._bwipoDirection) === "out";
 
         if (isDuplicate(parsed.waMessageId)) {
           log.debug(`Mensagem duplicada ignorada: ${parsed.waMessageId}`);
@@ -3040,10 +3072,13 @@ export async function processMetaWebhookPayload(
                 conversationId: conversation.id,
                 channelId: conversation.channelId ?? undefined,
                 content: parsed.text,
-                direction: isSystemMessage ? "system" : "in",
+                direction: isSystemMessage ? "system" : echoOut ? "out" : "in",
                 messageType: inboundMsgType,
                 externalId: parsed.waMessageId,
-                senderName: isSystemMessage ? "WhatsApp" : (profileName || contact.name),
+                senderName: isSystemMessage || echoOut
+                  ? "WhatsApp"
+                  : (profileName || contact.name),
+                ...(echoOut ? { authorType: "human" as const } : {}),
                 mediaUrl,
                 createdAt: parsed.timestamp,
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
@@ -3057,6 +3092,26 @@ export async function processMetaWebhookPayload(
             });
           }),
           );
+
+          if (echoOut) {
+            if (msgCreated) {
+              try {
+                sseBus.publish("new_message", {
+                  organizationId: conversation.organizationId,
+                  conversationId: conversation.id,
+                  contactId: contact.id,
+                  direction: "out",
+                  assignedToId: conversation.assignedToId ?? null,
+                  content: parsed.text,
+                  messageType: inboundMsgType,
+                  timestamp: parsed.timestamp,
+                });
+              } catch (err) {
+                log.warn("Falha ao publicar eco outbound (não-fatal):", err);
+              }
+            }
+            continue;
+          }
 
           if (!msgCreated) {
             // Reentrega da Meta: a linha já existe, mas o grant pode ter
