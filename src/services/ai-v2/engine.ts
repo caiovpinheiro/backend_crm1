@@ -480,8 +480,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false, error: "Conversation without contact" };
   }
 
-  // Kill-switch da org: mesmo comportamento do v1 (inbox-handler) — não
-  // responde e manda o ticket para a distribuição humana.
+  // Kill-switch da org: não responde e manda o ticket para a distribuição
+  // humana.
   if (!(await isAiAttendanceEnabled())) {
     const { maybeDistributeNewInboundTicket } = await import("@/services/distribution");
     await maybeDistributeNewInboundTicket({

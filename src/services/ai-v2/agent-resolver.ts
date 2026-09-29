@@ -4,7 +4,7 @@
  * - Se não tem responsável e existe um agente v2 ativo na org que PODE assumir
  *   (atendimento IA ligado, conversa não transferida para humano, telefone
  *   dentro da lista de teste), atribui e retorna.
- * - Caso contrário retorna null (caminho v1).
+ * - Caso contrário retorna null (conversa sem agente IA).
  */
 
 import { prismaBase } from "@/lib/prisma-base";
@@ -125,8 +125,8 @@ export async function resolveV2AgentForConversation(
 
   if (conv.assignedToId) return null;
 
-  // Kill-switch da org (`ai.newAttendanceEnabled`): o v1 não deixa chat novo
-  // entrar em Agente IA com ele desligado; o v2 segue a mesma regra.
+  // Kill-switch da org (`ai.newAttendanceEnabled`): com ele desligado, chat
+  // novo não entra em Agente IA.
   if (!(await isAiAttendanceEnabled())) return null;
   if (await wasHandedOffToHuman(conv)) return null;
 

@@ -1,9 +1,8 @@
 /**
  * Inatividade do cliente no agente v2 ("Começo e fim › Cliente sem
  * responder"): depois da última mensagem do agente, um aviso opcional e o
- * encerramento. O worker de inatividade do v1 ignora agentes v2 de
- * propósito; sem isto a config existia e nada acontecia — "encerro em 30
- * minutos" e o atendimento seguia aberto.
+ * encerramento. Sem isto a config existia e nada acontecia — "encerro em
+ * 30 minutos" e o atendimento seguia aberto.
  * Nenhum domínio de cliente.
  */
 

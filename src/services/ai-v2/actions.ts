@@ -402,8 +402,8 @@ async function executeSendMessageModel(action: V2Action, ctx: V2ActionContext): 
     }
 
     // Anexos (imagem, vídeo, áudio, documento): antes o v2 mandava só o
-    // texto do modelo e descartava a mídia. Mesmo envio do agente v1 e do
-    // inbox humano: só arquivo do armazenamento da org, até 2 por vez,
+    // texto do modelo e descartava a mídia. Mesmo envio do inbox humano:
+    // só arquivo do armazenamento da org, até 2 por vez,
     // sem repetir o mesmo arquivo na conversa em 7 dias — contados a partir
     // do último #reset, para o teste receber o anexo de novo.
     const { mediaFromTemplateRow } = await import("@/services/ai/message-models-retrieval");
@@ -704,7 +704,7 @@ export async function executeV2Actions(
   return { results, anyHandoff, anyClose, themeId, askOptions };
 }
 
-/** Defaults iguais à pilotagem v1: digitando + leitura ligados, 25 ms/char. */
+/** Defaults: digitando + leitura ligados, 25 ms/char. */
 export function v2HumanBehavior(config: {
   simulateTyping?: boolean;
   typingPerCharMs?: number;

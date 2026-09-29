@@ -7,7 +7,6 @@
  * documento compartilhado entre agentes nem entre tenants.
  */
 
-import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
@@ -185,17 +184,12 @@ async function requireAgentTimezone(agentId: string): Promise<string> {
     where: { id: agentId },
     select: {
       id: true,
-      inboxPolicy: true,
       businessHours: true,
-      verticalPack: true,
     },
   });
   if (!agent) throw new KnowledgeDocError("Agente não encontrado.", 404);
   return resolveAgentTimezone(
-    humanQueueContextFromAgent({
-      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy, agent.verticalPack),
-      businessHours: agent.businessHours,
-    }),
+    humanQueueContextFromAgent({ businessHours: agent.businessHours }),
   );
 }
 

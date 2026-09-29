@@ -3,8 +3,8 @@
  * testando o agente v2.
  *
  * Quem pode: telefone na lista de números de teste (`allowedPhoneNumbers`)
- * de um agente v2 ativo, ou operador com permissão de editar agente (mesma
- * regra do `#iniciar`). Para qualquer outro número o texto segue como
+ * de um agente v2 ativo, ou operador com permissão de editar agente. Para
+ * qualquer outro número o texto segue como
  * mensagem comum — nunca respondemos nada que revele o comando.
  *
  * O que faz:
