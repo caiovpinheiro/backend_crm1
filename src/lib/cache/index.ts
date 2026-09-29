@@ -58,7 +58,8 @@
  * payload grande, circuit breaker pra pular Redis uns segundos em vez
  * de pagar timeout em cada request.
  */
-import { gzipSync, gunzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gzip, gunzipSync } from "node:zlib";
 
 import IORedis, { type Redis as IORedisClient } from "ioredis";
 
@@ -83,7 +84,15 @@ const CIRCUIT_COOLDOWN_MS = 15_000;
 /** Prefixos ASCII que JSON.parse nunca aceita — valores gzipados. */
 const GZ_PREFIX = "gz1:";
 const GZ_MIN_BYTES = 8_192;
-const MAX_REDIS_VALUE_BYTES = 256_000;
+/**
+ * Teto do valor gzipado (antes do base64). Com 256 KB o board das orgs
+ * grandes nunca ia pro Redis e cada carga recalculava tudo. Acima disso
+ * o valor fica só no fallback em memória do processo.
+ */
+const MAX_REDIS_VALUE_BYTES = 1_000_000;
+
+/** gzip no threadpool do libuv — `gzipSync` travava a thread principal. */
+const gzipAsync = promisify(gzip);
 
 /**
  * Libera o lock SÓ se o valor ainda é o token desta chamada
@@ -225,11 +234,11 @@ export async function waitUntilCacheReady(
   return waitForRedisWritable(client, timeoutMs);
 }
 
-function encode(value: unknown): string | null {
+async function encode(value: unknown): Promise<string | null> {
   const json = JSON.stringify(value);
   const jsonBytes = Buffer.byteLength(json, "utf8");
   if (jsonBytes < GZ_MIN_BYTES) return json;
-  const gz = gzipSync(Buffer.from(json, "utf8"), { level: 6 });
+  const gz = await gzipAsync(Buffer.from(json, "utf8"), { level: 6 });
   if (gz.length >= MAX_REDIS_VALUE_BYTES) {
     return null;
   }
@@ -250,7 +259,10 @@ function decode<T>(raw: string): T {
 //
 // Map<key, { value, expiresAt }>. Sem LRU — limite simples por count
 // pra evitar leak em dev/test. Em prod com Redis saudavel, este Map
-// so e usado quando o circuit abre.
+// guarda o que o Redis não levou (payload acima do teto ou SET que
+// falhou) e é lido quando o Redis não tem a chave ou o circuit abre.
+// Vale por processo: um `del`/`delPattern` feito em outro processo não
+// limpa este Map, e o TTL é o limite do stale.
 
 const MEMORY_MAX_ENTRIES = 1_000;
 const memoryStore = new Map<string, { value: unknown; expiresAt: number }>();
@@ -302,6 +314,12 @@ export async function get<T>(key: CacheKey): Promise<T | undefined> {
     const raw = await client.get(fullKey);
     noteSuccess();
     if (!raw) {
+      // O `set` guarda aqui o que não coube no Redis (board grande).
+      const local = memoryGet<T>(fullKey);
+      if (local !== undefined) {
+        metrics.cacheHits?.inc({ key: safeLabel(key.split(":")[0]) });
+        return local;
+      }
       metrics.cacheMisses?.inc({ key: safeLabel(key.split(":")[0]) });
       return undefined;
     }
@@ -333,7 +351,7 @@ export async function set<T>(
     memorySet(fullKey, value, ttlSec);
     return;
   }
-  const payload = encode(value);
+  const payload = await encode(value);
   if (payload === null) {
     log.warn(
       { key, maxBytes: MAX_REDIS_VALUE_BYTES },
@@ -345,6 +363,8 @@ export async function set<T>(
   try {
     await client.set(fullKey, payload, "EX", ttlSec);
     noteSuccess();
+    // Cópia local antiga não pode responder quando esta chave sair do Redis.
+    memoryDel(fullKey);
   } catch (err) {
     noteFailure(err, key, "set");
     memorySet(fullKey, value, ttlSec);
@@ -527,10 +547,14 @@ async function loadAndStore<T>(
 }
 
 function matchesGlob(input: string, pattern: string): boolean {
-  // Glob simplificado: `*` -> `.*`, escapa o resto.
+  // Glob simplificado (mesma semântica do MATCH do Redis): `*` -> `.*`,
+  // `?` -> um caractere, escapa o resto.
   const re = new RegExp(
     "^" +
-      pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") +
+      pattern
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".") +
       "$",
   );
   return re.test(input);
