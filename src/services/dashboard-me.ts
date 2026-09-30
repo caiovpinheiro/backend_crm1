@@ -22,9 +22,12 @@ export type DashboardMeInboundDeal = {
   id: string;
   number: number;
   title: string;
+  stageId: string;
   stageName: string;
   pipelineName: string;
   count: number;
+  /** Início da espera atual: primeira entrada depois da última resposta humana. */
+  waitingSince: string;
 };
 
 export type DashboardMeResult = {
@@ -150,16 +153,19 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           AND d.status = 'OPEN'
           AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
       `),
-      // Não usa a fila do inbox. Um negócio OPEN por contato, com mensagem
-      // de entrada ainda sem resposta humana.
+      // Só entra quem ainda não foi respondido. A resposta humana vale em
+      // qualquer conversa do contato: a última saída pública humana encerra
+      // a espera, mesmo que o inbound esteja em outro ticket.
       prisma.$queryRaw<
         {
           dealId: string;
           dealNumber: number;
           title: string;
+          stageId: string;
           stageName: string;
           pipelineName: string;
           cnt: bigint;
+          waitingSince: Date;
         }[]
       >(Prisma.sql`
         WITH mine AS (
@@ -175,14 +181,30 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
             AND d.status = 'OPEN'::"DealStatus"
             AND d."contactId" IS NOT NULL
           ORDER BY d."contactId", d."updatedAt" DESC
+        ),
+        reply AS (
+          SELECT c."contactId" AS "contactId",
+                 MAX(m."createdAt") AS "lastReplyAt"
+          FROM messages m
+          INNER JOIN conversations c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${orgId}
+            AND m."organizationId" = ${orgId}
+            AND c."contactId" IN (SELECT "contactId" FROM mine)
+            AND m.direction = 'out'
+            AND m."isPrivate" = false
+            AND m."authorType" = 'human'::"MessageAuthorType"
+          GROUP BY c."contactId"
         )
         SELECT o."dealId" AS "dealId",
                o."dealNumber" AS "dealNumber",
                o."title" AS "title",
+               s.id AS "stageId",
                s.name AS "stageName",
                p.name AS "pipelineName",
-               COUNT(m.id)::bigint AS cnt
+               COUNT(m.id)::bigint AS cnt,
+               MIN(m."createdAt") AS "waitingSince"
         FROM mine o
+        LEFT JOIN reply r ON r."contactId" = o."contactId"
         INNER JOIN stages s ON s.id = o."stageId"
         INNER JOIN pipelines p ON p.id = s."pipelineId" AND p."archivedAt" IS NULL
         INNER JOIN conversations conv
@@ -193,17 +215,9 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
          AND m."organizationId" = ${orgId}
          AND m.direction = 'in'
          AND m."isPrivate" = false
-         AND NOT EXISTS (
-           SELECT 1 FROM messages reply
-           WHERE reply."conversationId" = m."conversationId"
-             AND reply."organizationId" = ${orgId}
-             AND reply.direction = 'out'
-             AND reply."isPrivate" = false
-             AND reply."authorType" = 'human'::"MessageAuthorType"
-             AND reply."createdAt" > m."createdAt"
-         )
-        GROUP BY o."dealId", o."dealNumber", o."title", s.name, s.position, p.name
-        ORDER BY p.name ASC, s.position ASC, COUNT(m.id) DESC
+         AND (r."lastReplyAt" IS NULL OR m."createdAt" > r."lastReplyAt")
+        GROUP BY o."dealId", o."dealNumber", o."title", s.id, s.name, s.position, p.name
+        ORDER BY MIN(m."createdAt") ASC
         LIMIT 40
       `),
     ]);
@@ -274,9 +288,11 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
       id: row.dealId,
       number: row.dealNumber,
       title: row.title,
+      stageId: row.stageId,
       stageName: row.stageName,
       pipelineName: row.pipelineName,
       count: Number(row.cnt),
+      waitingSince: row.waitingSince.toISOString(),
     })),
   };
 }
