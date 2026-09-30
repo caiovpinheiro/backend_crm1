@@ -417,6 +417,64 @@ function samePhoneDigits(a: string, b: string): boolean {
 }
 
 /**
+ * Eco de uma mídia que o próprio CRM acabou de enviar. O worker grava o
+ * wamid só depois do upload na Meta; se o eco chega antes, o dedup por
+ * `externalId` não acha a linha e o chat mostra o mesmo produto de novo.
+ * Reaproveita o envio pendente (mesmo texto, ou a única mídia pendente)
+ * em vez de criar outra mensagem.
+ */
+async function claimLocalOutboundForEcho(args: {
+  contactId: string;
+  text: string;
+  waMessageId: string;
+}): Promise<boolean> {
+  const since = new Date(Date.now() - 3 * 60 * 1000);
+  const pendingOfContact = {
+    direction: "out" as const,
+    externalId: null as null,
+    createdAt: { gte: since },
+    conversation: { contactId: args.contactId },
+  };
+  const text = args.text.trim();
+  const byContent = text
+    ? await prisma.message.findFirst({
+        where: { ...pendingOfContact, content: text },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      })
+    : null;
+  let targetId = byContent?.id ?? null;
+  if (!targetId) {
+    const pendingMedia = await prisma.message.findMany({
+      where: {
+        ...pendingOfContact,
+        sendStatus: "pending",
+        messageType: { in: ["image", "video", "audio", "document", "ptt"] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 2,
+      select: { id: true },
+    });
+    if (pendingMedia.length === 1) targetId = pendingMedia[0]!.id;
+  }
+  if (!targetId) return false;
+  try {
+    await prisma.message.update({
+      where: { id: targetId },
+      data: {
+        externalId: args.waMessageId,
+        sendStatus: "sent",
+        sendError: null,
+      },
+    });
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code !== "P2002") throw err;
+  }
+  return true;
+}
+
+/**
  * Cópia do que aconteceu no outro app licenciado no mesmo número
  * (`smb_message_echoes` / `message_echoes`). A Meta manda `from` = quem
  * falou e `to` = o outro lado. Reescreve `messages` para o laço normal:
@@ -3067,6 +3125,17 @@ export async function processMetaWebhookPayload(
           const replyLink = parsed.replyToWaMessageId
             ? await resolveReplyContext(parsed.replyToWaMessageId)
             : null;
+
+          if (
+            echoOut &&
+            (await claimLocalOutboundForEcho({
+              contactId: contact.id,
+              text: parsed.text,
+              waMessageId: parsed.waMessageId,
+            }))
+          ) {
+            continue;
+          }
 
           // `createMessageDedup` fica FORA da transação de propósito: o
           // P2002 aborta a tx no Postgres, então engolir o erro dentro do
