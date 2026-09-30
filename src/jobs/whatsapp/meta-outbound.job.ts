@@ -16,6 +16,7 @@ import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-
 import { prisma } from "@/lib/prisma";
 import { isMetaOutboundTemplate, type MetaOutboundPayload } from "@/lib/queue";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
+import { publishOutboundStatus } from "@/lib/outbound-status-signal";
 import { sseBus } from "@/lib/sse-bus";
 
 export type MetaOutboundResult = {
@@ -28,9 +29,13 @@ function publishStatus(
   organizationId: string,
   conversationId: string,
   messageId: string,
-  status: string,
+  status: "sent" | "failed",
   error?: string | null,
 ) {
+  // RT-7: acorda a API que espera em `waitUntilSent` (POST /messages e
+  // /attachments) sem ela ter que fazer polling no banco. Chamado sempre
+  // DEPOIS do update de `sendStatus`.
+  void publishOutboundStatus(messageId, status);
   try {
     sseBus.publish("message_status", {
       organizationId,
