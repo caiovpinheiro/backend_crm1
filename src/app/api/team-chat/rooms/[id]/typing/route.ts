@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { signalTyping } from "@/services/team-chat";
-import { denyUnless, jsonError, viewerOf } from "../../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../../_guard";
 
 export async function POST(
   _request: Request,
@@ -14,7 +14,7 @@ export async function POST(
     const { id } = await params;
     const name = (session.user as { name?: string | null }).name?.trim() || "Colega";
     const result = await signalTyping(viewerOf(session), id, name);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json({ ok: true });
   });
 }

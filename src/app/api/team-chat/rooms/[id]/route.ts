@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { deleteRoom, getRoom, updateRoom } from "@/services/team-chat";
-import { denyUnless, jsonError, viewerOf } from "../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../_guard";
 
 const PatchRoom = z
   .object({
@@ -23,7 +23,7 @@ export async function GET(
     if (denied) return denied;
     const { id } = await params;
     const result = await getRoom(viewerOf(session), id);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.room);
   });
 }
@@ -40,7 +40,7 @@ export async function PATCH(
     const parsed = PatchRoom.safeParse(body);
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await updateRoom(viewerOf(session), id, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.room);
   });
 }
@@ -54,7 +54,7 @@ export async function DELETE(
     if (denied) return denied;
     const { id } = await params;
     const result = await deleteRoom(viewerOf(session), id);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result);
   });
 }

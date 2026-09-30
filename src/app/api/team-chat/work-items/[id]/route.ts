@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { deleteWorkItem, getWorkItem, updateWorkItem } from "@/services/team-chat-work-items";
-import { denyUnless, jsonError, viewerOf } from "../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../_guard";
 
 const Patch = z.object({
   title: z.string().trim().min(1).max(200).optional(),
@@ -23,7 +23,7 @@ export async function GET(
     if (denied) return denied;
     const { id } = await params;
     const result = await getWorkItem(viewerOf(session), id);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.workItem);
   });
 }
@@ -39,7 +39,7 @@ export async function PATCH(
     const parsed = Patch.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await updateWorkItem(viewerOf(session), id, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.workItem);
   });
 }
@@ -53,7 +53,7 @@ export async function DELETE(
     if (denied) return denied;
     const { id } = await params;
     const result = await deleteWorkItem(viewerOf(session), id);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json({ ok: true });
   });
 }

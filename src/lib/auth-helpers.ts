@@ -36,12 +36,12 @@ type AuthResult<T> =
   | { ok: false; response: NextResponse };
 
 /**
- * Session "achatada" — o tipo retornado pelo `auth()` da v5 é uma
+ * Session "achatada" (`AppSession`) — o tipo retornado pelo `auth()` da v5 é uma
  * união grande (middleware/handler/sem args) e a inferência via
  * `ReturnType<typeof auth>` perde a propriedade `user`. Definimos
  * o shape mínimo que usamos e fazemos cast no helper.
  */
-type Session = {
+export type AppSession = {
   user: {
     id: string;
     name?: string | null;
@@ -57,7 +57,7 @@ type Session = {
   };
 };
 
-function sessionHumanActor(session: Session): ContextActor {
+function sessionHumanActor(session: AppSession): ContextActor {
   return {
     type: "HUMAN",
     label:
@@ -80,8 +80,8 @@ function sessionHumanActor(session: Session): ContextActor {
  * }
  * ```
  */
-export async function requireAuth(): Promise<AuthResult<Session>> {
-  const session = (await auth()) as Session | null;
+export async function requireAuth(): Promise<AuthResult<AppSession>> {
+  const session = (await auth()) as AppSession | null;
   if (!session?.user) {
     await logApiAccessRequireAuthFail("no_session");
     return {
@@ -147,7 +147,7 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
   return { ok: true, session };
 }
 
-function getRole(session: Session): UserRole | null {
+function getRole(session: AppSession): UserRole | null {
   const role = (session.user as { role?: unknown }).role;
   if (role === UserRole.ADMIN || role === UserRole.MANAGER || role === UserRole.MEMBER) {
     return role;
@@ -161,7 +161,7 @@ function getRole(session: Session): UserRole | null {
  */
 export async function requireRole(
   allowed: UserRole[],
-): Promise<AuthResult<Session>> {
+): Promise<AuthResult<AppSession>> {
   const r = await requireAuth();
   if (!r.ok) return r;
   const role = getRole(r.session);
@@ -192,7 +192,7 @@ export function requireManager() {
  * outra sessao. Use em rotas `/api/admin/*` e paginas `/admin/*` renderizadas
  * do servidor.
  */
-export async function requireSuperAdmin(): Promise<AuthResult<Session>> {
+export async function requireSuperAdmin(): Promise<AuthResult<AppSession>> {
   const r = await requireAuth();
   if (!r.ok) return r;
   if (!r.session.user.isSuperAdmin) {
@@ -208,18 +208,18 @@ export async function requireSuperAdmin(): Promise<AuthResult<Session>> {
 }
 
 /** Helper síncrono pra uso em código já com session em mãos. */
-export function isAdmin(session: Session | null | undefined): boolean {
+export function isAdmin(session: AppSession | null | undefined): boolean {
   if (!session?.user) return false;
   return getRole(session) === UserRole.ADMIN;
 }
 
-export function isManagerOrAdmin(session: Session | null | undefined): boolean {
+export function isManagerOrAdmin(session: AppSession | null | undefined): boolean {
   if (!session?.user) return false;
   const role = getRole(session);
   return role === UserRole.ADMIN || role === UserRole.MANAGER;
 }
 
-export function isSuperAdmin(session: Session | null | undefined): boolean {
+export function isSuperAdmin(session: AppSession | null | undefined): boolean {
   return Boolean(session?.user?.isSuperAdmin);
 }
 
@@ -254,7 +254,7 @@ export function isSuperAdmin(session: Session | null | undefined): boolean {
  * org ativa tem prioridade; o bypass so vale quando NAO ha org ativa.
  */
 export function userOrgFilter(
-  session: Session | { user: { organizationId: string | null; isSuperAdmin: boolean } },
+  session: AppSession | { user: { organizationId: string | null; isSuperAdmin: boolean } },
 ): { organizationId?: string } {
   if (session.user.organizationId) {
     return { organizationId: session.user.organizationId };
@@ -288,7 +288,7 @@ export function userOrgFilter(
  * idas assíncronas (busca em materiais, embeddings), onde o contexto
  * implícito se perdia ("organization context ausente").
  */
-export function runInSessionContext<T>(session: Session, fn: () => Promise<T>): Promise<T> {
+export function runInSessionContext<T>(session: AppSession, fn: () => Promise<T>): Promise<T> {
   return runWithContext(
     {
       organizationId: session.user.organizationId,
@@ -301,7 +301,7 @@ export function runInSessionContext<T>(session: Session, fn: () => Promise<T>): 
 }
 
 export async function withOrgContext<T>(
-  handler: (session: Session) => Promise<T> | T,
+  handler: (session: AppSession) => Promise<T> | T,
 ): Promise<NextResponse | T> {
   const r = await requireAuth();
   if (!r.ok) return r.response as unknown as NextResponse;
@@ -382,7 +382,7 @@ type AuthResultWithCtx<T> =
  */
 export async function requireCan(
   key: PermissionKey,
-): Promise<AuthResultWithCtx<Session>> {
+): Promise<AuthResultWithCtx<AppSession>> {
   const r = await requireAuth();
   if (!r.ok) return r;
 
@@ -410,7 +410,7 @@ export async function requireCan(
  * precisa do `ctx` pra fazer checagens condicionais (ex.: filtrar campos
  * do payload baseado no que o user pode ver).
  */
-export async function requireAuthWithCtx(): Promise<AuthResultWithCtx<Session>> {
+export async function requireAuthWithCtx(): Promise<AuthResultWithCtx<AppSession>> {
   const r = await requireAuth();
   if (!r.ok) return r;
   const ctx = await loadAuthzContext({

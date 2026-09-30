@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createRoom, listRooms } from "@/services/team-chat";
-import { denyUnless, jsonError, viewerOf } from "../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../_guard";
 
 const CreateRoom = z.object({
   memberIds: z.array(z.string().min(1)).min(1).max(80),
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     const parsed = CreateRoom.safeParse(body);
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await createRoom(viewerOf(session), parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result, { status: result.created ? 201 : 200 });
   });
 }

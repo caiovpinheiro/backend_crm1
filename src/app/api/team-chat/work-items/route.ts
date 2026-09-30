@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createWorkItem, listRoomWorkItems, WORK_ITEM_TYPES } from "@/services/team-chat-work-items";
-import { denyUnless, jsonError, viewerOf } from "../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../_guard";
 
 const Entry = z.object({
   text: z.string().min(1).max(500),
@@ -35,7 +35,7 @@ export async function GET(request: Request) {
     const roomId = new URL(request.url).searchParams.get("roomId");
     if (!roomId) return jsonError("Informe a conversa.", 400);
     const result = await listRoomWorkItems(viewerOf(session), roomId);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result);
   });
 }
@@ -48,7 +48,7 @@ export async function POST(request: Request) {
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     try {
       const result = await createWorkItem(viewerOf(session), parsed.data);
-      if ("error" in result) return jsonError(result.error, result.status);
+      if (isServiceError(result)) return jsonError(result.error, result.status);
       return NextResponse.json(result.workItem, { status: 201 });
     } catch (err) {
       console.error("[team-chat] create work item failed", err);

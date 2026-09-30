@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { denyUnless, jsonError } from "../../../_guard";
+import { denyUnless, isServiceError, jsonError } from "../../../_guard";
 import { moveItem } from "@/services/demands";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -22,7 +22,7 @@ export async function POST(request: Request, ctx: Ctx) {
     const parsed = Move.safeParse(body);
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await moveItem(session.user.id, id, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.item);
   });
 }

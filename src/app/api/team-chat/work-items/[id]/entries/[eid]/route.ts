@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { deleteWorkItemEntry, updateWorkItemEntry } from "@/services/team-chat-work-items";
-import { denyUnless, jsonError, viewerOf } from "../../../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../../../_guard";
 
 const Patch = z.object({
   text: z.string().min(1).max(500).optional(),
@@ -23,7 +23,7 @@ export async function PATCH(
     const parsed = Patch.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await updateWorkItemEntry(viewerOf(session), id, eid, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.workItem);
   });
 }
@@ -37,7 +37,7 @@ export async function DELETE(
     if (denied) return denied;
     const { id, eid } = await params;
     const result = await deleteWorkItemEntry(viewerOf(session), id, eid);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.workItem);
   });
 }
