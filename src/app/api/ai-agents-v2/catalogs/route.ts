@@ -116,7 +116,10 @@ export async function GET() {
       users,
       aiAgents: aiAgentCatalog,
       messageTemplates,
-      knowledgeDocs,
+      knowledgeDocs: knowledgeDocs.map((d: { id: string; title: string | null }) => ({
+        id: d.id,
+        name: d.title?.trim() || "Material sem nome",
+      })),
       channels,
       pipelines,
       tags,
