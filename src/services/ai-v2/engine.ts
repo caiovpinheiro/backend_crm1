@@ -1815,7 +1815,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // nada. Se o assunto tem uma que combina com o pedido, ela sai neste turno.
   if (
     announcesSending(replyText) &&
-    !allowedActions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment") &&
+    !llmOutput.actions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment") &&
     allowedModelIds.length > 0 &&
     allowedTools.has("send_message_model")
   ) {
