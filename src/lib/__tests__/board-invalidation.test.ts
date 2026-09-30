@@ -19,6 +19,10 @@ vi.mock("@/lib/inbox-sse-card", () => ({
   withInboxSseCard: async (_event: string, data: unknown) => data,
 }));
 
+import {
+  clearMessagePipelineCache,
+  PIPELINES_CACHE_TTL_MS,
+} from "@/lib/board-invalidation";
 import { cache } from "@/lib/cache";
 import { BOARD_INVALIDATION_WINDOW_MS, boardDataKey } from "@/lib/cache/keys";
 import { sseBus } from "@/lib/sse-bus";
@@ -54,6 +58,7 @@ async function settle() {
 beforeEach(() => {
   vi.useFakeTimers();
   h.queryRaw.mockReset();
+  clearMessagePipelineCache();
 });
 
 afterEach(() => {
@@ -154,5 +159,80 @@ describe("board: invalidação por new_message", () => {
     // Fim da janela: uma purga só, cobrindo as mensagens acumuladas.
     await vi.advanceTimersByTimeAsync(2_000);
     expect(await cached("org-f", "pipe-1")).toBeUndefined();
+  });
+});
+
+describe("board: cache contato → pipelines (60 s por processo)", () => {
+  it("mensagens seguidas do mesmo contato consultam o banco uma vez em 60 s", async () => {
+    expect(PIPELINES_CACHE_TTL_MS).toBe(60_000);
+    h.queryRaw.mockResolvedValue([{ pipelineId: "pipe-1" }]);
+
+    await seedBoards("org-g", "pipe-1");
+    newMessage("org-g");
+    await settle();
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+    expect(await cached("org-g", "pipe-1")).toBeUndefined();
+
+    // Mesmo contato, ainda dentro dos 60 s: sem consulta nova, purga
+    // agendada (trailing) do mesmo jeito.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await seedBoards("org-g", "pipe-1");
+    newMessage("org-g");
+    await settle();
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(BOARD_INVALIDATION_WINDOW_MS);
+    expect(await cached("org-g", "pipe-1")).toBeUndefined();
+
+    // Passados 60 s desde a consulta, o banco é consultado de novo.
+    await vi.advanceTimersByTimeAsync(PIPELINES_CACHE_TTL_MS);
+    newMessage("org-g");
+    await settle();
+    expect(h.queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("contato sem deal também fica em cache (sem consulta a cada mensagem)", async () => {
+    h.queryRaw.mockResolvedValue([]);
+    await seedBoards("org-h", "pipe-1");
+
+    newMessage("org-h");
+    await settle();
+    newMessage("org-h");
+    await settle();
+
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+    expect(await cached("org-h", "pipe-1")).toBeDefined();
+  });
+
+  it("cache é por org e por contato", async () => {
+    h.queryRaw.mockResolvedValue([]);
+
+    newMessage("org-i", { contactId: "contact-1" });
+    await settle();
+    newMessage("org-i", { contactId: "contact-2" });
+    await settle();
+    newMessage("org-j", { contactId: "contact-1" });
+    await settle();
+
+    expect(h.queryRaw).toHaveBeenCalledTimes(3);
+  });
+
+  it("consulta falhando não entra no cache: a próxima mensagem tenta de novo", async () => {
+    await seedBoards("org-k", "pipe-1", "pipe-2");
+    h.queryRaw
+      .mockRejectedValueOnce(new Error("db down"))
+      .mockResolvedValueOnce([{ pipelineId: "pipe-1" }]);
+
+    newMessage("org-k");
+    await settle();
+    expect(await cached("org-k", "pipe-1")).toBeUndefined();
+    expect(await cached("org-k", "pipe-2")).toBeUndefined();
+
+    await seedBoards("org-k", "pipe-1", "pipe-2");
+    await vi.advanceTimersByTimeAsync(BOARD_INVALIDATION_WINDOW_MS + 1);
+    newMessage("org-k");
+    await settle();
+    expect(h.queryRaw).toHaveBeenCalledTimes(2);
+    expect(await cached("org-k", "pipe-1")).toBeUndefined();
+    expect(await cached("org-k", "pipe-2")).toBeDefined();
   });
 });
