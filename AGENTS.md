@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-09-30 — Cursor Grok 4.7 — **Mensagem recebida na etapa**: o gatilho usa o deal que está na etapa configurada (`stageIds`), não o negócio aberto mais novo do contato. Se houver mais de um card nessa etapa, o `move_stage` move todos. "Sim"/ack não cancela esse gatilho; fluxo sem filtro de etapa continua sem disparar em ack.
 - 2026-09-30 — Cursor Grok 4.7 — **Flow não fala com o cliente**: resposta de WhatsApp Flow com telefone ou e-mail inválido não grava o campo e não envia mensagem na conversa. O aviso "Assistente CRM" ("Não consegui salvar…", tentativa 1/2) saiu de `applyWhatsappFlowResponseToContact`.
 - 2026-09-28 — Cursor Grok 4.7 — **Mensagem padrão ao encaminhar produto**: `ProductMessageTemplate` por org (`kind` + `courseLevel` null = qualquer nível). Texto com `{{variavel}}`. Resolução: modelo ativo do nível do curso, senão o do tipo sem nível, senão o texto atual do frontend. `GET /api/products/:id/message` renderiza. Permissões `product:view` / `product:edit`. Sem alterar o envio nativo Meta.
 - 2026-09-23 — Cursor Grok 4.7 — **Campos para entrar na etapa**: `Stage.requiredDealFieldIds` (só `CustomField` entity=deal). `moveDeal`, lote e automação `move_stage` recusam a troca com `STAGE_FIELDS_REQUIRED` enquanto algum desses campos estiver vazio. Reordenar na mesma etapa não exige. `PUT /api/pipelines/:id/stages/:stageId` grava a lista.
