@@ -74,7 +74,7 @@ function readStringArray(obj: Record<string, unknown>, key: string): string[] {
  * mantendo compatibilidade com o formato antigo de estágio único (`stageId`).
  * Retorna [] quando o operador não restringiu por estágio ("Qualquer estágio").
  */
-function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
+export function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
   const many = readStringArray(cfg, "stageIds");
   if (many.length > 0) return many;
   const one = readString(cfg, "stageId");
