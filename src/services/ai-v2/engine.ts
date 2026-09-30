@@ -42,7 +42,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
 import { knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
-import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -1811,6 +1811,28 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }, systemMessage(config, "returnPromiseHandoff"));
   // Negrito conforme "Quem é o agente › Destaques em negrito".
   let replyText = applyBoldPolicy(guard.text, config.bold);
+  // "Vou te enviar a orientação" sem mensagem pronta deixava o cliente sem
+  // nada. Se o assunto tem uma que combina com o pedido, ela sai neste turno.
+  if (
+    announcesSending(replyText) &&
+    !allowedActions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment") &&
+    allowedModelIds.length > 0 &&
+    allowedTools.has("send_message_model")
+  ) {
+    const rows = await Promise.resolve()
+      .then(() =>
+        prisma.messageTemplate.findMany({
+          where: { id: { in: allowedModelIds }, organizationId: orgId },
+          select: { id: true, name: true, content: true },
+        }),
+      )
+      .catch(() => [] as Array<{ id: string; name: string; content: string | null }>);
+    const promisedId = pickPromisedModelId(replyText, input.userMessage, rows ?? []);
+    if (promisedId) {
+      allowedActions.push({ type: "send_message_model", modelId: promisedId });
+      traceStep("ações", "Prometeu enviar e não escolheu mensagem pronta — enviada a do assunto que combina com o pedido");
+    }
+  }
   if (guard.warnings.length > 0) traceStep("guarda", guard.warnings.join("; "));
   if (guard.forceHandoff) {
     wantsHandoff = true;

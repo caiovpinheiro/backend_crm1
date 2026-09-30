@@ -88,6 +88,27 @@ export function announcesSending(reply: string): boolean {
   return /\b(?:segue|seguem|envio|enviei|enviando|mando|mandei|mandando|vou (?:te |lhe )?(?:enviar|mandar)|abaixo|anexo|anexei)\b/i.test(reply);
 }
 
+/**
+ * A resposta prometeu um envio e o modelo não escolheu mensagem pronta.
+ * Devolve a liberada neste assunto que mais combina com o pedido e com o
+ * que a resposta disse que ia mandar. Sem combinação, não chuta.
+ */
+export function pickPromisedModelId(
+  reply: string,
+  userMessage: string,
+  models: Array<{ id: string; name: string; content?: string | null }>,
+): string | null {
+  if (!announcesSending(reply) || models.length === 0) return null;
+  if (models.length === 1) return models[0].id;
+  const hay = `${userMessage}\n${reply}`;
+  let best: { id: string; score: number } | null = null;
+  for (const model of models) {
+    const score = sharedContentWords(hay, `${model.name}\n${model.content ?? ""}`);
+    if (!best || score > best.score) best = { id: model.id, score };
+  }
+  return best && best.score > 0 ? best.id : null;
+}
+
 /** Erro do executor quando o texto da mensagem pronta foi barrado por repetir uma recente. */
 export const MESSAGE_MODEL_REPEATED = "não reenviada: igual a uma mensagem recente";
 
