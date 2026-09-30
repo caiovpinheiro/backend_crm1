@@ -13,6 +13,18 @@ import { getUserDepartmentIds } from "@/services/task-visibility";
 export const PRE_DUE_WINDOW_MS = 15 * 60 * 1000;
 export const SNOOZE_MS = 10 * 60 * 1000;
 export const ALERT_PAGE_SIZE = 50;
+/**
+ * BD-8: janela inferior da busca. Atividade vencida há mais de 7 dias e
+ * nunca concluída não vira alerta — antes a paginação varria TODAS as
+ * vencidas da org (sem limite inferior) a cada GET e a cada tick do push.
+ * Override: `ACTIVITY_ALERT_LOOKBACK_MS`.
+ */
+export const ALERT_LOOKBACK_MS = (() => {
+  const raw = Number(process.env.ACTIVITY_ALERT_LOOKBACK_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 7 * 24 * 60 * 60 * 1000;
+})();
+/** Teto de páginas por chamada (páginas × ALERT_PAGE_SIZE atividades). */
+export const ALERT_MAX_PAGES = 10;
 
 export type AlertKind = "PRE_DUE" | "DUE";
 
@@ -446,24 +458,40 @@ function buildRecipientOr(userId: string, departmentIds: readonly string[]) {
   return orFilters;
 }
 
+export type GetNextActivityAlertOptions = {
+  now?: Date;
+  clock?: Clock;
+  pageSize?: number;
+  /** Teto de páginas; default `ALERT_MAX_PAGES`. */
+  maxPages?: number;
+  /**
+   * Restringe a busca a estas atividades (sweeper de push: candidatas já
+   * filtradas por org com NOT EXISTS em `activity_alert_states`).
+   */
+  activityIds?: readonly string[];
+};
+
 /**
  * GET: no máximo um alerta. Claim otimista; paginação evita starvation.
- * Horizonte: scheduledAt <= now + 15min (exclui futuros distantes).
+ * Horizonte: now - ALERT_LOOKBACK_MS <= scheduledAt <= now + 15min.
  */
 export async function getNextActivityAlert(
   userId: string,
   organizationId: string,
-  options?: { now?: Date; clock?: Clock; pageSize?: number },
+  options?: GetNextActivityAlertOptions,
 ): Promise<ActivityAlertDto | null> {
   const now = options?.now ?? options?.clock?.() ?? defaultClock();
   const pageSize = options?.pageSize ?? ALERT_PAGE_SIZE;
+  const maxPages = options?.maxPages ?? ALERT_MAX_PAGES;
+  if (options?.activityIds && options.activityIds.length === 0) return null;
   const departmentIds = await getUserDepartmentIds(userId, organizationId);
+  const horizonStart = new Date(now.getTime() - ALERT_LOOKBACK_MS);
   const horizonEnd = new Date(now.getTime() + PRE_DUE_WINDOW_MS);
   const recipientOr = buildRecipientOr(userId, departmentIds);
 
   let cursor: PageCursor | null = null;
 
-  for (;;) {
+  for (let page = 0; page < maxPages; page++) {
     const andFilters: Array<Record<string, unknown>> = [
       { OR: recipientOr },
     ];
@@ -485,7 +513,10 @@ export async function getNextActivityAlert(
       where: {
         organizationId,
         completed: false,
-        scheduledAt: { not: null, lte: horizonEnd },
+        scheduledAt: { not: null, gte: horizonStart, lte: horizonEnd },
+        ...(options?.activityIds
+          ? { id: { in: [...options.activityIds] } }
+          : {}),
         AND: andFilters,
       },
       include: activityInclude,
@@ -542,6 +573,9 @@ export async function getNextActivityAlert(
     if (!last.scheduledAt || activities.length < pageSize) return null;
     cursor = { scheduledAt: last.scheduledAt, id: last.id };
   }
+  // Teto de páginas: quem tem mais de maxPages × pageSize atividades na
+  // janela sem nada entregável hoje não pode custar mais que isso por GET.
+  return null;
 }
 
 export type AlertActionResult =
