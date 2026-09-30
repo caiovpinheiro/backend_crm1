@@ -6,12 +6,19 @@ import { assertNoActiveImport } from "@/lib/import-guard";
 import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import {
+  ACADEMIC_IMPORT_MAX_BYTES,
+  ACADEMIC_IMPORT_MAX_ROWS,
+  ImportFileError,
+  assertImportFileSignature,
+  importKindFromName,
+} from "@/lib/import-file-guard";
 import { readTableFromBuffer } from "@/lib/import-helpers";
 
 /** Upload só valida + enfileira; o etl-worker faz o replace da base. */
 export const maxDuration = 60;
 
-const MAX_FILE_SIZE = 32 * 1024 * 1024;
+const MAX_FILE_SIZE = ACADEMIC_IMPORT_MAX_BYTES;
 
 /**
  * Upload do relatório de matriculados (Excel/CSV). Substitui todos os
@@ -51,7 +58,8 @@ export async function POST(request: Request) {
   }
   const originalName = file.name ?? "matriculados.xlsx";
   const lower = originalName.toLowerCase();
-  if (!/\.(xlsx|xls|ods|csv)$/.test(lower)) {
+  const kind = /\.(xlsx|xls|ods|csv)$/.test(lower) ? importKindFromName(lower) : null;
+  if (!kind) {
     return NextResponse.json(
       { message: "Formato não suportado. Envie .xlsx, .xls, .ods ou .csv." },
       { status: 415 },
@@ -60,8 +68,19 @@ export async function POST(request: Request) {
 
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
+    if (buffer.length > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        { message: `Arquivo excede o limite de ${MAX_FILE_SIZE / 1024 / 1024} MB.` },
+        { status: 413 },
+      );
+    }
+    // SEC2-4: assinatura real (PK\x03\x04 / OLE2 / texto) antes do SheetJS —
+    // extensão sozinha aceitava HTML/zip bomb renomeados.
+    assertImportFileSignature(buffer, kind);
     // Conta linhas só para o total do BulkOperation; o worker re-parseia.
-    const { rows } = await readTableFromBuffer(buffer, originalName);
+    const { rows } = await readTableFromBuffer(buffer, originalName, undefined, {
+      maxRows: ACADEMIC_IMPORT_MAX_ROWS,
+    });
     if (rows.length === 0) {
       return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
     }
@@ -128,6 +147,9 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (e) {
+    if (e instanceof ImportFileError) {
+      return NextResponse.json({ message: e.message }, { status: e.status });
+    }
     console.error("[academic-records] upload error:", e);
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro interno ao importar." },

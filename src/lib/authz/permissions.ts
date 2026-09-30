@@ -369,6 +369,15 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "api_token",
+    label: "Tokens de API",
+    description:
+      "Tokens `eduit_…` para integrações (n8n, scripts). Herdam o papel completo do dono — conceda com cuidado. ADMIN tem por padrão via `*`.",
+    actions: [
+      { action: "manage", label: "Criar, listar e revogar os próprios tokens de API" },
+    ],
+  },
+  {
     resource: "keep",
     label: "Bwipo Keeps",
     description: "Notas pessoais do usuário na organização (texto, listas, anexos).",

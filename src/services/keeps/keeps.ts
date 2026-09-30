@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { sniffAttachment } from "@/lib/file-sniff";
 import { buildPublicUrl, generateFileName, saveFile } from "@/lib/storage/local";
 import { asJson, EMPTY_DOC, normalizeDoc, plainTextFromDoc, type KeepDoc } from "./doc";
 import {
@@ -408,12 +409,16 @@ export async function deleteKeepCategory(opts: { userId: string; id: string }) {
   ]);
 }
 
-const MAX_FILE_SIZE = 16 * 1024 * 1024;
+export const KEEP_MAX_FILE_SIZE = 16 * 1024 * 1024;
+// SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (ver
+// `sniffAttachment`), não ao Content-Type enviado pelo cliente.
 const ALLOWED_PREFIXES = [
   "image/",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument",
+  "application/vnd.ms-excel",
+  "application/vnd.oasis.opendocument",
   "text/plain",
   "text/csv",
   "audio/",
@@ -421,9 +426,30 @@ const ALLOWED_PREFIXES = [
 ];
 
 export function assertKeepUpload(mime: string, size: number) {
-  if (size > MAX_FILE_SIZE) throw new KeepError("Arquivo acima de 16 MB.", 413);
+  if (size > KEEP_MAX_FILE_SIZE) throw new KeepError("Arquivo acima de 16 MB.", 413);
   const ok = ALLOWED_PREFIXES.some((p) => mime === p || mime.startsWith(p));
   if (!ok) throw new KeepError("Tipo de arquivo não permitido.", 415);
+}
+
+/**
+ * Detecta o tipo real do anexo e valida contra a allowlist. Devolve o
+ * MIME/extensão canônicos que devem ir para o storage e para o banco.
+ */
+export function resolveKeepUpload(opts: {
+  buffer: Buffer;
+  declaredMime?: string | null;
+  fileName?: string | null;
+}): { mime: string; ext: string } {
+  if (opts.buffer.length > KEEP_MAX_FILE_SIZE) {
+    throw new KeepError("Arquivo acima de 16 MB.", 413);
+  }
+  const sniffed = sniffAttachment(opts.buffer, {
+    mime: opts.declaredMime,
+    fileName: opts.fileName,
+  });
+  if (!sniffed) throw new KeepError("Tipo de arquivo não permitido.", 415);
+  assertKeepUpload(sniffed.mime, opts.buffer.length);
+  return sniffed;
 }
 
 export async function addKeepAttachment(opts: {
@@ -434,14 +460,18 @@ export async function addKeepAttachment(opts: {
   mimeType: string;
   buffer: Buffer;
 }) {
-  assertKeepUpload(opts.mimeType, opts.buffer.length);
+  const detected = resolveKeepUpload({
+    buffer: opts.buffer,
+    declaredMime: opts.mimeType,
+    fileName: opts.fileName,
+  });
   const note = await prisma.keepNote.findFirst({
     where: { id: opts.noteId, userId: opts.userId },
     select: { id: true },
   });
   if (!note) throw new KeepError("Nota não encontrada.", 404);
-  const ext = (opts.fileName.split(".").pop() ?? "bin").toLowerCase();
-  const storageKey = generateFileName({ prefix: "keep", ext });
+  // Extensão e MIME vêm do conteúdo detectado, nunca do nome enviado.
+  const storageKey = generateFileName({ prefix: "keep", ext: detected.ext });
   await saveFile({
     orgId: opts.orgId,
     bucket: "keeps",
@@ -454,7 +484,7 @@ export async function addKeepAttachment(opts: {
       userId: opts.userId,
       noteId: note.id,
       fileName: opts.fileName.slice(0, 180),
-      mimeType: opts.mimeType,
+      mimeType: detected.mime,
       fileSize: opts.buffer.length,
       storageKey,
     },

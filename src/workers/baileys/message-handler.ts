@@ -23,6 +23,7 @@ import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
+import { maskPhone } from "@/lib/pii-mask";
 import { safeFetchBytes } from "@/lib/safe-fetch";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -152,7 +153,8 @@ async function resolveContact(
     channelId,
   }).catch((err) => log.warn("Falha ao garantir deal aberto:", err));
 
-  log.info(`Novo lead: ${name} (${phone})`);
+  // SEC2-5: sem nome/telefone em claro — ID do contato + telefone mascarado.
+  log.info({ contactId: created.id, phone: maskPhone(phone) }, "Novo lead criado via WhatsApp (QR)");
   return created;
 }
 

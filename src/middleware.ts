@@ -11,6 +11,11 @@ import {
   applyBrowserApiCors,
   isAllowedBrowserApiOrigin,
 } from "@/lib/browser-api-cors";
+import {
+  CSP_REPORT_PATH,
+  FRAME_OPTIONS_VALUE,
+  buildCspReportOnly,
+} from "@/lib/security-headers";
 
 /**
  * Mesma regra que `useSecureCookies` em `auth.config.ts` — define o nome do
@@ -82,12 +87,12 @@ async function readAuthFromRequestCookie(
  *   em requests same-origin, apenas a origem em cross-origin HTTPS, e nada
  *   em downgrade pra HTTP.
  * - X-Frame-Options: SAMEORIGIN — anti-clickjacking; so o proprio dominio
- *   pode embedar o CRM em iframe.
+ *   pode embedar o CRM em iframe. Valor vem de `@/lib/security-headers`
+ *   (mesma fonte do next.config.ts) — SEC-15.
  * - X-DNS-Prefetch-Control: on — libera DNS prefetch pra assets externos
  *   (CDNs de fotos, Baileys, etc.) sem afetar privacidade critica.
- *
- * NAO setamos Content-Security-Policy aqui pra nao quebrar o service worker
- * / inline scripts do Next. CSP fica de TODO separado com testes.
+ * - Content-Security-Policy-Report-Only: so relata (nunca bloqueia) para
+ *   inventariar o que quebraria antes de considerar enforcing.
  */
 function withSecurityHeaders(
   res: NextResponse,
@@ -102,7 +107,8 @@ function withSecurityHeaders(
   }
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.headers.set("X-Frame-Options", "SAMEORIGIN");
+  res.headers.set("X-Frame-Options", FRAME_OPTIONS_VALUE);
+  res.headers.set("Content-Security-Policy-Report-Only", buildCspReportOnly());
   res.headers.set("X-DNS-Prefetch-Control", "on");
   if (req?.nextUrl.pathname.startsWith("/api/")) {
     applyBrowserApiCors(req, res);
@@ -158,6 +164,8 @@ const PUBLIC_API_PATHS = new Set([
   // Convite de membro: o convidado ainda não tem sessão.
   "/api/invites/validate",
   "/api/invites/accept",
+  // Relatórios de violação da CSP Report-Only (o browser não manda cookie).
+  CSP_REPORT_PATH,
 ]);
 
 const PWA_PUBLIC_PATHS = new Set([

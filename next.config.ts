@@ -3,14 +3,16 @@ import { fileURLToPath } from "node:url";
 
 import type { NextConfig } from "next";
 
+import { baseSecurityHeaders } from "./src/lib/security-headers";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function securityHeaders(): { key: string; value: string }[] {
+  // SEC-15: X-Frame-Options/CSP Report-Only vêm de `src/lib/security-headers`
+  // (mesma fonte do middleware) — evita DENY aqui × SAMEORIGIN lá.
   const headers: { key: string; value: string }[] = [
-    { key: "X-Frame-Options", value: "DENY" },
-    { key: "X-Content-Type-Options", value: "nosniff" },
-    { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+    ...baseSecurityHeaders(),
     {
       key: "Permissions-Policy",
       value: "payment=(), usb=(), geolocation=()",

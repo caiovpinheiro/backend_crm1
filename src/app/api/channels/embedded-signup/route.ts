@@ -69,7 +69,18 @@ export async function POST(request: Request) {
           typeof tokenData.error === "object" && tokenData.error !== null
             ? ((tokenData.error as Record<string, unknown>).message as string)
             : "Falha ao trocar código por token.";
-        console.error("Embedded Signup token exchange error:", tokenData);
+        // SEC2-5: só código/tipo do erro — o corpo da Meta pode carregar
+        // fragmentos do fluxo OAuth (code, trace) que não devem ir pro log.
+        const metaErr =
+          typeof tokenData.error === "object" && tokenData.error !== null
+            ? (tokenData.error as Record<string, unknown>)
+            : {};
+        console.error("Embedded Signup token exchange error:", {
+          status: tokenRes.status,
+          code: metaErr.code ?? null,
+          type: metaErr.type ?? null,
+          subcode: metaErr.error_subcode ?? null,
+        });
         return NextResponse.json({ message: errMsg }, { status: 400 });
       }
 

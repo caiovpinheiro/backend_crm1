@@ -62,6 +62,7 @@ import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
+import { maskPhone } from "@/lib/pii-mask";
 import { isRetiredMetaPhoneNumberId } from "@/lib/channels/retired-whatsapp";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
@@ -899,7 +900,11 @@ async function resolveWebhookContact(
     log.warn("Falha ao garantir deal aberto:", err),
   );
 
-  log.info(`Novo lead: ${name} (${phone ?? bsuid})`);
+  // SEC2-5: sem nome/telefone em claro — ID do contato + telefone mascarado.
+  log.info(
+    { contactId: created.id, phone: phone ? maskPhone(phone) : undefined, hasBsuid: Boolean(bsuid) },
+    "Novo lead criado via WhatsApp (Meta)",
+  );
   return {
     id: created.id,
     name: created.name,
