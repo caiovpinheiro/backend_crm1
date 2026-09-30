@@ -22,14 +22,14 @@ function withOrg<T>(orgId: string, fn: () => Promise<T>): Promise<T> {
   return runWithContext(
     { organizationId: orgId } as Parameters<typeof runWithContext>[0],
     fn,
-  );
+  ) as Promise<T>;
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
   h.queryRaw.mockReset();
   h.queryRaw.mockResolvedValue([
-    { stageId: "st-1", totalDeals: 4n, advancedDeals: 0n, avgDays: "2.5" },
+    { stageId: "st-1", totalDeals: BigInt(4), advancedDeals: BigInt(0), avgDays: "2.5" },
   ]);
 });
 
