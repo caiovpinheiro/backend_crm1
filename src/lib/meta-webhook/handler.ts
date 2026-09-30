@@ -1660,9 +1660,15 @@ async function downloadAndSaveMedia(
   if (!token || !mediaId) return null;
 
   try {
+    // RT-17: sem timeout, um Graph lento segurava o job (e a conexão do
+    // pool) indefinidamente. TimeoutError cai no catch abaixo = mídia falhou.
     const metaRes = await fetch(
       `https://graph.facebook.com/v21.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(15_000),
+      }
     );
     if (!metaRes.ok) {
       log.warn(`Falha ao obter URL da mídia ${mediaId}: HTTP ${metaRes.status}`);
@@ -1675,6 +1681,7 @@ async function downloadAndSaveMedia(
     const fileRes = await fetch(downloadUrl, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
     });
     if (!fileRes.ok) {
       log.warn(`Falha ao baixar mídia ${mediaId}: HTTP ${fileRes.status}`);
@@ -1697,6 +1704,10 @@ async function downloadAndSaveMedia(
     );
     return saved.url;
   } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      log.warn(`Timeout ao baixar mídia ${mediaId} da Meta — tratada como falha de mídia.`);
+      return null;
+    }
     log.error("Erro ao baixar mídia da Meta:", err);
     return null;
   }

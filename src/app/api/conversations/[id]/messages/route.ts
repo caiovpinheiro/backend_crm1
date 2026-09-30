@@ -1265,6 +1265,9 @@ export async function POST(request: Request, context: RouteContext) {
         sendStatus = "failed";
         sendErrorMsg = errMsg;
       } else if (waitUntilSent) {
+        // RT-7: acorda pelo sinal do worker (Redis pub/sub) com polling de
+        // fallback em backoff; teto de 15 s. Se estourar, devolve `pending`
+        // e o `message_status` do SSE atualiza o cliente.
         const waited = await waitForMessageSendStatus(saved.id);
         if (waited === "sent") sendStatus = "sent";
         if (waited === "failed") sendStatus = "failed";

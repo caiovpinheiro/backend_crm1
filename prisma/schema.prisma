@@ -5559,9 +5559,12 @@ model ConversationTurn {
   @@unique([organizationId, openKey])
   @@index([conversationId, status])
   @@index([status, readyAt])
-  /// Sweeper de promoção: varre abertos por lastMessageAt (janela de
-  /// debounce) sem escanear turnos terminais.
+  /// Legado: o sweeper de promoção varria por lastMessageAt; hoje usa
+  /// firstMessageAt (abaixo). Mantido até confirmar idx_scan≈0 em produção.
   @@index([status, lastMessageAt])
+  /// Sweeper de promoção: abertos (RECEIVING/STABILIZING) com
+  /// firstMessageAt <= piso, ordenados por firstMessageAt.
+  @@index([status, firstMessageAt])
   /// Sweeper de stale reclaim: PROCESSING mais velho que o teto.
   @@index([status, claimedAt])
   @@index([organizationId, conversationId, createdAt])

@@ -105,6 +105,7 @@ export function startAIAgentInactivityWorker() {
 type ExpiredRow = {
   conversation_id: string;
   contact_id: string;
+  contact_name: string | null;
   assigned_to_id: string;
   agent_id: string;
   autonomy_mode: "AUTONOMOUS" | "DRAFT";
@@ -120,6 +121,7 @@ type ExpiredRow = {
 type IdleRow = {
   conversation_id: string;
   contact_id: string | null;
+  contact_name: string | null;
   organization_id: string;
   assigned_to_id: string;
   autonomy_mode: "AUTONOMOUS" | "DRAFT";
@@ -130,12 +132,23 @@ type IdleRow = {
   auto_close_policy: unknown;
 };
 
+/**
+ * BD-5: a consulta parte de `ai_agent_configs` (poucas linhas: um por
+ * agente ativo) e entra em `conversations` por
+ * `(organizationId, assignedToId, status, hasHumanReply)` — coberto pelo
+ * índice `(organizationId, status, assignedToId, hasHumanReply)`. A versão
+ * anterior começava em `conversations` filtrando `status`/`hasHumanReply`
+ * sem org (nenhum índice serve) e rodava os LATERAL em cada candidata antes
+ * do LIMIT. `contact.name` vem no SELECT para o loop não fazer um
+ * `contact.findUnique` por linha.
+ */
 async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
   if (idleMs <= 0) return [];
   return prismaBase.$queryRaw<IdleRow[]>`
     SELECT
       c.id AS conversation_id,
       c."contactId" AS contact_id,
+      ct.name AS contact_name,
       c."organizationId" AS organization_id,
       c."assignedToId" AS assigned_to_id,
       a."autonomyMode" AS autonomy_mode,
@@ -144,9 +157,14 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       last_out."createdAt" AS last_out_at,
       last_in.content AS last_in_content,
       c."lastInboundAt" AS last_inbound_at
-    FROM "conversations" c
-    JOIN "users" u ON u.id = c."assignedToId"
-    JOIN "ai_agent_configs" a ON a."userId" = u.id
+    FROM "ai_agent_configs" a
+    JOIN "users" u ON u.id = a."userId" AND u.type = 'AI'
+    JOIN "conversations" c
+      ON c."organizationId" = a."organizationId"
+     AND c."assignedToId" = a."userId"
+     AND c.status = 'OPEN'
+     AND c."hasHumanReply" = false
+    LEFT JOIN "contacts" ct ON ct.id = c."contactId"
     JOIN LATERAL (
       SELECT m.content, m."createdAt"
       FROM messages m
@@ -167,11 +185,8 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       ORDER BY m."createdAt" DESC
       LIMIT 1
     ) last_in ON true
-    WHERE u.type = 'AI'
-      AND a.active = true
+    WHERE a.active = true
       AND (a."engine" IS NULL OR a."engine" <> 'simple')
-      AND c.status = 'OPEN'
-      AND c."hasHumanReply" = false
       AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
       -- Aluno não falou depois da última mensagem da IA. Não usamos
       -- lastMessageDirection/hasAgentReply: no lead de entrada essas flags
@@ -239,22 +254,18 @@ async function processIdleAiOnly(
         const contactId = row.contact_id;
         if (idleMessage && isNudge && canText && contactId && row.assigned_to_id) {
           const agentUserId = row.assigned_to_id;
-          await withSystemContext(row.organization_id, async () => {
-            const contact = await prisma.contact.findUnique({
-              where: { id: contactId },
-              select: { name: true },
-            });
-            await sendAgentMessage({
+          await withSystemContext(row.organization_id, () =>
+            sendAgentMessage({
               conversationId: row.conversation_id,
               contactId,
               agentUserId,
               autonomyMode: row.autonomy_mode,
               text: renderTemplate(idleMessage, {
-                contactName: contact?.name ?? null,
+                contactName: row.contact_name ?? null,
               }),
               kind: "farewell",
-            });
-          }).catch((e) => {
+            }),
+          ).catch((e) => {
             console.warn(
               `[ai-inactivity] aviso de encerramento falhou conv=${row.conversation_id}:`,
               e instanceof Error ? e.message : e,
@@ -366,11 +377,14 @@ export async function tickOnce(now: Date = new Date()) {
   // Worker cross-tenant: varre TODAS as orgs. Usa prismaBase para que
   // o extension nao tente escopar ou exigir RequestContext. O JOIN
   // traz conversations.organizationId para montar withSystemContext
-  // por linha.
+  // por linha. Mesma forma de `listIdleAiOnly` (BD-5): parte dos agentes
+  // e entra em conversations pelo índice (org, status, assignedToId,
+  // hasHumanReply).
   const rows = await prismaBase.$queryRaw<ExpiredRow[]>`
     SELECT
       c.id AS conversation_id,
       c."contactId" AS contact_id,
+      ct.name AS contact_name,
       c."assignedToId" AS assigned_to_id,
       c."organizationId" AS organization_id,
       a.id AS agent_id,
@@ -381,15 +395,17 @@ export async function tickOnce(now: Date = new Date()) {
       a."inactivityFarewellMessage" AS farewell_message,
       a."businessHours" AS business_hours,
       c."updatedAt" AS updated_at
-    FROM "conversations" c
-    JOIN "users" u ON u.id = c."assignedToId"
-    JOIN "ai_agent_configs" a ON a."userId" = u.id
-    WHERE u.type = 'AI'
-      AND a.active = true
+    FROM "ai_agent_configs" a
+    JOIN "users" u ON u.id = a."userId" AND u.type = 'AI'
+    JOIN "conversations" c
+      ON c."organizationId" = a."organizationId"
+     AND c."assignedToId" = a."userId"
+     AND c.status = 'OPEN'
+     AND c."hasHumanReply" = true
+    LEFT JOIN "contacts" ct ON ct.id = c."contactId"
+    WHERE a.active = true
       AND (a."engine" IS NULL OR a."engine" <> 'simple')
       AND a."inactivityTimerMs" > 0
-      AND c.status = 'OPEN'
-      AND c."hasHumanReply" = true
       AND c."lastMessageDirection" = 'out'
       AND c."hasAgentReply" = true
       AND c."updatedAt" < (${now}::timestamptz - (a."inactivityTimerMs" || ' ms')::interval)
@@ -436,12 +452,8 @@ async function dispatchOne(row: ExpiredRow) {
   // Envia farewell (se configurada) antes do handoff pra cliente
   // ter contexto de que vai passar pra humano.
   if (row.farewell_message?.trim()) {
-    const contact = await prisma.contact.findUnique({
-      where: { id: row.contact_id },
-      select: { name: true },
-    });
     const text = renderTemplate(row.farewell_message, {
-      contactName: contact?.name ?? null,
+      contactName: row.contact_name ?? null,
       dealTitle: openDeal?.title ?? null,
       stageName: openDeal?.stage?.name ?? null,
     });

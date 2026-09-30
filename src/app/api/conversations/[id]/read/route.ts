@@ -5,6 +5,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { channelSendsReadReceipts } from "@/lib/channels/config";
+import { sseBus } from "@/lib/sse-bus";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -23,6 +24,20 @@ export async function POST(_request: Request, context: RouteContext) {
         where: { id },
         data: { unreadCount: 0, lastReadAt: new Date() },
       });
+
+      // MA-4: cada aba que abre a conversa faz POST /read, mas o badge de
+      // não lidas das OUTRAS abas (e dos outros usuários) só atualizava num
+      // refetch. Evento mínimo para o cliente zerar o contador em memória;
+      // best-effort — o read já foi persistido acima.
+      try {
+        sseBus.publish("conversation_updated", {
+          organizationId: session.user.organizationId,
+          conversationId: id,
+          unreadCount: 0,
+        });
+      } catch {
+        /* best-effort */
+      }
 
       // markAsRead na API da Meta tem que ir pelo canal da conversa
       // (token/phoneId desse cliente), nao pelo singleton global do env.
