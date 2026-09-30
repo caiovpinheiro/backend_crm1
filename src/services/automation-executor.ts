@@ -51,7 +51,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
-import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
+import { safeFetch } from "@/lib/safe-fetch";
 import { sseBus } from "@/lib/sse-bus";
 import {
   assertStageEntryFields,
@@ -4079,13 +4079,14 @@ async function executeStep(
         });
       }
 
-      await assertSafeOutboundUrl(finalUrl);
-      const res = await fetch(finalUrl, {
-        method,
-        headers: h,
-        body: bodyStr,
-        signal: AbortSignal.timeout(30_000),
-      });
+      // safeFetch valida a URL (anti-SSRF) antes da requisição e revalida
+      // cada salto de redirect (máx. 3), em vez de seguir às cegas.
+      const res = await safeFetch(
+        finalUrl,
+        { method, headers: h, body: bodyStr },
+        { timeoutMs: 30_000, maxRedirects: 3 },
+      );
+      await res.body?.cancel().catch(() => undefined);
       if (!res.ok) throw new Error(`webhook: HTTP ${res.status}`);
       return {};
     }
