@@ -14,12 +14,15 @@ const history = vi.hoisted(() => ({
   humanWasAssignedInThisConversation: vi.fn(),
 }));
 
+const settings = vi.hoisted(() => ({ getOrgSetting: vi.fn() }));
+
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
 vi.mock("@/services/distribution/assignee-eligibility", () => ({
   isAssigneeCurrentlyEligible: vi.fn(async () => ({ eligible: true })),
   shouldClearOwnershipOnIneligible: vi.fn(() => false),
 }));
 vi.mock("@/services/distribution/human-assignment-history", () => history);
+vi.mock("@/lib/org-settings", () => settings);
 
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
@@ -41,6 +44,7 @@ describe("keepHumanAfterAutomationClose", () => {
     vi.clearAllMocks();
     previousTicketClosedByAutomation();
     db.$transaction.mockResolvedValue(undefined);
+    settings.getOrgSetting.mockResolvedValue(null);
   });
 
   it("ticket novo sem responsável recebe o consultor do ticket anterior", async () => {
@@ -80,6 +84,42 @@ describe("keepHumanAfterAutomationClose", () => {
 
     expect(kept).toBe("user-previous");
     expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("modo 'always': toda mensagem devolve ao consultor anterior, mesmo após transferência", async () => {
+    settings.getOrgSetting.mockResolvedValue("always");
+    db.conversation.findUnique.mockResolvedValue({
+      assignedToId: "user-transferred",
+      assignedTo: { type: "HUMAN" },
+    });
+    history.humanWasAssignedInThisConversation.mockResolvedValue(true);
+
+    const kept = await keepHumanAfterAutomationClose(ARGS);
+
+    expect(kept).toBe("user-previous");
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("modo 'off': não devolve e não consulta nada", async () => {
+    settings.getOrgSetting.mockResolvedValue("off");
+
+    const kept = await keepHumanAfterAutomationClose(ARGS);
+
+    expect(kept).toBeNull();
+    expect(db.conversation.findFirst).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("valor desconhecido na configuração vale como o padrão", async () => {
+    settings.getOrgSetting.mockResolvedValue("qualquer");
+    db.conversation.findUnique.mockResolvedValue({
+      assignedToId: "user-transferred",
+      assignedTo: { type: "HUMAN" },
+    });
+    history.humanWasAssignedInThisConversation.mockResolvedValue(true);
+
+    expect(await keepHumanAfterAutomationClose(ARGS)).toBe("user-transferred");
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it("sem ticket anterior encerrado por automação não mexe em nada", async () => {
