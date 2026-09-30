@@ -18,10 +18,20 @@ export type DashboardMeItem = {
   meta: string | null;
 };
 
+export type DashboardMeStageCount = {
+  stageId: string;
+  stageName: string;
+  pipelineName: string;
+  pipelineNumber: number;
+  count: number;
+};
+
 export type DashboardMeResult = {
   conversations: { total: number; items: DashboardMeItem[] };
   activities: { overdue: number; today: number; items: DashboardMeItem[] };
   stalled: { total: number; items: DashboardMeItem[] };
+  /** Mensagens de entrada sem resposta humana, nos negócios OPEN do usuário, por etapa. */
+  inboundByStage: DashboardMeStageCount[];
 };
 
 function startOfDay(d: Date) {
@@ -56,7 +66,7 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
     hasError: false,
   };
 
-  const [waitingTotal, waitingRows, overdue, dueToday, openTasks, stalledRows, stalledTotal] =
+  const [waitingTotal, waitingRows, overdue, dueToday, openTasks, stalledRows, stalledTotal, inboundRows] =
     await Promise.all([
       prisma.conversation.count({ where: waitingWhere }),
       prisma.conversation.findMany({
@@ -129,6 +139,56 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           AND d.status = 'OPEN'
           AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
       `),
+      // Não usa a fila do inbox (assignedTo). Conta mensagem de entrada ainda
+      // sem resposta humana no negócio OPEN mais recente de cada contato do usuário.
+      prisma.$queryRaw<
+        {
+          stageId: string;
+          stageName: string;
+          pipelineName: string;
+          pipelineNumber: number;
+          cnt: bigint;
+        }[]
+      >(Prisma.sql`
+        WITH mine AS (
+          SELECT DISTINCT ON (d."contactId")
+            d."contactId" AS "contactId",
+            d."stageId" AS "stageId"
+          FROM deals d
+          WHERE d."organizationId" = ${orgId}
+            AND d."ownerId" = ${userId}
+            AND d.status = 'OPEN'::"DealStatus"
+            AND d."contactId" IS NOT NULL
+          ORDER BY d."contactId", d."updatedAt" DESC
+        )
+        SELECT s.id AS "stageId",
+               s.name AS "stageName",
+               p.name AS "pipelineName",
+               p.number AS "pipelineNumber",
+               COUNT(m.id)::bigint AS cnt
+        FROM mine o
+        INNER JOIN stages s ON s.id = o."stageId"
+        INNER JOIN pipelines p ON p.id = s."pipelineId" AND p."archivedAt" IS NULL
+        INNER JOIN conversations conv
+          ON conv."contactId" = o."contactId"
+         AND conv."organizationId" = ${orgId}
+        INNER JOIN messages m
+          ON m."conversationId" = conv.id
+         AND m."organizationId" = ${orgId}
+         AND m.direction = 'in'
+         AND m."isPrivate" = false
+         AND NOT EXISTS (
+           SELECT 1 FROM messages reply
+           WHERE reply."conversationId" = m."conversationId"
+             AND reply."organizationId" = ${orgId}
+             AND reply.direction = 'out'
+             AND reply."isPrivate" = false
+             AND reply."authorType" = 'human'::"MessageAuthorType"
+             AND reply."createdAt" > m."createdAt"
+         )
+        GROUP BY s.id, s.name, s.position, p.name, p.number
+        ORDER BY p.name ASC, s.position ASC
+      `),
     ]);
 
   const rankedTasks = [...openTasks].sort((a, b) => {
@@ -185,5 +245,12 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
         meta: daysAgoLabel(row.updatedAt),
       })),
     },
+    inboundByStage: inboundRows.map((row) => ({
+      stageId: row.stageId,
+      stageName: row.stageName,
+      pipelineName: row.pipelineName,
+      pipelineNumber: row.pipelineNumber,
+      count: Number(row.cnt),
+    })),
   };
 }
