@@ -259,9 +259,9 @@ export async function invalidatePipelines(orgId: string): Promise<void> {
 
 // ── Stage Metrics (headers do Kanban) ───────────────────────────
 //
-// computeStageMetrics varre o pipeline inteiro a cada carga do board.
-// Cache-aside com TTL curto (60s) em getStageMetrics reduz para 1
-// computacao/60s sob rajada. Chave por org + pipeline.
+// computeStageMetrics agrega os deals abertos do pipeline a cada carga do
+// board. Cache-aside (TTL STAGE_METRICS_TTL_SEC em analytics.ts) reduz
+// para 1 computacao por TTL sob rajada. Chave por org + pipeline.
 
 export function stageMetricsKey(orgId: string, pipelineId: string): string {
   return `stage_metrics:${orgId}:${pipelineId}`;

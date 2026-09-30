@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
+import { registerDbPool } from "@/lib/db-pool-metrics";
 import { warnPublicDoManagedHosts } from "@/lib/warn-public-do-managed-hosts";
 
 /**
@@ -254,6 +255,10 @@ function createPrismaClient() {
     options: `-c statement_timeout=${statementTimeoutMs}`,
     ...(ssl ? { ssl } : {}),
   });
+
+  // Gauge `crm_db_pool_connections` em /api/metrics — sem isto o coletor
+  // é no-op e o pool do processo nunca aparece.
+  registerDbPool(pool);
 
   // Resiliencia: log mas nao crash em erros transientes do pool.
   pool.on("error", (err) => {
