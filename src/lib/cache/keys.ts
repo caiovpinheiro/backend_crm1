@@ -125,14 +125,28 @@ export async function invalidateWhatsappTemplateCatalog(
 // stampede; badges aceitam stale. NÃO purgar em cada `new_message`
 // (preview) — isso era o storm de CPU. Purgar só quando o ticket
 // muda de aba.
+//
+// A query histórica (todos/resolvidos/finalizados) varre todas as
+// conversas da org (~620 ms) e tem cache próprio (`:hist`, TTL maior).
+// A invalidação apaga só as chaves ativas; a histórica expira pelo TTL.
+
+/** Tamanho do hash de escopo (`inboxTabCountsScopeFp`). */
+export const INBOX_TAB_COUNTS_FP_LENGTH = 20;
 
 export function inboxTabCountsKey(orgId: string, scopeFp: string): string {
   return `inbox_tab_counts:${orgId}:${scopeFp}`;
 }
 
+export function inboxTabCountsHistKey(orgId: string, scopeFp: string): string {
+  return `${inboxTabCountsKey(orgId, scopeFp)}:hist`;
+}
+
 export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
   try {
-    await cache.delPattern(`inbox_tab_counts:${orgId}:*`);
+    // `?` casa exatamente um caractere: pega `<fp>` e deixa `<fp>:hist`.
+    await cache.delPattern(
+      `inbox_tab_counts:${orgId}:${"?".repeat(INBOX_TAB_COUNTS_FP_LENGTH)}`,
+    );
   } catch {
     /* best-effort */
   }
@@ -314,9 +328,11 @@ async function purgeOrgBoards(orgId: string): Promise<void> {
  * segurar rajada de webhook. Purgar a cada mensagem devolveria o pico de
  * CPU de jul/26, então a primeira mensagem purga na hora (o operador vê o
  * card atualizar no refetch que o SSE dispara ~800ms depois) e as demais
- * da janela viram uma única purga no fim dela.
+ * da janela viram uma única purga no fim dela. Com 3s o board das orgs
+ * grandes era recalculado quase sem parar; 15s é o atraso máximo aceito
+ * para a prévia do card.
  */
-const BOARD_INVALIDATION_WINDOW_MS = 3_000;
+export const BOARD_INVALIDATION_WINDOW_MS = 15_000;
 
 type BoardInvalidationWindow = {
   timer: ReturnType<typeof setTimeout>;
@@ -324,33 +340,46 @@ type BoardInvalidationWindow = {
   again: boolean;
 };
 
+/** Chave `org` (todos os pipelines) ou `org:pipeline`. */
 const boardInvalidationWindows = new Map<string, BoardInvalidationWindow>();
 
 /**
- * Agenda a invalidação do board da org com coalescência (leading + trailing).
- * Fire-and-forget: nunca bloqueia o path de criação da mensagem.
+ * Agenda a invalidação do board com coalescência (leading + trailing).
+ * Com `pipelineId`, apaga só `board:<org>:<pipeline>:*`; sem ele, todos os
+ * pipelines da org. Fire-and-forget: nunca bloqueia o path de criação da
+ * mensagem.
  */
-export function scheduleBoardInvalidation(orgId: string | null | undefined): void {
+export function scheduleBoardInvalidation(
+  orgId: string | null | undefined,
+  pipelineId?: string | null,
+): void {
   if (!orgId) return;
 
-  const open = boardInvalidationWindows.get(orgId);
+  const windowKey = pipelineId ? `${orgId}:${pipelineId}` : orgId;
+  const open = boardInvalidationWindows.get(windowKey);
   if (open) {
     open.again = true;
     return;
   }
 
-  void purgeOrgBoards(orgId);
+  if (pipelineId) {
+    void invalidateBoardData(orgId, pipelineId).catch(() => {
+      /* cache é best-effort — o TTL cobre a falha */
+    });
+  } else {
+    void purgeOrgBoards(orgId);
+  }
 
   const slot: BoardInvalidationWindow = {
     again: false,
     timer: setTimeout(() => {
-      boardInvalidationWindows.delete(orgId);
-      if (slot.again) scheduleBoardInvalidation(orgId);
+      boardInvalidationWindows.delete(windowKey);
+      if (slot.again) scheduleBoardInvalidation(orgId, pipelineId);
     }, BOARD_INVALIDATION_WINDOW_MS),
   };
   // Não segura o event loop no shutdown.
   if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
     slot.timer.unref();
   }
-  boardInvalidationWindows.set(orgId, slot);
+  boardInvalidationWindows.set(windowKey, slot);
 }
