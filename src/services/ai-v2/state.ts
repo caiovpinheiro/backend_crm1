@@ -1,0 +1,178 @@
+/**
+ * Persistência do estado da conversa v2.
+ * Nenhum domínio de cliente.
+ */
+
+import { prisma } from "@/lib/prisma";
+import type { V2Owner, V2Stage } from "@/lib/ai-v2/types";
+import { parseV2Counters, defaultV2Counters, type V2Counters } from "./limits";
+
+export type V2ConversationStateRow = {
+  id: string;
+  organizationId: string;
+  conversationId: string;
+  agentId: string;
+  stage: string;
+  mode?: string | null;
+  themeId?: string | null;
+  humanActive: boolean;
+  owner: string;
+  originStageId?: string | null;
+  postCloseWindowEndAt?: Date | null;
+  closeReason?: string | null;
+  versionId?: string | null;
+  selectedDealId?: string | null;
+  entryConfirmationPending?: boolean;
+  identificationAttempts: number;
+  counters: Record<string, unknown>;
+  collectedVariables?: Record<string, unknown> | null;
+  updatedAt?: Date;
+};
+
+export async function getV2ConversationState(
+  conversationId: string,
+): Promise<V2ConversationStateRow | null> {
+  const row = await (prisma as unknown as {
+    aISimpleConversationState: {
+      findUnique: (args: { where: { conversationId: string } }) => Promise<V2ConversationStateRow | null>;
+    };
+  }).aISimpleConversationState.findUnique({
+    where: { conversationId },
+  });
+  return row;
+}
+
+export async function upsertV2ConversationState(args: {
+  organizationId: string;
+  conversationId: string;
+  agentId: string;
+  stage?: V2Stage;
+  mode?: string | null;
+  themeId?: string | null;
+  owner?: V2Owner;
+  originStageId?: string | null;
+  postCloseWindowEndAt?: Date | null;
+  closeReason?: string | null;
+  versionId?: string | null;
+  selectedDealId?: string | null;
+  entryConfirmationPending?: boolean;
+  identificationAttempts?: number;
+  counters?: V2Counters;
+  collectedVariables?: Record<string, unknown>;
+}): Promise<V2ConversationStateRow> {
+  const existing = await getV2ConversationState(args.conversationId);
+  const data: Record<string, unknown> = {
+    stage: args.stage ?? existing?.stage ?? "idle",
+    mode: args.mode ?? existing?.mode ?? null,
+    themeId: args.themeId ?? existing?.themeId ?? null,
+    owner: args.owner ?? existing?.owner ?? "agente",
+    originStageId: args.originStageId !== undefined ? args.originStageId : existing?.originStageId ?? null,
+    postCloseWindowEndAt: args.postCloseWindowEndAt !== undefined ? args.postCloseWindowEndAt : existing?.postCloseWindowEndAt ?? null,
+    closeReason: args.closeReason !== undefined ? args.closeReason : existing?.closeReason ?? null,
+    versionId: args.versionId !== undefined ? args.versionId : existing?.versionId ?? null,
+    selectedDealId: args.selectedDealId !== undefined ? args.selectedDealId : existing?.selectedDealId ?? null,
+    entryConfirmationPending: args.entryConfirmationPending !== undefined ? args.entryConfirmationPending : existing?.entryConfirmationPending ?? false,
+    identificationAttempts: args.identificationAttempts ?? existing?.identificationAttempts ?? 0,
+    counters: args.counters ? (args.counters as unknown as Record<string, unknown>) : existing?.counters ?? {},
+    collectedVariables: args.collectedVariables ?? existing?.collectedVariables ?? {},
+  };
+
+  if (existing) {
+    const updated = await (prisma as unknown as {
+      aISimpleConversationState: {
+        update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<V2ConversationStateRow>;
+      };
+    }).aISimpleConversationState.update({
+      where: { id: existing.id },
+      data,
+    });
+    return updated;
+  }
+
+  const created = await (prisma as unknown as {
+    aISimpleConversationState: {
+      create: (args: { data: Record<string, unknown> }) => Promise<V2ConversationStateRow>;
+    };
+  }).aISimpleConversationState.create({
+    data: {
+      organizationId: args.organizationId,
+      conversationId: args.conversationId,
+      agentId: args.agentId,
+      ...data,
+    },
+  });
+  return created;
+}
+
+/**
+ * Estado "encerrado" do ticket anterior do mesmo contato, ainda dentro da
+ * janela pós-encerramento. Encerrar (RESOLVED) faz a próxima mensagem do
+ * cliente abrir um ticket NOVO — sem herdar, a janela pós-encerramento
+ * (cortesia, nova demanda) nunca era vista: o "obrigado" virava um
+ * atendimento do zero, com boas-vindas e confirmação.
+ */
+export async function findInheritablePostCloseState(args: {
+  contactId: string;
+  conversationId: string;
+  agentId: string;
+  now?: Date;
+}): Promise<V2ConversationStateRow | null> {
+  const db = prisma as unknown as {
+    conversation: {
+      findMany: (args: unknown) => Promise<Array<{ id: string }>>;
+    };
+    aISimpleConversationState: {
+      findFirst: (args: unknown) => Promise<V2ConversationStateRow | null>;
+    };
+  };
+  const previous = await db.conversation.findMany({
+    where: { contactId: args.contactId, id: { not: args.conversationId }, status: "RESOLVED" },
+    orderBy: { updatedAt: "desc" },
+    take: 5,
+    select: { id: true },
+  });
+  if (previous.length === 0) return null;
+  return db.aISimpleConversationState.findFirst({
+    where: {
+      conversationId: { in: previous.map((c) => c.id) },
+      agentId: args.agentId,
+      stage: "closed",
+      postCloseWindowEndAt: { gt: args.now ?? new Date() },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+export async function resetV2Counters(
+  conversationId: string,
+): Promise<void> {
+  await (prisma as unknown as {
+    aISimpleConversationState: {
+      update: (args: { where: { conversationId: string }; data: Record<string, unknown> }) => Promise<void>;
+    };
+  }).aISimpleConversationState.update({
+    where: { conversationId },
+    data: { counters: defaultV2Counters() as unknown as Record<string, unknown> },
+  });
+}
+
+/**
+ * Reseta o estado v2 de uma conversa quando ela é atribuída a um agente IA
+ * (motor simples). Garante que o agente responda em vez de ficar mudo por
+ * causa do owner="pessoa" herdado de um atendimento humano anterior.
+ */
+export async function resetV2ConversationStateOwner(
+  conversationId: string,
+): Promise<void> {
+  await (prisma as unknown as {
+    aISimpleConversationState: {
+      updateMany: (args: {
+        where: { conversationId: string };
+        data: { owner: string; stage: string; humanActive: boolean; identificationAttempts: number };
+      }) => Promise<{ count: number }>;
+    };
+  }).aISimpleConversationState.updateMany({
+    where: { conversationId },
+    data: { owner: "agente", stage: "idle", humanActive: false, identificationAttempts: 0 },
+  });
+}

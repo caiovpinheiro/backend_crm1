@@ -41,6 +41,8 @@ const updateSchema = z
     sidebarItems: z.array(sidebarItemSchema).max(100).nullable().optional(),
     sharedInbox: z.boolean().optional(),
     mediaAccess: z.boolean().optional(),
+    seeTeam: z.boolean().optional(),
+    seeUnassigned: z.boolean().optional(),
     stageGrants: z.array(stageGrantSchema).max(500).nullable().optional(),
     pipelineGrants: z.array(pipelineGrantSchema).max(200).nullable().optional(),
     fieldGrants: z.array(fieldGrantSchema).max(500).nullable().optional(),

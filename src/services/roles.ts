@@ -40,6 +40,8 @@ const roleListSelect = {
   sidebarItems: true,
   sharedInbox: true,
   mediaAccess: true,
+  seeTeam: true,
+  seeUnassigned: true,
   _count: { select: { assignments: true } },
 } satisfies Prisma.RoleSelect;
 
@@ -143,6 +145,8 @@ function mapRoleList(
     sidebarItems: extractSidebarItems(row.sidebarItems),
     sharedInbox: row.sharedInbox,
     mediaAccess: row.mediaAccess,
+    seeTeam: row.seeTeam,
+    seeUnassigned: row.seeUnassigned,
     _count: {
       assignments: row._count.assignments,
       groups: 0,
@@ -236,6 +240,8 @@ export async function createRole(input: {
   sidebarItems?: SidebarItemPreference[] | null;
   sharedInbox?: boolean;
   mediaAccess?: boolean;
+  seeTeam?: boolean;
+  seeUnassigned?: boolean;
   stageGrants?: RoleStageGrantInput[] | null;
   pipelineGrants?: RolePipelineGrantInput[] | null;
   fieldGrants?: RoleFieldGrantInput[] | null;
@@ -274,6 +280,8 @@ export async function createRole(input: {
       systemPreset: null,
       ...(input.sharedInbox !== undefined ? { sharedInbox: input.sharedInbox } : {}),
       ...(input.mediaAccess !== undefined ? { mediaAccess: input.mediaAccess } : {}),
+      ...(input.seeTeam !== undefined ? { seeTeam: input.seeTeam } : {}),
+      ...(input.seeUnassigned !== undefined ? { seeUnassigned: input.seeUnassigned } : {}),
       ...(sidebarJson !== undefined ? { sidebarItems: sidebarJson } : {}),
       stageGrants: {
         create: stageGrants.map((g) => ({ organizationId: orgId, ...g })),
@@ -300,6 +308,8 @@ export async function updateRole(
     sidebarItems?: SidebarItemPreference[] | null;
     sharedInbox?: boolean;
     mediaAccess?: boolean;
+    seeTeam?: boolean;
+    seeUnassigned?: boolean;
     stageGrants?: RoleStageGrantInput[] | null;
     pipelineGrants?: RolePipelineGrantInput[] | null;
     fieldGrants?: RoleFieldGrantInput[] | null;
@@ -360,6 +370,8 @@ export async function updateRole(
   // (ADMIN bypassa enforcement de qualquer forma). Substitui a lista inteira.
   if (input.sharedInbox !== undefined) data.sharedInbox = input.sharedInbox;
   if (input.mediaAccess !== undefined) data.mediaAccess = input.mediaAccess;
+  if (input.seeTeam !== undefined) data.seeTeam = input.seeTeam;
+  if (input.seeUnassigned !== undefined) data.seeUnassigned = input.seeUnassigned;
   if (input.stageGrants !== undefined) {
     const grants = sanitizeStageGrants(input.stageGrants);
     data.stageGrants = {

@@ -13,7 +13,17 @@ import {
   normalizeBusinessHours,
   type BusinessHoursConfig,
 } from "@/lib/ai-agents/piloting";
-import type { InboxPolicy } from "@/lib/ai-agents/steering";
+
+/** Campos da política de inbox do agente que a fila humana lê. */
+export type AgentQueuePolicy = {
+  handoffMessage?: string | null;
+  humanAttendanceHours?: BusinessHoursConfig | null;
+  humanAttendancePreEndMinutes?: number | null;
+  queueMessage?: string | null;
+  assignedConsultantMessage?: string | null;
+  audioHandoffMessage?: string | null;
+  humanRequestKeywords?: string[];
+};
 
 export type HumanQueueContext = {
   businessHours?: BusinessHoursConfig | null;
@@ -37,7 +47,7 @@ export type HumanQueueContext = {
 
 /** Monta o contexto de fila a partir da configuração do agente. */
 export function humanQueueContextFromAgent(input: {
-  inboxPolicy?: InboxPolicy | null;
+  inboxPolicy?: AgentQueuePolicy | null;
   businessHours?: unknown;
 }): HumanQueueContext {
   const p = input.inboxPolicy ?? null;

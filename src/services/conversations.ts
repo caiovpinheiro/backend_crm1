@@ -254,6 +254,8 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   select: typeof listSelect;
 }> & {
   lastMessagePreview: ConversationLastMessagePreview | null;
+  /** Última mensagem do cliente — texto e horário exibidos no card. */
+  lastInboundPreview: ConversationLastInboundPreview | null;
   lastMessageAt: Date | null;
   tags: ConversationTag[];
   /** Fila Automação: contexto vivo ou atendimento só do robô. */
@@ -310,13 +312,37 @@ async function applyChannelSessionResetToInboundMap(
   }
 }
 
+/** Última mensagem do CLIENTE — é o que os cards exibem. */
+export type ConversationLastInboundPreview = {
+  content: string;
+  messageType: string;
+  createdAt: Date;
+};
+
+type PreviewBatchEntry = {
+  preview: ConversationLastMessagePreview;
+  createdAt: Date;
+  inbound: ConversationLastInboundPreview | null;
+};
+
+function clampPreview(text: string): string {
+  return text.length > 140 ? `${text.slice(0, 137)}…` : text;
+}
+
+/**
+ * Por conversa: a última mensagem de chat de qualquer lado (`preview`,
+ * segue dirigindo ticks/erro/ordenação) e a última do cliente
+ * (`inbound`, o texto do card). Uma consulta só (UNION ALL de dois
+ * DISTINCT ON).
+ */
 async function lastMessagePreviewsBatch(
   conversationIds: string[]
-): Promise<Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>> {
+): Promise<Map<string, PreviewBatchEntry>> {
   if (conversationIds.length === 0) return new Map();
   const orgId = getOrgIdOrThrow();
 
   const rows = await prisma.$queryRaw<{
+    kind: "any" | "in";
     conversationId: string;
     content: string;
     messageType: string;
@@ -325,45 +351,84 @@ async function lastMessagePreviewsBatch(
     sendError: string | null;
     createdAt: Date;
   }[]>`
-    SELECT DISTINCT ON ("conversationId")
-      "conversationId", "content", "messageType", "direction",
-      "sendStatus", "sendError", "createdAt"
-    FROM "messages"
-    WHERE "conversationId" = ANY(${conversationIds})
-      AND "organizationId" = ${orgId}
-      -- Mesma regra do board: preview = chat real, não nota/sistema.
-      AND "isPrivate" = false
-      AND "messageType" NOT IN (
-        'note',
-        'ai_draft',
-        'whatsapp_call',
-        'whatsapp_call_recording'
-      )
-      AND "messageType" NOT LIKE 'event%'
-      AND direction IN ('in', 'out')
-    ORDER BY "conversationId", "createdAt" DESC
+    WITH chat AS (
+      SELECT id, "conversationId", "content", "messageType", "direction",
+        "sendStatus", "sendError", "createdAt"
+      FROM "messages"
+      WHERE "conversationId" = ANY(${conversationIds})
+        AND "organizationId" = ${orgId}
+        -- Mesma regra do board: preview = chat real, não nota/sistema.
+        AND "isPrivate" = false
+        AND "messageType" NOT IN (
+          'note',
+          'ai_draft',
+          'whatsapp_call',
+          'whatsapp_call_recording'
+        )
+        AND "messageType" NOT LIKE 'event%'
+        AND direction IN ('in', 'out')
+    )
+    -- Desempate no mesmo segundo: o WhatsApp manda timestamp em segundos
+    -- e 3 mensagens seguidas empatavam (o card mostrava qualquer uma).
+    -- id (cuid) cresce com a ordem de gravação.
+    (SELECT DISTINCT ON ("conversationId") 'any' AS kind, "conversationId",
+       "content", "messageType", "direction", "sendStatus", "sendError", "createdAt"
+     FROM chat
+     ORDER BY "conversationId", "createdAt" DESC, id DESC)
+    UNION ALL
+    (SELECT DISTINCT ON ("conversationId") 'in' AS kind, "conversationId",
+       "content", "messageType", "direction", "sendStatus", "sendError", "createdAt"
+     FROM chat
+     WHERE direction = 'in'
+     ORDER BY "conversationId", "createdAt" DESC, id DESC)
   `;
 
-  const map = new Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>();
+  const map = new Map<string, PreviewBatchEntry>();
+  const entryFor = (id: string): PreviewBatchEntry => {
+    let e = map.get(id);
+    if (!e) {
+      e = {
+        preview: {
+          content: "",
+          messageType: "text",
+          mediaUrl: null,
+          direction: "in",
+          sendStatus: null,
+          sendError: null,
+        },
+        createdAt: new Date(0),
+        inbound: null,
+      };
+      map.set(id, e);
+    }
+    return e;
+  };
   for (const r of rows) {
-    const text = prettifyChatMessageBody(r.content ?? "").trim();
-    map.set(r.conversationId, {
-      preview: {
-        content: text.length > 140 ? `${text.slice(0, 137)}…` : text,
+    const text = clampPreview(prettifyChatMessageBody(r.content ?? "").trim());
+    const e = entryFor(r.conversationId);
+    if (r.kind === "in") {
+      e.inbound = {
+        content: text,
         messageType: r.messageType || "text",
-        // Card da lista não renderiza mídia — URL S3/local inchava ~50×300B.
-        mediaUrl: null,
-        direction: r.direction || "in",
-        sendStatus: r.sendStatus ?? null,
-        sendError:
-          r.sendStatus === "failed" && r.sendError
-            ? r.sendError.length > 80
-              ? `${r.sendError.slice(0, 77)}…`
-              : r.sendError
-            : null,
-      },
-      createdAt: r.createdAt,
-    });
+        createdAt: r.createdAt,
+      };
+      continue;
+    }
+    e.preview = {
+      content: text,
+      messageType: r.messageType || "text",
+      // Card da lista não renderiza mídia — URL S3/local inchava ~50×300B.
+      mediaUrl: null,
+      direction: r.direction || "in",
+      sendStatus: r.sendStatus ?? null,
+      sendError:
+        r.sendStatus === "failed" && r.sendError
+          ? r.sendError.length > 80
+            ? `${r.sendError.slice(0, 77)}…`
+            : r.sendError
+          : null,
+    };
+    e.createdAt = r.createdAt;
   }
   return map;
 }
@@ -1286,13 +1351,13 @@ type ConversationListPage = {
 
 async function paintListRows(
   rows: Prisma.ConversationGetPayload<{ select: typeof listSelect }>[],
-  previewMapReady?: Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>,
+  previewMapReady?: Map<string, PreviewBatchEntry>,
 ): Promise<ConversationListItem[]> {
   const convIds = rows.map((r) => r.id);
   const previewMap =
     previewMapReady ??
     (convIds.length === 0
-      ? new Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>()
+      ? new Map<string, PreviewBatchEntry>()
       : await lastMessagePreviewsBatch(convIds));
   const lastInboundMap = new Map<string, Date>();
   for (const row of rows) {
@@ -1329,6 +1394,7 @@ async function paintListRows(
       ...row,
       lastInboundAt: lastInboundMap.get(row.id) ?? null,
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
+      lastInboundPreview: previewMap.get(row.id)?.inbound ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
       hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
@@ -2480,6 +2546,7 @@ export async function getConversationById(idOrNumber: string) {
     ...row,
     lastInboundAt: lastInboundMap.get(convId) ?? null,
     lastMessagePreview: previewMap.get(convId)?.preview ?? null,
+    lastInboundPreview: previewMap.get(convId)?.inbound ?? null,
     lastMessageAt: previewMap.get(convId)?.createdAt ?? null,
     tags: Array.from(tagMap.values()),
     hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
@@ -2498,7 +2565,7 @@ const ASSIGN_CONVERSATION_SELECT = {
     select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
   },
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, type: true, aiAgentConfig: { select: { id: true, engine: true } } },
   },
 } as const;
 
@@ -2869,33 +2936,6 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
-/**
- * Devolve o deal do funil Atendimento à origem acadêmica. Sem vertical
- * no agente/org, é no-op. Encerrar conversa (humano, lote, automação, IA)
- * tem que limpar a fila — não só o close da IA.
- */
-async function restoreDealAfterConversationResolved(args: {
-  conversationId: string;
-  contactId: string | null;
-  organizationId: string | null;
-}): Promise<void> {
-  if (!args.contactId || !args.organizationId) return;
-  try {
-    const { resolveAgentVerticalForConversation } = await import(
-      "@/services/ai/agent-vertical"
-    );
-    const agent = await resolveAgentVerticalForConversation(
-      args.conversationId,
-      args.organizationId,
-    );
-    await agent.ops.restoreDealToAcademicOrigin?.({
-      contactId: args.contactId,
-    });
-  } catch (e) {
-    console.warn("[conversations] restoreDeal after close failed", e);
-  }
-}
-
 export async function updateConversationStatusInTx(
   _tx: ScopedTx,
   id: string,
@@ -2970,12 +3010,7 @@ export async function updateConversationStatusInDb(
 
   // Snapshot ANTES do update: precisamos de quem era o atendente para
   // logar a remoção e limpar deal/contato (abaixo).
-  let clearedAssignee: {
-    id: string;
-    name: string | null;
-    archetype?: string | null;
-    enabledTools?: string[] | null;
-  } | null = null;
+  let clearedAssignee: { id: string; name: string | null } | null = null;
   let closeContactId: string | null = null;
   if (status === "RESOLVED" && extra?.clearAssignedTo) {
     const prev = await prisma.conversation.findUnique({
@@ -2983,20 +3018,13 @@ export async function updateConversationStatusInDb(
       select: {
         assignedToId: true,
         contactId: true,
-        assignedTo: {
-          select: {
-            name: true,
-            aiAgentConfig: { select: { archetype: true, enabledTools: true } },
-          },
-        },
+        assignedTo: { select: { name: true } },
       },
     });
     if (prev?.assignedToId) {
       clearedAssignee = {
         id: prev.assignedToId,
         name: prev.assignedTo?.name ?? null,
-        archetype: prev.assignedTo?.aiAgentConfig?.archetype ?? null,
-        enabledTools: prev.assignedTo?.aiAgentConfig?.enabledTools ?? null,
       };
       closeContactId = prev.contactId ?? null;
     }
@@ -3056,50 +3084,30 @@ export async function updateConversationStatusInDb(
   // deals.ts é pesado e este arquivo é importado por webhooks quentes.
   if (clearedAssignee) {
     const orgId = getOrgIdOrNull();
-    const { isTabulationClassifier } = await import(
-      "@/lib/ai-agents/tabulation-classifier"
-    );
-    const { isFarewellCloser } = await import(
-      "@/lib/ai-agents/farewell-closer"
-    );
-    // Classificador / despedida só carimbam. O Encerrar tira o responsável
-    // e o log "X removida da conversa" parece que a ação caiu.
-    const skipUnassignLog =
-      isTabulationClassifier({
-        archetype: clearedAssignee.archetype,
-        enabledTools: clearedAssignee.enabledTools,
-        name: clearedAssignee.name,
-      }) ||
-      isFarewellCloser({
-        archetype: clearedAssignee.archetype,
-        name: clearedAssignee.name,
-      });
-    if (!skipUnassignLog) {
-      await logEvent({
-        type: "ASSIGNEE_CHANGED",
-        entityType: "CONVERSATION",
-        entityId: id,
-        entityLabel: updated.externalId ?? null,
+    await logEvent({
+      type: "ASSIGNEE_CHANGED",
+      entityType: "CONVERSATION",
+      entityId: id,
+      entityLabel: updated.externalId ?? null,
+      conversationId: id,
+      contactId: closeContactId,
+      field: "assignedTo",
+      oldValue: clearedAssignee.name,
+      newValue: null,
+      meta: {
+        fromUserId: clearedAssignee.id,
+        toUserId: null,
+        reason: "conversation_closed",
+      },
+    });
+    try {
+      sseBus.publish("conversation_timeline_updated", {
+        organizationId: orgId,
         conversationId: id,
-        contactId: closeContactId,
-        field: "assignedTo",
-        oldValue: clearedAssignee.name,
-        newValue: null,
-        meta: {
-          fromUserId: clearedAssignee.id,
-          toUserId: null,
-          reason: "conversation_closed",
-        },
+        type: "ASSIGNEE_CHANGED",
       });
-      try {
-        sseBus.publish("conversation_timeline_updated", {
-          organizationId: orgId,
-          conversationId: id,
-          type: "ASSIGNEE_CHANGED",
-        });
-      } catch {
-        /* best-effort */
-      }
+    } catch {
+      /* best-effort */
     }
     if (closeContactId) {
       const { clearContactOwnershipOnClose } = await import("@/services/deals");
@@ -3109,14 +3117,6 @@ export async function updateConversationStatusInDb(
         actorUserId: userIdForFk(getRequestContext()?.userId),
       }).catch(() => {});
     }
-  }
-
-  if (status === "RESOLVED" && !followUp) {
-    await restoreDealAfterConversationResolved({
-      conversationId: id,
-      contactId: updated.contactId ?? updated.contact?.id ?? closeContactId,
-      organizationId: updated.organizationId,
-    });
   }
 
   return updated;
@@ -3310,14 +3310,6 @@ export async function resolveConversationsInline(params: {
       data: closePatch,
     });
     updated += toResolve.length;
-
-    for (const conv of toResolve) {
-      await restoreDealAfterConversationResolved({
-        conversationId: conv.id,
-        contactId: conv.contactId,
-        organizationId: conv.organizationId,
-      });
-    }
 
     if (!params.keepAgent) {
       const pairs = new Map<string, { contactId: string; userId: string }>();

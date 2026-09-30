@@ -147,9 +147,26 @@ export async function getVisibilityFilter(
     loadVisibilityMap(),
     loadUnassignedMap(),
   ]);
-  const mode = getModeForRole(settings, role);
+  let mode = getModeForRole(settings, role);
   // Ver ou não os itens SEM responsável (pool livre). Eixo ortogonal a own/all.
-  const includeUnassigned = getUnassignedForRole(unassignedSettings, role);
+  let includeUnassigned = getUnassignedForRole(unassignedSettings, role);
+
+  // Papel personalizado pode ampliar (nunca reduzir) a visibilidade do
+  // papel legado. OR entre os papéis atribuídos; default false não muda nada.
+  if (role !== "ADMIN") {
+    try {
+      const orgId = getOrgIdOrThrow();
+      const ctx = await loadAuthzContext({
+        userId: user.id,
+        organizationId: orgId,
+        isSuperAdmin: false,
+      });
+      if (ctx.seeTeam) mode = "all";
+      if (ctx.seeUnassigned) includeUnassigned = true;
+    } catch {
+      // Fora de RequestContext — permanece a visibilidade do papel legado.
+    }
+  }
 
   // Deal sem dono só aparece quando o papel pode ver o pool livre; caso
   // contrário exige `ownerId` presente. `{}` = todos (dono ou não).

@@ -85,6 +85,11 @@ const db = vi.hoisted(() => {
             return false;
           }
         }
+        if ("is" in c && typeof c.is === "object" && c.is !== null) {
+          if (value === null || typeof value !== "object" || !matches(value as Record<string, unknown>, c.is as Record<string, unknown>)) {
+            return false;
+          }
+        }
         continue;
       }
       if (value !== cond) return false;
@@ -213,6 +218,14 @@ const db = vi.hoisted(() => {
   };
 
   const message = {
+    findFirst: async ({
+      where,
+    }: {
+      where: { organizationId: string; id: string };
+    }) => {
+      const m = messages.get(where.id);
+      return m && m.organizationId === where.organizationId ? { ...m } : null;
+    },
     findMany: async ({
       where,
     }: {
@@ -227,18 +240,77 @@ const db = vi.hoisted(() => {
         .map((m) => ({ ...m })),
   };
 
-  return { turns, messages, state, conversationTurn, message };
+  const conversations = new Map<string, Record<string, unknown>>();
+  const users = new Map<string, Record<string, unknown>>();
+
+  const conversation = {
+    findUnique: async ({ where }: { where: { id: string } }) => {
+      const row = conversations.get(where.id);
+      return row ? { ...row } : null;
+    },
+    updateMany: async ({
+      where,
+      data,
+    }: {
+      where?: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => {
+      const hits = [...conversations.values()].filter((r) => matches(r, where));
+      for (const row of hits) Object.assign(row, data);
+      return { count: hits.length };
+    },
+  };
+
+  const user = {
+    findFirst: async ({
+      where,
+      orderBy,
+    }: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, "asc" | "desc">;
+    }) => {
+      const rows = sortRows(
+        [...users.values()].filter((r) => matches(r, where)),
+        orderBy,
+      );
+      return rows[0] ? { ...rows[0] } : null;
+    },
+    findMany: async ({
+      where,
+      orderBy,
+    }: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, "asc" | "desc">;
+    }) => sortRows([...users.values()].filter((r) => matches(r, where)), orderBy).map((r) => ({ ...r })),
+  };
+
+  return { turns, messages, state, conversationTurn, message, conversation, user, conversations, users, setConversation: (id: string, data: Record<string, unknown>) => conversations.set(id, { ...data, id }), setUser: (id: string, data: Record<string, unknown>) => users.set(id, { ...data, id }) };
 });
 
 const turns = db.turns as unknown as Map<string, TurnRow>;
 const messages = db.messages as unknown as Map<string, MessageRow>;
+const conversations = db.conversations as unknown as Map<string, Record<string, unknown>>;
+const users = db.users as unknown as Map<string, Record<string, unknown>>;
+const setConversation = db.setConversation as (id: string, data: Record<string, unknown>) => void;
+const setUser = db.setUser as (id: string, data: Record<string, unknown>) => void;
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: { conversationTurn: db.conversationTurn, message: db.message },
+  prisma: {
+    conversationTurn: db.conversationTurn,
+    message: db.message,
+  },
 }));
 
 vi.mock("@/lib/prisma-base", () => ({
-  prismaBase: { conversationTurn: db.conversationTurn, message: db.message },
+  prismaBase: {
+    conversationTurn: db.conversationTurn,
+    message: db.message,
+    conversation: db.conversation,
+    user: db.user,
+    // Resolver do v2 consulta o estado para não devolver à IA uma conversa
+    // já transferida para humano. Aqui nenhuma conversa tem estado v2.
+    aISimpleConversationState: { findUnique: async () => null },
+  },
 }));
 
 vi.mock("@/lib/prisma-helpers", () => ({
@@ -263,50 +335,79 @@ vi.mock("@/lib/org-settings", () => ({
 
 vi.mock("@/services/ai/phone-allowlist", () => ({
   isContactAllowedForAi: vi.fn(async () => true),
+  normalizePhoneDigits: (p: string) => p.replace(/\D/g, ""),
+  phoneMatchesAllowlist: (p: string, set: Set<string>) => set.has(p.replace(/\D/g, "")),
+}));
+
+const attendanceGate = vi.hoisted(() => ({ enabled: true }));
+vi.mock("@/services/ai/attendance-gate", () => ({
+  isAiAttendanceEnabled: vi.fn(async () => attendanceGate.enabled),
 }));
 
 const legacy = vi.hoisted(() => ({
-  scheduleAiReply: vi.fn(async () => {}),
   claimInboundMessageForAi: vi.fn(async () => true),
   collectUnansweredInboundText: vi.fn(async () => ""),
 }));
 
 vi.mock("@/services/ai/inbound-debounce", () => legacy);
 
+const redistribution = vi.hoisted(() => ({
+  scheduleInboundRedistribution: vi.fn(),
+}));
+
+vi.mock("@/services/ai/inbound-redistribution", () => redistribution);
+
 const agent = vi.hoisted(() => ({
   // Assinatura explícita: sem ela `mock.calls[0][0]` não tipa e as
   // asserções sobre o texto agregado viram `any`.
-  maybeReplyAsAIAgent: vi.fn(
+  processV2Turn: vi.fn(
     async (_args: {
       conversationId: string;
-      contactId: string;
-      userMessage: string;
       channel: string;
-      inboundMessageIds?: string[];
-      turnId?: string;
+      userMessage: string;
+      messageType?: string;
+      turnId: string;
+      messageIds: string[];
+      attempt?: number;
+      claimedAt?: Date | null;
     }) => {},
   ),
 }));
 
-vi.mock("@/services/ai/inbox-handler", () => agent);
+vi.mock("@/services/ai-v2/engine", () => agent);
 
 import {
   appendToOpenTurn,
   buildAggregatedText,
   claimTurn,
+  completeTurn,
   invalidateOpenTurns,
   isTurnDue,
   onInboundMessageForAi,
   promoteTurnToReady,
+  requeueTurnForAssignee,
   turnDueAt,
 } from "@/services/ai/turn-manager";
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
 
-const { maybeReplyAsAIAgent } = agent;
-const { scheduleAiReply, claimInboundMessageForAi } = legacy;
+const { processV2Turn } = agent;
+const { claimInboundMessageForAi } = legacy;
+const { scheduleInboundRedistribution } = redistribution;
 
 const CONV = "conv-1";
 const CONTACT = "contact-1";
+
+/** Conversa atribuída ao agente IA — o turno só roda com agente. */
+function assignToAgent() {
+  setConversation(CONV, {
+    organizationId: ORG,
+    assignedToId: "ai-user-1",
+    assignedTo: {
+      id: "ai-user-1",
+      aiAgentConfig: { id: "agent-1", engine: "simple" },
+    },
+  });
+}
 
 function addMessage(id: string, content: string, over: Partial<MessageRow> = {}) {
   messages.set(id, {
@@ -345,12 +446,14 @@ function firstTurn() {
 beforeEach(() => {
   turns.clear();
   messages.clear();
+  conversations.clear();
+  users.clear();
   db.state.seq = 0;
   vi.clearAllMocks();
   claimInboundMessageForAi.mockResolvedValue(true);
   legacy.collectUnansweredInboundText.mockResolvedValue("");
-  maybeReplyAsAIAgent.mockResolvedValue(undefined);
-  process.env.AI_TURN_MANAGER = "1";
+  processV2Turn.mockResolvedValue(undefined);
+  assignToAgent();
   // O loop do sweeper é irrelevante aqui: os testes chamam o tick à mão.
   process.env.AI_TURN_SWEEPER = "0";
   vi.useFakeTimers();
@@ -359,7 +462,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  delete process.env.AI_TURN_MANAGER;
   delete process.env.AI_TURN_SWEEPER;
 });
 
@@ -373,8 +475,8 @@ describe("agregação de mensagens em turno", () => {
 
     expect(res.promoted).toBe(1);
     expect(res.dispatched).toBe(1);
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
-    expect(maybeReplyAsAIAgent.mock.calls[0][0]).toMatchObject({
+    expect(processV2Turn).toHaveBeenCalledTimes(1);
+    expect(processV2Turn.mock.calls[0][0]).toMatchObject({
       conversationId: CONV,
       userMessage: "Oi",
     });
@@ -401,11 +503,11 @@ describe("agregação de mensagens em turno", () => {
 
     // As Messages continuam individuais no banco — o turno só referencia.
     expect(messages.size).toBe(5);
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
-    expect(maybeReplyAsAIAgent.mock.calls[0][0].userMessage).toBe(
+    expect(processV2Turn).toHaveBeenCalledTimes(1);
+    expect(processV2Turn.mock.calls[0][0].userMessage).toBe(
       "Oi\npreciso\nde ajuda\ncom minha\nmatrícula",
     );
-    expect(maybeReplyAsAIAgent.mock.calls[0][0].inboundMessageIds).toEqual([
+    expect(processV2Turn.mock.calls[0][0].messageIds).toEqual([
       "m1",
       "m2",
       "m3",
@@ -424,8 +526,8 @@ describe("agregação de mensagens em turno", () => {
     await sweepConversationTurns();
 
     expect(turns.size).toBe(2);
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(2);
-    expect(maybeReplyAsAIAgent.mock.calls[1][0].userMessage).toBe("outra dúvida");
+    expect(processV2Turn).toHaveBeenCalledTimes(2);
+    expect(processV2Turn.mock.calls[1][0].userMessage).toBe("outra dúvida");
   });
 
   it("nova bolha reabre o turno que já estava READY (input não se perde)", async () => {
@@ -485,7 +587,7 @@ describe("janelas de debounce", () => {
 
     const res = await sweepConversationTurns();
     expect(res.promoted).toBe(1);
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
+    expect(processV2Turn).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -547,6 +649,51 @@ describe("concorrência", () => {
     expect(novo.status).toBe("RECEIVING");
   });
 
+  it("turno aberto durante PROCESSING espera o anterior terminar (um por vez na conversa)", async () => {
+    await ingest("m1", "Oi quero trocar de plano");
+    const first = firstTurn().id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(first, ORG);
+    await claimTurn(first, ORG, "worker-a");
+
+    vi.advanceTimersByTime(500);
+    await ingest("m2", "?");
+    const second = [...turns.values()].find((t) => t.id !== first)!.id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(second, ORG);
+    expect(await claimTurn(second, ORG, "worker-b")).toBeNull();
+    expect(turns.get(second)!.status).toBe("READY");
+
+    // Bolha nova ainda entra no turno que espera.
+    await ingest("m3", "alô");
+    expect(turns.get(second)!.messageIds).toEqual(["m2", "m3"]);
+
+    await completeTurn(first, ORG);
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(second, ORG);
+    expect(await claimTurn(second, ORG, "worker-b")).not.toBeNull();
+    expect(turns.get(second)!.status).toBe("PROCESSING");
+  });
+
+  it("transferência para outro agente de IA: as mesmas mensagens viram turno pronto, que roda depois do atual", async () => {
+    await ingest("m1", "o boleto veio com valor diferente");
+    const first = firstTurn().id as string;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(first, ORG);
+    await claimTurn(first, ORG, "worker-a");
+
+    const again = await requeueTurnForAssignee(first);
+    expect(again).toBeTruthy();
+    const row = turns.get(again!)!;
+    expect(row.status).toBe("READY");
+    expect(row.openKey).toBeNull();
+    expect(row.messageIds).toEqual(["m1"]);
+    // Espera o turno atual terminar.
+    expect(await claimTurn(again!, ORG, "worker-b")).toBeNull();
+    await completeTurn(first, ORG);
+    expect(await claimTurn(again!, ORG, "worker-b")).not.toBeNull();
+  });
+
   it("promoção concorrente materializa o turno uma vez só", async () => {
     await ingest("m1", "Oi");
     const turnId = firstTurn().id;
@@ -572,7 +719,7 @@ describe("resiliência", () => {
 
     expect(res.dispatched).toBe(1);
     expect(turns.get(turnId)!.status).toBe("COMPLETED");
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
+    expect(processV2Turn).toHaveBeenCalledTimes(1);
   });
 
   it("PROCESSING travado é recuperado e reprocessado no mesmo tick", async () => {
@@ -582,10 +729,10 @@ describe("resiliência", () => {
     vi.advanceTimersByTime(1500);
     await promoteTurnToReady(turnId, ORG);
     await claimTurn(turnId, ORG, "worker-morto");
-    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
+    expect(processV2Turn).not.toHaveBeenCalled();
 
-    // Passa do teto de PROCESSING (AI_TURN_STALE_MS, default 120s).
-    vi.advanceTimersByTime(130_000);
+    // Passa do teto de PROCESSING (AI_TURN_STALE_MS; padrão = tentativas × tempo do modelo + 60 s = 240 s).
+    vi.advanceTimersByTime(250_000);
     const res = await sweepConversationTurns({ limit: 10 });
 
     // O tick devolve o turno para READY (attempts++) e, na etapa de
@@ -597,7 +744,7 @@ describe("resiliência", () => {
     expect(turn.attempts).toBe(1);
     expect(turn.status).toBe("COMPLETED");
     expect(turn.claimedBy).not.toBe("worker-morto");
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
+    expect(processV2Turn).toHaveBeenCalledTimes(1);
   });
 
   it("stale reclaim não rouba turno de worker que ainda está no prazo", async () => {
@@ -626,7 +773,7 @@ describe("resiliência", () => {
     await claimTurn(turnId, ORG, "worker-morto");
     turns.get(turnId)!.attempts = 2; // AI_TURN_MAX_ATTEMPTS default = 3
 
-    vi.advanceTimersByTime(130_000);
+    vi.advanceTimersByTime(250_000);
     const res = await sweepConversationTurns({ limit: 10 });
 
     expect(res.failed).toBe(1);
@@ -634,7 +781,7 @@ describe("resiliência", () => {
   });
 
   it("falha do agente devolve o turno para READY e o retry roda", async () => {
-    maybeReplyAsAIAgent.mockRejectedValueOnce(new Error("LLM fora do ar"));
+    processV2Turn.mockRejectedValueOnce(new Error("LLM fora do ar"));
 
     await ingest("m1", "Oi");
     vi.advanceTimersByTime(1500);
@@ -648,7 +795,7 @@ describe("resiliência", () => {
 
     await sweepConversationTurns();
     expect(turns.get(turnId)!.status).toBe("COMPLETED");
-    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(2);
+    expect(processV2Turn).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -666,7 +813,7 @@ describe("cancelamento", () => {
 
     vi.advanceTimersByTime(1500);
     await sweepConversationTurns();
-    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
+    expect(processV2Turn).not.toHaveBeenCalled();
   });
 
   it("turno já em PROCESSING não é abortado pelo cancelamento", async () => {
@@ -686,8 +833,7 @@ describe("cancelamento", () => {
 });
 
 describe("entrypoint de ingestão", () => {
-  it("com a flag desligada delega para o debounce legado", async () => {
-    process.env.AI_TURN_MANAGER = "0";
+  it("conversa com agente IA abre turno", async () => {
     addMessage("m1", "Oi");
 
     await onInboundMessageForAi({
@@ -698,11 +844,19 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
-    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
-    expect(turns.size).toBe(0);
+    expect(turns.size).toBe(1);
+    expect(scheduleInboundRedistribution).not.toHaveBeenCalled();
   });
 
-  it("com a flag ligada abre turno e não toca no debounce legado", async () => {
+  it("conversa com agente fora do motor atual não abre turno", async () => {
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: "ai-user-1",
+      assignedTo: {
+        id: "ai-user-1",
+        aiAgentConfig: { id: "agent-1", engine: "legacy" },
+      },
+    });
     addMessage("m1", "Oi");
 
     await onInboundMessageForAi({
@@ -713,8 +867,67 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
-    expect(scheduleAiReply).not.toHaveBeenCalled();
+    expect(turns.size).toBe(0);
+    expect(scheduleInboundRedistribution).not.toHaveBeenCalled();
+  });
+
+  it("sem responsável + agente ativo: atribui e abre turno", async () => {
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: null,
+      assignedTo: null,
+    });
+    setUser("ai-user-1", {
+      organizationId: ORG,
+      type: "AI",
+      aiAgentConfig: { id: "agent-1", active: true, engine: "simple" },
+      createdAt: new Date(),
+    });
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
     expect(turns.size).toBe(1);
+  });
+
+  it("atendimento IA desligado na org: não atribui e agenda a segunda passada da distribuição", async () => {
+    attendanceGate.enabled = false;
+    try {
+      setConversation(CONV, {
+        organizationId: ORG,
+        assignedToId: null,
+        assignedTo: null,
+      });
+      setUser("ai-user-1", {
+        organizationId: ORG,
+        type: "AI",
+        aiAgentConfig: { id: "agent-1", active: true, engine: "simple" },
+        createdAt: new Date(),
+      });
+      addMessage("m1", "Oi");
+
+      await onInboundMessageForAi({
+        conversationId: CONV,
+        contactId: CONTACT,
+        messageId: "m1",
+        userMessage: "Oi",
+        channel: "meta",
+      });
+
+      expect(turns.size).toBe(0);
+      expect(scheduleInboundRedistribution).toHaveBeenCalledWith({
+        conversationId: CONV,
+        contactId: CONTACT,
+      });
+    } finally {
+      attendanceGate.enabled = true;
+    }
   });
 
   it("mensagem já reivindicada por outro processo não abre turno", async () => {

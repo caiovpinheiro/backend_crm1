@@ -14,6 +14,7 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
 import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
+import { startListenSweeper } from "@/services/ai-v2/listen";
 
 const log = getLogger("worker.meta-webhook");
 
@@ -101,6 +102,8 @@ export function startMetaWebhookWorker() {
   // recupera PROCESSING travado. No-op com a flag desligada. É aqui porque
   // este worker é quem ingere o inbound Meta — o turno nasce neste processo.
   startAiTurnSweeper();
+  // Escutar a equipe: lê em lote as conversas das escutas ligadas.
+  startListenSweeper();
 
   log.info({ concurrency }, "worker-meta-webhook iniciado");
   return worker;

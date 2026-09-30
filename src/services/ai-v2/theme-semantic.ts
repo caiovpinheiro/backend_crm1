@@ -1,0 +1,275 @@
+/**
+ * Escolha de assunto pelo SIGNIFICADO da mensagem.
+ *
+ * A seleção por gatilhos (`selectV2Theme`) compara palavras: só acerta
+ * quando o cliente usa um termo cadastrado. Aqui cada assunto vira um
+ * vetor (nome + gatilhos + exemplos + começo das instruções) e a mensagem
+ * é comparada por similaridade — "preciso de um comprovante de X" chega
+ * perto de um assunto descrito como "emitir documento de X" sem ninguém
+ * cadastrar o sinônimo.
+ *
+ * Gatilhos continuam valendo primeiro (sinal explícito do operador); o
+ * significado entra quando nenhum gatilho casou.
+ * Nenhum domínio de cliente.
+ */
+
+import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
+import { isHumanRequestTheme } from "@/lib/ai-v2/config";
+import { embedTexts } from "@/services/ai/provider";
+import { matchV2Theme, selectV2Theme } from "./themes";
+import { themeThresholdsFor, type ThemeThresholds } from "./similarity-presets";
+
+/**
+ * Réguas do reconhecimento pela opção de "Do que ele cuida › Assuntos"
+ * (rígido / equilibrado / flexível) — ver similarity-presets.
+ */
+export function themeThresholds(config: V2AgentConfig): ThemeThresholds {
+  return themeThresholdsFor(config.themeRecognition?.preset);
+}
+
+/** Texto que representa o assunto no espaço de embeddings. */
+export function themeEmbeddingText(theme: V2Theme): string {
+  const parts = [
+    theme.name,
+    (theme.when ?? []).join(", "),
+    (theme.examples ?? []).join(" | "),
+    (theme.instructions ?? "").slice(0, 300),
+  ];
+  return parts.map((p) => p.trim()).filter(Boolean).join("\n");
+}
+
+// Vetor por texto do assunto: muda só quando a config publicada muda.
+const themeVectorCache = new Map<string, number[]>();
+const MAX_CACHE = 500;
+
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length && i < b.length; i += 1) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
+async function themeVectors(themes: V2Theme[], apiKey: string): Promise<number[][]> {
+  const texts = themes.map(themeEmbeddingText);
+  const missing = [...new Set(texts.filter((t) => !themeVectorCache.has(t)))];
+  if (missing.length > 0) {
+    const { embeddings } = await embedTexts(missing, apiKey);
+    if (themeVectorCache.size + missing.length > MAX_CACHE) themeVectorCache.clear();
+    missing.forEach((t, i) => themeVectorCache.set(t, embeddings[i]));
+  }
+  return texts.map((t) => themeVectorCache.get(t) ?? []);
+}
+
+function contentWordCount(text: string): number {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 4).length;
+}
+
+/**
+ * Mensagem curta que s\u00f3 acompanha a conversa: menos palavras de conte\u00fado
+ * que `minWords`, ou curta (menos de 3) terminando em pergunta ("consegue
+ * me enviar?"). Duas palavras sem pergunta costumam ser um assunto dito
+ * direto e podem trocar o atual.
+ */
+export function isShortFollowUp(text: string, minWords: number): boolean {
+  const words = contentWordCount(text);
+  return words < minWords || (words < 3 && /\?\s*$/.test(text.trim()));
+}
+
+export type V2ThemeSelection = {
+  theme: V2Theme | null;
+  method: "trigger" | "semantic" | "kept" | "none";
+  similarity?: number;
+  /** Mantido porque o cliente respondia a uma pergunta do agente. */
+  answer?: boolean;
+};
+
+const foldText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/** Pergunta de oferta de ajuda ("posso ajudar em algo mais?"): não espera resposta sobre o assunto. */
+const HELP_OFFER = /\b(?:posso|poderia|quer que eu)\b.*\b(?:ajud|mais alguma|algo mais)|\bmais alguma (?:coisa|duvida)\b|\balgo mais\b/;
+
+/**
+ * A última mensagem do agente terminou numa pergunta dele — fora o fecho
+ * configurado, a oferta de ajuda e as opções numeradas do fim. A mensagem
+ * seguinte do cliente é resposta a essa pergunta.
+ */
+export function agentAskedQuestion(lastAgentMessage: string | null | undefined, config: Pick<V2AgentConfig, "replyEnding" | "themes">): boolean {
+  if (!lastAgentMessage?.trim()) return false;
+  let text = lastAgentMessage;
+  const endings = [config.replyEnding, ...(config.themes ?? []).map((t) => t.replyEnding)];
+  for (const e of endings) {
+    for (const p of [...(e?.procedure?.phrases ?? []), ...(e?.info?.phrases ?? [])]) {
+      const phrase = p?.trim();
+      if (phrase) text = text.split(phrase).join(" ");
+    }
+  }
+  text = text.replace(/(?:\n\s*\d+[.)]\s+[^\n]*)+\s*$/u, "").trim();
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+  const last = sentences[sentences.length - 1] ?? "";
+  return last.endsWith("?") && !HELP_OFFER.test(foldText(last));
+}
+
+/** O cliente avisa que muda de assunto ("outra dúvida", "mudando de assunto"). */
+const SUBJECT_CHANGE = /\b(?:outro assunto|outra (?:duvida|coisa|questao|pergunta)|mudando de assunto|mudar de assunto|aproveitando|alem disso|tambem (?:queria|quero|preciso))\b/;
+
+export function changesSubject(message: string): boolean {
+  return SUBJECT_CHANGE.test(foldText(message));
+}
+
+/**
+ * Ordem: gatilho casado na mensagem > assunto mais próximo em significado
+ * (acima do mínimo) > assunto atual da conversa. Falha de embedding não
+ * derruba o turno — cai no assunto atual (ou nenhum), como antes.
+ */
+export async function selectV2ThemeSemantic(args: {
+  config: V2AgentConfig;
+  message: string;
+  currentThemeId?: string;
+  apiKey: string | null;
+  /**
+   * A última mensagem do agente era uma pergunta dele: a resposta do cliente
+   * fica no assunto atual. Antes, uma palavra da resposta ("o pedido foi
+   * para o endereço antigo") casava o gatilho de outro assunto e o roteiro do
+   * assunto em andamento se perdia no meio.
+   */
+  answeringQuestion?: boolean;
+}): Promise<V2ThemeSelection> {
+  const currentTheme = args.currentThemeId ? (args.config.themes ?? []).find((t) => t.id === args.currentThemeId) ?? null : null;
+  const keepForAnswer = !!args.answeringQuestion && !!currentTheme && !changesSubject(args.message);
+  // Sem o assunto atual: `selectV2Theme` o mantém sempre que nenhum outro
+  // gatilho casa, o que impediria o significado de trocar de assunto.
+  const byTrigger = selectV2Theme(args.config, args.message);
+  const th = themeThresholds(args.config);
+  // Pelo sentido, fica de fora o assunto que só repete o pedido de pessoa
+  // (vale só pelo gatilho); o que transfere direto exige sentido forte.
+  const themes = (args.config.themes ?? []).filter((t) => !isHumanRequestTheme(t, args.config));
+  const strongEnough = (t: V2Theme, sim: number) => !t.directHandoff || sim >= th.switchSimilarity;
+  if (byTrigger) {
+    // Gatilho do assunto de pedido de pessoa: vale o gatilho (fora da conferência pelo sentido).
+    if (isHumanRequestTheme(byTrigger, args.config)) return { theme: byTrigger, method: "trigger" };
+    if (keepForAnswer && currentTheme && currentTheme.id !== byTrigger.id) return { theme: currentTheme, method: "kept", answer: true };
+    // Palavra solta da lista ("empresa") levava "a empresa pediu um
+    // comprovante" para o assunto que tinha essa palavra no gatilho. Com frase de verdade, confere
+    // o sentido: se outro assunto é claramente mais próximo, ele vence.
+    if (!args.apiKey || contentWordCount(args.message) < 4) return { theme: byTrigger, method: "trigger" };
+    try {
+      const [{ embeddings }, vectors] = await Promise.all([embedTexts([args.message.trim()], args.apiKey), themeVectors(themes, args.apiKey)]);
+      const mv = embeddings[0] ?? [];
+      let best: V2Theme | null = null;
+      let bestSim = -1;
+      let triggerSim = -1;
+      themes.forEach((t, i) => {
+        const sim = cosine(mv, vectors[i] ?? []);
+        if (t.id === byTrigger.id) triggerSim = sim;
+        if (sim > bestSim) {
+          bestSim = sim;
+          best = t;
+        }
+      });
+      if (best && (best as V2Theme).id !== byTrigger.id && bestSim >= th.switchSimilarity && bestSim >= triggerSim + 0.08 && strongEnough(best, bestSim)) {
+        return { theme: best, method: "semantic", similarity: bestSim };
+      }
+    } catch (err) {
+      console.warn("[ai-v2] conferência semântica do gatilho falhou:", err instanceof Error ? err.message : err);
+    }
+    return { theme: byTrigger, method: "trigger" };
+  }
+
+  const current = args.currentThemeId ? themes.find((t) => t.id === args.currentThemeId) ?? null : null;
+  const fallback = (similarity?: number): V2ThemeSelection =>
+    current ? { theme: current, method: "kept", similarity } : { theme: null, method: "none", similarity };
+
+  const text = args.message.trim();
+  if (themes.length === 0 || !text || !args.apiKey) return fallback();
+  if (keepForAnswer && current) return { theme: current, method: "kept", answer: true };
+  // Acompanhamento curto ("ok", "consegue me enviar?") continua no assunto
+  // da conversa; pouco texto dá similaridade instável.
+  if (current && isShortFollowUp(text, th.shortMessageWords)) return fallback();
+
+  try {
+    const [{ embeddings }, vectors] = await Promise.all([
+      embedTexts([text], args.apiKey),
+      themeVectors(themes, args.apiKey),
+    ]);
+    const messageVector = embeddings[0] ?? [];
+    let best: V2Theme | null = null;
+    let bestSim = -1;
+    let currentSim = -1;
+    themes.forEach((theme, i) => {
+      const sim = cosine(messageVector, vectors[i] ?? []);
+      if (current && theme.id === current.id) currentSim = sim;
+      if (sim > bestSim) {
+        bestSim = sim;
+        best = theme;
+      }
+    });
+    const switching = !!current && best !== null && (best as V2Theme).id !== current.id;
+    if (switching && (bestSim < th.switchSimilarity || bestSim < currentSim + th.switchMargin)) {
+      return fallback(bestSim);
+    }
+    if (best && bestSim >= th.minSimilarity && strongEnough(best, bestSim)) {
+      return { theme: best, method: "semantic", similarity: bestSim };
+    }
+    return fallback(bestSim);
+  } catch (err) {
+    console.warn("[ai-v2] seleção semântica de assunto falhou:", err instanceof Error ? err.message : err);
+    return fallback();
+  }
+}
+
+export type V2ThemeRecognition = {
+  selection: V2ThemeSelection;
+  /** Todos os assuntos, do mais provável ao menos. */
+  ranking: Array<{ id: string; name: string; matched: string[]; similarity: number | null }>;
+  minSimilarity: number;
+};
+
+/**
+ * "Testar reconhecimento": qual assunto uma primeira mensagem pegaria, e por
+ * quê (palavras que casaram e proximidade de sentido de cada assunto).
+ * Usa a mesma escolha do atendimento, sem assunto anterior.
+ */
+export async function explainV2ThemeRecognition(args: {
+  config: V2AgentConfig;
+  message: string;
+  apiKey: string | null;
+}): Promise<V2ThemeRecognition> {
+  const themes = args.config.themes ?? [];
+  const selection = await selectV2ThemeSemantic({ config: args.config, message: args.message, apiKey: args.apiKey });
+  let sims: number[] | null = null;
+  if (args.apiKey && themes.length > 0 && args.message.trim()) {
+    try {
+      const [{ embeddings }, vectors] = await Promise.all([embedTexts([args.message.trim()], args.apiKey), themeVectors(themes, args.apiKey)]);
+      sims = themes.map((_, i) => cosine(embeddings[0] ?? [], vectors[i] ?? []));
+    } catch (err) {
+      console.warn("[ai-v2] similaridade dos assuntos falhou:", err instanceof Error ? err.message : err);
+    }
+  }
+  const ranking = themes
+    .map((t, i) => {
+      const m = matchV2Theme(t, args.message);
+      return { id: t.id, name: t.name, matched: m.matched, score: m.score, similarity: sims ? sims[i] : null };
+    })
+    .sort((a, b) => {
+      if (a.id === selection.theme?.id) return -1;
+      if (b.id === selection.theme?.id) return 1;
+      return b.score - a.score || (b.similarity ?? 0) - (a.similarity ?? 0);
+    })
+    .map(({ score: _score, ...rest }) => rest);
+  return { selection, ranking, minSimilarity: themeThresholds(args.config).minSimilarity };
+}
+
+/** Limpa o cache (testes). */
+export function clearThemeVectorCache(): void {
+  themeVectorCache.clear();
+}

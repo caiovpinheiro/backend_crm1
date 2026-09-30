@@ -80,6 +80,8 @@ export type ScopeLevel = "NONE" | "SELF" | "TEAM" | "ALL";
  *   - fieldDenyView/fieldDenyEdit: mascaramento por "entity.fieldKey".
  *     Deny vence: campo negado por QUALQUER papel fica oculto/somente-leitura.
  *   - sharedInbox/mediaAccess: OR entre papeis (default permissivo).
+ *   - seeTeam/seeUnassigned: OR entre papeis. Só expande a visibilidade
+ *     legada (MEMBER/MANAGER); default false não restringe.
  */
 export interface RoleGrantContext {
   stageView: ReadonlySet<string> | null;
@@ -90,6 +92,8 @@ export interface RoleGrantContext {
   fieldDenyEdit: ReadonlySet<string>;
   sharedInbox: boolean;
   mediaAccess: boolean;
+  seeTeam: boolean;
+  seeUnassigned: boolean;
 }
 
 export interface AuthzContext extends RoleGrantContext {
@@ -115,6 +119,8 @@ interface CachedAuthzPayload {
   fieldDenyEdit: string[];
   sharedInbox: boolean;
   mediaAccess: boolean;
+  seeTeam: boolean;
+  seeUnassigned: boolean;
 }
 
 /** Contexto de grants vazio/permissivo (super-admin, sem org, etc.). */
@@ -127,6 +133,8 @@ const PERMISSIVE_GRANTS: RoleGrantContext = {
   fieldDenyEdit: new Set(),
   sharedInbox: true,
   mediaAccess: true,
+  seeTeam: false,
+  seeUnassigned: false,
 };
 
 // ──────────────────────────────────────────────
@@ -297,6 +305,8 @@ async function loadFromDb(
           permissions: true,
           sharedInbox: true,
           mediaAccess: true,
+          seeTeam: true,
+          seeUnassigned: true,
           stageGrants: { select: { stageId: true, canView: true, canEdit: true } },
           pipelineGrants: { select: { pipelineId: true, canView: true } },
           fieldGrants: {
@@ -318,6 +328,8 @@ async function loadFromDb(
   const fieldDenyEdit = new Set<string>();
   let sharedInbox = false;
   let mediaAccess = false;
+  let seeTeam = false;
+  let seeUnassigned = false;
 
   for (const a of assignments) {
     sawAnyRole = true;
@@ -329,6 +341,8 @@ async function loadFromDb(
     // Extras (OR — mais permissivo vence).
     if (a.role.sharedInbox) sharedInbox = true;
     if (a.role.mediaAccess) mediaAccess = true;
+    if (a.role.seeTeam) seeTeam = true;
+    if (a.role.seeUnassigned) seeUnassigned = true;
 
     stagePolicies.push(stagePolicyFromGrants(a.role.stageGrants));
     pipelinePolicies.push(pipelinePolicyFromGrants(a.role.pipelineGrants));
@@ -369,6 +383,8 @@ async function loadFromDb(
     // Sem papeis atribuidos → permissivo (fallback legado cuida das permissions).
     sharedInbox: sawAnyRole ? sharedInbox : true,
     mediaAccess: sawAnyRole ? mediaAccess : true,
+    seeTeam,
+    seeUnassigned,
   };
 }
 
@@ -434,6 +450,8 @@ export async function loadAuthzContext(input: {
     fieldDenyEdit: new Set(payload.fieldDenyEdit ?? []),
     sharedInbox: payload.sharedInbox ?? true,
     mediaAccess: payload.mediaAccess ?? true,
+    seeTeam: payload.seeTeam ?? false,
+    seeUnassigned: payload.seeUnassigned ?? false,
   };
 }
 

@@ -1,0 +1,164 @@
+import { describe, expect, it } from "vitest";
+import { evaluateV2Rules, isWithinV2BusinessHours } from "../rules";
+import type { V2AgentConfig, V2Rule, V2CRMContext } from "@/lib/ai-v2/types";
+
+function baseRulesConfig(rules: V2Rule[], businessHours?: V2AgentConfig["businessHours"]): V2AgentConfig {
+  return {
+    name: "Test",
+    model: "gpt-4o-mini",
+    responseBehavior: "balanced",
+    tone: "Neutro",
+    globalRules: [],
+    allowedDomains: [],
+    contextFields: { contact: [], deal: [] },
+    variables: [],
+    entry: { confirmContact: false, onDealNotFound: "ask_identification" },
+    handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [] },
+    closure: {},
+    limits: {},
+    media: {},
+    rules,
+    businessHours,
+  } as unknown as V2AgentConfig;
+}
+
+const emptyContext: V2CRMContext = { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } };
+
+describe("isWithinV2BusinessHours", () => {
+  it("retorna true quando desabilitado", () => {
+    const config = baseRulesConfig([], { enabled: false, timezone: "America/Sao_Paulo", weekdays: [] });
+    expect(isWithinV2BusinessHours(config, new Date("2026-09-20T02:00:00-03:00"))).toBe(true);
+  });
+
+  it("detecta fora do horário fora do slot", () => {
+    const config = baseRulesConfig([], {
+      enabled: true,
+      timezone: "America/Sao_Paulo",
+      weekdays: [{ day: 1, start: "08:00", end: "18:00" }],
+    });
+    // Domingo 20/09/2026
+    expect(isWithinV2BusinessHours(config, new Date("2026-09-20T10:00:00-03:00"))).toBe(false);
+  });
+
+  it("detecta dentro do horário no slot correto", () => {
+    const config = baseRulesConfig([], {
+      enabled: true,
+      timezone: "America/Sao_Paulo",
+      weekdays: [{ day: 1, start: "08:00", end: "18:00" }],
+    });
+    // Segunda 21/09/2026 10:00 BRT
+    expect(isWithinV2BusinessHours(config, new Date("2026-09-21T10:00:00-03:00"))).toBe(true);
+  });
+});
+
+describe("evaluateV2Rules conditions", () => {
+  it("contact_tag casa com tag presente", () => {
+    const rules: V2Rule[] = [{
+      id: "r1",
+      name: "Tag",
+      order: 1,
+      conditions: [{ type: "contact_tag", values: ["VIP"] }],
+      actions: [{ type: "no_reply" }],
+    }];
+    const config = baseRulesConfig(rules);
+    const context = { ...emptyContext, contact: { tags: ["VIP"] } as any };
+    const matched = evaluateV2Rules(config, {
+      userMessage: "Oi",
+      isFirstMessage: true,
+      withinBusinessHours: true,
+      contactTags: ["VIP"],
+    }, context);
+    expect(matched?.id).toBe("r1");
+  });
+
+  it("survey_received usa flag do input", () => {
+    const rules: V2Rule[] = [{
+      id: "r1",
+      name: "Survey",
+      order: 1,
+      conditions: [{ type: "survey_received" }],
+      actions: [{ type: "no_reply" }],
+    }];
+    const config = baseRulesConfig(rules);
+    const matched = evaluateV2Rules(config, {
+      userMessage: "5",
+      isFirstMessage: false,
+      withinBusinessHours: true,
+      surveyReceived: true,
+    }, emptyContext);
+    expect(matched?.id).toBe("r1");
+  });
+
+  it("out_of_hours casa quando withinBusinessHours é false", () => {
+    const rules: V2Rule[] = [{
+      id: "r1",
+      name: "Fora",
+      order: 1,
+      conditions: [{ type: "out_of_hours" }],
+      actions: [{ type: "send_message", message: "Fora do expediente." }],
+    }];
+    const config = baseRulesConfig(rules);
+    const matched = evaluateV2Rules(config, {
+      userMessage: "Oi",
+      isFirstMessage: true,
+      withinBusinessHours: false,
+    }, emptyContext);
+    expect(matched?.id).toBe("r1");
+  });
+});
+
+describe("regra Pedido de humano: frases explícitas e palavras de 'Chamar a equipe'", () => {
+  const rule = (enabled = true) =>
+    ({ id: "human_request", name: "Pedido de humano", order: 0, enabled, conditions: [{ type: "keywords", values: ["humano"] }], actions: [{ type: "handoff" }] }) as any;
+  const cfg = (enabled = true) => ({ ...baseRulesConfig([rule(enabled)]), handoff: { humanRequestKeywords: ["supervisor"] } }) as any;
+  const match = (c: V2AgentConfig, m: string) =>
+    evaluateV2Rules(c, { userMessage: m, isFirstMessage: false, withinBusinessHours: true } as any, emptyContext)?.id ?? null;
+
+  it("'Falar com equipe' (botão) e palavras da outra lista casam", () => {
+    expect(match(cfg(), "Falar com equipe")).toBe("human_request");
+    expect(match(cfg(), "quero atendimento humano")).toBe("human_request");
+    expect(match(cfg(), "chama o supervisor")).toBe("human_request");
+  });
+
+  it("palavra solta não casa; regra desligada não casa", () => {
+    expect(match(cfg(), "a equipe me mandou um e-mail")).toBeNull();
+    expect(match(cfg(false), "Falar com equipe")).toBeNull();
+  });
+});
+
+describe("evaluateV2Rules — palavras-chave", () => {
+  const cfg = {
+    rules: [
+      {
+        id: "human_request",
+        name: "Pedido de humano",
+        order: 0,
+        conditions: [{ type: "keywords", values: ["humano", "pessoa", "atendente", "consultor", "falar com alguém"] }],
+        actions: [{ type: "handoff" }],
+      },
+    ],
+  } as any;
+  const match = (m: string) =>
+    evaluateV2Rules(cfg, { userMessage: m, isFirstMessage: false, withinBusinessHours: true } as any, {} as any)?.id ?? null;
+
+  it("mensagens comuns com artigos/palavras curtas não disparam", () => {
+    for (const m of [
+      "minha empresa está pedindo uma segunda via do contrato",
+      "Comecei no emprego agora e preciso do comprovante",
+      "Tenho uma pendência pra resolver",
+      "e o aplicativo?",
+      "tem o passo a passo?",
+      "quero fazer uma consulta",
+    ]) {
+      expect(match(m), m).toBeNull();
+    }
+  });
+
+  it("pedido de humano continua disparando (com plural, acento e frase)", () => {
+    expect(match("quero falar com um atendente")).toBe("human_request");
+    expect(match("tem algum HUMANO aí?")).toBe("human_request");
+    expect(match("chama os atendentes")).toBe("human_request");
+    expect(match("preciso falar com alguém")).toBe("human_request");
+  });
+});
+

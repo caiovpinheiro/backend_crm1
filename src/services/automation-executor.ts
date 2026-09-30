@@ -1068,6 +1068,51 @@ function interpolateWebhookString(template: string, root: Record<string, unknown
   });
 }
 
+const AUTOMATION_DATE_TZ = "America/Sao_Paulo";
+
+/** `YYYY-MM-DD` da data local no fuso — formato que o campo DATE armazena. */
+function isoDateInTimeZone(d: Date, timeZone: string): string {
+  // en-CA formata como YYYY-MM-DD.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+function timeInTimeZone(d: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
+function brDateFromIso(isoDate: string): string {
+  const [y, m, day] = isoDate.split("-");
+  return y && m && day ? `${day}/${m}/${y}` : isoDate;
+}
+
+/**
+ * Valor de campo DATE vindo de variável (`{{now}}`, `{{hoje}}`, ISO,
+ * `dd/mm/aaaa`) → `YYYY-MM-DD`, que é o que o `<input type="date">` do
+ * CRM lê. Não reconheceu → devolve como veio (não inventa data).
+ */
+function normalizeDateFieldValue(raw: string): string {
+  const v = raw.trim();
+  if (!v) return v;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const br = v.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s.*)?$/);
+  if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+  const parsed = new Date(v);
+  if (!Number.isNaN(parsed.getTime())) {
+    return isoDateInTimeZone(parsed, AUTOMATION_DATE_TZ);
+  }
+  return v;
+}
+
 function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
   // 03/jun/26 — root expandido pra cobrir o que o construtor visual de
   // body do step `webhook` lista no catálogo (ver
@@ -1076,10 +1121,18 @@ function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
   // `{{conversation.id}}` e `{{contactCustomFields.<nome>}}` apareciam na
   // UI mas resolviam pra string vazia. Mantemos os campos existentes
   // intactos pra não quebrar bodies salvos.
+  const nowDate = new Date();
+  const todayIso = isoDateInTimeZone(nowDate, AUTOMATION_DATE_TZ);
   return {
     event: rt.event,
     automationId: rt.automationId,
-    timestamp: new Date().toISOString(),
+    timestamp: nowDate.toISOString(),
+    // Data/hora do momento em que o passo executa — para `update_field`
+    // em campos de data ({{now}}/{{today}}) e texto ({{hoje}}/{{agora}}).
+    now: nowDate.toISOString(),
+    today: todayIso,
+    hoje: brDateFromIso(todayIso),
+    agora: `${brDateFromIso(todayIso)} ${timeInTimeZone(nowDate, AUTOMATION_DATE_TZ)}`,
     contactId: rt.contactId ?? null,
     dealId: rt.dealId ?? null,
     contact: rt.contact ?? null,
@@ -2447,14 +2500,7 @@ async function executeStep(
         select: {
           id: true,
           type: true,
-          name: true,
-          aiAgentConfig: {
-            select: {
-              active: true,
-              archetype: true,
-              enabledTools: true,
-            },
-          },
+          aiAgentConfig: { select: { active: true } },
         },
       });
       if (!agentUser || agentUser.type !== "AI") {
@@ -2498,9 +2544,8 @@ async function executeStep(
 
       // Saudação proativa: dispara imediatamente após a atribuição,
       // sem esperar o cliente mandar mensagem. Isso resolve o caso de
-      // automações cujo trigger é "Negócio criado" / etc. — antes, o
-      // agente ficava mudo porque `maybeReplyAsAIAgent` só roda em
-      // inbound. Idempotente via `Conversation.aiGreetedAt`, então
+      // automações cujo trigger é "Negócio criado" / etc. — o agente
+      // só responde a inbound. Idempotente via `Conversation.aiGreetedAt`, então
       // se o cliente mandar algo depois, a saudação não repete.
       //
       // Falhas aqui não podem derrubar o passo da automação: o log do
@@ -2508,59 +2553,23 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        const { isTabulationClassifier } = await import(
-          "@/lib/ai-agents/tabulation-classifier"
-        );
-        if (
-          isTabulationClassifier({
-            ...agentUser.aiAgentConfig,
-            name: agentUser.name,
-          })
-        ) {
-          const { triggerTabulationClassifyForContact } = await import(
-            "@/services/ai/tabulation-classify"
-          );
-          const classified = await triggerTabulationClassifyForContact({
+        try {
+          const opening = await triggerAgentOpeningForContact({
             contactId: contactForOpening,
             agentUserId,
+            channel: "meta",
           });
-          if (classified.status === "failed") {
-            throw new Error(
-              `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
-            );
-          }
-          if (classified.status === "skipped") {
+          if (opening.status === "skipped") {
             log.info(
-              `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
+              `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
             );
-            return { note: `classificação pulada (${classified.reason})` };
+          } else {
+            log.info(
+              `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+            );
           }
-          const label = classified.tabulationName ?? classified.tabulationId;
-          log.info(
-            `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
-          );
-          return {
-            note: `tabulou: ${label}`,
-          };
-        } else {
-          try {
-            const opening = await triggerAgentOpeningForContact({
-              contactId: contactForOpening,
-              agentUserId,
-              channel: "meta",
-            });
-            if (opening.status === "skipped") {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
-              );
-            } else {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
-              );
-            }
-          } catch (err) {
-            log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
-          }
+        } catch (err) {
+          log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
         }
       }
       return {};
@@ -2683,7 +2692,14 @@ async function executeStep(
       const entity = readString(cfg, "entity") ?? "contact";
       const field = readString(cfg, "field");
       if (!field) throw new Error("update_field: field obrigatório");
-      const value = cfg["value"];
+      let value = cfg["value"];
+      // Valor com `{{…}}` (ex.: `{{now}}`, `{{lastResponse}}`,
+      // `{{contact.name}}`) resolve no momento da execução — mesmo root
+      // das mensagens + variáveis do fluxo.
+      if (typeof value === "string" && value.includes("{{")) {
+        const flowVars = asRecord(cfg["__variables"]) ?? undefined;
+        value = await interpolateMessageVariables(value, rt, flowVars);
+      }
 
       if (entity === "deal") {
         const targetDealId = rt.dealId ?? readString(cfg, "dealId");
@@ -2718,11 +2734,17 @@ async function executeStep(
         } else {
           const customField = await prisma.customField.findFirst({
             where: { entity: "deal", OR: [{ name: field }, { id: field }] },
-            select: { id: true },
+            select: { id: true, type: true },
           });
           if (!customField) {
             throw new Error(`update_field: campo de negócio não suportado: ${field}`);
           }
+          const stored =
+            value == null
+              ? ""
+              : customField.type === "DATE"
+                ? normalizeDateFieldValue(String(value))
+                : String(value);
           await prisma.dealCustomFieldValue.upsert({
             where: {
               dealId_customFieldId: {
@@ -2730,11 +2752,11 @@ async function executeStep(
                 customFieldId: customField.id,
               },
             },
-            update: { value: value == null ? "" : String(value) },
+            update: { value: stored },
             create: withOrgFromCtx({
               dealId: targetDealId,
               customFieldId: customField.id,
-              value: value == null ? "" : String(value),
+              value: stored,
             }),
           });
         }
@@ -2753,11 +2775,17 @@ async function executeStep(
         } else {
           const customField = await prisma.customField.findFirst({
             where: { entity: "contact", OR: [{ name: field }, { id: field }] },
-            select: { id: true },
+            select: { id: true, type: true },
           });
           if (!customField) {
             throw new Error(`update_field: campo de contato não suportado: ${field}`);
           }
+          const stored =
+            value == null
+              ? ""
+              : customField.type === "DATE"
+                ? normalizeDateFieldValue(String(value))
+                : String(value);
           await prisma.contactCustomFieldValue.upsert({
             where: {
               contactId_customFieldId: {
@@ -2765,11 +2793,11 @@ async function executeStep(
                 customFieldId: customField.id,
               },
             },
-            update: { value: value == null ? "" : String(value) },
+            update: { value: stored },
             create: withOrgFromCtx({
               contactId: targetContactId,
               customFieldId: customField.id,
-              value: value == null ? "" : String(value),
+              value: stored,
             }),
           });
         }
@@ -4618,62 +4646,8 @@ async function executeStep(
     }
 
     case "ask_ai_agent": {
-      // Chama um agente de IA com o prompt configurado (interpolando
-      // variáveis) e salva a resposta como variável de contexto pra
-      // usar nos próximos passos (ex: condition, send_whatsapp_message).
-      const agentId = readString(cfg, "agentId");
-      if (!agentId) throw new Error("ask_ai_agent: agentId não configurado");
-      const promptTemplate = readString(cfg, "promptTemplate") ?? "";
-      const variableName = readString(cfg, "saveToVariable") ?? "ai_response";
-
-      const vars = (cfg as Record<string, unknown>)["__variables"] as
-        | Record<string, unknown>
-        | undefined;
-      const prompt = vars
-        ? interpolateVariables(promptTemplate, vars)
-        : promptTemplate;
-      if (!prompt.trim()) throw new Error("ask_ai_agent: prompt vazio");
-
-      // import dinâmico pra evitar ciclo (runner → prisma → services).
-      const { runAgent } = await import("@/services/ai/runner");
-      const openDeal = rt.contactId
-        ? await prisma.deal.findFirst({
-            where: { contactId: rt.contactId, status: "OPEN" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-      const conv = rt.contactId
-        ? await prisma.conversation.findFirst({
-            where: { contactId: rt.contactId, channel: "whatsapp" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-
-      const result = await runAgent({
-        agentId,
-        source: "automation",
-        userMessage: prompt,
-        conversationId: conv?.id ?? null,
-        contactId: rt.contactId ?? null,
-        dealId: openDeal?.id ?? null,
-      });
-      if (result.status === "FAILED") {
-        throw new Error(`ask_ai_agent: ${result.error ?? "falha no agente"}`);
-      }
-
-      // Persiste a variável no contexto da automation (mesma lógica
-      // usada por `set_variable`).
-      if (rt.contactId) {
-        const ctx = await getActiveContext(rt.automationId, rt.contactId);
-        if (ctx) {
-          const next = { ...((ctx.variables as Record<string, unknown>) ?? {}) };
-          next[variableName] = result.text;
-          await advanceContext(ctx.id, ctx.currentStepId, next);
-        }
-      }
-      return {};
+      // Rodava o motor antigo de agente, que foi removido.
+      throw new Error("ask_ai_agent: passo descontinuado");
     }
 
     case "business_hours": {
