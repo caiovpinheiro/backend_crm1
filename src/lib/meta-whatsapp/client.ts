@@ -1457,6 +1457,9 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${waba}/message_templates`, {
       method: "POST",
       body: JSON.stringify(payload),
+      // 1 tentativa: o default (3×20s) estoura o proxy. A resposta chega sem
+      // CORS e o browser só mostra "Failed to fetch", escondendo o erro da Meta.
+      maxAttempts: 1,
     });
   }
 
