@@ -3,6 +3,7 @@ import type { EmailAccount, EmailEncryption, EmailVisibility } from "@prisma/cli
 import { can, loadAuthzContext } from "@/lib/authz";
 import { encryptSecret, decryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
+import { maskEmail } from "@/lib/pii-mask";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext, runWithContext } from "@/lib/request-context";
@@ -309,7 +310,7 @@ export async function connectEmailAccount(
 ): Promise<{ ok: true; account: SerializedEmailAccount } | EmailFieldError> {
   const tested = await testEmailAccountConnection(input);
   if (!tested.ok) {
-    log.warn({ field: tested.field, email: input.email, message: tested.message }, "falha ao testar conexão de e-mail");
+    log.warn({ field: tested.field, email: maskEmail(input.email), message: tested.message }, "falha ao testar conexão de e-mail");
     return tested;
   }
 
@@ -352,7 +353,7 @@ export async function connectEmailAccount(
         ),
       });
 
-      log.info({ accountId: created.id, email: created.email }, "conta de e-mail conectada");
+      log.info({ accountId: created.id, email: maskEmail(created.email) }, "conta de e-mail conectada");
 
       return {
         ok: true,

@@ -8,6 +8,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
+import { maskPhone } from "@/lib/pii-mask";
 import { logEvent } from "@/services/activity-log";
 import { resolveContactSearchCandidates } from "@/services/kanban-filters";
 
@@ -37,7 +38,7 @@ function normalizeContactPhoneInput(
   if (!trimmed) return null;
   const normalized = normalizePhone(trimmed);
   if (!normalized) {
-    log.warn({ phone: trimmed }, "telefone nao normalizavel descartado");
+    log.warn({ phone: maskPhone(trimmed), length: trimmed.length }, "telefone nao normalizavel descartado");
     return null;
   }
   return normalized;

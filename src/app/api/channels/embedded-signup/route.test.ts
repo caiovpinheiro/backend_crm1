@@ -97,9 +97,19 @@ describe("POST /api/channels/embedded-signup", () => {
       "fetch",
       vi.fn(async () => ({
         ok: false,
-        json: async () => ({ error: { message: "invalid code" } }),
+        status: 400,
+        json: async () => ({
+          error: {
+            message: "invalid code",
+            type: "OAuthException",
+            code: 100,
+            error_subcode: 36007,
+            fbtrace_id: "TRACE-SECRET",
+          },
+        }),
       })) as unknown as typeof fetch,
     );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { POST } = await import("./route");
     const res = await POST(
@@ -107,5 +117,14 @@ describe("POST /api/channels/embedded-signup", () => {
     );
     expect(res.status).toBe(400);
     expect(provisionMetaCloudChannel).not.toHaveBeenCalled();
+
+    // SEC2-5: o log leva só código/tipo do erro — nunca o corpo da Meta
+    // (message/fbtrace_id podem carregar fragmentos do fluxo OAuth).
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(errorSpy.mock.calls[0]);
+    expect(logged).toContain("OAuthException");
+    expect(logged).toContain("100");
+    expect(logged).not.toContain("invalid code");
+    expect(logged).not.toContain("TRACE-SECRET");
   });
 });
