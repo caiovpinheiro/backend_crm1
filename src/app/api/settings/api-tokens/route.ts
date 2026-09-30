@@ -75,7 +75,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Nome é obrigatório." }, { status: 400 });
     }
 
-    // `expiresAt` ausente/inválido → o serviço aplica o default de 90 dias.
+    // `expiresAt` é opcional: ausente → token sem expiração (salvo
+    // `API_TOKEN_DEFAULT_EXPIRY_DAYS` no env). Inválido/passado → 400.
     let expiresAt: Date | null = null;
     if (typeof b.expiresAt === "string" && b.expiresAt.trim()) {
       const d = new Date(b.expiresAt);
@@ -100,7 +101,7 @@ export async function POST(request: Request) {
         id: result.id,
         token: result.token,
         prefix: result.prefix,
-        expiresAt: result.expiresAt.toISOString(),
+        expiresAt: result.expiresAt ? result.expiresAt.toISOString() : null,
       },
       { status: 201 }
     );

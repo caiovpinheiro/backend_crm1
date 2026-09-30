@@ -1,6 +1,7 @@
 /**
- * SEC-18 — tokens `eduit_` exigem `api_token:manage`; sem expiresAt o
- * serviço aplica 90 dias e a resposta devolve a data.
+ * SEC-18 — tokens `eduit_` exigem `api_token:manage`; `expiresAt` segue
+ * opcional (ausente → sem expiração), inválido/passado → 400, e a resposta
+ * devolve `expiresAt` (ISO ou null).
  */
 import { NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,7 +40,7 @@ describe("/api/settings/api-tokens — permissão api_token:manage", () => {
       id: "tok1",
       token: "eduit_x",
       prefix: "eduit_x",
-      expiresAt: new Date("2026-12-29T12:00:00Z"),
+      expiresAt: null,
     });
     revokeToken.mockResolvedValue({ count: 1 });
   });
@@ -71,14 +72,25 @@ describe("/api/settings/api-tokens — permissão api_token:manage", () => {
     expect(revokeToken).not.toHaveBeenCalled();
   });
 
-  it("POST sem expiresAt → serviço recebe null (default 90 d) e resposta traz expiresAt", async () => {
+  it("POST sem expiresAt → serviço recebe null (sem expiração) e resposta traz expiresAt null", async () => {
     requirePermission.mockResolvedValue(null);
     const res = await POST(post({ name: "n8n" }));
     expect(res.status).toBe(201);
     expect(generateToken).toHaveBeenCalledWith("u1", "org1", "n8n", null);
-    const data = (await res.json()) as { expiresAt: string; token: string };
-    expect(data.expiresAt).toBe("2026-12-29T12:00:00.000Z");
+    const data = (await res.json()) as { expiresAt: string | null; token: string };
+    expect(data.expiresAt).toBeNull();
     expect(data.token).toBe("eduit_x");
+  });
+
+  it("POST com expiresAt futuro → repassa a data e resposta traz ISO", async () => {
+    requirePermission.mockResolvedValue(null);
+    const future = new Date("2027-01-15T12:00:00Z");
+    generateToken.mockResolvedValue({ id: "tok1", token: "eduit_x", prefix: "eduit_x", expiresAt: future });
+    const res = await POST(post({ name: "n8n", expiresAt: future.toISOString() }));
+    expect(res.status).toBe(201);
+    expect(generateToken).toHaveBeenCalledWith("u1", "org1", "n8n", future);
+    const data = (await res.json()) as { expiresAt: string | null };
+    expect(data.expiresAt).toBe("2027-01-15T12:00:00.000Z");
   });
 
   it("POST com expiresAt no passado → 400", async () => {

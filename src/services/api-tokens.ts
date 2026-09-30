@@ -10,8 +10,13 @@ import { logAudit } from "@/lib/audit/log";
 
 const TOKEN_PREFIX = "eduit_";
 
-/** SEC-18: token sem `expiresAt` informado expira em 90 dias. */
-export const API_TOKEN_DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+/**
+ * Expiração padrão OPCIONAL (desligada por default): com
+ * `API_TOKEN_DEFAULT_EXPIRY_DAYS=<dias>` no env, token criado sem
+ * `expiresAt` expira em N dias. Sem a env, o token não expira —
+ * comportamento histórico, mantido a pedido do produto.
+ */
+export const API_TOKEN_DEFAULT_EXPIRY_ENV = "API_TOKEN_DEFAULT_EXPIRY_DAYS";
 
 /** RT-13: cache em memória do token validado (por hash) — evita 1 SELECT por request. */
 export const API_TOKEN_CACHE_TTL_MS = 60 * 1000;
@@ -23,8 +28,16 @@ function hashToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
 }
 
-export function defaultApiTokenExpiry(now: Date = new Date()): Date {
-  return new Date(now.getTime() + API_TOKEN_DEFAULT_TTL_MS);
+/**
+ * `null` quando `API_TOKEN_DEFAULT_EXPIRY_DAYS` não está definida (ou é
+ * inválida/≤ 0): token sem `expiresAt` não expira.
+ */
+export function defaultApiTokenExpiry(now: Date = new Date()): Date | null {
+  const raw = process.env[API_TOKEN_DEFAULT_EXPIRY_ENV]?.trim();
+  if (!raw) return null;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  return new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
 export async function generateToken(
@@ -32,11 +45,12 @@ export async function generateToken(
   organizationId: string,
   name: string,
   expiresAt?: Date | null
-): Promise<{ id: string; token: string; prefix: string; expiresAt: Date }> {
+): Promise<{ id: string; token: string; prefix: string; expiresAt: Date | null }> {
   const raw = TOKEN_PREFIX + randomBytes(24).toString("hex");
   const tokenHash = hashToken(raw);
   const tokenPrefix = raw.slice(0, 12);
-  // Sem expiração informada → 90 dias. Token perpétuo deixa de existir.
+  // Expiração é opcional: sem `expiresAt` o token não expira, salvo se a
+  // env `API_TOKEN_DEFAULT_EXPIRY_DAYS` estiver ligada.
   const effectiveExpiresAt =
     expiresAt instanceof Date && !Number.isNaN(expiresAt.getTime())
       ? expiresAt

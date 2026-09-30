@@ -1,6 +1,7 @@
 /**
- * SEC-18 / RT-13 — expiração padrão de 90 dias, cache por hash (60 s) e
- * `lastUsedAt` no máximo 1×/min.
+ * SEC-18 / RT-13 — expiração OPCIONAL (sem env não expira; com
+ * `API_TOKEN_DEFAULT_EXPIRY_DAYS` aplica um padrão), cache por hash (60 s)
+ * e `lastUsedAt` no máximo 1×/min.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +21,7 @@ vi.mock("@/lib/audit/log", () => ({ logAudit }));
 
 import {
   API_TOKEN_CACHE_TTL_MS,
-  API_TOKEN_DEFAULT_TTL_MS,
+  API_TOKEN_DEFAULT_EXPIRY_ENV,
   generateToken,
   invalidateApiTokenCache,
   revokeToken,
@@ -48,29 +49,47 @@ function record(overrides: Partial<{ expiresAt: Date | null; status: string }> =
   };
 }
 
-describe("generateToken — expiração padrão", () => {
+describe("generateToken — expiração opcional", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     create.mockResolvedValue({ id: "tok1" });
     logAudit.mockResolvedValue(undefined);
   });
-
-  it("sem expiresAt → 90 dias a partir de agora", async () => {
-    const before = Date.now();
-    const r = await generateToken("u1", "org1", "n8n", null);
-    const after = Date.now();
-    expect(r.token.startsWith("eduit_")).toBe(true);
-    expect(r.expiresAt.getTime()).toBeGreaterThanOrEqual(before + API_TOKEN_DEFAULT_TTL_MS);
-    expect(r.expiresAt.getTime()).toBeLessThanOrEqual(after + API_TOKEN_DEFAULT_TTL_MS);
-    const data = create.mock.calls[0][0].data as { expiresAt: Date };
-    expect(data.expiresAt).toBeInstanceOf(Date);
-    expect(Math.round((data.expiresAt.getTime() - before) / DAY)).toBe(90);
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
-  it("expiresAt explícito é respeitado", async () => {
+  it("sem expiresAt e sem API_TOKEN_DEFAULT_EXPIRY_DAYS → token não expira", async () => {
+    const r = await generateToken("u1", "org1", "n8n", null);
+    expect(r.token.startsWith("eduit_")).toBe(true);
+    expect(r.expiresAt).toBeNull();
+    const data = create.mock.calls[0][0].data as { expiresAt: Date | null };
+    expect(data.expiresAt).toBeNull();
+  });
+
+  it("com API_TOKEN_DEFAULT_EXPIRY_DAYS=90 → expira em 90 dias", async () => {
+    vi.stubEnv(API_TOKEN_DEFAULT_EXPIRY_ENV, "90");
+    const before = Date.now();
+    const r = await generateToken("u1", "org1", "n8n", null);
+    expect(r.expiresAt).toBeInstanceOf(Date);
+    expect(Math.round((r.expiresAt!.getTime() - before) / DAY)).toBe(90);
+    const data = create.mock.calls[0][0].data as { expiresAt: Date | null };
+    expect(data.expiresAt?.getTime()).toBe(r.expiresAt!.getTime());
+  });
+
+  it("env inválida ou zero → não expira", async () => {
+    vi.stubEnv(API_TOKEN_DEFAULT_EXPIRY_ENV, "abc");
+    expect((await generateToken("u1", "org1", "a", null)).expiresAt).toBeNull();
+    vi.stubEnv(API_TOKEN_DEFAULT_EXPIRY_ENV, "0");
+    expect((await generateToken("u1", "org1", "b", null)).expiresAt).toBeNull();
+  });
+
+  it("expiresAt explícito é respeitado (mesmo com env ligada)", async () => {
+    vi.stubEnv(API_TOKEN_DEFAULT_EXPIRY_ENV, "90");
     const custom = new Date(Date.now() + 7 * DAY);
     const r = await generateToken("u1", "org1", "n8n", custom);
-    expect(r.expiresAt.getTime()).toBe(custom.getTime());
+    expect(r.expiresAt?.getTime()).toBe(custom.getTime());
   });
 });
 
