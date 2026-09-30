@@ -6,7 +6,6 @@ import {
   normalizeFlowMatchKey,
   sanitizeFlowFieldKey,
 } from "@/lib/meta-whatsapp/parse-flow-response";
-import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
@@ -15,11 +14,7 @@ import { resolveFlowDefinitionForInbound } from "@/services/whatsapp-flow-defini
 
 const log = getLogger("whatsapp-flow-apply");
 
-const MAX_VALIDATION_RETRIES = 2;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-/** Tentativas de revalidação por contato+campo (processo Node; reinicia no deploy). */
-const retryAttempts = new Map<string, number>();
 
 export type FlowFieldApplyEntry = {
   fieldKey: string;
@@ -38,8 +33,6 @@ export type FlowFieldInvalidEntry = {
   fieldKey: string;
   label: string;
   error: string;
-  retrySent: boolean;
-  attempt: number;
 };
 
 export type FlowApplyResult = {
@@ -64,10 +57,6 @@ type FlowFieldWithMapping = {
     customField: { id: string; name: string; type: CustomFieldType; entity: string } | null;
   } | null;
 };
-
-function retryKey(contactId: string, fieldKey: string): string {
-  return `${contactId}:${fieldKey}`;
-}
 
 function normalizeStringValue(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -302,65 +291,6 @@ async function applyNativeField(
   await prisma.contact.update({ where: { id: contactId }, data });
 }
 
-async function sendValidationRetryMessage(opts: {
-  conversationId: string;
-  contactId: string;
-  channelRef: { id: string; provider: string } | null;
-  waJid: string | null;
-  label: string;
-  error: string;
-  attempt: number;
-}): Promise<boolean> {
-  const content =
-    `⚠️ Não consegui salvar *${opts.label}*.\n` +
-    `${opts.error}\n\n` +
-    `Por favor, responda novamente com o formato correto ` +
-    `(tentativa ${opts.attempt}/${MAX_VALIDATION_RETRIES}).`;
-
-  try {
-    const conv = await prisma.conversation.findUnique({
-      where: { id: opts.conversationId },
-      select: { id: true, contactId: true, waJid: true },
-    });
-    if (!conv) return false;
-
-    const saved = await prisma.message.create({
-      data: withOrgFromCtx({
-        conversationId: opts.conversationId,
-        content,
-        direction: "out",
-        messageType: "text",
-        senderName: "Assistente CRM",
-        authorType: "bot",
-      }),
-    });
-
-    const result = await sendWhatsAppText({
-      conversationId: opts.conversationId,
-      contactId: opts.contactId,
-      channelRef: opts.channelRef,
-      content,
-      messageId: saved.id,
-      waJid: opts.waJid ?? conv.waJid,
-    });
-
-    if (result.failed) {
-      log.warn("[whatsapp-flow] falha ao enviar retry de validação", {
-        contactId: opts.contactId,
-        error: result.error,
-      });
-      return false;
-    }
-    return true;
-  } catch (err) {
-    log.warn("[whatsapp-flow] erro ao enviar retry de validação", {
-      contactId: opts.contactId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-}
-
 function findFieldDefinition(
   fields: FlowFieldWithMapping[],
   responseKey: string,
@@ -407,7 +337,6 @@ export async function applyWhatsappFlowResponseToContact(params: {
   flowMetaName?: string | null;
   flowToken?: string | null;
   channelRef?: { id: string; provider: string } | null;
-  waJid?: string | null;
 }): Promise<FlowApplyResult> {
   const result: FlowApplyResult = {
     flowDefinitionId: null,
@@ -495,43 +424,19 @@ export async function applyWhatsappFlowResponseToContact(params: {
 
     const validation = validateFlowFieldValue(fieldDef.fieldType, rawValue);
     if (!validation.ok) {
-      const rKey = retryKey(params.contactId, fieldDef.fieldKey);
-      const prev = retryAttempts.get(rKey) ?? 0;
-      const attempt = prev + 1;
-      retryAttempts.set(rKey, attempt);
-
-      let retrySent = false;
-      if (attempt <= MAX_VALIDATION_RETRIES) {
-        retrySent = await sendValidationRetryMessage({
-          conversationId: params.conversationId,
-          contactId: params.contactId,
-          channelRef: params.channelRef ?? null,
-          waJid: params.waJid ?? null,
-          label: fieldDef.label,
-          error: validation.error,
-          attempt,
-        });
-      }
-
       result.invalid.push({
         fieldKey: fieldDef.fieldKey,
         label: fieldDef.label,
         error: validation.error,
-        retrySent,
-        attempt,
       });
 
-      log.info("[whatsapp-flow] validação falhou", {
+      log.info("[whatsapp-flow] validação falhou — campo não gravado", {
         contactId: params.contactId,
         fieldKey: fieldDef.fieldKey,
         error: validation.error,
-        attempt,
-        retrySent,
       });
       continue;
     }
-
-    retryAttempts.delete(retryKey(params.contactId, fieldDef.fieldKey));
 
     try {
       if (mapping.targetKind === "CONTACT_NATIVE") {
