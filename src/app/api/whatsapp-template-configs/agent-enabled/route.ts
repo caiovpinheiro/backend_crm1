@@ -123,6 +123,7 @@ export async function GET(request: Request) {
             flowAction: analysis.flowAction,
             flowId: analysis.flowId,
             headerFormat: analysis.headerFormat,
+            headerPreview: analysis.headerText ?? "",
           };
         })
         .filter((row): row is NonNullable<typeof row> => row != null);
