@@ -104,6 +104,27 @@ function pricingOptions(raw: unknown, fallbackPrice: number): PricingOption[] {
   });
 }
 
+/** Texto de duração do curso: pós em meses, graduação em semestre. */
+export function formatCourseDuration(args: {
+  level: string | null | undefined;
+  semester: number | null | undefined;
+  pricingOptions: unknown;
+  unitPrice: number;
+  discount: number;
+  catalogPrice?: number;
+}): string {
+  const level = args.level && isCourseLevel(args.level) ? args.level : null;
+  const options = pricingOptions(args.pricingOptions, args.catalogPrice ?? args.unitPrice);
+  const matched =
+    level === "POSTGRADUATE" ? matchOption(options, args.unitPrice, args.discount) : null;
+  if (level === "POSTGRADUATE" && matched?.months != null) return `${matched.months} meses`;
+  const semester = args.semester;
+  if (semester != null && Number.isFinite(Number(semester)) && Number(semester) > 0) {
+    return level === "POSTGRADUATE" ? `${semester} meses` : `${semester}º semestre`;
+  }
+  return "";
+}
+
 function matchOption(
   options: PricingOption[],
   unitPrice: number,
@@ -217,15 +238,14 @@ export async function renderProductMessageForProduct(args: {
   const promo = base * (1 - discount / 100);
   const options = pricingOptions(product.courseConfig?.pricingOptions, Number(product.price) || 0);
   const matched = level === "POSTGRADUATE" ? matchOption(options, base, discount) : null;
-  const semester = product.courseConfig?.semester ?? null;
-  const duration =
-    level === "POSTGRADUATE" && matched?.months != null
-      ? `${matched.months} meses`
-      : semester != null
-        ? level === "POSTGRADUATE"
-          ? `${semester} meses`
-          : `${semester}º semestre`
-        : "";
+  const duration = formatCourseDuration({
+    level,
+    semester: product.courseConfig?.semester ?? null,
+    pricingOptions: product.courseConfig?.pricingOptions,
+    unitPrice: base,
+    discount,
+    catalogPrice: Number(product.price) || 0,
+  });
 
   const values: Record<string, string> = {
     nome: product.name ?? "",

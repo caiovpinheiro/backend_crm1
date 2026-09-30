@@ -6,6 +6,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createDealEvent, getDealById } from "@/services/deals";
+import { formatCourseDuration } from "@/services/product-messages";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -47,7 +48,29 @@ export async function GET(_request: Request, context: RouteContext) {
     const items = await prisma.dealProduct.findMany({
       where: { dealId },
       include: {
-        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true, imageUrl: true, imageMime: true, imageName: true } },
+        product: {
+          select: {
+            id: true,
+            name: true,
+            sku: true,
+            unit: true,
+            type: true,
+            kind: true,
+            price: true,
+            imageUrl: true,
+            imageMime: true,
+            imageName: true,
+            courseConfig: {
+              select: { level: true, semester: true, pricingOptions: true },
+            },
+            customValues: {
+              select: {
+                value: true,
+                customField: { select: { name: true, label: true } },
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -68,6 +91,26 @@ export async function GET(_request: Request, context: RouteContext) {
       imageUrl: item.product.imageUrl ?? null,
       imageMime: item.product.imageMime ?? null,
       imageName: item.product.imageName ?? null,
+      courseDuration: (() => {
+        const structured = formatCourseDuration({
+          level: item.product.courseConfig?.level,
+          semester: item.product.courseConfig?.semester,
+          pricingOptions: item.product.courseConfig?.pricingOptions,
+          unitPrice: Number(item.unitPrice),
+          discount: Number(item.discount),
+          catalogPrice: Number(item.product.price) || 0,
+        });
+        const custom =
+          item.product.customValues
+            .find((row) => {
+              const label = `${row.customField.label} ${row.customField.name}`;
+              return /dura/i.test(label) && row.value.trim();
+            })
+            ?.value.trim() ?? "";
+        const level = item.product.courseConfig?.level;
+        if (level === "GRADUATION") return custom || structured || null;
+        return structured || custom || null;
+      })(),
       quantity: Number(item.quantity),
       unitPrice: Number(item.unitPrice),
       discount: Number(item.discount),
