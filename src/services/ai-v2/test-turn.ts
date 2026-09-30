@@ -7,7 +7,7 @@
 
 import type { V2Action, V2AgentConfig, V2CRMContext, V2Destination, V2Rule, V2Stage } from "@/lib/ai-v2/types";
 import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
-import { MESSAGE_MODEL_MIN_COVERAGE, introBeforeMaterial, messageModelCoverage } from "./sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, announcesSending, introBeforeMaterial, messageModelCoverage, pickPromisedModelId } from "./sent-materials";
 import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
@@ -610,6 +610,28 @@ export async function simulateV2Turn(
   const activeTheme = getV2ThemeById(config, themeId ?? undefined);
   const allowedTools = allowedActionTypes(config, activeTheme);
   const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  if (
+    announcesSending(output.reply) &&
+    !output.actions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment") &&
+    allowedModelIds.length > 0 &&
+    allowedTools.has("send_message_model") &&
+    organizationId
+  ) {
+    try {
+      const { prisma } = await import("@/lib/prisma");
+      const rows: Array<{ id: string; name: string; content: string | null }> = await (prisma as any).messageTemplate.findMany({
+        where: { id: { in: allowedModelIds }, organizationId },
+        select: { id: true, name: true, content: true },
+      });
+      const promisedId = pickPromisedModelId(output.reply, userMessage, rows ?? []);
+      if (promisedId) {
+        output = { ...output, actions: [...output.actions, { type: "send_message_model", modelId: promisedId }] };
+        traceStep("ações", "Prometeu enviar e não escolheu mensagem pronta — enviada a do assunto que combina com o pedido");
+      }
+    } catch {
+      // Sem banco (teste unitário): a promessa segue como o modelo escreveu.
+    }
+  }
   const executedActions: V2TestTurnResult["executedActions"] = [];
   const discardedActions: V2TestTurnResult["discardedActions"] = [];
   for (const action of output.actions) {

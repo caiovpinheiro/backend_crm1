@@ -12,7 +12,7 @@ import { businessHoursText } from "../rules";
 import { isHumanRequestTheme } from "@/lib/ai-v2/config";
 import { parseClaimCheck, buildClaimCheckInput } from "../claim-check";
 import { evaluateV2Rules } from "../rules";
-import { announcesSending } from "../sent-materials";
+import { announcesSending, pickPromisedModelId } from "../sent-materials";
 
 const out = (reply: string): V2LLMOutput =>
   ({ reply, confirmed: null, handoff: false, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "", actions: [] }) as V2LLMOutput;
@@ -115,6 +115,16 @@ describe("tarefas auxiliares e anexos", () => {
     expect(announcesSending("Segue o vídeo com o passo a passo.")).toBe(true);
     expect(announcesSending("Vou te enviar o material.")).toBe(true);
     expect(announcesSending("O prazo é de 3 dias.")).toBe(false);
+  });
+
+  it("promessa de envio escolhe a mensagem pronta do assunto que combina", () => {
+    const models = [
+      { id: "campo", name: "Campo de Estágio", content: "Como solicitar indicação de campo de estágio na Área do Aluno." },
+      { id: "termo", name: "Solicitação de Termo de Estágio", content: "Passo a passo para solicitar a assinatura do termo de estágio." },
+    ];
+    expect(pickPromisedModelId("Vou te enviar a orientação sobre a assinatura do termo.", "sobre a assinatura", models)).toBe("termo");
+    expect(pickPromisedModelId("O prazo do TCE é de 15 dias.", "qual o prazo", models)).toBeNull();
+    expect(pickPromisedModelId("Vou te enviar o passo a passo.", "estágio", [{ id: "unico", name: "Estágio", content: "Texto." }])).toBe("unico");
   });
 });
 
