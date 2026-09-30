@@ -7,6 +7,7 @@ import { getActiveContext } from "@/services/automation-context";
 import {
   enqueueAutomation,
   evaluateTrigger,
+  readTriggerStageIds,
   type AutomationJobContext,
 } from "@/services/automations";
 import {
@@ -389,7 +390,18 @@ async function resolveMessageChannelId(
   return undefined;
 }
 
-async function enrichContext(event: string, context: AutomationJobContext): Promise<AutomationJobContext> {
+const messageDealSelect = {
+  id: true,
+  status: true,
+  stageId: true,
+  stage: { select: { pipelineId: true } },
+} as const;
+
+async function enrichContext(
+  event: string,
+  context: AutomationJobContext,
+  triggerConfig?: unknown,
+): Promise<AutomationJobContext> {
   const data = asRecord(context.data) ?? {};
 
   if (event === "lead_score_reached" && context.contactId) {
@@ -409,6 +421,39 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
     const channelId = await resolveMessageChannelId(context.contactId, data);
     const withChannel = channelId ? { ...data, channelId } : data;
 
+    // Gatilho "mensagem recebida na etapa X": o card que está nessa
+    // etapa é o alvo, mesmo que o contato tenha outro negócio mais
+    // novo em outra fase. Sem card nessa etapa o filtro fecha.
+    const stageIds = readTriggerStageIds(asRecord(triggerConfig) ?? {});
+    if (stageIds.length > 0) {
+      const matched = await prisma.deal.findMany({
+        where: { contactId: context.contactId, stageId: { in: stageIds } },
+        select: messageDealSelect,
+        orderBy: { updatedAt: "desc" },
+        take: 20,
+      });
+      const preferred = matched.find((d) => d.status === "OPEN") ?? matched[0];
+      if (!preferred) {
+        return {
+          ...context,
+          data: { ...withChannel, stageId: "__no_matching_stage__" },
+        };
+      }
+      return {
+        ...context,
+        dealId: preferred.id,
+        data: {
+          ...withChannel,
+          stageId: preferred.stageId,
+          pipelineId: preferred.stage.pipelineId,
+          dealStageId: preferred.stageId,
+          dealPipelineId: preferred.stage.pipelineId,
+          dealStatus: preferred.status,
+          stageMatchedDealIds: matched.map((d) => d.id),
+        },
+      };
+    }
+
     // 27/mai/26 (v3) — Suporte ao filtro `dealStatus` (OPEN/WON/LOST).
     // Antes pegavamos só o deal OPEN; agora priorizamos OPEN mas, se
     // o contato não tem nenhum aberto, caímos no deal mais recente
@@ -417,23 +462,13 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
     // mensagem (pós-venda, reengajamento, etc.).
     let deal = await prisma.deal.findFirst({
       where: { contactId: context.contactId, status: "OPEN" },
-      select: {
-        id: true,
-        status: true,
-        stageId: true,
-        stage: { select: { pipelineId: true } },
-      },
+      select: messageDealSelect,
       orderBy: { updatedAt: "desc" },
     });
     if (!deal) {
       deal = await prisma.deal.findFirst({
         where: { contactId: context.contactId, status: { in: ["WON", "LOST"] } },
-        select: {
-          id: true,
-          status: true,
-          stageId: true,
-          stage: { select: { pipelineId: true } },
-        },
+        select: messageDealSelect,
         orderBy: { updatedAt: "desc" },
       });
     }
@@ -667,6 +702,10 @@ export async function fireTrigger(  event: string,
 
   if (!hasAutomations) return;
 
+  // Ack/obrigado não dispara fluxo sem filtro de etapa (menu, template).
+  // Gatilho "mensagem recebida na etapa X" roda mesmo assim: o card
+  // dessa etapa tem que sair, inclusive num "sim".
+  let idleInbound = false;
   if (
     (event === "conversation_created" || event === "message_received") &&
     context.data &&
@@ -677,10 +716,13 @@ export async function fireTrigger(  event: string,
         "@/services/ai/idle-inbound"
       );
       if (await shouldSkipIdleInboundAutomation(asRecord(context.data))) {
-        console.info(
-          `[fireTrigger] skip ${event} — inbound ocioso (ack/obrigado/confirmação) contact=${context.contactId ?? "-"}`,
-        );
-        return;
+        if (event !== "message_received") {
+          console.info(
+            `[fireTrigger] skip ${event} — inbound ocioso (ack/obrigado/confirmação) contact=${context.contactId ?? "-"}`,
+          );
+          return;
+        }
+        idleInbound = true;
       }
     } catch (err) {
       console.warn(
@@ -717,7 +759,13 @@ export async function fireTrigger(  event: string,
 
   for (const automation of automations) {
     try {
-      const enriched = await enrichContext(event, baseContext);
+      if (
+        idleInbound &&
+        readTriggerStageIds(asRecord(automation.triggerConfig) ?? {}).length === 0
+      ) {
+        continue;
+      }
+      const enriched = await enrichContext(event, baseContext, automation.triggerConfig);
       const passes = evaluateTrigger(automation.triggerType, automation.triggerConfig, {
         ...enriched,
         event,

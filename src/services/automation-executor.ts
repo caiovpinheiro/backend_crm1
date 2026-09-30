@@ -2043,15 +2043,21 @@ async function executeStep(
     case "move_to_stage": {
       const stageId = readString(cfg, "stageId") ?? readString(cfg, "value");
       if (!stageId) throw new Error("move_stage: stageId obrigatório");
+      const matchedIds = Array.isArray(rt.data.stageMatchedDealIds)
+        ? rt.data.stageMatchedDealIds.filter(
+            (id): id is string => typeof id === "string" && id.trim() !== "",
+          )
+        : [];
       let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && rt.contactId) {
+      if (!targetDealId && matchedIds.length === 0 && rt.contactId) {
         const openDeal = await prisma.deal.findFirst({
           where: { contactId: rt.contactId, status: "OPEN" },
           select: { id: true },
         });
         targetDealId = openDeal?.id;
       }
-      if (!targetDealId) {
+      const dealIds = [...new Set(matchedIds.length > 0 ? matchedIds : targetDealId ? [targetDealId] : [])];
+      if (dealIds.length === 0) {
         // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
         // Padrão continua sendo throw (ex.: Dna Work não pode mudar).
         if (cfg.continueIfNoDeal === true) {
@@ -2065,8 +2071,10 @@ async function executeStep(
         where: { id: stageId },
         select: { isWon: true, isLost: true, name: true },
       });
+      let moved = 0;
+      for (const dealId of dealIds) {
       const currentDeal = await prisma.deal.findUnique({
-        where: { id: targetDealId },
+        where: { id: dealId },
         select: {
           status: true,
           stageId: true,
@@ -2085,8 +2093,8 @@ async function executeStep(
           : currentDeal?.status === "OPEN" || !currentDeal
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
-      await assertStageEntryFields(targetDealId, stageId);
-      await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
+      await assertStageEntryFields(dealId, stageId);
+      await prisma.deal.update({ where: { id: dealId }, data: { stageId, ...statusPatch } });
       // Só sincroniza Deal.status. NÃO encerrar conversa: fila ≠ funil.
       // Loga STAGE_CHANGED na timeline do negócio (paridade com o move
       // manual/kanban/bulk). Antes o move por automação não registrava o
@@ -2099,8 +2107,9 @@ async function executeStep(
       // rastro visível). `automationId`/`automationName` também vão no
       // meta pra permitir filtros/consultas.
       if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
+        moved += 1;
         createDealEvent(
-          targetDealId,
+          dealId,
           null,
           "STAGE_CHANGED",
           {
@@ -2115,17 +2124,13 @@ async function executeStep(
             ref: rt.automationId,
           },
         ).catch(() => {});
-      }
-      // Dispara "mudança de fase" (encadeado, com guarda anti-loop) pra que
-      // automações "quando entra na fase X" também rodem quando OUTRA
-      // automação move o negócio. Antes esse caminho não disparava nada.
-      if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
-        void notifyDealStageChanged(targetDealId, currentDeal.stageId, stageId, {
+        void notifyDealStageChanged(dealId, currentDeal.stageId, stageId, {
           contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
           depth: (rt.depth ?? 0) + 1,
         });
       }
-      return {};
+      }
+      return moved > 1 ? { note: `OK (${moved} negócios)` } : {};
     }
 
     case "mark_deal_won":
