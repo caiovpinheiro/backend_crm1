@@ -47,7 +47,21 @@ export type SseEventEnvelope = {
   organizationId: string | null;
   data: unknown;
   audienceUserIds?: string[];
+  /**
+   * Frame SSE (`event: …\ndata: …\n\n`) já codificado, calculado UMA vez
+   * por `dispatch` e compartilhado por todos os listeners. A rota usa
+   * este buffer quando entrega `data` sem alteração para o usuário; só
+   * re-serializa quando o gate de visibilidade mudou o payload.
+   */
+  wire?: Uint8Array;
 };
+
+const sseFrameEncoder = new TextEncoder();
+
+/** Codifica um evento no formato de linha do SSE. */
+export function encodeSseFrame(event: string, data: unknown): Uint8Array {
+  return sseFrameEncoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
 
 export type SsePublishOptions = {
   audienceUserIds?: string[];
@@ -375,6 +389,12 @@ class SseBus {
     for (const entry of [...this.listeners]) {
       if (!shouldDeliverSseEvent(entry, event, envelope)) {
         continue;
+      }
+      // Serializa uma vez por evento, não uma vez por conexão: com N
+      // conexões na org eram N `JSON.stringify` + N `encode` do mesmo
+      // `card`. Só quando há pelo menos um destinatário.
+      if (!envelope.wire) {
+        envelope.wire = encodeSseFrame(event, envelope.data);
       }
       try {
         entry.fn(event, envelope);
