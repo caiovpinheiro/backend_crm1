@@ -11,7 +11,6 @@ import { getActiveContext } from "@/services/automation-context";
 import {
   enqueueAutomation,
   evaluateTrigger,
-  readTriggerStageIds,
   type AutomationJobContext,
 } from "@/services/automations";
 import {
@@ -39,6 +38,20 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
 function readString(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+function readStringArray(obj: Record<string, unknown>, key: string): string[] {
+  const v = obj[key];
+  if (!Array.isArray(v)) return [];
+  return v.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+}
+
+/** Mesma regra de `readTriggerStageIds` em automations.ts. Local para o teste que mocka esse módulo. */
+function triggerStageIds(cfg: Record<string, unknown>): string[] {
+  const many = readStringArray(cfg, "stageIds");
+  if (many.length > 0) return many;
+  const one = readString(cfg, "stageId");
+  return one ? [one] : [];
 }
 
 /**
@@ -428,7 +441,7 @@ async function enrichContext(
     // Gatilho "mensagem recebida na etapa X": o card que está nessa
     // etapa é o alvo, mesmo que o contato tenha outro negócio mais
     // novo em outra fase. Sem card nessa etapa o filtro fecha.
-    const stageIds = readTriggerStageIds(asRecord(triggerConfig) ?? {});
+    const stageIds = triggerStageIds(asRecord(triggerConfig) ?? {});
     if (stageIds.length > 0) {
       const matched = await prisma.deal.findMany({
         where: { contactId: context.contactId, stageId: { in: stageIds } },
@@ -765,7 +778,7 @@ export async function fireTrigger(  event: string,
     try {
       if (
         idleInbound &&
-        readTriggerStageIds(asRecord(automation.triggerConfig) ?? {}).length === 0
+        triggerStageIds(asRecord(automation.triggerConfig) ?? {}).length === 0
       ) {
         continue;
       }
