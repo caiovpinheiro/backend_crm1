@@ -23,6 +23,7 @@ import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
+import { safeFetchBytes } from "@/lib/safe-fetch";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
@@ -32,6 +33,11 @@ import {
 } from "@/services/whatsapp-groups";
 
 const log = getLogger("baileys-msg");
+
+/** CDNs de onde o WhatsApp serve foto de perfil (`sock.profilePictureUrl`). */
+const AVATAR_CDN_HOSTS = ["pps.whatsapp.net", "*.whatsapp.net", "*.fbcdn.net"];
+const AVATAR_FETCH_TIMEOUT_MS = 15_000;
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 
 function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -214,14 +220,23 @@ async function syncContactAvatar(
   if (!cdnUrl) return;
 
   try {
-    const res = await fetch(cdnUrl);
+    // URL vem do servidor do WhatsApp: restringe aos CDNs conhecidos, sem
+    // redirect, com timeout e limite de bytes (anti-SSRF / anti-abuso).
+    const { response: res, buffer } = await safeFetchBytes(
+      cdnUrl,
+      {},
+      {
+        allowedHosts: AVATAR_CDN_HOSTS,
+        maxRedirects: 0,
+        timeoutMs: AVATAR_FETCH_TIMEOUT_MS,
+        maxBytes: AVATAR_MAX_BYTES,
+      },
+    );
     if (!res.ok) {
       log.debug(`Falha ao baixar avatar (HTTP ${res.status}) para ${jid}`);
       return;
     }
-    const arrayBuf = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
-    if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) return;
+    if (buffer.length === 0) return;
 
     // PR 1.3: storage tenant-scoped. Antes: shared `public/uploads/avatars/`.
     const filename = `${contact.id}.jpg`;
