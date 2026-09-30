@@ -18,6 +18,12 @@ import {
 import { decryptSecret } from "./crypto/secrets";
 import { verifyTotp } from "./auth/totp";
 import { findMatchingBackupCode } from "./auth/backup-codes";
+import {
+  getJwtRefreshSnapshot,
+  setJwtRefreshSnapshot,
+  type JwtRefreshSnapshot,
+} from "./auth/jwt-refresh-cache";
+import { getClientIp, withRateLimit } from "./rate-limit";
 
 /** Código em `signIn(..., { redirect: false })` → `result.code` quando o Prisma falha (ex.: BD parada). */
 class DatabaseUnavailable extends CredentialsSignin {
@@ -43,6 +49,31 @@ class EmailUnverified extends CredentialsSignin {
   code = "email_unverified";
 }
 
+/** SEC-12: IP estourou o limiter `auth.credentials` (antes do lockout/bcrypt). */
+class RateLimited extends CredentialsSignin {
+  code = "rate_limited";
+}
+
+/**
+ * SEC-12: limiter por IP no callback de credenciais. O middleware libera
+ * `/api/auth/*`, então este é o único ponto que barra password spraying
+ * (N e-mails × 4 tentativas cada, abaixo do lockout por e-mail) e flood de
+ * bcrypt. Roda antes de qualquer consulta/hash. Fail-open sem `request`
+ * (chamadas fora do fluxo HTTP) — igual ao resto do rate-limit.
+ */
+async function enforceCredentialsIpRateLimit(
+  request: Request | undefined,
+): Promise<void> {
+  if (!request || typeof request.headers?.get !== "function") return;
+  const rl = await withRateLimit({
+    route: "auth.credentials",
+    profile: "auth.credentials",
+    scope: "ip",
+    id: getClientIp(request),
+  });
+  if (!rl.ok) throw new RateLimited();
+}
+
 const nextAuth = NextAuth({
   ...authConfig,
   providers: [
@@ -61,8 +92,11 @@ const nextAuth = NextAuth({
         mfaCode: { label: "Codigo MFA", type: "text" },
         backupCode: { label: "Codigo de backup", type: "text" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, request) {
         if (!credentials?.email || !credentials?.password) return null;
+
+        // SEC-12: teto por IP antes de tocar no banco ou no bcrypt.
+        await enforceCredentialsIpRateLimit(request);
 
         const email = String(credentials.email).trim().toLowerCase();
 
@@ -298,44 +332,64 @@ const nextAuth = NextAuth({
         token.isSuperAdmin = Boolean((user as { isSuperAdmin?: boolean }).isSuperAdmin);
         token.picture = (user as { image?: string | null }).image ?? null;
       } else if (token.id) {
-        try {
-          // Refresh role + avatarUrl + organizationId/slug do banco a cada
-          // renovação do JWT — garante que se:
-          //   a) o agente atualizar a foto em /settings/profile, OU
-          //   b) o super-admin mover o user para outra org, OU
-          //   c) o super-admin suspender o user / remover super-admin,
-          // a session reflita no próximo tick sem exigir re-login. Se
-          // a org ficou SUSPENDED, invalidamos o token forcando logout.
-          const dbUser = await prisma.user.findUnique({
-            where: { id: token.id as string },
-            select: {
-              role: true,
-              avatarUrl: true,
-              organizationId: true,
-              isSuperAdmin: true,
-              isErased: true,
-              organization: { select: { status: true, slug: true } },
-            },
-          });
-          if (dbUser) {
-            if (
-              dbUser.isErased ||
-              (dbUser.organization &&
-                dbUser.organization.status !== "ACTIVE" &&
-                !dbUser.isSuperAdmin)
-            ) {
-              // Forca logout no proximo getServerSession. Deixamos o
-              // token vazio — middleware redireciona pra /login.
-              return {};
+        const userId = token.id as string;
+        // Refresh role + avatarUrl + organizationId/slug do banco — garante
+        // que se:
+        //   a) o agente atualizar a foto em /settings/profile, OU
+        //   b) o super-admin mover o user para outra org, OU
+        //   c) o super-admin suspender o user / remover super-admin,
+        // a session reflita sem exigir re-login. Se a org ficou SUSPENDED
+        // (ou o user foi apagado), invalidamos o token forcando logout.
+        //
+        // SS-2: o resultado fica em cache de memória por 30 s por userId
+        // (`jwt-refresh-cache.ts`) — antes era 1 query por chamada de
+        // `auth()`. Atraso máximo até refletir: 30 s por réplica.
+        let snapshot: JwtRefreshSnapshot | null = getJwtRefreshSnapshot(userId);
+        if (!snapshot) {
+          try {
+            const dbUser = await prisma.user.findUnique({
+              where: { id: userId },
+              select: {
+                role: true,
+                avatarUrl: true,
+                organizationId: true,
+                isSuperAdmin: true,
+                isErased: true,
+                organization: { select: { status: true, slug: true } },
+              },
+            });
+            if (dbUser) {
+              snapshot =
+                dbUser.isErased ||
+                (dbUser.organization &&
+                  dbUser.organization.status !== "ACTIVE" &&
+                  !dbUser.isSuperAdmin)
+                  ? { invalid: true }
+                  : {
+                      invalid: false,
+                      role: dbUser.role,
+                      organizationId: dbUser.organizationId,
+                      organizationSlug: dbUser.organization?.slug ?? null,
+                      isSuperAdmin: dbUser.isSuperAdmin,
+                      picture: dbUser.avatarUrl ?? null,
+                    };
+              setJwtRefreshSnapshot(userId, snapshot);
             }
-            token.role = dbUser.role;
-            token.organizationId = dbUser.organizationId;
-            token.organizationSlug = dbUser.organization?.slug ?? null;
-            token.isSuperAdmin = dbUser.isSuperAdmin;
-            token.picture = dbUser.avatarUrl ?? null;
+          } catch (err) {
+            console.error("[auth] jwt role refresh failed", err);
           }
-        } catch (err) {
-          console.error("[auth] jwt role refresh failed", err);
+        }
+        if (snapshot) {
+          if (snapshot.invalid) {
+            // Forca logout no proximo getServerSession. Deixamos o
+            // token vazio — middleware redireciona pra /login.
+            return {};
+          }
+          token.role = snapshot.role ?? undefined;
+          token.organizationId = snapshot.organizationId;
+          token.organizationSlug = snapshot.organizationSlug;
+          token.isSuperAdmin = snapshot.isSuperAdmin;
+          token.picture = snapshot.picture;
         }
       }
       return token;

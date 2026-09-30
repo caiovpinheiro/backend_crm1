@@ -115,6 +115,18 @@ export const RATE_LIMIT_PROFILES = {
   "api.webhooks": { points: 120, durationSec: 60 },
   /** Endpoints públicos sensíveis: login, signup, recover-password. 10 req/min/IP. */
   "auth.public": { points: 10, durationSec: 60 },
+  /**
+   * Callback de credenciais (`authorize()` do NextAuth), por IP. Roda ANTES
+   * do lockout por e-mail e do bcrypt: barra password spraying (N e-mails ×
+   * 4 tentativas cada) e flood de CPU. 20/min cabe um escritório atrás de
+   * NAT (login com MFA = 2 chamadas) e ainda limita a ~30k tentativas/dia/IP.
+   */
+  "auth.credentials": { points: 20, durationSec: 60 },
+  /**
+   * Segunda janela do tenant-lookup (enumeração lenta): além dos 10/min de
+   * `auth.public`, no máximo 120/h por IP. Login legítimo gasta 1-2 por sessão.
+   */
+  "auth.lookup.hourly": { points: 120, durationSec: 3600 },
   /** Convites: previne enumeration. 30 tentativas/hora/IP. */
   "auth.invite": { points: 30, durationSec: 3600 },
   /** Bulk-ops (import contatos, export). 5/min/org. */

@@ -6,13 +6,15 @@
  * resposta humana e sem nenhuma outbound depois do último inbound. NÃO
  * envia mensagem ao aluno — só reatribui / enfileira na Distribuição.
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * POST aplica via `distribution-execute` / `stuck-inbound` (mesmo jobId
  * do tick de inatividade — não roda o SQL duas vezes).
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import {
   allowInlineDistributionFallback,
@@ -33,25 +35,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET nao configurado." },
-      { status: 503 },
-    );
-  }
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) {
-    return NextResponse.json(
-      { ok: false, message: "Cron secret invalido." },
-      { status: 401 },
-    );
-  }
-  return null;
+  return requireCronSecret(request);
 }
 
 function intParam(url: URL, name: string, fallback: number): number {

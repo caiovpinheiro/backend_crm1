@@ -35,6 +35,7 @@
 import { NextResponse } from "next/server";
 import { UserRole, type UserRole as UserRoleEnum } from "@prisma/client";
 
+import { invalidateJwtRefreshCache } from "@/lib/auth/jwt-refresh-cache";
 import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
 import { prismaBase } from "@/lib/prisma-base";
@@ -610,6 +611,8 @@ export async function invalidateAuthzForUser(
   organizationId: string,
   userId: string,
 ): Promise<void> {
+  // SS-2: o callback `jwt` também cacheia role/org por 30 s neste processo.
+  invalidateJwtRefreshCache(userId);
   await cache.del(cacheKey(organizationId, userId));
 }
 
