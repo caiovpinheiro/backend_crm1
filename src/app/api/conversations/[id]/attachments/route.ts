@@ -98,6 +98,8 @@ type AttachmentSource =
       caption: string;
       requestedChannelId: string | null;
       waitUntilSent?: boolean;
+      /** Produto: não avisa o chat até o worker Meta terminar. */
+      deferChatUntilSent?: boolean;
     };
 
 function readChannelId(raw: unknown): string | null {
@@ -318,6 +320,7 @@ async function parseAttachmentRequest(
         caption: typeof rec.caption === "string" ? rec.caption : "",
         requestedChannelId: readChannelId(rec.channelId),
         waitUntilSent: rec.waitUntilSent === true,
+        deferChatUntilSent: rec.deferChatUntilSent === true,
       },
     };
   }
@@ -637,18 +640,24 @@ export async function POST(request: Request, context: RouteContext) {
           });
         } catch { /* columns may not exist yet */ }
 
-        try {
-          sseBus.publish("new_message", {
-            organizationId: conv.organizationId,
-            conversationId: conv.id,
-            contactId: conv.contactId,
-            direction: "out",
-            content: displayContent,
-            timestamp: msgRow.createdAt,
-          });
-        } catch {
-          // best-effort
-        }
+        const deferChat =
+          source.mode === "reuse" && source.deferChatUntilSent === true;
+        const publishChat = () => {
+          try {
+            sseBus.publish("new_message", {
+              organizationId: conv.organizationId,
+              conversationId: conv.id,
+              contactId: conv.contactId,
+              direction: "out",
+              content: displayContent,
+              timestamp: msgRow.createdAt,
+            });
+          } catch {
+            // best-effort
+          }
+        };
+        // Encaminhar produto: a bolha só entra depois do worker.
+        if (!deferChat) publishChat();
 
         cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
           console.warn(
@@ -690,6 +699,7 @@ export async function POST(request: Request, context: RouteContext) {
           if (waited === "sent") sendStatus = "sent";
           if (waited === "failed") sendStatus = "failed";
         }
+        if (deferChat) publishChat();
 
         return NextResponse.json({
           message: {
