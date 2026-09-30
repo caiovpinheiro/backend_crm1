@@ -18,11 +18,12 @@ export type DashboardMeItem = {
   meta: string | null;
 };
 
-export type DashboardMeStageCount = {
-  stageId: string;
+export type DashboardMeInboundDeal = {
+  id: string;
+  number: number;
+  title: string;
   stageName: string;
   pipelineName: string;
-  pipelineNumber: number;
   count: number;
 };
 
@@ -30,8 +31,8 @@ export type DashboardMeResult = {
   conversations: { total: number; items: DashboardMeItem[] };
   activities: { overdue: number; today: number; items: DashboardMeItem[] };
   stalled: { total: number; items: DashboardMeItem[] };
-  /** Mensagens de entrada sem resposta humana, nos negócios OPEN do usuário, por etapa. */
-  inboundByStage: DashboardMeStageCount[];
+  /** Negócios OPEN do usuário com mensagem de entrada ainda sem resposta humana. */
+  inboundDeals: DashboardMeInboundDeal[];
 };
 
 function startOfDay(d: Date) {
@@ -77,7 +78,17 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           id: true,
           number: true,
           updatedAt: true,
-          contact: { select: { name: true } },
+          contact: {
+            select: {
+              name: true,
+              deals: {
+                where: { ownerId: userId, status: "OPEN" },
+                orderBy: { updatedAt: "desc" },
+                take: 1,
+                select: { number: true },
+              },
+            },
+          },
         },
       }),
       prisma.activity.count({
@@ -139,19 +150,23 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           AND d.status = 'OPEN'
           AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
       `),
-      // Não usa a fila do inbox (assignedTo). Conta mensagem de entrada ainda
-      // sem resposta humana no negócio OPEN mais recente de cada contato do usuário.
+      // Não usa a fila do inbox. Um negócio OPEN por contato, com mensagem
+      // de entrada ainda sem resposta humana.
       prisma.$queryRaw<
         {
-          stageId: string;
+          dealId: string;
+          dealNumber: number;
+          title: string;
           stageName: string;
           pipelineName: string;
-          pipelineNumber: number;
           cnt: bigint;
         }[]
       >(Prisma.sql`
         WITH mine AS (
           SELECT DISTINCT ON (d."contactId")
+            d.id AS "dealId",
+            d.number AS "dealNumber",
+            d.title AS "title",
             d."contactId" AS "contactId",
             d."stageId" AS "stageId"
           FROM deals d
@@ -161,10 +176,11 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
             AND d."contactId" IS NOT NULL
           ORDER BY d."contactId", d."updatedAt" DESC
         )
-        SELECT s.id AS "stageId",
+        SELECT o."dealId" AS "dealId",
+               o."dealNumber" AS "dealNumber",
+               o."title" AS "title",
                s.name AS "stageName",
                p.name AS "pipelineName",
-               p.number AS "pipelineNumber",
                COUNT(m.id)::bigint AS cnt
         FROM mine o
         INNER JOIN stages s ON s.id = o."stageId"
@@ -186,8 +202,9 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
              AND reply."authorType" = 'human'::"MessageAuthorType"
              AND reply."createdAt" > m."createdAt"
          )
-        GROUP BY s.id, s.name, s.position, p.name, p.number
-        ORDER BY p.name ASC, s.position ASC
+        GROUP BY o."dealId", o."dealNumber", o."title", s.name, s.position, p.name
+        ORDER BY p.name ASC, s.position ASC, COUNT(m.id) DESC
+        LIMIT 40
       `),
     ]);
 
@@ -203,14 +220,22 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
   return {
     conversations: {
       total: waitingTotal,
-      items: waitingRows.map((row) => ({
-        id: row.id,
-        number: row.number ?? null,
-        title: row.contact?.name || `Conversa #${row.number ?? ""}`.trim(),
-        subtitle: "Aguardando sua resposta",
-        href: row.number ? `/inbox?tab=esperando&c=${row.number}` : `/inbox?tab=esperando`,
-        meta: daysAgoLabel(row.updatedAt),
-      })),
+      items: waitingRows.map((row) => {
+        const dealNumber = row.contact?.deals[0]?.number;
+        return {
+          id: row.id,
+          number: row.number ?? null,
+          title: row.contact?.name || `Conversa #${row.number ?? ""}`.trim(),
+          subtitle: "Aguardando sua resposta",
+          href:
+            dealNumber != null
+              ? `/pipeline?deal=${dealNumber}`
+              : row.number
+                ? `/inbox?tab=esperando&c=${row.number}`
+                : `/inbox?tab=esperando`,
+          meta: daysAgoLabel(row.updatedAt),
+        };
+      }),
     },
     activities: {
       overdue,
@@ -245,11 +270,12 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
         meta: daysAgoLabel(row.updatedAt),
       })),
     },
-    inboundByStage: inboundRows.map((row) => ({
-      stageId: row.stageId,
+    inboundDeals: inboundRows.map((row) => ({
+      id: row.dealId,
+      number: row.dealNumber,
+      title: row.title,
       stageName: row.stageName,
       pipelineName: row.pipelineName,
-      pipelineNumber: row.pipelineNumber,
       count: Number(row.cnt),
     })),
   };
