@@ -102,6 +102,19 @@ async function resolveHeaderMediaBuffer(
  * ordenado pelo número (`{{2}}` antes de `{{10}}`); nomeado mantém a ordem de
  * aparição, que é a ordem em que o operador leu o texto.
  */
+/** A Meta recusa texto que começa ou termina na variável, ou variáveis coladas. */
+function metaVariablePlacementError(text: string, where: "cabeçalho" | "corpo"): string | null {
+  const t = text.trim();
+  if (!/\{\{[^}]+\}\}/.test(t)) return null;
+  if (/^\{\{/.test(t) || /\}\}$/.test(t)) {
+    return `O ${where} não pode começar nem terminar com a variável. A Meta recusa. Escreva um texto em volta, por exemplo: Pedido {{1}} confirmado.`;
+  }
+  if (/\}\}\s*\{\{/.test(t)) {
+    return `O ${where} não pode ter duas variáveis coladas. Coloque um texto entre elas.`;
+  }
+  return null;
+}
+
 function orderedPlaceholderKeys(text: string): string[] {
   const keys = extractMetaPlaceholderKeys(text);
   const allNumeric = keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
@@ -306,6 +319,12 @@ export async function POST(request: Request) {
           { message: "O cabeçalho de texto da Meta tem no máximo 60 caracteres." },
           { status: 400 },
         );
+      }
+      const placement =
+        (b.headerFormat === "TEXT" ? metaVariablePlacementError(headerTextRaw, "cabeçalho") : null) ??
+        (category !== "AUTHENTICATION" ? metaVariablePlacementError(bodyText, "corpo") : null);
+      if (placement) {
+        return NextResponse.json({ message: placement }, { status: 400 });
       }
 
       const missingExamples = [
