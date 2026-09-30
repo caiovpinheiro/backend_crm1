@@ -3300,7 +3300,6 @@ export async function processMetaWebhookPayload(
                 channelRef: conversation.channelId
                   ? { id: conversation.channelId, provider: "META_CLOUD_API" }
                   : null,
-                waJid: null,
               });
               if (flowApply.alerts.length > 0) {
                 log.warn("[whatsapp-flow] alertas na aplicação", {
