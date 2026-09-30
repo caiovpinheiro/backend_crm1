@@ -9,6 +9,7 @@ import {
   isAssigneeCurrentlyEligible,
   shouldClearOwnershipOnIneligible,
 } from "@/services/distribution/assignee-eligibility";
+import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 
 const RETURN_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -139,6 +140,25 @@ export async function keepHumanAfterAutomationClose(args: {
 }): Promise<string | null> {
   const humanId = await findHumanToKeepAfterAutomationClose(args.contactId);
   if (!humanId) return null;
+
+  // Quem foi atribuído NESTA conversa (transferência ou distribuição) fica.
+  // Sem isto, cada mensagem do cliente devolvia o ticket ao consultor do
+  // ticket anterior, sem registro, desfazendo a transferência.
+  const current = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { assignedToId: true, assignedTo: { select: { type: true } } },
+  });
+  if (
+    current?.assignedToId &&
+    current.assignedToId !== humanId &&
+    current.assignedTo?.type === "HUMAN" &&
+    (await humanWasAssignedInThisConversation(
+      args.conversationId,
+      current.assignedToId,
+    ))
+  ) {
+    return current.assignedToId;
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.conversation.update({
