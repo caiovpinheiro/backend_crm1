@@ -6,7 +6,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createDealEvent, getDealById } from "@/services/deals";
-import { formatCourseDuration } from "@/services/product-messages";
+import { formatCourseDuration, formatCourseMode } from "@/services/product-messages";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -61,7 +61,7 @@ export async function GET(_request: Request, context: RouteContext) {
             imageMime: true,
             imageName: true,
             courseConfig: {
-              select: { level: true, semester: true, pricingOptions: true },
+              select: { level: true, mode: true, semester: true, pricingOptions: true },
             },
             customValues: {
               select: {
@@ -111,6 +111,7 @@ export async function GET(_request: Request, context: RouteContext) {
         if (level === "GRADUATION") return custom || structured || null;
         return structured || custom || null;
       })(),
+      courseMode: formatCourseMode(item.product.courseConfig?.mode) || null,
       quantity: Number(item.quantity),
       unitPrice: Number(item.unitPrice),
       discount: Number(item.discount),
