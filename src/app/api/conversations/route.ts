@@ -41,18 +41,25 @@ export async function GET(request: Request) {
     try {
       const { searchParams } = new URL(request.url);
       const user = { id: apiUser.id, role: apiUser.role as "ADMIN" | "MANAGER" | "MEMBER" };
-      const grants = await getScopeGrants();
-      const allowedChannelIds = await listAllowedChannelIds(apiUser);
 
-      // Permissões efetivas (Authz v2) — conectam as roles custom ao gating de
-      // abas do inbox. Admin/super-admin recebem `*` (todas as abas). Sem isso,
-      // um MEMBER com role custom concedendo `conversation:view` continuaria
-      // preso ao default legado (só "esperando"/"respondidas").
-      const authz = await loadAuthzContext({
-        userId: apiUser.id,
-        organizationId: apiUser.organizationId,
-        isSuperAdmin: apiUser.isSuperAdmin,
-      });
+      // Loaders independentes em paralelo (antes: 4 awaits em série, cada
+      // um com o seu round-trip Postgres/Redis antes da listagem).
+      //
+      // `authz`: permissões efetivas (Authz v2) — conectam as roles custom
+      // ao gating de abas do inbox. Admin/super-admin recebem `*` (todas as
+      // abas). Sem isso, um MEMBER com role custom concedendo
+      // `conversation:view` continuaria preso ao default legado (só
+      // "esperando"/"respondidas").
+      const [grants, allowedChannelIds, authz, visibility] = await Promise.all([
+        getScopeGrants(),
+        listAllowedChannelIds(apiUser),
+        loadAuthzContext({
+          userId: apiUser.id,
+          organizationId: apiUser.organizationId,
+          isSuperAdmin: apiUser.isSuperAdmin,
+        }),
+        getVisibilityFilter(user),
+      ]);
       const inboxPerms: ReadonlySet<string> =
         authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
 
@@ -159,7 +166,6 @@ export async function GET(request: Request) {
       });
 
       if (searchParams.get("counts") === "1") {
-        const visibility = await getVisibilityFilter(user);
         const conversationWhere = andConversationWhere(
           withInboxQueueVisibility(
             visibility.conversationWhere,
@@ -255,7 +261,6 @@ export async function GET(request: Request) {
       const search =
         typeof searchRaw === "string" && searchRaw.trim().length > 0 ? searchRaw.trim() : undefined;
 
-      const visibility = await getVisibilityFilter(user);
       const conversationWhere = andConversationWhere(
         withInboxQueueVisibility(
           visibility.conversationWhere,

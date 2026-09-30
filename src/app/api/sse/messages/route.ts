@@ -1,6 +1,11 @@
 import type { AppUserRole } from "@/lib/auth-types";
 import { auth } from "@/lib/auth";
-import { loadAuthzContext, canViewPipeline, canViewStage } from "@/lib/authz";
+import {
+  loadAuthzContext,
+  canViewPipeline,
+  canViewStage,
+  type AuthzContext,
+} from "@/lib/authz";
 import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors";
 import {
@@ -9,12 +14,23 @@ import {
   stripHiddenInboxSseCard,
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
+import { getLogger } from "@/lib/logger";
 import { runWithContext } from "@/lib/request-context";
 import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
-import { sseBus } from "@/lib/sse-bus";
+import { encodeSseFrame, sseBus } from "@/lib/sse-bus";
 import { watchSseMembership } from "@/lib/sse-membership-watch";
 
 export const dynamic = "force-dynamic";
+
+const log = getLogger("sse");
+
+/**
+ * Contexto de authz memorizado por conexão. Antes: `loadAuthzContext`
+ * (Redis GET + parse) por evento × por conexão, mesmo para quem não tem
+ * restrição de funil. Perda de acesso chega por `sse_access_revoked`
+ * (fecha o stream); mudança de grants entra no próximo ciclo do TTL.
+ */
+const SSE_AUTHZ_CTX_TTL_MS = 45_000;
 
 /**
  * Stream SSE de eventos do CRM.
@@ -76,6 +92,36 @@ export async function GET(request: Request) {
   let closed = false;
   const convBlockCache = new Map<string, { at: number; blocked: boolean }>();
 
+  // RT-2: uma carga de ctx por conexão dentro do TTL (singleflight entre
+  // eventos concorrentes da mesma conexão). Reset na revogação.
+  let authzMemo: { ctx: AuthzContext; at: number } | null = null;
+  let authzInflight: Promise<AuthzContext> | null = null;
+  const resetAuthz = () => {
+    authzMemo = null;
+    authzInflight = null;
+  };
+  const resolveAuthz = (): Promise<AuthzContext> => {
+    const now = Date.now();
+    if (authzMemo && now - authzMemo.at < SSE_AUTHZ_CTX_TTL_MS) {
+      return Promise.resolve(authzMemo.ctx);
+    }
+    if (authzInflight) return authzInflight;
+    const pending = loadAuthzContext({
+      userId,
+      organizationId,
+      isSuperAdmin: false,
+    })
+      .then((ctx) => {
+        authzMemo = { ctx, at: Date.now() };
+        return ctx;
+      })
+      .finally(() => {
+        if (authzInflight === pending) authzInflight = null;
+      });
+    authzInflight = pending;
+    return pending;
+  };
+
   function teardown() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
@@ -117,30 +163,48 @@ export async function GET(request: Request) {
         (event, envelope) => {
           if (closed) return;
           if (event === SSE_ACCESS_REVOKED) {
+            resetAuthz();
             closeStream();
             return;
           }
           void (async () => {
+            // RT-1: erro no filtro de visibilidade (pool cheio, Redis
+            // fora) NÃO é "cliente desconectou". Fechar aqui derrubava
+            // todas as conexões não-admin da réplica de uma vez e a
+            // reconexão em massa realimentava a pressão no pool. O evento
+            // é descartado (fail-closed); o stream segue vivo.
+            let data: unknown;
             try {
               if (closed) return;
               if (
                 await sseEventHiddenByFunnel(
                   envelope.data,
-                  {
-                    userId: sessionUser.id ?? "",
-                    organizationId,
-                    isSuperAdmin,
-                  },
+                  { organizationId, isSuperAdmin },
+                  resolveAuthz,
                   convBlockCache,
                 )
               ) {
                 return;
               }
               if (closed) return;
-              const data = stripHiddenInboxSseCard(envelope.data, cardGate, event);
-              const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-              controller.enqueue(encoder.encode(payload));
+              data = stripHiddenInboxSseCard(envelope.data, cardGate, event);
+            } catch (err) {
+              log.warn(
+                { err, event, userId, organizationId },
+                "[sse] filtro de visibilidade falhou — evento descartado",
+              );
+              return;
+            }
+            // RT-3: payload intacto → reaproveita o frame serializado no
+            // dispatch; só re-serializa quando o gate alterou o objeto.
+            const frame =
+              data === envelope.data && envelope.wire
+                ? envelope.wire
+                : encodeSseFrame(event, data);
+            try {
+              controller.enqueue(frame);
             } catch {
+              // Só o enqueue indica stream fechado/errado.
               closeStream();
             }
           })();
@@ -171,24 +235,25 @@ function readId(data: unknown, key: string): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** Não entrega evento de funil/etapa/conversa bloqueados para o assinante. */
+/**
+ * Não entrega evento de funil/etapa/conversa bloqueados para o assinante.
+ * `resolveAuthz` é o memo por conexão: no caso comum (admin/manager/sem
+ * grants de funil) o gate inteiro sai sem tocar Redis ou Postgres.
+ */
 async function sseEventHiddenByFunnel(
   data: unknown,
-  user: { userId: string; organizationId: string | null; isSuperAdmin: boolean },
+  user: { organizationId: string | null; isSuperAdmin: boolean },
+  resolveAuthz: () => Promise<AuthzContext>,
   convCache: Map<string, { at: number; blocked: boolean }>,
 ): Promise<boolean> {
-  if (!user.organizationId || !user.userId || user.isSuperAdmin) return false;
+  if (!user.organizationId || user.isSuperAdmin) return false;
   const pipelineId = readId(data, "pipelineId");
   const stageId = readId(data, "stageId");
   const conversationId = readId(data, "conversationId");
   if (!pipelineId && !stageId && !conversationId) return false;
 
-  const ctx = await loadAuthzContext({
-    userId: user.userId,
-    organizationId: user.organizationId,
-    isSuperAdmin: false,
-  });
-  if (!funnelScopeOf(ctx)) return false;
+  const ctx = await resolveAuthz();
+  if (funnelScopeOf(ctx) === null) return false;
   if (pipelineId && !canViewPipeline(ctx, pipelineId)) return true;
   if (stageId && !canViewStage(ctx, stageId)) return true;
   if (!conversationId) return false;
