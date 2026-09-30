@@ -23,11 +23,8 @@ import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
-<<<<<<< HEAD
 import { maskPhone } from "@/lib/pii-mask";
-=======
 import { safeFetchBytes } from "@/lib/safe-fetch";
->>>>>>> origin/fix/seg-fetch-seguro
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
