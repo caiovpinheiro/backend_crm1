@@ -1,9 +1,16 @@
 /**
- * Quando a automação encerra e o aluno volta, o ticket novo não pode
+ * Quando a automação encerra e o cliente volta, o ticket novo não pode
  * ir para o 1º atendimento da IA. O consultor que estava no chat
  * anterior continua responsável.
+ *
+ * Configurável em Conversas (`conversation.returnToPreviousAgent`):
+ *  - `new_ticket` (padrão): só enquanto ninguém foi atribuído NESTA
+ *    conversa; transferência ou distribuição no ticket novo fica.
+ *  - `always`: toda mensagem do cliente devolve ao consultor anterior.
+ *  - `off`: não devolve; segue a distribuição normal.
  */
 
+import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import {
   isAssigneeCurrentlyEligible,
@@ -12,6 +19,18 @@ import {
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 
 const RETURN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export type ReturnToPreviousAgentMode = "new_ticket" | "always" | "off";
+
+export async function returnToPreviousAgentMode(): Promise<ReturnToPreviousAgentMode> {
+  try {
+    const raw = (await getOrgSetting("conversation.returnToPreviousAgent"))?.trim();
+    if (raw === "always" || raw === "off") return raw;
+  } catch {
+    /* fora de RequestContext: padrão */
+  }
+  return "new_ticket";
+}
 
 function asRecord(meta: unknown): Record<string, unknown> {
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
@@ -138,16 +157,22 @@ export async function keepHumanAfterAutomationClose(args: {
   conversationId: string;
   contactId: string;
 }): Promise<string | null> {
+  const mode = await returnToPreviousAgentMode();
+  if (mode === "off") return null;
+
   const humanId = await findHumanToKeepAfterAutomationClose(args.contactId);
   if (!humanId) return null;
 
   // Quem foi atribuído NESTA conversa (transferência ou distribuição) fica.
   // Sem isto, cada mensagem do cliente devolvia o ticket ao consultor do
   // ticket anterior, sem registro, desfazendo a transferência.
-  const current = await prisma.conversation.findUnique({
-    where: { id: args.conversationId },
-    select: { assignedToId: true, assignedTo: { select: { type: true } } },
-  });
+  const current =
+    mode === "new_ticket"
+      ? await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedToId: true, assignedTo: { select: { type: true } } },
+        })
+      : null;
   if (
     current?.assignedToId &&
     current.assignedToId !== humanId &&
