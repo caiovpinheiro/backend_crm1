@@ -4,7 +4,7 @@ import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { buildPublicUrl } from "@/lib/storage/local";
 import { keepFail } from "@/services/keeps/keep-http";
-import { addKeepAttachment } from "@/services/keeps/keeps";
+import { KEEP_MAX_FILE_SIZE, addKeepAttachment } from "@/services/keeps/keeps";
 
 export const dynamic = "force-dynamic";
 
@@ -42,8 +42,13 @@ export async function POST(
   if (!isFileLike(file)) {
     return NextResponse.json({ message: "Arquivo obrigatório." }, { status: 400 });
   }
+  // Teto de tamanho ANTES de ler o corpo (SEC2-3) — antes só `assertKeepUpload`
+  // checava, já com o buffer inteiro em memória.
+  if (file.size > KEEP_MAX_FILE_SIZE) {
+    return NextResponse.json({ message: "Arquivo acima de 16 MB." }, { status: 413 });
+  }
   const fileName = (file.name || "arquivo").slice(0, 180);
-  const mimeType = (file.type || "application/octet-stream").split(";")[0].trim();
+  const mimeType = (file.type || "").split(";")[0].trim();
   const buffer = Buffer.from(await file.arrayBuffer());
 
   try {

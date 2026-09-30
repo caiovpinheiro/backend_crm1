@@ -69,7 +69,7 @@ export function applyBrowserApiCors(
   );
   res.headers.set(
     "Access-Control-Expose-Headers",
-    "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-Export-Total, X-Storage-Tenant",
+    "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-Export-Total",
   );
   res.headers.set("Access-Control-Max-Age", "86400");
   const vary = res.headers.get("Vary");

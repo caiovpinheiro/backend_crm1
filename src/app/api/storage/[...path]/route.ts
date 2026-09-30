@@ -31,6 +31,24 @@ import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
+/**
+ * Buckets de anexo enviados por usuários/contatos (SEC2-3/SEC2-12):
+ * documentos saem como download (`attachment`); imagem/áudio/vídeo
+ * continuam `inline` porque são renderizados por <img>/<audio>/<video>
+ * e já passam pelo sniff de magic bytes no upload.
+ */
+const ATTACHMENT_BUCKETS = new Set<string>(["attachments", "keeps", "inbound-media"]);
+
+function contentDisposition(bucket: string, fileName: string, mimeType: string): string {
+  const safeName = fileName.replace(/[^\w.\-]+/g, "_").slice(0, 120) || "arquivo";
+  const isMedia =
+    mimeType.startsWith("image/") ||
+    mimeType.startsWith("audio/") ||
+    mimeType.startsWith("video/");
+  const kind = ATTACHMENT_BUCKETS.has(bucket) && !isMedia ? "attachment" : "inline";
+  return `${kind}; filename="${safeName}"`;
+}
+
 function withStorageCors(request: Request, res: Response): Response {
   applyBrowserApiCors(request, res);
   return res;
@@ -165,7 +183,7 @@ export async function GET(request: Request, context: RouteContext) {
                 "Content-Range": `bytes ${start}-${end}/${total}`,
                 "Accept-Ranges": "bytes",
                 "Cache-Control": "private, max-age=300",
-                "X-Storage-Tenant": parsed.orgId,
+                "Content-Disposition": contentDisposition(parsed.bucket, parsed.fileName, mimeType),
               },
             }),
           );
@@ -189,7 +207,7 @@ export async function GET(request: Request, context: RouteContext) {
           "Content-Length": String(file.size),
           "Cache-Control": "private, max-age=300",
           "Accept-Ranges": "bytes",
-          "X-Storage-Tenant": parsed.orgId,
+          "Content-Disposition": contentDisposition(parsed.bucket, parsed.fileName, file.mimeType),
         },
       }),
     );
@@ -210,7 +228,7 @@ export async function GET(request: Request, context: RouteContext) {
           "Content-Length": String(aliasFile.size),
           "Cache-Control": "private, max-age=300",
           "Accept-Ranges": "bytes",
-          "X-Storage-Tenant": parsed.orgId,
+          "Content-Disposition": contentDisposition(parsed.bucket, name, aliasFile.mimeType),
         },
       }),
     );
@@ -231,6 +249,15 @@ export async function GET(request: Request, context: RouteContext) {
         console.warn("[storage] write-through do fallback falhou:", err);
       });
       const headers = new Headers(fallback.headers);
+      headers.delete("X-Storage-Tenant");
+      headers.set(
+        "Content-Disposition",
+        contentDisposition(
+          parsed.bucket,
+          parsed.fileName,
+          headers.get("content-type") ?? mimeFromFilename(parsed.fileName),
+        ),
+      );
       return withStorageCors(
         request,
         new Response(new Uint8Array(buf), {

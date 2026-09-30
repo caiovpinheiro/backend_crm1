@@ -9,6 +9,7 @@ import {
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
 } from "@/lib/audio-convert";
+import { sniffAttachment } from "@/lib/file-sniff";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { enqueueMetaAttach } from "@/lib/queue";
@@ -35,13 +36,17 @@ import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 type RouteContext = { params: Promise<{ id: string }> };
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
+// SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (nunca ao
+// Content-Type do cliente). `application/octet-stream` saiu.
 const ALLOWED_PREFIXES = [
   "image/", "video/", "audio/",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument",
   "application/vnd.ms-excel",
-  "application/octet-stream",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.oasis.opendocument",
+  "application/zip",
   "text/plain", "text/csv",
 ];
 
@@ -454,11 +459,6 @@ export async function POST(request: Request, context: RouteContext) {
         }
 
         fileName = raw.name || "file";
-        mimeBase = resolveMime(raw.type, fileName);
-
-        if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
-          return NextResponse.json({ message: `Tipo não suportado: ${mimeBase}` }, { status: 400 });
-        }
 
         let buffer: Buffer;
         try {
@@ -468,10 +468,22 @@ export async function POST(request: Request, context: RouteContext) {
           return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
         }
 
-        const storeExt = fileName.includes(".")
-          ? fileName.split(".").pop()!
-          : mimeBase.split("/").pop() ?? "bin";
-        const safeFileName = generateFileName({ prefix: "att", ext: storeExt });
+        // Tipo real pelos magic bytes. O MIME declarado (já normalizado por
+        // `resolveMime`, que trata ".mp4 / WhatsApp Video" como vídeo) só
+        // desempata containers ambíguos (mp4 áudio×vídeo, zip docx×xlsx).
+        const sniffed = sniffAttachment(buffer, {
+          mime: resolveMime(raw.type, fileName),
+          fileName,
+        });
+        if (!sniffed || !ALLOWED_PREFIXES.some((p) => sniffed.mime.startsWith(p))) {
+          return NextResponse.json(
+            { message: "Tipo de arquivo não suportado ou conteúdo não reconhecido." },
+            { status: 415 },
+          );
+        }
+        mimeBase = sniffed.mime;
+
+        const safeFileName = generateFileName({ prefix: "att", ext: sniffed.ext });
 
         // PR 1.3: storage prefixado por org. Antes: `public/uploads/<file>`
         // (servido estático sem auth). Agora: `<STORAGE_ROOT>/<orgId>/attachments/<file>`,
