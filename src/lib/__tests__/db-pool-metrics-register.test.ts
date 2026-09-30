@@ -9,6 +9,12 @@ const h = vi.hoisted(() => ({
   pools: [] as Array<Record<string, unknown>>,
 }));
 
+// O setup global (`src/test-setup/mock-prisma-base.ts`) troca
+// `@/lib/prisma-base` por um client vazio. Aqui o módulo REAL tem que
+// rodar — é o `createPrismaClient` dele que registra o pool no gauge —,
+// com pg/adapter/PrismaClient falsos (abaixo). Nada conecta.
+vi.unmock("@/lib/prisma-base");
+
 vi.mock("pg", () => ({
   Pool: class FakePool {
     totalCount = 5;
