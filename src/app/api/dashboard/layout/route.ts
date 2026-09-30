@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { mergeDashboardLayoutData } from "@/lib/dashboard-layout-merge";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -44,7 +45,26 @@ const payloadSchema = z.object({
 
 type LayoutData = z.infer<typeof payloadSchema>;
 
+const patchSchema = payloadSchema
+  .partial()
+  .strict()
+  .refine(
+    (value) =>
+      value.name !== undefined ||
+      value.preset !== undefined ||
+      value.visibleWidgets !== undefined ||
+      value.layout !== undefined ||
+      value.meta !== undefined,
+    { message: "Payload vazio." },
+  );
+
 const DEFAULT_NAME = "Padrão";
+const MAX_LAYOUT_JSON_CHARS = 128_000;
+
+function isRetryableWrite(err: unknown): boolean {
+  const code = (err as { code?: string }).code;
+  return code === "P2002" || code === "P2034";
+}
 
 /**
  * GET /api/dashboard/layout
@@ -180,6 +200,129 @@ export async function PUT(request: Request) {
       });
     } catch (err) {
       log.error("Falha ao salvar layout de dashboard:", err);
+      return NextResponse.json(
+        { message: "Não foi possível salvar o layout." },
+        { status: 500 },
+      );
+    }
+  });
+}
+
+/**
+ * PATCH /api/dashboard/layout
+ * Merge parcial. `meta` substitui só as chaves enviadas (`negocios`, `service`,
+ * `operator`, `ui`, `filters`, …). `visibleWidgets` e `layout` só mudam se
+ * vierem no body. `organizationId` e `userId` vêm da sessão — o schema é
+ * strict e recusa esses campos no body.
+ */
+export async function PATCH(request: Request) {
+  return withOrgContext(async (session) => {
+    const userId = session.user.id;
+
+    if (!session.user.organizationId) {
+      return NextResponse.json(
+        { message: "Super-admin não persiste layout de dashboard." },
+        { status: 400 },
+      );
+    }
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+    }
+
+    if (body && typeof body === "object") {
+      if ("organizationId" in body || "userId" in body) {
+        return NextResponse.json(
+          { message: "organizationId e userId vêm da sessão." },
+          { status: 400 },
+        );
+      }
+      const raw = JSON.stringify(body);
+      if (raw.length > MAX_LAYOUT_JSON_CHARS) {
+        return NextResponse.json({ message: "Payload grande demais." }, { status: 400 });
+      }
+    }
+
+    const parsed = patchSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { message: "Payload inválido.", issues: parsed.error.issues.slice(0, 5) },
+        { status: 400 },
+      );
+    }
+
+    const data = parsed.data;
+    const name = data.name?.trim() || DEFAULT_NAME;
+    const organizationId = session.user.organizationId;
+
+    try {
+      let record: { id: string; updatedAt: Date } | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          record = await prismaBase.$transaction(
+            async (tx) => {
+              // Unique (userId, name) é global. prismaBase + id da sessão:
+              // o body não escolhe dono nem org.
+              const existing = await tx.userDashboardLayout.findFirst({
+                where: { userId, name },
+              });
+              const merged = mergeDashboardLayoutData(existing?.data, {
+                visibleWidgets: data.visibleWidgets,
+                layout: data.layout,
+                meta: data.meta,
+              }) as unknown as Prisma.InputJsonValue;
+
+              if (existing) {
+                return tx.userDashboardLayout.update({
+                  where: { id: existing.id },
+                  data: {
+                    preset: data.preset ?? existing.preset,
+                    data: merged,
+                    isDefault: true,
+                    organizationId,
+                  },
+                  select: { id: true, updatedAt: true },
+                });
+              }
+
+              return tx.userDashboardLayout.create({
+                data: {
+                  userId,
+                  name,
+                  isDefault: true,
+                  preset: data.preset ?? "custom",
+                  organizationId,
+                  data: merged,
+                },
+                select: { id: true, updatedAt: true },
+              });
+            },
+            { isolationLevel: "Serializable" },
+          );
+          break;
+        } catch (err) {
+          if (attempt < 2 && isRetryableWrite(err)) continue;
+          throw err;
+        }
+      }
+
+      if (!record) {
+        return NextResponse.json(
+          { message: "Não foi possível salvar o layout." },
+          { status: 500 },
+        );
+      }
+
+      return NextResponse.json({
+        ok: true,
+        id: record.id,
+        updatedAt: record.updatedAt.toISOString(),
+      });
+    } catch (err) {
+      log.error("Falha ao mesclar layout de dashboard:", err);
       return NextResponse.json(
         { message: "Não foi possível salvar o layout." },
         { status: 500 },
