@@ -12,6 +12,13 @@ import { prismaBase } from "@/lib/prisma-base";
  * 2+ orgs → `orgs[]` sem `slug` (front mostra o seletor).
  * Super-admin sem org → `apex: true`.
  *
+ * SEC-11: a resposta NÃO devolve dado pessoal do titular (`displayName`
+ * foi removido — o front trata como opcional). A distinção 404/200 ainda
+ * revela se o e-mail existe; tornar a resposta neutra exige mudar o fluxo
+ * do front (ver PR). Enquanto isso, duas janelas de rate-limit por IP:
+ * `auth.public` (10/min) + `auth.lookup.hourly` (120/h) contra enumeração
+ * lenta.
+ *
  * Não muda unicidade de e-mail: users existentes continuam 0 ou 1 hit.
  * POST /api/auth/tenant-lookup  { email }
  */
@@ -25,6 +32,13 @@ export async function POST(request: Request) {
     id: ip,
   });
   if (!rl.ok) return rl.response;
+  const rlHourly = await withRateLimit({
+    route: "auth.tenant-lookup",
+    profile: "auth.lookup.hourly",
+    scope: "ip",
+    id: ip,
+  });
+  if (!rlHourly.ok) return rlHourly.response;
 
   let email = "";
   try {
@@ -46,7 +60,6 @@ export async function POST(request: Request) {
   const users = await prismaBase.user.findMany({
     where: { email, type: { not: "AI" } },
     select: {
-      name: true,
       isSuperAdmin: true,
       organization: { select: { slug: true, name: true, status: true } },
     },
@@ -66,7 +79,6 @@ export async function POST(request: Request) {
       name: u.organization!.name,
       status: u.organization!.status,
     }));
-  const displayName = users[0]?.name ?? null;
   const apexOnly =
     orgs.length === 0 && users.some((u) => u.isSuperAdmin && !u.organization);
 
@@ -77,7 +89,6 @@ export async function POST(request: Request) {
         slug: null,
         apex: true as const,
         orgs: [] as const,
-        displayName,
       },
       { status: 200, headers: rl.headers },
     );
@@ -96,7 +107,6 @@ export async function POST(request: Request) {
         slug: orgs[0].slug,
         apex: false as const,
         orgs,
-        displayName,
       },
       { status: 200, headers: rl.headers },
     );
@@ -109,7 +119,6 @@ export async function POST(request: Request) {
         slug: null,
         apex: false as const,
         orgs,
-        displayName,
       },
       { status: 200, headers: rl.headers },
     );

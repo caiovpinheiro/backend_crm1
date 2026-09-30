@@ -8,14 +8,16 @@
  * tenha subido só depois de os turnos serem criados. Como todo o estado
  * está no banco, o cron sozinho é suficiente para drenar a fila.
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * No container de prod:
- *   curl -fsS "http://127.0.0.1:3000/api/cron/ai-turns-sweep?secret=$CRON_SECRET"
- *   curl -fsS -X POST "http://127.0.0.1:3000/api/cron/ai-turns-sweep?secret=$CRON_SECRET&apply=1"
+ *   curl -fsS -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/ai-turns-sweep"
+ *   curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/ai-turns-sweep?apply=1"
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { isTurnManagerEnabled } from "@/services/ai/turn-manager";
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
@@ -25,25 +27,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET nao configurado." },
-      { status: 503 },
-    );
-  }
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) {
-    return NextResponse.json(
-      { ok: false, message: "Cron secret invalido." },
-      { status: 401 },
-    );
-  }
-  return null;
+  return requireCronSecret(request);
 }
 
 function parseLimit(request: Request): number {

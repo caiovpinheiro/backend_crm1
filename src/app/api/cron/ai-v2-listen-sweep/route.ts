@@ -4,10 +4,12 @@
  *
  * Rede de segurança do tick dos workers (`startListenSweeper`). Cada escuta
  * tem trava própria no banco: rodar junto com o tick não duplica leitura.
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { sweepAllListenSessions } from "@/services/ai-v2/listen";
 
@@ -16,13 +18,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) return NextResponse.json({ ok: false, message: "CRON_SECRET nao configurado." }, { status: 503 });
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) return NextResponse.json({ ok: false, message: "Cron secret invalido." }, { status: 401 });
-  return null;
+  return requireCronSecret(request);
 }
 
 async function handle(request: Request, apply: boolean) {

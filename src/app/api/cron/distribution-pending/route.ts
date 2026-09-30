@@ -9,16 +9,18 @@
  * uma passagem vazia o cron devolve `{skipped:true,reason:cooldown}`
  * até `agent_online` / `agent_eligible` / `new_item` / `manual`.
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * Como agendar (EasyPanel > Scheduled Service):
  *   Schedule: every 1 minute
- *   Command:  curl -fsS "https://BACKEND/api/cron/distribution-pending?secret=$CRON_SECRET"
+ *   Command:  curl -fsS -H "Authorization: Bearer $CRON_SECRET" "https://BACKEND/api/cron/distribution-pending"
  *
  * Sem migration / sem tabela nova — só código.
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
@@ -32,26 +34,8 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    const expected = process.env.CRON_SECRET?.trim();
-    if (!expected) {
-      return NextResponse.json(
-        { ok: false, message: "CRON_SECRET nao configurado." },
-        { status: 503 },
-      );
-    }
-
-    const url = new URL(request.url);
-    const headerSecret = (request.headers.get("authorization") ?? "")
-      .replace(/^Bearer\s+/i, "")
-      .trim();
-    const provided =
-      headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-    if (!provided || provided !== expected) {
-      return NextResponse.json(
-        { ok: false, message: "Cron secret invalido." },
-        { status: 401 },
-      );
-    }
+    const denied = requireCronSecret(request);
+    if (denied) return denied;
 
     const orgs = await prismaBase.organizationWidget.findMany({
       where: { widgetSlug: "smart_distribution", status: "ACTIVE" },

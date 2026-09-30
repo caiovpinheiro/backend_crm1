@@ -2,14 +2,16 @@
  * GET  /api/cron/halt-inbound-burst              dry-run
  * POST /api/cron/halt-inbound-burst?apply=1      encerra tickets do burst
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * No container de prod:
- *   curl -fsS "http://127.0.0.1:3000/api/cron/halt-inbound-burst?secret=$CRON_SECRET&hours=6"
- *   curl -fsS -X POST "http://127.0.0.1:3000/api/cron/halt-inbound-burst?secret=$CRON_SECRET&hours=6&apply=1"
+ *   curl -fsS -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/halt-inbound-burst?hours=6"
+ *   curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/halt-inbound-burst?hours=6&apply=1"
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import {
   DEFAULT_BURST_PHONE_NUMBER_ID,
@@ -21,25 +23,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET nao configurado." },
-      { status: 503 },
-    );
-  }
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) {
-    return NextResponse.json(
-      { ok: false, message: "Cron secret invalido." },
-      { status: 401 },
-    );
-  }
-  return null;
+  return requireCronSecret(request);
 }
 
 function parseOpts(request: Request, applyDefault: boolean) {

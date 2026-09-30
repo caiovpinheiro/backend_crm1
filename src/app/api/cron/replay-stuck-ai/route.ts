@@ -2,14 +2,16 @@
  * GET  /api/cron/replay-stuck-ai          dry-run
  * POST /api/cron/replay-stuck-ai?apply=1  dispara respostas
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * No container de prod (sem src/ nem tsx):
- *   curl -fsS "http://127.0.0.1:3000/api/cron/replay-stuck-ai?secret=$CRON_SECRET&hours=24"
- *   curl -fsS -X POST "http://127.0.0.1:3000/api/cron/replay-stuck-ai?secret=$CRON_SECRET&hours=24&apply=1"
+ *   curl -fsS -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/replay-stuck-ai?hours=24"
+ *   curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "http://127.0.0.1:3000/api/cron/replay-stuck-ai?hours=24&apply=1"
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { replayStuckAiInbox } from "@/services/ai/replay-stuck-inbox";
 
@@ -18,25 +20,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET nao configurado." },
-      { status: 503 },
-    );
-  }
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) {
-    return NextResponse.json(
-      { ok: false, message: "Cron secret invalido." },
-      { status: 401 },
-    );
-  }
-  return null;
+  return requireCronSecret(request);
 }
 
 function parseOpts(request: Request, applyDefault: boolean) {
