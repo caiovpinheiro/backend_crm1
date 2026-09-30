@@ -5,6 +5,11 @@
 
 export type OperatorVariableMeta = {
   key: string;
+  /**
+   * Cabeçalho e corpo numeram sozinhos (`{{1}}` nos dois). Sem isto o
+   * mapeamento do corpo ganharia do cabeçalho.
+   */
+  component?: "header" | "body";
   label: string;
   /**
    * Valor de exemplo mostrado à Meta na criação do template (`example` do
@@ -61,19 +66,25 @@ export function extractUnsupportedPlaceholderTokens(text: string): string[] {
   return extractPlaceholderKeysFromBodyText(text).filter((k) => !isMetaPlaceholderKey(k));
 }
 
-/** Preserva labels/exemplos/mapeamentos já gravados quando as chaves continuam iguais. */
-export function mergeOperatorVariables(
-  bodyText: string,
+function variableComponent(v: OperatorVariableMeta): "header" | "body" {
+  return v.component === "header" ? "header" : "body";
+}
+
+function mergeComponentVariables(
+  text: string,
+  component: "header" | "body",
   previous: OperatorVariableMeta[] | null | undefined,
 ): OperatorVariableMeta[] {
-  const keys = extractPlaceholderKeysFromBodyText(bodyText);
-  const prevByKey = new Map((previous ?? []).map((v) => [v.key, v]));
+  const keys = extractPlaceholderKeysFromBodyText(text);
   return keys.map((key) => {
-    const old = prevByKey.get(key);
+    const old = (previous ?? []).find(
+      (v) => variableComponent(v) === component && String(v.key ?? "").trim() === key,
+    );
     const ex = old?.example?.trim();
     const crm = old?.crmField?.trim();
     return {
       key,
+      component,
       label: old?.label?.trim() || key,
       ...(ex ? { example: ex } : {}),
       ...(crm ? { crmField: crm } : {}),
@@ -81,11 +92,29 @@ export function mergeOperatorVariables(
   });
 }
 
+/**
+ * Preserva labels/exemplos/mapeamentos já gravados quando as chaves continuam
+ * iguais. Corpo primeiro: quem ainda busca só pela chave encontra o corpo.
+ */
+export function mergeOperatorVariables(
+  bodyText: string,
+  previous: OperatorVariableMeta[] | null | undefined,
+  headerText?: string,
+): OperatorVariableMeta[] {
+  return [
+    ...mergeComponentVariables(bodyText, "body", previous),
+    ...mergeComponentVariables(headerText ?? "", "header", previous),
+  ];
+}
+
 /** Mapeamento CRM gravado para uma chave, se houver. */
 export function operatorVariableCrmField(
   vars: OperatorVariableMeta[] | null | undefined,
   key: string,
+  component: "header" | "body" = "body",
 ): string {
-  const hit = (vars ?? []).find((v) => String(v?.key ?? "").trim() === key);
+  const hit = (vars ?? []).find(
+    (v) => variableComponent(v) === component && String(v?.key ?? "").trim() === key,
+  );
   return hit?.crmField?.trim() ?? "";
 }

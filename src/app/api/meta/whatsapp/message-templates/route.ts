@@ -295,6 +295,19 @@ export async function POST(request: Request) {
       const headerKeys =
         wantsExamples && b.headerFormat === "TEXT" ? orderedPlaceholderKeys(headerTextRaw) : [];
 
+      if (headerKeys.length > 1) {
+        return NextResponse.json(
+          { message: "A Meta aceita apenas uma variável no cabeçalho de texto." },
+          { status: 400 },
+        );
+      }
+      if (b.headerFormat === "TEXT" && headerTextRaw.length > 60) {
+        return NextResponse.json(
+          { message: "O cabeçalho de texto da Meta tem no máximo 60 caracteres." },
+          { status: 400 },
+        );
+      }
+
       const missingExamples = [
         ...bodyKeys.filter((k) => !bodyExamples.has(k)).map((k) => `corpo {{${k}}}`),
         ...headerKeys.filter((k) => !headerExamples.has(k)).map((k) => `cabeçalho {{${k}}}`),
