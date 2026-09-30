@@ -8,10 +8,12 @@
  *    sincroniza `status/closedAt` com a etapa, exige motivo de perda.
  *  - `nextDealNumber`: delega no contador atômico da org do contexto.
  *  - `resolveBoardDealIds` / `getBoardData`: `where` de visibilidade
- *    (status OPEN por padrão, `ownerId`, escopo do pipeline) e chave de
- *    cache por org.
+ *    (status OPEN por padrão, `ownerId`, escopo do pipeline), chave de
+ *    cache por org e cards de todas as etapas numa única consulta
+ *    ranqueada com o mesmo `where`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "@prisma/client";
 
 const h = vi.hoisted(() => {
   delete process.env.REDIS_URL;
@@ -173,6 +175,17 @@ function seedDeal(stageId: string, status: "OPEN" | "WON" | "LOST" = "OPEN") {
       : { ...peek, stageId, position: 0, status },
   );
   h.tx.deal.findUnique.mockResolvedValue({ id: "deal-1", stageId, position: 0, status });
+}
+
+/**
+ * `$queryRaw` recebe um `Prisma.Sql` (janela ranqueada do board) ou um
+ * template literal (`strings, ...values`); só o primeiro tem `.strings`
+ * como propriedade. Casa apenas a janela `ROW_NUMBER() OVER (...)`.
+ */
+function isRankedWindowSql(arg: unknown): arg is Prisma.Sql {
+  if (Array.isArray(arg) || typeof arg !== "object" || arg === null) return false;
+  const strings = (arg as { strings?: unknown }).strings;
+  return Array.isArray(strings) && strings.join("?").includes("ROW_NUMBER() OVER");
 }
 
 beforeEach(() => {
@@ -444,19 +457,54 @@ describe("getBoardData — cache por org e where de visibilidade", () => {
     expect(groupBy.where).toEqual({ stage: { pipelineId: "pipe-1" } });
   });
 
-  it("cards de cada etapa são lidos com o MESMO where de visibilidade", async () => {
+  it("cards de TODAS as etapas saem de UMA consulta ranqueada com o MESMO where de visibilidade", async () => {
     h.prisma.stage.findMany.mockResolvedValueOnce([
       { id: "stage-a", pipelineId: "pipe-1", position: 0, isWon: false, isLost: false, rottingDays: 7 },
+      { id: "stage-b", pipelineId: "pipe-1", position: 1, isWon: false, isLost: false, rottingDays: 7 },
     ]);
-    await withOrg(ORG, () => getBoardData("pipe-1", { ownerId: "u1" }));
-    const dealsCall = h.prisma.deal.findMany.mock.calls.find(
-      (c) => (c[0] as { where: { stageId?: string } }).where.stageId === "stage-a",
+    // A janela devolve só (id, stageId, rn); as outras `$queryRaw` do board
+    // (produtos / conversas / mensagens) seguem vazias.
+    h.prisma.$queryRaw.mockImplementation(async (first: unknown) =>
+      isRankedWindowSql(first)
+        ? [
+            { id: "deal-a1", stageId: "stage-a", rn: 1 },
+            { id: "deal-b1", stageId: "stage-b", rn: 1 },
+          ]
+        : [],
     );
-    expect(dealsCall).toBeDefined();
-    expect((dealsCall![0] as { where: unknown }).where).toEqual({
-      AND: [{ status: "OPEN" }, { ownerId: "u1" }],
-      stageId: "stage-a",
-    });
+    const updatedAt = new Date();
+    h.prisma.deal.findMany.mockResolvedValueOnce([
+      { id: "deal-b1", stageId: "stage-b", contactId: null, contact: null, updatedAt, tags: [], activities: [] },
+      { id: "deal-a1", stageId: "stage-a", contactId: null, contact: null, updatedAt, tags: [], activities: [] },
+    ]);
+
+    const out = await withOrg(ORG, () => getBoardData("pipe-1", { ownerId: "u1" }));
+
+    // 1) UMA janela para todas as etapas: o where de visibilidade (status
+    //    OPEN + ownerId) entra uma única vez, fora da partição por etapa —
+    //    é o mesmo predicado para cada coluna. Valores só como parâmetros.
+    const ranked = h.prisma.$queryRaw.mock.calls.map((c) => c[0]).filter(isRankedWindowSql);
+    expect(ranked).toHaveLength(1);
+    const text = ranked[0]!.strings.join("?").replace(/\s+/g, " ");
+    expect(text).toContain('ROW_NUMBER() OVER ( PARTITION BY d."stageId" ORDER BY');
+    expect(text).toContain(
+      'WHERE d."organizationId" = ? AND d."stageId" = ANY(?) AND ((d."status" = ?::"DealStatus" AND d."ownerId" = ?))',
+    );
+    expect(ranked[0]!.values).toEqual([ORG, ["stage-a", "stage-b"], "OPEN", "u1", expect.any(Number)]);
+
+    // 2) Nenhum `findMany` por etapa: só a hidratação por `id IN` dos ids
+    //    que a janela devolveu.
+    expect(h.prisma.deal.findMany).toHaveBeenCalledTimes(1);
+    const hydrate = h.prisma.deal.findMany.mock.calls[0]![0] as { where: Record<string, unknown> };
+    expect(hydrate.where).toEqual({ id: { in: ["deal-a1", "deal-b1"] } });
+
+    // 3) Cada card volta na própria etapa.
+    expect(out.map((s) => [s.id, s.deals.map((d) => d.id)])).toEqual([
+      ["stage-a", ["deal-a1"]],
+      ["stage-b", ["deal-b1"]],
+    ]);
+
+    h.prisma.$queryRaw.mockReset().mockResolvedValue([]);
   });
 
   it("fora de contexto de org não consulta nada", async () => {
