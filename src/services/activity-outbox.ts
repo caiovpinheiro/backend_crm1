@@ -502,13 +502,47 @@ export async function projectTabulationOutboxBatch(
 
 let tabulationProjectorStarted = false;
 
+/**
+ * `cleanupActivityOutbox` não tinha chamador: linhas processadas ficavam
+ * para sempre e o poll de 5 s crescia com o uso. Roda no primeiro tick do
+ * projetor (boot) e depois 1x por dia por processo.
+ */
+export const OUTBOX_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let lastOutboxCleanupAt = 0;
+
+/** Só para testes: volta o agendamento da limpeza ao estado de boot. */
+export function resetTabulationProjectorForTests(): void {
+  lastOutboxCleanupAt = 0;
+  tabulationProjectorStarted = false;
+}
+
+/**
+ * Um tick do projetor: projeta o lote e, quando passou o intervalo,
+ * limpa a outbox processada. Falha da limpeza não derruba a projeção.
+ */
+export async function runTabulationProjectorTick(
+  now = Date.now(),
+): Promise<{ projected: number; cleaned: number | null }> {
+  const projected = await projectTabulationOutboxBatch();
+  let cleaned: number | null = null;
+  if (now - lastOutboxCleanupAt >= OUTBOX_CLEANUP_INTERVAL_MS) {
+    lastOutboxCleanupAt = now;
+    try {
+      cleaned = await cleanupActivityOutbox();
+    } catch (err) {
+      console.error("[activity-outbox] cleanup failed", err);
+    }
+  }
+  return { projected, cleaned };
+}
+
 /** Timer à parte. Não consome fila de WhatsApp, campanha ou automação. */
 export function startTabulationOutboxProjector(intervalMs = 5_000): void {
   if (tabulationProjectorStarted) return;
   tabulationProjectorStarted = true;
 
   const tick = () => {
-    void projectTabulationOutboxBatch()
+    void runTabulationProjectorTick()
       .catch((err) => {
         console.error("[activity-outbox] tabulation tick failed", err);
       })

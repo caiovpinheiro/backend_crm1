@@ -59,7 +59,7 @@
  * de pagar timeout em cada request.
  */
 import { promisify } from "node:util";
-import { gzip, gunzipSync } from "node:zlib";
+import { gzip, gunzip } from "node:zlib";
 
 import IORedis, { type Redis as IORedisClient } from "ioredis";
 
@@ -93,6 +93,12 @@ const MAX_REDIS_VALUE_BYTES = 1_000_000;
 
 /** gzip no threadpool do libuv — `gzipSync` travava a thread principal. */
 const gzipAsync = promisify(gzip);
+/**
+ * gunzip também no threadpool: o board chega a 1 MB gzipado (vários MB de
+ * JSON) e o `get` roda em cada carga — `gunzipSync` segurava a thread
+ * principal a cada hit, mais vezes que o `set`.
+ */
+const gunzipAsync = promisify(gunzip);
 
 /**
  * Libera o lock SÓ se o valor ainda é o token desta chamada
@@ -245,10 +251,10 @@ async function encode(value: unknown): Promise<string | null> {
   return GZ_PREFIX + gz.toString("base64");
 }
 
-function decode<T>(raw: string): T {
+async function decode<T>(raw: string): Promise<T> {
   if (raw.startsWith(GZ_PREFIX)) {
-    const json = gunzipSync(
-      Buffer.from(raw.slice(GZ_PREFIX.length), "base64"),
+    const json = (
+      await gunzipAsync(Buffer.from(raw.slice(GZ_PREFIX.length), "base64"))
     ).toString("utf8");
     return JSON.parse(json) as T;
   }
@@ -325,7 +331,7 @@ export async function get<T>(key: CacheKey): Promise<T | undefined> {
     }
     metrics.cacheHits?.inc({ key: safeLabel(key.split(":")[0]) });
     try {
-      return decode<T>(raw);
+      return await decode<T>(raw);
     } catch (parseErr) {
       log.warn({ err: parseErr, key }, "[cache] decode falhou — tratando como miss");
       metrics.cacheMisses?.inc({ key: safeLabel(key.split(":")[0]) });

@@ -758,13 +758,19 @@ export type StageMetric = {
 
 export async function getStageMetrics(pipelineId: string): Promise<StageMetric[]> {
   const orgId = getOrgIdOrThrow();
-  // Cache-aside: este calculo varre todo o pipeline (inclusive deals
-  // fechados) e roda em CADA carga do board. Sob rajada (dezenas de
-  // loads iguais em segundos), o cache reduz para 1 computacao/60s.
-  return cache.wrap(stageMetricsKey(orgId, pipelineId), 60, () =>
+  // Cache-aside: este calculo agrega os deals abertos do pipeline e roda em
+  // CADA carga do board. Sob rajada (dezenas de loads iguais em segundos),
+  // o cache reduz para 1 computacao a cada STAGE_METRICS_TTL_SEC.
+  return cache.wrap(stageMetricsKey(orgId, pipelineId), STAGE_METRICS_TTL_SEC, () =>
     computeStageMetrics(orgId, pipelineId),
   );
 }
+
+/**
+ * 300 s: com 20 funis ativos, 60 s eram 20 agregações por minuto. A média
+ * de dias dos cards abertos muda devagar; o cabeçalho tolera 5 min.
+ */
+export const STAGE_METRICS_TTL_SEC = 300;
 
 async function computeStageMetrics(
   orgId: string,
@@ -780,6 +786,12 @@ async function computeStageMetrics(
   // referenciava a própria tabela da subquery (sempre falso), então
   // `advancedDeals`/`conversionRate` SEMPRE resultavam 0. Mantemos o mesmo
   // resultado (`advancedDeals = 0`) sem o scan.
+  //
+  // Só deals OPEN: o board mostra as colunas com os cards abertos, e
+  // `avgDaysInStage` é a idade média desses cards (o frontend só tipa o
+  // campo; não há tela que mostre a média dos fechados). Antes a agregação
+  // varria o histórico inteiro do funil (WON/LOST desde sempre) a cada
+  // carga — índice `(organizationId, stageId, status)` passa a servir.
   const rows = await prisma.$queryRaw<
     { stageId: string; totalDeals: bigint; advancedDeals: bigint; avgDays: unknown }[]
   >`
@@ -788,18 +800,13 @@ async function computeStageMetrics(
       COUNT(*)::bigint AS "totalDeals",
       0::bigint AS "advancedDeals",
       COALESCE(AVG(
-        EXTRACT(EPOCH FROM (
-          CASE
-            WHEN d.status IN ('WON'::"DealStatus", 'LOST'::"DealStatus")
-              THEN COALESCE(d."closedAt", d."updatedAt")
-            ELSE NOW()
-          END - d."createdAt"
-        )) / 86400.0
+        EXTRACT(EPOCH FROM (NOW() - d."createdAt")) / 86400.0
       ), 0) AS "avgDays"
     FROM deals d
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE s."pipelineId" = ${pipelineId}
       AND d."organizationId" = ${orgId}
+      AND d.status = 'OPEN'::"DealStatus"
     GROUP BY d."stageId"
   `;
 

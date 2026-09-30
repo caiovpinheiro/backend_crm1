@@ -8,7 +8,7 @@ import {
   INBOX_TAB_COUNTS_FP_LENGTH,
   inboxTabCountsHistKey,
   inboxTabCountsKey,
-  invalidateInboxTabCounts,
+  scheduleTabCountsInvalidation,
 } from "@/lib/cache/keys";
 import {
   resolveConversationId,
@@ -2816,7 +2816,7 @@ export async function assignConversationsInline(params: {
   }
 
   if (updated > 0) {
-    void invalidateInboxTabCounts(params.organizationId);
+    scheduleTabCountsInvalidation(params.organizationId);
   }
 
   return { updated, skipped };
@@ -3084,9 +3084,11 @@ export async function updateConversationStatusInDb(
   });
 
   // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
+  // Coalescido na janela de 15 s (`scheduleTabCountsInvalidation`): o
+  // `conversation_updated` publicado abaixo cai na mesma janela, então a
+  // mudança de status não vira duas purgas (SCAN) no Redis.
   if (status === "RESOLVED" || status === "OPEN") {
-    const orgId = getOrgIdOrNull();
-    if (orgId) void invalidateInboxTabCounts(orgId);
+    scheduleTabCountsInvalidation(getOrgIdOrNull());
   }
 
   if (followUp) {
@@ -3517,9 +3519,7 @@ export async function resolveConversationsInline(params: {
 
   if (updated > 0) {
     const orgId = getOrgIdOrNull();
-    if (orgId) {
-      void invalidateInboxTabCounts(orgId);
-    }
+    scheduleTabCountsInvalidation(orgId);
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({
