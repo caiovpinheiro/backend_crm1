@@ -34,6 +34,12 @@ const MODE_LABEL: Record<string, string> = {
   HYBRID: "Híbrido",
 };
 
+/** Rótulo da modalidade do curso (EAD, Presencial, Híbrido). */
+export function formatCourseMode(mode: string | null | undefined): string {
+  if (!mode) return "";
+  return MODE_LABEL[mode] ?? "";
+}
+
 const BASE_VARIABLES: MessageVariable[] = [
   { key: "nome", label: "Nome", sample: "Administração" },
   { key: "descricao", label: "Descrição", sample: "Curso na modalidade EAD." },
