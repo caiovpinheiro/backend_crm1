@@ -323,6 +323,11 @@ vi.mock("@/lib/webhook-context", () => ({
 
 vi.mock("@/lib/org-settings", () => ({
   getOrgSetting: vi.fn(async () => null),
+  // O entrypoint de ingestão passa por `shouldSkipNewAiForIdleInbound` →
+  // `isClosingProtocolEnabled`, que lê este toggle. Sem o export o mock
+  // lançava e cada teste logava "[ai-turn] idle inbound check failed".
+  // `false` = protocolo de encerramento desligado (mesmo caminho de antes).
+  getOrgSettingBool: vi.fn(async () => false),
 }));
 
 vi.mock("@/services/ai/phone-allowlist", () => ({

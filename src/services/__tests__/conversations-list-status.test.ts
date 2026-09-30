@@ -9,7 +9,8 @@
  *  - `getConversations`: colapso por contato+canal SÓ em Encerradas/
  *    Resolvendo (DISTINCT ON), nunca em fila quente ou união mista.
  *  - `updateConversationStatusInDb`: encerrar preenche `closedAt`, zera
- *    `hasError`, invalida badges, devolve o deal ao funil de origem
+ *    `hasError`, invalida badges (pela janela coalescida
+ *    `scheduleTabCountsInvalidation`), devolve o deal ao funil de origem
  *    (`restoreDealToAcademicOrigin`), enfileira redistribuição; Acompanhar
  *    não encerra; reabrir limpa tabulação; desvincular atendente loga.
  */
@@ -28,7 +29,7 @@ const h = vi.hoisted(() => {
     },
     automationContext: { findMany: vi.fn().mockResolvedValue([]) },
     orgSetting: vi.fn().mockResolvedValue(null as string | null),
-    invalidateInboxTabCounts: vi.fn().mockResolvedValue(undefined),
+    scheduleTabCountsInvalidation: vi.fn(),
     ssePublish: vi.fn(),
     logEvent: vi.fn().mockResolvedValue(undefined),
     restoreDeal: vi.fn().mockResolvedValue(undefined),
@@ -59,9 +60,13 @@ vi.mock("@/lib/org-settings", () => ({
   getOrgSetting: vi.fn().mockResolvedValue(null),
   getOrgSettingBool: vi.fn().mockResolvedValue(false),
 }));
+// `conversations.ts` zera os badges pela janela coalescida de 15 s
+// (`scheduleTabCountsInvalidation`), nunca pelo `invalidateInboxTabCounts`
+// direto (ver `tab-counts-invalidation.test.ts`) — a costura observável é
+// o agendamento; a purga em si é coberta lá.
 vi.mock("@/lib/cache/keys", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/cache/keys")>()),
-  invalidateInboxTabCounts: h.invalidateInboxTabCounts,
+  scheduleTabCountsInvalidation: h.scheduleTabCountsInvalidation,
 }));
 vi.mock("@/services/channels", () => ({
   parseInboxFilterChannelIds: (ids: string[]) => ({ ids, missing: [], deleted: false }),
@@ -439,7 +444,7 @@ describe("updateConversationStatusInDb", () => {
     expect(data.followUpAt).toBeNull();
     expect(data).not.toHaveProperty("tabulationId");
 
-    expect(h.invalidateInboxTabCounts).toHaveBeenCalledWith(ORG);
+    expect(h.scheduleTabCountsInvalidation).toHaveBeenCalledWith(ORG);
     expect(h.resolveAgentVertical).toHaveBeenCalledWith("conv-1", ORG);
     expect(h.restoreDeal).toHaveBeenCalledWith({ contactId: "contact-1" });
     await Promise.resolve();
@@ -477,7 +482,7 @@ describe("updateConversationStatusInDb", () => {
     const data = h.conversation.update.mock.calls[0]![0].data as Record<string, unknown>;
     expect(data).toMatchObject({ status: "OPEN", closedAt: null, tabulationId: null, followUpAt: null });
     expect(data).not.toHaveProperty("hasError");
-    expect(h.invalidateInboxTabCounts).toHaveBeenCalledWith(ORG);
+    expect(h.scheduleTabCountsInvalidation).toHaveBeenCalledWith(ORG);
     expect(h.restoreDeal).not.toHaveBeenCalled();
   });
 
@@ -485,7 +490,7 @@ describe("updateConversationStatusInDb", () => {
     await withOrg(ORG, () => updateConversationStatusInDb("conv-1", "PENDING"));
     const data = h.conversation.update.mock.calls[0]![0].data as Record<string, unknown>;
     expect(data).toEqual({ status: "PENDING" });
-    expect(h.invalidateInboxTabCounts).not.toHaveBeenCalled();
+    expect(h.scheduleTabCountsInvalidation).not.toHaveBeenCalled();
   });
 
   it("encerrar desvinculando atendente: registra ASSIGNEE_CHANGED, limpa deal/contato e libera capacidade do atendente", async () => {
