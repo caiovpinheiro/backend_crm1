@@ -72,7 +72,11 @@ vi.mock("ioredis", () => {
 
 vi.mock("node:zlib", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:zlib")>();
-  return { ...actual, gzipSync: vi.fn(actual.gzipSync) };
+  return {
+    ...actual,
+    gzipSync: vi.fn(actual.gzipSync),
+    gunzipSync: vi.fn(actual.gunzipSync),
+  };
 });
 
 vi.mock("@/lib/logger", () => ({
@@ -119,6 +123,7 @@ beforeEach(() => {
   h.store.clear();
   h.warn.mockClear();
   vi.mocked(zlib.gzipSync).mockClear();
+  vi.mocked(zlib.gunzipSync).mockClear();
 });
 
 describe("cache do board com Redis no ar", () => {
@@ -163,6 +168,27 @@ describe("cache do board com Redis no ar", () => {
     await cache.set(key, incompressiblePayload(50_000), 45);
     expect(gzippedBytesInRedis(key)).toBeGreaterThan(0);
     expect(zlib.gzipSync).not.toHaveBeenCalled();
+  });
+
+  it("descomprime fora da thread principal na leitura (sem gunzipSync)", async () => {
+    const key = boardDataKey("org-gunzip", "pipe-1", "variant-a");
+    const payload = incompressiblePayload(50_000);
+    await cache.set(key, payload, 45);
+    expect(gzippedBytesInRedis(key)).toBeGreaterThan(0);
+
+    expect(await cache.get(key)).toEqual(payload);
+    expect(zlib.gunzipSync).not.toHaveBeenCalled();
+  });
+
+  it("valor gzipado corrompido no Redis vira miss, sem derrubar o get", async () => {
+    const key = boardDataKey("org-corrupt", "pipe-1", "variant-a");
+    h.store.set(`cache:${key}`, "gz1:" + Buffer.from("nao-e-gzip").toString("base64"));
+
+    expect(await cache.get(key)).toBeUndefined();
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ key }),
+      "[cache] decode falhou — tratando como miss",
+    );
   });
 
   it("cópia em memória some quando o valor passa a caber no Redis", async () => {
