@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { resolveMetaMediaAccess } from "@/lib/meta-media-access";
 import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
 
 export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user) {
+    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  }
+
+  const orgId = (session.user as { organizationId?: string | null }).organizationId ?? null;
+  if (!orgId) {
     return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
   }
 
@@ -15,9 +21,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ message: "URL inválida." }, { status: 400 });
   }
 
-  const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
-  if (!token) {
-    return NextResponse.json({ message: "Token Meta não configurado." }, { status: 503 });
+  // A URL Meta só é servida se pertencer à org da sessão (mensagem ou
+  // avatar). Token do canal da conversa; fallback env da plataforma.
+  const access = await resolveMetaMediaAccess(orgId, mediaUrl);
+  if (!access) {
+    return NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 });
   }
 
   try {
@@ -25,7 +33,7 @@ export async function GET(request: Request) {
     // resposta 206 (Partial Content) para tocar/buscar — sem isso o player
     // fica preto em 0:00. Meta/WhatsApp CDN suporta range requests.
     const upstreamHeaders: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${access.token}`,
     };
     const range = request.headers.get("range");
     if (range) upstreamHeaders["Range"] = range;
@@ -33,6 +41,8 @@ export async function GET(request: Request) {
     const res = await fetch(mediaUrl, {
       headers: upstreamHeaders,
       cache: "no-store",
+      // Sem seguir redirect: o token da org não pode vazar para outro host.
+      redirect: "error",
     });
 
     // 200 (completo) e 206 (parcial) são ambos válidos.
@@ -47,7 +57,8 @@ export async function GET(request: Request) {
     const outHeaders = new Headers({
       "Content-Type": contentType,
       "Accept-Ranges": "bytes",
-      "Cache-Control": "public, max-age=31536000, immutable",
+      // Mídia autorizada por org/sessão: não pode ficar em cache compartilhado.
+      "Cache-Control": "private, no-store",
     });
 
     // Preserva headers de range/tamanho do upstream para o player.
