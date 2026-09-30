@@ -16,6 +16,7 @@
 
 import type { Prisma } from "@prisma/client";
 
+import { ACADEMIC_IMPORT_MAX_ROWS } from "@/lib/import-file-guard";
 import { readTableFromBuffer } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 
@@ -166,7 +167,9 @@ export async function importMatriculados(params: {
 }): Promise<ImportResult> {
   const { organizationId, buffer, fileName, uploadedById } = params;
 
-  const { rows } = await readTableFromBuffer(buffer, fileName);
+  const { rows } = await readTableFromBuffer(buffer, fileName, undefined, {
+    maxRows: ACADEMIC_IMPORT_MAX_ROWS,
+  });
   const parsed: ParsedRecord[] = [];
   let skipped = 0;
   for (const r of rows) {

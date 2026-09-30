@@ -5,11 +5,17 @@ import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard";
 import { validateDealImportHeaders } from "@/lib/deal-import-core";
 import {
+  IMPORT_MAX_BYTES,
+  IMPORT_MAX_ROWS,
+  ImportFileError,
+  importTooLargeMessage,
+} from "@/lib/import-file-guard";
+import {
   readDelimiterFlag,
   readImportModeFlag,
   readTagFlag,
   readUpdateExistingFlag,
-  readUploadedTable,
+  readTableFromBuffer,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
@@ -82,6 +88,14 @@ export async function POST(request: Request) {
       );
     }
 
+    // SEC2-4: teto de bytes explícito na rota.
+    if (file.size > IMPORT_MAX_BYTES) {
+      return NextResponse.json(
+        { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+        { status: 413 },
+      );
+    }
+
     const delimiter = readDelimiterFlag(formData);
     const updateExisting = readUpdateExistingFlag(formData);
     // `importMode` é o novo flag (create/update/upsert). Fallback derivado
@@ -93,7 +107,16 @@ export async function POST(request: Request) {
 
     // Parseia uma vez para validar cabeçalho e contar as linhas (total do
     // BulkOperation). O worker re-parseia o arquivo salvo no storage.
-    const { headers, rows } = await readUploadedTable(file, delimiter);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (buffer.length > IMPORT_MAX_BYTES) {
+      return NextResponse.json(
+        { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+        { status: 413 },
+      );
+    }
+    const { headers, rows } = await readTableFromBuffer(buffer, file.name, delimiter, {
+      maxRows: IMPORT_MAX_ROWS,
+    });
     const headerError = validateDealImportHeaders(headers, {
       allowCreate: importMode !== "update",
     });
@@ -112,7 +135,6 @@ export async function POST(request: Request) {
           ? "ods"
           : "csv";
     const fileName = generateFileName({ prefix: "deals", ext });
-    const buffer = Buffer.from(await file.arrayBuffer());
     await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
 
     const operation = await prisma.bulkOperation.create({
@@ -173,6 +195,9 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (e) {
+    if (e instanceof ImportFileError) {
+      return NextResponse.json({ message: e.message }, { status: e.status });
+    }
     console.error(e);
     return NextResponse.json({ message: "Erro ao importar negócios." }, { status: 500 });
   }

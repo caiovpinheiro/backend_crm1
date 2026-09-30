@@ -5,9 +5,14 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { assertNoActiveImport } from "@/lib/import-guard";
 import {
+  IMPORT_MAX_BYTES,
+  ImportFileError,
+  importTooLargeMessage,
+} from "@/lib/import-file-guard";
+import {
   readDelimiterFlag,
   readUpdateExistingFlag,
-  readUploadedTable,
+  readTableFromBuffer,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
@@ -55,9 +60,26 @@ export async function POST(request: Request) {
         );
       }
 
+      // SEC2-4: teto de bytes explícito na rota.
+      if (file.size > IMPORT_MAX_BYTES) {
+        return NextResponse.json(
+          { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+          { status: 413 },
+        );
+      }
+
       const delimiter = readDelimiterFlag(formData);
       const updateExisting = readUpdateExistingFlag(formData);
-      const { rows } = await readUploadedTable(file, delimiter);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      if (buffer.length > IMPORT_MAX_BYTES) {
+        return NextResponse.json(
+          { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+          { status: 413 },
+        );
+      }
+      const { rows } = await readTableFromBuffer(buffer, file.name, delimiter, {
+        maxRows: MAX_ROWS,
+      });
 
       if (rows.length === 0) {
         return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
@@ -78,7 +100,6 @@ export async function POST(request: Request) {
             ? "ods"
             : "csv";
       const fileName = generateFileName({ prefix: "companies", ext });
-      const buffer = Buffer.from(await file.arrayBuffer());
       await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
 
       const operation = await prisma.bulkOperation.create({
@@ -137,6 +158,9 @@ export async function POST(request: Request) {
       );
     });
   } catch (e) {
+    if (e instanceof ImportFileError) {
+      return NextResponse.json({ message: e.message }, { status: e.status });
+    }
     console.error("[companies/import]", e);
     return NextResponse.json(
       { message: "Erro ao importar empresas." },
