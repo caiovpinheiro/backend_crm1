@@ -75,7 +75,10 @@ import { processIncomingMessage as processSalesbotMessage, contactHasPausedAutom
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
-import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
+import {
+  handleMessagingWebhookPost,
+  processMessagingWebhookPayload,
+} from "@/lib/meta-webhook/messaging-handler";
 import { asMetaId, configMetaIds } from "@/lib/meta-webhook/messaging-payload";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
@@ -2665,14 +2668,15 @@ async function executePostBody(
   const object = str(body.object);
   if (object === "page" || object === "instagram") {
     // Callback do produto Instagram/Messenger colada por engano na URL
-    // do WhatsApp (/api/webhooks/meta). Encaminha em vez de ignorar.
+    // do WhatsApp (/api/webhooks/meta). Encaminha em vez de ignorar; o
+    // evento de auditoria já foi gravado acima (não duplicar).
     return handleMessagingWebhookPost(
       new Request(request.url, {
         method: "POST",
         headers: request.headers,
         body: rawBody,
       }),
-      { skipSignature: true },
+      { skipSignature: true, metaWebhookEventId },
     );
   }
   if (object !== "whatsapp_business_account") {
@@ -3589,7 +3593,13 @@ export async function processStoredMetaWebhookEvent(
 ): Promise<void> {
   const event = await prismaBase.metaWebhookEvent.findUnique({
     where: { id: metaWebhookEventId },
-    select: { id: true, organizationId: true, rawBody: true, processed: true },
+    select: {
+      id: true,
+      organizationId: true,
+      objectType: true,
+      rawBody: true,
+      processed: true,
+    },
   });
   if (!event) {
     throw new Error(`MetaWebhookEvent ${metaWebhookEventId} não encontrado`);
@@ -3603,6 +3613,14 @@ export async function processStoredMetaWebhookEvent(
     return;
   }
   await withSystemContext(event.organizationId, async () => {
+    // Instagram/Messenger: mesma fila, loop próprio (messaging-handler).
+    if (event.objectType === "page" || event.objectType === "instagram") {
+      await processMessagingWebhookPayload(
+        event.rawBody as Record<string, unknown>,
+        { metaWebhookEventId },
+      );
+      return;
+    }
     await processMetaWebhookPayload(
       event.rawBody as Record<string, unknown>,
       { metaWebhookEventId },

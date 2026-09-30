@@ -809,12 +809,18 @@ function getMetaWebhookQueue(): Queue<MetaWebhookJobPayload> | null {
 /**
  * Enfileira um MetaWebhookEvent para processamento assíncrono pelo
  * `worker-meta-webhook`. `jobId = metaWebhookEventId` deduplica retries
- * da Meta (mesmo evento não vira dois jobs).
+ * da Meta (mesmo evento não vira dois jobs). O caller pode passar um
+ * `jobId` determinístico próprio (ex.: hash do corpo — Instagram/Messenger)
+ * para que um reenvio da Meta com o mesmo payload não vire segundo job.
+ * BullMQ rejeita `:` em custom jobId — usar hífen.
  *
  * Retorna `null` se Redis indisponível — o caller deve responder 503
  * (Meta reintenta); não processar síncrono na API.
  */
-export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
+export async function enqueueMetaWebhookEvent(
+  payload: MetaWebhookJobPayload,
+  opts?: { jobId?: string },
+) {
   const queue = getMetaWebhookQueue();
   if (!queue) {
     console.warn("[queue] Redis indisponível — não é possível enfileirar meta-webhook");
@@ -823,7 +829,7 @@ export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
   const attempts = readPositiveInt(process.env.META_WEBHOOK_MAX_ATTEMPTS, 5);
   const backoffDelay = readPositiveInt(process.env.META_WEBHOOK_BACKOFF_DELAY, 2000);
   return queue.add("process", payload, {
-    jobId: payload.metaWebhookEventId,
+    jobId: opts?.jobId || payload.metaWebhookEventId,
     removeOnComplete: true,
     removeOnFail: { count: 1000 },
     attempts,
