@@ -40,6 +40,23 @@ import {
   buildOutboundTemplateMessageContent,
   extractLegacyBracketTemplateName,
 } from "@/lib/whatsapp-outbound-template-label";
+import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
+
+const FLOW_RESPONSE_MARK = /resposta\s+do\s+formul/i;
+
+/** Rótulos do Flow (Nome, CPF…) para trocar a chave técnica na bolha. */
+async function loadFlowFieldLabels(contents: string[]) {
+  if (!contents.some((c) => FLOW_RESPONSE_MARK.test(c))) return [];
+  const flows = await prisma.whatsappFlowDefinition.findMany({
+    where: { status: { in: ["PUBLISHED", "DRAFT"] } },
+    select: {
+      screens: {
+        select: { fields: { select: { fieldKey: true, label: true } } },
+      },
+    },
+  });
+  return flows.flatMap((flow) => flow.screens.flatMap((screen) => screen.fields));
+}
 
 /** Após humano enviar: mata salesbot ativo do contato (best-effort). */
 async function stopAutomationsAfterHumanReply(
@@ -575,11 +592,17 @@ export async function GET(request: Request, context: RouteContext) {
       return replyDisplayByInternalId.get(internalId) ?? internalId;
     };
 
+    const flowLabelSources = await loadFlowFieldLabels(
+      [...rows, ...historyTickets.flatMap((t) => t.rows)].map((r) => r.content),
+    );
+    const presentContent = (raw: string) =>
+      relabelFlowResponseContent(openedContent(raw), flowLabelSources);
+
     const messages: InboxMessageDto[] = rows.map((r) => {
       const ev = eventActorOf(r.id, r.senderName);
       return {
       id: r.externalId ?? r.id,
-      content: openedContent(r.content),
+      content: presentContent(r.content),
       createdAt: r.createdAt.toISOString(),
       direction: r.direction as InboxMessageDto["direction"],
       messageType: r.messageType,
@@ -624,7 +647,7 @@ export async function GET(request: Request, context: RouteContext) {
       const mapRows = (rr: typeof rows): InboxMessageDto[] =>
         rr.map((r) => ({
           id: r.externalId ?? r.id,
-          content: openedContent(r.content),
+          content: presentContent(r.content),
           createdAt: r.createdAt.toISOString(),
           direction: r.direction as InboxMessageDto["direction"],
           messageType: r.messageType,

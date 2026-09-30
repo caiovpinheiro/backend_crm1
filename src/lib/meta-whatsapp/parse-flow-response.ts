@@ -86,6 +86,64 @@ export function normalizeFlowMatchKey(s: string): string {
     .replace(/[^a-z0-9]/g, "");
 }
 
+export type FlowFieldLabelSource = {
+  fieldKey: string;
+  label: string;
+};
+
+/**
+ * Casa o rótulo gravado na mensagem (chave Meta, ex. `TextInput_334928`)
+ * com o texto cadastrado no Flow (`Nome`, `CPF`).
+ */
+export function matchFlowFieldLabel(
+  shown: string,
+  fields: FlowFieldLabelSource[],
+): string | null {
+  const target = normalizeFlowMatchKey(shown);
+  if (target.length < 2 || fields.length === 0) return null;
+
+  let best: { label: string; score: number } | null = null;
+  for (const field of fields) {
+    const label = field.label.trim();
+    if (!label) continue;
+    const keyN = normalizeFlowMatchKey(field.fieldKey);
+    const labelN = normalizeFlowMatchKey(label);
+    let score = 0;
+    if (keyN && keyN === target) score = 120 + keyN.length;
+    else if (labelN && labelN === target) score = 110;
+    else if (keyN.length >= 6 && (target.includes(keyN) || keyN.includes(target))) {
+      score = 60 + Math.min(keyN.length, target.length);
+    }
+    if (score > (best?.score ?? 0)) best = { label, score };
+  }
+  if (!best || best.score < 60) return null;
+  return best.label;
+}
+
+/** Troca `*TextInput 334928*` pelo rótulo do Flow, sem alterar o valor. */
+export function relabelFlowResponseContent(
+  content: string,
+  fields: FlowFieldLabelSource[],
+): string {
+  if (!fields.length) return content;
+  const lines = content.split(/\r?\n/);
+  const header = lines[0]?.trim() ?? "";
+  if (!/^[\u{1F4CB}]?\s*[*_]*resposta\s+do\s+formul/iu.test(header)) return content;
+
+  return lines
+    .map((line) => {
+      const trimmed = line.trim();
+      const match = trimmed.match(/^(\*+)(.+?)\1$/);
+      if (!match) return line;
+      const current = match[2].trim();
+      const next = matchFlowFieldLabel(current, fields);
+      if (!next || normalizeFlowMatchKey(next) === normalizeFlowMatchKey(current)) return line;
+      const pad = line.match(/^\s*/)?.[0] ?? "";
+      return `${pad}*${next}*`;
+    })
+    .join("\n");
+}
+
 export function cleanFlowFieldLabel(k: string): string {
   let s = k.replace(/^screen_\d+_/i, "").replace(/_\d+$/, "");
   s = s.replace(/_+/g, " ").trim();
