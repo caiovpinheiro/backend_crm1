@@ -89,16 +89,23 @@ export async function PUT(request: Request) {
               // aprovado lá continua com `{{1}}`.
               const crmField =
                 typeof o.crmField === "string" && o.crmField.trim() ? o.crmField.trim() : undefined;
+              const component = o.component === "header" ? "header" : "body";
               return {
                 key,
+                component,
                 label: label || key,
                 ...(example ? { example } : {}),
                 ...(crmField ? { crmField } : {}),
               };
             })
             .filter(
-              (x): x is { key: string; label: string; example?: string; crmField?: string } =>
-                x != null,
+              (x): x is {
+                key: string;
+                component: "header" | "body";
+                label: string;
+                example?: string;
+                crmField?: string;
+              } => x != null,
             );
           operatorVariables = cleaned as unknown as Prisma.InputJsonValue;
         }
