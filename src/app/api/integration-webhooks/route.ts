@@ -55,7 +55,7 @@ export async function POST(request: Request) {
 
       const b = body as Record<string, unknown>;
       const url = typeof b.url === "string" ? b.url.trim() : "";
-      const urlError = assertWebhookUrl(url);
+      const urlError = await assertWebhookUrl(url);
       if (urlError) return NextResponse.json({ message: urlError }, { status: 400 });
 
       const events = normalizeWebhookEvents(b.events);

@@ -2,6 +2,8 @@ import { createHmac, randomBytes } from "crypto";
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { safeFetch } from "@/lib/safe-fetch";
+import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
 
 export const INTEGRATION_WEBHOOK_EVENTS = [
   "agent_changed",
@@ -109,15 +111,6 @@ function publicShape(row: {
   };
 }
 
-function isHttpsUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
 export function normalizeWebhookEvents(raw: unknown): string[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const out: string[] = [];
@@ -199,11 +192,21 @@ export async function deleteIntegrationWebhook(id: string): Promise<boolean> {
   }
 }
 
-export function assertWebhookUrl(url: string): string | null {
+/**
+ * Valida a URL do webhook na criação: http(s), tamanho e anti-SSRF
+ * (porta, host interno, IP privado/reservado resolvido). Devolve a mensagem
+ * de erro ou null quando ok.
+ */
+export async function assertWebhookUrl(url: string): Promise<string | null> {
   const trimmed = url.trim();
   if (!trimmed) return "url é obrigatória.";
-  if (!isHttpsUrl(trimmed)) return "url deve ser http(s).";
   if (trimmed.length > 2000) return "url é longa demais.";
+  try {
+    await assertSafeOutboundUrl(trimmed);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `url inválida: ${msg.replace(/^webhook:\s*/, "")}.`;
+  }
   return null;
 }
 
@@ -277,27 +280,25 @@ export async function dispatchIntegrationWebhooks(
       if (hook.secret) {
         headers["X-Eduit-Signature"] = signBody(hook.secret, body);
       }
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), DISPATCH_TIMEOUT_MS);
       try {
-        const res = await fetch(hook.url, {
-          method: "POST",
-          headers,
-          body,
-          signal: controller.signal,
-        });
+        // Revalida a URL a cada envio (anti-SSRF, inclusive hooks antigos
+        // cadastrados antes da validação) e recusa redirects.
+        const res = await safeFetch(
+          hook.url,
+          { method: "POST", headers, body },
+          { timeoutMs: DISPATCH_TIMEOUT_MS, maxRedirects: 0 },
+        );
         if (!res.ok) {
           console.warn(
             `[integration-webhooks] ${hook.id} ${event} → HTTP ${res.status}`,
           );
         }
+        await res.body?.cancel().catch(() => undefined);
       } catch (err) {
         console.warn(
           `[integration-webhooks] ${hook.id} ${event} failed:`,
           err instanceof Error ? err.message : err,
         );
-      } finally {
-        clearTimeout(timer);
       }
     }),
   );
