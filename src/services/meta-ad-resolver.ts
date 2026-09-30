@@ -21,6 +21,27 @@ const log = getLogger("meta-ad-resolver");
 
 const GRAPH_BASE = `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
 
+/**
+ * RT-17: os fetches ao Graph rodam no worker sem timeout — um Graph lento
+ * segurava o job (e a conexão do pool) indefinidamente. `TimeoutError` é
+ * tratado como falha de resolução (status "error"), nunca como exceção.
+ */
+export const AD_RESOLVER_FETCH_TIMEOUT_MS = 15_000;
+
+function graphFetchInit(accessToken: string): RequestInit {
+  return {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(AD_RESOLVER_FETCH_TIMEOUT_MS),
+  };
+}
+
+function describeFetchError(err: unknown): string {
+  if (err instanceof Error && err.name === "TimeoutError") {
+    return `timeout após ${AD_RESOLVER_FETCH_TIMEOUT_MS}ms`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 type ResolveStatus = "ok" | "not_found" | "no_access" | "rate_limited" | "error";
 
 type ResolvedAd = {
@@ -141,15 +162,9 @@ async function fetchAdFromPost(
 
   let res: Response;
   try {
-    res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    res = await fetch(url.toString(), graphFetchInit(accessToken));
   } catch (err) {
-    return {
-      status: "error",
-      error: err instanceof Error ? err.message : String(err),
-      data: null,
-    };
+    return { status: "error", error: describeFetchError(err), data: null };
   }
 
   if (res.status === 401 || res.status === 403) {
@@ -229,9 +244,7 @@ async function fetchAdFromPost(
     try {
       const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
       adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
-      const r = await fetch(adUrl.toString(), {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+      const r = await fetch(adUrl.toString(), graphFetchInit(accessToken));
       if (r.ok) {
         const a = (await r.json()) as Record<string, unknown>;
         if (typeof a.name === "string") adName = a.name;
@@ -269,9 +282,7 @@ async function fetchAdById(
   try {
     const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
     adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
-    const r = await fetch(adUrl.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const r = await fetch(adUrl.toString(), graphFetchInit(accessToken));
     if (r.status === 401 || r.status === 403) {
       return { status: "no_access", error: `HTTP ${r.status}`, data: null };
     }
@@ -322,11 +333,7 @@ async function fetchAdById(
       },
     };
   } catch (err) {
-    return {
-      status: "error",
-      error: err instanceof Error ? err.message : String(err),
-      data: null,
-    };
+    return { status: "error", error: describeFetchError(err), data: null };
   }
 }
 
