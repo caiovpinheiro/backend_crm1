@@ -37,6 +37,17 @@ import {
   getRequestContext,
 } from "@/lib/request-context";
 import {
+  InvalidListCursorError,
+  encodeListCursor,
+  listKeysetSql,
+  listKeysetWhere,
+  listSortColumnSql,
+  parseListCursor,
+  type ListCursor,
+  type ListSortBy,
+  type ListSortOrder,
+} from "@/services/conversation-list-cursor";
+import {
   publishConversationTimelineUpdated,
   publishConversationUpdated,
 } from "@/lib/realtime-events";
@@ -166,8 +177,9 @@ export type GetConversationsParams = {
   page?: number;
   perPage?: number;
   /**
-   * Keyset da próxima página (`${sortValMs}_${id}`). Preferir sobre
-   * `page`/`skip` — OFFSET desloca quando chega mensagem no topo.
+   * Keyset da próxima página — o `nextCursor` opaco da resposta anterior
+   * (ver `conversation-list-cursor.ts`). Preferir sobre `page`/`skip` —
+   * OFFSET desloca quando chega mensagem no topo e relê tudo o que pula.
    * Sem cursor, `page` continua válido (clientes velhos).
    */
   cursor?: string;
@@ -1083,88 +1095,6 @@ export async function getFilteredConversationIds(
   return rows.map((r) => r.id);
 }
 
-function listSortColumnSql(
-  sortBy: "updatedAt" | "createdAt" | "unreadCount",
-): Prisma.Sql {
-  if (sortBy === "createdAt") return Prisma.sql`c."createdAt"`;
-  if (sortBy === "unreadCount") return Prisma.sql`c."unreadCount"`;
-  return Prisma.sql`c."updatedAt"`;
-}
-
-type ListCursor = { sortVal: Date | number; id: string };
-
-/** `${sortValMs|n}_${id}` — opaco pro cliente; bate com o ORDER BY da lista. */
-function parseListCursor(
-  raw: string | undefined | null,
-  sortBy: "updatedAt" | "createdAt" | "unreadCount",
-): ListCursor | null {
-  if (!raw) return null;
-  const sep = raw.lastIndexOf("_");
-  if (sep <= 0) return null;
-  const valPart = raw.slice(0, sep);
-  const id = raw.slice(sep + 1);
-  if (!id) return null;
-  if (sortBy === "unreadCount") {
-    const n = Number(valPart);
-    return Number.isFinite(n) ? { sortVal: n, id } : null;
-  }
-  const asNum = Number(valPart);
-  if (Number.isFinite(asNum) && asNum > 1e11) return { sortVal: new Date(asNum), id };
-  const d = new Date(valPart);
-  return Number.isNaN(d.getTime()) ? null : { sortVal: d, id };
-}
-
-function encodeListCursor(
-  sortVal: Date | number | string | null | undefined,
-  id: string,
-): string | null {
-  if (sortVal == null || !id) return null;
-  if (typeof sortVal === "number") return `${sortVal}_${id}`;
-  const d = sortVal instanceof Date ? sortVal : new Date(sortVal);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${d.getTime()}_${id}`;
-}
-
-function cursorAfterRepsSql(cursor: ListCursor, sortOrder: "asc" | "desc"): Prisma.Sql {
-  const val = cursor.sortVal;
-  if (sortOrder === "desc") {
-    return Prisma.sql`(reps.sort_val < ${val} OR (reps.sort_val = ${val} AND reps.id < ${cursor.id}))`;
-  }
-  return Prisma.sql`(reps.sort_val > ${val} OR (reps.sort_val = ${val} AND reps.id > ${cursor.id}))`;
-}
-
-function cursorAfterColSql(
-  sortCol: Prisma.Sql,
-  cursor: ListCursor,
-  sortOrder: "asc" | "desc",
-): Prisma.Sql {
-  const val = cursor.sortVal;
-  if (sortOrder === "desc") {
-    return Prisma.sql`(${sortCol} < ${val} OR (${sortCol} = ${val} AND c.id < ${cursor.id}))`;
-  }
-  return Prisma.sql`(${sortCol} > ${val} OR (${sortCol} = ${val} AND c.id > ${cursor.id}))`;
-}
-
-function passesListCursor(
-  sortVal: Date | number | null | undefined,
-  id: string,
-  cursor: ListCursor,
-  sortOrder: "asc" | "desc",
-): boolean {
-  if (sortVal == null) return false;
-  const a =
-    sortVal instanceof Date
-      ? sortVal.getTime()
-      : typeof sortVal === "number"
-        ? sortVal
-        : new Date(sortVal).getTime();
-  const b =
-    cursor.sortVal instanceof Date ? cursor.sortVal.getTime() : Number(cursor.sortVal);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  if (sortOrder === "desc") return a < b || (a === b && id < cursor.id);
-  return a > b || (a === b && id > cursor.id);
-}
-
 type CollapsedConversationPage = {
   /** Até `take` IDs a partir de `skip` (já colapsados). */
   ids: string[];
@@ -1181,88 +1111,155 @@ function inboxClosedCardGroupSql() {
   END`;
 }
 
-/**
- * Uma página colapsada por contato+canal em SQL (`DISTINCT ON`).
- * Fallback: scan em lotes Prisma se o `where` não traduzir.
- */
-async function findCollapsedConversationPage(args: {
+type ListPageArgs = {
   where: Prisma.ConversationWhereInput;
   collapse: boolean;
-  sortBy: "updatedAt" | "createdAt" | "unreadCount";
-  sortOrder: "asc" | "desc";
+  sortBy: ListSortBy;
+  sortOrder: ListSortOrder;
+  /** Só para o cliente antigo (`page` sem `cursor`). Com cursor é ignorado. */
   skip: number;
   take: number;
   cursor?: ListCursor | null;
-}): Promise<CollapsedConversationPage> {
+};
+
+/**
+ * SQL de uma página de IDs da lista. `whereSql` é o `where` da lista já
+ * traduzido (alias `c`, com `organizationId`).
+ *
+ * Com `cursor` (keyset) nenhuma variante usa OFFSET:
+ *
+ *  - sem colapso: `WHERE … AND (chave, id) < (cursor) ORDER BY … LIMIT n`.
+ *  - com colapso (Encerradas/Resolvendo, 1 card por contato+canal): devolve
+ *    só o REPRESENTANTE de cada grupo — a linha sem irmã mais nova no mesmo
+ *    escopo (`NOT EXISTS`) — depois do cursor. Lê na ordem do índice e para
+ *    no `LIMIT`; antes era `DISTINCT ON` sobre todas as conversas do escopo
+ *    a cada página.
+ *
+ * Sem cursor: 1ª página (sem OFFSET) ou, para o cliente antigo que ainda
+ * manda `page`, o caminho com OFFSET de sempre.
+ */
+export function buildConversationListPageSql(
+  args: Omit<ListPageArgs, "where"> & { whereSql: Prisma.Sql },
+): Prisma.Sql {
+  const { whereSql, sortBy, sortOrder, take } = args;
+  const sortCol = listSortColumnSql(sortBy);
+  const sortDir = sortOrder === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+  const cursor = args.cursor ?? null;
+  const skip = cursor ? 0 : args.skip;
+
+  if (!args.collapse) {
+    if (cursor) {
+      return Prisma.sql`
+        SELECT c.id
+        FROM conversations c
+        WHERE (${whereSql}) AND ${listKeysetSql(sortBy, cursor, sortOrder)}
+        ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+        LIMIT ${take}
+      `;
+    }
+    const offset = skip > 0 ? Prisma.sql`OFFSET ${skip}` : Prisma.empty;
+    return Prisma.sql`
+      SELECT c.id
+      FROM conversations c
+      WHERE (${whereSql})
+      ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+      LIMIT ${take} ${offset}
+    `;
+  }
+
+  if (cursor) {
+    // Irmã "melhor" = a que o DISTINCT ON escolheria no lugar desta linha.
+    const better = sortOrder === "desc" ? Prisma.sql`>` : Prisma.sql`<`;
+    return Prisma.sql`
+      SELECT o.id
+      FROM (
+        SELECT
+          c.id,
+          ${sortCol} AS sort_val,
+          c."contactId" AS contact_id,
+          COALESCE(c.channel, '') AS chan
+        FROM conversations c
+        WHERE (${whereSql}) AND ${listKeysetSql(sortBy, cursor, sortOrder)}
+      ) o
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM conversations c
+        WHERE (${whereSql})
+          AND c."contactId" = o.contact_id
+          AND COALESCE(c.channel, '') = o.chan
+          AND (${sortCol}, c.id) ${better} (o.sort_val, o.id)
+      )
+      ORDER BY o.sort_val ${sortDir}, o.id ${sortDir}
+      LIMIT ${take}
+    `;
+  }
+
+  if (skip === 0) {
+    return Prisma.sql`
+      SELECT reps.id
+      FROM (
+        SELECT DISTINCT ON (inner_c.grp)
+          inner_c.id,
+          inner_c.sort_val
+        FROM (
+          SELECT
+            c.id,
+            ${sortCol} AS sort_val,
+            ${inboxClosedCardGroupSql()} AS grp
+          FROM conversations c
+          WHERE ${whereSql}
+          ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+          LIMIT ${COLLAPSE_FIRST_PAGE_SCAN}
+        ) inner_c
+        ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
+      ) reps
+      ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
+      LIMIT ${take}
+    `;
+  }
+
+  // Cliente antigo (`page` ≥ 2 sem cursor): colapsa o escopo e pula `skip`.
+  return Prisma.sql`
+    SELECT reps.id
+    FROM (
+      SELECT DISTINCT ON (inner_c.grp)
+        inner_c.id,
+        inner_c.sort_val
+      FROM (
+        SELECT
+          c.id,
+          ${sortCol} AS sort_val,
+          ${inboxClosedCardGroupSql()} AS grp
+        FROM conversations c
+        WHERE ${whereSql}
+      ) inner_c
+      ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
+    ) reps
+    ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
+    LIMIT ${take} OFFSET ${skip}
+  `;
+}
+
+/**
+ * Uma página de IDs da lista (colapsada por contato+canal quando
+ * `collapse`). Fallback: varredura em lotes pelo Prisma se o `where` não
+ * traduzir para SQL.
+ */
+async function findCollapsedConversationPage(
+  args: ListPageArgs,
+): Promise<CollapsedConversationPage> {
   const orgId = getOrgIdOrNull();
   const skip = args.cursor ? 0 : args.skip;
   if (orgId) {
     const scoped: Prisma.ConversationWhereInput = {
       AND: [args.where, { organizationId: orgId }],
     };
-    const sql = sqlConversationWhere(scoped, orgId);
-    if (sql) {
-      const sortCol = listSortColumnSql(args.sortBy);
-      const sortDir = args.sortOrder === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
-      const cursorPred = args.cursor
-        ? cursorAfterRepsSql(args.cursor, args.sortOrder)
-        : Prisma.sql`TRUE`;
-      const rowCursorPred = args.cursor
-        ? cursorAfterColSql(sortCol, args.cursor, args.sortOrder)
-        : Prisma.sql`TRUE`;
+    const whereSql = sqlConversationWhere(scoped, orgId);
+    if (whereSql) {
       try {
-        const firstPageCollapse =
-          args.collapse && !args.cursor && skip === 0;
-        const rows = args.collapse
-          ? firstPageCollapse
-            ? await prisma.$queryRaw<{ id: string }[]>`
-                SELECT reps.id
-                FROM (
-                  SELECT DISTINCT ON (inner_c.grp)
-                    inner_c.id,
-                    inner_c.sort_val
-                  FROM (
-                    SELECT
-                      c.id,
-                      ${sortCol} AS sort_val,
-                      ${inboxClosedCardGroupSql()} AS grp
-                    FROM conversations c
-                    WHERE ${sql}
-                    ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
-                    LIMIT ${COLLAPSE_FIRST_PAGE_SCAN}
-                  ) inner_c
-                  ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
-                ) reps
-                ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
-                LIMIT ${args.take}
-              `
-            : await prisma.$queryRaw<{ id: string }[]>`
-              SELECT reps.id
-              FROM (
-                SELECT DISTINCT ON (inner_c.grp)
-                  inner_c.id,
-                  inner_c.sort_val
-                FROM (
-                  SELECT
-                    c.id,
-                    ${sortCol} AS sort_val,
-                    ${inboxClosedCardGroupSql()} AS grp
-                  FROM conversations c
-                  WHERE ${sql}
-                ) inner_c
-                ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
-              ) reps
-              WHERE ${cursorPred}
-              ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
-              LIMIT ${args.take} OFFSET ${skip}
-            `
-          : await prisma.$queryRaw<{ id: string }[]>`
-              SELECT c.id
-              FROM conversations c
-              WHERE ${sql} AND ${rowCursorPred}
-              ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
-              LIMIT ${args.take} OFFSET ${skip}
-            `;
+        const rows = await prisma.$queryRaw<{ id: string }[]>(
+          buildConversationListPageSql({ ...args, whereSql }),
+        );
         const ids = rows.map((r) => r.id);
         const hasMore = ids.length === args.take;
         const emptyPastEnd = skip > 0 && ids.length === 0;
@@ -1283,30 +1280,38 @@ async function findCollapsedConversationPage(args: {
   return scanCollapsedRepIdsJs(args);
 }
 
-async function scanCollapsedRepIdsJs(args: {
-  where: Prisma.ConversationWhereInput;
-  collapse: boolean;
-  sortBy: "updatedAt" | "createdAt" | "unreadCount";
-  sortOrder: "asc" | "desc";
-  skip: number;
-  take: number;
-  cursor?: ListCursor | null;
-}): Promise<CollapsedConversationPage> {
-  const needReps = args.cursor ? args.take : args.skip + args.take;
+/**
+ * Fallback sem SQL cru: lotes pelo Prisma, cada lote começando DEPOIS do
+ * último item do anterior (keyset) — antes era `skip: <já lidos>`, um
+ * OFFSET que crescia a cada lote.
+ *
+ * Com cursor o primeiro lote já começa depois dele. No modo colapsado isso
+ * exige saber quais grupos já tiveram representante numa página anterior:
+ * uma consulta por lote procura irmãs dos candidatos antes do cursor.
+ */
+async function scanCollapsedRepIdsJs(
+  args: ListPageArgs,
+): Promise<CollapsedConversationPage> {
+  const cursor = args.cursor ?? null;
+  const needReps = cursor ? args.take : args.skip + args.take;
   const BATCH = 500;
   const HARD_CAP = 8_000;
   const seenGroups = new Set<string>();
   const repIds: string[] = [];
   let scanned = 0;
   let exhausted = false;
+  let after: ListCursor | null = cursor;
   const orderBy: Prisma.ConversationOrderByWithRelationInput[] = [
     { [args.sortBy]: args.sortOrder },
     { id: args.sortOrder },
   ];
 
   while (repIds.length < needReps && scanned < HARD_CAP) {
+    const take = Math.min(BATCH, HARD_CAP - scanned);
     const batch = await prisma.conversation.findMany({
-      where: args.where,
+      where: after
+        ? { AND: [args.where, listKeysetWhere(args.sortBy, after, args.sortOrder)] }
+        : args.where,
       orderBy,
       select: {
         id: true,
@@ -1317,33 +1322,51 @@ async function scanCollapsedRepIdsJs(args: {
         createdAt: true,
         unreadCount: true,
       },
-      skip: scanned,
-      take: Math.min(BATCH, HARD_CAP - scanned),
+      take,
     });
     if (batch.length === 0) {
       exhausted = true;
       break;
     }
     scanned += batch.length;
-    if (batch.length < BATCH) exhausted = true;
+    if (batch.length < take) exhausted = true;
+    const tail = batch[batch.length - 1]!;
+    after = { sortVal: tail[args.sortBy], id: tail.id };
+
+    if (args.collapse && cursor) {
+      const contactIds = [
+        ...new Set(
+          batch
+            .filter((r) => r.contactId && !seenGroups.has(inboxClosedCardGroupKey(r)))
+            .map((r) => r.contactId as string),
+        ),
+      ];
+      if (contactIds.length > 0) {
+        const shown = await prisma.conversation.findMany({
+          where: {
+            AND: [
+              args.where,
+              { contactId: { in: contactIds } },
+              { NOT: listKeysetWhere(args.sortBy, cursor, args.sortOrder) },
+            ],
+          },
+          select: { id: true, contactId: true, channel: true },
+        });
+        for (const s of shown) seenGroups.add(inboxClosedCardGroupKey(s));
+      }
+    }
 
     for (const r of batch) {
       const groupKey = args.collapse ? inboxClosedCardGroupKey(r) : `id:${r.id}`;
       if (seenGroups.has(groupKey)) continue;
       seenGroups.add(groupKey);
-      if (
-        args.cursor &&
-        !passesListCursor(r[args.sortBy], r.id, args.cursor, args.sortOrder)
-      ) {
-        continue;
-      }
       repIds.push(r.id);
       if (repIds.length >= needReps) break;
     }
     if (exhausted) break;
   }
 
-  const ids = args.cursor
+  const ids = cursor
     ? repIds.slice(0, args.take)
     : repIds.slice(args.skip, args.skip + args.take);
   const capped = !exhausted && scanned >= HARD_CAP;
@@ -1351,7 +1374,7 @@ async function scanCollapsedRepIdsJs(args: {
   return {
     ids,
     hasMore,
-    knownTotal: !args.cursor && exhausted && !capped ? repIds.length : null,
+    knownTotal: !cursor && exhausted && !capped ? repIds.length : null,
   };
 }
 
@@ -1484,6 +1507,7 @@ export async function getConversations(
   const sortBy = params.sortBy ?? "updatedAt";
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
+  if (params.cursor && !cursor) throw new InvalidListCursorError();
 
   // Colapso SQL só em Encerradas/Resolvidos. `todos` / sem aba / filas
   // OPEN: ORDER BY + LIMIT (1ª página) — DISTINCT ON em OPEN+RESOLVED
@@ -1527,7 +1551,7 @@ export async function getConversations(
         : sortBy === "unreadCount"
           ? last.unreadCount
           : last.updatedAt;
-  const nextCursor = hasMore && last ? encodeListCursor(sortVal, last.id) : null;
+  const nextCursor = hasMore && last ? encodeListCursor(sortBy, sortVal, last.id) : null;
 
   return { items, total, page, perPage, hasMore, nextCursor };
 }

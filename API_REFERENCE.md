@@ -222,7 +222,7 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
 
 | Método | Path | Auth | Query / Body | Descrição |
 |--------|------|------|--------------|-----------|
-| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&page=1&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. |
+| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&cursor=&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. Paginação por cursor (keyset): a resposta traz `nextCursor` (opaco) e `hasMore`; mande-o de volta em `cursor` para a página seguinte — sem OFFSET, não repete nem pula item. `page=N` continua aceito (legado, usa OFFSET). Cursor ilegível → 400. |
 | POST | `/api/conversations/create` | sessão | `{ contactId, channelId?, message?, skipSend? }` | Cria conversa WhatsApp com um contato. `skipSend=true` apenas reserva a conversa sem mandar mensagem. |
 | GET | `/api/conversations/[id]` | Bearer/sessão | — | Detalhe de uma conversa (contato, canal, owner, status, tags). |
 | POST | `/api/conversations/bulk` | sessão | `{ ids: string[], action: "resolve"\|"reopen"\|"assign"\|"unassign"\|"snooze"\|"unsnooze", payload? }` | Operação em massa nas conversas. |
@@ -534,6 +534,7 @@ existe (e `items[]` já traz os deals com `contact`, `stage`, `owner`).
 | DELETE | `/api/pipelines/[id]` | — | Remove (somente se vazio). |
 | GET | `/api/pipelines/[id]/board` | `?status=&perStage=` | View Kanban com deals agrupados por stage. |
 | POST | `/api/pipelines/[id]/board` | `{ action, payload }` | Operações no board (reorder, bulk move). |
+| POST | `/api/pipelines/[id]/board/columns` | `{ status?, filters?, sort?, direction?, columns: [{ stageId, cursor, limit? }] }` | "Carregar mais" por cursor: devolve só os próximos cards de cada etapa pedida — `{ columns: [{ stageId, deals, totalCount, hasMore, nextCursor }] }`. `cursor` é o `nextCursor` que a etapa traz no board (ou na página anterior); `status`/`filters`/`sort` devem ser os do board. Não recarrega o board nem usa o cache dele. |
 | POST | `/api/pipelines/[id]/stages` | `{ name, color?, position?, isWon?, isLost? }` | Cria stage. |
 | PUT | `/api/pipelines/[id]/stages` | `{ stages: [{ id, position }] }` | Reordena stages. |
 | PUT | `/api/pipelines/[id]/stages/[stageId]` | `{ name?, color?, isWon?, isLost? }` | Edita stage. |
@@ -1180,6 +1181,7 @@ PUT     /api/pipelines/[id]
 DELETE  /api/pipelines/[id]
 GET     /api/pipelines/[id]/board
 POST    /api/pipelines/[id]/board
+POST    /api/pipelines/[id]/board/columns
 POST    /api/pipelines/[id]/stages
 PUT     /api/pipelines/[id]/stages
 PUT     /api/pipelines/[id]/stages/[stageId]
