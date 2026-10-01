@@ -107,10 +107,33 @@ const CHANNEL_BY_USER = { channel: { view: { users: { [USERS.member.id]: ["ch_1"
 type Counts = { consultas: number; fases: number; redis: number; redisEmSerie: number };
 
 /**
- * A mesma medição com os handlers de antes do P-10. Fica aqui como
- * registro — o teste confere o "depois".
+ * A mesma medição com os handlers de antes do P-10 (este arquivo rodado
+ * contra o código anterior). Fica como registro e como piso: `measure`
+ * recusa cenário sem "antes" e qualquer "depois" pior que ele.
  */
-const ANTES: Record<string, Counts> = {};
+const antes = (consultas: number, fases: number, redis: number, redisEmSerie: number): Counts => ({
+  consultas,
+  fases,
+  redis,
+  redisEmSerie,
+});
+const ANTES: Record<string, Counts> = {
+  "messages / operador, conversa própria, flag off": antes(12, 6, 2, 2),
+  "messages / operador, conversa própria pelo número, flag off": antes(14, 8, 2, 2),
+  "messages / operador, conversa própria, flag on (canal por usuário)": antes(13, 6, 3, 3),
+  "messages / operador, conversa própria, flag on (canal por papel)": antes(13, 6, 3, 3),
+  "messages / gestor, conversa de outro agente, flag off": antes(15, 9, 6, 5),
+  "messages / gestor, conversa de outro agente, flag on (canal por papel)": antes(17, 10, 8, 7),
+  "messages / admin, conversa de outro agente, flag on": antes(16, 9, 7, 6),
+  "messages / operador, conversa da fila, flag off": antes(15, 9, 6, 5),
+  "messages / operador, conversa da fila, flag on (canal por papel)": antes(17, 10, 8, 7),
+  "messages / operador, página anterior (?before)": antes(11, 6, 2, 2),
+  "messages / operador, histórico (?history=1)": antes(11, 8, 2, 2),
+  "messages / operador, conversa com extras": antes(15, 9, 2, 2),
+  "inbox / operador, flag on": antes(2, 1, 7, 4),
+  "inbox / gestor own, flag on": antes(2, 1, 9, 6),
+  "inbox counts / operador, flag on": antes(2, 1, 7, 4),
+};
 
 async function clearCaches() {
   await cache.delPattern("*");
@@ -158,12 +181,18 @@ function measure(name: string, entries: IoEntry[]): Counts {
   if (process.env.P10_REPORT) {
     appendFileSync(process.env.P10_REPORT, `${describeStats(name, pg, redis)}\n\n`);
   }
-  return {
+  const depois: Counts = {
     consultas: pg.count,
     fases: pg.phases,
     redis: redis.count,
     redisEmSerie: redis.phases,
   };
+  const before = ANTES[name];
+  expect(before, `sem medição "antes" para: ${name}`).toBeDefined();
+  for (const key of Object.keys(depois) as (keyof Counts)[]) {
+    expect(depois[key], `${name}: ${key} piorou`).toBeLessThanOrEqual(before![key]);
+  }
+  return depois;
 }
 
 const minutesFromNoon = (min: number) =>
@@ -320,7 +349,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / operador, conversa própria, flag off", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 2, redisEmSerie: 1 });
     });
 
     it("operador abre a própria conversa pelo número (bookmark ?c=101)", async () => {
@@ -334,7 +363,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         warm.entries,
       );
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 2, redisEmSerie: 1 });
     });
 
     it("operador abre a própria conversa (flag ligada, regra de canal por usuário)", async () => {
@@ -348,7 +377,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         warm.entries,
       );
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 5, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
     });
 
     it("gestor abre conversa de outro agente (flag desligada)", async () => {
@@ -358,7 +387,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / gestor, conversa de outro agente, flag off", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 2 });
     });
 
     it("admin abre conversa de outro agente (flag ligada)", async () => {
@@ -368,7 +397,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / admin, conversa de outro agente, flag on", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 7, fases: 3, redis: 5, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 7, fases: 3, redis: 5, redisEmSerie: 3 });
     });
 
     it("operador rola para a página anterior (?before)", async () => {
@@ -379,7 +408,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / operador, página anterior (?before)", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 7, fases: 3, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 7, fases: 3, redis: 2, redisEmSerie: 1 });
     });
   });
 
@@ -394,7 +423,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         "messages / operador, conversa própria, flag on (canal por papel)",
         warm.entries,
       );
-      expect(c).toEqual({ consultas: 9, fases: 3, redis: 5, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 9, fases: 3, redis: 3, redisEmSerie: 2 });
 
       await probe.run(clearCaches);
       setup("manager", { rbacFlag: true, scopeGrants: CHANNEL_BY_ROLE });
@@ -405,7 +434,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
           "messages / gestor, conversa de outro agente, flag on (canal por papel)",
           gestor.entries,
         ),
-      ).toEqual({ consultas: 9, fases: 3, redis: 5, redisEmSerie: 2 });
+      ).toEqual({ consultas: 9, fases: 3, redis: 5, redisEmSerie: 3 });
     });
 
     it("veredito que depende do banco (operador abre conversa da fila): +1 consulta e +1 fase", async () => {
@@ -422,7 +451,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         consultas: 9,
         fases: 4,
         redis: 4,
-        redisEmSerie: 1,
+        redisEmSerie: 2,
       });
 
       await probe.run(clearCaches);
@@ -439,7 +468,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
           "messages / operador, conversa da fila, flag on (canal por papel)",
           comPapel.entries,
         ),
-      ).toEqual({ consultas: 10, fases: 4, redis: 5, redisEmSerie: 2 });
+      ).toEqual({ consultas: 10, fases: 4, redis: 5, redisEmSerie: 3 });
     });
 
     it("histórico (?history=1): os tickets antigos são lidos um a um — 4 fases", async () => {
@@ -447,7 +476,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const warm = await openWarm(CONV.mine, "?history=1");
       expect(warm.status).toBe(200);
       const c = measure("messages / operador, histórico (?history=1)", warm.entries);
-      expect(c).toEqual({ consultas: 7, fases: 4, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 7, fases: 4, redis: 2, redisEmSerie: 1 });
     });
 
     it("extras da página (outro canal, citação fora da página, template legado, evento genérico, flow): +1 cada, na fase 3", async () => {
@@ -455,7 +484,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const warm = await openWarm(CONV.mine);
       expect(warm.status).toBe(200);
       const c = measure("messages / operador, conversa com extras", warm.entries);
-      expect(c).toEqual({ consultas: 13, fases: 3, redis: 4, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 13, fases: 3, redis: 2, redisEmSerie: 1 });
     });
   });
 });
@@ -723,13 +752,3 @@ describe("GET /api/conversations/:id/messages — autorização negativa", () =>
     expect((await openConversation(CONV.mine)).status).toBe(200);
   });
 });
-
-// `ANTES` é preenchido no fim do arquivo para manter os cenários legíveis.
-Object.assign(ANTES, {
-  "messages / operador, conversa própria, flag off": {
-    consultas: 12,
-    fases: 6,
-    redis: 2,
-    redisEmSerie: 2,
-  },
-} satisfies Record<string, Counts>);
