@@ -11,7 +11,9 @@ export const dynamic = "force-dynamic";
 const ALLOWED_ENTITIES = new Set(["deal"]);
 
 /** Cache curto de nome/avatar por usuário — evita 1 query a cada heartbeat
- *  (~15s). TTL de 5 min cobre trocas de foto sem custo relevante. */
+ *  (25s, enviado só pela aba líder do navegador; TTL do viewer 90s em
+ *  `entity-presence.ts`). TTL de 5 min cobre trocas de foto sem custo
+ *  relevante. */
 const userInfoCache = new Map<
   string,
   { name: string; avatarUrl: string | null; ts: number }
