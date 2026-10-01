@@ -55,7 +55,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     const savedKey = [body.openaiApiKey, body.anthropicApiKey].some((k) => typeof k === "string" && k.trim() !== "");
     if (savedKey) {
       void runInSessionContext(r.session, () => reindexFailedKnowledgeDocs(id)).catch((err) => {
-        console.warn("[PUT /api/ai-agents-v2/[id]] reindexação dos materiais falhou:", err instanceof Error ? err.message : err);
+        log.warn({ err, id }, "[PUT /api/ai-agents-v2/[id]] reindexação dos materiais falhou");
       });
     }
     return NextResponse.json(agent);

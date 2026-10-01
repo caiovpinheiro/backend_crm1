@@ -514,7 +514,7 @@ export async function reindexFailedKnowledgeDocs(agentId: string): Promise<numbe
       await reindexKnowledgeDoc(agentId, doc.id);
       done += 1;
     } catch (err) {
-      console.warn(`[ai] reindexação de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+      log.warn({ err, doc: doc.id, agent: agentId }, "[ai] reindexação de material falhou");
     }
   }
   return done;
