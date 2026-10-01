@@ -3146,6 +3146,9 @@ model Conversation {
   // (org) e (org,status) eram prefixo de (org,status,updatedAt) e
   // (org,status,assignedToId,hasHumanReply) — write tax no inbound.
   @@index([organizationId, status, updatedAt])
+  /// Keyset da lista do inbox (`ORDER BY updatedAt, id` dentro da org) quando o
+  /// filtro não fixa `status` — Todos, Encerradas, Resolvendo.
+  @@index([organizationId, updatedAt, id])
   /// 3ª coluna cobre o MAX(updatedAt) por contato do board "Última interação"
   /// (index-only). Serve também qualquer lookup por (organizationId, contactId).
   @@index([organizationId, contactId, updatedAt])
