@@ -592,6 +592,20 @@ export function startWhatsappOwnedSweepers() {
     .catch((e) =>
       log.error({ err: e }, "[sse-bus] failed to start tabulation outbox projector"),
     );
+
+  // Consumidor de CONVERSATION_CLOSED da mesma outbox (filtro por tipo: não
+  // disputa linha com o projetor de tabulação). ACTIVITY_OUTBOX_WORKER=0
+  // desliga; lote/intervalo em ACTIVITY_OUTBOX_WORKER_BATCH/_INTERVAL_MS.
+  import("@/services/activity-outbox")
+    .then(({ startConversationClosedOutboxProjector }) =>
+      startConversationClosedOutboxProjector(),
+    )
+    .catch((e) =>
+      log.error(
+        { err: e },
+        "[sse-bus] failed to start conversation-closed outbox projector",
+      ),
+    );
 }
 
 function startBackgroundSweepers() {

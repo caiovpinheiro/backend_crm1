@@ -917,6 +917,9 @@ export async function POST(request: Request, context: RouteContext) {
             oldValue: conv.status,
             newValue: "RESOLVED",
             organizationId: result.row.organizationId,
+            // O consumidor da outbox roda fora da sessão: quem encerrou vai
+            // no payload (igual ao CONVERSATION_TABULATED abaixo).
+            actorUserId: tabulatedByUserId,
             meta: {
               action,
               ...(tabulationId ? { tabulationId } : {}),
