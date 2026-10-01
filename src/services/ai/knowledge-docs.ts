@@ -484,6 +484,30 @@ export async function reindexKnowledgeDoc(agentId: string, docId: string) {
   return withValidityView(doc, current.timezone);
 }
 
+/**
+ * Reindexa os materiais do agente que ficaram com falha. Chamado quando a
+ * chave do agente é salva: material criado antes da chave falha na
+ * indexação e, sem isto, continuava fora das respostas até alguém
+ * reindexar um por um.
+ */
+export async function reindexFailedKnowledgeDocs(agentId: string): Promise<number> {
+  const failed = await prisma.aIAgentKnowledgeDoc.findMany({
+    where: { agentId, status: "FAILED" },
+    select: { id: true },
+    take: 200,
+  });
+  let done = 0;
+  for (const doc of failed) {
+    try {
+      await reindexKnowledgeDoc(agentId, doc.id);
+      done += 1;
+    } catch (err) {
+      console.warn(`[ai] reindexação de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  return done;
+}
+
 export async function deleteKnowledgeDoc(agentId: string, docId: string) {
   const doc = await prisma.aIAgentKnowledgeDoc.findFirst({
     where: { id: docId, agentId },

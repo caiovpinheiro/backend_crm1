@@ -114,6 +114,7 @@ export function summarizeConfigForDiagnosis(
       tentativasIdentificacao: config.entry.maxAttempts,
     },
     selecaoNegocio: config.dealSelection,
+    usaNegocioPerdido: config.includeLostDeals === true,
     camposDoCliente: {
       contato: config.contextFields.contact.map((f) => ({ campo: f.label ?? f.key, permissoes: f.permissions })),
       negocio: config.contextFields.deal.map((f) => ({ campo: f.label ?? f.key, permissoes: f.permissions })),

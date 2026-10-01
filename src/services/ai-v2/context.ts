@@ -72,7 +72,19 @@ function customValuesOf(rows: Array<{ customFieldId: string; value: unknown; cus
 }
 
 const CONTACT_BUILTIN = new Set(["id", "name", "phone", "email", "tags"]);
-const DEAL_BUILTIN = new Set(["id", "title", "stageId", "stageName", "status", "value", "number"]);
+const DEAL_BUILTIN = new Set([
+  "id",
+  "title",
+  "stage",
+  "stageId",
+  "stageName",
+  "pipelineName",
+  "status",
+  "value",
+  "number",
+  "lostReason",
+  "expectedClose",
+]);
 const squashName = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
 
 /**
@@ -207,10 +219,14 @@ async function loadDealFields(
     select: {
       id: true,
       title: true,
-      stage: { select: { id: true, name: true } },
+      stage: { select: { id: true, name: true, pipeline: { select: { name: true } } } },
       status: true,
       value: true,
       number: true,
+      // Constam no catálogo de campos do negócio; sem estarem aqui o campo
+      // liberado na tela chegava sempre vazio ao agente.
+      lostReason: true,
+      expectedClose: true,
       customFields: { select: { customFieldId: true, value: true, customField: { select: { name: true, label: true } } } },
     } as Record<string, unknown>,
   });
@@ -236,8 +252,13 @@ async function loadDealFields(
   out.id = deal.id;
   out.title = deal.title;
   if (deal.stage) {
-    out.stageId = (deal.stage as { id: string; name: string }).id;
-    out.stageName = (deal.stage as { id: string; name: string }).name;
+    const stage = deal.stage as { id: string; name: string; pipeline?: { name?: string | null } | null };
+    out.stageId = stage.id;
+    out.stageName = stage.name;
+    if (stage.pipeline?.name) out.pipelineName = stage.pipeline.name;
+    // "stage" é a chave do catálogo: o agente recebe o nome da etapa, não o
+    // objeto da relação.
+    if (allowedKeys.includes("deal.stage")) out.stage = stage.name;
   }
   out.status = deal.status;
   out.value = deal.value;
@@ -353,22 +374,33 @@ export async function loadV2Context(args: {
   let deals: Array<Record<string, unknown>> = [];
   let selectedDeal: Record<string, unknown> | null = null;
   let dealId: string | undefined;
+  let usedLostDeal = false;
   if (contactId) {
-    const rows = await (prisma as unknown as {
+    const dealClient = (prisma as unknown as {
       deal: {
         findMany: (args: {
-          where: { contactId: string; status?: { not: string } };
+          where: { contactId: string; status?: { not: string } | string };
           orderBy: { updatedAt: "desc" };
           take: number;
           select: { id: boolean };
         }) => Promise<Array<{ id: string }>>;
       };
-    }).deal.findMany({
-      where: { contactId, status: { not: "LOST" } },
-      orderBy: { updatedAt: "desc" },
-      take: 5,
-      select: { id: true },
     });
+    const dealContactId = contactId;
+    const findDeals = (status: { not: string } | string) =>
+      dealClient.deal.findMany({
+        where: { contactId: dealContactId, status },
+        orderBy: { updatedAt: "desc" },
+        take: 5,
+        select: { id: true },
+      });
+    let rows = await findDeals({ not: "LOST" });
+    // Negócio em andamento sempre vem primeiro; o perdido só entra quando
+    // não há outro e o agente foi configurado para isso.
+    if (rows.length === 0 && args.config.includeLostDeals) {
+      rows = await findDeals("LOST");
+      usedLostDeal = rows.length > 0;
+    }
     for (const row of rows) {
       const d = await loadDealFields(row.id, exposure.readableKeys);
       if (d) deals.push(d);
@@ -434,7 +466,9 @@ export async function loadV2Context(args: {
         ? "Negócio escolhido pelo cliente salvo na conversa."
         : "Modo 'perguntar': há vários negócios abertos; aguardando escolha do cliente."
       : deals.length > 0
-        ? "Negócio mais recente selecionado automaticamente."
+        ? usedLostDeal
+          ? "Nenhum negócio em andamento: usando o negócio perdido mais recente."
+          : "Negócio mais recente selecionado automaticamente."
         : "Nenhum negócio aberto encontrado.";
 
   // Campos permitidos com metadados do catálogo

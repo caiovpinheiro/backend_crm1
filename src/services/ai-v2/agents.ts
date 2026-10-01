@@ -282,7 +282,9 @@ export async function createV2Agent(organizationId: string, input: {
       data: {
         organizationId,
         userId: user.id,
-        active: input.active ?? true,
+        // Nasce desligado: quem liga é a primeira publicação. Ligado desde a
+        // criação, respondia com o modelo inicial antes de ser publicado.
+        active: input.active ?? false,
         engine: "simple",
         archetype: "ATENDIMENTO",
         model: config.model ?? "gpt-4o-mini",
