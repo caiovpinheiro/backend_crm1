@@ -27,6 +27,7 @@ const executeDistribution = vi.fn(async () => ({
 const keepHumanAfterAutomationClose = vi.fn(async () => null);
 const tryAssignFirstAttendanceAi = vi.fn(async () => null);
 const humanWasAssignedInThisConversation = vi.fn(async () => false);
+const isDistributionAutoOnInbound = vi.fn(async () => true);
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),
@@ -76,6 +77,8 @@ vi.mock("@/services/distribution/enabled", () => ({
 }));
 vi.mock("@/services/distribution/pending-shared", () => ({
   ensureConversationInWaitingQueue: vi.fn(async () => {}),
+  isDistributionAutoOnInbound: (...a: unknown[]) =>
+    isDistributionAutoOnInbound(...a),
 }));
 
 // ── prisma fake ──
@@ -130,6 +133,7 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     conversations = new Map();
     departmentModes = new Map();
     vi.clearAllMocks();
+    isDistributionAutoOnInbound.mockResolvedValue(true);
   });
 
   it("conversa NOVA sem departamento: smart distribui (limitação registrada — leads não troca esse dono depois)", async () => {
@@ -246,6 +250,27 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
       "@/services/distribution/assignee-eligibility"
     );
     expect(isAssigneeCurrentlyEligible).toHaveBeenCalled();
+    expect(executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("autoOnInbound=false não distribui inbound sem passo na automação", async () => {
+    isDistributionAutoOnInbound.mockResolvedValue(false);
+    conversations.set("c1", {
+      id: "c1",
+      contactId: "ct1",
+      assignedToId: null,
+      assignedVia: null,
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c1",
+      contactId: "ct1",
+      assignedToId: null,
+    });
+
     expect(executeDistribution).not.toHaveBeenCalled();
   });
 });

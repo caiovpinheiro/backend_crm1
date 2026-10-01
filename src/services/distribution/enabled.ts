@@ -9,15 +9,16 @@
  * o motor continua distribuindo. Desligar é decisão explícita da org.
  */
 
-import { getOrgSettingBool } from "@/lib/org-settings";
+import { getOrgSettingBoolFresh } from "@/lib/org-settings";
 
 /** Chave gravada pelo toggle da UI (`PUT /api/distribution/settings`). */
 export const DISTRIBUTION_ENABLED_KEY = "distribution.enabled";
 
 export async function isDistributionEnabled(): Promise<boolean> {
   try {
-    return (await getOrgSettingBool(DISTRIBUTION_ENABLED_KEY, true)) !== false;
-  } catch {
+    return (await getOrgSettingBoolFresh(DISTRIBUTION_ENABLED_KEY, true)) !== false;
+  } catch (e) {
+    console.error("[distribution] leitura de distribution.enabled falhou", e);
     return true;
   }
 }

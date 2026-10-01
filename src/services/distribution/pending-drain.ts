@@ -40,6 +40,8 @@ import {
   explainEmptyDrain,
   getDrainState,
   getWaitingQueueWhere,
+  isDistributionAutoOnInbound,
+  listRequestedPendingConversationIds,
   hasRemainingCapacityInScope,
   liveFreeCapacityForUser,
   logCooldownSkip,
@@ -192,6 +194,25 @@ export async function processPendingDistributionQueue(opts: {
       console.warn("[distribution] cancelStalePendingOrphans failed", e);
     }
 
+    // Toggle desligado: não varre a Entrada. Só drena quem o passo,
+    // a IA ou o operador colocou na fila.
+    const autoOnInbound = await isDistributionAutoOnInbound();
+    const requestedPendingIds = autoOnInbound
+      ? null
+      : await listRequestedPendingConversationIds();
+    if (requestedPendingIds && requestedPendingIds.length === 0) {
+      debugInfo(
+        "[distribution] processPending skip — autoOnInbound=false sem pedido",
+        () => JSON.stringify({ orgId, trigger: opts.trigger, cancelledOrphans }),
+      );
+      return {
+        resolved: 0,
+        cancelled: cancelledOrphans,
+        pending: 0,
+        trigger: opts.trigger,
+      };
+    }
+
     let views: Awaited<ReturnType<typeof getDistributionResponsibles>> = [];
     try {
       views = await getDistributionResponsibles();
@@ -314,6 +335,9 @@ export async function processPendingDistributionQueue(opts: {
         where: {
           lastInboundAt: { not: null },
           ...activeInboxQueueGuardWhere(),
+          ...(requestedPendingIds
+            ? { id: { in: requestedPendingIds } }
+            : {}),
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },
