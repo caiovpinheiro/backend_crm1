@@ -218,6 +218,11 @@ export function getCacheClient(): IORedisClient | null {
   return client;
 }
 
+/** Sem URL de Redis (ou cliente que não pôde ser criado): só memória. */
+export function isCacheRedisDisabled(): boolean {
+  return redisDisabled;
+}
+
 /** Workers: espera o Redis do cache ficar ready antes do 1º job. */
 export async function waitUntilCacheReady(
   timeoutMs = 8_000,
