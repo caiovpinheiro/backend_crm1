@@ -10,6 +10,7 @@ import {
   WHATSAPP_SESSION_WINDOW_MS,
 } from "@/services/whatsapp-session-expiry";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("whatsapp-session-expiry-sweeper");
 
@@ -47,9 +48,9 @@ export function startWhatsappSessionExpirySweeper(): void {
       );
     });
   };
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     tick();
-    setInterval(tick, INTERVAL_MS);
+    scheduleBackgroundInterval(tick, INTERVAL_MS);
   }, 20_000);
   log.info({ tickMs: INTERVAL_MS }, "[whatsapp-session-expiry] sweeper iniciado");
 }

@@ -25,6 +25,7 @@ import {
   getNextActivityAlert,
 } from "@/services/activity-alerts";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("activity-alert-push-sweeper");
 
@@ -49,9 +50,9 @@ export function startActivityAlertPushSweeper(): void {
       );
     });
   };
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     tick();
-    setInterval(tick, INTERVAL_MS);
+    scheduleBackgroundInterval(tick, INTERVAL_MS);
   }, 30_000);
   log.info(
     { tickMs: INTERVAL_MS, fcm: isFcmConfigured() ? "configurado" : "AUSENTE" },

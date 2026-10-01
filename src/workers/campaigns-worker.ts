@@ -44,6 +44,7 @@ import {
   isCampaignWindowPrefetchEnabled,
 } from "@/lib/campaign-send-rate";
 import {
+  flushAllCampaignCounters,
   incrementCampaignCounter,
   maybeCompleteCampaign,
 } from "@/lib/campaign-counters";
@@ -60,6 +61,7 @@ import {
 } from "@/services/campaign-template-variables";
 import { randomUUID } from "node:crypto";
 import { getLogger } from "@/lib/logger";
+import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.campaigns");
 
@@ -1237,6 +1239,8 @@ function startRoundRobinSender(opts: {
   const attemptsByRecipient = new Map<string, number>();
   let rotation = 0;
   let orgCache: { orgs: string[]; at: number } = { orgs: [], at: 0 };
+  // SIGTERM: refill para de reivindicar e os runners não pegam item novo.
+  let stopping = false;
   const stats = { claimed: 0, sent: 0, failed: 0, retried: 0 };
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1338,7 +1342,7 @@ function startRoundRobinSender(opts: {
   }
 
   async function refill() {
-    for (;;) {
+    while (!stopping) {
       try {
         const room = localBufferMax - localQueue.length;
         if (room <= 0) {
@@ -1385,7 +1389,7 @@ function startRoundRobinSender(opts: {
   }
 
   async function runner() {
-    for (;;) {
+    while (!stopping) {
       const item = localQueue.shift();
       if (!item) {
         await sleep(25);
@@ -1457,8 +1461,8 @@ function startRoundRobinSender(opts: {
     }
   }
 
-  void refill();
-  for (let i = 0; i < sendConcurrency; i++) void runner();
+  const loops: Promise<void>[] = [refill()];
+  for (let i = 0; i < sendConcurrency; i++) loops.push(runner());
 
   const statsTimer = setInterval(() => {
     log.info(
@@ -1485,6 +1489,31 @@ function startRoundRobinSender(opts: {
     },
     "[campaign-rr] rodízio ativo",
   );
+
+  /**
+   * Shutdown: para de reivindicar, espera o envio em andamento de cada
+   * runner terminar e devolve a PENDING o que ficou no buffer local (já
+   * estava SENDING no banco). Sem isso esses recipients só voltavam pelo
+   * sweepStuck depois de CAMPAIGN_RR_STALE_SENDING_MS (5 min).
+   */
+  async function stop(): Promise<void> {
+    stopping = true;
+    clearInterval(statsTimer);
+    await Promise.allSettled(loops);
+    const leftover = localQueue.splice(0).map((i) => i.recipientId);
+    if (leftover.length > 0) {
+      const released = await prismaBase.campaignRecipient.updateMany({
+        where: { id: { in: leftover }, status: "SENDING" },
+        data: { status: "PENDING" },
+      });
+      log.info(
+        { released: released.count, buffer: leftover.length },
+        "[campaign-rr] shutdown — buffer local devolvido a PENDING",
+      );
+    }
+  }
+
+  return { stop };
 }
 
 export function startCampaignLoops() {
@@ -1535,8 +1564,13 @@ export function startCampaignLoops() {
   const roundRobin = isCampaignSendRoundRobinEnabled();
 
   let sendWorker: Worker<CampaignSendPayload> | null = null;
+  let roundRobinSender: { stop: () => Promise<void> } | null = null;
   if (roundRobin) {
-    startRoundRobinSender({ sendConcurrency, rateLimitMax, rateLimitDuration });
+    roundRobinSender = startRoundRobinSender({
+      sendConcurrency,
+      rateLimitMax,
+      rateLimitDuration,
+    });
     // Backlog pré-rodízio na fila Redis não tem consumidor neste modo — o
     // loop envia os mesmos recipients via PENDING no banco (idempotente),
     // então o backlog é só desperdício de memória. Aviso best-effort.
@@ -1692,9 +1726,30 @@ export function startCampaignLoops() {
       : "[campaigns-worker] Dispatch and send workers started",
   );
 
-  return { dispatchWorker, sendWorker };
+  return { dispatchWorker, sendWorker, roundRobinSender, sweepTimer };
 }
 
 if (require.main === module) {
-  startCampaignLoops();
+  const loops = startCampaignLoops();
+  installGracefulShutdown({
+    name: "worker-campaigns",
+    log,
+    steps: [
+      { name: "sweep-timer", run: () => clearInterval(loops.sweepTimer) },
+      {
+        // Em paralelo: close() de cada Worker espera o job ativo terminar.
+        name: "workers",
+        run: () =>
+          Promise.all([
+            loops.roundRobinSender?.stop(),
+            loops.dispatchWorker.close(),
+            loops.sendWorker?.close(),
+          ]),
+      },
+      // Contadores em buffer (2 s) — senão o último lote some e a campanha
+      // fica SENDING com 100% até o sweep de outro processo.
+      { name: "campaign-counters", run: () => flushAllCampaignCounters() },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 }

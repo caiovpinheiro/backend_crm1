@@ -23,6 +23,7 @@ import {
   type LogEventInput,
 } from "@/services/activity-log";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout } from "@/lib/background-timers";
 
 const log = getLogger("activity-outbox");
 
@@ -781,11 +782,11 @@ export function startConversationClosedOutboxProjector(
         log.error({ err }, "[activity-outbox] conversation-closed tick failed");
       })
       .finally(() => {
-        setTimeout(tick, intervalMs);
+        scheduleBackgroundTimeout(tick, intervalMs);
       });
   };
 
-  setTimeout(tick, 0);
+  scheduleBackgroundTimeout(tick, 0);
   return true;
 }
 
@@ -836,9 +837,9 @@ export function startTabulationOutboxProjector(intervalMs = 5_000): void {
         log.error({ err }, "[activity-outbox] tabulation tick failed");
       })
       .finally(() => {
-        setTimeout(tick, intervalMs);
+        scheduleBackgroundTimeout(tick, intervalMs);
       });
   };
 
-  setTimeout(tick, 0);
+  scheduleBackgroundTimeout(tick, 0);
 }
