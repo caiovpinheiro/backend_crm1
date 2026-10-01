@@ -9,8 +9,11 @@
 import type { Prisma } from "@prisma/client";
 
 import { invalidateBoardData } from "@/lib/cache/keys";
+import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+
+const log = getLogger("deal-duplicates");
 
 type UnifyClient = Pick<Prisma.TransactionClient, "$executeRaw" | "$queryRaw">;
 
@@ -24,10 +27,7 @@ export async function pipelineForbidsDuplicateDeals(
     });
     return row?.allowDuplicateDeals === false;
   } catch (err) {
-    console.warn(
-      "[pipeline] leitura de allowDuplicateDeals falhou; duplicata segue permitida:",
-      err,
-    );
+    log.warn({ err }, "leitura de allowDuplicateDeals falhou; duplicata segue permitida");
     return false;
   }
 }
