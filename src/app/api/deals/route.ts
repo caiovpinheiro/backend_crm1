@@ -12,6 +12,7 @@ import {
   flattenDealListItem,
   getDeals,
   isValidDealStatus,
+  wasReusedOpenDeal,
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getLogger } from "@/lib/logger";
@@ -226,16 +227,18 @@ export async function POST(request: Request) {
               : undefined,
       });
 
-      const uid = authResult.user.id;
-      createDealEvent(deal.id, uid, "CREATED", {
-        stageId: b.stageId,
-        createdAt: deal.createdAt instanceof Date ? deal.createdAt.toISOString() : deal.createdAt,
-      }).catch(() => {});
-      fireTrigger("deal_created", {
-        dealId: deal.id,
-        contactId: deal.contactId ?? undefined,
-        data: { stageId: b.stageId, toStageId: b.stageId },
-      }).catch(() => {});
+      if (!wasReusedOpenDeal(deal)) {
+        const uid = authResult.user.id;
+        createDealEvent(deal.id, uid, "CREATED", {
+          stageId: b.stageId,
+          createdAt: deal.createdAt instanceof Date ? deal.createdAt.toISOString() : deal.createdAt,
+        }).catch(() => {});
+        fireTrigger("deal_created", {
+          dealId: deal.id,
+          contactId: deal.contactId ?? undefined,
+          data: { stageId: b.stageId, toStageId: b.stageId },
+        }).catch(() => {});
+      }
 
       // NB (jul/26): NÃO criamos mais Conversation WhatsApp antecipadamente ao
       // nascer o deal. Isso poluía a fila com conversas OPEN sem nenhuma

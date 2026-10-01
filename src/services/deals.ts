@@ -15,6 +15,7 @@ import { withOrg, withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { getOrgSettingBool } from "@/lib/org-settings";
+import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
 import {
   logEvent,
   userIdForFk,
@@ -601,7 +602,65 @@ export async function nextDealNumber(): Promise<number> {
   return allocateOrgNumber("Deal", getOrgIdOrThrow());
 }
 
+const REUSED_OPEN_DEAL = Symbol.for("crm.reusedOpenDeal");
+
+/** A criação devolveu o negócio aberto que o contato já tinha neste funil. */
+export function wasReusedOpenDeal(deal: object): boolean {
+  return Boolean((deal as Record<symbol, unknown>)[REUSED_OPEN_DEAL]);
+}
+
+function markReusedOpenDeal<T extends object>(deal: T): T {
+  Object.defineProperty(deal, REUSED_OPEN_DEAL, { value: true });
+  return deal;
+}
+
+/**
+ * Negócio OPEN comercial que permanece quando o funil não aceita duplicata:
+ * o mais à frente na etapa; empate, o atualizado por último.
+ */
+export async function findCanonicalOpenDealInPipeline(
+  contactId: string,
+  pipelineId: string,
+) {
+  return prisma.deal.findFirst({
+    where: {
+      contactId,
+      status: "OPEN",
+      dealRole: "COMMERCIAL",
+      stage: { pipelineId },
+    },
+    orderBy: [
+      { stage: { position: "desc" } },
+      { updatedAt: "desc" },
+      { createdAt: "asc" },
+    ],
+    include: listInclude,
+  });
+}
+
+async function reuseOpenDealWhenPipelineForbidsDuplicates(data: CreateDealInput) {
+  if (!data.contactId || data.id) return null;
+  if (data.status && data.status !== "OPEN") return null;
+  if (data.dealRole && data.dealRole !== "COMMERCIAL") return null;
+
+  const stage = await prisma.stage.findUnique({
+    where: { id: data.stageId },
+    select: { pipelineId: true },
+  });
+  if (!stage) return null;
+  if (!(await pipelineForbidsDuplicateDeals(stage.pipelineId))) return null;
+
+  const existing = await findCanonicalOpenDealInPipeline(
+    data.contactId,
+    stage.pipelineId,
+  );
+  return existing ? markReusedOpenDeal(existing) : null;
+}
+
 export async function createDeal(data: CreateDealInput) {
+  const reused = await reuseOpenDealWhenPipelineForbidsDuplicates(data);
+  if (reused) return reused;
+
   // Título opcional. Prioridade:
   //  1. título informado
   //  2. "Negócio {Nome do Contato}" quando há contactId

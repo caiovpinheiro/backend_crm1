@@ -63,9 +63,11 @@ import {
   createDealEvent,
   markDealLost,
   markDealWon,
+  findCanonicalOpenDealInPipeline,
   nextDealNumber,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
+import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
@@ -4537,6 +4539,25 @@ async function executeStep(
         select: { name: true, pipelineId: true, pipeline: { select: { name: true } } },
       });
       if (!stage) throw new Error("create_deal: stageId inválido");
+      if (
+        rt.contactId &&
+        (await pipelineForbidsDuplicateDeals(stage.pipelineId))
+      ) {
+        const existing = await findCanonicalOpenDealInPipeline(
+          rt.contactId,
+          stage.pipelineId,
+        );
+        if (existing) {
+          rt.dealId = existing.id;
+          rt.deal = {
+            ...(existing as unknown as Deal & { contactId: string | null }),
+            stageName: existing.stage?.name ?? stage.name,
+            pipelineId: existing.stage?.pipeline?.id ?? stage.pipelineId,
+            pipelineName: existing.stage?.pipeline?.name ?? stage.pipeline?.name ?? "",
+          };
+          return {};
+        }
+      }
       // `Deal.number` e mandatorio + unico por org. Aloca max+1 com retry
       // em P2002 (corrida concorrente). Mesmo padrao de services/deals.ts.
       let deal: Deal | null = null;

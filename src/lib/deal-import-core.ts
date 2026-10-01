@@ -11,7 +11,7 @@ import { prismaImportScoped as prisma } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, updateContact } from "@/services/contacts";
 import { upsertDealCustomFieldValues } from "@/services/custom-fields";
-import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
+import { createDeal, isValidDealStatus, updateDeal, wasReusedOpenDeal } from "@/services/deals";
 
 /**
  * Núcleo de processamento do import de NEGÓCIOS — compartilhado entre a rota
@@ -732,7 +732,7 @@ export async function processDealRow(
         ownerId,
       });
       dealId = (d as { id?: string })?.id ?? null;
-      outcome = "created";
+      outcome = wasReusedOpenDeal(d) ? "updated" : "created";
     }
 
     if (opts.importTagId && dealId) {
