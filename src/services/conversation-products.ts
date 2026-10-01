@@ -24,7 +24,7 @@ import {
   type ProductWhatsAppSendMode,
 } from "@/lib/product-whatsapp-send-mode";
 import { isBaileysChannel } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishOutboundNewMessage } from "@/lib/realtime-events";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { logEvent } from "@/services/activity-log";
 import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
@@ -125,25 +125,6 @@ async function ensureRetailerInCatalog(
 
 function actorName(actor: ProductSendActor): string {
   return actor.name?.trim() || actor.email?.trim() || "Agente";
-}
-
-function publishNewMessage(
-  conv: { id: string; organizationId: string; contactId: string | null },
-  content: string,
-  timestamp: Date,
-): void {
-  try {
-    sseBus.publish("new_message", {
-      organizationId: conv.organizationId,
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      direction: "out",
-      content,
-      timestamp,
-    });
-  } catch {
-    /* best-effort */
-  }
 }
 
 export async function sendProductsToConversation(args: {
@@ -454,7 +435,7 @@ export async function sendProductsToConversation(args: {
     },
   });
 
-  publishNewMessage(conv, preview, saved.createdAt);
+  publishOutboundNewMessage(conv, preview, saved.createdAt);
 
   if (conv.contactId) {
     try {

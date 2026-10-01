@@ -9,7 +9,10 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { reopenResolvedAsNewTicket } from "@/services/conversations";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationUpdated,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 
 import { WhatsappCallConsentStatus } from "@prisma/client";
 
@@ -111,7 +114,7 @@ async function dispatchCallPermissionTemplate(args: {
           sendError: msg.slice(0, 500),
         }),
       });
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: args.conv.organizationId,
         conversationId: args.conv.id,
         contactId: args.conv.contactId,
@@ -172,7 +175,7 @@ async function dispatchCallPermissionTemplate(args: {
     }
   }
 
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: args.conv.organizationId,
     conversationId: args.conv.id,
     contactId: args.conv.contactId,
@@ -180,7 +183,7 @@ async function dispatchCallPermissionTemplate(args: {
     content: args.content,
     timestamp: savedMsg.createdAt,
   });
-  sseBus.publish("conversation_updated", {
+  publishConversationUpdated({
     organizationId: args.conv.organizationId,
     conversationId: args.conv.id,
     contactId: args.conv.contactId,
@@ -438,7 +441,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         },
       });
 
-      sseBus.publish("conversation_updated", {
+      publishConversationUpdated({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,

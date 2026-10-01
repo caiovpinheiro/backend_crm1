@@ -13,7 +13,7 @@ import {
 } from "@/services/ai/replay-sandbox";
 import { withOrg, withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import {
   logEvent,
@@ -830,7 +830,7 @@ async function logConversationAssigneeChanges(
       },
     });
     try {
-      sseBus.publish("conversation_timeline_updated", {
+      publishConversationTimelineUpdated({
         organizationId,
         conversationId: c.conversationId,
         type: "ASSIGNEE_CHANGED",

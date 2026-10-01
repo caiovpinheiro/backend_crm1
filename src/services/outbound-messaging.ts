@@ -29,7 +29,7 @@ import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { isBaileysChannel, sendWhatsAppText } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishOutboundNewMessage } from "@/lib/realtime-events";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
@@ -163,25 +163,6 @@ function ensureChannelConnected(
   };
 }
 
-function publishNewMessage(
-  conv: Pick<ConversationLite, "id" | "organizationId" | "contactId">,
-  content: string,
-  timestamp: Date,
-): void {
-  try {
-    sseBus.publish("new_message", {
-      organizationId: conv.organizationId,
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      direction: "out",
-      content,
-      timestamp,
-    });
-  } catch {
-    // best-effort: nunca derruba o envio por falha de SSE
-  }
-}
-
 // ── Nota interna ─────────────────────────────
 
 /**
@@ -254,7 +235,7 @@ export async function createInternalNoteOnConversation(args: {
     });
   })();
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
 
   return {
     ok: true,
@@ -409,7 +390,7 @@ export async function sendTextToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -645,7 +626,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -954,7 +935,7 @@ export async function sendInteractiveListToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -1174,7 +1155,7 @@ export async function sendFlowToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -1423,7 +1404,7 @@ export async function sendTemplateToConversation(
     // colunas opcionais em bases antigas
   }
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
 
   const priorPublic = await prisma.message.count({
     where: {

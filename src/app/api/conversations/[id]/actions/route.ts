@@ -23,7 +23,10 @@ import {
   insertActivityOutbox,
   type ActivityOutboxInput,
 } from "@/services/activity-outbox";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationTimelineUpdated,
+  publishConversationUpdated,
+} from "@/lib/realtime-events";
 import { metrics } from "@/lib/metrics";
 import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
 import {
@@ -144,7 +147,7 @@ async function logConversationAssigneeChanged(args: {
     },
   });
   try {
-    sseBus.publish("conversation_timeline_updated", {
+    publishConversationTimelineUpdated({
       organizationId: args.organizationId,
       conversationId: args.conversationId,
       type: "ASSIGNEE_CHANGED",
@@ -484,7 +487,7 @@ export async function POST(request: Request, context: RouteContext) {
             });
             // Empurra o evento pro chatter em tempo real.
             try {
-              sseBus.publish("conversation_timeline_updated", {
+              publishConversationTimelineUpdated({
                 organizationId: (session.user as { organizationId: string | null })
                   .organizationId,
                 conversationId: id,
@@ -681,7 +684,7 @@ export async function POST(request: Request, context: RouteContext) {
           meta: { action, newConversationId: created.id, newNumber: created.number },
         });
         try {
-          sseBus.publish("conversation_timeline_updated", {
+          publishConversationTimelineUpdated({
             organizationId: conv.organizationId,
             conversationId: id,
             type: "CONVERSATION_REOPENED",
@@ -727,7 +730,7 @@ export async function POST(request: Request, context: RouteContext) {
             /* fire-and-forget */
           });
           try {
-            sseBus.publish("conversation_timeline_updated", {
+            publishConversationTimelineUpdated({
               organizationId: conv.organizationId,
               conversationId: created.id,
               type: "CONVERSATION_CREATED",
@@ -1008,7 +1011,7 @@ export async function POST(request: Request, context: RouteContext) {
         // new_message). Cobre tambem encerramentos por outro agente/automacao,
         // quando nao ha mutation local pra invalidar a query.
         try {
-          sseBus.publish("conversation_timeline_updated", {
+          publishConversationTimelineUpdated({
             organizationId: conv.organizationId,
             conversationId: id,
             type: convEventType,
@@ -1040,7 +1043,7 @@ export async function POST(request: Request, context: RouteContext) {
           },
         });
         try {
-          sseBus.publish("conversation_updated", {
+          publishConversationUpdated({
             organizationId: conv.organizationId,
             conversationId: id,
             status: updated.status,

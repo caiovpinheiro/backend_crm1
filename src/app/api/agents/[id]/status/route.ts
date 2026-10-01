@@ -6,7 +6,10 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishPresenceUpdate,
+  publishSupportTicketUpdated,
+} from "@/lib/realtime-events";
 import { enqueueProcessPendingOrRun } from "@/services/distribution";
 import { drainSupportQueue } from "@/services/support/distribution";
 
@@ -81,7 +84,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       // #endregion
       if (statusChanged) {
         await recordPresenceTransition({ userId: id, nextStatus: status });
-        sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
+        publishPresenceUpdate({ organizationId: getOrgIdOrNull(), userId: id, status });
 
         // Alguém voltou a ficar ONLINE: drena a fila de espera da
         // Distribuição (leads que ficaram sem responsável elegível).
@@ -136,7 +139,7 @@ export async function PUT(req: Request, ctx: Ctx) {
             if (orgId) {
               const assigned = await drainSupportQueue(orgId);
               for (const ticketId of assigned) {
-                sseBus.publish("support_ticket_updated", {
+                publishSupportTicketUpdated({
                   organizationId: orgId,
                   ticketId,
                   status: "OPEN",

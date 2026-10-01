@@ -5,7 +5,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { channelSendsReadReceipts } from "@/lib/channels/config";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationUpdated } from "@/lib/realtime-events";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -30,7 +30,7 @@ export async function POST(_request: Request, context: RouteContext) {
       // refetch. Evento mínimo para o cliente zerar o contador em memória;
       // best-effort — o read já foi persistido acima.
       try {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: session.user.organizationId,
           conversationId: id,
           unreadCount: 0,

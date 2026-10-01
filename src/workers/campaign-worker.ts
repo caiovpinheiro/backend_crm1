@@ -50,9 +50,9 @@ async function markInboxJobFailed(opts: {
       data: { hasError: true },
     })
     .catch(() => {});
-  const { sseBus } = await import("@/lib/sse-bus");
+  const { publishMessageStatus } = await import("@/lib/realtime-events");
   try {
-    sseBus.publish("message_status", {
+    publishMessageStatus({
       organizationId: opts.organizationId,
       conversationId: opts.conversationId,
       messageId: opts.messageId,

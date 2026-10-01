@@ -612,8 +612,8 @@ async function executeSendWhatsappTemplate(action: V2Action, ctx: V2ActionContex
         ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
       }),
     });
-    const { sseBus } = await import("@/lib/sse-bus");
-    sseBus.publish("new_message", {
+    const { publishNewMessage } = await import("@/lib/realtime-events");
+    publishNewMessage({
       organizationId: conv.organizationId,
       conversationId: ctx.conversationId,
       contactId: ctx.contactId,

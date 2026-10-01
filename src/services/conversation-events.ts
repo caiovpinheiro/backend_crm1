@@ -12,7 +12,7 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 
 export const CONVERSATION_EVENT_ACTIONS = [
   "distribuicao",
@@ -138,7 +138,7 @@ export async function createConversationEvent(args: {
     })
     .catch(() => null);
 
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: conv?.organizationId ?? getOrgIdOrNull(),
     conversationId: args.conversationId,
     contactId: conv?.contactId ?? null,

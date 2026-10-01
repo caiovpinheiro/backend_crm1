@@ -25,7 +25,10 @@ import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound
 import { getLogger } from "@/lib/logger";
 import { maskPhone } from "@/lib/pii-mask";
 import { safeFetchBytes } from "@/lib/safe-fetch";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishContactUpdated,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
 import {
@@ -257,7 +260,7 @@ async function syncContactAvatar(
 
     // Notifica a UI: lista de conversas, header, deal panel — tudo
     // que renderiza ChatAvatar pra esse contato deve refetchar.
-    sseBus.publish("contact_updated", {
+    publishContactUpdated({
       organizationId: contact.organizationId,
       contactId: contact.id,
       avatarUrl: newUrl,
@@ -725,7 +728,7 @@ export async function handleBaileysMessage(
       (err) => log.warn("Falha ao cancelar agendamentos pendentes:", err),
     );
 
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: getOrgIdOrNull(),
       conversationId: conversation.id,
       contactId: contact.id,

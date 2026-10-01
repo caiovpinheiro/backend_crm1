@@ -1,7 +1,10 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishNewMessage,
+  publishWhatsappCall,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logEvent } from "@/services/activity-log";
@@ -173,7 +176,7 @@ export async function processMetaWhatsappCallsWebhook(
           contactId: contact.id,
         }),
       });
-      sseBus.publish("whatsapp_call", {
+      publishWhatsappCall({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
@@ -216,7 +219,7 @@ export async function processMetaWhatsappCallsWebhook(
               data: { updatedAt: new Date(), lastMessageDirection: "out" },
             })
             .catch(() => {});
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: sseOrgId(conv.organizationId),
             conversationId: conv.id,
             contactId: contact.id,
@@ -440,7 +443,7 @@ export async function processMetaWhatsappCallsWebhook(
         }).catch(() => {});
       }
 
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
@@ -502,7 +505,7 @@ export async function processMetaWhatsappCallsWebhook(
               data: { updatedAt: new Date(), lastMessageDirection: callMessageDirection },
             })
             .catch(() => {});
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: sseOrgId(conv.organizationId),
             conversationId: conv.id,
             contactId: contact.id,
@@ -521,7 +524,7 @@ export async function processMetaWhatsappCallsWebhook(
     }
 
     if (!skipInboundRingSse) {
-      sseBus.publish("whatsapp_call", {
+      publishWhatsappCall({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,

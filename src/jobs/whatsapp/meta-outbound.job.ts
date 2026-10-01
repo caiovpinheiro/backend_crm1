@@ -17,7 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { isMetaOutboundTemplate, type MetaOutboundPayload } from "@/lib/queue";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { publishOutboundStatus } from "@/lib/outbound-status-signal";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageStatus } from "@/lib/realtime-events";
 
 export type MetaOutboundResult = {
   sendStatus: "sent" | "failed";
@@ -37,7 +37,7 @@ function publishStatus(
   // DEPOIS do update de `sendStatus`.
   void publishOutboundStatus(messageId, status);
   try {
-    sseBus.publish("message_status", {
+    publishMessageStatus({
       organizationId,
       conversationId,
       messageId,

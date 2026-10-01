@@ -18,7 +18,7 @@ import {
 } from "@/lib/ai-agents/tabulation-classifier";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { tabulationHistoryWindowStart } from "@/lib/zoned-date";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -152,7 +152,7 @@ export async function applyConversationTabulation(args: {
   }
 
   try {
-    sseBus.publish("conversation_timeline_updated", {
+    publishConversationTimelineUpdated({
       organizationId: conv.organizationId,
       conversationId: conv.id,
       type: alreadySame ? "CONVERSATION_CLOSED" : "CONVERSATION_TABULATED",

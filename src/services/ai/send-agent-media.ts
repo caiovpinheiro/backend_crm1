@@ -8,7 +8,7 @@ import { enqueueMetaAttach, type MetaAttachPayload } from "@/lib/queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { isBaileysChannel, sendWhatsAppMedia } from "@/lib/send-whatsapp";
 import { resolveOutboundAttachmentMime } from "@/lib/storage/local";
 import { isOrgOwnedStorageUrl, isStorageUrlOfOrg, readStoredMediaForSend } from "@/lib/storage/read-for-send";
@@ -130,7 +130,7 @@ export async function sendAgentFollowUpMedia(args: {
     });
 
     try {
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: orgId,
         conversationId: conv.id,
         contactId: args.contactId,

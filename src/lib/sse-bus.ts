@@ -1,6 +1,10 @@
 import IORedis from "ioredis";
 
-import { scheduleBoardInvalidationForMessage } from "@/lib/board-invalidation";
+import {
+  scheduleBoardInvalidationForMessage,
+  withMessageBoardScope,
+  type MessageBoardScope,
+} from "@/lib/board-invalidation";
 import {
   parseSseRedisMessage,
   serializeSseRedisBody,
@@ -42,27 +46,21 @@ import {
  * Eventos sem organizationId no envelope (caminho legado) sao DROPADOS
  * com warning — fail-closed.
  *
- * Contrato dos eventos leves do chat (set/26, `src/lib/realtime-events.ts`)
- * ──────────────────────────────────────────────────────────────────────
- * `typing` — um agente está digitando na conversa. Para os OUTROS agentes
- * da org (o cliente ignora o próprio `userId`). Throttle no servidor: no
- * máximo 1 evento a cada 3s por (conversa, agente). Publicado por
- * `POST /api/conversations/:id/typing`, independente de o canal Meta
- * repassar o indicador ao contato. Payload:
- *   { organizationId, conversationId, contactId: string | null,
- *     userId: string | null, userName: string | null,
- *     source: "agent" | "contact", until: ISO }
- * `until` = agora + 5s; o cliente esconde "digitando…" ao passar dele.
- * `source: "contact"` está reservado: nem o webhook da Meta (Cloud API
- * não entrega typing do contato) nem o worker Baileys (não assina
- * `presence.update`) publicam hoje.
+ * Contrato dos eventos (`src/lib/realtime-events.ts`)
+ * ──────────────────────────────────────────────────
+ * Este arquivo é só o transporte. Os nomes de evento, o formato de cada
+ * payload e os publishers tipados ficam em `realtime-events.ts` — o único
+ * módulo da aplicação que chama `sseBus.publish`
+ * (`realtime-contract.test.ts` garante). O barramento acrescenta ao
+ * payload: `card`/`cardOmitted` (snapshot do card do inbox) e, em
+ * `new_message`, `pipelineIds`/`dealIds` (escopo do board, vindo do cache
+ * contato → pipelines de `board-invalidation.ts`).
  *
- * `scheduled_message_updated` — a lista de agendamentos PENDENTES da
- * conversa mudou. Publicado ao criar, cancelar (manual ou automático por
- * resposta/encerramento), enviar e falhar. O cliente invalida
- * `["scheduled-messages", conversationId]`; não há item no payload.
- *   { organizationId, conversationId, scheduledMessageId: string | null,
- *     status: "PENDING" | "CANCELLED" | "SENT" | "FAILED" }
+ * `typing`: throttle no servidor de 1 evento a cada 3 s por (conversa,
+ * agente), publicado por `POST /api/conversations/:id/typing`.
+ * `scheduled_message_updated`: publicado ao criar, cancelar (manual ou
+ * automático por resposta/encerramento), enviar e falhar; o cliente
+ * invalida `["scheduled-messages", conversationId]`.
  *
  * Presença "quem está vendo" (`entity_viewers`, `src/lib/entity-presence.ts`):
  * TTL do viewer 90s; heartbeat de 25s enviado só pela aba líder do
@@ -129,6 +127,30 @@ async function inboxSseCardWithinBudget(
         }, INBOX_CARD_BUDGET_MS);
       }),
     ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Escopo do board (`pipelineIds`/`dealIds`) de um `new_message`: enfeite
+ * como o `card`. Vem do cache contato → pipelines (60 s) ou da consulta
+ * única que já existia para a purga do board; se ela travar, o evento sai
+ * sem escopo e o cliente usa o caminho antigo (casa o card pelo contato).
+ */
+async function boardScopeWithinBudget(
+  scope: Promise<MessageBoardScope | null>,
+): Promise<MessageBoardScope | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      scope,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), INBOX_CARD_BUDGET_MS);
+      }),
+    ]);
+  } catch {
+    return null;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -295,7 +317,8 @@ class SseBus {
    * publishers que ainda nao foram migrados emitem warning e o evento
    * cai no chao (fail-closed pra evitar leak).
    *
-   * Ex.: sseBus.publish("new_message", { organizationId: conv.organizationId, conversationId, ... })
+   * Não chame direto: use o publisher do evento em `realtime-events.ts`
+   * (`publishNewMessage`, `publishConversationUpdated`, …).
    *
    * `new_message` / `conversation_updated` that can land a ticket in the
    * inbox list get an extra `card` field (slim list DTO). See
@@ -352,8 +375,14 @@ class SseBus {
     // `message_status` (ticks entregue→lida) fica de fora de propósito: são
     // vários eventos por mensagem e o ganho no card não paga o recompute do
     // board. Esses ticks acompanham o TTL / o poll de 30s.
+    //
+    // A mesma resolução (cache de 60 s ou UMA consulta) devolve o escopo
+    // que o fan-out anexa ao evento: `pipelineIds` / `dealIds`.
+    let boardScope: Promise<MessageBoardScope | null> | undefined;
     if (event === "new_message") {
-      void scheduleBoardInvalidationForMessage(orgId, data);
+      boardScope = scheduleBoardInvalidationForMessage(orgId, data).catch(
+        () => null,
+      );
     }
 
     // Badges: NÃO purgar em `new_message` (preview). O FE ainda recebe o
@@ -368,7 +397,7 @@ class SseBus {
       organization: safeLabel(orgId),
     });
 
-    void this.fanout(event, orgId, data, audienceUserIds);
+    void this.fanout(event, orgId, data, audienceUserIds, boardScope);
   }
 
   private async fanout(
@@ -376,7 +405,12 @@ class SseBus {
     orgId: string,
     data: unknown,
     audienceUserIds?: string[],
+    boardScope?: Promise<MessageBoardScope | null>,
   ) {
+    // Corre junto com o snapshot do card, não depois dele.
+    const scopeWithinBudget = boardScope
+      ? boardScopeWithinBudget(boardScope)
+      : null;
     let payload = data;
     try {
       payload = await inboxSseCardWithinBudget(event, data);
@@ -384,6 +418,9 @@ class SseBus {
       console.error("[sse-bus] inbox card snapshot:", e);
     }
     payload = markInboxCardOmittedByBudget(event, data, payload);
+    if (scopeWithinBudget) {
+      payload = withMessageBoardScope(payload, await scopeWithinBudget);
+    }
 
     const envelope: SseEventEnvelope = {
       organizationId: orgId,

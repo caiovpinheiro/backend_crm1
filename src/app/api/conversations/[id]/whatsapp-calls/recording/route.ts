@@ -5,7 +5,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -259,7 +259,7 @@ export async function POST(request: Request, context: RouteContext) {
         /* ignore */
       }
 
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,
