@@ -203,12 +203,13 @@ export async function PUT(request: Request) {
     Object.assign(data, SESSION_VERSION_BUMP);
   }
   const passwordChanged = Boolean(data.hashedPassword);
-  // Só lê a versão nova quando houve incremento (não vai na resposta).
-  const versionSelect = passwordChanged ? ({ sessionVersion: true } as const) : {};
 
-  /** Pós-commit: notifica a revogação e monta a resposta. */
+  /**
+   * Pós-commit: notifica a revogação e monta a resposta. `sessionVersion`
+   * vem do UPDATE só para emitir a prova — não vai no corpo.
+   */
   const respond = async (
-    updated: Record<string, unknown> & { sessionVersion?: number },
+    updated: Record<string, unknown> & { sessionVersion: number },
     extra: Record<string, unknown> = {},
   ) => {
     const { sessionVersion: newVersion, ...profile } = updated;
@@ -236,7 +237,7 @@ export async function PUT(request: Request) {
     const updated = await prisma.user.update({
       where: { id: session.user.id },
       data,
-      select: { ...PROFILE_SELECT, ...versionSelect },
+      select: { ...PROFILE_SELECT, sessionVersion: true },
     });
     return await respond(updated);
   } catch (e) {
@@ -255,7 +256,7 @@ export async function PUT(request: Request) {
     const updated = await prisma.user.update({
       where: { id: session.user.id },
       data: dataWithoutTheme,
-      select: { ...PROFILE_SELECT_CORE, ...versionSelect },
+      select: { ...PROFILE_SELECT_CORE, sessionVersion: true },
     });
     return await respond(updated, { chatTheme: DEFAULT_CHAT_THEME_DB });
   }

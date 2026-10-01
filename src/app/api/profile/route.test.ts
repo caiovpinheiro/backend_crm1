@@ -83,7 +83,7 @@ beforeEach(() => {
 
 describe("PUT /api/profile — edição comum", () => {
   it("não incrementa a versão, não notifica e não devolve prova nem sessionVersion", async () => {
-    mocks.update.mockResolvedValue({ ...PROFILE, name: "Novo Nome" });
+    mocks.update.mockResolvedValue({ ...PROFILE, name: "Novo Nome", sessionVersion: 3 });
     const res = await PUT(put({ name: "Novo Nome" }));
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -91,7 +91,7 @@ describe("PUT /api/profile — edição comum", () => {
     expect(json).not.toHaveProperty("sessionRenewal");
     const args = mocks.update.mock.calls[0][0];
     expect(args.data).toEqual({ name: "Novo Nome" });
-    expect(args.select).not.toHaveProperty("sessionVersion");
+    expect(json).not.toHaveProperty("sessionVersion");
     expect(mocks.revokeUser).not.toHaveBeenCalled();
   });
 });
