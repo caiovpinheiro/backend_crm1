@@ -41,6 +41,9 @@ import {
   turnStaleMs,
   TURN_DEBOUNCE_FLOOR_MS,
 } from "@/services/ai/turn-manager";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.turn-sweeper");
 
 export type SweepResult = {
   promoted: number;
@@ -57,10 +60,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 function logSweep(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-turn-sweep]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-turn-sweep] ${event}`);
 }
 
 /**
@@ -214,9 +214,10 @@ export function startAiTurnSweeper(opts: { force?: boolean } = {}): void {
     sweeping = true;
     void sweepConversationTurns()
       .catch((err) => {
-        console.error("[ai-turn-sweep] tick falhou", {
-          err: err instanceof Error ? err.message : String(err),
-        });
+        log.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          "[ai-turn-sweep] tick falhou",
+        );
       })
       .finally(() => {
         sweeping = false;

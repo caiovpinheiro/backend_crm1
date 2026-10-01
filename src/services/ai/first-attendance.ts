@@ -33,12 +33,12 @@ import {
   resolveAgentVerticalByAgentUserId,
   type AgentVertical,
 } from "@/services/ai/agent-vertical";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.first-attendance");
 
 function logAi(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-attend]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-attend] ${event}`);
 }
 
 async function isFirstAttendanceEnabled(): Promise<boolean> {
@@ -190,7 +190,7 @@ async function isContactInAgentScope(
         if (nameMatches(pipe.name)) return true;
       }
     } catch (err) {
-      console.warn("[ai-attend] isContactInAgentScope canal/default falhou", err);
+      log.warn({ err }, "[ai-attend] isContactInAgentScope canal/default falhou");
     }
     // Sem vertical e sem funil configurado, o agente atende: restringir
     // por nome de funil é regra da vertical, não do CRM.
@@ -322,7 +322,7 @@ export async function tryAssignFirstAttendanceAi(args: {
         return null;
       }
     } catch (e) {
-      console.error("[ai] idle inbound check failed", e);
+      log.error({ err: e }, "[ai] idle inbound check failed");
     }
   }
 
@@ -336,7 +336,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       return null;
     }
   } catch (e) {
-    console.error("[ai] first_attendance allowlist failed — skipping", e);
+    log.error({ err: e }, "[ai] first_attendance allowlist failed — skipping");
     return null;
   }
 
@@ -354,7 +354,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       return null;
     }
   } catch (e) {
-    console.error("[ai] keepHumanAfterAutomationClose failed", e);
+    log.error({ err: e }, "[ai] keepHumanAfterAutomationClose failed");
   }
 
   try {
@@ -384,7 +384,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       return null;
     }
   } catch (e) {
-    console.error("[ai] first_attendance channel status check failed — skipping", e);
+    log.error({ err: e }, "[ai] first_attendance channel status check failed — skipping");
     return null;
   }
 
@@ -417,7 +417,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       });
     }
   } catch (e) {
-    console.error("[ai] first_attendance automation-context check failed — skipping", e);
+    log.error({ err: e }, "[ai] first_attendance automation-context check failed — skipping");
     return null;
   }
 
@@ -681,7 +681,7 @@ export async function ensureInboundAiAttendance(args: {
       userMessage: args.userMessage,
     });
   } catch (e) {
-    console.error("[ai] ensureInboundAiAttendance failed", e);
+    log.error({ err: e }, "[ai] ensureInboundAiAttendance failed");
     return null;
   }
 }

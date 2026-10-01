@@ -23,6 +23,9 @@ import { prismaBase } from "@/lib/prisma-base";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { withSystemContext } from "@/lib/webhook-context";
 import { collectUnansweredInboundText } from "@/services/ai/inbound-debounce";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.retry-unanswered-ai-inbound");
 
 /** Silêncio mínimo antes de reprocessar (o debounce normal leva ~2,5s). */
 export const AI_RETRY_UNANSWERED_MS = 3 * 60 * 1000;
@@ -259,16 +262,22 @@ export async function retryUnansweredAiInbound(
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
       });
-      console.error(
-        `[ai-retry-unanswered] falha conv=${row.id}:`,
-        err instanceof Error ? err.message : err,
+      log.error(
+        { conv: row.id, err: err instanceof Error ? err.message : err },
+        "[ai-retry-unanswered] falha",
       );
     }
   }
 
   if (result.retried > 0 || result.failed > 0) {
-    console.info(
-      `[ai-retry-unanswered] reprocessadas=${result.retried} puladas=${result.skipped} falhas=${result.failed} de ${result.candidates} candidatas`,
+    log.info(
+      {
+        reprocessadas: result.retried,
+        puladas: result.skipped,
+        falhas: result.failed,
+        candidatas: result.candidates,
+      },
+      "[ai-retry-unanswered] resumo",
     );
   }
 

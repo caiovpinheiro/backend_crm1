@@ -16,6 +16,9 @@
  */
 
 import { unzipSync } from "fflate";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.knowledge-extract");
 
 /** Limite de bytes do arquivo enviado. */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -199,7 +202,7 @@ async function extractPdf(buffer: Buffer): Promise<string> {
     const result = await parser.getText({ pageJoiner: "" });
     return stripCalendarGrid((result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n")).trim();
   } catch (err) {
-    console.error("[knowledge] falha ao ler PDF:", err instanceof Error ? err.message : err);
+    log.error({ err: err instanceof Error ? err.message : err }, "[knowledge] falha ao ler PDF");
     throw new KnowledgeExtractError(
       "Não foi possível extrair texto do PDF. Verifique se o arquivo não está corrompido ou é uma imagem escaneada.",
     );

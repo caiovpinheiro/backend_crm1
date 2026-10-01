@@ -18,6 +18,9 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts, EMBEDDING_DIMENSIONS } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.embeddings");
 
 const CHUNK_SIZE = 3200;
 const CHUNK_OVERLAP = 300;
@@ -151,7 +154,7 @@ export function scheduleIndexing(docId: string, rawText: string) {
   // `aiIngestQueue.add("index", { docId })`.
   setImmediate(() => {
     void indexKnowledgeDoc(docId, rawText).catch((err) => {
-      console.error(`[ai] indexação falhou doc=${docId}:`, err);
+      log.error({ doc: docId, err }, "[ai] indexação falhou");
     });
   });
 }

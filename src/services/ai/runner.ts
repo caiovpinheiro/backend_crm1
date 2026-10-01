@@ -112,6 +112,9 @@ import {
   normalizeToolCallLimits,
   ToolCallGovernor,
 } from "@/services/ai/tool-governor";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.runner");
 
 /**
  * `inbox_test` é o inbound normal rodando com o MODO DE TESTE ligado na
@@ -371,7 +374,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           agentApiKey,
           4,
         ).catch((err) => {
-          console.warn(`[ai] RAG falhou, seguindo sem contexto: ${err}`);
+          log.warn({ err }, "[ai] RAG falhou, seguindo sem contexto");
           return { chunks: [], expired: [] };
         });
     const retrievedChunks = knowledge.chunks;
@@ -411,9 +414,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const retrievedModels = useMessageModelsRag
       ? await retrieveRelevantMessageModels(args.userMessage, 3).catch(
           (err) => {
-            console.warn(
-              `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
-            );
+            log.warn({ err }, "[ai] modelos internos RAG falhou, seguindo sem");
             return [];
           },
         )
@@ -454,7 +455,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
           args.conversationId ?? null,
           args.contactId ?? null,
         ).catch((err) => {
-          console.warn(`[ai] contexto de campanha falhou: ${err}`);
+          log.warn({ err }, "[ai] contexto de campanha falhou");
           return null;
         });
     const campaignDispatchBlock = formatCampaignDispatchBlock(campaignCtx);
@@ -783,12 +784,15 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
 
     const stepCountReached = result.steps >= maxSteps;
     if (stepCountReached) {
-      console.warn("[ai] maxSteps reached", {
-        agentId: agent.id,
-        conversationId: args.conversationId ?? null,
-        steps: result.steps,
-        maxSteps,
-      });
+      log.warn(
+        {
+          agentId: agent.id,
+          conversationId: args.conversationId ?? null,
+          steps: result.steps,
+          maxSteps,
+        },
+        "[ai] maxSteps reached",
+      );
     }
 
     for (const call of result.toolCalls) {
@@ -880,11 +884,14 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
       }
     }
     if (claimBlocked) {
-      console.warn("[ai] resposta descartada — efeito afirmado sem execução", {
-        agentId: agent.id,
-        conversationId: args.conversationId ?? null,
-        unsupported: effectAudit.unsupported,
-      });
+      log.warn(
+        {
+          agentId: agent.id,
+          conversationId: args.conversationId ?? null,
+          unsupported: effectAudit.unsupported,
+        },
+        "[ai] resposta descartada — efeito afirmado sem execução",
+      );
       await prisma.aIAgentMessage.create({
         data: withOrgFromCtx({
           runId: run.id,
@@ -931,11 +938,10 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
     const status: RunResult["status"] = statusForOutcome(outcome);
 
     if (governor.limitHit || governor.replays > 0) {
-      console.warn("[ai] tetos de tool acionados", {
-        agentId: agent.id,
-        conversationId: args.conversationId ?? null,
-        ...governor.stats(),
-      });
+      log.warn(
+        { agentId: agent.id, conversationId: args.conversationId ?? null, ...governor.stats() },
+        "[ai] tetos de tool acionados",
+      );
     }
 
     await prisma.aIAgentRun.update({

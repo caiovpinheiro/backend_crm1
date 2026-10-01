@@ -19,6 +19,9 @@ import {
   resolveAutoCloseTabulation,
   tabulationLogMeta,
 } from "@/services/tabulations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.close-ai-conversation");
 
 export type CloseAiConversationArgs = {
   conversationId: string;
@@ -164,7 +167,7 @@ export async function closeAiOnlyConversation(
         contactId: contactId ?? null,
       });
     } catch (e) {
-      console.warn("[ai-close] refino de vertical falhou", e);
+      log.warn({ err: e }, "[ai-close] refino de vertical falhou");
     }
   }
 

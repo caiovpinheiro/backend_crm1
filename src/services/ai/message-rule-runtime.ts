@@ -19,6 +19,9 @@ import {
 } from "@/services/deals";
 import { addTagToContact } from "@/services/tags";
 import type { VerticalPackOps } from "@/verticals/types";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.message-rule-runtime");
 
 export type MessageRuleOutcome =
   /// O turno segue para o modelo (base de conhecimento). Interceptos
@@ -70,8 +73,9 @@ async function applyRuleTag(
       select: { id: true },
     });
     if (!tag) {
-      console.error(
-        `[ai] regra de mensagem: tag "${tagName}" não existe no CRM — crie a tag antes de usá-la na regra.`,
+      log.error(
+        { tagName },
+        "[ai] regra de mensagem: tag não existe no CRM — crie a tag antes de usá-la na regra.",
       );
       return;
     }
@@ -82,7 +86,7 @@ async function applyRuleTag(
     if (already) return;
     await addTagToContact(contactId, tag.id);
   } catch (err) {
-    console.error("[ai] regra de mensagem: falha ao marcar tag", err);
+    log.error({ err }, "[ai] regra de mensagem: falha ao marcar tag");
   }
 }
 
@@ -128,11 +132,10 @@ export async function executeMessageRule(
         })
       : null;
     if (!owner) {
-      console.error("[ai] regra assign_owner: destino ausente nesta org", {
-        ruleId: rule.id,
-        ownerUserId,
-        conversationId: deps.conversationId,
-      });
+      log.error(
+        { ruleId: rule.id, ownerUserId, conversationId: deps.conversationId },
+        "[ai] regra assign_owner: destino ausente nesta org",
+      );
       return { kind: "continue" };
     }
     try {
@@ -147,12 +150,15 @@ export async function executeMessageRule(
       );
       await invalidateBoardsForPipelines(cluster.pipelineIds);
     } catch (err) {
-      console.error("[ai] regra assign_owner: falha ao atribuir", {
-        ruleId: rule.id,
-        ownerUserId: owner.id,
-        conversationId: deps.conversationId,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      log.error(
+        {
+          ruleId: rule.id,
+          ownerUserId: owner.id,
+          conversationId: deps.conversationId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "[ai] regra assign_owner: falha ao atribuir",
+      );
       return { kind: "continue" };
     }
     if (rule.message) {

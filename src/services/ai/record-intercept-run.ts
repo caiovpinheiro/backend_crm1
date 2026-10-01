@@ -18,6 +18,9 @@ import {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { statusForOutcome } from "@/services/ai/run-outcome";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.record-intercept-run");
 
 /**
  * Desfecho a partir do estado final da conversa. Escopo de tenant vem do
@@ -150,10 +153,10 @@ export async function recordInboxInterceptRun(args: {
     });
     return run?.id ?? null;
   } catch (err) {
-    console.warn("[ai] recordInboxInterceptRun failed", {
-      intercept: args.interceptName,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { intercept: args.interceptName, err: err instanceof Error ? err.message : String(err) },
+      "[ai] recordInboxInterceptRun failed",
+    );
     return null;
   }
 }

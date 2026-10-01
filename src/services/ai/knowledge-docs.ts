@@ -21,6 +21,9 @@ import {
   resolveAgentTimezone,
 } from "@/services/ai/human-queue-policy";
 import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.knowledge-docs");
 
 export const MAX_CONTENT_CHARS = 500_000;
 export const MAX_TITLE_CHARS = 200;
@@ -455,10 +458,13 @@ export async function healLegacyKnowledgeDocs(agentId: string): Promise<number> 
   });
   for (const doc of legacy) {
     await reindexKnowledgeDoc(agentId, doc.id).catch((err) => {
-      console.warn(`[ai] autocorreção de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+      log.warn(
+        { doc: doc.id, err: err instanceof Error ? err.message : err },
+        "[ai] autocorreção de material falhou",
+      );
     });
   }
-  if (legacy.length > 0) console.info(`[ai] ${legacy.length} material(is) em JSON reindexado(s) agent=${agentId}`);
+  if (legacy.length > 0) log.info({ count: legacy.length, agent: agentId }, "[ai] materiais em JSON reindexados");
   return legacy.length;
 }
 

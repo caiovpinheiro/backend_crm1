@@ -15,6 +15,9 @@ import { isOrgOwnedStorageUrl, isStorageUrlOfOrg, readStoredMediaForSend } from 
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
 import { traceStep } from "@/services/ai-v2/trace";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.send-agent-media");
 
 function kindFromMime(mime: string | null): "image" | "video" | "audio" | "document" {
   const t = (mime ?? "").toLowerCase();
@@ -246,7 +249,10 @@ async function preuploadToMeta(
     const finalMime = uploadMime !== "application/octet-stream" ? uploadMime : mime || found.mimeType || "application/octet-stream";
     return await metaClient.uploadMedia(found.buffer, finalMime, fileName || found.fileName);
   } catch (err) {
-    console.warn("[send-agent-media] upload prévio à Meta falhou; o worker tenta com o arquivo:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[send-agent-media] upload prévio à Meta falhou; o worker tenta com o arquivo",
+    );
     return undefined;
   }
 }

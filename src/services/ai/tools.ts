@@ -117,6 +117,9 @@ import {
 } from "@/services/ai/tool-governor";
 import type { ActivityType, Prisma } from "@prisma/client";
 import { getVerticalPack } from "@/verticals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.tools");
 
 export type RunContext = {
   /// User.id do agente AI (para logar autoria em atividades, deals etc).
@@ -1692,9 +1695,9 @@ function transferToAiAgentTool(ctx: RunContext) {
             }
           } catch (err) {
             openingStatus = "failed";
-            console.warn(
+            log.warn(
+              { err: err instanceof Error ? err.message : err },
               "[ai] speakOnAiTransfer opening failed",
-              err instanceof Error ? err.message : err,
             );
           }
         }

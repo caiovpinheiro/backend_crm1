@@ -103,6 +103,9 @@ import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { readTestMode } from "@/services/ai/test-mode";
 import { runAiTestTurn } from "@/services/ai/test-mode-turn";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.inbox-handler");
 
 export type InboundAIArgs = {
   conversationId: string;
@@ -456,7 +459,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         return;
       }
     } catch (e) {
-      console.error("[ai] phone allowlist in maybeReply — blocking", e);
+      log.error({ err: e }, "[ai] phone allowlist in maybeReply — blocking");
       return;
     }
 
@@ -1663,7 +1666,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     if (result.autonomyMode === "AUTONOMOUS" && args.channel === "meta") {
       if (!metaClient.configured) {
-        console.warn("[ai-inbox] Meta não configurado para este canal; gravando como rascunho.");
+        log.warn("[ai-inbox] Meta não configurado para este canal; gravando como rascunho.");
         await saveDraft(assignee.id, args.conversationId, text);
         await markRunResponseDiscarded({
           runId: result.runId,
@@ -1717,8 +1720,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const send = await metaClient.sendText(contact.phone, text);
         externalId = send.messages?.[0]?.id ?? null;
       } catch (err) {
-        console.error(
-          `[ai-inbox] Falha ao enviar resposta autônoma: ${err}. Salvando rascunho pro humano revisar.`,
+        log.error(
+          { err },
+          "[ai-inbox] Falha ao enviar resposta autônoma. Salvando rascunho pro humano revisar.",
         );
         logAi("send_failed", {
           conversationId: args.conversationId,
@@ -1777,9 +1781,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           agentUserId: assignee.id,
           attachments: result.followUpMedia,
         }).catch((err) => {
-          console.warn(
-            "[ai-inbox] follow-up media falhou:",
-            err instanceof Error ? err.message : err,
+          log.warn(
+            { err: err instanceof Error ? err.message : err },
+            "[ai-inbox] follow-up media falhou",
           );
           return 0;
         });
@@ -1833,9 +1837,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             agentUserId: assignee.id,
             attachments: result.followUpMedia,
           }).catch((err) => {
-            console.warn(
-              "[ai-inbox] follow-up media falhou:",
-              err instanceof Error ? err.message : err,
+            log.warn(
+              { err: err instanceof Error ? err.message : err },
+              "[ai-inbox] follow-up media falhou",
             );
             return 0;
           });
@@ -1863,7 +1867,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       durationMs: Date.now() - startedAt.getTime(),
     });
   } catch (err) {
-    console.error("[ai-inbox] erro não-fatal:", err);
+    log.error({ err }, "[ai-inbox] erro não-fatal");
     logAi("run_error", {
       conversationId: args.conversationId,
       error: err instanceof Error ? err.message : String(err),
@@ -1956,10 +1960,7 @@ async function applyHumanBehaviorBeforeSend(args: {
     try {
       await args.metaClient.markAsRead(wamid);
     } catch (err) {
-      console.warn(
-        "[ai-inbox] markAsRead falhou:",
-        err instanceof Error ? err.message : err,
-      );
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-inbox] markAsRead falhou");
     }
   }
 }

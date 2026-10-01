@@ -40,6 +40,9 @@ import {
   claimInboundMessageForAi,
   collectUnansweredInboundText,
 } from "@/services/ai/inbound-debounce";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.turn-manager");
 
 /** Piso da janela de debounce — o mesmo do debounce antigo. Debounce 0 */
 /** gera uma resposta por bolha (triplica "vou te conectar"). */
@@ -70,10 +73,7 @@ export type InboundTurnInput = {
 };
 
 function logTurn(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-turn]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-turn] ${event}`);
 }
 
 function envInt(name: string, fallback: number): number {
@@ -338,7 +338,7 @@ export async function onInboundMessageForAi(
       messageId: input.messageId,
       channel: input.channel,
     }).catch((err) => {
-      console.error("[ai-v2] #reset falhou", err);
+      log.error({ err }, "[ai-v2] #reset falhou");
       return false;
     });
     if (consumed) return;
@@ -354,7 +354,7 @@ export async function onInboundMessageForAi(
       channel: input.channel,
       messageId: input.messageId,
     }).catch((err) => {
-      console.error("[ai-test] comando falhou", err);
+      log.error({ err }, "[ai-test] comando falhou");
       return false;
     });
     if (consumed) return;
@@ -378,7 +378,7 @@ export async function onInboundMessageForAi(
         return;
       }
     } catch (e) {
-      console.error("[ai-turn] idle inbound check failed", e);
+      log.error({ err: e }, "[ai-turn] idle inbound check failed");
     }
   }
 
@@ -399,7 +399,7 @@ export async function onInboundMessageForAi(
       return;
     }
   } catch (e) {
-    console.error("[ai-turn] phone allowlist check failed — blocking", e);
+    log.error({ err: e }, "[ai-turn] phone allowlist check failed — blocking");
     return;
   }
 
@@ -455,10 +455,10 @@ export function armFastPath(turnId: string, dueAt: number): void {
   const timer = setTimeout(() => {
     fastPathTimers.delete(turnId);
     void promoteAndDispatchTurn(turnId).catch((err) => {
-      console.error("[ai-turn] fast path falhou", {
-        turnId,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      log.error(
+        { turnId, err: err instanceof Error ? err.message : String(err) },
+        "[ai-turn] fast path falhou",
+      );
     });
   }, delay);
   timer.unref?.();
@@ -502,10 +502,10 @@ async function isSimpleEngineTurn(conversationId: string): Promise<boolean> {
     })) as { assignedTo?: { aiAgentConfig?: { engine?: string } } } | null;
     return conv?.assignedTo?.aiAgentConfig?.engine === "simple";
   } catch (err) {
-    console.error("[ai-turn] isSimpleEngineTurn falhou", {
-      conversationId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      { conversationId, err: err instanceof Error ? err.message : String(err) },
+      "[ai-turn] isSimpleEngineTurn falhou",
+    );
     return false;
   }
 }
@@ -845,16 +845,19 @@ export async function runTurn(turn: {
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[ai-turn] runTurn falhou", { turnId: turn.id, err: message });
+    log.error({ turnId: turn.id, err: message }, "[ai-turn] runTurn falhou");
     await failOrRetryTurn(turn.id, turn.organizationId, message);
     // Falhou: o retry e o turno seguinte ficam com o sweeper.
     return;
   }
   void dispatchDeferredTurn(turn.conversationId, turn.id).catch((err) => {
-    console.error("[ai-turn] turno seguinte falhou", {
-      conversationId: turn.conversationId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      {
+        conversationId: turn.conversationId,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "[ai-turn] turno seguinte falhou",
+    );
   });
 }
 
@@ -950,11 +953,10 @@ export async function invalidateOpenTurns(
     }
     return res.count;
   } catch (err) {
-    console.error("[ai-turn] invalidateOpenTurns falhou", {
-      conversationId,
-      reason,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      { conversationId, reason, err: err instanceof Error ? err.message : String(err) },
+      "[ai-turn] invalidateOpenTurns falhou",
+    );
     return 0;
   }
 }

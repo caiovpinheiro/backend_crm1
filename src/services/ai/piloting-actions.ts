@@ -49,6 +49,9 @@ import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 import { createConversationEvent } from "@/services/conversation-events";
 import { rewriteMismatchedDaypartWish } from "@/services/ai/idle-followup";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.piloting-actions");
 
 /**
  * Busca o wamid (externalId) da mensagem INBOUND mais recente da
@@ -109,9 +112,9 @@ async function closeAttendanceIfFarewell(args: {
       replyText: args.text,
     });
   } catch (e) {
-    console.warn(
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
       "[ai-piloting] encerramento pós-despedida falhou",
-      e instanceof Error ? e.message : e,
     );
   }
 }
@@ -335,9 +338,9 @@ export async function sendAgentMessage(args: {
         try {
           await metaClient.markAsRead(inboundWamid);
         } catch (err) {
-          console.warn(
-            `[ai-piloting] markAsRead falhou conv=${args.conversationId}:`,
-            err instanceof Error ? err.message : err,
+          log.warn(
+            { conv: args.conversationId, err: err instanceof Error ? err.message : err },
+            "[ai-piloting] markAsRead falhou",
           );
         }
       }
@@ -391,8 +394,9 @@ export async function sendAgentMessage(args: {
         sentInteractive = true;
       } catch (err) {
         // Recusado (janela, formato): as opções seguem numeradas no texto.
-        console.warn(
-          `[ai-piloting] envio interativo falhou conv=${args.conversationId}: ${err}. Enviando como texto.`,
+        log.warn(
+          { conv: args.conversationId, err },
+          "[ai-piloting] envio interativo falhou. Enviando como texto.",
         );
       }
     }
@@ -407,8 +411,9 @@ export async function sendAgentMessage(args: {
         );
         externalId = send.messages?.[0]?.id ?? null;
       } catch (err) {
-        console.error(
-          `[ai-piloting] envio autônomo falhou conv=${args.conversationId}: ${err}. Gravando rascunho.`,
+        log.error(
+          { conv: args.conversationId, err },
+          "[ai-piloting] envio autônomo falhou. Gravando rascunho.",
         );
         return saveDraft(args.conversationId, args.agentUserId, text);
       }
@@ -533,9 +538,9 @@ export async function sendAgentMessage(args: {
       });
       return { status: "sent", messageId: saved.id };
     } catch (err) {
-      console.warn(
-        `[ai-piloting] Baileys send falhou conv=${args.conversationId}:`,
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { conv: args.conversationId, err: err instanceof Error ? err.message : err },
+        "[ai-piloting] Baileys send falhou",
       );
       return saveDraft(args.conversationId, args.agentUserId, text);
     }
