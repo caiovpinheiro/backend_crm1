@@ -503,7 +503,8 @@ export type AdvancedDealFilters = {
    * Filtros de conversa do contato (via Contact.conversations.some).
    * `conversationStatus`: "open" = alguma conversa não resolvida / "closed" = alguma resolvida.
    * `windowState`: janela 24h da Meta (WhatsApp Cloud), não é status RESOLVED.
-   * `lastMessageDirection`: "out" = última msg nossa / "in" = última msg do cliente.
+   * `lastMessageDirection`: "out" = última msg nossa / "in" = última msg do cliente,
+   *   olhando só as conversas não encerradas do contato.
    */
   conversationStatus?: "open" | "closed";
   windowState?: "open" | "closed";
@@ -976,8 +977,28 @@ export async function buildDealWhereFromFilters(
     const convSome: Prisma.ConversationWhereInput = {};
     if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
-    if (filters.lastMessageDirection === "in" || filters.lastMessageDirection === "out") {
-      convSome.lastMessageDirection = filters.lastMessageDirection;
+    const dir = filters.lastMessageDirection;
+    if (dir === "in" || dir === "out") {
+      // Só a conversa ATIVA conta. Antes bastava "alguma conversa" com a
+      // direção pedida: um contato com conversa antiga encerrada em que o
+      // cliente falou por último aparecia em "Mensagem recebida" mesmo com a
+      // conversa atual respondida — o filtro mostrava recebidas E enviadas.
+      // Regra: tem conversa não encerrada com a direção pedida e NENHUMA
+      // conversa não encerrada com a direção oposta.
+      convSome.lastMessageDirection = dir;
+      if (convSome.status === undefined) convSome.status = { not: "RESOLVED" };
+      conditions.push({
+        contact: {
+          is: {
+            conversations: {
+              none: {
+                status: { not: "RESOLVED" },
+                lastMessageDirection: dir === "in" ? "out" : "in",
+              },
+            },
+          },
+        },
+      });
     }
     if (Object.keys(convSome).length > 0) {
       conditions.push({ contact: { is: { conversations: { some: convSome } } } });
