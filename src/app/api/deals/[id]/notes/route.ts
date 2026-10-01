@@ -30,7 +30,7 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 
@@ -145,7 +145,7 @@ export async function POST(request: Request, ctx: Ctx) {
           // Notifica o inbox aberto em tempo real (mesmo padrão do
           // handler de messages/route.ts no envio outbound normal).
           try {
-            sseBus.publish("new_message", {
+            publishNewMessage({
               organizationId: conv.organizationId,
               conversationId: conv.id,
               contactId: conv.contactId,

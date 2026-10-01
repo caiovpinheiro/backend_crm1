@@ -20,6 +20,10 @@ const UNLISTED_NEW_MESSAGE_KEYS = [
   "assignedToId",
   "channelId",
   "cardOmitted",
+  // Escopo do board (só ids): sem eles quem não lista a conversa voltaria
+  // a refazer o board inteiro a cada mensagem da org.
+  "pipelineIds",
+  "dealIds",
 ] as const;
 
 export function redactNewMessageForUnlisted(

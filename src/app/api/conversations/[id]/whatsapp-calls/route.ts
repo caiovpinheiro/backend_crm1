@@ -13,7 +13,7 @@ import {
   sessionFromCallEventErrorsJson,
 } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import { publishWhatsappCall } from "@/lib/realtime-events";
 import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
 
 export const maxDuration = 30;
@@ -337,7 +337,7 @@ export async function POST(request: Request, context: RouteContext) {
           bizOpaque: bizOpaque || null,
         }),
       });
-      sseBus.publish("whatsapp_call", {
+      publishWhatsappCall({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,

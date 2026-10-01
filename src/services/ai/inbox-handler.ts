@@ -92,7 +92,7 @@ import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { createConversationEvent } from "@/services/conversation-events";
 import {
   hasAgentGreetedInCurrentAssignment,
@@ -1755,7 +1755,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           },
         })
         .catch(() => null);
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: getOrgIdOrNull(),
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -1889,7 +1889,7 @@ async function saveDraft(
       sendStatus: "draft",
     }),
   });
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: getOrgIdOrNull(),
     conversationId,
     direction: "out",

@@ -30,7 +30,7 @@ import { createMessageDedup } from "@/lib/message-dedup";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import {
   activeConversationOnAccountWhere,
@@ -641,7 +641,7 @@ async function processEvent(
   try {
     // Org do canal, não do contexto: o guard fail-closed do sse-bus
     // descarta o evento sem org e este ingest roda no worker.
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: hit.organizationId,
       conversationId: conversation.id,
       contactId: contact.id,

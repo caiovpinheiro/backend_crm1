@@ -8,7 +8,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { teamChatAudience } from "@/lib/sse-audience";
-import { sseBus } from "@/lib/sse-bus";
+import { publishTeamChat } from "@/lib/realtime-events";
 import { extractCrmRefsFromText, stripCrmUrls } from "@/lib/crm-internal-url";
 import { getSystemPresenceMap } from "@/services/system-presence";
 import {
@@ -220,10 +220,10 @@ export async function publishTeamChatEvent(
   const memberIds = roomId ? await loadRoomMemberUserIds(roomId) : [];
   const audienceUserIds = teamChatAudience(memberIds, extraAudience);
   const payloadMemberIds = memberIds.length > 0 ? memberIds : audienceUserIds;
-  sseBus.publish(
+  publishTeamChat(
     event,
     { organizationId, ...data, memberIds: payloadMemberIds },
-    { audienceUserIds },
+    audienceUserIds,
   );
 }
 

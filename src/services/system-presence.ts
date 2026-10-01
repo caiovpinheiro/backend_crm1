@@ -21,7 +21,7 @@
  */
 
 import { prismaBase } from "@/lib/prisma-base";
-import { sseBus } from "@/lib/sse-bus";
+import { publishSystemPresenceUpdate } from "@/lib/realtime-events";
 
 /**
  * Cadência do heartbeat (client) — 180s, pausado com aba oculta.
@@ -90,7 +90,7 @@ export async function recordHeartbeat(params: {
   `;
   const row = rows[0];
   if (row?.created) {
-    sseBus.publish("system_presence_update", {
+    publishSystemPresenceUpdate({
       organizationId,
       userId,
       systemOnline: true,
@@ -133,7 +133,7 @@ export async function sweepStaleSessions(): Promise<{ closed: number }> {
   `;
 
   for (const row of closed) {
-    sseBus.publish("system_presence_update", {
+    publishSystemPresenceUpdate({
       organizationId: row.organizationId,
       userId: row.userId,
       systemOnline: false,

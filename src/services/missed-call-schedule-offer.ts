@@ -4,7 +4,7 @@ import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 
@@ -143,7 +143,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
     }),
   }).catch(() => {});
 
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: getOrgIdOrNull(),
     conversationId: params.conversationId,
     contactId: params.contactId,

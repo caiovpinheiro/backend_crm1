@@ -11,7 +11,7 @@
 
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { updateConversationStatusInDb } from "@/services/conversations";
@@ -138,7 +138,7 @@ export async function closeAiOnlyConversation(
   }
 
   try {
-    sseBus.publish("conversation_timeline_updated", {
+    publishConversationTimelineUpdated({
       organizationId: conv.organizationId,
       conversationId: conv.id,
       type: "CONVERSATION_CLOSED",

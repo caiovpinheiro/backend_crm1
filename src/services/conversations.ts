@@ -36,7 +36,10 @@ import {
   getOrgIdOrThrow,
   getRequestContext,
 } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationTimelineUpdated,
+  publishConversationUpdated,
+} from "@/lib/realtime-events";
 import { logEvent, userIdForFk } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
@@ -2813,7 +2816,7 @@ export async function assignConversationsInline(params: {
         },
       }).catch(() => undefined);
       try {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: params.organizationId,
           conversationId,
           assignedToId: nextId,
@@ -2821,7 +2824,7 @@ export async function assignConversationsInline(params: {
             ? { type: result.conversation.assignedTo.type }
             : null,
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: params.organizationId,
           conversationId,
           type: "ASSIGNEE_CHANGED",
@@ -3112,7 +3115,7 @@ export async function updateConversationStatusInDb(
 
   if (followUp) {
     try {
-      sseBus.publish("conversation_updated", {
+      publishConversationUpdated({
         organizationId: updated.organizationId,
         conversationId: id,
         status: updated.status,
@@ -3180,7 +3183,7 @@ export async function updateConversationStatusInDb(
         },
       });
       try {
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: orgId,
           conversationId: id,
           type: "ASSIGNEE_CHANGED",
@@ -3519,13 +3522,13 @@ export async function resolveConversationsInline(params: {
       }
 
       try {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           status: "RESOLVED",
           closedAt: new Date().toISOString(),
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           type: "CONVERSATION_CLOSED",

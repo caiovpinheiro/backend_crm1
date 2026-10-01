@@ -15,7 +15,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { enqueueMetaAttach } from "@/lib/queue";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import {
   generateFileName,
   locateReusableStoredObject,
@@ -567,7 +567,7 @@ export async function POST(request: Request, context: RouteContext) {
         }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
         try {
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: conv.organizationId,
             conversationId: conv.id,
             contactId: conv.contactId,
@@ -656,7 +656,7 @@ export async function POST(request: Request, context: RouteContext) {
           source.mode === "reuse" && source.deferChatUntilSent === true;
         const publishChat = () => {
           try {
-            sseBus.publish("new_message", {
+            publishNewMessage({
               organizationId: conv.organizationId,
               conversationId: conv.id,
               contactId: conv.contactId,
@@ -774,7 +774,7 @@ export async function POST(request: Request, context: RouteContext) {
       }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,

@@ -18,7 +18,7 @@ import {
 } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 
 const log = getLogger("conversations.create");
@@ -175,7 +175,7 @@ export async function POST(request: Request) {
             },
           });
           try {
-            sseBus.publish("conversation_timeline_updated", {
+            publishConversationTimelineUpdated({
               organizationId: getOrgIdOrNull(),
               conversationId: conversation.id,
               type: "CONVERSATION_CREATED",
