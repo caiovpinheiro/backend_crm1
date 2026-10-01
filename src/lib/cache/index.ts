@@ -50,22 +50,25 @@
  *
  * ## Resiliencia
  *
- * ioredis multiplexa TODOS os GETs/SETs numa conexao so. `commandTimeout`
- * conta espera na fila: um GET grande (board ~500KB) atrasava authz/
- * inbox e disparava "Command timed out" em lote. Timeout envenena o
- * pipeline do ioredis (a resposta ainda chega). Por isso: timeout mais
- * folgado, `enableOfflineQueue: false`, reconnect no timeout, gzip em
- * payload grande, circuit breaker pra pular Redis uns segundos em vez
- * de pagar timeout em cada request.
+ * A conexao (timeouts, circuit breaker, db proprio via `REDIS_CACHE_URL`
+ * / `REDIS_CACHE_DB`) mora em `redis-client.ts`. Aqui: gzip em payload
+ * grande e fallback em memoria quando o Redis nao responde.
  */
 import { promisify } from "node:util";
 import { gzip, gunzip } from "node:zlib";
 
-import IORedis, { type Redis as IORedisClient } from "ioredis";
-
 import { getLogger } from "@/lib/logger";
 import { metrics, safeLabel } from "@/lib/metrics";
-import { isRedisWritable, waitForRedisWritable } from "@/lib/redis-ready";
+
+import {
+  circuitIsOpen,
+  getCacheClient as getClient,
+  noteFailure,
+  noteSuccess,
+  waitUntilCacheReady,
+} from "./redis-client";
+
+export { waitUntilCacheReady };
 
 const log = getLogger("cache");
 
@@ -75,11 +78,6 @@ const DEFAULT_TTL_SEC = 60;
 const LOCK_TTL_MS = 20_000;
 const STAMPEDE_RETRY_DELAY_MS = 150;
 const STAMPEDE_MAX_RETRIES = 50;
-
-const CONNECT_TIMEOUT_MS = 1_000;
-const COMMAND_TIMEOUT_MS = 2_000;
-const CIRCUIT_FAILURES_TO_OPEN = 5;
-const CIRCUIT_COOLDOWN_MS = 15_000;
 
 /** Prefixos ASCII que JSON.parse nunca aceita — valores gzipados. */
 const GZ_PREFIX = "gz1:";
@@ -109,136 +107,6 @@ const RELEASE_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] then
 else
   return 0
 end`;
-
-let redis: IORedisClient | null = null;
-let redisDisabled = false;
-let consecutiveFailures = 0;
-let circuitOpenUntil = 0;
-let lastCircuitLogAt = 0;
-
-function circuitIsOpen(): boolean {
-  return Date.now() < circuitOpenUntil;
-}
-
-function isTimeoutError(err: unknown): boolean {
-  return err instanceof Error && /timed out/i.test(err.message);
-}
-
-function resetClient(): void {
-  if (!redis) return;
-  const client = redis;
-  redis = null;
-  try {
-    client.disconnect();
-  } catch {
-    /* best-effort */
-  }
-}
-
-function noteSuccess(): void {
-  consecutiveFailures = 0;
-}
-
-function noteFailure(err: unknown, key: string, op: string): void {
-  consecutiveFailures += 1;
-  if (isTimeoutError(err)) {
-    resetClient();
-  }
-  if (
-    consecutiveFailures === 1 ||
-    consecutiveFailures === CIRCUIT_FAILURES_TO_OPEN
-  ) {
-    log.warn({ err, key, op, consecutiveFailures }, `[cache] ${op} falhou — fallback memoria`);
-  }
-  if (consecutiveFailures >= CIRCUIT_FAILURES_TO_OPEN) {
-    circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
-    consecutiveFailures = 0;
-    resetClient();
-    log.warn(
-      { cooldownMs: CIRCUIT_COOLDOWN_MS, key, op },
-      "[cache] circuit aberto — Redis ignorado temporariamente",
-    );
-  }
-}
-
-function ensureClient(): IORedisClient | null {
-  if (redisDisabled) return null;
-  if (circuitIsOpen()) {
-    if (Date.now() - lastCircuitLogAt > 5_000) {
-      lastCircuitLogAt = Date.now();
-      log.warn(
-        { retryInMs: circuitOpenUntil - Date.now() },
-        "[cache] circuit aberto — usando memoria",
-      );
-    }
-    return null;
-  }
-  if (redis) {
-    const status = redis.status;
-    if (status === "end" || status === "close") {
-      resetClient();
-    } else {
-      return redis;
-    }
-  }
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    redisDisabled = true;
-    log.info("[cache] REDIS_URL ausente — usando fallback in-memory.");
-    return null;
-  }
-  try {
-    redis = new IORedis(url, {
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: false,
-      enableOfflineQueue: false,
-      connectTimeout: CONNECT_TIMEOUT_MS,
-      commandTimeout: COMMAND_TIMEOUT_MS,
-      keepAlive: 10_000,
-      // ioredis 5 manda CLIENT SETINFO no handshake; conexoes presas nisso
-      // ficaram 19h idle em prod e nunca ficaram ready.
-      disableClientInfo: true,
-      lazyConnect: false,
-      retryStrategy(times) {
-        if (circuitIsOpen()) return null;
-        return Math.min(times * 200, 2_000);
-      },
-    });
-    redis.on("error", (err) => {
-      if (Date.now() - lastCircuitLogAt > 5_000) {
-        lastCircuitLogAt = Date.now();
-        log.warn({ err }, "[cache] redis client error (continuando com fallback)");
-      }
-      if (isTimeoutError(err)) resetClient();
-    });
-    return redis;
-  } catch (err) {
-    log.warn({ err }, "[cache] falha ao criar redis client — fallback");
-    redisDisabled = true;
-    return null;
-  }
-}
-
-/**
- * Cliente só quando o socket já aceita comando. Com
- * `enableOfflineQueue: false`, GET/SET em `connecting` vira
- * "Stream isn't writeable" e o circuit abre no boot do worker.
- */
-function getClient(): IORedisClient | null {
-  const client = ensureClient();
-  if (!client) return null;
-  if (!isRedisWritable(client)) return null;
-  return client;
-}
-
-/** Workers: espera o Redis do cache ficar ready antes do 1º job. */
-export async function waitUntilCacheReady(
-  timeoutMs = 8_000,
-): Promise<boolean> {
-  const client = ensureClient();
-  if (!client) return false;
-  return waitForRedisWritable(client, timeoutMs);
-}
 
 async function encode(value: unknown): Promise<string | null> {
   const json = JSON.stringify(value);
