@@ -14,6 +14,9 @@ import {
   validateV2Config,
 } from "@/lib/ai-v2/config";
 import { anthropicKeyFields, openaiKeyFields } from "@/services/ai-v2/agent-key";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.agents");
 
 export type V2AgentListItem = {
   id: string;
@@ -69,7 +72,10 @@ async function todayStats(organizationId: string, agentIds: string[]): Promise<M
       out.set(r.agentId, cur);
     }
   } catch (err) {
-    console.warn("[listV2Agents] números de hoje indisponíveis:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[listV2Agents] números de hoje indisponíveis",
+    );
   }
   return out;
 }
@@ -109,7 +115,10 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
       try {
         return normalizeV2Config(raw);
       } catch (err) {
-        console.error(`[listV2Agents] ${label} invalido em ${r.id}:`, err instanceof z.ZodError ? formatZodIssues(err) : err);
+        log.error(
+          { label, agentId: r.id, err: err instanceof z.ZodError ? formatZodIssues(err) : err },
+          "[listV2Agents] config invalida",
+        );
         return null;
       }
     };
@@ -200,7 +209,7 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       where: { id },
       select: { organizationId: true, engine: true, userId: true },
     });
-    console.error(`[getV2Agent] not found id=${id} org=${organizationId} engine=simple; anyRow=`, anyRow);
+    log.error({ id, org: organizationId, anyRow }, "[getV2Agent] not found (engine=simple)");
     return null;
   }
   try {
@@ -230,7 +239,7 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai-v2] invalid config for agent", id, err);
+    log.error({ id, err }, "[ai-v2] invalid config for agent");
     throw new Error(`Configuração inválida para o agente ${id}: ${msg}`);
   }
 }

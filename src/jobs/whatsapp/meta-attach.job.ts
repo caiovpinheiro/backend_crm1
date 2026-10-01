@@ -19,7 +19,7 @@ import { getDecryptedChannelConfig } from "@/lib/channels/config";
 import { formatMetaSendError, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import type { MetaAttachKind, MetaAttachPayload } from "@/lib/queue";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageStatus } from "@/lib/realtime-events";
 import {
   mimeFromFilename,
   parseStoragePath,
@@ -29,6 +29,10 @@ import {
 } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("jobs.whatsapp.meta-attach");
 
 export type MetaAttachResult = {
   sendStatus: "sent" | "failed";
@@ -58,7 +62,7 @@ function publishStatus(
   error?: string | null,
 ) {
   try {
-    sseBus.publish("message_status", {
+    publishMessageStatus({
       organizationId,
       conversationId,
       messageId,
@@ -181,33 +185,61 @@ export async function processMetaAttach(
     };
   }
 
+  // Quem enfileirou já subiu o arquivo para a Meta (a API, onde ele existe):
+  // envia pelo id, sem precisar do arquivo neste processo. Áudio nunca vem
+  // assim — a conversão é aqui.
+  const preUploadedId = kind !== "audio" && payload.mediaId?.trim() ? payload.mediaId.trim() : null;
+
   const storedPath = msg.mediaUrl ? parseStoragePath(msg.mediaUrl) : null;
   let stored: { buffer: Buffer; mimeType: string } | null = null;
   let storedFileName = storedPath?.fileName ?? payload.originalName ?? "file";
 
-  if (storedPath && storedPath.orgId === payload.organizationId) {
-    stored = await readStoredFile(
-      storedPath.orgId,
-      storedPath.bucket,
-      storedPath.fileName,
-    );
-  } else if (msg.mediaUrl?.startsWith("/uploads/") || msg.mediaUrl?.startsWith("/api/uploads/")) {
-    const relative = msg.mediaUrl.replace(/^\/api/, "").replace(/^\/uploads\//, "");
-    stored = await readLegacyUploadsFile(relative);
-    storedFileName = relative.split("/").pop() || storedFileName;
-  }
-
-  if (!stored?.buffer.length) {
-    if (!storedPath || storedPath.orgId !== payload.organizationId) {
-      return markFailed(payload, "Arquivo não encontrado no storage.", {
-        messageType: kind,
-      });
+  if (!preUploadedId) {
+    if (storedPath && storedPath.orgId === payload.organizationId) {
+      stored = await readStoredFile(
+        storedPath.orgId,
+        storedPath.bucket,
+        storedPath.fileName,
+      );
+    } else if (msg.mediaUrl?.startsWith("/uploads/") || msg.mediaUrl?.startsWith("/api/uploads/")) {
+      const relative = msg.mediaUrl.replace(/^\/api/, "").replace(/^\/uploads\//, "");
+      stored = await readLegacyUploadsFile(relative);
+      storedFileName = relative.split("/").pop() || storedFileName;
     }
-    return markFailed(payload, "Arquivo vazio ou ilegível.", { messageType: kind });
+
+    // Sem o arquivo neste processo: mesmo read do envio de mídia das
+    // automações — variantes de nome (mp4↔MP4, jpg↔jpeg), /uploads legado e
+    // GET no servidor da API (STORAGE_PEER_URL / NEXTAUTH_URL com
+    // CRON_SECRET). Com storage em disco (sem S3), o arquivo gravado pela API
+    // não existe no volume do worker de WhatsApp: o anexo de modelo falhava
+    // enquanto o inbox mostrava o vídeo.
+    if (!stored?.buffer.length && storedPath && storedPath.orgId === payload.organizationId && msg.mediaUrl) {
+      const { readStoredMediaForSend } = await import("@/lib/storage/read-for-send");
+      const found = await readStoredMediaForSend(msg.mediaUrl).catch(() => null);
+      if (found?.buffer.length) {
+        stored = { buffer: found.buffer, mimeType: found.mimeType };
+        storedFileName = found.fileName;
+      }
+    }
+
+    if (!stored?.buffer.length) {
+      if (!storedPath || storedPath.orgId !== payload.organizationId) {
+        return markFailed(payload, "Arquivo não encontrado no storage.", {
+          messageType: kind,
+        });
+      }
+      // Sem objeto nenhum ≠ objeto vazio: "vazio ou ilegível" escondia que o
+      // arquivo não existe no storage (upload não concluído, trocado ou apagado).
+      return markFailed(
+        payload,
+        stored ? "Arquivo vazio ou ilegível." : "Arquivo não encontrado no storage — envie o arquivo de novo.",
+        { messageType: kind },
+      );
+    }
   }
 
   const classifiedMime = resolveOutboundAttachmentMime({
-    rawType: payload.mime || stored.mimeType,
+    rawType: payload.mime || stored?.mimeType || "",
     fileNames: [payload.originalName, storedFileName],
   });
   if (classifiedMime.startsWith("video/") && kind === "audio") {
@@ -220,27 +252,29 @@ export async function processMetaAttach(
   let uploadMime =
     classifiedMime !== "application/octet-stream"
       ? classifiedMime
-      : payload.mime || stored.mimeType || "application/octet-stream";
+      : payload.mime || stored?.mimeType || "application/octet-stream";
   let uploadName = payload.originalName || storedFileName;
-  let storeBuffer = stored.buffer;
+  let storeBuffer = stored?.buffer ?? Buffer.alloc(0);
+  const originalBytes = storeBuffer.length;
 
   if (kind === "video") {
     if (!uploadMime.startsWith("video/")) {
       const fromName = mimeFromFilename(uploadName);
       uploadMime = fromName.startsWith("video/") ? fromName : "video/mp4";
     }
-    if (storeBuffer.length > WHATSAPP_VIDEO_MAX_BYTES) {
+    if (!preUploadedId && storeBuffer.length > WHATSAPP_VIDEO_MAX_BYTES) {
       return markFailed(payload, WHATSAPP_VIDEO_TOO_LARGE_MESSAGE, { messageType: "video" });
     }
   }
 
   if (kind === "audio") {
     const inputExt = guessInputExt(payload.mime);
-    console.log(
-      `[meta-attach] Convertendo audio ${payload.mime} (.${inputExt}) para formato aceito pela Meta`,
+    log.info(
+      { mime: payload.mime, inputExt },
+      "[meta-attach] Convertendo audio para formato aceito pela Meta",
     );
     const prepared = await prepareWhatsAppAudio(
-      stored.buffer,
+      storeBuffer,
       inputExt,
       payload.originalName,
     );
@@ -249,8 +283,9 @@ export async function processMetaAttach(
     }
     const blocked = metaCloudAudioUploadBlocked(prepared.payload);
     if (blocked) {
-      console.warn(
-        `[meta-attach] Áudio não enviável à Meta (${prepared.payload.failReason ?? prepared.payload.mime})`,
+      log.warn(
+        { failReason: prepared.payload.failReason ?? prepared.payload.mime },
+        "[meta-attach] Áudio não enviável à Meta",
       );
       return markFailed(payload, blocked, {
         messageType: "audio",
@@ -263,8 +298,15 @@ export async function processMetaAttach(
     uploadMime = prepared.payload.mime;
     uploadName = prepared.payload.fileName;
     storeBuffer = prepared.payload.buffer;
-    console.log(
-      `[meta-attach] Preparo OK (${audioDelivery}), ${stored.buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+    log.info(
+      {
+        audioDelivery,
+        originalBytes,
+        storedBytes: storeBuffer.length,
+        mime: uploadMime,
+        voice: sendAsVoice,
+      },
+      "[meta-attach] Preparo OK",
     );
   }
 
@@ -306,7 +348,7 @@ export async function processMetaAttach(
   let metaSendError: string | null = null;
 
   try {
-    const mediaId = await metaClient.uploadMedia(storeBuffer, uploadMime, uploadName);
+    const mediaId = preUploadedId ?? (await metaClient.uploadMedia(storeBuffer, uploadMime, uploadName));
     const result = await metaClient.sendMediaById(
       to,
       mediaId,
@@ -317,12 +359,22 @@ export async function processMetaAttach(
       recipient,
     );
     externalId = result.messages?.[0]?.id ?? null;
-    console.log(
-      `[meta-attach] Enviado ${mediaType} (${to ?? "—"}/${recipient ?? "—"}) | channel=${channel?.id ?? "ENV"} | mime=${uploadMime} | mediaId=${mediaId} | wamid=${externalId} | voice=${sendAsVoice}`,
+    log.info(
+      {
+        mediaType,
+        to: maskPhone(to),
+        recipient: recipient ?? null,
+        channel: channel?.id ?? "ENV",
+        mime: uploadMime,
+        mediaId,
+        wamid: externalId,
+        voice: sendAsVoice,
+      },
+      "[meta-attach] Enviado",
     );
   } catch (err) {
     const errMsg = formatMetaSendError(err);
-    console.error("[meta-attach] Falha ao enviar para Meta:", errMsg);
+    log.error({ err: errMsg }, "[meta-attach] Falha ao enviar para Meta");
     metaSendError = errMsg;
   }
 
@@ -361,7 +413,7 @@ export async function processMetaAttach(
   fireTrigger("message_sent", {
     contactId: msg.conversation.contactId,
     data: { channel: "WhatsApp", content: payload.caption || "[Anexo]" },
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
   return {
     sendStatus: "sent",

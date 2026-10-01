@@ -235,6 +235,7 @@ export async function uploadCallRecording(params: {
       { method: "POST", body: form },
     );
   } catch (err) {
+    // eslint-disable-next-line no-console -- código de cliente ("use client"); o logger é só de servidor
     console.warn("[call-recording] upload falhou:", err);
   }
 }

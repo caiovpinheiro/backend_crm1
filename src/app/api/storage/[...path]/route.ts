@@ -15,7 +15,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { applyBrowserApiCors } from "@/lib/browser-api-cors";
+import { applyBrowserApiCors } from "@/lib/browser-api-cors-node";
 import {
   isStorageReuseBucket,
   mimeFromFilename,
@@ -26,13 +26,46 @@ import {
   statStoredFile,
 } from "@/lib/storage/local";
 import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
+import { authorizeStorageObject } from "@/lib/storage-object-access";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/storage/[...path]");
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
-function withStorageCors(request: Request, res: Response): Response {
-  applyBrowserApiCors(request, res);
-  return res;
+/**
+ * Buckets de anexo enviados por usuários/contatos (SEC2-3/SEC2-12):
+ * documentos saem como download (`attachment`); imagem/áudio/vídeo
+ * continuam `inline` porque são renderizados por <img>/<audio>/<video>
+ * e já passam pelo sniff de magic bytes no upload.
+ */
+const ATTACHMENT_BUCKETS = new Set<string>(["attachments", "keeps", "inbound-media"]);
+
+function contentDisposition(bucket: string, fileName: string, mimeType: string): string {
+  const safeName = fileName.replace(/[^\w.\-]+/g, "_").slice(0, 120) || "arquivo";
+  const isMedia =
+    mimeType.startsWith("image/") ||
+    mimeType.startsWith("audio/") ||
+    mimeType.startsWith("video/");
+  const kind = ATTACHMENT_BUCKETS.has(bucket) && !isMedia ? "attachment" : "inline";
+  return `${kind}; filename="${safeName}"`;
+}
+
+async function withStorageCors(request: Request, res: Response): Promise<Response> {
+  try {
+    await applyBrowserApiCors(request, res);
+    return res;
+  } catch {
+    // `Response` vinda de `fetch` (fallback upstream) tem headers imutáveis.
+    const copy = new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: new Headers(res.headers),
+    });
+    await applyBrowserApiCors(request, copy);
+    return copy;
+  }
 }
 
 /** Worker sem cookie: mesmo segredo dos crons. Não aceita `?secret=` (vaza em log). */
@@ -75,14 +108,29 @@ export async function GET(request: Request, context: RouteContext) {
   } else {
     // Multi-tenancy enforcement: só super-admin atravessa orgs.
     const sUser = session!.user as {
+      id: string;
       organizationId?: string | null;
       isSuperAdmin?: boolean;
+      role?: string | null;
     };
     const sessionOrgId = sUser.organizationId ?? null;
     const isSuperAdmin = Boolean(sUser.isSuperAdmin);
 
     if (!isSuperAdmin && sessionOrgId !== parsed.orgId) {
       // 404 (e não 403) pra não confirmar existência.
+      return withStorageCors(
+        request,
+        NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
+      );
+    }
+
+    const allowed = await authorizeStorageObject({
+      userId: sUser.id,
+      organizationId: sessionOrgId,
+      isSuperAdmin,
+      role: sUser.role ?? null,
+    }, parsed);
+    if (!allowed) {
       return withStorageCors(
         request,
         NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
@@ -149,7 +197,7 @@ export async function GET(request: Request, context: RouteContext) {
                 "Content-Range": `bytes ${start}-${end}/${total}`,
                 "Accept-Ranges": "bytes",
                 "Cache-Control": "private, max-age=300",
-                "X-Storage-Tenant": parsed.orgId,
+                "Content-Disposition": contentDisposition(parsed.bucket, parsed.fileName, mimeType),
               },
             }),
           );
@@ -173,7 +221,7 @@ export async function GET(request: Request, context: RouteContext) {
           "Content-Length": String(file.size),
           "Cache-Control": "private, max-age=300",
           "Accept-Ranges": "bytes",
-          "X-Storage-Tenant": parsed.orgId,
+          "Content-Disposition": contentDisposition(parsed.bucket, parsed.fileName, file.mimeType),
         },
       }),
     );
@@ -194,7 +242,7 @@ export async function GET(request: Request, context: RouteContext) {
           "Content-Length": String(aliasFile.size),
           "Cache-Control": "private, max-age=300",
           "Accept-Ranges": "bytes",
-          "X-Storage-Tenant": parsed.orgId,
+          "Content-Disposition": contentDisposition(parsed.bucket, name, aliasFile.mimeType),
         },
       }),
     );
@@ -212,9 +260,18 @@ export async function GET(request: Request, context: RouteContext) {
         },
         buf,
       ).catch((err) => {
-        console.warn("[storage] write-through do fallback falhou:", err);
+        log.warn({ err }, "[storage] write-through do fallback falhou");
       });
       const headers = new Headers(fallback.headers);
+      headers.delete("X-Storage-Tenant");
+      headers.set(
+        "Content-Disposition",
+        contentDisposition(
+          parsed.bucket,
+          parsed.fileName,
+          headers.get("content-type") ?? mimeFromFilename(parsed.fileName),
+        ),
+      );
       return withStorageCors(
         request,
         new Response(new Uint8Array(buf), {

@@ -1,26 +1,12 @@
 import { extForMime, sniffImageMime } from "@/lib/file-sniff";
 import { prisma } from "@/lib/prisma";
+import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
+import { readResponseBodyLimited } from "@/lib/media-byte-limits";
 
 import { generateFileName, saveFile, type OrgOwnedReuseUrl } from "./local";
 
 const MAX_BYTES = 16 * 1024 * 1024;
 const FETCH_MS = 15_000;
-
-function isBlockedHostname(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h === "0.0.0.0" || h.endsWith(".local")) {
-    return true;
-  }
-  if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(h)) {
-    return true;
-  }
-  if (h.includes(":")) {
-    if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:")) {
-      return true;
-    }
-  }
-  return false;
-}
 
 /**
  * Capa de produto fora do storage (ex.: i.ibb.co) não passa em
@@ -41,7 +27,11 @@ export async function ingestProductCoverForReuse(
     return null;
   }
   if (parsed.protocol !== "https:") return null;
-  if (isBlockedHostname(parsed.hostname)) return null;
+  try {
+    await assertSafeOutboundUrl(reuseUrl);
+  } catch {
+    return null;
+  }
 
   const owned = await prisma.product.findFirst({
     where: { organizationId: orgId, imageUrl: reuseUrl },
@@ -55,7 +45,7 @@ export async function ingestProductCoverForReuse(
   try {
     res = await fetch(reuseUrl, {
       signal: ac.signal,
-      redirect: "follow",
+      redirect: "error",
       headers: { "User-Agent": "Mozilla/5.0 (compatible; BwipoCRM/1.0)" },
     });
   } catch {
@@ -68,7 +58,12 @@ export async function ingestProductCoverForReuse(
   const len = Number(res.headers.get("content-length") ?? "0");
   if (len > MAX_BYTES) return null;
 
-  const buf = Buffer.from(await res.arrayBuffer());
+  let buf: Buffer;
+  try {
+    buf = await readResponseBodyLimited(res, MAX_BYTES);
+  } catch {
+    return null;
+  }
   if (buf.length === 0 || buf.length > MAX_BYTES) return null;
 
   const mime = sniffImageMime(buf);

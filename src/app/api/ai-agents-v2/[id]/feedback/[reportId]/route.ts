@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { cancelFeedbackReport, getFeedbackReport } from "@/services/ai-v2/feedback";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/feedback/[reportId]");
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string; reportId: string }> }) {
   const { id, reportId } = await params;
@@ -14,7 +17,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       if (!data) return NextResponse.json({ message: "Relatório não encontrado." }, { status: 404 });
       return NextResponse.json(data);
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/feedback/[reportId]]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/feedback/[reportId]]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao carregar o relatório." }, { status: 500 });
     }
   });

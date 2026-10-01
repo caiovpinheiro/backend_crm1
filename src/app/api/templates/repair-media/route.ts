@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { repairOrgTemplateMedia } from "@/lib/storage/repair-template-media";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/templates/repair-media");
 
 export const maxDuration = 300;
 
@@ -43,7 +46,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json(result);
   } catch (e) {
-    console.error("[templates/repair-media]", e);
+    log.error({ err: e }, "[templates/repair-media] falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao reparar mídias." },
       { status: 500 },

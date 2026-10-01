@@ -18,6 +18,9 @@ import {
   provisionMessagingChannel,
   type MessagingPlatform,
 } from "@/services/channels-messaging-provision";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/meta-messaging/connect");
 
 function parsePlatform(value: unknown): MessagingPlatform | null {
   if (value === "messenger" || value === "instagram") return value;
@@ -87,7 +90,7 @@ export async function POST(request: Request) {
       if (e instanceof MessagingProvisionError) {
         return NextResponse.json({ message: e.message }, { status: e.status });
       }
-      console.error("[meta-messaging/connect] erro:", e);
+      log.error({ err: e }, "[meta-messaging/connect] erro");
       const msg = e instanceof Error ? e.message : "Erro ao conectar canal.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }

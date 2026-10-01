@@ -4,10 +4,26 @@
  * Centralizar aqui evita typo entre callers e permite refactor em
  * massa sem caca-fantasmas. NAO concatenar strings ad-hoc nas rotas
  * — sempre via builder.
+ *
+ * ## Famílias com versão
+ *
+ * Quando a invalidação cobre "todas as chaves de X" (todas as variantes
+ * do board de um pipeline, todos os contadores de uma org), a chave embute
+ * o número de versão da família (`v<n>`) e invalidar é um INCR em
+ * `cache:v:<família>:<org>[:<pipeline>]` — ver `versions.ts`. Por isso os
+ * builders dessas chaves são `async`: eles leem a versão (memória do
+ * processo, no máximo uma ida ao Redis a cada 500 ms). Nada aqui chama
+ * `cache.delPattern` (SCAN).
  */
 import { createHash } from "node:crypto";
 
 import { cache } from "./index";
+import {
+  bumpCacheVersion,
+  cacheVersionName,
+  getCacheVersion,
+  getCacheVersions,
+} from "./versions";
 
 // ── Channel ─────────────────────────────────────────────────────
 //
@@ -22,6 +38,130 @@ export function channelKey(id: string): string {
 
 export async function invalidateChannel(id: string): Promise<void> {
   await cache.del(channelKey(id));
+}
+
+// ── Lookups de canal dos webhooks (`wh_ctx:*`, `meta_wh:*`) ─────
+//
+// Respondem "de que org/canal é este identificador?" (phone_number_id,
+// entry.id, sessionId…) e guardam os appSecrets para validar a assinatura.
+// Antes, qualquer create/update/delete de canal de QUALQUER org apagava
+// tudo com `delPattern("meta_wh:*")` + `delPattern("wh_ctx:*")` (SCAN do
+// Redis inteiro, e as outras orgs perdiam o cache junto).
+//
+// Agora a invalidação é por org, com versão (`cache:v:channel:<org>`):
+//
+// - appSecrets de uma org: a versão da org vai na chave.
+// - identificador → org: a org é a RESPOSTA do lookup, então não dá pra
+//   pôr a versão dela na chave. O valor guardado leva um carimbo
+//   `{ o: org, v: versão }` e só vale se a versão da org `o` ainda for a
+//   mesma (`wrapChannelLookup`).
+// - "não mapeado" (`o: null`) e a lista global de appSecrets (webhook sem
+//   slug) não pertencem a org nenhuma: usam a versão `cache:v:channel:_all`,
+//   que sobe a cada escrita de canal — é o que cobre o POST que cacheou
+//   "não mapeado" pouco antes do onboarding do canal novo.
+//
+// Limite conhecido: se a org B cadastra um identificador que está em cache
+// apontando para a org A (mesmo número em duas orgs), a entrada da org A
+// não é invalidada e vale até o TTL (60 s `meta_wh`, 300 s `wh_ctx`).
+
+/** Escopo "qualquer org" da família `channel`. */
+const CHANNEL_ANY_ORG = "_all";
+
+function channelVersion(orgId: string | null): string {
+  return cacheVersionName("channel", orgId ?? CHANNEL_ANY_ORG);
+}
+
+export type WebhookContextLookupBy =
+  | "channelId"
+  | "phoneNumber"
+  | "metaPhoneNumberId"
+  | "baileysSessionId";
+
+// O `s` marca o formato carimbado: um processo ainda na versão anterior
+// (deploy em andamento) lê as chaves antigas e não tropeça no valor novo.
+export function webhookContextKey(by: WebhookContextLookupBy, value: string): string {
+  return `wh_ctx:s:${by}:${value}`;
+}
+
+export function metaWebhookPhoneKey(phoneNumberId: string): string {
+  return `meta_wh:s:phone:${phoneNumberId}`;
+}
+
+export function metaWebhookMessagingKey(platform: string, entryId: string): string {
+  return `meta_wh:s:msg:${platform}:${entryId}`;
+}
+
+/** `orgId` nulo = webhook sem slug (appSecrets de todas as orgs). */
+export async function metaWebhookSecretsKey(orgId: string | null): Promise<string> {
+  const version = await getCacheVersion(channelVersion(orgId));
+  return `meta_wh:secrets:${orgId ?? "global"}:v${version}`;
+}
+
+type StampedChannelLookup<T> = {
+  /** Org do resultado; `null` = identificador não mapeado. */
+  o: string | null;
+  /** Versão de `channel:<o>` (ou `channel:_all`) quando foi gravado. */
+  v: string;
+  d: T | null;
+};
+
+function isStampedChannelLookup(value: unknown): value is StampedChannelLookup<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return (
+    (rec.o === null || typeof rec.o === "string") &&
+    typeof rec.v === "string" &&
+    "d" in rec
+  );
+}
+
+/**
+ * Cache-aside de um lookup identificador → org/canal. A entrada só vale
+ * enquanto a versão de canais da org do resultado não mudar.
+ */
+export async function wrapChannelLookup<T extends { organizationId: string }>(
+  key: string,
+  ttlSec: number,
+  loader: () => Promise<T | null>,
+): Promise<T | null> {
+  const entry = await cache.wrap<StampedChannelLookup<T>>(
+    key,
+    ttlSec,
+    async () => {
+      // Lida ANTES da consulta: canal criado durante ela já deixa o "não
+      // mapeado" vencido. Para o resultado positivo a org só é conhecida
+      // depois — fica a mesma janela de corrida do delete-depois-do-load.
+      const anyOrgVersion = await getCacheVersion(channelVersion(null));
+      const d = await loader();
+      const o = d?.organizationId ?? null;
+      const v = o ? await getCacheVersion(channelVersion(o)) : anyOrgVersion;
+      return { o, v, d };
+    },
+    {
+      accept: async (cached) =>
+        isStampedChannelLookup(cached) &&
+        cached.v === (await getCacheVersion(channelVersion(cached.o))),
+    },
+  );
+  return entry.d;
+}
+
+/**
+ * Chame em todo create/update/delete de canal. Invalida os lookups e os
+ * appSecrets da org do canal, mais os "não mapeado" e a lista global de
+ * appSecrets. Dois INCR — não toca nas entradas das outras orgs.
+ */
+export async function invalidateChannelLookups(
+  orgId: string | null | undefined,
+): Promise<void> {
+  try {
+    await bumpCacheVersion(
+      ...(orgId ? [channelVersion(orgId)] : []),
+      channelVersion(null),
+    );
+  } catch {
+    /* best-effort — o TTL cobre a falha */
+  }
 }
 
 // ── AIAgentConfig ───────────────────────────────────────────────
@@ -97,8 +237,20 @@ export async function invalidateUser(id: string): Promise<void> {
 // catálogo é propriedade da WABA: uma org com dois canais na mesma WABA
 // compartilha o cache, e dois canais em WABAs distintas não se misturam.
 
-export function whatsappTemplateCatalogKey(orgId: string, wabaId: string): string {
-  return `wa_tpl_catalog:${orgId}:${wabaId}`;
+//
+// Versão por org (`cache:v:wa_tpl_catalog:<org>`): limpar "todas as WABAs
+// da org" é um INCR; com `wabaId` apaga a chave exata.
+
+function whatsappTemplateCatalogVersion(orgId: string): string {
+  return cacheVersionName("wa_tpl_catalog", orgId);
+}
+
+export async function whatsappTemplateCatalogKey(
+  orgId: string,
+  wabaId: string,
+): Promise<string> {
+  const version = await getCacheVersion(whatsappTemplateCatalogVersion(orgId));
+  return `wa_tpl_catalog:${orgId}:v${version}:${wabaId}`;
 }
 
 /** Sem `wabaId`, limpa o catálogo de todas as WABAs da org. */
@@ -109,9 +261,9 @@ export async function invalidateWhatsappTemplateCatalog(
   if (!orgId) return;
   try {
     if (wabaId && wabaId.trim().length > 0) {
-      await cache.del(whatsappTemplateCatalogKey(orgId, wabaId.trim()));
+      await cache.del(await whatsappTemplateCatalogKey(orgId, wabaId.trim()));
     } else {
-      await cache.delPattern(`wa_tpl_catalog:${orgId}:*`);
+      await bumpCacheVersion(whatsappTemplateCatalogVersion(orgId));
     }
   } catch {
     /* best-effort */
@@ -125,14 +277,35 @@ export async function invalidateWhatsappTemplateCatalog(
 // stampede; badges aceitam stale. NÃO purgar em cada `new_message`
 // (preview) — isso era o storm de CPU. Purgar só quando o ticket
 // muda de aba.
+//
+// A query histórica (todos/resolvidos/finalizados) varre todas as
+// conversas da org (~620 ms) e tem cache próprio (`hist`, TTL maior).
+// A invalidação troca a versão só das chaves ativas
+// (`cache:v:inbox_tab_counts:<org>`); a histórica não embute versão e
+// expira pelo TTL.
 
-export function inboxTabCountsKey(orgId: string, scopeFp: string): string {
-  return `inbox_tab_counts:${orgId}:${scopeFp}`;
+/** Tamanho do hash de escopo (`inboxTabCountsScopeFp`). */
+export const INBOX_TAB_COUNTS_FP_LENGTH = 20;
+
+function inboxTabCountsVersion(orgId: string): string {
+  return cacheVersionName("inbox_tab_counts", orgId);
+}
+
+export async function inboxTabCountsKey(
+  orgId: string,
+  scopeFp: string,
+): Promise<string> {
+  const version = await getCacheVersion(inboxTabCountsVersion(orgId));
+  return `inbox_tab_counts:${orgId}:v${version}:${scopeFp}`;
+}
+
+export function inboxTabCountsHistKey(orgId: string, scopeFp: string): string {
+  return `inbox_tab_counts:${orgId}:hist:${scopeFp}`;
 }
 
 export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
   try {
-    await cache.delPattern(`inbox_tab_counts:${orgId}:*`);
+    await bumpCacheVersion(inboxTabCountsVersion(orgId));
   } catch {
     /* best-effort */
   }
@@ -245,9 +418,9 @@ export async function invalidatePipelines(orgId: string): Promise<void> {
 
 // ── Stage Metrics (headers do Kanban) ───────────────────────────
 //
-// computeStageMetrics varre o pipeline inteiro a cada carga do board.
-// Cache-aside com TTL curto (60s) em getStageMetrics reduz para 1
-// computacao/60s sob rajada. Chave por org + pipeline.
+// computeStageMetrics agrega os deals abertos do pipeline a cada carga do
+// board. Cache-aside (TTL STAGE_METRICS_TTL_SEC em analytics.ts) reduz
+// para 1 computacao por TTL sob rajada. Chave por org + pipeline.
 
 export function stageMetricsKey(orgId: string, pipelineId: string): string {
   return `stage_metrics:${orgId}:${pipelineId}`;
@@ -270,14 +443,31 @@ export async function invalidateStageMetrics(
 //
 // Cache-aside com TTL curto + stampede-lock colapsa a rajada numa única
 // query por `variant` (visibilidade + status + filtros + paginação/sort).
-// Hash da variant: a JSON crua estourava a chave Redis (SCAN/GET lentos).
-export function boardDataKey(
+// Hash da variant: a JSON crua estourava a chave Redis (GET lento).
+//
+// Duas versões na chave: a da org (`cache:v:board:<org>`, invalida todos
+// os pipelines) e a do pipeline (`cache:v:board:<org>:<pipeline>`). As
+// variantes da versão anterior ficam no Redis até o TTL do board (45 s).
+
+function boardOrgVersion(orgId: string): string {
+  return cacheVersionName("board", orgId);
+}
+
+function boardPipelineVersion(orgId: string, pipelineId: string): string {
+  return cacheVersionName("board", orgId, pipelineId);
+}
+
+export async function boardDataKey(
   orgId: string,
   pipelineId: string,
   variant: string,
-): string {
+): Promise<string> {
   const fp = createHash("sha1").update(variant).digest("hex").slice(0, 20);
-  return `board:${orgId}:${pipelineId}:${fp}`;
+  const [orgVersion, pipelineVersion] = await getCacheVersions(
+    boardOrgVersion(orgId),
+    boardPipelineVersion(orgId, pipelineId),
+  );
+  return `board:${orgId}:${pipelineId}:v${orgVersion}.${pipelineVersion}:${fp}`;
 }
 
 /** Invalida TODAS as variantes do board de um pipeline (todos os filtros). */
@@ -285,7 +475,7 @@ export async function invalidateBoardData(
   orgId: string,
   pipelineId: string,
 ): Promise<void> {
-  await cache.delPattern(`board:${orgId}:${pipelineId}:*`);
+  await bumpCacheVersion(boardPipelineVersion(orgId, pipelineId));
 }
 
 /**
@@ -293,15 +483,12 @@ export async function invalidateBoardData(
  *
  * Uma mensagem nova muda `lastMessage`/`unreadCount` dos cards, mas quem a
  * cria (webhook, envio manual, automação, IA) conhece a conversa — não o
- * pipeline do negócio. Varrer por org evita um lookup extra no hot path.
+ * pipeline do negócio. Trocar a versão da org evita um lookup extra no
+ * hot path.
  */
 export async function invalidateOrgBoards(orgId: string): Promise<void> {
-  await purgeOrgBoards(orgId);
-}
-
-async function purgeOrgBoards(orgId: string): Promise<void> {
   try {
-    await cache.delPattern(`board:${orgId}:*`);
+    await bumpCacheVersion(boardOrgVersion(orgId));
   } catch {
     /* cache é best-effort — o TTL cobre a falha */
   }
@@ -310,13 +497,17 @@ async function purgeOrgBoards(orgId: string): Promise<void> {
 /**
  * Janela de coalescência das invalidações por mensagem.
  *
- * O board é a query mais cara do app (~2,4s) e o cache-aside existe pra
- * segurar rajada de webhook. Purgar a cada mensagem devolveria o pico de
- * CPU de jul/26, então a primeira mensagem purga na hora (o operador vê o
+ * A invalidação em si ficou barata (INCR), mas cada uma obriga o próximo
+ * leitor a recalcular: o board é a query mais cara do app (~2,4s) e o
+ * cache-aside existe pra segurar rajada de webhook. Purgar a cada mensagem
+ * devolveria o pico de CPU de jul/26, então a primeira mensagem purga na
+ * hora (o operador vê o
  * card atualizar no refetch que o SSE dispara ~800ms depois) e as demais
- * da janela viram uma única purga no fim dela.
+ * da janela viram uma única purga no fim dela. Com 3s o board das orgs
+ * grandes era recalculado quase sem parar; 15s é o atraso máximo aceito
+ * para a prévia do card.
  */
-const BOARD_INVALIDATION_WINDOW_MS = 3_000;
+export const BOARD_INVALIDATION_WINDOW_MS = 15_000;
 
 type BoardInvalidationWindow = {
   timer: ReturnType<typeof setTimeout>;
@@ -324,33 +515,75 @@ type BoardInvalidationWindow = {
   again: boolean;
 };
 
+/** Chave `org` (todos os pipelines) ou `org:pipeline`. */
 const boardInvalidationWindows = new Map<string, BoardInvalidationWindow>();
 
 /**
- * Agenda a invalidação do board da org com coalescência (leading + trailing).
- * Fire-and-forget: nunca bloqueia o path de criação da mensagem.
+ * Agenda a invalidação do board com coalescência (leading + trailing).
+ * Com `pipelineId`, troca só a versão daquele pipeline; sem ele, a da org
+ * (todos os pipelines). Fire-and-forget: nunca bloqueia o path de criação
+ * da mensagem.
  */
-export function scheduleBoardInvalidation(orgId: string | null | undefined): void {
+export function scheduleBoardInvalidation(
+  orgId: string | null | undefined,
+  pipelineId?: string | null,
+): void {
   if (!orgId) return;
 
-  const open = boardInvalidationWindows.get(orgId);
+  const windowKey = pipelineId ? `${orgId}:${pipelineId}` : orgId;
+  const open = boardInvalidationWindows.get(windowKey);
   if (open) {
     open.again = true;
     return;
   }
 
-  void purgeOrgBoards(orgId);
+  if (pipelineId) {
+    void invalidateBoardData(orgId, pipelineId).catch(() => {
+      /* cache é best-effort — o TTL cobre a falha */
+    });
+  } else {
+    void invalidateOrgBoards(orgId);
+  }
 
   const slot: BoardInvalidationWindow = {
     again: false,
     timer: setTimeout(() => {
-      boardInvalidationWindows.delete(orgId);
-      if (slot.again) scheduleBoardInvalidation(orgId);
+      boardInvalidationWindows.delete(windowKey);
+      if (slot.again) scheduleBoardInvalidation(orgId, pipelineId);
     }, BOARD_INVALIDATION_WINDOW_MS),
   };
   // Não segura o event loop no shutdown.
   if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
     slot.timer.unref();
   }
-  boardInvalidationWindows.set(orgId, slot);
+  boardInvalidationWindows.set(windowKey, slot);
+}
+
+// ── Origem de tenant confiável no CORS ──────────────────────────
+//
+// "`https://{slug}.{base}` pode receber CORS com credenciais?" — org
+// existe, está ACTIVE e tem usuário com e-mail verificado (ver
+// `lib/cors-tenant-origin.ts`). Guarda também a resposta negativa, por
+// isso a versão por slug (`cache:v:cors_tenant_origin:<slug>`): verificar
+// o e-mail, aceitar convite ou mudar o status da org troca a versão e a
+// resposta antiga deixa de ser lida.
+
+function corsTenantOriginVersion(slug: string): string {
+  return cacheVersionName("cors_tenant_origin", slug);
+}
+
+export async function corsTenantOriginKey(slug: string): Promise<string> {
+  const version = await getCacheVersion(corsTenantOriginVersion(slug));
+  return `cors_tenant_origin:${slug}:v${version}`;
+}
+
+export async function invalidateCorsTenantOrigin(
+  slug: string | null | undefined,
+): Promise<void> {
+  if (!slug) return;
+  try {
+    await bumpCacheVersion(corsTenantOriginVersion(slug));
+  } catch {
+    /* best-effort */
+  }
 }

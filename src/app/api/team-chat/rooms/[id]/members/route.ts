@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { addMembers, leaveRoom } from "@/services/team-chat";
-import { denyUnless, jsonError, viewerOf } from "../../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../../_guard";
 
 const AddMembers = z.object({
   memberIds: z.array(z.string().min(1)).min(1).max(80),
@@ -21,7 +21,7 @@ export async function POST(
     const parsed = AddMembers.safeParse(body);
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await addMembers(viewerOf(session), id, parsed.data.memberIds);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.room);
   });
 }
@@ -35,7 +35,7 @@ export async function DELETE(
     if (denied) return denied;
     const { id } = await params;
     const result = await leaveRoom(viewerOf(session), id);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result);
   });
 }

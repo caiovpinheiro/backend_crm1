@@ -23,15 +23,26 @@ import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import { getLogger } from "@/lib/logger";
-import { sseBus } from "@/lib/sse-bus";
+import { maskPhone } from "@/lib/pii-mask";
+import { safeFetchBytes } from "@/lib/safe-fetch";
+import {
+  publishContactUpdated,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
+import { noteContactActivity } from "./contact-typing";
 import {
   appendWhatsAppGroupMessage,
   findWhatsAppGroupByJid,
 } from "@/services/whatsapp-groups";
 
 const log = getLogger("baileys-msg");
+
+/** CDNs de onde o WhatsApp serve foto de perfil (`sock.profilePictureUrl`). */
+const AVATAR_CDN_HOSTS = ["pps.whatsapp.net", "*.whatsapp.net", "*.fbcdn.net"];
+const AVATAR_FETCH_TIMEOUT_MS = 15_000;
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 
 function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -146,7 +157,8 @@ async function resolveContact(
     channelId,
   }).catch((err) => log.warn("Falha ao garantir deal aberto:", err));
 
-  log.info(`Novo lead: ${name} (${phone})`);
+  // SEC2-5: sem nome/telefone em claro — ID do contato + telefone mascarado.
+  log.info({ contactId: created.id, phone: maskPhone(phone) }, "Novo lead criado via WhatsApp (QR)");
   return created;
 }
 
@@ -214,14 +226,23 @@ async function syncContactAvatar(
   if (!cdnUrl) return;
 
   try {
-    const res = await fetch(cdnUrl);
+    // URL vem do servidor do WhatsApp: restringe aos CDNs conhecidos, sem
+    // redirect, com timeout e limite de bytes (anti-SSRF / anti-abuso).
+    const { response: res, buffer } = await safeFetchBytes(
+      cdnUrl,
+      {},
+      {
+        allowedHosts: AVATAR_CDN_HOSTS,
+        maxRedirects: 0,
+        timeoutMs: AVATAR_FETCH_TIMEOUT_MS,
+        maxBytes: AVATAR_MAX_BYTES,
+      },
+    );
     if (!res.ok) {
       log.debug(`Falha ao baixar avatar (HTTP ${res.status}) para ${jid}`);
       return;
     }
-    const arrayBuf = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
-    if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) return;
+    if (buffer.length === 0) return;
 
     // PR 1.3: storage tenant-scoped. Antes: shared `public/uploads/avatars/`.
     const filename = `${contact.id}.jpg`;
@@ -240,7 +261,7 @@ async function syncContactAvatar(
 
     // Notifica a UI: lista de conversas, header, deal panel — tudo
     // que renderiza ChatAvatar pra esse contato deve refetchar.
-    sseBus.publish("contact_updated", {
+    publishContactUpdated({
       organizationId: contact.organizationId,
       contactId: contact.id,
       avatarUrl: newUrl,
@@ -685,6 +706,18 @@ export async function handleBaileysMessage(
 
     if (!msgCreated) return;
 
+    // "digitando…" do contato: mensagem nova numa conversa aberta assina
+    // (ou renova) a presença deste JID. Só memória + 1 nó no socket; a
+    // política (TTL, teto, ritmo) está em `contact-typing.ts`.
+    noteContactActivity(channelId, {
+      jid: rawJid,
+      resolvedJid: jid,
+      organizationId: channelOwner.organizationId,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      conversationStatus: conversation.status,
+    });
+
     const inboundAt = new Date();
     await prisma.conversation.update({
       where: { id: conversation.id },
@@ -708,7 +741,7 @@ export async function handleBaileysMessage(
       (err) => log.warn("Falha ao cancelar agendamentos pendentes:", err),
     );
 
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: getOrgIdOrNull(),
       conversationId: conversation.id,
       contactId: contact.id,

@@ -15,6 +15,9 @@ import { NextResponse } from "next/server";
 
 import { requireSuperAdmin } from "@/lib/auth-helpers";
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/admin/db-stats");
 
 const MAX_QUERY_LENGTH = 250;
 
@@ -160,7 +163,7 @@ export async function GET() {
       pgStatStatementsAvailable: slowQueries.length > 0,
     });
   } catch (err) {
-    console.error("[admin/db-stats GET]", err);
+    log.error({ err }, "[admin/db-stats GET] falhou");
     const msg = err instanceof Error ? err.message : "Erro ao auditar banco.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

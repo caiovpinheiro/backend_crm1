@@ -9,28 +9,26 @@
  * Decisão de produto: NÃO marcar timeout como erro. A mensagem permanece
  * `sent` (1 ✓ na UI) até um webhook real (`delivered` / `read` / `failed`).
  *
- * O módulo continua existindo para:
- *  - export estável (`startStaleOutboundSweeper` ainda é chamado no boot);
- *  - one-shot de auto-heal de tipos internos marcados indevidamente no passado.
+ * O módulo continua existindo só pelo export estável
+ * (`startStaleOutboundSweeper` ainda é chamado no boot do worker-whatsapp).
+ *
+ * Auto-cura removida (BD-21): `healWronglyFailedInternalMessages` rodava um
+ * `updateMany` em `messages` por `sendStatus='failed' AND sendError=<texto
+ * legado>` a cada boot — filtro sem índice, varrendo a tabela inteira para
+ * corrigir linhas que o sweeper antigo marcou por engano. A correção já foi
+ * aplicada em todos os ambientes e o sweeper que causava o problema é no-op
+ * desde então; não há mais linhas novas para curar. Se algum ambiente
+ * antigo ainda precisar, rode uma vez à mão:
+ *
+ *   UPDATE messages SET "sendStatus" = 'delivered', "sendError" = NULL
+ *   WHERE "sendStatus" = 'failed'
+ *     AND "messageType" IN ('whatsapp_call', 'whatsapp_call_recording', 'note', 'ai_draft')
+ *     AND "sendError" LIKE 'Timeout: a Meta não confirmou entrega%';
  */
 
-// Usa prismaBase (sem org-scope): o worker não tem RequestContext.
-import { prismaBase as prisma } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("stale-outbound-sweeper");
-
-// Texto legado do sendError de timeout — só usado pelo auto-heal abaixo
-// (mensagens internas que o sweeper antigo marcou por engano).
-const STALE_ERROR_MESSAGE =
-  "Timeout: a Meta não confirmou entrega (nenhum webhook de status recebido no CRM). Verifique se o callback do webhook está acessível na internet e se os eventos estão sendo processados. Se o número estiver ok no Manager, o cliente pode ter recebido a mensagem mesmo assim.";
-
-const INTERNAL_MESSAGE_TYPES = [
-  "whatsapp_call",
-  "whatsapp_call_recording",
-  "note",
-  "ai_draft",
-];
 
 /**
  * No-op: não marca mais outbound stale como `failed`.
@@ -42,47 +40,12 @@ export async function sweepStaleOutbound(
   return 0;
 }
 
-/**
- * Auto-healing one-shot: corrige mensagens internas (gravação de
- * chamada, evento de call, notas, rascunho de IA) que foram
- * erroneamente marcadas como `failed` pelo sweeper antes do filtro
- * `messageType notIn INTERNAL_MESSAGE_TYPES`.
- *
- * Roda no boot uma única vez. Idempotente — só toca linhas com o
- * `sendError` exato do sweeper legado.
- */
-export async function healWronglyFailedInternalMessages(): Promise<number> {
-  try {
-    const result = await prisma.message.updateMany({
-      where: {
-        sendStatus: "failed",
-        sendError: STALE_ERROR_MESSAGE,
-        messageType: { in: INTERNAL_MESSAGE_TYPES },
-      },
-      data: {
-        sendStatus: "delivered",
-        sendError: null,
-      },
-    });
-    if (result.count > 0) {
-      log.info(
-        `Auto-healing: ${result.count} mensagem(ns) interna(s) marcada(s) indevidamente como stale foram restauradas.`,
-      );
-    }
-    return result.count;
-  } catch (err) {
-    log.warn("Falha no auto-healing de mensagens internas:", err);
-    return 0;
-  }
-}
-
 let _started = false;
 
 export function startStaleOutboundSweeper(_intervalMs?: number) {
   if (_started) return;
   _started = true;
-  // One-shot legado; não inicia intervalo — timeout não vira failed.
-  healWronglyFailedInternalMessages().catch(() => {});
+  // Não inicia intervalo nem toca o banco — timeout não vira failed.
   log.info(
     "Sweeper de stale-outbound desativado (mensagens `sent` sem webhook da Meta permanecem `sent`).",
   );

@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Rede de segurança da distribuição.
  *
- * O aluno escreveu, a IA é a responsável e ninguém respondeu. Cobre falha
+ * O contato escreveu, a IA é a responsável e ninguém respondeu. Cobre falha
  * de LLM/chave, canal fora do ar e qualquer caminho em que o agente fica
  * em silêncio — sem isso o lead fica preso na IA e nunca chega a humano.
  *
@@ -9,13 +9,17 @@
  * de inatividade só enfileiram o mesmo jobId. GET do cron continua
  * dry-run aqui. Override: `AI_AGENT_STUCK_INBOUND_MS` (0 desliga).
  *
- * Nunca envia mensagem ao aluno: só reatribui / enfileira.
+ * Nunca envia mensagem ao contato: só reatribui / enfileira.
  */
 
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
+import { resolveAgentVerticalForConversation } from "@/services/ai/agent-vertical";
 import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.stuck-inbound-distribution");
 
 export const STUCK_INBOUND_MS = 15 * 60 * 1000;
 
@@ -113,7 +117,7 @@ async function listStuckInbound(args: {
       AND c."lastInboundAt" < ${cutoff}::timestamptz
       AND c."lastInboundAt" >= ${since}::timestamptz
       AND (${org}::text = '' OR c."organizationId" = ${org}::text)
-      -- Ninguém respondeu depois da última mensagem do aluno.
+      -- Ninguém respondeu depois da última mensagem do contato.
       AND NOT EXISTS (
         SELECT 1 FROM messages m
         WHERE m."conversationId" = c.id
@@ -209,8 +213,16 @@ export async function distributeStuckInbound(
     }
 
     try {
+      // Pack do agente da conversa (pode não ter): a rede de segurança
+      // é genérica — enfileirar/distribuir não é regra de vertical.
+      const agent = await resolveAgentVerticalForConversation(
+        row.conversation_id,
+        row.organization_id,
+      );
       const result = await withSystemContext(row.organization_id, () =>
         executeDepartmentHandoff({
+          ops: agent.ops,
+          policy: agent.inboxPolicy,
           conversationId: row.conversation_id,
           contactId: row.contact_id,
           reason: `IA sem responder há ${idleMinutes} min — distribuição de segurança`,
@@ -239,16 +251,17 @@ export async function distributeStuckInbound(
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
       });
-      console.error(
-        `[ai-stuck-inbound] falha conv=${row.conversation_id}:`,
-        err instanceof Error ? err.message : err,
+      log.error(
+        { conv: row.conversation_id, err: err instanceof Error ? err.message : err },
+        "[ai-stuck-inbound] falha",
       );
     }
   }
 
   if (distributed > 0 || queued > 0) {
-    console.info(
-      `[ai-stuck-inbound] distribuídas=${distributed} enfileiradas=${queued} de ${items.length} candidatas`,
+    log.info(
+      { distribuidas: distributed, enfileiradas: queued, candidatas: items.length },
+      "[ai-stuck-inbound] resumo",
     );
   }
 

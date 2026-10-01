@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getRevenueOverTime, type AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/revenue");
 
 function parseRequiredPeriod(
   searchParams: URLSearchParams
@@ -50,7 +53,7 @@ export async function GET(request: Request) {
       const data = await getRevenueOverTime(period, groupBy);
       return NextResponse.json(data);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar receita ao longo do tempo." },
         { status: 500 }

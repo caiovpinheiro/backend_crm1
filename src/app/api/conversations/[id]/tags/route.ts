@@ -27,6 +27,9 @@ import { prisma } from "@/lib/prisma";
 import { notifyTagAdded } from "@/services/automation-triggers";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/tags");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -173,7 +176,7 @@ export async function POST(request: Request, ctx: Ctx) {
 
       return NextResponse.json({ ok: true, action, ...result });
     } catch (e) {
-      console.error("[conversations/tags] erro:", e);
+      log.error({ err: e }, "[conversations/tags] erro");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao aplicar tag." },
         { status: 500 },
@@ -215,7 +218,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
 
       return NextResponse.json({ ok: true, action: "remove", ...result });
     } catch (e) {
-      console.error("[conversations/tags] erro:", e);
+      log.error({ err: e }, "[conversations/tags] erro");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao remover tag." },
         { status: 500 },

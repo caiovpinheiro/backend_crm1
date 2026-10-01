@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getMyApi4ComStatus } from "@/services/sip-extensions";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions/me/api4com-status");
 
 /**
  * GET /api/sip-extensions/me/api4com-status
@@ -63,18 +66,15 @@ export async function GET(request: Request) {
           };
         }
       } catch (e) {
-        console.error(
-          "[sip-extensions/me/api4com-status] Falha ao consultar webhook:",
-          (e as Error)?.message ?? e,
+        log.error(
+          { err: (e as Error)?.message ?? e },
+          "[sip-extensions/me/api4com-status] Falha ao consultar webhook",
         );
       }
 
       return NextResponse.json({ ...status, webhook });
     } catch (e) {
-      console.error(
-        "[sip-extensions/me/api4com-status] Erro:",
-        (e as Error)?.message ?? e,
-      );
+      log.error({ err: (e as Error)?.message ?? e }, "[sip-extensions/me/api4com-status] Erro");
       return NextResponse.json(
         { message: "Erro ao obter status da conexão Api4Com." },
         { status: 500 },

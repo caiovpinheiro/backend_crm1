@@ -18,6 +18,9 @@ import { NextResponse } from "next/server";
 
 import { requireSuperAdmin } from "@/lib/auth-helpers";
 import { buildPerfReport, renderReportMarkdown } from "@/lib/perf/report";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/admin/perf-report");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -47,7 +50,7 @@ export async function GET(request: Request) {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (err) {
-    console.error("[admin/perf-report GET]", err);
+    log.error({ err }, "[admin/perf-report GET] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Falha ao gerar perf-report." },
       { status: 500 },

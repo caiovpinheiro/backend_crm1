@@ -10,6 +10,9 @@ import {
 import { extractMetaPlaceholderKeys } from "@/lib/meta-whatsapp/operator-template-variables";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/meta/whatsapp/message-templates");
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
   const r = session.user?.role;
@@ -226,7 +229,7 @@ export async function GET(request: Request) {
         hiddenCount: marked.filter((r) => r.hiddenInCrm).length,
       });
     } catch (e: unknown) {
-      console.error("[meta-templates] GET", e);
+      log.error({ err: e }, "[meta-templates] GET falhou");
       const msg = e instanceof Error ? e.message : "Erro ao listar templates na Meta.";
       return NextResponse.json({ message: msg }, { status: 502 });
     }
@@ -371,7 +374,7 @@ export async function POST(request: Request) {
             example: { header_handle: [headerHandle] },
           });
         } catch (mediaErr: unknown) {
-          console.error("[meta-templates] header media", mediaErr);
+          log.error({ err: mediaErr }, "[meta-templates] header media");
           const msg =
             mediaErr instanceof Error ? mediaErr.message : "Erro ao preparar a mídia de exemplo do cabeçalho.";
           return NextResponse.json({ message: msg }, { status: 400 });
@@ -437,7 +440,7 @@ export async function POST(request: Request) {
       );
       return NextResponse.json(data, { status: 201 });
     } catch (e: unknown) {
-      console.error("[meta-templates] POST", e);
+      log.error({ err: e }, "[meta-templates] POST falhou");
       // Rejeição de validação da Meta (exemplo faltando, formato de parâmetro
       // trocado…) precisa chegar legível ao operador, com o `fbtrace_id`.
       if (isMetaGraphError(e)) {

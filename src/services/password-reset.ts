@@ -1,6 +1,10 @@
 import { hash } from "bcryptjs";
 
 import { clearLoginLockout } from "@/lib/auth/lockout";
+import {
+  SESSION_VERSION_BUMP,
+  notifySessionsRevoked,
+} from "@/lib/auth/session-revocation";
 import { generateUrlToken, hashSecret } from "@/lib/auth/token-hash";
 import { sendPasswordResetEmail } from "@/lib/mail/send";
 import { prismaBase } from "@/lib/prisma-base";
@@ -92,7 +96,7 @@ export async function consumePasswordReset(input: {
       userId: true,
       expiresAt: true,
       usedAt: true,
-      user: { select: { email: true, emailVerifiedAt: true } },
+      user: { select: { email: true, emailVerifiedAt: true, organizationId: true } },
     },
   });
   if (!row || row.usedAt || row.expiresAt.getTime() < Date.now()) {
@@ -110,8 +114,16 @@ export async function consumePasswordReset(input: {
       data: {
         hashedPassword,
         ...(row.user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
+        // SV-1: quem redefine a senha derruba sessões antigas (conta
+        // possivelmente comprometida é o caso típico de "esqueci a senha").
+        ...SESSION_VERSION_BUMP,
       },
     });
   });
   await clearLoginLockout(row.user.email);
+  notifySessionsRevoked({
+    userId: row.userId,
+    organizationId: row.user.organizationId ?? null,
+    reason: "password_reset",
+  });
 }

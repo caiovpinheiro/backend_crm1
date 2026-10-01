@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getNextActivityAlert } from "@/services/activity-alerts";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/alerts");
 
 export async function GET(request: Request) {
   try {
@@ -21,7 +24,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ alert });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar alerta." }, { status: 500 });
   }
 }

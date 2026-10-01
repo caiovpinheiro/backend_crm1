@@ -3,6 +3,9 @@ import { Prisma } from "@prisma/client";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/losses");
 
 function toNumber(v: unknown): number {
   if (v == null) return 0;
@@ -79,7 +82,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ items, totalLost, totalValue: Math.round(totalValue * 100) / 100 });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao carregar motivos de perda." },
       { status: 500 },

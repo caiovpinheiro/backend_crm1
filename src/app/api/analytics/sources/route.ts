@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getLeadSources, type AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/sources");
 
 function parseOptionalPeriod(
   searchParams: URLSearchParams
@@ -40,7 +43,7 @@ export async function GET(request: Request) {
       const data = await getLeadSources(period);
       return NextResponse.json(data);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar fontes de leads." },
         { status: 500 }

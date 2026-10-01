@@ -13,6 +13,9 @@ import {
   MAX_UPLOAD_BYTES,
   titleFromFileName,
 } from "@/services/ai/knowledge-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents/[id]/knowledge");
 
 /**
  * GET — lista paginada dos documentos de conhecimento do agente.
@@ -20,10 +23,7 @@ import {
  *
  *  - `application/json` com `{ title, content }` — texto colado na tela;
  *  - `multipart/form-data` com o campo `file` — arquivo, cujo texto sai
- *    de `extractKnowledgeText` (txt, md, csv, tsv, docx).
- *
- * PDF é rejeitado com mensagem explícita pelo extrator, e imagem exigiria
- * visão/OCR — ver o cabeçalho de `knowledge-extract.ts`.
+ *    de `extractKnowledgeText` (txt, md, csv, tsv, docx, pdf).
  *
  * A extração roda inline: é O(tamanho) em memória, sem I/O de rede, e o
  * upload é limitado a 10 MB. O trabalho pesado (chunking + embeddings)
@@ -85,7 +85,13 @@ export async function POST(
       if (e instanceof KnowledgeDocError) {
         return NextResponse.json({ message: e.message }, { status: e.status });
       }
-      throw e;
+      // Sem isto o erro sobe como 500 sem corpo JSON e a tela só mostra
+      // "Servidor temporariamente indisponível".
+      log.error({ err: e }, "[POST /api/ai-agents/[id]/knowledge]");
+      return NextResponse.json(
+        { message: "Não foi possível adicionar o material. Tente de novo ou envie em outro formato." },
+        { status: 500 },
+      );
     }
   });
 }
@@ -122,7 +128,7 @@ async function inputFromUpload(request: Request): Promise<CreateInput> {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const extracted = extractKnowledgeText(file.name, buffer);
+  const extracted = await extractKnowledgeText(file.name, buffer);
   const field = (name: string) => {
     const v = form.get(name);
     return typeof v === "string" && v.trim() ? v : undefined;

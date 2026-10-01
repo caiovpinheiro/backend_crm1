@@ -5,6 +5,9 @@ import {
   clampInteractionCount,
   recordSystemActivity,
 } from "@/services/system-activity";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/agents/me/activity");
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +59,7 @@ export async function POST(request: Request) {
       if (isMigrationPending) {
         return NextResponse.json({ ok: false, _migrationPending: true });
       }
-      console.warn("[/api/agents/me/activity] falhou:", msg);
+      log.warn({ err: msg }, "[/api/agents/me/activity] falhou");
       // Resposta segura: 200 pra não gerar toast/log ruidoso no cliente.
       return NextResponse.json({ ok: false });
     }

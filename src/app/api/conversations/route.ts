@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
-import { loadAuthzContext } from "@/lib/authz";
 import {
   andConversationWhere,
   conversationFunnelWhere,
   visibleStageIds,
 } from "@/lib/authz/funnel-visibility";
-import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
+import { authzContextOnce, scopeGrantsOnce } from "@/lib/authz/request-prechecks";
+import { canSeeInboxTab } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
+import { createRequestMemo } from "@/lib/request-memo";
 import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
+import { InvalidListCursorError } from "@/services/conversation-list-cursor";
 import {
   buildInboxFilterConditions,
   findSessionExpiringConversationIds,
@@ -21,6 +23,9 @@ import {
   type InboxCategoryTab,
   type InboxTab,
 } from "@/services/conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations");
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -41,18 +46,31 @@ export async function GET(request: Request) {
     try {
       const { searchParams } = new URL(request.url);
       const user = { id: apiUser.id, role: apiUser.role as "ADMIN" | "MANAGER" | "MEMBER" };
-      const grants = await getScopeGrants();
-      const allowedChannelIds = await listAllowedChannelIds(apiUser);
 
-      // Permissões efetivas (Authz v2) — conectam as roles custom ao gating de
-      // abas do inbox. Admin/super-admin recebem `*` (todas as abas). Sem isso,
-      // um MEMBER com role custom concedendo `conversation:view` continuaria
-      // preso ao default legado (só "esperando"/"respondidas").
-      const authz = await loadAuthzContext({
-        userId: apiUser.id,
-        organizationId: apiUser.organizationId,
-        isSuperAdmin: apiUser.isSuperAdmin,
-      });
+      // Loaders independentes em paralelo (antes: 4 awaits em série, cada
+      // um com o seu round-trip Postgres/Redis antes da listagem).
+      //
+      // `memo`: os quatro pedem insumos em comum (contexto authz, flag de
+      // escopo granular, grants). Com o memo da requisição cada um é lido
+      // uma vez e todas as idas ao Redis saem juntas — sem ele eram 7 a 9
+      // GETs, 4 a 6 em série dentro de cada loader.
+      //
+      // `authz`: permissões efetivas (Authz v2) — conectam as roles custom
+      // ao gating de abas do inbox. Admin/super-admin recebem `*` (todas as
+      // abas). Sem isso, um MEMBER com role custom concedendo
+      // `conversation:view` continuaria preso ao default legado (só
+      // "esperando"/"respondidas").
+      const memo = createRequestMemo();
+      const [grants, allowedChannelIds, authz, visibility] = await Promise.all([
+        scopeGrantsOnce(memo),
+        listAllowedChannelIds(apiUser, memo),
+        authzContextOnce(memo, {
+          userId: apiUser.id,
+          organizationId: apiUser.organizationId,
+          isSuperAdmin: apiUser.isSuperAdmin,
+        }),
+        getVisibilityFilter(user, { memo }),
+      ]);
       const inboxPerms: ReadonlySet<string> =
         authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
 
@@ -159,7 +177,6 @@ export async function GET(request: Request) {
       });
 
       if (searchParams.get("counts") === "1") {
-        const visibility = await getVisibilityFilter(user);
         const conversationWhere = andConversationWhere(
           withInboxQueueVisibility(
             visibility.conversationWhere,
@@ -255,7 +272,6 @@ export async function GET(request: Request) {
       const search =
         typeof searchRaw === "string" && searchRaw.trim().length > 0 ? searchRaw.trim() : undefined;
 
-      const visibility = await getVisibilityFilter(user);
       const conversationWhere = andConversationWhere(
         withInboxQueueVisibility(
           visibility.conversationWhere,
@@ -312,7 +328,12 @@ export async function GET(request: Request) {
 
       return NextResponse.json(result);
     } catch (e) {
-      console.error(e);
+      // Cursor ilegível ou de outra ordenação: erro do cliente, não 500 —
+      // e não cai em silêncio na 1ª página (o scroll infinito repetiria).
+      if (e instanceof InvalidListCursorError) {
+        return NextResponse.json({ message: e.message }, { status: 400 });
+      }
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar conversas." }, { status: 500 });
     }
   });

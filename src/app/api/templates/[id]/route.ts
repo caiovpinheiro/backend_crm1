@@ -8,6 +8,9 @@ import {
   normalizeTemplateAttachments,
   templateSequenceLimitError,
 } from "@/services/templates";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/templates/[id]");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -24,7 +27,7 @@ export async function GET(_req: Request, ctx: Ctx) {
         return NextResponse.json({ message: "Template não encontrado." }, { status: 404 });
       return NextResponse.json(template);
     } catch (e) {
-      console.error("[templates/:id GET]", e);
+      log.error({ err: e }, "[templates/:id GET] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao carregar template." },
         { status: 500 },
@@ -91,7 +94,7 @@ export async function PUT(request: Request, ctx: Ctx) {
       });
       return NextResponse.json(template);
     } catch (e) {
-      console.error("[templates/:id PUT]", e);
+      log.error({ err: e }, "[templates/:id PUT] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao atualizar template." },
         { status: 500 },
@@ -107,7 +110,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
       await deleteTemplate(id);
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.error("[templates/:id DELETE]", e);
+      log.error({ err: e }, "[templates/:id DELETE] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao excluir template." },
         { status: 500 },

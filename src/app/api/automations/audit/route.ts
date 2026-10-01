@@ -17,6 +17,9 @@ import {
   type AutomationLike,
 } from "@/lib/automation-auditor";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/audit");
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -63,7 +66,7 @@ export async function GET(request: Request) {
         crossConflicts,
       });
     } catch (e) {
-      console.error("[audit global]", e);
+      log.error({ err: e }, "[audit global] falhou");
       return NextResponse.json(
         { message: "Erro ao auditar automações." },
         { status: 500 },

@@ -137,10 +137,8 @@ const entries = [
   "src/workers/baileys/index.ts",
 ];
 
-await build({
+const workerBuild = {
   absWorkingDir: projectRoot,
-  entryPoints: entries,
-  outdir: path.resolve(projectRoot, "dist/workers"),
   bundle: true,
   platform: "node",
   target: "node22",
@@ -161,12 +159,45 @@ await build({
   // Carrega o tsconfig do projeto para herdar `target`, `strict`, etc.
   tsconfig: path.resolve(projectRoot, "tsconfig.json"),
   plugins: [aliasAtPlugin],
-  // Aliases adicionais para nomes que esbuild não consegue resolver
-  // sozinho em CJS (raro, mas existem casos com `next` que vazam imports).
-  // Mantemos vazio por enquanto — adicionar conforme aparecerem warnings.
   // Marca como worker code para evitar tree-shaking agressivo de side effects
   // (ex.: registro de signal handlers no `if (require.main === module)`).
   treeShaking: false,
+};
+
+await build({
+  ...workerBuild,
+  entryPoints: entries,
+  outdir: path.resolve(projectRoot, "dist/workers"),
+});
+
+// Build separado: se entrar em `entries`, o outbase vira `src/` e os
+// workers saem em dist/workers/workers/*.js.
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/replay-agent-runs.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/replay-agent-runs.js"),
+});
+
+// Dump de auditoria dos agentes (somente leitura), rodado no container.
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/dump-agent-audit.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/dump-agent-audit.js"),
+});
+
+// Materialização das regras do pack no banco. Roda uma vez no container,
+// ANTES do deploy que tira o fallback do runner.
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/materialize-steering-rules.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/materialize-steering-rules.js"),
+});
+
+// Medição do contrato de atendimento por conversa (somente leitura).
+await build({
+  ...workerBuild,
+  entryPoints: ["src/scripts/audit-attendance.ts"],
+  outfile: path.resolve(projectRoot, "dist/workers/audit-attendance.js"),
 });
 
 console.log("[build-workers] ✓ workers compilados em dist/workers/");

@@ -6,6 +6,9 @@ import {
   parseServiceSections,
 } from "@/services/painel-service";
 import { computePainelRange, parseClockMode } from "@/services/painel-period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/painel/service");
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -27,7 +30,7 @@ export async function GET(request: Request) {
       );
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[api/painel/service]", e);
+      log.error({ err: e }, "[api/painel/service] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar o painel de atendimentos." },
         { status: 500 },

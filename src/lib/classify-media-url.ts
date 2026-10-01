@@ -1,4 +1,4 @@
-import { parseStoragePath, type StorageBucket } from "@/lib/storage/local";
+import { parseStoragePath } from "@/lib/storage/local";
 
 /** Extrai `?url=` de `/api/media/proxy?url=...` (path relativo ou absoluto). */
 export function extractMediaProxyTarget(raw: string): string | null {
@@ -18,7 +18,7 @@ export function extractMediaProxyTarget(raw: string): string | null {
 
 export type ClassifiedMediaUrl =
   | { kind: "meta"; url: string }
-  | { kind: "storage"; orgId: string; bucket: StorageBucket; fileName: string }
+  | { kind: "storage"; orgId: string; bucket: string; fileName: string }
   | { kind: "uploads"; relative: string }
   | { kind: "denied" };
 

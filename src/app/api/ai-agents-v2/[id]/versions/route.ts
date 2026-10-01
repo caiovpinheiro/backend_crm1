@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { listV2AgentVersions } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/versions");
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -16,7 +19,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     const versions = await listV2AgentVersions(id, r.session.user.organizationId!);
     return NextResponse.json({ versions });
   } catch (err) {
-    console.error("[GET /api/ai-agents-v2/[id]/versions]", err);
+    log.error({ err }, "[GET /api/ai-agents-v2/[id]/versions]");
     return NextResponse.json({ message: "Erro ao carregar as versões." }, { status: 500 });
   }
 }

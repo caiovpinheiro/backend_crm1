@@ -7,6 +7,9 @@ import {
   getApi4ComIntegration,
   updateApi4ComIntegration,
 } from "@/services/call-provider-configs";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/call-provider-configs/api4com");
 
 const PatchSchema = z.object({
   serviceToken: z.string().nullable().optional(),
@@ -29,7 +32,7 @@ export async function GET(request: Request) {
       const integration = await getApi4ComIntegration();
       return NextResponse.json(integration);
     } catch (e) {
-      console.error("[call-provider-configs/api4com] GET:", e);
+      log.error({ err: e }, "[call-provider-configs/api4com] GET falhou");
       return NextResponse.json({ message: "Erro ao carregar integração Api4Com." }, { status: 500 });
     }
   });
@@ -60,7 +63,7 @@ export async function PATCH(request: Request) {
       const integration = await updateApi4ComIntegration(parsed.data);
       return NextResponse.json(integration);
     } catch (e) {
-      console.error("[call-provider-configs/api4com] PATCH:", e);
+      log.error({ err: e }, "[call-provider-configs/api4com] PATCH falhou");
       return NextResponse.json({ message: "Erro ao salvar integração Api4Com." }, { status: 500 });
     }
   });

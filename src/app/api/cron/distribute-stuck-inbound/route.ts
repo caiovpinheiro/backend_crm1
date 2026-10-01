@@ -6,13 +6,15 @@
  * resposta humana e sem nenhuma outbound depois do último inbound. NÃO
  * envia mensagem ao aluno — só reatribui / enfileira na Distribuição.
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * POST aplica via `distribution-execute` / `stuck-inbound` (mesmo jobId
  * do tick de inatividade — não roda o SQL duas vezes).
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import {
   allowInlineDistributionFallback,
@@ -27,31 +29,16 @@ import {
   distributeStuckInbound,
   type StuckInboundOptions,
 } from "@/services/ai/stuck-inbound-distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/distribute-stuck-inbound");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function authorize(request: Request): NextResponse | null {
-  const expected = process.env.CRON_SECRET?.trim();
-  if (!expected) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET nao configurado." },
-      { status: 503 },
-    );
-  }
-  const url = new URL(request.url);
-  const headerSecret = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
-  const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-  if (!provided || provided !== expected) {
-    return NextResponse.json(
-      { ok: false, message: "Cron secret invalido." },
-      { status: 401 },
-    );
-  }
-  return null;
+  return requireCronSecret(request);
 }
 
 function intParam(url: URL, name: string, fallback: number): number {
@@ -104,9 +91,7 @@ async function enqueueApply(opts: StuckInboundOptions) {
     scope: "distribution.stuck-inbound",
     kind: "queue_unavailable",
   });
-  console.warn(
-    "[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback",
-  );
+  log.warn("[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback");
   return NextResponse.json(
     { ok: false, message: "Fila de distribuição indisponível." },
     { status: 503 },
@@ -122,7 +107,7 @@ export async function GET(request: Request) {
     const result = await distributeStuckInbound(opts);
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/distribute-stuck-inbound]", e);
+    log.error({ err: e }, "[cron/distribute-stuck-inbound] falhou");
     return NextResponse.json(
       {
         ok: false,
@@ -144,7 +129,7 @@ export async function POST(request: Request) {
     }
     return enqueueApply(opts);
   } catch (e) {
-    console.error("[cron/distribute-stuck-inbound]", e);
+    log.error({ err: e }, "[cron/distribute-stuck-inbound] falhou");
     return NextResponse.json(
       {
         ok: false,

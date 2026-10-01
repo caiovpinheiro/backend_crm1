@@ -11,12 +11,17 @@ import {
 } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { requireConversationAccess } from "@/lib/conversation-access";
+import {
+  CONVERSATION_ACCESS_SELECT,
+  requireConversationAccess,
+  requireConversationAccessAndLoad,
+} from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
+import { createRequestMemo } from "@/lib/request-memo";
 import { enqueueMetaOutbound } from "@/lib/queue";
 import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
@@ -24,7 +29,7 @@ import {
   platformFromConversationChannel,
   sendMessengerOrInstagramText,
 } from "@/lib/send-meta-messaging";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { logEvent } from "@/services/activity-log";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
@@ -41,6 +46,9 @@ import {
   extractLegacyBracketTemplateName,
 } from "@/lib/whatsapp-outbound-template-label";
 import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/messages");
 
 const FLOW_RESPONSE_MARK = /resposta\s+do\s+formul/i;
 
@@ -66,7 +74,7 @@ async function stopAutomationsAfterHumanReply(
   try {
     await cancelActiveContextsForContactIfAny(contactId);
   } catch (err) {
-    console.warn("[automation] cancel after human reply:", err);
+    log.warn({ err }, "[automation] cancel after human reply");
   }
 }
 
@@ -286,6 +294,50 @@ async function findMessagesSafe(args: {
 
 // ── GET ──────────────────────────────────────
 
+/** Teto de tickets ativos do mesmo contato+canal unificados na timeline. */
+const MAX_ACTIVE_SIBLINGS = 20;
+/** Tickets ativos do contato lidos junto com a conversa (todos os canais). */
+const ACTIVE_TICKETS_SCAN = 60;
+
+/**
+ * Linha da conversa para o GET, numa leitura só: os campos da decisão de
+ * acesso, os que o handler usa (subconjunto de `getConversationLite`), o
+ * Channel da conversa e os tickets ATIVOS do contato — que antes eram uma
+ * consulta à parte, em série, só para montar o `where` das mensagens.
+ *
+ * Os tickets vêm de todos os canais (o canal da conversa só é conhecido
+ * depois de ler a linha); o handler recorta canal e org em memória e fica
+ * com até `MAX_ACTIVE_SIBLINGS`, como antes.
+ */
+const MESSAGES_CONVERSATION_SELECT = {
+  ...CONVERSATION_ACCESS_SELECT,
+  number: true,
+  channel: true,
+  createdAt: true,
+  pinnedNoteId: true,
+  channelRef: {
+    select: {
+      id: true,
+      organizationId: true,
+      provider: true,
+      config: true,
+      name: true,
+      phoneNumber: true,
+      type: true,
+    },
+  },
+  contact: {
+    select: {
+      conversations: {
+        where: { status: { not: "RESOLVED" } },
+        orderBy: { updatedAt: "desc" },
+        take: ACTIVE_TICKETS_SCAN,
+        select: { id: true, channel: true, organizationId: true },
+      },
+    },
+  },
+} satisfies Prisma.ConversationSelect;
+
 export async function GET(request: Request, context: RouteContext) {
   try {
     const authResult = await authenticateApiRequest(request);
@@ -294,13 +346,21 @@ export async function GET(request: Request, context: RouteContext) {
     return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     const accessUser = authResult.user as { id: string; role: AppUserRole };
-    const denied = await requireConversationAccess({ user: authResult.user }, id);
-    if (denied) return denied;
 
-    const conv = await getConversationLite(id);
-    if (!conv) {
-      return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
-    }
+    // ── Fase 1: a conversa e os pré-checks de autorização ──────────────
+    // Uma leitura da linha (acesso + dados do handler + tickets ativos do
+    // contato) em paralelo com authz/visibilidade/canal. O memo faz o
+    // `canReply` lá embaixo reaproveitar flag, grants e papéis lidos aqui.
+    const memo = createRequestMemo();
+    const access = await requireConversationAccessAndLoad(
+      { user: authResult.user },
+      id,
+      (where) =>
+        prisma.conversation.findFirst({ where, select: MESSAGES_CONVERSATION_SELECT }),
+      { memo, prefetch: true },
+    );
+    if (access.response) return access.response;
+    const conv = access.conversation;
 
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
@@ -310,30 +370,29 @@ export async function GET(request: Request, context: RouteContext) {
 
     // Unifica mensagens de todas as conversas ATIVAS do mesmo contato+canal
     // em uma única timeline cronológica. Tickets RESOLVED continuam no
-    // histórico (history=1), com separadores.
-    const siblingActiveConversations =
+    // histórico (history=1), com separadores. Os tickets ativos do contato
+    // já vieram junto com a conversa; aqui só se recorta canal e org.
+    const siblingActiveConversationIds =
       conv.contactId && conv.channel
-        ? await prisma.conversation.findMany({
-            where: {
-              organizationId: conv.organizationId,
-              contactId: conv.contactId,
-              channel: conv.channel,
-              id: { not: conv.id },
-              status: { not: "RESOLVED" },
-            },
-            select: { id: true },
-            take: 20,
-          })
+        ? (conv.contact?.conversations ?? [])
+            .filter(
+              (c) =>
+                c.id !== conv.id &&
+                c.channel === conv.channel &&
+                c.organizationId === conv.organizationId,
+            )
+            .slice(0, MAX_ACTIVE_SIBLINGS)
+            .map((c) => c.id)
         : [];
     const activeMessageConversationFilter: Prisma.MessageWhereInput =
-      siblingActiveConversations.length > 0
-        ? {
-            conversationId: {
-              in: [conv.id, ...siblingActiveConversations.map((c) => c.id)],
-            },
-          }
+      siblingActiveConversationIds.length > 0
+        ? { conversationId: { in: [conv.id, ...siblingActiveConversationIds] } }
         : { conversationId: conv.id };
 
+    // Mesmo recorte do `previousTickets` (encerrados ANTERIORES a este, do
+    // mesmo canal): `hasOlderTickets` só promete o que `?history=1` entrega.
+    // Sem o `createdAt`, um ticket encerrado mais novo fazia o chat pedir um
+    // histórico que nunca vinha.
     const olderTicketsProbe =
       !includeHistory && !before && conv.contactId
         ? prisma.conversation.findFirst({
@@ -341,15 +400,48 @@ export async function GET(request: Request, context: RouteContext) {
               contactId: conv.contactId,
               id: { not: conv.id },
               status: "RESOLVED",
+              createdAt: { lt: conv.createdAt },
               ...(conv.channel ? { channel: conv.channel } : {}),
             },
             select: { id: true },
           })
         : Promise.resolve(null);
 
+    // Histórico = apenas tickets encerrados (RESOLVED) anteriores a este.
+    // Conversas ativas do mesmo contato+canal já são unificadas na página
+    // principal em ordem cronológica.
+    const previousTickets =
+      includeHistory && conv.contactId && conv.channel
+        ? prisma.conversation.findMany({
+            where: {
+              contactId: conv.contactId,
+              channel: conv.channel,
+              id: { not: conv.id },
+              status: "RESOLVED",
+              createdAt: { lt: conv.createdAt },
+            },
+            orderBy: { createdAt: "desc" },
+            select: { id: true, number: true, closedAt: true, createdAt: true },
+            take: 40,
+          })
+        : Promise.resolve(
+            [] as { id: string; number: number; closedAt: Date | null; createdAt: Date }[],
+          );
+
+    // O Channel da conversa veio no `channelRef`: a sessão de 24h não
+    // precisa reler o `config`. Só vale se for mesmo a linha que a consulta
+    // escopada devolveria (mesmo id, mesma org).
+    const convChannel =
+      conv.channelRef &&
+      conv.channelRef.id === conv.channelId &&
+      conv.channelRef.organizationId === conv.organizationId
+        ? conv.channelRef
+        : null;
+
+    // ── Fase 2: tudo que só depende da conversa ────────────────────────
     // Cold path: 1ª página + probe barato (só pra saber se o prefetch/
     // scroll-up deve pedir history). history=1 sem `before` = 1 ticket.
-    const [pinnedBundle, convSession, rowsDesc, olderTicket] = await Promise.all([
+    const [pinnedBundle, convSession, rowsDesc, olderTicket, prevConvs] = await Promise.all([
       (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
         try {
           const pins = await prisma.pinnedMessage.findMany({
@@ -380,7 +472,7 @@ export async function GET(request: Request, context: RouteContext) {
           return { pinnedNoteId: conv.pinnedNoteId ?? null, pinnedMessageIds: [] };
         }
       })(),
-      getConversationSession(conv),
+      getConversationSession(conv, convChannel ? { channel: convChannel } : {}),
       includeHistory
         ? Promise.resolve([] as MsgRow[])
         : findMessagesSafe({
@@ -397,6 +489,7 @@ export async function GET(request: Request, context: RouteContext) {
             take: limit,
           }),
       olderTicketsProbe,
+      previousTickets,
     ]);
 
     const hasMore = includeHistory ? false : rowsDesc.length === limit;
@@ -425,21 +518,6 @@ export async function GET(request: Request, context: RouteContext) {
     };
     let historyTickets: HistoryTicket[] = [];
     if (includeHistory && conv.contactId && conv.channel) {
-      // Histórico = apenas tickets encerrados (RESOLVED) anteriores a este.
-      // Conversas ativas do mesmo contato+canal já são unificadas na página
-      // principal em ordem cronológica.
-      const prevConvs = await prisma.conversation.findMany({
-        where: {
-          contactId: conv.contactId,
-          channel: conv.channel,
-          id: { not: conv.id },
-          status: "RESOLVED",
-          createdAt: { lt: conv.createdAt },
-        },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, number: true, closedAt: true, createdAt: true },
-        take: 40,
-      });
       let remaining = historyBudget ?? 25;
       const loaded: HistoryTicket[] = [];
       for (let i = 0; i < prevConvs.length; i++) {
@@ -475,6 +553,9 @@ export async function GET(request: Request, context: RouteContext) {
       historyTickets = loaded.reverse();
     }
 
+    const allRows = [...rows, ...historyTickets.flatMap((t) => t.rows)];
+    const allContents = allRows.map((r) => r.content);
+
     const outSenderNames = Array.from(
       new Set(
         rows
@@ -491,45 +572,141 @@ export async function GET(request: Request, context: RouteContext) {
         ),
       ),
     );
+    // Caso comum: todas as mensagens trafegaram pelo canal da conversa, que
+    // já está em mãos — o mapa de conexões sai do `channelRef` sem consulta.
+    // Só vale quando o filtro de org da consulta original o devolveria.
+    const orgFilter = userOrgFilter({ user: authResult.user });
+    const onlyConvChannel =
+      convChannel !== null &&
+      (orgFilter.organizationId === undefined ||
+        orgFilter.organizationId === convChannel.organizationId) &&
+      referencedChannelIds.every((channelId) => channelId === convChannel.id);
 
-    const [favRows, agents, channelRows, canReply] = await Promise.all([
-      prisma.favoriteMessage
-        .findMany({
-          where: {
-            userId: (authResult.user as { id: string }).id,
-            messageId: { in: rows.map((r) => r.id) },
-          },
-          select: { messageId: true },
-        })
-        .catch(() => [] as { messageId: string }[]),
+    // replyToId no banco = cuid interno; bolha usa externalId ?? id.
+    // Mapeia para o id de exibição pra o FE rolar até a citação. A maioria
+    // das citações aponta para mensagem desta mesma página: resolve em
+    // memória e só consulta as que ficaram de fora.
+    const replyParentIds = [
+      ...new Set(
+        allRows
+          .map((r) => r.replyToId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    ];
+    const replyDisplayByInternalId = new Map<string, string>();
+    const loadedRowsById = new Map(allRows.map((r) => [r.id, r]));
+    const missingReplyParentIds: string[] = [];
+    for (const parentId of replyParentIds) {
+      const parent = loadedRowsById.get(parentId);
+      if (parent) replyDisplayByInternalId.set(parent.id, parent.externalId ?? parent.id);
+      else missingReplyParentIds.push(parentId);
+    }
+
+    // ── Fase 3: tudo que depende das mensagens carregadas ──────────────
+    // (antes: 4 consultas em paralelo e mais 4 em série depois delas).
+    // `canReply` não vai mais ao banco/Redis: usa o memo da fase 1.
+    const [
+      favRows,
+      agents,
+      channelRows,
+      canReply,
+      templateContentMap,
+      eventActors,
+      replyParents,
+      flowLabelSources,
+      lifeEvents,
+    ] = await Promise.all([
+      rows.length > 0
+        ? prisma.favoriteMessage
+            .findMany({
+              where: {
+                userId: (authResult.user as { id: string }).id,
+                messageId: { in: rows.map((r) => r.id) },
+              },
+              select: { messageId: true },
+            })
+            .catch(() => [] as { messageId: string }[])
+        : Promise.resolve([] as { messageId: string }[]),
       outSenderNames.length > 0
         ? prisma.user.findMany({
             where: {
               OR: outSenderNames.map((name) => ({
                 name: { equals: name, mode: "insensitive" as const },
               })),
-              ...userOrgFilter({ user: authResult.user }),
+              ...orgFilter,
             },
             select: { name: true, avatarUrl: true },
           })
         : Promise.resolve([] as { name: string; avatarUrl: string | null }[]),
-      referencedChannelIds.length > 0
-        ? prisma.channel.findMany({
-            where: {
-              id: { in: referencedChannelIds },
-              ...userOrgFilter({ user: authResult.user }),
-            },
-            select: { id: true, name: true, type: true, phoneNumber: true },
-          })
-        : Promise.resolve(
+      referencedChannelIds.length === 0
+        ? Promise.resolve(
             [] as {
               id: string;
               name: string;
               type: string;
               phoneNumber: string | null;
             }[],
-          ),
-      canDoChannelAction(accessUser, "send", conv.channelId),
+          )
+        : onlyConvChannel && convChannel
+          ? Promise.resolve([
+              {
+                id: convChannel.id,
+                name: convChannel.name,
+                type: convChannel.type as string,
+                phoneNumber: convChannel.phoneNumber,
+              },
+            ])
+          : prisma.channel.findMany({
+              where: {
+                id: { in: referencedChannelIds },
+                ...orgFilter,
+              },
+              select: { id: true, name: true, type: true, phoneNumber: true },
+            }),
+      canDoChannelAction(accessUser, "send", conv.channelId, memo),
+      expandLegacyTemplateContents(allContents),
+      enrichEventMessageActors([
+        {
+          conversationId: conv.id,
+          rows,
+          contents: rows.map((r) => r.content),
+        },
+        ...historyTickets.map((t) => ({
+          conversationId: t.id,
+          rows: t.rows,
+          contents: t.rows.map((r) => r.content),
+        })),
+      ]).catch(() => new Map<string, { senderName: string; senderUserId: string | null }>()),
+      missingReplyParentIds.length > 0
+        ? prisma.message.findMany({
+            where: {
+              id: { in: missingReplyParentIds },
+              ...orgFilter,
+            },
+            select: { id: true, externalId: true },
+          })
+        : Promise.resolve([] as { id: string; externalId: string | null }[]),
+      loadFlowFieldLabels(allContents),
+      // Quem abriu/encerrou cada ticket — só com histórico na resposta.
+      historyTickets.length > 0
+        ? prisma.activityEvent
+            .findMany({
+              where: {
+                conversationId: { in: [...historyTickets.map((t) => t.id), conv.id] },
+                type: { in: ["CONVERSATION_CREATED", "CONVERSATION_CLOSED"] },
+              },
+              select: {
+                conversationId: true,
+                type: true,
+                actorUserId: true,
+                actorLabel: true,
+                actorType: true,
+                actorUser: { select: { name: true, email: true, type: true } },
+              },
+              orderBy: { occurredAt: "asc" },
+            })
+            .catch(() => [])
+        : Promise.resolve([]),
     ]);
 
     const favoritedIds = new Set(favRows.map((f) => f.messageId));
@@ -538,24 +715,7 @@ export async function GET(request: Request, context: RouteContext) {
       senderAvatarMap.set(agent.name.toLowerCase(), agent.avatarUrl ?? null);
     }
 
-    const templateContentMap = await expandLegacyTemplateContents([
-      ...rows.map((r) => r.content),
-      ...historyTickets.flatMap((t) => t.rows.map((r) => r.content)),
-    ]);
     const openedContent = (raw: string) => templateContentMap.get(raw) ?? raw;
-
-    const eventActors = await enrichEventMessageActors([
-      {
-        conversationId: conv.id,
-        rows,
-        contents: rows.map((r) => r.content),
-      },
-      ...historyTickets.map((t) => ({
-        conversationId: t.id,
-        rows: t.rows,
-        contents: t.rows.map((r) => r.content),
-      })),
-    ]).catch(() => new Map<string, { senderName: string; senderUserId: string | null }>());
 
     const eventActorOf = (id: string, fallbackName: string | null) => {
       const hit = eventActors.get(id);
@@ -565,36 +725,14 @@ export async function GET(request: Request, context: RouteContext) {
       };
     };
 
-    // replyToId no banco = cuid interno; bolha usa externalId ?? id.
-    // Mapeia para o id de exibição pra o FE rolar até a citação.
-    const replyParentIds = [
-      ...new Set(
-        [...rows, ...historyTickets.flatMap((t) => t.rows)]
-          .map((r) => r.replyToId)
-          .filter((id): id is string => typeof id === "string" && id.length > 0),
-      ),
-    ];
-    const replyDisplayByInternalId = new Map<string, string>();
-    if (replyParentIds.length > 0) {
-      const parents = await prisma.message.findMany({
-        where: {
-          id: { in: replyParentIds },
-          ...userOrgFilter({ user: authResult.user }),
-        },
-        select: { id: true, externalId: true },
-      });
-      for (const p of parents) {
-        replyDisplayByInternalId.set(p.id, p.externalId ?? p.id);
-      }
+    for (const p of replyParents) {
+      replyDisplayByInternalId.set(p.id, p.externalId ?? p.id);
     }
     const replyToDisplayId = (internalId: string | null | undefined) => {
       if (!internalId) return null;
       return replyDisplayByInternalId.get(internalId) ?? internalId;
     };
 
-    const flowLabelSources = await loadFlowFieldLabels(
-      [...rows, ...historyTickets.flatMap((t) => t.rows)].map((r) => r.content),
-    );
     const presentContent = (raw: string) =>
       relabelFlowResponseContent(openedContent(raw), flowLabelSources);
 
@@ -667,24 +805,6 @@ export async function GET(request: Request, context: RouteContext) {
           catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
         }));
 
-      const ticketIds = [...historyTickets.map((t) => t.id), conv.id];
-      const lifeEvents = await prisma.activityEvent
-        .findMany({
-          where: {
-            conversationId: { in: ticketIds },
-            type: { in: ["CONVERSATION_CREATED", "CONVERSATION_CLOSED"] },
-          },
-          select: {
-            conversationId: true,
-            type: true,
-            actorUserId: true,
-            actorLabel: true,
-            actorType: true,
-            actorUser: { select: { name: true, email: true, type: true } },
-          },
-          orderBy: { occurredAt: "asc" },
-        })
-        .catch(() => []);
       const createdByConv = new Map<string, (typeof lifeEvents)[number]>();
       const closedByConv = new Map<string, (typeof lifeEvents)[number]>();
       for (const ev of lifeEvents) {
@@ -756,7 +876,7 @@ export async function GET(request: Request, context: RouteContext) {
     });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao carregar mensagens.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }
@@ -1072,7 +1192,7 @@ export async function POST(request: Request, context: RouteContext) {
             conversationId: conv.id,
             content,
           }),
-        }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+        }).catch((err) => log.warn({ err }, "[automation trigger] message_sent")),
       );
 
       if (!sendRes.failed) {
@@ -1093,7 +1213,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -1106,10 +1226,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
         (err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio manual:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
       );
 
       return NextResponse.json(
@@ -1212,7 +1329,7 @@ export async function POST(request: Request, context: RouteContext) {
       void stopAutomationsAfterHumanReply(conv.contactId);
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -1227,10 +1344,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
         (err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio manual:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
       );
       cancelAiReplyDebounce(conv.id, "human_outbound");
 
@@ -1252,7 +1366,7 @@ export async function POST(request: Request, context: RouteContext) {
       if (!job) {
         // Sem fail-open sync na API — mensagem fica failed; UI pode reenviar.
         const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-        console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+        log.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
         await prisma.message
           .updateMany({
             where: { id: saved.id, sendStatus: "pending" },
@@ -1265,6 +1379,9 @@ export async function POST(request: Request, context: RouteContext) {
         sendStatus = "failed";
         sendErrorMsg = errMsg;
       } else if (waitUntilSent) {
+        // RT-7: acorda pelo sinal do worker (Redis pub/sub) com polling de
+        // fallback em backoff; teto de 15 s. Se estourar, devolve `pending`
+        // e o `message_status` do SSE atualiza o cliente.
         const waited = await waitForMessageSendStatus(saved.id);
         if (waited === "sent") sendStatus = "sent";
         if (waited === "failed") sendStatus = "failed";
@@ -1332,7 +1449,7 @@ export async function POST(request: Request, context: RouteContext) {
           conversationId: conv.id,
           content,
         }),
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+      }).catch((err) => log.warn({ err }, "[automation trigger] message_sent")),
     );
 
     // Log unificado de atividade (Activity Log) — fire-and-forget.
@@ -1360,7 +1477,7 @@ export async function POST(request: Request, context: RouteContext) {
     // 'esperando' para 'respondidas' (ou similar). Sem isso, a UI so
     // atualizava no proximo polling (15-20s) — usuario percebia delay.
     try {
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,
@@ -1378,10 +1495,7 @@ export async function POST(request: Request, context: RouteContext) {
     // cancelledById=null porque o cancelamento é automático, não manual.
     cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
       (err) =>
-        console.warn(
-          "[scheduled-messages] falha ao cancelar apos envio manual:",
-          err,
-        ),
+        log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
     );
     // Humano respondeu: invalida debounce do Agente IA pendente.
     cancelAiReplyDebounce(conv.id, "human_outbound");
@@ -1405,7 +1519,7 @@ export async function POST(request: Request, context: RouteContext) {
     }, { status: 201 });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     const msg = e instanceof Error ? e.message : "Erro ao enviar mensagem.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

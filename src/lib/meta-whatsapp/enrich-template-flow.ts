@@ -4,6 +4,9 @@ import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import { MetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { isFlowDefinitionButton } from "@/lib/meta-whatsapp/is-flow-definition-button";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-whatsapp.enrich-template-flow");
 
 export { isFlowDefinitionButton };
 
@@ -170,13 +173,9 @@ async function findTemplateByListing(
       listRaw = await client.listMessageTemplates({ limit: 200, after });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      console.error(
-        "[meta-flow-enrich]",
-        JSON.stringify({
-          phase: "listing_fallback_threw",
-          page,
-          message,
-        }),
+      log.error(
+        { phase: "listing_fallback_threw", page, message },
+        "[meta-flow-enrich] listing_fallback_threw",
       );
       return { row: null, reason: { kind: "listing_throw", message, page } };
     }
@@ -204,15 +203,15 @@ async function findTemplateByListing(
     sameNameDifferentLanguage.size > 0
       ? Array.from(sameNameDifferentLanguage).sort()
       : undefined;
-  console.warn(
-    "[meta-flow-enrich]",
-    JSON.stringify({
+  log.warn(
+    {
       phase: "listing_fallback_not_found",
       templateName,
       languageCode,
       totalRowsScanned,
       sameNameDifferentLanguage: langHint,
-    }),
+    },
+    "[meta-flow-enrich] listing_fallback_not_found",
   );
   return {
     row: null,
@@ -286,14 +285,14 @@ async function resolveTemplateDefinitionRow(
         e instanceof Error ? e.message : String(e);
     }
 
-    console.warn(
-      "[meta-flow-enrich]",
-      JSON.stringify({
+    log.warn(
+      {
         phase: "gid_lookup_failed_falling_back_to_listing",
         templateGraphId: gid,
         reason: gidFailurePath,
         message: gidFailureMessage,
-      }),
+      },
+      "[meta-flow-enrich] gid_lookup_failed_falling_back_to_listing",
     );
 
     const fallback = await findTemplateByListing(
@@ -400,27 +399,27 @@ export async function enrichTemplateComponentsForFlowSend(
       ? [...args.components]
       : [];
 
-  console.log(
-    "[meta-flow-enrich]",
-    JSON.stringify({
+  log.info(
+    {
       phase: "start",
       templateGraphId: args.templateGraphId ?? null,
       templateName: args.templateName,
       language: args.languageCode,
       inputPayloadAlreadyHasFlowButton: sendPayloadAlreadyHasFlowButton(base),
-    }),
+    },
+    "[meta-flow-enrich] start",
   );
 
   if (sendPayloadAlreadyHasFlowButton(base)) {
     const existingTok = extractFlowTokenFromSendComponents(base);
     const out = base.length ? base : undefined;
-    console.log(
-      "[meta-flow-enrich]",
-      JSON.stringify({
+    log.info(
+      {
         phase: "final_components",
         reason: "input_already_has_flow_button",
-        components: out ?? [],
-      }),
+        components: (out ?? []).length,
+      },
+      "[meta-flow-enrich] final_components",
     );
     return { components: out, flowToken: existingTok };
   }
@@ -432,35 +431,35 @@ export async function enrichTemplateComponentsForFlowSend(
     strictFlowEnrich,
   });
   const row = resolved.row;
-  console.log(
-    "[meta-flow-enrich]",
-    JSON.stringify({
+  log.info(
+    {
       phase: "after_resolve_definition",
       definitionFound: row != null,
       resolutionPath: resolved.resolutionPath,
-    }),
+    },
+    "[meta-flow-enrich] after_resolve_definition",
   );
 
   const flowIndex = getFlowButtonIndexFromTemplateDefinition(row?.components);
   const inspectedButtons = collectFlatButtonsFromDefinitionComponents(row?.components);
-  console.log(
-    "[meta-flow-enrich]",
-    JSON.stringify({
+  log.info(
+    {
       phase: "after_flow_button_index",
       flowButtonIndex: flowIndex,
       ...(flowIndex == null ? { inspectedDefinitionButtons: inspectedButtons } : {}),
-    }),
+    },
+    "[meta-flow-enrich] after_flow_button_index",
   );
 
   if (flowIndex == null) {
     const out = base.length ? base : undefined;
-    console.log(
-      "[meta-flow-enrich]",
-      JSON.stringify({
+    log.info(
+      {
         phase: "final_components",
         reason: "no_flow_button_in_definition",
-        components: out ?? [],
-      }),
+        components: (out ?? []).length,
+      },
+      "[meta-flow-enrich] final_components",
     );
     return { components: out, flowToken: null };
   }
@@ -479,13 +478,9 @@ export async function enrichTemplateComponentsForFlowSend(
     );
   }
 
-  console.log(
-    "[meta-flow-enrich]",
-    JSON.stringify({
-      phase: "final_components",
-      reason: "flow_button_appended",
-      components: merged,
-    }),
+  log.info(
+    { phase: "final_components", reason: "flow_button_appended", components: merged.length },
+    "[meta-flow-enrich] final_components",
   );
 
   return { components: merged, flowToken: token };

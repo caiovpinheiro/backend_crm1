@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { listMessages, markRead, sendMessage } from "@/services/team-chat";
-import { denyUnless, jsonError, viewerOf } from "../../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../../_guard";
 
 const Attachment = z.object({
   url: z.string().max(500).optional().default(""),
@@ -46,7 +46,7 @@ export async function GET(
         ? Number(url.searchParams.get("take"))
         : undefined,
     });
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     await markRead(viewerOf(session), id);
     return NextResponse.json(result);
   });
@@ -64,7 +64,7 @@ export async function POST(
     const parsed = Send.safeParse(body);
     if (!parsed.success) return jsonError("Mensagem inválida.", 400);
     const result = await sendMessage(viewerOf(session), id, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.message, { status: 201 });
   });
 }

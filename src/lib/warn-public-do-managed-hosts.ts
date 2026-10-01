@@ -96,6 +96,7 @@ export function warnPublicDoManagedHosts(
   if ((env.NODE_ENV ?? "").toLowerCase() !== "production") return;
 
   for (const { envName, hostname } of collectPublicDoManagedHosts(env)) {
+    // eslint-disable-next-line no-console -- importado pelo instrumentation (bundle Edge) e o teste afirma a saída do console
     console.warn(formatWarning(envName, hostname));
   }
 }

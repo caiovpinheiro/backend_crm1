@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/contacts/duplicates");
 
 /**
  * GET /api/contacts/duplicates
@@ -108,7 +111,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ groups });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao localizar duplicatas." },
       { status: 500 },

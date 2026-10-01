@@ -1,0 +1,2384 @@
+/**
+ * Tools disponíveis para agentes de IA.
+ *
+ * Cada tool é exposta como um objeto do Vercel AI SDK (via helper
+ * `tool({...})`). O runner monta o `ToolSet` que vai pro LLM chamando
+ * `buildToolSet(ctx, enabledIds)` — com isso apenas as tools que o
+ * admin marcou em `AIAgentConfig.enabledTools` ficam disponíveis pra
+ * aquele agente específico.
+ *
+ * Reaproveitamos os services existentes (deals, activities, tags...)
+ * em vez de duplicar lógica. Os erros são capturados e devolvidos
+ * como `{ ok: false, error }` pra que o LLM possa raciocinar sobre
+ * falhas em vez de derrubar a run inteira.
+ */
+
+
+import { tool, type ToolSet } from "ai";
+import { z } from "zod";
+import {
+  renderTemplatePreview,
+  templateVariablesFromSendComponents,
+} from "@/lib/meta-whatsapp/build-template-components";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import {
+  llmMayCloseConversation,
+  normalizeAutoClosePolicy,
+  type AutoClosePolicy,
+} from "@/lib/ai-agents/piloting";
+import {
+  applyArgPolicy,
+  describeToolPolicy,
+  emptyToolPolicy,
+  listAllows,
+  listBlocks,
+  normalizeInboxPolicy,
+  toolPolicyFor,
+  type InboxPolicy,
+  type ToolConfigMap,
+  type ToolPolicy,
+} from "@/lib/ai-agents/steering";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
+import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import {
+  publishConversationAssignment,
+  publishNewMessage,
+} from "@/lib/realtime-events";
+import { createActivity } from "@/services/activities";
+import { notifyDealStageChanged } from "@/services/automation-triggers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
+import {
+  assignOwnerToContactClusterTx,
+  createDeal,
+  createDealEvent,
+  invalidateBoardsForPipelines,
+  updateDeal,
+} from "@/services/deals";
+import { executeDistribution } from "@/services/distribution";
+import { addTagToContact, applyExistingTagToContact } from "@/services/tags";
+import { evaluateTransferGate, isIdleOrchestrationMessage } from "@/services/ai/transfer-gate";
+import {
+  excludeSelfFromAgentNames,
+  executeOrchestratedHandoff,
+  formatAiHandoffDestinations,
+  selfAiDestinationError,
+} from "@/services/ai/agent-handoff";
+import {
+  loadConversationPeerHistory,
+  peerAlreadyAttended,
+  PEER_ALREADY_ATTENDED_ERROR,
+} from "@/services/ai/conversation-peers";
+import {
+  departmentNotFoundMessage,
+  executeDepartmentHandoff,
+  resolveDepartmentForAgent,
+  selfDepartmentRouteError,
+} from "@/services/ai/department-handoff";
+import {
+  buildQueuedWaitingHint,
+  humanQueueContextFromAgent,
+} from "@/services/ai/human-queue-policy";
+import {
+  CRM_SEARCH_GUIDANCE,
+  describeCrmExposure,
+  describeCrmIdentity,
+  describeLinkedIdentity,
+  identityValueMatches,
+  loadCrmFieldCatalog,
+  matchFieldValues,
+  normalizeIdentityValue,
+  partitionFieldValues,
+  resolveIdentityFields,
+  type CrmFieldDescriptor,
+  type CrmFieldExposure,
+  type CrmFieldValue,
+  type CrmSearchEntity,
+} from "@/services/ai/crm-field-policy";
+import {
+  findRecordSource,
+  listRecordSources,
+  type RecordSource,
+} from "@/services/ai/record-sources";
+import {
+  loadConversationIdentity,
+  rememberConversationIdentity,
+} from "@/services/ai/conversation-identity";
+import { isEffectTool, simulateEffectTool } from "@/services/ai/effect-claims";
+import {
+  denialPayload,
+  replayPayload,
+  type ToolCallGovernor,
+} from "@/services/ai/tool-governor";
+import type { ActivityType, Prisma } from "@prisma/client";
+import { getVerticalPack } from "@/verticals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.tools");
+
+export type RunContext = {
+  /// User.id do agente AI (para logar autoria em atividades, deals etc).
+  agentUserId: string;
+  /// ID do agente (AIAgentConfig.id) — opcional, para auditoria.
+  agentId?: string;
+  /// Conversa em curso (se aplicável). Quase todas as tools precisam dela
+  /// pra enviar mensagens ou abrir ticket.
+  conversationId?: string | null;
+  /// Contato em curso.
+  contactId?: string | null;
+  /// Deal em curso (se houver um aberto para este contato).
+  dealId?: string | null;
+  /// Última mensagem do aluno (para inferir departamento no handoff).
+  userMessage?: string | null;
+  /// Mensagens anteriores do cliente na conversa (gate de transferência).
+  priorUserMessages?: string[];
+  /// Vertical pack do agente (`null` = sem ops de vertical).
+  verticalPack?: string | null;
+  /// Política de inbox do agente (aliases de departamento, keywords).
+  inboxPolicy?: InboxPolicy | null;
+  /// Encerramento automático (pilotagem). Ausente = understood.
+  autoClosePolicy?: AutoClosePolicy | null;
+  /// Conversa em MODO DE TESTE (`src/services/ai/test-mode.ts`): nenhuma
+  /// ferramenta de efeito executa. O bloqueio é código, não instrução de
+  /// prompt — ver `withTestModeSimulation`.
+  testMode?: boolean;
+  /// Org do run (worker/automação). Tools de tabulação não dependem só do ALS.
+  organizationId?: string | null;
+  archetype?: string | null;
+  agentName?: string | null;
+  /// Classificador: no máximo uma `tabulate_conversation` por run.
+  tabulationAppliedThisRun?: boolean;
+  /// Nomes dos outros agentes IA da org (sem o atual). Destinos da tool.
+  peerAiAgentNames?: string[];
+  /// Rótulo do tenant por chave de campo ("deal.rgm" → "RGM"), pré-carregado
+  /// pelo runner. A description da tool é montada de forma síncrona, e é
+  /// pelo RÓTULO que o modelo reconhece o que a pessoa escreveu — sem isto
+  /// ele veria só a chave técnica. Ausente = a description usa a chave.
+  crmFieldLabels?: Record<string, string>;
+};
+
+function packOps(ctx: RunContext): Record<string, any> {
+  return getVerticalPack(ctx.verticalPack)?.ops ?? {};
+}
+
+function packToolCopy(ctx: RunContext) {
+  return getVerticalPack(ctx.verticalPack)?.toolCopy;
+}
+
+/**
+ * Fontes consultáveis deste agente: as do CRM mais as que o pack do tenant
+ * registrou. É por aqui que uma tabela de produto vira entidade pesquisável
+ * sem o núcleo saber o que ela guarda.
+ */
+export function recordSourcesForCtx(ctx: RunContext): RecordSource[] {
+  return listRecordSources(getVerticalPack(ctx.verticalPack)?.recordSources);
+}
+
+/** Horário/cópia da fila humana configurados no agente (Fase 3). */
+function queueCtx(ctx: RunContext) {
+  return humanQueueContextFromAgent({ inboxPolicy: ctx.inboxPolicy ?? null });
+}
+
+/** Exportados para as tools que moram nos verticais (`pack.extraTools`). */
+export function ok<T>(data: T) {
+  return { ok: true as const, ...data } as { ok: true } & T;
+}
+export function fail(error: string, extra?: { reason?: string }) {
+  return extra?.reason
+    ? { ok: false as const, error, reason: extra.reason }
+    : { ok: false as const, error };
+}
+
+function policyDeniedHumanTransfer() {
+  return fail(
+    "Não distribua: o contato não pediu humano e o tema ainda é atendimento da IA. Responda você.",
+    { reason: "policy_requires_explicit_request" },
+  );
+}
+
+function fireTabulateOnHumanExit(ctx: RunContext) {
+  const orgId = ctx.organizationId ?? getOrgIdOrNull();
+  if (!orgId || !ctx.contactId) return;
+  void import("@/services/ai/tabulation-classify")
+    .then(({ maybeTabulateOnExit }) =>
+      maybeTabulateOnExit({
+        organizationId: orgId,
+        contactId: ctx.contactId,
+        policy: ctx.inboxPolicy,
+        trigger: "human_handoff",
+      }),
+    )
+    .catch(() => null);
+}
+
+/** Fila humana conforme a política de transferência do agente. */
+function transferAllowed(ctx: RunContext): boolean {
+  return evaluateTransferGate({
+    verticalPack: ctx.verticalPack,
+    userMessage: ctx.userMessage,
+    priorUserMessages: ctx.priorUserMessages,
+    inboxPolicy: ctx.inboxPolicy,
+  }).allows;
+}
+
+export const USER_EXPLICITLY_ASKED_DESCRIPTION =
+  "true SOMENTE se o contato pediu, nesta conversa, para falar com uma " +
+  "pessoa/equipe/atendente — com qualquer palavra ('me passa pra alguém', " +
+  "'quero uma pessoa de verdade', 'tem gente aí?'). false se você está " +
+  "transferindo por decisão sua. Não invente: isto libera a transferência.";
+
+/**
+ * Gate de fila humana + de onde veio a decisão, para o evento de
+ * auditoria. A keyword continua valendo; a afirmação do modelo passa a
+ * valer também, porque lista de termos nunca cobre todas as formas de
+ * pedir atendimento humano.
+ */
+function evaluateHumanTransferGate(
+  ctx: RunContext,
+  userExplicitlyAsked?: boolean,
+): { allowed: boolean; matchedBy: "keyword" | "model_assertion" | null } {
+  const state = evaluateTransferGate({
+    verticalPack: ctx.verticalPack,
+    userMessage: ctx.userMessage,
+    priorUserMessages: ctx.priorUserMessages,
+    inboxPolicy: ctx.inboxPolicy,
+    userExplicitlyAsked,
+  });
+  return { allowed: state.allows, matchedBy: state.matchedBy };
+}
+
+function coordinatorIdleHandoffError(ctx: RunContext): string | null {
+  if (ctx.archetype !== "COORDENADOR") return null;
+  if (!isIdleOrchestrationMessage(ctx.userMessage)) return null;
+  return "Não há assunto para encaminhar. Responda uma frase curta e espere o pedido.";
+}
+
+// ── create_deal ────────────────────────────────────────────────
+
+function createDealTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Cria um novo deal (oportunidade) no primeiro estágio do pipeline padrão, associado ao contato atual. Use quando qualificar um lead novo e quiser registrar a oportunidade.",
+    inputSchema: z.object({
+      title: z.string().min(3).describe("Título curto do deal, ex: 'Curso de inglês — João Silva'."),
+      value: z
+        .number()
+        .optional()
+        .describe("Valor estimado em BRL. Omita se ainda não souber."),
+      notes: z
+        .string()
+        .optional()
+        .describe("Observação opcional a ser registrada como primeira atividade do deal."),
+    }),
+    execute: async ({ title, value, notes }) => {
+      try {
+        if (!ctx.contactId) return fail("Sem contato associado para criar deal.");
+        const defaultPipeline = await prisma.pipeline.findFirst({
+          where: { isDefault: true, archivedAt: null },
+          include: { stages: { orderBy: { position: "asc" }, take: 1 } },
+        });
+        const stage = defaultPipeline?.stages[0];
+        if (!stage) return fail("Pipeline padrão sem estágios configurados.");
+        const deal = await createDeal({
+          title,
+          value,
+          contactId: ctx.contactId,
+          stageId: stage.id,
+          ownerId: ctx.agentUserId,
+        });
+        if (notes?.trim()) {
+          await createActivity({
+            type: "NOTE",
+            title: "Nota do agente IA",
+            description: notes.trim(),
+            completed: true,
+            dealId: deal.id,
+            contactId: ctx.contactId,
+            userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
+          }).catch(() => null);
+        }
+        createDealEvent(deal.id, ctx.agentUserId, "AI_AGENT_ACTION", {
+          action: "created_deal",
+          agentId: ctx.agentId ?? null,
+          title: deal.title,
+          value: value ?? null,
+        }).catch(() => {});
+        return ok({ dealId: deal.id, title: deal.title });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao criar deal.");
+      }
+    },
+  });
+}
+
+// ── move_stage ─────────────────────────────────────────────────
+
+function moveStageTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Move o deal atual para outro estágio (pode ser em outro funil). Use quando o lead avançar na jornada ou precisar migrar para outro pipeline (ex.: de 'Qualificação' para 'Proposta', ou de 'Vendas' → 'Pós-venda'). Informe `pipelineName` quando o estágio pertence a um funil diferente do atual.",
+    inputSchema: z.object({
+      stageName: z
+        .string()
+        .describe("Nome do estágio de destino (match case-insensitive, ex: 'Proposta')."),
+      pipelineName: z
+        .string()
+        .optional()
+        .describe(
+          "Nome do funil de destino quando diferente do atual (case-insensitive). Se omitido, procura o estágio primeiro no funil atual e, em seguida, entre todos os funis (falha se houver ambiguidade).",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo do movimento; vira nota anexada ao deal."),
+    }),
+    execute: async ({ stageName, pipelineName, reason }) => {
+      try {
+        if (!ctx.dealId) return fail("Sem deal ativo para mover.");
+        const deal = await prisma.deal.findUnique({
+          where: { id: ctx.dealId },
+          select: { id: true, stageId: true, stage: { select: { pipelineId: true } } },
+        });
+        if (!deal) return fail("Deal não encontrado.");
+
+        // Resolução do estágio de destino:
+        // 1) Com `pipelineName` explícito: procura o funil por nome e o
+        //    estágio dentro dele.
+        // 2) Sem `pipelineName`: tenta primeiro o funil atual do deal e,
+        //    caso não encontre, faz busca global. Ambiguidade global
+        //    (mais de um funil com estágio de mesmo nome) falha pedindo
+        //    o funil explícito.
+        let target: { id: string; name: string; pipelineId: string } | null = null;
+        if (pipelineName?.trim()) {
+          const pipe = await prisma.pipeline.findFirst({
+            where: { name: { equals: pipelineName.trim(), mode: "insensitive" } },
+            select: { id: true, name: true },
+          });
+          if (!pipe) return fail(`Funil "${pipelineName}" não encontrado.`);
+          target = await prisma.stage.findFirst({
+            where: {
+              pipelineId: pipe.id,
+              name: { equals: stageName, mode: "insensitive" },
+            },
+            select: { id: true, name: true, pipelineId: true },
+          });
+          if (!target)
+            return fail(`Estágio "${stageName}" não existe no funil "${pipe.name}".`);
+        } else {
+          target = await prisma.stage.findFirst({
+            where: {
+              pipelineId: deal.stage.pipelineId,
+              name: { equals: stageName, mode: "insensitive" },
+            },
+            select: { id: true, name: true, pipelineId: true },
+          });
+          if (!target) {
+            const candidates = await prisma.stage.findMany({
+              where: { name: { equals: stageName, mode: "insensitive" } },
+              select: {
+                id: true,
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { name: true } },
+              },
+              take: 5,
+            });
+            if (candidates.length === 0)
+              return fail(`Estágio "${stageName}" não existe em nenhum funil.`);
+            if (candidates.length > 1) {
+              const names = candidates.map((c) => `"${c.pipeline?.name ?? c.pipelineId}"`).join(", ");
+              return fail(
+                `Estágio "${stageName}" existe em vários funis (${names}). Informe pipelineName.`,
+              );
+            }
+            target = {
+              id: candidates[0].id,
+              name: candidates[0].name,
+              pipelineId: candidates[0].pipelineId,
+            };
+          }
+        }
+        await updateDeal(deal.id, { stageId: target.id });
+        // Dispara "mudança de fase" quando a IA move o negócio — antes esse
+        // caminho só registrava AI_AGENT_ACTION e não acionava automações.
+        if (deal.stageId !== target.id) {
+          void notifyDealStageChanged(deal.id, deal.stageId, target.id, {
+            contactId: ctx.contactId ?? undefined,
+            depth: 0,
+          });
+        }
+        createDealEvent(deal.id, ctx.agentUserId, "AI_AGENT_ACTION", {
+          action: "moved_stage",
+          agentId: ctx.agentId ?? null,
+          stageId: target.id,
+          stageName: target.name,
+          reason: reason?.trim() ?? null,
+        }).catch(() => {});
+        if (reason?.trim() && ctx.contactId) {
+          await createActivity({
+            type: "NOTE",
+            title: `Movido para ${target.name}`,
+            description: reason.trim(),
+            completed: true,
+            dealId: deal.id,
+            contactId: ctx.contactId,
+            userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
+          }).catch(() => null);
+        }
+        return ok({ stageId: target.id, stageName: target.name });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao mover deal.");
+      }
+    },
+  });
+}
+
+// ── add_tag ────────────────────────────────────────────────────
+
+function addTagTool(ctx: RunContext, policy: ToolPolicy) {
+  return tool({
+    description:
+      "Adiciona uma tag ao contato atual. Se a tag não existir, ela é criada. Útil para segmentar leads por interesse, origem ou qualificação.",
+    inputSchema: z.object({
+      tagName: z.string().min(1).describe("Nome da tag, ex: 'Interessado em premium'."),
+    }),
+    execute: async ({ tagName }) => {
+      try {
+        if (!ctx.contactId) return fail("Sem contato para marcar.");
+        const name = tagName.trim();
+        if (!name) return fail("Nome de tag vazio.");
+        if (!listAllows(policy.allowedTagNames, name)) {
+          return fail(
+            `Tag "${name}" não está liberada para este agente. Permitidas: ${policy.allowedTagNames.join(", ")}.`,
+          );
+        }
+        let tag = await prisma.tag.findFirst({
+          where: { name: { equals: name, mode: "insensitive" } },
+          select: { id: true, name: true },
+        });
+        if (!tag) {
+          if (policy.denyCreateNew || policy.allowedTagNames.length > 0) {
+            return fail(
+              `Tag "${name}" não existe e a criação de tags novas está desativada para este agente.`,
+            );
+          }
+          tag = await prisma.tag.create({
+            data: withOrgFromCtx({ name, color: "#64748b" }),
+            select: { id: true, name: true },
+          });
+        }
+        const already = await prisma.tagOnContact.findFirst({
+          where: { contactId: ctx.contactId, tagId: tag.id },
+          select: { contactId: true },
+        });
+        if (!already) {
+          await addTagToContact(ctx.contactId, tag.id);
+        }
+        if (ctx.dealId && !already) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "added_tag",
+            agentId: ctx.agentId ?? null,
+            tagName: tag.name,
+          }).catch(() => {});
+        }
+        return ok({ tagId: tag.id, tagName: tag.name, alreadyHad: !!already });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao marcar tag.");
+      }
+    },
+  });
+}
+
+// ── create_activity ────────────────────────────────────────────
+
+const ACTIVITY_TYPES = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"] as const;
+
+function createActivityTool(ctx: RunContext, policy: ToolPolicy) {
+  return tool({
+    description:
+      "Registra uma atividade ou follow-up vinculado ao contato/deal atual. Útil para 'ligar amanhã 15h' ou deixar uma nota pro time comercial.",
+    inputSchema: z.object({
+      type: z.enum(ACTIVITY_TYPES).describe("Tipo (CALL, TASK, NOTE, MEETING...)"),
+      title: z.string().min(3),
+      description: z.string().optional(),
+      scheduledAt: z
+        .string()
+        .optional()
+        .describe("ISO 8601 — ex: '2026-05-01T15:00:00-03:00'. Omita para nota sem data."),
+    }),
+    execute: async ({ type, title, description, scheduledAt }) => {
+      try {
+        let resolvedType = type as string;
+        if (!listAllows(policy.allowedTypes, resolvedType)) {
+          // Com defaultType configurado o operador prefere corrigir a
+          // silenciosamente em vez de fazer o LLM tentar de novo.
+          if (policy.defaultType) {
+            resolvedType = policy.defaultType;
+          } else {
+            return fail(
+              `Tipo "${resolvedType}" não liberado. Permitidos: ${policy.allowedTypes.join(", ")}.`,
+            );
+          }
+        }
+        if (!ACTIVITY_TYPES.includes(resolvedType as (typeof ACTIVITY_TYPES)[number])) {
+          return fail(`Tipo de atividade inválido: "${resolvedType}".`);
+        }
+        const activity = await createActivity({
+          type: resolvedType as ActivityType,
+          title,
+          description,
+          scheduledAt: scheduledAt ?? undefined,
+          completed: resolvedType === "NOTE",
+          contactId: ctx.contactId ?? undefined,
+          dealId: ctx.dealId ?? undefined,
+          userId: ctx.agentUserId,
+          createdById: ctx.agentUserId,
+        });
+        return ok({ activityId: activity.id });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao criar atividade.");
+      }
+    },
+  });
+}
+
+// ── send_whatsapp_template ─────────────────────────────────────
+
+function sendWhatsappTemplateTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Envia um template aprovado pela Meta para o contato atual via WhatsApp. Use para reengajar após janela de 24h ou enviar propostas padronizadas. O template deve existir em /templates.",
+    inputSchema: z.object({
+      templateName: z.string().describe("Nome exato do template aprovado."),
+      languageCode: z.string().default("pt_BR").optional(),
+      bodyVariables: z
+        .array(z.string())
+        .optional()
+        .describe("Variáveis de {{1}}, {{2}}... do template, em ordem."),
+    }),
+    execute: async ({ templateName, languageCode, bodyVariables }) => {
+      try {
+        // Replay com handoff real: nada sai para o WhatsApp do contato.
+        if (isReplaySandboxActive(ctx.organizationId)) {
+          recordBlockedEffect("outbound_send", `template:${templateName}`);
+          return fail("Envio bloqueado: replay em sandbox.");
+        }
+        if (!ctx.contactId) return fail("Sem contato.");
+        // Multi-tenancy: resolve o cliente Meta a partir do canal da
+        // conversa atual em vez do singleton global. Sem isso, o LLM da
+        // org B chamaria sendTemplate pelo numero da Eduit (env vars).
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const conv = await prisma.conversation.findUnique({
+          where: { id: ctx.conversationId },
+          select: {
+            organizationId: true,
+            channelRef: { select: { config: true } },
+          },
+        });
+        if (!conv) return fail("Conversa não encontrada.");
+        const channelConfig = conv.channelRef?.config as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        const metaClient = metaClientFromConfig(channelConfig);
+        if (!metaClient.configured) return fail("Canal Meta não configurado.");
+        const contact = await prisma.contact.findUnique({
+          where: { id: ctx.contactId },
+          select: { phone: true },
+        });
+        if (!contact?.phone) return fail("Contato sem telefone.");
+        const lc = languageCode ?? "pt_BR";
+        let templateGraphId: string | null = null;
+        // Capturar `id` aqui para gravar `templateConfigId` no message.create
+        // — assim o resolver de Flow inbound identifica corretamente o flow
+        // disparado pelo Agente IA quando o cliente responder.
+        let tplConfigId: string | null = null;
+        let tplBodyPreview: string | null = null;
+        let tplCategory: string | null = null;
+        try {
+          const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
+            where: { metaTemplateName: templateName },
+            select: { id: true, metaTemplateId: true, bodyPreview: true, category: true },
+          });
+          templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+          tplConfigId = gidRow?.id ?? null;
+          tplBodyPreview = gidRow?.bodyPreview?.trim() || null;
+          tplCategory = gidRow?.category ?? null;
+        } catch {
+          /* ignore */
+        }
+        const baseComponents =
+          Array.isArray(bodyVariables) && bodyVariables.length > 0
+            ? [
+                {
+                  type: "body",
+                  parameters: bodyVariables.map((text) => ({
+                    type: "text" as const,
+                    text,
+                  })),
+                },
+              ]
+            : undefined;
+        const renderedTplBody = tplBodyPreview
+          ? renderTemplatePreview(
+              tplBodyPreview,
+              templateVariablesFromSendComponents(baseComponents),
+            ) || tplBodyPreview
+          : null;
+        const tplChatContent = buildOutboundTemplateMessageContent(
+          templateName,
+          "generic",
+          tplCategory,
+          renderedTplBody,
+        );
+        const enrichSend = await enrichTemplateComponentsForFlowSend(metaClient, {
+          templateName,
+          languageCode: lc,
+          components: baseComponents,
+          templateGraphId,
+        });
+        const res = await metaClient.sendTemplate(
+          contact.phone,
+          templateName,
+          lc,
+          enrichSend.components,
+        );
+        const externalId = res?.messages?.[0]?.id ?? null;
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId: ctx.conversationId,
+            content: tplChatContent,
+            direction: "out",
+            messageType: "template",
+            senderName: ctx.agentName?.trim() || "Agente IA",
+            externalId,
+            aiAgentUserId: ctx.agentUserId,
+            ...(typeof enrichSend.flowToken === "string" && enrichSend.flowToken.trim()
+              ? { flowToken: enrichSend.flowToken.trim() }
+              : {}),
+            ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
+          }),
+        });
+        await prisma.conversation
+          .update({
+            where: { id: ctx.conversationId },
+            data: {
+              lastMessageDirection: "out",
+              hasAgentReply: true,
+              updatedAt: new Date(),
+            },
+          })
+          .catch(() => null);
+        publishNewMessage({
+          organizationId: conv.organizationId,
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          direction: "out",
+          content: saved.content,
+          timestamp: saved.createdAt,
+        });
+        return ok({ externalId, templateName });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao enviar template.");
+      }
+    },
+  });
+}
+
+// ── search_products ────────────────────────────────────────────
+
+/**
+ * Tool de consulta ao catálogo de produtos/serviços.
+ *
+ * É a fonte de verdade pro agente responder preço, descrição, SKU,
+ * tipo. O system prompt injeta uma política de apresentação (campo
+ * `productPolicy` do AIAgentConfig) que orienta COMO o LLM deve
+ * expor os dados devolvidos aqui.
+ *
+ * Busca é TOLERANTE A ACENTOS (normalização NFD) e MULTI-PALAVRA —
+ * porque `contains` do Postgres é case-insensitive mas NÃO
+ * accent-insensitive, e o LLM frequentemente manda variações
+ * ("administracao", "curso de administração", etc.). Nós trazemos
+ * os candidatos ativos e filtramos em memória, rankeando por quão
+ * bem o termo bate no nome. Custom fields (modalidade, duração,
+ * etc.) também entram no haystack pra cobrir perguntas por
+ * atributo (ex.: "curso EAD", "4 anos").
+ *
+ * Sempre devolvemos preço como número + string formatada em BRL —
+ * o LLM tende a errar menos usando a versão já formatada.
+ */
+
+/** Normaliza string pra busca: lowercase + remove acentos. */
+function normalizeForSearch(s: string | null | undefined): string {
+  if (!s) return "";
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function searchProductsTool(_ctx: RunContext) {
+  return tool({
+    description:
+      "Busca produtos, serviços ou cursos no catálogo interno por nome, SKU, descrição ou atributos. Use SEMPRE antes de responder sobre preço, modalidade, duração, características ou disponibilidade — nunca invente esses dados. Busca tolera acentos e múltiplas palavras. Retorna até 5 itens com preço formatado em BRL e campos personalizados (modalidade, carga horária, etc.).",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .describe(
+          "Termo de busca livre. Ex.: 'Administração', 'curso EAD', 'ABC-001', 'direito presencial'. A busca tolera acentos e procura em nome, SKU, descrição e campos personalizados.",
+        ),
+      type: z
+        .enum(["PRODUCT", "SERVICE"])
+        .optional()
+        .describe(
+          "Filtro opcional pelo tipo. Use 'PRODUCT' para produtos/cursos ou 'SERVICE' para serviços. Omita para buscar em todos.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Máximo de itens a retornar (1-20, padrão 5)."),
+    }),
+    execute: async ({ query, type, limit }) => {
+      try {
+        const term = query.trim();
+        if (!term) return fail("Busca vazia.");
+        const take = Math.min(Math.max(limit ?? 5, 1), 20);
+
+        const where: Prisma.ProductWhereInput = { isActive: true };
+        if (type) where.type = type;
+
+        // Traz todos os candidatos ativos (limitado pra não estourar
+        // memória em catálogos gigantes). Em catálogos >500 itens
+        // vale migrar pra índice pg_trgm + unaccent no Postgres.
+        const candidates = await prisma.product.findMany({
+          where,
+          take: 500,
+          orderBy: [{ name: "asc" }],
+          include: {
+            customValues: {
+              include: {
+                customField: {
+                  select: { id: true, name: true, label: true, type: true },
+                },
+              },
+            },
+          },
+        });
+
+        const termN = normalizeForSearch(term);
+        const words = termN.split(/\s+/).filter((w) => w.length >= 2);
+
+        type WithScore = { product: (typeof candidates)[number]; score: number };
+        const scored: WithScore[] = [];
+
+        for (const p of candidates) {
+          const nameN = normalizeForSearch(p.name);
+          const skuN = normalizeForSearch(p.sku);
+          const descN = normalizeForSearch(p.description);
+          const cfN = p.customValues
+            .map((v) => normalizeForSearch(v.value))
+            .join(" ");
+          const haystack = `${nameN} ${skuN} ${descN} ${cfN}`;
+
+          // Match principal: termo inteiro aparece em nome/sku (ranking alto)
+          // Fallback: TODAS as palavras (>=2 chars) aparecem em qualquer campo
+          let score = 0;
+          if (termN && nameN.includes(termN)) score = 100;
+          else if (termN && skuN.includes(termN)) score = 80;
+          else if (
+            words.length > 0 &&
+            words.every((w) => haystack.includes(w))
+          ) {
+            // score cresce conforme as palavras baterem no nome especificamente
+            score =
+              30 +
+              words.filter((w) => nameN.includes(w)).length * 10;
+          }
+
+          if (score > 0) scored.push({ product: p, score });
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        const matched = scored.slice(0, take).map((s) => s.product);
+
+        if (matched.length === 0) {
+          return ok({
+            query: term,
+            total: 0,
+            products: [],
+            hint:
+              "Nenhum produto ativo encontrado para este termo. Não invente dados — diga que vai confirmar com o time e ofereça handoff humano.",
+          });
+        }
+
+        const fmtBRL = new Intl.NumberFormat("pt-BR", {
+          style: "currency",
+          currency: "BRL",
+        });
+
+        const serialized = matched.map((p) => {
+          const priceNum = Number(p.price);
+          return {
+            id: p.id,
+            name: p.name,
+            sku: p.sku,
+            type: p.type,
+            unit: p.unit,
+            price: priceNum,
+            priceFormatted: fmtBRL.format(priceNum),
+            description: p.description ?? null,
+            customFields: p.customValues
+              .filter((v) => v.value && v.value.trim())
+              .map((v) => ({
+                name: v.customField.name,
+                label: v.customField.label,
+                value: v.value,
+              })),
+          };
+        });
+
+        return ok({
+          query: term,
+          total: serialized.length,
+          products: serialized,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao buscar produtos.",
+        );
+      }
+    },
+  });
+}
+
+// ── search_crm_records ─────────────────────────────────────────
+
+/**
+ * Busca ampla, leitura estreita.
+ *
+ * A varredura passa por TODOS os campos (fixos e personalizados) — é assim
+ * que quem digita o próprio documento acha o próprio cadastro. O que sai
+ * para o modelo é só o que o operador liberou em
+ * `toolConfig.search_crm_records.readableFields`; o resto vira rótulo em
+ * `hiddenFields`, sem valor. Ver `crm-field-policy.ts` para o porquê.
+ */
+function crmValuesFromRecord(
+  catalog: CrmFieldDescriptor[],
+  entity: CrmSearchEntity,
+  builtin: Record<string, unknown>,
+  custom: Array<{ name: string; value: string }>,
+): CrmFieldValue[] {
+  const out: CrmFieldValue[] = [];
+  for (const field of catalog) {
+    if (field.entity !== entity) continue;
+    const raw =
+      field.source === "builtin"
+        ? builtin[field.name]
+        : custom.find((c) => c.name === field.name)?.value;
+    if (raw === null || raw === undefined) continue;
+    const value =
+      raw instanceof Date
+        ? raw.toLocaleDateString("pt-BR")
+        : String(raw);
+    if (!value.trim()) continue;
+    out.push({ field, value });
+  }
+  return out;
+}
+
+type CrmRecordPayload = {
+  entity: CrmSearchEntity;
+  ref: string;
+  fields: Array<{ label: string; value: string }>;
+  hiddenFields: string[];
+  matchedFields: string[];
+};
+
+/**
+ * Os registros já ligados ao contato precisam de desempate?
+ *
+ * Só quando o operador declarou campo-chave E os registros de fato
+ * divergem nele. Dois negócios com o mesmo valor de chave são o mesmo
+ * cliente duplicado — perguntar ali seria ruído. Sem chave declarada a
+ * ferramenta se comporta como antes e devolve todos.
+ */
+function linkedIdentityAmbiguity(args: {
+  catalog: CrmFieldDescriptor[];
+  linkedKeys: string[];
+  records: CrmFieldValue[][];
+}): { label: string } | null {
+  if (args.linkedKeys.length === 0 || args.records.length < 2) return null;
+  for (const field of resolveIdentityFields(args.catalog, args.linkedKeys)) {
+    const seen = new Set(
+      args.records
+        .map(
+          (values) =>
+            values.find((v) => v.field.key === field.key)?.value ?? "",
+        )
+        .filter(Boolean)
+        .map((v) => normalizeIdentityValue(v)),
+    );
+    if (seen.size > 1) return { label: field.label };
+  }
+  return null;
+}
+
+/**
+ * Localiza registros por um campo declarado como identificador.
+ *
+ * O filtro do banco é por igualdade (valor como veio e sem formatação),
+ * e o casamento final passa por `identityValueMatches`. Nunca `contains`:
+ * um identificador que seja trecho de outro traria a pessoa errada, e o
+ * agente passaria a afirmar coisas sobre o cadastro de terceiro.
+ *
+ * Quem executa a consulta é a FONTE (`RecordSource`). O motor não sabe em
+ * qual tabela o campo mora — sabe que a fonte que declarou o campo sabe
+ * procurá-lo.
+ */
+async function findRecordsByIdentity(args: {
+  source: RecordSource;
+  field: CrmFieldDescriptor;
+  informed: string;
+  catalog: CrmFieldDescriptor[];
+  organizationId: string;
+  contact: { id: string; phone?: string | null; email?: string | null } | null;
+}): Promise<
+  Array<{ recordId: string; ref: string; values: CrmFieldValue[] }>
+> {
+  const { source, field, informed, catalog } = args;
+  const normalized = normalizeIdentityValue(informed);
+  if (!normalized) return [];
+  const candidates = [...new Set([informed.trim(), normalized])].filter(Boolean);
+
+  const rows = await source.findByFieldValue({
+    organizationId: args.organizationId,
+    contact: args.contact,
+    take: 5,
+    field: { name: field.name, source: field.source },
+    candidates,
+  });
+
+  const out: Array<{ recordId: string; ref: string; values: CrmFieldValue[] }> =
+    [];
+  for (const row of rows) {
+    const values = crmValuesFromRecord(
+      catalog,
+      source.entity,
+      row.builtin,
+      row.custom,
+    );
+    const stored = values.find((v) => v.field.key === field.key)?.value ?? "";
+    if (!identityValueMatches(stored, informed)) continue;
+    out.push({ recordId: row.id, ref: row.ref, values });
+  }
+  return out;
+}
+
+function searchCrmRecordsTool(ctx: RunContext, policy: ToolPolicy) {
+  const exposure: CrmFieldExposure = {
+    readableKeys: policy.readableFields,
+    citableKeys: policy.readableFields,
+    orgWide: policy.allowOrgWideSearch,
+  };
+  // Quais entidades existem para ESTE agente. Sai do registro de fontes
+  // (núcleo + pack do tenant), nunca de uma lista fixa aqui.
+  const sources = recordSourcesForCtx(ctx);
+  const entityIds = sources.map((s) => s.entity);
+  const entityMenu = sources
+    .map((s) => `${s.entity} (${s.label})`)
+    .join(", ");
+  // Campos que ESTA organização declarou como identificadores. Vazio = a
+  // ferramenta mantém o schema de antes, sem o argumento.
+  const identityKeys = policy.identityKeys;
+  const identityShape =
+    identityKeys.length > 0
+      ? {
+          identificador: z
+            .object({
+              campo: z.enum(identityKeys as [string, ...string[]]),
+              valor: z.string().min(3),
+            })
+            .optional()
+            .describe(
+              "Dado que a pessoa informou no chat para ser localizada. Só preencha com o que ela escreveu; nunca com valor deduzido ou lembrado. O casamento é exato.",
+            ),
+        }
+      : {};
+  return tool({
+    description: `Procura informação nos campos do CRM — colunas fixas e campos personalizados das entidades configuradas nesta organização. A busca varre todos os campos; a LEITURA devolve apenas os campos que o operador liberou.\n\n${CRM_SEARCH_GUIDANCE}\n\n${describeCrmExposure(
+      exposure,
+    )}\n\n${describeCrmIdentity(
+      identityKeys.map((key) => ({
+        key,
+        label: ctx.crmFieldLabels?.[key.toLowerCase()] ?? key,
+      })),
+    )}\n\n${describeLinkedIdentity(policy.linkedIdentityKeys)}`,
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .describe(
+          "Termo livre: as palavras da pergunta da pessoa ou o dado que ela informou. Tolera acento e maiúscula.",
+        ),
+      entity: z
+        .enum([...entityIds, "any"] as unknown as [string, ...string[]])
+        .optional()
+        .describe(
+          `Onde procurar: ${entityMenu}. Omita para procurar em tudo.`,
+        ),
+      scope: z
+        .enum(["current_contact", "organization"])
+        .optional()
+        .describe(
+          "'current_contact' (padrão) lê só o cadastro de quem está na conversa. 'organization' procura registros de terceiros e só funciona se o operador tiver liberado.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Máximo de registros a retornar (1-10, padrão 5)."),
+      ...identityShape,
+    }),
+    execute: async (args) => {
+      const { query, entity, scope, limit } = args;
+      const { identificador } = args as {
+        identificador?: { campo: string; valor: string };
+      };
+      try {
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const term = query.trim();
+        if (!term) return fail("Busca vazia.");
+        const take = Math.min(Math.max(limit ?? 5, 1), 5);
+        const wanted: CrmSearchEntity[] =
+          !entity || entity === "any" ? entityIds : [entity as CrmSearchEntity];
+
+        const orgWide = scope === "organization";
+        if (orgWide && !exposure.orgWide) {
+          return fail(
+            "Busca em cadastros de terceiros não está liberada neste agente. Use scope 'current_contact' ou transfira para um consultor.",
+          );
+        }
+        if (!orgWide && !ctx.contactId) {
+          return fail("Sem contato associado à conversa.");
+        }
+
+        const { fields: catalog } = await loadCrmFieldCatalog({
+          sensitiveTerms: policy.sensitiveTerms,
+          sources,
+        });
+        const records: CrmRecordPayload[] = [];
+
+        const push = (
+          recordEntity: CrmSearchEntity,
+          ref: string,
+          values: CrmFieldValue[],
+          opts?: { requireMatch?: boolean },
+        ) => {
+          const { matched, matchedLabels } = matchFieldValues(values, term);
+          // No escopo do próprio contato o cadastro é devolvido mesmo sem
+          // casar o termo: a pergunta pode ser vaga ("e a minha situação?")
+          // e o registro certo é um só. Em busca ampla, sem match não entra.
+          if (opts?.requireMatch && !matched) return;
+          const { visible, hiddenLabels } = partitionFieldValues(
+            values,
+            exposure,
+          );
+          records.push({
+            entity: recordEntity,
+            ref,
+            fields: visible,
+            hiddenFields: hiddenLabels,
+            matchedFields: matchedLabels,
+          });
+        };
+
+        const contact = ctx.contactId
+          ? await prisma.contact.findUnique({
+              where: { id: ctx.contactId },
+              select: { id: true, phone: true, email: true },
+            })
+          : null;
+        if (!orgWide && !contact) return fail("Contato não encontrado.");
+        const baseQuery = { organizationId: orgId, contact, take };
+
+        // Identificação vem ANTES da busca por assunto: a pessoa informou o
+        // dado dela, então o registro certo não depende de o termo casar com
+        // algum campo. Não passa pelo portão de busca ampla de propósito —
+        // achar o próprio cadastro por um identificador que só o dono sabe é
+        // justamente para isso que o campo foi declarado. Sem chave
+        // declarada o schema nem expõe o argumento; ignorar aqui também
+        // evita que uma chamada forjada vire erro de ferramenta.
+        if (identificador && identityKeys.length > 0) {
+          const personEntities = new Set(
+            sources.filter((s) => s.identifiesPerson).map((s) => s.entity),
+          );
+          const field = resolveIdentityFields(
+            catalog,
+            identityKeys,
+            personEntities,
+          ).find((f) => f.key === identificador.campo);
+          const source = field
+            ? findRecordSource(sources, field.entity)
+            : null;
+          if (!field || !source) {
+            return fail(
+              `"${identificador.campo}" não está configurado como identificador neste agente.`,
+            );
+          }
+          const found = await findRecordsByIdentity({
+            source,
+            field,
+            informed: identificador.valor,
+            catalog,
+            organizationId: orgId,
+            contact,
+          });
+          if (found.length === 0) {
+            return ok({
+              records: [],
+              total: 0,
+              identifiedBy: field.label,
+              hint: "Nenhum registro com esse identificador. Confirme o dado com a pessoa ou encaminhe para um consultor — não afirme que ela não tem cadastro.",
+            });
+          }
+          // Um registro só: a pessoa digitou o dado, é a fonte mais forte
+          // que existe e sobrescreve palpite anterior. Fica na conversa para
+          // o próximo agente não perguntar de novo. Com vários registros não
+          // há o que fixar — o identificador não distinguiu qual é qual.
+          if (found.length === 1) {
+            await rememberConversationIdentity({
+              conversationId: ctx.conversationId,
+              entity: source.entity,
+              recordId: found[0].recordId,
+              ref: found[0].ref,
+              by: field.label,
+              overwrite: true,
+            });
+          }
+          for (const r of found) push(source.entity, r.ref, r.values);
+          return ok({
+            records,
+            total: records.length,
+            identifiedBy: field.label,
+            ...(found.length > 1
+              ? {
+                  hint: `Este ${field.label} tem ${found.length} registros. Diga que são ${found.length}, use os campos de cada um em \`records\` e pergunte sobre qual a pessoa quer falar antes de responder o resto. NÃO misture os dados dos dois.`,
+                }
+              : {}),
+          });
+        }
+
+        // A conversa já sabe de quem é. Vale para qualquer agente que pegue
+        // a conversa depois — inclusive o que não participou da
+        // identificação. Sem isto, a transferência reabria a pergunta.
+        const pinned = orgWide
+          ? null
+          : await loadConversationIdentity(ctx.conversationId);
+
+        for (const entityId of wanted) {
+          const source = findRecordSource(sources, entityId);
+          // Entidade que só existe porque a organização criou campo
+          // personalizado nela: não há registro para percorrer.
+          if (!source) continue;
+
+          // Catálogo é a mesma lista para todo mundo — não é dado de
+          // pessoa, então a busca é sempre ampla e sempre exige casar o
+          // termo, independente do escopo pedido.
+          if (source.sharedCatalog) {
+            const rows = await source.searchByTerm({
+              ...baseQuery,
+              contact: null,
+              term,
+            });
+            for (const row of rows) {
+              push(
+                entityId,
+                row.ref,
+                crmValuesFromRecord(catalog, entityId, row.builtin, row.custom),
+                { requireMatch: true },
+              );
+            }
+            continue;
+          }
+
+          if (orgWide) {
+            const rows = await source.searchByTerm({
+              ...baseQuery,
+              contact: null,
+              term,
+            });
+            for (const row of rows) {
+              push(
+                entityId,
+                row.ref,
+                crmValuesFromRecord(catalog, entityId, row.builtin, row.custom),
+                { requireMatch: true },
+              );
+            }
+            continue;
+          }
+
+          const rows = await source.forContact(baseQuery);
+          if (rows.length === 0) continue;
+          let valued = rows.map((row) => ({
+            row,
+            values: crmValuesFromRecord(
+              catalog,
+              entityId,
+              row.builtin,
+              row.custom,
+            ),
+          }));
+
+          if (source.multiplePerContact) {
+            if (
+              pinned?.entity === entityId &&
+              valued.some((v) => v.row.id === pinned.recordId)
+            ) {
+              valued = valued.filter((v) => v.row.id === pinned.recordId);
+            }
+            // Mais de um registro no mesmo contato: juntar tudo faria o
+            // agente misturar dois registros da mesma pessoa (ou de duas)
+            // numa resposta só. Com campo-chave declarado ele pergunta por
+            // qual, em vez de escolher sozinho.
+            const ambiguity = linkedIdentityAmbiguity({
+              catalog,
+              linkedKeys: policy.linkedIdentityKeys,
+              records: valued.map((v) => v.values),
+            });
+            if (ambiguity) {
+              return ok({
+                records: [],
+                needsIdentification: true,
+                keyField: ambiguity.label,
+                hint: `Há mais de um registro neste contato. Peça à pessoa que informe o ${ambiguity.label} e chame esta ferramenta de novo com \`identificador\`. NÃO escolha um registro por conta própria e não misture os dados dos dois.`,
+              });
+            }
+            // Um registro só e nenhuma dúvida: o telefone já identificou a
+            // pessoa. Registrar isso poupa o próximo agente de refazer a
+            // consulta e, principalmente, de perguntar.
+            if (valued.length === 1) {
+              await rememberConversationIdentity({
+                conversationId: ctx.conversationId,
+                entity: entityId,
+                recordId: valued[0].row.id,
+                ref: valued[0].row.ref,
+                by: null,
+                overwrite: false,
+              });
+            }
+          }
+
+          for (const v of valued) push(entityId, v.row.ref, v.values);
+        }
+
+        const trimmed = records.slice(0, take);
+        const anyVisible = trimmed.some((r) => r.fields.length > 0);
+        const anyHidden = trimmed.some((r) => r.hiddenFields.length > 0);
+
+        let hint: string;
+        if (trimmed.length === 0) {
+          hint =
+            "Nenhum registro para este termo. Não invente e não deduza: diga que não localizou e ofereça atendimento humano.";
+        } else if (!anyVisible && exposure.readableKeys.length === 0) {
+          hint =
+            "O registro existe, mas o operador não liberou nenhum campo para leitura. Confirme que localizou o cadastro, NÃO afirme nada sobre o conteúdo e encaminhe para a equipe.";
+        } else if (!anyVisible) {
+          hint =
+            "Nenhum dos campos deste registro está liberado para você. Não deduza o conteúdo — encaminhe para a equipe.";
+        } else if (anyHidden) {
+          hint =
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Os rótulos em `hiddenFields` existem mas você não pode ler nem repassar: se a pessoa pedir um deles, encaminhe para a equipe.";
+        } else {
+          hint =
+            "Responda usando apenas `fields`, em fala natural — se um campo aqui contradiz o que você ia dizer, o campo está certo. Não repasse documento, credencial nem dado financeiro.";
+        }
+
+        // O termo NÃO volta no payload: quando o cliente digita o próprio
+        // documento para se identificar, ecoar a busca reinjetaria o dado no
+        // contexto do modelo pela porta dos fundos.
+        return ok({
+          scope: orgWide ? "organization" : "current_contact",
+          total: trimmed.length,
+          records: trimmed,
+          hint,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao consultar o CRM.",
+        );
+      }
+    },
+  });
+}
+
+// ── transfer_to_human ──────────────────────────────────────────
+
+/**
+ * Recusa nomes de departamento fora do que o operador liberou. Devolve
+ * a mensagem de erro (para o LLM corrigir) ou null quando pode seguir.
+ */
+function departmentGate(
+  policy: ToolPolicy,
+  departmentName: string | null | undefined,
+): string | null {
+  const name = departmentName?.trim();
+  if (!name) return null;
+  if (listBlocks(policy.blockedDepartments, name)) {
+    return `Departamento "${name}" está bloqueado para este agente.`;
+  }
+  if (!listAllows(policy.allowedDepartments, name)) {
+    return `Departamento "${name}" não liberado. Permitidos: ${policy.allowedDepartments.join(", ")}.`;
+  }
+  return null;
+}
+
+function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
+  return tool({
+    description:
+      copy?.transferToHuman ??
+      "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
+        "ÚLTIMO RECURSO: só quando o contato pedir humano/atendente, ou você já tentou as tools/base e ainda não puder seguir com segurança. " +
+        "Citar um tema operacional NÃO basta. Se puder orientar, NÃO chame esta tool. " +
+        "Quando chamar, a distribuição EXECUTA de verdade; confirme ao contato que um atendente vai ajudar. " +
+        "Prefira `departmentName` quando souber a área. Se omitir, o sistema infere.",
+    inputSchema: z.object({
+      reason: z
+        .string()
+        .describe(
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelamento').",
+        ),
+      departmentName: z
+        .string()
+        .optional()
+        .describe(
+          "Nome do departamento de destino (opcional).",
+        ),
+      userExplicitlyAsked: z
+        .boolean()
+        .optional()
+        .describe(USER_EXPLICITLY_ASKED_DESCRIPTION),
+    }),
+    execute: async ({ reason, departmentName, userExplicitlyAsked }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const gateState = evaluateHumanTransferGate(ctx, userExplicitlyAsked);
+        if (!gateState.allowed) {
+          return policyDeniedHumanTransfer();
+        }
+        const gate = departmentGate(policy, departmentName);
+        if (gate) return fail(gate);
+        // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
+        // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
+        const result = await executeDepartmentHandoff({
+          ops: packOps(ctx),
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId ?? null,
+          dealId: ctx.dealId,
+          departmentName: departmentName ?? null,
+          userMessage: ctx.userMessage ?? null,
+          reason,
+          policy: ctx.inboxPolicy,
+        });
+        if (ctx.contactId) {
+          await createActivity({
+            type: "NOTE",
+            title: "Transferência IA → humano",
+            description: [
+              reason,
+              result.departmentName
+                ? `Dept: ${result.departmentName}`
+                : null,
+              result.distribution?.selectedUserName
+                ? `Atribuído: ${result.distribution.selectedUserName}`
+                : result.distribution?.reason
+                  ? `Distribuição: ${result.distribution.reason}`
+                  : null,
+            ]
+              .filter(Boolean)
+              .join(" | "),
+            completed: true,
+            contactId: ctx.contactId,
+            dealId: ctx.dealId ?? undefined,
+            userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
+          }).catch(() => null);
+        }
+        publishConversationAssignment({
+          organizationId: getOrgIdOrNull(),
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          assignedToId: result.distribution?.selectedUserId ?? null,
+          reason,
+        });
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "transferred_to_human",
+            agentId: ctx.agentId ?? null,
+            reason,
+            departmentId: result.departmentId,
+            departmentName: result.departmentName,
+            selectedUserId: result.distribution?.selectedUserId ?? null,
+            // Auditoria do gate: o pedido de humano foi reconhecido por
+            // keyword da config ou pela afirmação do modelo?
+            gateDecision: "allowed",
+            matchedBy: gateState.matchedBy,
+          }).catch(() => {});
+        }
+        const queuedWaiting =
+          result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+          result.distribution?.reason === "NO_DEPARTMENT";
+        fireTabulateOnHumanExit(ctx);
+        return ok({
+          transferred: true,
+          departmentName: result.departmentName,
+          assigned: Boolean(result.distribution?.success),
+          assignedTo: result.distribution?.selectedUserName ?? null,
+          distributionReason: result.distribution?.reason ?? null,
+          queuedWaiting,
+          hint: queuedWaiting ? buildQueuedWaitingHint(queueCtx(ctx)) : undefined,
+        });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : "Falha ao transferir.");
+      }
+    },
+  });
+}
+
+// ── transfer_to_ai_agent ───────────────────────────────────────
+
+/**
+ * Entrega a conversa a OUTRO agente de IA (orquestrador → especialista).
+ *
+ * A Distribuição Inteligente só sorteia candidatos `HUMAN`, então handoff
+ * por departamento nunca alcança um agente IA. Aqui a atribuição é direta e
+ * vale para o cluster inteiro do contato (conversa, contato, deals OPEN),
+ * que é o que o inbox e o pipeline leem como responsável.
+ *
+ * O aviso ao aluno (se a política `announceAiTransfer` estiver ligada)
+ * sai DAQUI, antes de trocar o dono: depois da reatribuição o texto
+ * final do turno morre no `assertAiStillAuthorized`.
+ *
+ * Se o destino tem `inboxPolicy.speakOnAiTransfer`, dispara a mensagem
+ * de abertura da Pilotagem dele na hora. Sem o interruptor, o especialista
+ * só responde no próximo inbound.
+ */
+function peerDestinations(ctx: RunContext): string[] {
+  return excludeSelfFromAgentNames(
+    ctx.peerAiAgentNames ?? [],
+    ctx.agentName,
+  );
+}
+
+function transferToAiAgentTool(ctx: RunContext) {
+  const dests = peerDestinations(ctx);
+  const destClause = formatAiHandoffDestinations(dests);
+  return tool({
+    description:
+      "Entrega a conversa a outro agente de IA especializado, que assume a continuidade do atendimento. " +
+      "Use quando já entendeu a necessidade e ela é do escopo de outro agente. " +
+      "NÃO use em saudação, recado sem assunto ou 'depois eu falo'. " +
+      "Se a política pedir aviso, `noticeMessage` é o que o contato recebe ANTES da troca. " +
+      "Nunca transfira para você mesmo." +
+      destClause +
+      " Depois de chamar esta tool NÃO escreva mais nada — quem fala agora é o outro agente.",
+    inputSchema: z.object({
+      agentName: z
+        .string()
+        .min(2)
+        .describe(
+          dests.length > 0
+            ? `Nome do agente de destino, exatamente como está cadastrado (${dests.join(", ")}).`
+            : "Nome de outro agente de destino, exatamente como está cadastrado. Não use o próprio nome.",
+        ),
+      noticeMessage: z
+        .string()
+        .min(3)
+        .optional()
+        .describe(
+          "Aviso ao aluno antes da troca. Ignorado se o operador desligou o aviso na Inbox.",
+        ),
+      reason: z
+        .string()
+        .describe(
+          "Motivo curto da classificação, para auditoria interna. NÃO vai para o aluno.",
+        ),
+      tagName: z
+        .string()
+        .optional()
+        .describe(
+          "Tag marcada no contato antes da transferência (ex.: 'RET-IA'). Precisa já existir no CRM.",
+        ),
+    }),
+    execute: async ({ agentName, noticeMessage, reason, tagName }) => {
+      try {
+        const wanted = agentName.trim();
+        const selfErr = selfAiDestinationError({
+          wanted,
+          selfName: ctx.agentName,
+          selfUserId: ctx.agentUserId,
+        });
+        if (selfErr) return fail(selfErr, { reason: "self_transfer" });
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const idle = coordinatorIdleHandoffError(ctx);
+        if (idle) return fail(idle);
+        if (!ctx.contactId) return fail("Sem contato na conversa.");
+
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
+        const target = await prisma.user.findFirst({
+          where: {
+            type: "AI",
+            ...(orgId ? { organizationId: orgId } : {}),
+            name: { equals: wanted, mode: "insensitive" },
+            aiAgentConfig: { active: true },
+          },
+          select: {
+            id: true,
+            name: true,
+            aiAgentConfig: { select: { id: true, inboxPolicy: true } },
+          },
+        });
+        if (!target) {
+          const others = await prisma.user.findMany({
+            where: {
+              type: "AI",
+              ...(orgId ? { organizationId: orgId } : {}),
+              aiAgentConfig: { active: true },
+              id: { not: ctx.agentUserId },
+            },
+            select: { name: true },
+            orderBy: { name: "asc" },
+            take: 10,
+          });
+          return fail(
+            others.length > 0
+              ? `Agente "${wanted}" não encontrado ou inativo. Disponíveis: ${others
+                  .map((o) => o.name)
+                  .join(", ")}.`
+              : `Agente "${wanted}" não encontrado ou inativo.`,
+          );
+        }
+        const selfIdErr = selfAiDestinationError({
+          wanted,
+          selfName: ctx.agentName,
+          selfUserId: ctx.agentUserId,
+          destUserId: target.id,
+        });
+        if (selfIdErr) return fail(selfIdErr, { reason: "self_transfer" });
+
+        // Devolver a conversa para quem já tentou é o pingue-pongue que o
+        // contato sente como "ninguém me atende". Aqui não dá para cair na
+        // fila humana direto — o texto do turno é do modelo —, então a tool
+        // recusa dizendo qual é a saída.
+        if (
+          peerAlreadyAttended(
+            await loadConversationPeerHistory(ctx.conversationId),
+            { id: target.aiAgentConfig?.id, name: target.name },
+          )
+        ) {
+          return fail(PEER_ALREADY_ATTENDED_ERROR, {
+            reason: "peer_already_attended",
+          });
+        }
+
+        const handoffStartedAt = new Date();
+        const srcPolicy = ctx.inboxPolicy ?? normalizeInboxPolicy(null);
+        const announce = srcPolicy.announceAiTransfer;
+        const canned = srcPolicy.announceAiTransferMessage?.trim();
+        const noticeText = announce
+          ? (canned
+              ? canned.replaceAll("{{target_agent}}", target.name)
+              : noticeMessage?.trim() ||
+                `Vou te passar para ${target.name}, que segue com você daqui.`)
+          : null;
+
+        if (noticeText) {
+          // Aviso primeiro: a reatribuição derruba a entrega do texto do turno.
+          const { sendAgentMessage } = await import(
+            "@/services/ai/piloting-actions"
+          );
+          const me = await prisma.user.findUnique({
+            where: { id: ctx.agentUserId },
+            select: { aiAgentConfig: { select: { autonomyMode: true } } },
+          });
+          const notice = await sendAgentMessage({
+            conversationId: ctx.conversationId,
+            contactId: ctx.contactId,
+            agentUserId: ctx.agentUserId,
+            autonomyMode: me?.aiAgentConfig?.autonomyMode ?? "AUTONOMOUS",
+            text: noticeText,
+          });
+          if (notice.status === "skipped") {
+            return fail(
+              `Não consegui avisar o aluno (${notice.reason}) — não transferi. Siga o atendimento neste turno.`,
+            );
+          }
+        }
+
+        const tagApplied = await applyExistingTagToContact({
+          contactId: ctx.contactId,
+          tagName: tagName ?? null,
+          source: "[ai] handoff entre agentes",
+        });
+
+        const cluster = await prisma.$transaction((tx) =>
+          assignOwnerToContactClusterTx(tx, {
+            userId: target.id,
+            contactId: ctx.contactId,
+            conversationId: ctx.conversationId,
+            dealId: ctx.dealId ?? null,
+            via: "ai_handoff",
+          }),
+        );
+        await invalidateBoardsForPipelines(cluster.pipelineIds);
+
+        publishConversationAssignment({
+          organizationId: getOrgIdOrNull(),
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          assignedToId: target.id,
+          reason,
+        });
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "transferred_to_ai_agent",
+            agentId: ctx.agentId ?? null,
+            reason,
+            targetAgentUserId: target.id,
+            targetAgentName: target.name,
+          }).catch(() => {});
+        }
+
+        const destPolicy = normalizeInboxPolicy(target.aiAgentConfig?.inboxPolicy);
+        let openingStatus: string | null = null;
+        if (destPolicy.speakOnAiTransfer && ctx.contactId) {
+          try {
+            const { triggerAgentOpeningForContact } = await import(
+              "@/services/ai/piloting-actions"
+            );
+            const conv = ctx.conversationId
+              ? await prisma.conversation.findUnique({
+                  where: { id: ctx.conversationId },
+                  select: {
+                    channelRef: { select: { provider: true } },
+                  },
+                })
+              : null;
+            const opening = await triggerAgentOpeningForContact({
+              contactId: ctx.contactId,
+              agentUserId: target.id,
+              channel:
+                conv?.channelRef?.provider === "BAILEYS_MD" ? "baileys" : "meta",
+              ignorePriorBotOutbound: true,
+              handoffStartedAt,
+            });
+            openingStatus = opening.status;
+            if (opening.status === "skipped") {
+              openingStatus = `skipped:${opening.reason}`;
+            }
+          } catch (err) {
+            openingStatus = "failed";
+            log.warn(
+              { err: err instanceof Error ? err.message : err },
+              "[ai] speakOnAiTransfer opening failed",
+            );
+          }
+        }
+
+        return ok({
+          transferred: true,
+          // `assigned` é o que a auditoria de efeito olha para liberar a
+          // promessa feita ao aluno (`effect-claims`).
+          assigned: true,
+          agentName: target.name,
+          // Id do destino resolvido: quem lê o resultado (runner, QA) compara
+          // por id. Nome de agente é editável e repete entre orgs.
+          targetAgentUserId: target.id,
+          tagApplied,
+          noticeStatus: noticeText ? "sent" : "off",
+          openingStatus,
+          hint: destPolicy.speakOnAiTransfer
+            ? "Transferência concluída. Não escreva mais nada neste turno — o destino fala agora."
+            : "Transferência concluída. Não escreva mais nada neste turno.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao transferir para o agente.",
+        );
+      }
+    },
+  });
+}
+
+// ── transfer_to_department ─────────────────────────────────────
+
+function transferToDepartmentTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
+  return tool({
+    description:
+      copy?.transferToDepartment ??
+      "Roteia a conversa atual para um departamento com base no assunto do contato. NÃO tira a conversa do agente — apenas define o departamento responsável, usado pela Distribuição Inteligente para escolher o atendente certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
+    inputSchema: z.object({
+      departmentName: z
+        .string()
+        .min(1)
+        .describe(
+          "Nome do departamento de destino.",
+        ),
+    }),
+    execute: async ({ departmentName }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
+        const name = departmentName.trim();
+        if (!name) return fail("Nome de departamento vazio.");
+        const gate = departmentGate(policy, name);
+        if (gate) return fail(gate);
+
+        const ops = packOps(ctx);
+        // Refino do pack (opcional): últimas inbound podem forçar outro
+        // departamento. Sem pack, o nome pedido pelo modelo vale.
+        let dept: { id: string; name: string } | null = null;
+        if (ops.messageImpliesRematricula || ops.messageImpliesOperationalAtendimento) {
+          const recentIn = await prisma.message.findMany({
+            where: {
+              conversationId: ctx.conversationId,
+              direction: "in",
+              isPrivate: false,
+            },
+            orderBy: { createdAt: "desc" },
+            take: 6,
+            select: { content: true },
+          });
+          const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
+          if (
+            (ops.messageImpliesRematricula?.(inboundBlob) ||
+              ops.messageImpliesOperationalAtendimento?.(inboundBlob)) &&
+            ops.resolveDepartmentByKey
+          ) {
+            dept = await ops.resolveDepartmentByKey(
+              "atendimento",
+              ctx.inboxPolicy,
+            );
+          }
+        }
+        if (!dept) {
+          dept = await resolveDepartmentForAgent(name, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+        }
+        if (!dept) return fail(await departmentNotFoundMessage(name));
+        if (ops.enforceAtendimentoIfAcolhimentoBlocked) {
+          dept = await ops.enforceAtendimentoIfAcolhimentoBlocked({
+            contactId: ctx.contactId,
+            dept,
+            policy: ctx.inboxPolicy,
+          });
+        }
+        if (!dept) return fail(await departmentNotFoundMessage(name));
+        const selfDept = await selfDepartmentRouteError({
+          agentUserId: ctx.agentUserId,
+          departmentId: dept.id,
+        });
+        if (selfDept) return fail(selfDept, { reason: "self_department" });
+        await prisma.conversation.update({
+          where: { id: ctx.conversationId },
+          data: { departmentId: dept.id, updatedAt: new Date() },
+        });
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "transferred_to_department",
+            agentId: ctx.agentId ?? null,
+            departmentId: dept.id,
+            departmentName: dept.name,
+          }).catch(() => {});
+        }
+        return ok({ departmentId: dept.id, departmentName: dept.name });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao rotear departamento.",
+        );
+      }
+    },
+  });
+}
+
+// ── execute_distribution ───────────────────────────────────────
+
+function executeDistributionTool(ctx: RunContext, policy: ToolPolicy) {
+  const copy = packToolCopy(ctx);
+  return tool({
+    description:
+      copy?.executeDistribution ??
+      "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor sorteia quem recebe pelo peso (volume) de cada elegível, dentro do departamento roteado, respeitando horário e disponibilidade — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
+    inputSchema: z.object({
+      departmentName: z
+        .string()
+        .optional()
+        .describe(
+          "Departamento-alvo (opcional). Se omitido, usa o departamento já roteado na conversa. Ex.: 'Retenção'.",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto do encaminhamento, para registro."),
+    }),
+    execute: async ({ departmentName, reason }) => {
+      try {
+        if (!ctx.contactId && !ctx.dealId)
+          return fail("Sem contato/negócio para distribuir.");
+        if (!transferAllowed(ctx)) {
+          return policyDeniedHumanTransfer();
+        }
+        const gate = departmentGate(policy, departmentName);
+        if (gate) return fail(gate);
+
+        const ops = packOps(ctx);
+        // Se a conversa está na IA, usa o handoff de departamento (limpa
+        // assignee + dept + reassign). Evita early-return "ASSIGNED"
+        // mantendo a IA.
+        if (ctx.conversationId) {
+          const conv = await prisma.conversation.findUnique({
+            where: { id: ctx.conversationId },
+            select: { assignedTo: { select: { type: true } } },
+          });
+          if (conv?.assignedTo?.type === "AI") {
+            // Tool chamada = handoff intencional. Não adiar (evita promessa
+            // "vou conectar" sem fila real).
+            const handoff = await executeDepartmentHandoff({
+              ops,
+              conversationId: ctx.conversationId,
+              contactId: ctx.contactId ?? null,
+              dealId: ctx.dealId,
+              departmentName: departmentName ?? null,
+              userMessage: ctx.userMessage ?? null,
+              reason: reason ?? "execute_distribution via IA",
+              policy: ctx.inboxPolicy,
+            });
+            const queuedWaiting =
+              handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+              handoff.distribution?.reason === "NO_DEPARTMENT";
+            fireTabulateOnHumanExit(ctx);
+            return ok({
+              assigned: Boolean(handoff.distribution?.success),
+              // Sandbox do replay: quem receberia, sem receber de fato.
+              simulated: handoff.distribution?.simulated === true,
+              // `assignedUserId` saiu do payload: id interno de usuário não
+              // tem uso para o modelo e não precisa ser serializado.
+              assignedTo: handoff.distribution?.selectedUserName ?? null,
+              departmentName: handoff.departmentName,
+              reason: handoff.distribution?.reason ?? null,
+              queuedWaiting,
+              hint: queuedWaiting
+                ? buildQueuedWaitingHint(queueCtx(ctx))
+                : undefined,
+            });
+          }
+        }
+
+        let departmentId: string | null = null;
+        if (departmentName?.trim()) {
+          const dept = await resolveDepartmentForAgent(departmentName, {
+            ops,
+            policy: ctx.inboxPolicy,
+          });
+          if (!dept) return fail(await departmentNotFoundMessage(departmentName));
+          departmentId = dept.id;
+          if (ctx.conversationId) {
+            await prisma.conversation.update({
+              where: { id: ctx.conversationId },
+              data: { departmentId: dept.id, updatedAt: new Date() },
+            });
+          }
+        }
+
+        const result = await executeDistribution({
+          dealId: ctx.dealId ?? null,
+          contactId: ctx.contactId ?? null,
+          conversationId: ctx.conversationId ?? null,
+          triggerSource: "AI_AGENT",
+          departmentId,
+          reassign: true,
+        });
+
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "executed_distribution",
+            agentId: ctx.agentId ?? null,
+            success: result.success,
+            reason: result.reason,
+            selectedUserId: result.selectedUserId,
+            note: reason?.trim() ?? null,
+          }).catch(() => {});
+        }
+
+        if (result.success) {
+          fireTabulateOnHumanExit(ctx);
+          return ok({
+            assigned: true,
+            assignedTo: result.selectedUserName,
+            simulated: result.simulated === true,
+            departmentName: departmentName?.trim() || null,
+          });
+        }
+        // Não é erro de execução — é resultado de negócio (sem elegível, etc.).
+        return ok({
+          assigned: false,
+          reason: result.reason,
+          hint:
+            result.reason === "NO_ELIGIBLE_RESPONSIBLE"
+              ? buildQueuedWaitingHint(queueCtx(ctx))
+              : result.reason === "NO_DEPARTMENT"
+                ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
+                : "Distribuição não realizada. Considere transferir para humano manualmente.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao executar distribuição.",
+        );
+      }
+    },
+  });
+}
+
+// ── close_conversation ─────────────────────────────────────────
+
+function closeConversationTool(ctx: RunContext) {
+  const copy = packToolCopy(ctx);
+  return tool({
+    description:
+      copy?.closeConversation ??
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o contato pedir para encerrar/finalizar, ou agradecer de forma conclusiva depois de já ter sido atendido. NÃO use se já houver atendente humano na conversa. NÃO use só porque o contato disse que volta depois — nesse caso confirme e continue; encerre no agradecimento seguinte.",
+    inputSchema: z.object({
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto do encerramento (ex.: 'Contato pediu para encerrar')."),
+    }),
+    execute: async ({ reason }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const policy = normalizeAutoClosePolicy(ctx.autoClosePolicy);
+        if (!llmMayCloseConversation(policy)) {
+          return fail(
+            policy.mode === "off"
+              ? "Encerramento automático está desligado neste agente."
+              : "Neste agente só encerro com pedido explícito (encerrar/finalizar) ou palavra-chave. Não chame esta tool.",
+          );
+        }
+        const closeFn =
+          packOps(ctx).closeAiOnlyConversation ??
+          (await import("@/services/ai/close-ai-conversation"))
+            .closeAiOnlyConversation;
+        const { isFarewellCloser } = await import(
+          "@/lib/ai-agents/farewell-closer"
+        );
+        const result = await closeFn({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId ?? null,
+          reason: reason ?? "close_conversation via IA",
+          allowAfterHumanReply: isFarewellCloser({
+            archetype: ctx.archetype,
+            name: ctx.agentName,
+          }),
+        });
+        if (!result.closed) {
+          return fail(
+            result.reason === "HAS_HUMAN_REPLY"
+              ? "Já houve resposta humana — não posso encerrar por aqui. Transfira ou deixe o consultor encerrar."
+              : result.reason === "NOT_AI_ASSIGNEE"
+                ? "A conversa não está com a IA — não encerro."
+                : result.reason === "ALREADY_CLOSED"
+                  ? "Conversa já encerrada."
+                  : `Não foi possível encerrar (${result.reason}).`,
+          );
+        }
+        return ok({
+          closed: true,
+          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao contato em uma frase curta.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao encerrar conversa.",
+        );
+      }
+    },
+  });
+}
+
+// ── list_tabulations / tabulate_conversation ───────────────────
+
+function listTabulationsTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Lista TODAS as tabulações FOLHA ativas da organização (todos os departamentos). Use para achar a folha mais próxima da dúvida ou problema do contato. Não envia mensagem ao cliente.",
+    inputSchema: z.object({}),
+    execute: async () => {
+      try {
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const { listActiveTabulationLeaves } = await import(
+          "@/services/tabulations"
+        );
+        const leaves = await listActiveTabulationLeaves({
+          organizationId: orgId,
+        });
+        return ok({
+          leaves: leaves.map((l) => ({
+            id: l.id,
+            number: l.number,
+            path: l.path,
+            departmentName: l.departmentName,
+          })),
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao listar tabulações.",
+        );
+      }
+    },
+  });
+}
+
+function tabulateConversationTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Aplica uma tabulação FOLHA à conversa atual (motivo da demanda). Não encerra e não envia mensagem ao cliente. Use somente um id devolvido por list_tabulations ou listado no catálogo do prompt.",
+    inputSchema: z.object({
+      tabulationId: z
+        .string()
+        .min(1)
+        .describe("ID da folha de tabulação (não use categoria pai)."),
+      reason: z
+        .string()
+        .optional()
+        .describe("Resumo interno curto do porquê desta folha."),
+    }),
+    execute: async ({ tabulationId }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        if (ctx.tabulationAppliedThisRun) {
+          return fail(
+            "Já tabulou nesta execução. Não chame tabulate_conversation de novo.",
+          );
+        }
+        const orgId = ctx.organizationId ?? getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        const { applyConversationTabulation } = await import(
+          "@/services/ai/tabulation-classify"
+        );
+        const result = await applyConversationTabulation({
+          conversationId: ctx.conversationId,
+          organizationId: orgId,
+          tabulationId,
+          contactId: ctx.contactId ?? null,
+          source: "AI_AGENT",
+          closeIfOpen: false,
+        });
+        if (!result.ok) return fail(result.error);
+        ctx.tabulationAppliedThisRun = true;
+        return ok({
+          tabulated: true,
+          alreadyApplied: result.alreadyApplied,
+          closed: result.closed,
+          tabulationId: result.tabulation.tabulationId,
+          tabulationName: result.tabulation.name,
+          tabulationNumber: result.tabulation.number,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao tabular conversa.",
+        );
+      }
+    },
+  });
+}
+
+function transferConversationTool(ctx: RunContext, policy: ToolPolicy) {
+  const destClause = formatAiHandoffDestinations(peerDestinations(ctx));
+  return tool({
+    description:
+      "Passa a conversa para um destino: departamento (fila escolhe um consultor), uma pessoa da equipe, ou outro agente de IA. " +
+      "Use `department` quando a área importa e qualquer consultor serve; `user` para alguém específico; `ai_agent` para um especialista IA da organização. " +
+      "Pessoa indisponível (offline/expediente/fila cheia) cai na fila do departamento dela — não deixa o ticket parado nela. " +
+      "Para departamento e pessoa, só chame se o contato pediu humano/atendente ou você não puder seguir com segurança. " +
+      "Para `ai_agent`, nunca use o próprio agente." +
+      destClause,
+    inputSchema: z.object({
+      target: z
+        .enum(["department", "user", "ai_agent"])
+        .describe(
+          "department = fila do departamento; user = pessoa da equipe; ai_agent = outro agente IA.",
+        ),
+      name: z
+        .string()
+        .min(1)
+        .describe(
+          "Nome do departamento, da pessoa ou do agente IA (como está no CRM). Também aceita o id.",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto, para o próximo atendente ler."),
+      userExplicitlyAsked: z
+        .boolean()
+        .optional()
+        .describe(
+          `${USER_EXPLICITLY_ASKED_DESCRIPTION} Só é lido quando target é department ou user.`,
+        ),
+    }),
+    execute: async ({ target, name, reason, userExplicitlyAsked }) => {
+      try {
+        if (target === "ai_agent") {
+          const selfErr = selfAiDestinationError({
+            wanted: name,
+            selfName: ctx.agentName,
+            selfUserId: ctx.agentUserId,
+          });
+          if (selfErr) return fail(selfErr, { reason: "self_transfer" });
+        }
+        if (!ctx.conversationId) return fail("Sem conversa ativa para transferir.");
+        let gateMatchedBy: "keyword" | "model_assertion" | null = null;
+        if (target === "ai_agent") {
+          const idle = coordinatorIdleHandoffError(ctx);
+          if (idle) return fail(idle);
+        } else {
+          const gateState = evaluateHumanTransferGate(ctx, userExplicitlyAsked);
+          if (!gateState.allowed) return policyDeniedHumanTransfer();
+          gateMatchedBy = gateState.matchedBy;
+        }
+        const result = await executeOrchestratedHandoff({
+          gateDecision: target === "ai_agent" ? null : "allowed",
+          gateMatchedBy,
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId ?? null,
+          dealId: ctx.dealId,
+          fromAgentUserId: ctx.agentUserId,
+          fromAgentName: ctx.agentName,
+          target,
+          name,
+          reason,
+          userMessage: ctx.userMessage,
+          policy: ctx.inboxPolicy,
+          toolPolicy: policy,
+          ops: packOps(ctx),
+        });
+        if (result.error) return fail(result.error);
+        if (result.target !== "ai_agent") fireTabulateOnHumanExit(ctx);
+        return ok({
+          target: result.target,
+          assigned: result.assigned,
+          assignedTo: result.assignedTo,
+          assignedUserType: result.assignedUserType,
+          simulated: result.simulated === true,
+          departmentName: result.departmentName,
+          queuedWaiting: result.queuedWaiting,
+          distributionReason: result.distributionReason,
+          fallback: result.fallback,
+          hint: result.queuedWaiting
+            ? buildQueuedWaitingHint(queueCtx(ctx))
+            : undefined,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao transferir a conversa.",
+        );
+      }
+    },
+  });
+}
+
+// ── ToolSet builder ────────────────────────────────────────────
+
+// Usamos `any` pro Tool porque cada tool tem um inputSchema e output
+// diferentes; o ToolSet do AI SDK aceita tools heterogêneas, mas
+// TypeScript não consegue inferir isso automaticamente sem este cast.
+type AnyTool = ReturnType<typeof tool<any, any>>;
+
+type ToolFactory = (ctx: RunContext, policy: ToolPolicy) => AnyTool;
+
+const FACTORY_MAP: Record<string, ToolFactory> = {
+  create_deal: createDealTool,
+  move_stage: moveStageTool,
+  add_tag: addTagTool,
+  create_activity: createActivityTool,
+  search_products: searchProductsTool,
+  search_crm_records: searchCrmRecordsTool,
+  send_whatsapp_template: sendWhatsappTemplateTool,
+  transfer_to_department: transferToDepartmentTool,
+  execute_distribution: executeDistributionTool,
+  transfer_to_human: transferToHumanTool,
+  transfer_to_ai_agent: transferToAiAgentTool,
+  transfer_conversation: transferConversationTool,
+  close_conversation: closeConversationTool,
+  list_tabulations: listTabulationsTool,
+  tabulate_conversation: tabulateConversationTool,
+};
+
+/**
+ * Ferramenta que veio do pack do tenant (`extraTools`), não do núcleo.
+ *
+ * O núcleo não conhece o nome nem o assunto dela: recebe o id que está em
+ * `enabledTools` e pergunta ao pack quem constrói. Assim uma ferramenta de
+ * produto (consulta acadêmica, agenda de clínica, rastreio de pedido) entra
+ * sem que `FACTORY_MAP` precise crescer.
+ */
+function packToolFactory(ctx: RunContext, id: string): ToolFactory | null {
+  const extra = getVerticalPack(ctx.verticalPack)?.extraTools?.find(
+    (t) => t.id === id,
+  );
+  return extra ? (extra.factory as ToolFactory) : null;
+}
+
+/**
+ * Camada genérica da policy, válida para qualquer tool: anuncia as
+ * travas na description (senão o LLM insiste no arg bloqueado e entra
+ * em loop de erro) e higieniza os args antes do execute.
+ */
+function withArgPolicy(t: AnyTool, policy: ToolPolicy): AnyTool {
+  const suffix = describeToolPolicy(policy);
+  if (!suffix) return t;
+  const execute = t.execute;
+  return {
+    ...t,
+    description: `${t.description ?? ""}${suffix}`,
+    ...(execute
+      ? {
+          execute: ((args: Record<string, unknown>, options: unknown) =>
+            execute(
+              applyArgPolicy(args ?? {}, policy),
+              options as never,
+            )) as typeof execute,
+        }
+      : {}),
+  } as AnyTool;
+}
+
+/**
+ * MODO DE TESTE: a ferramenta de efeito não roda.
+ *
+ * Este é o ponto onde o bloqueio acontece — um envelope no `execute`, o mesmo
+ * lugar por onde toda chamada de tool já passa. Determinístico: o modelo pode
+ * pedir `transfer_to_human` à vontade que a função real nunca é invocada. A
+ * lista de quem é "efeito" é `EFFECT_TOOLS` (`effect-claims.ts`), a mesma que
+ * a auditoria de efeito usa — não existe segunda lista para desincronizar.
+ *
+ * As tools de consulta e as que não mudam atribuição nem estado de
+ * atendimento continuam executando: o valor do teste é ver o agente real, e
+ * sem elas a resposta seria outra.
+ */
+function withTestModeSimulation(
+  id: string,
+  t: AnyTool,
+  ctx: RunContext,
+): AnyTool {
+  const execute = t.execute;
+  if (!execute || !isEffectTool(id)) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>) => {
+      if (
+        id === "transfer_to_human" ||
+        id === "execute_distribution" ||
+        (id === "transfer_conversation" && args.target !== "ai_agent")
+      ) {
+        if (!transferAllowed(ctx)) {
+          return policyDeniedHumanTransfer();
+        }
+      }
+      if (
+        id === "transfer_to_ai_agent" ||
+        (id === "transfer_conversation" && args.target === "ai_agent")
+      ) {
+        const idle = coordinatorIdleHandoffError(ctx);
+        if (idle) return fail(idle);
+      }
+      return simulateEffectTool(id, args);
+    }) as typeof execute,
+  } as AnyTool;
+}
+
+/**
+ * Dedup + tetos por run. O modelo reexecutava a mesma tool porque o retorno
+ * anterior só repetia o erro, sem dizer "já tentou". Envelopa o `execute`
+ * depois do `withArgPolicy` para que a chave de dedup use os args já
+ * higienizados.
+ */
+function withCallGovernor(
+  id: string,
+  t: AnyTool,
+  governor: ToolCallGovernor,
+): AnyTool {
+  const execute = t.execute;
+  if (!execute) return t;
+  return {
+    ...t,
+    execute: (async (args: Record<string, unknown>, options: unknown) => {
+      const decision = governor.decide(id, args);
+      if (decision.action === "replay") {
+        return replayPayload(id, decision.previousResult);
+      }
+      if (decision.action === "deny") {
+        return denialPayload(id, decision.reason);
+      }
+      const result = await execute(args as never, options as never);
+      governor.record(id, args, result);
+      return result;
+    }) as typeof execute,
+  } as AnyTool;
+}
+
+export function buildToolSet(
+  ctx: RunContext,
+  enabledIds: string[],
+  toolConfig?: ToolConfigMap | null,
+  governor?: ToolCallGovernor,
+): ToolSet {
+  const set: Record<string, AnyTool> = {};
+  for (const id of enabledIds) {
+    const factory = FACTORY_MAP[id] ?? packToolFactory(ctx, id);
+    if (!factory) continue;
+    let policy = toolConfig ? toolPolicyFor(toolConfig, id) : emptyToolPolicy();
+    if (id === "transfer_to_ai_agent" || id === "transfer_conversation") {
+      policy = {
+        ...policy,
+        allowedAgentNames: excludeSelfFromAgentNames(
+          policy.allowedAgentNames,
+          ctx.agentName,
+        ),
+      };
+    }
+    let built = withArgPolicy(factory(ctx, policy), policy);
+    // Antes do governor: a chamada simulada continua contando para os tetos e
+    // para o dedup, senão um loop do modelo em modo de teste rodaria solto.
+    if (ctx.testMode) built = withTestModeSimulation(id, built, ctx);
+    set[id] = governor ? withCallGovernor(id, built, governor) : built;
+  }
+  return set as ToolSet;
+}
+
+/** Ferramentas do núcleo — existem para qualquer tenant, de qualquer ramo. */
+export const AVAILABLE_TOOL_IDS = Object.keys(FACTORY_MAP);
+
+/** Núcleo + o que o pack do tenant adiciona. É esta a lista que a tela mostra. */
+export function availableToolIdsForPack(packId?: string | null): string[] {
+  const extra = (getVerticalPack(packId)?.extraTools ?? []).map((t) => t.id);
+  return [...AVAILABLE_TOOL_IDS, ...extra];
+}

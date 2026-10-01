@@ -4,7 +4,11 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
+import { registerDbPool } from "@/lib/db-pool-metrics";
 import { warnPublicDoManagedHosts } from "@/lib/warn-public-do-managed-hosts";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("prisma-base");
 
 /**
  * Cliente Prisma cru (sem extension de organizationId). Use quando:
@@ -135,10 +139,9 @@ export async function withPgPoolRetry<T>(
   } catch (err) {
     if (!isPgPoolTimeoutError(err)) throw err;
     const mode = appMode();
-    console.warn(
-      `[prisma-base] pool timeout APP_MODE=${mode}` +
-        (label ? ` op=${label}` : "") +
-        " — retry 1x",
+    log.warn(
+      { APP_MODE: mode, ...(label ? { op: label } : {}) },
+      "[prisma-base] pool timeout — retry 1x",
     );
     await sleep(50 + Math.floor(Math.random() * 100));
     return await fn();
@@ -175,8 +178,9 @@ function createPrismaClient() {
   const engineType = (process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "").toLowerCase();
   const winArm64 = process.platform === "win32" && process.arch === "arm64";
   if (engineType === "binary" || winArm64) {
-    console.info(
-      `[prisma-base] engine=${engineType || "library"} arch=${process.arch} sem adapter APP_MODE=${mode}`,
+    log.info(
+      { engine: engineType || "library", arch: process.arch, APP_MODE: mode },
+      "[prisma-base] sem adapter",
     );
     return new PrismaClient({ log: [...prismaLog] });
   }
@@ -213,14 +217,15 @@ function createPrismaClient() {
     try {
       ssl = { ca: readFileSync(caPath, "utf8"), rejectUnauthorized: true };
     } catch (err) {
-      console.warn(
-        `[prisma-base] não conseguiu ler o CA em ${caPath} — caindo no TLS padrão:`,
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { caPath, err: err instanceof Error ? err.message : err },
+        "[prisma-base] não conseguiu ler o CA — caindo no TLS padrão",
       );
     }
   } else if (caPath) {
-    console.warn(
-      `[prisma-base] CA ausente em ${caPath} — montar /app/certs como nos outros workers, ou o pool segue só com sslmode`,
+    log.warn(
+      { caPath },
+      "[prisma-base] CA ausente — montar /app/certs como nos outros workers, ou o pool segue só com sslmode",
     );
   }
 
@@ -255,27 +260,32 @@ function createPrismaClient() {
     ...(ssl ? { ssl } : {}),
   });
 
+  // Gauge `crm_db_pool_connections` em /api/metrics — sem isto o coletor
+  // é no-op e o pool do processo nunca aparece.
+  registerDbPool(pool);
+
   // Resiliencia: log mas nao crash em erros transientes do pool.
   pool.on("error", (err) => {
-    console.warn(
-      `[prisma-base] pool error APP_MODE=${mode} (continuando):`,
-      err.message,
-    );
+    log.warn({ APP_MODE: mode, err: err.message }, "[prisma-base] pool error (continuando)");
   });
 
-  console.info(
-    `[prisma-base] pool ready APP_MODE=${mode} max=${max}` +
-      ` connTimeoutMs=${connectionTimeoutMillis}` +
-      ` idleTimeoutMs=${idleTimeoutMillis}` +
-      ` statementTimeoutMs=${statementTimeoutMs}` +
-      ` application_name=${appName}`,
+  log.info(
+    {
+      APP_MODE: mode,
+      max,
+      connTimeoutMs: connectionTimeoutMillis,
+      idleTimeoutMs: idleTimeoutMillis,
+      statementTimeoutMs,
+      application_name: appName,
+    },
+    "[prisma-base] pool ready",
   );
 
-  const adapter = new PrismaPg(pool);
+  const adapter = new PrismaPg(pool) as any;
   return new PrismaClient({
     adapter,
     log: [...prismaLog],
-  });
+  } as any);
 }
 
 export const prismaBase =

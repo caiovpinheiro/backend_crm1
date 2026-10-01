@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createSavedFilter, listSavedFilters } from "@/services/saved-filters";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/saved-filters");
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -11,7 +14,7 @@ export async function GET(request: Request) {
       const items = await listSavedFilters(user, entityType);
       return NextResponse.json({ items });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar filtros." }, { status: 500 });
     }
   });

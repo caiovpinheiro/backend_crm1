@@ -7,6 +7,9 @@ import {
   setPipelineLossReasonRequired,
   setPipelineLossReasons,
 } from "@/services/loss-reasons";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]/loss-reasons");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -20,7 +23,7 @@ export async function GET(_req: Request, ctx: Ctx) {
       }
       return NextResponse.json(meta);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar motivos do funil." }, { status: 500 });
     }
   });
@@ -64,7 +67,7 @@ export async function PUT(request: Request, ctx: Ctx) {
       if (e instanceof Error && e.message === "INVALID_REASON") {
         return NextResponse.json({ message: "Motivo inválido." }, { status: 400 });
       }
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       return NextResponse.json({ message: "Erro ao salvar motivos do funil." }, { status: 500 });
     }
   });

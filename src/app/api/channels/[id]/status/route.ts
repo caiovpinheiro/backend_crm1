@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getChannelById } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]/status");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -23,7 +26,7 @@ export async function GET(_request: Request, context: RouteContext) {
       phoneNumber: channel.phoneNumber ?? undefined,
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao consultar status.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

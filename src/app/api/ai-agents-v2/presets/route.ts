@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { listV2PresetsService } from "@/services/ai-v2/agents";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/presets");
 
 export async function GET() {
   const r = await requireAuth();
@@ -14,7 +17,7 @@ export async function GET() {
     }));
     return NextResponse.json({ presets });
   } catch (err) {
-    console.error("[GET /api/ai-agents-v2/presets]", err);
+    log.error({ err }, "[GET /api/ai-agents-v2/presets] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao listar presets v2." },
       { status: 500 },

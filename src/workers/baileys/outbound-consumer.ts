@@ -12,10 +12,15 @@ import {
 } from "@/lib/queue";
 import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageStatus } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
+import { noteContactActivity } from "./contact-typing";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.outbound-consumer");
 
 export function startOutboundConsumer(
   manager: BaileysManager,
@@ -128,8 +133,13 @@ export function startOutboundConsumer(
                   })
                   .catch(() => {});
               }
-              console.log(
-                `[baileys-outbound] áudio preparado (${prepared.payload.delivery}) ${buffer.length} -> ${audioBuffer.length} bytes`,
+              log.info(
+                {
+                  delivery: prepared.payload.delivery,
+                  inputBytes: buffer.length,
+                  outputBytes: audioBuffer.length,
+                },
+                "[baileys-outbound] áudio preparado",
               );
             }
 
@@ -177,9 +187,9 @@ export function startOutboundConsumer(
         "WhatsApp não confirmou o envio",
       );
       if (sent?.key?.id) {
-        console.info(`[baileys-outbound] enviado ${sent.key.id} → ${jid}`);
+        log.info({ messageId: sent.key.id, jid: maskPhone(jid) }, "[baileys-outbound] enviado");
       } else {
-        console.warn(`[baileys-outbound] send sem id de mensagem → ${jid}`);
+        log.warn({ jid: maskPhone(jid) }, "[baileys-outbound] send sem id de mensagem");
       }
 
       if (!messageId) return;
@@ -189,15 +199,34 @@ export function startOutboundConsumer(
       // delivered/read do Baileys não achavam a mensagem por wamid.
       const meta = await prismaBase.message.findUnique({
         where: { id: messageId },
-        select: { organizationId: true, conversationId: true },
+        select: {
+          organizationId: true,
+          conversationId: true,
+          conversation: {
+            select: { contactId: true, status: true, lastInboundAt: true },
+          },
+        },
       });
+      // "digitando…" do contato: resposta do CRM numa conversa aberta em
+      // que o contato JÁ escreveu renova/assina a presença do JID. Envio
+      // frio (sem inbound neste ticket) não assina — ver `contact-typing.ts`.
+      if (meta?.organizationId && meta.conversation?.contactId) {
+        noteContactActivity(channelId, {
+          jid,
+          organizationId: meta.organizationId,
+          conversationId: meta.conversationId,
+          contactId: meta.conversation.contactId,
+          conversationStatus: meta.conversation.status,
+          contactHasWritten: meta.conversation.lastInboundAt != null,
+        });
+      }
       if (meta?.organizationId && sent?.key?.id) {
         await withSystemContext(meta.organizationId, async () => {
           await prisma.message.update({
             where: { id: messageId },
             data: { externalId: sent.key!.id!, sendStatus: "sent" },
           });
-          sseBus.publish("message_status", {
+          publishMessageStatus({
             organizationId: meta.organizationId,
             conversationId: meta.conversationId,
             messageId,
@@ -210,14 +239,14 @@ export function startOutboundConsumer(
   );
 
   worker.on("failed", (job, err) => {
-    console.error(`[baileys-outbound] job ${job?.id} falhou:`, err.message);
+    log.error({ jobId: job?.id, err: err.message }, "[baileys-outbound] job falhou");
   });
 
   worker.on("completed", (job) => {
-    console.info(`[baileys-outbound] job ${job.id} concluído`);
+    log.info({ jobId: job.id }, "[baileys-outbound] job concluído");
   });
 
-  console.info(`[baileys-outbound] ouvindo fila "${BAILEYS_OUTBOUND_QUEUE_NAME}"`);
+  log.info({ queue: BAILEYS_OUTBOUND_QUEUE_NAME }, "[baileys-outbound] ouvindo fila");
   return worker;
 }
 
@@ -244,7 +273,7 @@ async function markFailed(messageId: string, error: string) {
         where: { id: messageId },
         data: { sendStatus: "failed", sendError: error },
       });
-      sseBus.publish("message_status", {
+      publishMessageStatus({
         organizationId: msg.organizationId,
         conversationId: msg.conversationId,
         messageId,

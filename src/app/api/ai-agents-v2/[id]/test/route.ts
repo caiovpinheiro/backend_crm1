@@ -5,6 +5,9 @@ import { getV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { simulateV2Turn } from "@/services/ai-v2/test-turn";
 import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/test");
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -46,7 +49,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       );
       return NextResponse.json(result);
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/test]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/test]");
       const raw = err instanceof Error ? err.message : String(err);
       if (raw === "NO_ANTHROPIC_KEY") {
         return NextResponse.json(

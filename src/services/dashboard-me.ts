@@ -18,10 +18,24 @@ export type DashboardMeItem = {
   meta: string | null;
 };
 
+export type DashboardMeInboundDeal = {
+  id: string;
+  number: number;
+  title: string;
+  stageId: string;
+  stageName: string;
+  pipelineName: string;
+  count: number;
+  /** Início da espera atual: primeira entrada depois da última resposta humana. */
+  waitingSince: string;
+};
+
 export type DashboardMeResult = {
   conversations: { total: number; items: DashboardMeItem[] };
   activities: { overdue: number; today: number; items: DashboardMeItem[] };
   stalled: { total: number; items: DashboardMeItem[] };
+  /** Negócios OPEN do usuário com mensagem de entrada ainda sem resposta humana. */
+  inboundDeals: DashboardMeInboundDeal[];
 };
 
 function startOfDay(d: Date) {
@@ -56,7 +70,7 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
     hasError: false,
   };
 
-  const [waitingTotal, waitingRows, overdue, dueToday, openTasks, stalledRows, stalledTotal] =
+  const [waitingTotal, waitingRows, overdue, dueToday, openTasks, stalledRows, stalledTotal, inboundRows] =
     await Promise.all([
       prisma.conversation.count({ where: waitingWhere }),
       prisma.conversation.findMany({
@@ -67,7 +81,17 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           id: true,
           number: true,
           updatedAt: true,
-          contact: { select: { name: true } },
+          contact: {
+            select: {
+              name: true,
+              deals: {
+                where: { ownerId: userId, status: "OPEN" },
+                orderBy: { updatedAt: "desc" },
+                take: 1,
+                select: { number: true },
+              },
+            },
+          },
         },
       }),
       prisma.activity.count({
@@ -129,6 +153,73 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
           AND d.status = 'OPEN'
           AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
       `),
+      // Só entra quem ainda não foi respondido. A resposta humana vale em
+      // qualquer conversa do contato: a última saída pública humana encerra
+      // a espera, mesmo que o inbound esteja em outro ticket.
+      prisma.$queryRaw<
+        {
+          dealId: string;
+          dealNumber: number;
+          title: string;
+          stageId: string;
+          stageName: string;
+          pipelineName: string;
+          cnt: bigint;
+          waitingSince: Date;
+        }[]
+      >(Prisma.sql`
+        WITH mine AS (
+          SELECT DISTINCT ON (d."contactId")
+            d.id AS "dealId",
+            d.number AS "dealNumber",
+            d.title AS "title",
+            d."contactId" AS "contactId",
+            d."stageId" AS "stageId"
+          FROM deals d
+          WHERE d."organizationId" = ${orgId}
+            AND d."ownerId" = ${userId}
+            AND d.status = 'OPEN'::"DealStatus"
+            AND d."contactId" IS NOT NULL
+          ORDER BY d."contactId", d."updatedAt" DESC
+        ),
+        reply AS (
+          SELECT c."contactId" AS "contactId",
+                 MAX(m."createdAt") AS "lastReplyAt"
+          FROM messages m
+          INNER JOIN conversations c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${orgId}
+            AND m."organizationId" = ${orgId}
+            AND c."contactId" IN (SELECT "contactId" FROM mine)
+            AND m.direction = 'out'
+            AND m."isPrivate" = false
+            AND m."authorType" = 'human'::"MessageAuthorType"
+          GROUP BY c."contactId"
+        )
+        SELECT o."dealId" AS "dealId",
+               o."dealNumber" AS "dealNumber",
+               o."title" AS "title",
+               s.id AS "stageId",
+               s.name AS "stageName",
+               p.name AS "pipelineName",
+               COUNT(m.id)::bigint AS cnt,
+               MIN(m."createdAt") AS "waitingSince"
+        FROM mine o
+        LEFT JOIN reply r ON r."contactId" = o."contactId"
+        INNER JOIN stages s ON s.id = o."stageId"
+        INNER JOIN pipelines p ON p.id = s."pipelineId" AND p."archivedAt" IS NULL
+        INNER JOIN conversations conv
+          ON conv."contactId" = o."contactId"
+         AND conv."organizationId" = ${orgId}
+        INNER JOIN messages m
+          ON m."conversationId" = conv.id
+         AND m."organizationId" = ${orgId}
+         AND m.direction = 'in'
+         AND m."isPrivate" = false
+         AND (r."lastReplyAt" IS NULL OR m."createdAt" > r."lastReplyAt")
+        GROUP BY o."dealId", o."dealNumber", o."title", s.id, s.name, s.position, p.name
+        ORDER BY MIN(m."createdAt") ASC
+        LIMIT 40
+      `),
     ]);
 
   const rankedTasks = [...openTasks].sort((a, b) => {
@@ -143,14 +234,22 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
   return {
     conversations: {
       total: waitingTotal,
-      items: waitingRows.map((row) => ({
-        id: row.id,
-        number: row.number ?? null,
-        title: row.contact?.name || `Conversa #${row.number ?? ""}`.trim(),
-        subtitle: "Aguardando sua resposta",
-        href: row.number ? `/inbox?tab=esperando&c=${row.number}` : `/inbox?tab=esperando`,
-        meta: daysAgoLabel(row.updatedAt),
-      })),
+      items: waitingRows.map((row) => {
+        const dealNumber = row.contact?.deals[0]?.number;
+        return {
+          id: row.id,
+          number: row.number ?? null,
+          title: row.contact?.name || `Conversa #${row.number ?? ""}`.trim(),
+          subtitle: "Aguardando sua resposta",
+          href:
+            dealNumber != null
+              ? `/pipeline?deal=${dealNumber}`
+              : row.number
+                ? `/inbox?tab=esperando&c=${row.number}`
+                : `/inbox?tab=esperando`,
+          meta: daysAgoLabel(row.updatedAt),
+        };
+      }),
     },
     activities: {
       overdue,
@@ -185,5 +284,15 @@ export async function getDashboardMe(userId: string): Promise<DashboardMeResult>
         meta: daysAgoLabel(row.updatedAt),
       })),
     },
+    inboundDeals: inboundRows.map((row) => ({
+      id: row.dealId,
+      number: row.dealNumber,
+      title: row.title,
+      stageId: row.stageId,
+      stageName: row.stageName,
+      pipelineName: row.pipelineName,
+      count: Number(row.cnt),
+      waitingSince: row.waitingSince.toISOString(),
+    })),
   };
 }

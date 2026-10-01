@@ -4,6 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { addRoleAssignment } from "@/services/roles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/roles/[id]/assignments");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -48,7 +51,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return NextResponse.json(role, { status: 201 });
     } catch (e) {
-      console.error("[POST /api/roles/[id]/assignments]", e);
+      log.error({ err: e }, "[POST /api/roles/[id]/assignments]");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao atribuir role." },
         { status: 400 },

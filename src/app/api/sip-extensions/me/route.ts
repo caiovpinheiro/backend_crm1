@@ -19,6 +19,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions/me");
 
 export async function DELETE(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -43,7 +46,7 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ disconnected: true }, { status: 200 });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("[sip-extensions/me DELETE]:", msg);
+      log.error({ err: msg }, "[sip-extensions/me DELETE] falhou");
       return NextResponse.json(
         { message: "Erro ao desconectar a conta Api4Com." },
         { status: 500 },

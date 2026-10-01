@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { setSuggestionRefused } from "@/services/ai-v2/config-review";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/review/[runId]/refuse");
 
 /** Recusa (ou desfaz a recusa de) uma sugestão: a próxima revisão não a repete. */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string; runId: string }> }) {
@@ -26,7 +29,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Erro ao recusar.";
       const status = msg.includes("não encontrad") ? 404 : 500;
-      if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/review/[runId]/refuse]", err);
+      if (status === 500) log.error({ err }, "[POST /api/ai-agents-v2/[id]/review/[runId]/refuse]");
       return NextResponse.json({ message: msg }, { status });
     }
   });

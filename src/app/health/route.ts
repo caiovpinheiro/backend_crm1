@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import IORedis from "ioredis";
 
-import { prisma } from "@/lib/prisma";
+import {
+  canSeeHealthDetail,
+  getHealthSnapshot,
+  healthUptimeSec,
+  type HealthCheckResult,
+} from "@/lib/health-check";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -19,66 +23,14 @@ export const runtime = "nodejs";
  *    browser, funciona offline com auto-refresh nativo via meta tag.
  *
  * Mantemos `/api/health` separado para monitores externos (JSON).
+ *
+ * Pública só com o estado agregado ("Operacional"/"Degradado"). Os cartões
+ * de Postgres/Redis, latências e uptime aparecem apenas com `HEALTH_TOKEN`
+ * ou sessão de super-admin — mesma regra do `/api/health`
+ * (`@/lib/health-check`).
  */
 
-const HEALTH_TIMEOUT_MS = 2000;
-const startedAt = Date.now();
-
-const globalForHealth = globalThis as unknown as { healthRedis?: IORedis };
-
-function getHealthRedis(): IORedis | null {
-  const url = process.env.REDIS_URL;
-  if (!url) return null;
-  if (!globalForHealth.healthRedis) {
-    globalForHealth.healthRedis = new IORedis(url, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
-      connectTimeout: HEALTH_TIMEOUT_MS,
-      commandTimeout: HEALTH_TIMEOUT_MS,
-      enableOfflineQueue: false,
-      reconnectOnError: () => false,
-    });
-    globalForHealth.healthRedis.on("error", () => {});
-  }
-  return globalForHealth.healthRedis;
-}
-
-async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return await Promise.race([
-    p,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timeout após ${ms}ms`)), ms),
-    ),
-  ]);
-}
-
-type CheckResult = { ok: true; latencyMs: number } | { ok: false; error: string };
-
-async function checkPostgres(): Promise<CheckResult> {
-  const t0 = Date.now();
-  try {
-    await withTimeout(prisma.$queryRaw`SELECT 1`, HEALTH_TIMEOUT_MS, "postgres");
-    return { ok: true, latencyMs: Date.now() - t0 };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-async function checkRedis(): Promise<CheckResult> {
-  const t0 = Date.now();
-  const redis = getHealthRedis();
-  if (!redis) return { ok: false, error: "REDIS_URL não configurado" };
-  try {
-    if (redis.status === "wait" || redis.status === "end") {
-      await withTimeout(redis.connect(), HEALTH_TIMEOUT_MS, "redis-connect");
-    }
-    const pong = await withTimeout(redis.ping(), HEALTH_TIMEOUT_MS, "redis-ping");
-    if (pong !== "PONG") return { ok: false, error: `resposta inesperada: ${pong}` };
-    return { ok: true, latencyMs: Date.now() - t0 };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
+type CheckResult = HealthCheckResult;
 
 function formatUptime(totalSec: number): string {
   if (totalSec < 60) return `${totalSec}s`;
@@ -138,10 +90,13 @@ const ICON_SHIELD_OK = `<svg width="20" height="20" viewBox="0 0 24 24" fill="no
 const ICON_SHIELD_ALERT = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`;
 const ICON_SERVER = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>`;
 
-export async function GET() {
-  const [db, redis] = await Promise.all([checkPostgres(), checkRedis()]);
-  const ok = db.ok && redis.ok;
-  const uptimeSec = Math.round((Date.now() - startedAt) / 1000);
+export async function GET(request: Request) {
+  const [snapshot, detail] = await Promise.all([
+    getHealthSnapshot(),
+    canSeeHealthDetail(request),
+  ]);
+  const { db, redis, ok } = snapshot;
+  const uptimeSec = healthUptimeSec();
   const timestamp = new Date().toLocaleString("pt-BR", {
     day: "2-digit",
     month: "2-digit",
@@ -162,13 +117,32 @@ export async function GET() {
     ? "Todos os serviços estão respondendo normalmente"
     : "Uma ou mais dependências estão com problemas";
 
+  const detailHtml = detail
+    ? `<div style="margin-top:16px;display:grid;gap:12px;grid-template-columns:1fr 1fr">
+      ${renderCheck("Postgres", ICON_DB, db)}
+      ${renderCheck("Redis", ICON_ZAP, redis)}
+    </div>
+
+    <div style="margin-top:16px;border-radius:16px;border:1px solid rgba(0,0,0,0.06);background:#fff;padding:16px">
+      <div style="display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.025em;color:#94a3b8">${ICON_SERVER}Runtime</div>
+      <dl style="margin:12px 0 0;display:grid;grid-template-columns:1fr 1fr;row-gap:12px;font-size:13px">
+        <dt style="color:#64748b">Uptime</dt>
+        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-variant-numeric:tabular-nums;color:#0f172a">${formatUptime(uptimeSec)}</dd>
+        <dt style="color:#64748b">HTTP</dt>
+        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-variant-numeric:tabular-nums;color:#0f172a">${ok ? 200 : 503}</dd>
+        <dt style="color:#64748b">Timestamp</dt>
+        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#334155">${escapeHtml(timestamp)}</dd>
+      </dl>
+    </div>`
+    : "";
+
   const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="10">
-  <title>System Health · CRM EduIT</title>
+  <title>System Health</title>
   <style>
     *,*::before,*::after{box-sizing:border-box}
     body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:#f8fafc;color:#0f172a;min-height:100dvh;padding:40px 16px}
@@ -185,7 +159,7 @@ export async function GET() {
         <div style="width:40px;height:40px;border-radius:16px;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center">${ICON_ACTIVITY}</div>
         <div>
           <h1 style="margin:0;font-size:18px;font-weight:900;letter-spacing:-0.02em;color:#0f172a">System Health</h1>
-          <p style="margin:0;font-size:12px;font-weight:500;color:#64748b">CRM EduIT · status em tempo real</p>
+          <p style="margin:0;font-size:12px;font-weight:500;color:#64748b">Status em tempo real</p>
         </div>
       </div>
       <a href="/health" style="display:inline-flex;align-items:center;gap:8px;border-radius:12px;border:1px solid rgba(0,0,0,0.06);background:#fff;padding:6px 12px;font-size:12px;font-weight:600;color:#334155;text-decoration:none">Atualizar</a>
@@ -207,22 +181,7 @@ export async function GET() {
       </div>
     </div>
 
-    <div style="margin-top:16px;display:grid;gap:12px;grid-template-columns:1fr 1fr">
-      ${renderCheck("Postgres", ICON_DB, db)}
-      ${renderCheck("Redis", ICON_ZAP, redis)}
-    </div>
-
-    <div style="margin-top:16px;border-radius:16px;border:1px solid rgba(0,0,0,0.06);background:#fff;padding:16px">
-      <div style="display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.025em;color:#94a3b8">${ICON_SERVER}Runtime</div>
-      <dl style="margin:12px 0 0;display:grid;grid-template-columns:1fr 1fr;row-gap:12px;font-size:13px">
-        <dt style="color:#64748b">Uptime</dt>
-        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-variant-numeric:tabular-nums;color:#0f172a">${formatUptime(uptimeSec)}</dd>
-        <dt style="color:#64748b">HTTP</dt>
-        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-variant-numeric:tabular-nums;color:#0f172a">${ok ? 200 : 503}</dd>
-        <dt style="color:#64748b">Timestamp</dt>
-        <dd style="margin:0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#334155">${escapeHtml(timestamp)}</dd>
-      </dl>
-    </div>
+    ${detailHtml}
 
     <footer style="margin-top:24px;display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:500;color:#94a3b8">
       <span>Atualiza automaticamente a cada 10s</span>

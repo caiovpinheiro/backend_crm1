@@ -67,12 +67,12 @@ describe("ToolCallGovernor", () => {
   it("teto por ferramenta barra a 4ª chamada com argumentos diferentes", () => {
     const g = new ToolCallGovernor(limits);
     for (let i = 0; i < 3; i++) {
-      expect(g.decide("consultar_matricula", { cpf: `${i}` }).action).toBe(
+      expect(g.decide("search_crm_records", { cpf: `${i}` }).action).toBe(
         "run",
       );
-      g.record("consultar_matricula", { cpf: `${i}` }, { ok: true });
+      g.record("search_crm_records", { cpf: `${i}` }, { ok: true });
     }
-    const denied = g.decide("consultar_matricula", { cpf: "9" });
+    const denied = g.decide("search_crm_records", { cpf: "9" });
     expect(denied).toEqual({ action: "deny", reason: "tool_cap" });
     expect(g.limitHit).toBe(true);
   });

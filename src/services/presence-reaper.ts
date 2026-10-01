@@ -1,3 +1,7 @@
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("presence-reaper");
+
 /**
  * Rebaixa automaticamente o status de agentes inativos.
  *
@@ -15,9 +19,7 @@ let started = false;
 export function startPresenceReaper() {
   if (started) return;
   started = true;
-  console.info(
-    "[presence-reaper] DEPRECATED — nenhum tick agendado. Use system-presence sweeper.",
-  );
+  log.info("[presence-reaper] DEPRECATED — nenhum tick agendado. Use system-presence sweeper.");
 }
 
 export async function reapOnce() {

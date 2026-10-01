@@ -24,6 +24,9 @@ import {
   type InboxTab,
 } from "@/services/conversations";
 import { resolveTabulationForStep } from "@/services/tabulations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/bulk");
 
 /** Abas válidas para o encerramento "todas do filtro" (paridade com a listagem). */
 const FILTER_TABS = new Set<InboxTab>([
@@ -559,7 +562,7 @@ export async function POST(request: Request) {
       // Log detalhado no servidor + detalhe na resposta para diagnóstico via
       // Network tab (o "funciona no dev, 500 na prod" costuma ser schema drift
       // — migração pendente — ou Redis lançando no enqueue).
-      console.error("[bulk]", { msg, code, stack });
+      log.error({ err: msg, code, stack }, "[bulk] falhou");
       return NextResponse.json(
         { message: "Erro ao executar ação em massa.", detail: msg, code, stack },
         { status: 500 },

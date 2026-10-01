@@ -4,6 +4,9 @@ import type { CallDirection, CallStatus } from "@prisma/client";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { listCalls } from "@/services/calls";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/calls");
 
 /**
  * GET /api/calls
@@ -95,7 +98,7 @@ export async function GET(request: Request) {
         perPage: result.perPage,
       });
     } catch (e) {
-      console.error("[calls] GET:", e);
+      log.error({ err: e }, "[calls] GET falhou");
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
     }
   });

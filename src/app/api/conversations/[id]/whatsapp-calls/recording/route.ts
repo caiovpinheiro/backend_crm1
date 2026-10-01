@@ -5,8 +5,11 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/whatsapp-calls/recording");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -80,7 +83,7 @@ export async function POST(request: Request, context: RouteContext) {
       try {
         form = await request.formData();
       } catch (err) {
-        console.error("[call-recording] formData parse error:", err);
+        log.error({ err }, "[call-recording] formData parse error");
         return NextResponse.json({ message: "Upload inválido." }, { status: 400 });
       }
 
@@ -151,7 +154,7 @@ export async function POST(request: Request, context: RouteContext) {
       try {
         buffer = await blobToBuffer(raw);
       } catch (err) {
-        console.error("[call-recording] buffer read error:", err);
+        log.error({ err }, "[call-recording] buffer read error");
         return NextResponse.json(
           { message: "Falha ao ler arquivo." },
           { status: 500 },
@@ -259,7 +262,7 @@ export async function POST(request: Request, context: RouteContext) {
         /* ignore */
       }
 
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,
@@ -277,7 +280,7 @@ export async function POST(request: Request, context: RouteContext) {
         durationSec,
       });
     } catch (err) {
-      console.error("[call-recording] fatal:", err);
+      log.error({ err }, "[call-recording] fatal");
       return NextResponse.json(
         { message: "Erro ao salvar gravação." },
         { status: 500 },

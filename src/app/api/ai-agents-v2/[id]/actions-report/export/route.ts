@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { exportActionsReportCsv, parseActionReportFilters } from "@/services/ai-v2/actions-report";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/actions-report/export");
 
 /** Mesmos filtros do relatório, em CSV. */
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -27,7 +30,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         },
       });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/actions-report/export]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/actions-report/export]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao exportar." }, { status: 500 });
     }
   });

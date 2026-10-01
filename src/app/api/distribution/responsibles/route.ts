@@ -16,6 +16,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/responsibles");
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -53,7 +56,7 @@ export async function GET(request: Request) {
       });
       return NextResponse.json({ responsibles });
     } catch (e) {
-      console.error("[GET /api/distribution/responsibles]", e);
+      log.error({ err: e }, "[GET /api/distribution/responsibles] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar responsáveis." },
         { status: 500 },

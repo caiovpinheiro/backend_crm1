@@ -22,6 +22,9 @@
 import { NextResponse } from "next/server";
 
 import { processWebhookEvent } from "@/services/calls";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/webhooks/calls/[provider]");
 
 type RouteContext = { params: Promise<{ provider: string }> };
 
@@ -86,7 +89,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     // Erros pós-auth (normalização, etc.): 200 para evitar retry em loop.
-    console.warn(`[webhooks/calls/${provider}] Processamento parcial:`, result.reason);
+    log.warn({ provider, reason: result.reason }, "[webhooks/calls] Processamento parcial");
     return NextResponse.json({ ok: false, reason: result.reason }, { status: 200 });
   }
 

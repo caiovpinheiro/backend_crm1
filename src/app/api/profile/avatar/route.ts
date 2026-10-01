@@ -20,6 +20,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { extForMime, sniffImageMime } from "@/lib/file-sniff";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/profile/avatar");
 
 const MAX_AVATAR_SIZE = 4 * 1024 * 1024;
 
@@ -95,7 +98,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ url: saved.url, mimeType: mime });
   } catch (error) {
-    console.error("[profile/avatar] upload failed", error);
+    log.error({ err: error }, "[profile/avatar] upload failed");
     return NextResponse.json(
       { message: "Erro ao salvar a imagem." },
       { status: 500 },

@@ -18,6 +18,29 @@ import {
 import { decryptSecret } from "./crypto/secrets";
 import { verifyTotp } from "./auth/totp";
 import { findMatchingBackupCode } from "./auth/backup-codes";
+import {
+  getJwtRefreshSnapshot,
+  setJwtRefreshSnapshot,
+  type JwtRefreshSnapshot,
+} from "./auth/jwt-refresh-cache";
+import {
+  getCachedSessionVersion,
+  sessionVersionFromClaim,
+  sessionVersionMatches,
+  setCachedSessionVersion,
+} from "./auth/session-version";
+import { resolveKnownSessionVersion } from "./auth/session-version-check";
+import {
+  renewSessionVersion,
+  sessionRenewalProofFrom,
+} from "./auth/session-renewal";
+import { getClientIp, withRateLimit } from "./rate-limit";
+import { runInBackground } from "@/lib/background";
+import { resendVerificationOnLogin } from "@/services/email-verification";
+import { maskEmail } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auth");
 
 /** Código em `signIn(..., { redirect: false })` → `result.code` quando o Prisma falha (ex.: BD parada). */
 class DatabaseUnavailable extends CredentialsSignin {
@@ -38,9 +61,29 @@ class MfaInvalid extends CredentialsSignin {
   code = "mfa_invalid";
 }
 
-/** Signup recente: e-mail ainda não confirmado. */
-class EmailUnverified extends CredentialsSignin {
-  code = "email_unverified";
+/** SEC-12: IP estourou o limiter `auth.credentials` (antes do lockout/bcrypt). */
+class RateLimited extends CredentialsSignin {
+  code = "rate_limited";
+}
+
+/**
+ * SEC-12: limiter por IP no callback de credenciais. O middleware libera
+ * `/api/auth/*`, então este é o único ponto que barra password spraying
+ * (N e-mails × 4 tentativas cada, abaixo do lockout por e-mail) e flood de
+ * bcrypt. Roda antes de qualquer consulta/hash. Fail-open sem `request`
+ * (chamadas fora do fluxo HTTP) — igual ao resto do rate-limit.
+ */
+async function enforceCredentialsIpRateLimit(
+  request: Request | undefined,
+): Promise<void> {
+  if (!request || typeof request.headers?.get !== "function") return;
+  const rl = await withRateLimit({
+    route: "auth.credentials",
+    profile: "auth.credentials",
+    scope: "ip",
+    id: getClientIp(request),
+  });
+  if (!rl.ok) throw new RateLimited();
 }
 
 const nextAuth = NextAuth({
@@ -61,8 +104,11 @@ const nextAuth = NextAuth({
         mfaCode: { label: "Codigo MFA", type: "text" },
         backupCode: { label: "Codigo de backup", type: "text" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, request) {
         if (!credentials?.email || !credentials?.password) return null;
+
+        // SEC-12: teto por IP antes de tocar no banco ou no bcrypt.
+        await enforceCredentialsIpRateLimit(request);
 
         const email = String(credentials.email).trim().toLowerCase();
 
@@ -97,6 +143,7 @@ const nextAuth = NextAuth({
               mfaSecret: true,
               mfaEnabledAt: true,
               emailVerifiedAt: true,
+              sessionVersion: true,
               organization: { select: { slug: true } },
             },
           });
@@ -111,7 +158,7 @@ const nextAuth = NextAuth({
               candidates.find((u) => u.isSuperAdmin && !u.organizationId) ?? null;
           }
         } catch (err) {
-          console.error("[auth] authorize: database error", err);
+          log.error({ err }, "[auth] authorize: database error");
           await recordLoginAttempt({ email, outcome: "db_error" });
           throw new DatabaseUnavailable();
         }
@@ -154,12 +201,29 @@ const nextAuth = NextAuth({
           return null;
         }
 
+        // Senha correta, e-mail ainda não confirmado. O cliente recebe a
+        // MESMA falha genérica de senha errada / conta inexistente
+        // (`code=credentials`): o antigo `email_unverified` dizia a quem
+        // tentava que a conta existe (pentest out/2026). Para o titular
+        // não ficar sem saída, o código de verificação é reenviado aqui,
+        // em segundo plano (teto `auth.verify-resend` por usuário) — o
+        // tempo de resposta não muda. A tentativa conta para o lockout
+        // como qualquer outra falha (ver `FAILURE_OUTCOMES`).
         if (
           !user.isSuperAdmin &&
           user.type === "HUMAN" &&
           !user.emailVerifiedAt
         ) {
-          throw new EmailUnverified();
+          await recordLoginAttempt({
+            email,
+            userId: user.id,
+            outcome: "email_unverified",
+          });
+          const unverifiedUserId = user.id;
+          runInBackground("auth.login.verify-resend", () =>
+            resendVerificationOnLogin({ userId: unverifiedUserId }),
+          );
+          return null;
         }
 
         // PR 4.1: MFA enforcement. Se o user habilitou MFA, exige
@@ -190,7 +254,7 @@ const nextAuth = NextAuth({
               const decrypted = decryptSecret(user.mfaSecret);
               mfaOk = verifyTotp(decrypted, totpCode);
             } catch (err) {
-              console.error("[auth] decrypt mfaSecret failed", err);
+              log.error({ err }, "[auth] decrypt mfaSecret failed");
               mfaOk = false;
             }
           }
@@ -231,8 +295,9 @@ const nextAuth = NextAuth({
         // organizationId=null e o Prisma scope mostra uma mensagem
         // tecnica vazando pro cliente.
         if (!user.organizationId && !user.isSuperAdmin) {
-          console.warn(
-            `[auth] login barrado: user ${user.email} sem organizationId`,
+          log.warn(
+            { userId: user.id, email: maskEmail(user.email) },
+            "[auth] login barrado: user sem organizationId",
           );
           await recordLoginAttempt({
             email,
@@ -276,6 +341,8 @@ const nextAuth = NextAuth({
           organizationId: user.organizationId,
           organizationSlug,
           isSuperAdmin: user.isSuperAdmin,
+          // SV-1: vai para o JWT; o banco incrementa para revogar.
+          sessionVersion: sessionVersionFromClaim(user.sessionVersion),
           // NextAuth lê `image` como o avatar do usuário (mapeia pra
           // `session.user.image`). Espelhamos `User.avatarUrl` aqui pra
           // que a foto cadastrada em `/settings/profile` apareça em
@@ -288,7 +355,7 @@ const nextAuth = NextAuth({
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session: updateData }) {
       if (user) {
         token.id = user.id;
         token.role = (user as { role?: AppUserRole | null }).role ?? undefined;
@@ -297,45 +364,117 @@ const nextAuth = NextAuth({
           (user as { organizationSlug?: string | null }).organizationSlug ?? null;
         token.isSuperAdmin = Boolean((user as { isSuperAdmin?: boolean }).isSuperAdmin);
         token.picture = (user as { image?: string | null }).image ?? null;
+        token.sessionVersion = sessionVersionFromClaim(
+          (user as { sessionVersion?: unknown }).sessionVersion,
+        );
       } else if (token.id) {
-        try {
-          // Refresh role + avatarUrl + organizationId/slug do banco a cada
-          // renovação do JWT — garante que se:
-          //   a) o agente atualizar a foto em /settings/profile, OU
-          //   b) o super-admin mover o user para outra org, OU
-          //   c) o super-admin suspender o user / remover super-admin,
-          // a session reflita no próximo tick sem exigir re-login. Se
-          // a org ficou SUSPENDED, invalidamos o token forcando logout.
-          const dbUser = await prisma.user.findUnique({
-            where: { id: token.id as string },
-            select: {
-              role: true,
-              avatarUrl: true,
-              organizationId: true,
-              isSuperAdmin: true,
-              isErased: true,
-              organization: { select: { status: true, slug: true } },
-            },
-          });
-          if (dbUser) {
-            if (
-              dbUser.isErased ||
-              (dbUser.organization &&
-                dbUser.organization.status !== "ACTIVE" &&
-                !dbUser.isSuperAdmin)
-            ) {
-              // Forca logout no proximo getServerSession. Deixamos o
-              // token vazio — middleware redireciona pra /login.
-              return {};
+        const userId = token.id as string;
+        // Refresh role + avatarUrl + organizationId/slug do banco — garante
+        // que se:
+        //   a) o agente atualizar a foto em /settings/profile, OU
+        //   b) o super-admin mover o user para outra org, OU
+        //   c) o super-admin suspender o user / remover super-admin,
+        // a session reflita sem exigir re-login. Se a org ficou SUSPENDED
+        // (ou o user foi apagado), invalidamos o token forcando logout.
+        //
+        // SS-2: o resultado fica em cache de memória por 30 s por userId
+        // (`jwt-refresh-cache.ts`) — antes era 1 query por chamada de
+        // `auth()`. Atraso máximo até refletir: 30 s por réplica.
+        let snapshot: JwtRefreshSnapshot | null = getJwtRefreshSnapshot(userId);
+        if (!snapshot) {
+          try {
+            const dbUser = await prisma.user.findUnique({
+              where: { id: userId },
+              select: {
+                role: true,
+                avatarUrl: true,
+                organizationId: true,
+                isSuperAdmin: true,
+                isErased: true,
+                sessionVersion: true,
+                organization: { select: { status: true, slug: true } },
+              },
+            });
+            if (dbUser) {
+              snapshot =
+                dbUser.isErased ||
+                (dbUser.organization &&
+                  dbUser.organization.status !== "ACTIVE" &&
+                  !dbUser.isSuperAdmin)
+                  ? { invalid: true }
+                  : {
+                      invalid: false,
+                      role: dbUser.role,
+                      organizationId: dbUser.organizationId,
+                      organizationSlug: dbUser.organization?.slug ?? null,
+                      isSuperAdmin: dbUser.isSuperAdmin,
+                      picture: dbUser.avatarUrl ?? null,
+                    };
+              // SV-1: a mesma consulta prima o cache de versão (60 s) —
+              // a comparação abaixo e o `requireAuth` não voltam ao banco.
+              setCachedSessionVersion(
+                userId,
+                sessionVersionFromClaim(dbUser.sessionVersion),
+              );
+            } else {
+              // Linha não existe mais (hard delete em DELETE /api/users/[id]
+              // = remoção da org): sessão inválida, e o estado fica em cache.
+              snapshot = { invalid: true };
             }
-            token.role = dbUser.role;
-            token.organizationId = dbUser.organizationId;
-            token.organizationSlug = dbUser.organization?.slug ?? null;
-            token.isSuperAdmin = dbUser.isSuperAdmin;
-            token.picture = dbUser.avatarUrl ?? null;
+            setJwtRefreshSnapshot(userId, snapshot);
+          } catch (err) {
+            log.error({ err }, "[auth] jwt role refresh failed");
           }
-        } catch (err) {
-          console.error("[auth] jwt role refresh failed", err);
+        }
+        if (snapshot) {
+          if (snapshot.invalid) {
+            // Forca logout no proximo getServerSession. Deixamos o
+            // token vazio — middleware redireciona pra /login.
+            return {};
+          }
+          token.role = snapshot.role ?? undefined;
+          token.organizationId = snapshot.organizationId;
+          token.organizationSlug = snapshot.organizationSlug;
+          token.isSuperAdmin = snapshot.isSuperAdmin;
+          token.picture = snapshot.picture;
+        }
+        // SV-2: o próprio usuário revogou as sessões (troca de senha /
+        // "sair dos outros dispositivos") e esta é a que fez o pedido: o
+        // `update()` traz a prova de uso único que a rota devolveu. Só
+        // aqui a claim sobe — e só para a versão ATUAL do banco, vindo da
+        // imediatamente anterior (`session-renewal.ts`). Sem prova, ou com
+        // prova recusada, nada muda e a checagem abaixo decide: um token
+        // revogado não se renova chamando `update()`.
+        if (trigger === "update") {
+          const proof = sessionRenewalProofFrom(updateData);
+          if (proof) {
+            const renewed = await renewSessionVersion({
+              userId,
+              organizationId: (token.organizationId as string | null | undefined) ?? null,
+              tokenVersion: sessionVersionFromClaim(token.sessionVersion),
+              proof,
+            });
+            if (renewed !== null) token.sessionVersion = renewed;
+          }
+        }
+        // SV-1: token emitido antes do último `revokeUserSessions` (troca
+        // de senha, "sair de todos os dispositivos", erase). Só o cache
+        // deste processo — primado logo acima; frio apenas quando o banco
+        // falhou (fail-open, como o refresh). `null` limpa o cookie.
+        // Claim à frente do cache (sessão renovada em outra réplica): relê
+        // o banco em vez de derrubar uma sessão válida.
+        const tokenVersion = sessionVersionFromClaim(token.sessionVersion);
+        if (
+          !sessionVersionMatches(
+            tokenVersion,
+            await resolveKnownSessionVersion(
+              userId,
+              tokenVersion,
+              getCachedSessionVersion(userId),
+            ),
+          )
+        ) {
+          return null;
         }
       }
       return token;
@@ -356,6 +495,9 @@ const nextAuth = NextAuth({
         // `session.user.image` recebe `undefined` mesmo com a foto
         // já no banco.
         session.user.image = (token.picture as string | null | undefined) ?? null;
+        // SV-1: o `requireAuth` compara esta claim com o banco.
+        (session.user as { sessionVersion?: number }).sessionVersion =
+          sessionVersionFromClaim(token.sessionVersion);
       }
       return session;
     },

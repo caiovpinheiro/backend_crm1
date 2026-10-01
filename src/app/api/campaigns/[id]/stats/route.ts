@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getCampaignStats } from "@/services/campaigns";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/stats");
 
 export async function GET(
   _request: Request,
@@ -16,7 +19,7 @@ export async function GET(
       const stats = await getCampaignStats(id);
       return NextResponse.json(stats);
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao buscar estatísticas." },
         { status: 500 },

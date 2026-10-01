@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getAgentAutomations } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/agent-runnable");
 
 /**
  * GET /api/automations/agent-runnable
@@ -20,7 +23,7 @@ export async function GET() {
       const items = await getAgentAutomations();
       return NextResponse.json({ items, total: items.length });
     } catch (e) {
-      console.error("[GET /api/automations/agent-runnable]", e);
+      log.error({ err: e }, "[GET /api/automations/agent-runnable] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar automações." },
         { status: 500 },

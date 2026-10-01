@@ -1,4 +1,11 @@
 import { parseCsv, type CsvDelimiter, detectDelimiter } from "@/lib/csv-parse";
+import {
+  IMPORT_MAX_ROWS,
+  ImportFileError,
+  assertImportFileSignature,
+  countCsvLines,
+  importKindFromName,
+} from "@/lib/import-file-guard";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -82,29 +89,47 @@ function sheetToRows(
 export async function readUploadedTable(
   file: File,
   explicitDelimiter?: CsvDelimiter,
+  options?: ReadTableOptions,
 ): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
   const buffer = Buffer.from(await file.arrayBuffer());
-  return readTableFromBuffer(buffer, file.name, explicitDelimiter);
+  return readTableFromBuffer(buffer, file.name, explicitDelimiter, options);
 }
+
+export type ReadTableOptions = {
+  /** Teto de linhas de dados. Excedido → `ImportFileError` 413 ANTES do parse completo. */
+  maxRows?: number;
+};
 
 /**
  * Variante de `readUploadedTable` que recebe um Buffer + nome do arquivo.
  * Usada pelo etl-worker, que lê o arquivo do storage (volume) e não tem um
  * objeto `File` do FormData. Detecta XLSX/CSV pela extensão do nome.
+ *
+ * SEC2-4: valida a assinatura real (ZIP/OLE2/texto) e o tamanho
+ * descomprimido declarado antes de entregar ao SheetJS; limita as linhas
+ * lidas (`sheetRows` / contagem de quebras no CSV). Lança `ImportFileError`.
  */
 export async function readTableFromBuffer(
   buffer: Buffer,
   fileName: string,
   explicitDelimiter?: CsvDelimiter,
+  options?: ReadTableOptions,
 ): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-  const name = fileName.toLowerCase();
-  const isSpreadsheet =
-    name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".ods");
+  const maxRows = Math.max(1, Math.floor(options?.maxRows ?? IMPORT_MAX_ROWS));
+  const kind = importKindFromName(fileName) ?? "csv";
+  assertImportFileSignature(buffer, kind);
+  const isSpreadsheet = kind !== "csv";
 
   if (isSpreadsheet) {
+    // `xlsx` vem do tarball oficial do SheetJS (cdn.sheetjs.com), versionado
+    // em `vendor/` para o `npm ci` não depender do CDN: o registry
+    // npm parou em 0.18.5, com dois advisories sem correção; >= 0.20.2 resolve.
+    // exceljs não serve aqui: não lê .xls/.ods nem produz o texto formatado (`w`).
     const XLSX = await import("xlsx");
     const buf = buffer;
-    const wb = XLSX.read(buf, { type: "buffer" });
+    // `sheetRows`: cabeçalho + maxRows + 1 sentinela — o SheetJS para de
+    // materializar células além disso, mesmo em planilha "inflável".
+    const wb = XLSX.read(buf, { type: "buffer", sheetRows: maxRows + 2 });
     const firstSheetName = wb.SheetNames[0];
     if (!firstSheetName) return { headers: [], rows: [] };
     const ws = wb.Sheets[firstSheetName];
@@ -115,6 +140,12 @@ export async function readTableFromBuffer(
     // "zera" a coluna. Prefira `w` quando existir; senão use `v`.
     const data = sheetToRows(XLSX, ws);
     if (data.length === 0) return { headers: [], rows: [] };
+    if (data.length - 1 > maxRows) {
+      throw new ImportFileError(
+        `Limite de ${maxRows.toLocaleString("pt-BR")} linhas por importação. Divida o arquivo.`,
+        413,
+      );
+    }
 
     const headerRow = data[0] ?? [];
     const headers = headerRow.map((h) =>
@@ -135,9 +166,24 @@ export async function readTableFromBuffer(
     return { headers, rows };
   }
 
+  // Contagem de quebras antes do parse: conservadora (quebras dentro de
+  // aspas contam), nunca permissiva.
+  if (countCsvLines(buffer, maxRows + 1) > maxRows + 1) {
+    throw new ImportFileError(
+      `Limite de ${maxRows.toLocaleString("pt-BR")} linhas por importação. Divida o arquivo.`,
+      413,
+    );
+  }
   const text = buffer.toString("utf-8");
   const delimiter = explicitDelimiter ?? detectDelimiter(text);
-  return parseCsv(text, delimiter);
+  const parsed = parseCsv(text, delimiter);
+  if (parsed.rows.length > maxRows) {
+    throw new ImportFileError(
+      `Limite de ${maxRows.toLocaleString("pt-BR")} linhas por importação. Divida o arquivo.`,
+      413,
+    );
+  }
+  return parsed;
 }
 
 /**

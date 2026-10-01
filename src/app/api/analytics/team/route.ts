@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getTeamPerformance, type AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/team");
 
 function parseOptionalPeriod(
   searchParams: URLSearchParams
@@ -39,7 +42,7 @@ export async function GET(request: Request) {
     const data = await getTeamPerformance(period);
     return NextResponse.json(data);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao carregar desempenho da equipe." },
       { status: 500 }

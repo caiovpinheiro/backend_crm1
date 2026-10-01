@@ -18,6 +18,9 @@ import { isHumanRequestTheme } from "@/lib/ai-v2/config";
 import { embedTexts } from "@/services/ai/provider";
 import { matchV2Theme, selectV2Theme } from "./themes";
 import { themeThresholdsFor, type ThemeThresholds } from "./similarity-presets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.theme-semantic");
 
 /**
  * Réguas do reconhecimento pela opção de "Do que ele cuida › Assuntos"
@@ -180,7 +183,10 @@ export async function selectV2ThemeSemantic(args: {
         return { theme: best, method: "semantic", similarity: bestSim };
       }
     } catch (err) {
-      console.warn("[ai-v2] conferência semântica do gatilho falhou:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] conferência semântica do gatilho falhou",
+      );
     }
     return { theme: byTrigger, method: "trigger" };
   }
@@ -222,7 +228,10 @@ export async function selectV2ThemeSemantic(args: {
     }
     return fallback(bestSim);
   } catch (err) {
-    console.warn("[ai-v2] seleção semântica de assunto falhou:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2] seleção semântica de assunto falhou",
+    );
     return fallback();
   }
 }
@@ -252,7 +261,10 @@ export async function explainV2ThemeRecognition(args: {
       const [{ embeddings }, vectors] = await Promise.all([embedTexts([args.message.trim()], args.apiKey), themeVectors(themes, args.apiKey)]);
       sims = themes.map((_, i) => cosine(embeddings[0] ?? [], vectors[i] ?? []));
     } catch (err) {
-      console.warn("[ai-v2] similaridade dos assuntos falhou:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] similaridade dos assuntos falhou",
+      );
     }
   }
   const ranking = themes

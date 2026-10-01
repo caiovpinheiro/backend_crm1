@@ -2,7 +2,7 @@
  * Allowlist compartilhada para URLs de mídia servidas pelos endpoints
  * Meta (WhatsApp Cloud API). Centraliza a validação para evitar
  * divergência entre rotas de mídia (media/proxy, media/audio-mp3,
- * media/transcribe).
+ * transcribe).
  *
  * Regras:
  *   1. Aceita apenas HTTPS. HTTP puro é recusado (Meta nunca serve por http).

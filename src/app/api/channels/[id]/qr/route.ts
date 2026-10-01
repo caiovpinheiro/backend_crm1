@@ -4,11 +4,15 @@ import QRCode from "qrcode";
 import { auth } from "@/lib/auth";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import { safeFetchBytes } from "@/lib/safe-fetch";
 import {
   getChannelById,
   parseChannelConfigDecrypted,
   updateChannel,
 } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]/qr");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -17,12 +21,28 @@ function str(cfg: Record<string, unknown>, key: string): string | undefined {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
 }
 
+/** Hosts de onde a Meta serve `qr_image_url` (Graph API / CDNs do grupo). */
+const QR_IMAGE_HOSTS = ["graph.facebook.com", "*.facebook.com", "*.whatsapp.net", "*.fbcdn.net"];
+const QR_IMAGE_TIMEOUT_MS = 10_000;
+const QR_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+
 async function imageUrlToDataUri(url: string): Promise<string | null> {
   try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
+    // A URL vem da resposta da Meta, mas é dado externo: allowlist de host,
+    // sem redirect, timeout e limite de bytes.
+    const { response: res, buffer: buf } = await safeFetchBytes(
+      url,
+      { cache: "no-store" },
+      {
+        allowedHosts: QR_IMAGE_HOSTS,
+        maxRedirects: 0,
+        timeoutMs: QR_IMAGE_TIMEOUT_MS,
+        maxBytes: QR_IMAGE_MAX_BYTES,
+      },
+    );
+    if (!res.ok || buf.length === 0) return null;
     const mime = res.headers.get("content-type")?.split(";")[0]?.trim() || "image/png";
+    if (!mime.startsWith("image/")) return null;
     return `data:${mime};base64,${buf.toString("base64")}`;
   } catch {
     return null;
@@ -143,7 +163,7 @@ export async function GET(request: Request, context: RouteContext) {
       status: channel.status,
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao obter QR code.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

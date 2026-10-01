@@ -8,6 +8,9 @@ import {
   normalizeTemplateAttachments,
   templateSequenceLimitError,
 } from "@/services/templates";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/templates");
 
 // Bug 29/mai/26: usavamos `auth()` direto. createTemplate chama
 // `withOrgFromCtx({...})` que exige RequestContext ativo, e
@@ -29,7 +32,7 @@ export async function GET(request: Request) {
       const templates = await getTemplates();
       return NextResponse.json(templates);
     } catch (e) {
-      console.error("[templates GET]", e);
+      log.error({ err: e }, "[templates GET] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao listar templates." },
         { status: 500 },
@@ -87,7 +90,7 @@ export async function POST(request: Request) {
       });
       return NextResponse.json(template, { status: 201 });
     } catch (e) {
-      console.error("[templates POST]", e);
+      log.error({ err: e }, "[templates POST] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao criar template." },
         { status: 500 },

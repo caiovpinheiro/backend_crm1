@@ -39,6 +39,9 @@ import {
   markAsFailed,
   markAsSent,
 } from "@/services/scheduled-messages";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("scheduled-messages-worker");
 
 const INTERVAL_MS = Number(process.env.SCHEDULED_MESSAGES_INTERVAL_MS) || 30_000;
 const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -50,7 +53,7 @@ export function startScheduledMessagesWorker() {
   // Permite desligar o worker em réplicas específicas (ex.: rodar só em
   // uma instância dedicada).
   if (process.env.SCHEDULED_MESSAGES_WORKER === "0") {
-    console.info("[scheduled-messages] worker desativado via env");
+    log.info("[scheduled-messages] worker desativado via env");
     return;
   }
   started = true;
@@ -59,9 +62,9 @@ export function startScheduledMessagesWorker() {
     try {
       await tickOnce();
     } catch (err) {
-      console.warn(
-        "[scheduled-messages] tick falhou:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[scheduled-messages] tick falhou",
       );
     }
   };
@@ -73,9 +76,7 @@ export function startScheduledMessagesWorker() {
     setInterval(() => void tick(), INTERVAL_MS);
   }, 15_000);
 
-  console.info(
-    `[scheduled-messages] worker iniciado (tick=${INTERVAL_MS}ms)`,
-  );
+  log.info({ tickMs: INTERVAL_MS }, "[scheduled-messages] worker iniciado");
 }
 
 export async function tickOnce() {
@@ -123,10 +124,7 @@ export async function tickOnce() {
     } catch (err) {
       failed++;
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[scheduled-messages] dispatch falhou id=${item.id}:`,
-        msg,
-      );
+      log.error({ id: item.id, err: msg }, "[scheduled-messages] dispatch falhou");
       await withSystemContext(orgId, () => markAsFailed(item.id, msg)).catch(
         () => {},
       );
@@ -134,9 +132,7 @@ export async function tickOnce() {
   }
 
   if (sent > 0 || failed > 0) {
-    console.info(
-      `[scheduled-messages] tick concluído — enviadas=${sent} falhas=${failed}`,
-    );
+    log.info({ enviadas: sent, falhas: failed }, "[scheduled-messages] tick concluído");
   }
   return { processed: due.length, sent, failed };
 }

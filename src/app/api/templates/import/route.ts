@@ -9,6 +9,9 @@ import {
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { createTemplate, updateTemplate } from "@/services/templates";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/templates/import");
 
 const MAX_ROWS = 5_000;
 
@@ -194,7 +197,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ created, updated, skipped, failed });
     });
   } catch (e) {
-    console.error("[templates/import]", e);
+    log.error({ err: e }, "[templates/import] falhou");
     return NextResponse.json(
       { message: "Erro ao importar modelos internos." },
       { status: 500 },

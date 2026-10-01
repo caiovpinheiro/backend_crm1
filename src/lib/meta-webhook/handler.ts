@@ -22,6 +22,11 @@ import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { cache } from "@/lib/cache";
+import {
+  metaWebhookPhoneKey,
+  metaWebhookSecretsKey,
+  wrapChannelLookup,
+} from "@/lib/cache/keys";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import {
   enrichWhatsappOrder,
@@ -47,7 +52,12 @@ export type WebhookScope = {
   organizationId: string;
   organizationSlug: string;
 };
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishContactUpdated,
+  publishConversationUpdated,
+  publishMessageStatus,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
@@ -62,6 +72,7 @@ import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
+import { maskPhone } from "@/lib/pii-mask";
 import { isRetiredMetaPhoneNumberId } from "@/lib/channels/retired-whatsapp";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
@@ -75,7 +86,10 @@ import { processIncomingMessage as processSalesbotMessage, contactHasPausedAutom
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
-import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
+import {
+  handleMessagingWebhookPost,
+  processMessagingWebhookPayload,
+} from "@/lib/meta-webhook/messaging-handler";
 import { asMetaId, configMetaIds } from "@/lib/meta-webhook/messaging-payload";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
@@ -343,7 +357,7 @@ async function applyContactPhoneChange(params: {
   }
 
   try {
-    sseBus.publish("contact_updated", {
+    publishContactUpdated({
       organizationId: getOrgIdOrNull(),
       contactId,
       reason: "phone_changed",
@@ -896,7 +910,11 @@ async function resolveWebhookContact(
     log.warn("Falha ao garantir deal aberto:", err),
   );
 
-  log.info(`Novo lead: ${name} (${phone ?? bsuid})`);
+  // SEC2-5: sem nome/telefone em claro — ID do contato + telefone mascarado.
+  log.info(
+    { contactId: created.id, phone: phone ? maskPhone(phone) : undefined, hasBsuid: Boolean(bsuid) },
+    "Novo lead criado via WhatsApp (Meta)",
+  );
   return {
     id: created.id,
     name: created.name,
@@ -1660,9 +1678,15 @@ async function downloadAndSaveMedia(
   if (!token || !mediaId) return null;
 
   try {
+    // RT-17: sem timeout, um Graph lento segurava o job (e a conexão do
+    // pool) indefinidamente. TimeoutError cai no catch abaixo = mídia falhou.
     const metaRes = await fetch(
       `https://graph.facebook.com/v21.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(15_000),
+      }
     );
     if (!metaRes.ok) {
       log.warn(`Falha ao obter URL da mídia ${mediaId}: HTTP ${metaRes.status}`);
@@ -1675,6 +1699,7 @@ async function downloadAndSaveMedia(
     const fileRes = await fetch(downloadUrl, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
     });
     if (!fileRes.ok) {
       log.warn(`Falha ao baixar mídia ${mediaId}: HTTP ${fileRes.status}`);
@@ -1697,6 +1722,10 @@ async function downloadAndSaveMedia(
     );
     return saved.url;
   } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      log.warn(`Timeout ao baixar mídia ${mediaId} da Meta — tratada como falha de mídia.`);
+      return null;
+    }
     log.error("Erro ao baixar mídia da Meta:", err);
     return null;
   }
@@ -2034,7 +2063,7 @@ async function processStatusUpdate(
         // invalidate inbox em todos os operadores.
         if (!isCampaignMsg) {
           try {
-            sseBus.publish("message_status", {
+            publishMessageStatus({
               organizationId: orgId,
               conversationId: msg.conversationId,
               messageId: bubbleId,
@@ -2343,7 +2372,8 @@ export async function handleMetaWebhookGet(
 
 /** TTL do cache de lookups de canal do webhook (phoneNumberId→org e
  * appSecrets). 60s: janela curta de staleness; a invalidação explícita em
- * `services/channels.ts` (delPattern "meta_wh:*") cobre edições de canal. */
+ * `services/channels.ts` (`invalidateChannelLookups`, versão por org)
+ * cobre edições de canal. */
 const META_WH_CACHE_TTL_SEC = 60;
 
 async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
@@ -2367,7 +2397,7 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   // histórico (só secrets de env).
   try {
     const channelSecrets = await cache.wrap(
-      `meta_wh:secrets:${scope?.organizationId ?? "global"}`,
+      await metaWebhookSecretsKey(scope?.organizationId ?? null),
       META_WH_CACHE_TTL_SEC,
       () => loadChannelAppSecrets(scope),
     );
@@ -2448,9 +2478,9 @@ export async function handleMetaWebhookPost(
       // Cache-aside 60s do mapeamento phoneNumberId → org/canal: este
       // findFirst rodava 1× por POST (somado ao findMany de appSecrets,
       // eram 2 lookups de channel por webhook — stress sa221601).
-      // Invalidado na edição de canal (delPattern "meta_wh:*").
-      const channel = await cache.wrap(
-        `meta_wh:phone:${phoneNumberId}`,
+      // Invalidado na edição de canal (versão `channel:<org>`).
+      const channel = await wrapChannelLookup(
+        metaWebhookPhoneKey(phoneNumberId),
         META_WH_CACHE_TTL_SEC,
         async () => {
           const ch = await prismaBase.channel.findFirst({
@@ -2654,14 +2684,15 @@ async function executePostBody(
   const object = str(body.object);
   if (object === "page" || object === "instagram") {
     // Callback do produto Instagram/Messenger colada por engano na URL
-    // do WhatsApp (/api/webhooks/meta). Encaminha em vez de ignorar.
+    // do WhatsApp (/api/webhooks/meta). Encaminha em vez de ignorar; o
+    // evento de auditoria já foi gravado acima (não duplicar).
     return handleMessagingWebhookPost(
       new Request(request.url, {
         method: "POST",
         headers: request.headers,
         body: rawBody,
       }),
-      { skipSignature: true },
+      { skipSignature: true, metaWebhookEventId },
     );
   }
   if (object !== "whatsapp_business_account") {
@@ -3179,7 +3210,7 @@ export async function processMetaWebhookPayload(
           if (echoOut) {
             if (msgCreated) {
               try {
-                sseBus.publish("new_message", {
+                publishNewMessage({
                   organizationId: conversation.organizationId,
                   conversationId: conversation.id,
                   contactId: contact.id,
@@ -3215,7 +3246,7 @@ export async function processMetaWebhookPayload(
                   consentPayload,
                 );
                 if (granted) {
-                  sseBus.publish("conversation_updated", {
+                  publishConversationUpdated({
                     organizationId: getOrgIdOrNull(),
                     conversationId: conversation.id,
                     contactId: contact.id,
@@ -3227,7 +3258,7 @@ export async function processMetaWebhookPayload(
                     consentPayload,
                   );
                   if (denied) {
-                    sseBus.publish("conversation_updated", {
+                    publishConversationUpdated({
                       organizationId: getOrgIdOrNull(),
                       conversationId: conversation.id,
                       contactId: contact.id,
@@ -3362,7 +3393,7 @@ export async function processMetaWebhookPayload(
                 consentPayload,
               );
               if (granted) {
-                sseBus.publish("conversation_updated", {
+                publishConversationUpdated({
                   organizationId: getOrgIdOrNull(),
                   conversationId: conversation.id,
                   contactId: contact.id,
@@ -3377,7 +3408,7 @@ export async function processMetaWebhookPayload(
                   consentPayload,
                 );
                 if (denied) {
-                  sseBus.publish("conversation_updated", {
+                  publishConversationUpdated({
                     organizationId: getOrgIdOrNull(),
                     conversationId: conversation.id,
                     contactId: contact.id,
@@ -3423,8 +3454,11 @@ export async function processMetaWebhookPayload(
             );
 
             try {
-              sseBus.publish("new_message", {
-                organizationId: getOrgIdOrNull(),
+              publishNewMessage({
+                // Org da própria conversa, não do contexto: o guard
+                // fail-closed do sse-bus descarta o evento sem org, e o
+                // inbound roda no worker-meta-webhook.
+                organizationId: conversation.organizationId,
                 conversationId: conversation.id,
                 contactId: contact.id,
                 direction: "in",
@@ -3435,7 +3469,7 @@ export async function processMetaWebhookPayload(
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
               });
             } catch (err) {
-              log.debug("Falha ao publicar SSE (não-fatal):", err);
+              log.warn("Falha ao publicar SSE (não-fatal):", err);
             }
 
             // Push notification ao operador (PWA — funciona com app
@@ -3575,7 +3609,13 @@ export async function processStoredMetaWebhookEvent(
 ): Promise<void> {
   const event = await prismaBase.metaWebhookEvent.findUnique({
     where: { id: metaWebhookEventId },
-    select: { id: true, organizationId: true, rawBody: true, processed: true },
+    select: {
+      id: true,
+      organizationId: true,
+      objectType: true,
+      rawBody: true,
+      processed: true,
+    },
   });
   if (!event) {
     throw new Error(`MetaWebhookEvent ${metaWebhookEventId} não encontrado`);
@@ -3589,6 +3629,14 @@ export async function processStoredMetaWebhookEvent(
     return;
   }
   await withSystemContext(event.organizationId, async () => {
+    // Instagram/Messenger: mesma fila, loop próprio (messaging-handler).
+    if (event.objectType === "page" || event.objectType === "instagram") {
+      await processMessagingWebhookPayload(
+        event.rawBody as Record<string, unknown>,
+        { metaWebhookEventId },
+      );
+      return;
+    }
     await processMetaWebhookPayload(
       event.rawBody as Record<string, unknown>,
       { metaWebhookEventId },

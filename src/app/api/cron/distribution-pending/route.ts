@@ -9,16 +9,18 @@
  * uma passagem vazia o cron devolve `{skipped:true,reason:cooldown}`
  * até `agent_online` / `agent_eligible` / `new_item` / `manual`.
  *
- * Autenticação: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * Como agendar (EasyPanel > Scheduled Service):
  *   Schedule: every 1 minute
- *   Command:  curl -fsS "https://BACKEND/api/cron/distribution-pending?secret=$CRON_SECRET"
+ *   Command:  curl -fsS -H "Authorization: Bearer $CRON_SECRET" "https://BACKEND/api/cron/distribution-pending"
  *
  * Sem migration / sem tabela nova — só código.
  */
 
 import { NextResponse } from "next/server";
+
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
@@ -26,32 +28,17 @@ import {
   enqueueProcessPendingOrRun,
   isFruitlessCooldownActiveAsync,
 } from "@/services/distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/distribution-pending");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    const expected = process.env.CRON_SECRET?.trim();
-    if (!expected) {
-      return NextResponse.json(
-        { ok: false, message: "CRON_SECRET nao configurado." },
-        { status: 503 },
-      );
-    }
-
-    const url = new URL(request.url);
-    const headerSecret = (request.headers.get("authorization") ?? "")
-      .replace(/^Bearer\s+/i, "")
-      .trim();
-    const provided =
-      headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-    if (!provided || provided !== expected) {
-      return NextResponse.json(
-        { ok: false, message: "Cron secret invalido." },
-        { status: 401 },
-      );
-    }
+    const denied = requireCronSecret(request);
+    if (denied) return denied;
 
     const orgs = await prismaBase.organizationWidget.findMany({
       where: { widgetSlug: "smart_distribution", status: "ACTIVE" },
@@ -95,20 +82,13 @@ export async function GET(request: Request) {
           pending: drain.pending,
         });
       } catch (e) {
-        console.error(
-          "[cron/distribution-pending] org failed",
-          organizationId,
-          e,
-        );
+        log.error({ organizationId, err: e }, "[cron/distribution-pending] org failed");
         results.push({ organizationId, resolved: 0, pending: -1 });
       }
     }
 
     if (orgs.length > 0 && skippedCooldown === orgs.length) {
-      console.info(
-        "[cron/distribution-pending] skipped",
-        JSON.stringify({ reason: "cooldown", orgs: orgs.length }),
-      );
+      log.info({ reason: "cooldown", orgs: orgs.length }, "[cron/distribution-pending] skipped");
       return NextResponse.json({
         ok: true,
         skipped: true,
@@ -128,7 +108,7 @@ export async function GET(request: Request) {
       results,
     });
   } catch (e) {
-    console.error("[cron/distribution-pending]", e);
+    log.error({ err: e }, "[cron/distribution-pending] falhou");
     return NextResponse.json(
       { ok: false, message: "Erro no cron de distribuição." },
       { status: 500 },

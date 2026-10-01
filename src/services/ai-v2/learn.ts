@@ -34,6 +34,9 @@ import {
   type LearnMessage,
   type LearnParams,
 } from "./learn-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.learn");
 
 const HEARTBEAT_MS = 30 * 1000;
 const STALE_MS = 3 * 60 * 1000;
@@ -291,7 +294,7 @@ export async function startLearnRun(args: {
       }
     }),
   ).catch(async (err) => {
-    console.error("[ai-v2 learn] falhou:", err);
+    log.error({ err }, "[ai-v2 learn] falhou");
     await db.$executeRawUnsafe(
       `UPDATE "ai_v2_learn_runs" SET "status"='error', "error"=$2, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
       runId, err instanceof Error ? err.message : String(err),
@@ -423,7 +426,10 @@ async function executeLearn(args: {
       await progress({ stats, total: picked.length, done: stats.analyzed });
       return analysis ? { c, analysis } : null;
     } catch (err) {
-      console.warn("[ai-v2 learn] análise falhou:", c.id, err instanceof Error ? err.message : err);
+      log.warn(
+        { cId: c.id, err: err instanceof Error ? err.message : err },
+        "[ai-v2 learn] análise falhou",
+      );
       return null;
     }
   });

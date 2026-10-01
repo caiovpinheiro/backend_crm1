@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getCampaignRecipients } from "@/services/campaigns";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/recipients");
 
 export async function GET(
   request: Request,
@@ -25,7 +28,7 @@ export async function GET(
 
       return NextResponse.json(result);
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao listar destinatários." },
         { status: 500 },

@@ -8,6 +8,9 @@ import {
   listIntegrationWebhooks,
   normalizeWebhookEvents,
 } from "@/services/integration-webhooks";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/integration-webhooks");
 
 export async function GET(request: Request) {
   try {
@@ -25,7 +28,7 @@ export async function GET(request: Request) {
       return NextResponse.json(items);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar webhooks." }, { status: 500 });
   }
 }
@@ -55,7 +58,7 @@ export async function POST(request: Request) {
 
       const b = body as Record<string, unknown>;
       const url = typeof b.url === "string" ? b.url.trim() : "";
-      const urlError = assertWebhookUrl(url);
+      const urlError = await assertWebhookUrl(url);
       if (urlError) return NextResponse.json({ message: urlError }, { status: 400 });
 
       const events = normalizeWebhookEvents(b.events);
@@ -92,7 +95,7 @@ export async function POST(request: Request) {
       }
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar webhook." }, { status: 500 });
   }
 }

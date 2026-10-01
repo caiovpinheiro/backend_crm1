@@ -6,6 +6,9 @@ import {
   listV2Agents,
 } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2");
 
 export async function GET() {
   const r = await requireAuth();
@@ -18,7 +21,7 @@ export async function GET() {
     const items = await listV2Agents(r.session.user.organizationId!);
     return NextResponse.json({ agents: items });
   } catch (err) {
-    console.error("[GET /api/ai-agents-v2]", err);
+    log.error({ err }, "[GET /api/ai-agents-v2] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao listar agentes v2." },
       { status: 500 },
@@ -53,7 +56,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json(agent, { status: 201 });
   } catch (err) {
-    console.error("[POST /api/ai-agents-v2]", err);
+    log.error({ err }, "[POST /api/ai-agents-v2] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao criar agente v2." },
       { status: 500 },

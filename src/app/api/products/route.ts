@@ -11,6 +11,9 @@ import {
   parseProductWhatsAppSendMode,
   PRODUCT_WHATSAPP_SEND_MODE_KEY,
 } from "@/lib/product-whatsapp-send-mode";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/products");
 
 const ACCENT_FROM = "áàâãäåéèêëíìîïóòôõöúùûüýÿçñ";
 const ACCENT_TO = "aaaaaaeeeeiiiiooooouuuuyycn";
@@ -167,7 +170,7 @@ export async function GET(request: Request) {
       products = { rows: sortSearched(rows), total };
     } catch (inner) {
       const raw = inner instanceof Error ? inner.message : "";
-      if (!raw.includes("product_meta_links")) throw inner;
+      if (!raw.includes("product_meta_links") && !raw.includes("metaLinks")) throw inner;
       const [rows, total] = await Promise.all([
         prisma.product.findMany({
           where,
@@ -199,7 +202,7 @@ export async function GET(request: Request) {
       sendMode,
     });
   } catch (e) {
-    console.error("[products] GET falhou:", e);
+    log.error({ err: e }, "[products] GET falhou");
     return NextResponse.json({ message: "Erro ao listar produtos." }, { status: 500 });
   }
   });

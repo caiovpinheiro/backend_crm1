@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/quick-replies/groups/[id]");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -31,7 +34,7 @@ export async function PUT(request: Request, ctx: Ctx) {
     });
     return NextResponse.json(updated);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     return NextResponse.json({ message: "Erro ao atualizar grupo." }, { status: 500 });
   }
 }
@@ -50,7 +53,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     });
     return NextResponse.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao excluir grupo." }, { status: 500 });
   }
 }

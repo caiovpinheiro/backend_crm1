@@ -75,17 +75,24 @@ export function welcomeEmail(input: {
 export function verifyEmailTemplate(input: {
   code: string;
   organizationName?: string;
+  /** Página de confirmação; presente quando o reenvio partiu do login. */
+  verifyUrl?: string;
 }): { subject: string; text: string; html: string } {
   const subject = "Confirme seu e-mail — Bwipo";
   const org = input.organizationName
     ? ` para ${input.organizationName}`
     : "";
-  const text = `Seu código de verificação${org} é: ${input.code}\n\nEle expira em 30 minutos.`;
+  const linkText = input.verifyUrl ? `\n\nDigite o código em: ${input.verifyUrl}` : "";
+  const linkHtml = input.verifyUrl
+    ? `
+     <p style="margin:16px 0 0;"><a href="${escapeHtml(input.verifyUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:999px;font-size:14px;">Confirmar e-mail</a></p>`
+    : "";
+  const text = `Seu código de verificação${org} é: ${input.code}\n\nEle expira em 30 minutos.${linkText}`;
   const html = wrap(
     "Confirme seu e-mail",
     `<p style="margin:0 0 16px;font-size:15px;line-height:1.5;">Use o código abaixo${org ? escapeHtml(org) : ""}:</p>
      <p style="margin:0;font-size:32px;letter-spacing:.24em;font-weight:700;">${escapeHtml(input.code)}</p>
-     <p style="margin:16px 0 0;font-size:13px;color:#71717a;">Expira em 30 minutos.</p>`,
+     <p style="margin:16px 0 0;font-size:13px;color:#71717a;">Expira em 30 minutos.</p>${linkHtml}`,
   );
   return { subject, text, html };
 }

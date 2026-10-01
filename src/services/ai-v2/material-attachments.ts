@@ -10,6 +10,9 @@
 import { randomUUID } from "node:crypto";
 import { prismaBase } from "@/lib/prisma-base";
 import { isOrgOwnedStorageUrl } from "@/lib/storage/read-for-send";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.material-attachments");
 
 export const MATERIAL_ATTACHMENT_LIMITS = { perMaterial: 5, perTurnOffered: 6, perReply: 2, descriptionChars: 300, nameChars: 120 };
 
@@ -228,7 +231,10 @@ export async function attachmentsForDocs(agentId: string, docIds: string[]): Pro
     );
     return rows.map((r) => ({ ...toAttachment(r), docTitle: String(r.docTitle ?? "") }));
   } catch (err) {
-    console.warn("[ai-v2] anexos dos materiais indisponíveis:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2] anexos dos materiais indisponíveis",
+    );
     return [];
   }
 }

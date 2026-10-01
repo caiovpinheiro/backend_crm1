@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { cloneMessageTemplatesBetweenClients } from "@/lib/meta-whatsapp/clone-message-templates";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/meta/whatsapp/message-templates/clone");
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
   const r = session.user?.role;
@@ -98,7 +101,7 @@ export async function POST(request: Request) {
         ...report,
       });
     } catch (e: unknown) {
-      console.error("[meta-templates] clone", e);
+      log.error({ err: e }, "[meta-templates] clone");
       const msg = e instanceof Error ? e.message : "Erro ao clonar templates na Meta.";
       return NextResponse.json({ message: msg }, { status: 502 });
     }

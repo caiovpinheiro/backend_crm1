@@ -10,6 +10,9 @@ import {
   updateChannel,
   updateChannelStatus,
 } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]/connect");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -112,7 +115,7 @@ export async function POST(_request: Request, context: RouteContext) {
       status: 400,
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     try {
       const { id } = await context.params;
       await updateChannelStatus(id, "FAILED");

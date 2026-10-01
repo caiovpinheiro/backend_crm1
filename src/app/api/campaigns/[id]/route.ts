@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getCampaignById, updateCampaign, deleteCampaign } from "@/services/campaigns";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]");
 
 export async function GET(
   _request: Request,
@@ -19,7 +22,7 @@ export async function GET(
       }
       return NextResponse.json({ campaign });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao buscar campanha." },
         { status: 500 },
@@ -59,7 +62,7 @@ export async function PUT(
       const campaign = await updateCampaign(id, data as never);
       return NextResponse.json({ campaign });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       const status = e instanceof Error && e.message.includes("rascunho") ? 409 : 500;
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao atualizar campanha." },
@@ -81,7 +84,7 @@ export async function DELETE(
       await deleteCampaign(id);
       return NextResponse.json({ ok: true });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "DELETE falhou");
       const status = e instanceof Error && e.message.includes("ativa") ? 409 : 500;
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao excluir campanha." },

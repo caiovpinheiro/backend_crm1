@@ -51,8 +51,12 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
-import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
-import { sseBus } from "@/lib/sse-bus";
+import { safeFetch } from "@/lib/safe-fetch";
+import {
+  publishConversationTimelineUpdated,
+  publishConversationUpdated,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import {
   assertStageEntryFields,
   assignDealOwner,
@@ -713,13 +717,13 @@ async function finishConversationsForContact(
 
     try {
       if (rowOrg) {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: rowOrg,
           conversationId: c.id,
           contactId: rt.contactId,
           status: "RESOLVED",
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: rowOrg,
           conversationId: c.id,
           type: "CONVERSATION_CLOSED",
@@ -2430,7 +2434,7 @@ async function executeStep(
               },
             });
           } catch (e) {
-            console.warn("[leads] falha ao avançar occurrence do contexto", e);
+            log.warn({ err: e }, "[leads] falha ao avançar occurrence do contexto");
           }
         }
 
@@ -2507,7 +2511,14 @@ async function executeStep(
         select: {
           id: true,
           type: true,
-          aiAgentConfig: { select: { active: true } },
+          name: true,
+          aiAgentConfig: {
+            select: {
+              active: true,
+              archetype: true,
+              enabledTools: true,
+            },
+          },
         },
       });
       if (!agentUser || agentUser.type !== "AI") {
@@ -2523,6 +2534,14 @@ async function executeStep(
         return {};
       }
 
+      const { isTabulationClassifier } = await import(
+        "@/lib/ai-agents/tabulation-classifier"
+      );
+      const classifier = isTabulationClassifier({
+        ...agentUser.aiAgentConfig,
+        name: agentUser.name,
+      });
+
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
       let contactForOpening: string | null = null;
       if (target === "deal") {
@@ -2530,9 +2549,9 @@ async function executeStep(
         if (!targetDealId) {
           throw new Error("transfer_to_ai_agent: dealId ausente");
         }
-        await assignDealOwner(targetDealId, agentUserId);
-        // Resolve o contact do deal pra poder disparar a saudação
-        // proativa (precisa do contactId, não do dealId).
+        if (!classifier) {
+          await assignDealOwner(targetDealId, agentUserId);
+        }
         const deal = await prisma.deal.findUnique({
           where: { id: targetDealId },
           select: { contactId: true },
@@ -2543,16 +2562,20 @@ async function executeStep(
         if (!targetContactId) {
           throw new Error("transfer_to_ai_agent: contactId ausente");
         }
-        await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
-        );
+        if (!classifier) {
+          await prisma.$transaction((tx) =>
+            propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
+          );
+        }
         contactForOpening = targetContactId;
       }
 
+      // Classificador só carimba a folha — nunca vira dono do WhatsApp.
       // Saudação proativa: dispara imediatamente após a atribuição,
       // sem esperar o cliente mandar mensagem. Isso resolve o caso de
-      // automações cujo trigger é "Negócio criado" / etc. — o agente
-      // só responde a inbound. Idempotente via `Conversation.aiGreetedAt`, então
+      // automações cujo trigger é "Negócio criado" / etc. — antes, o
+      // agente ficava mudo porque `maybeReplyAsAIAgent` só roda em
+      // inbound. Idempotente via `Conversation.aiGreetedAt`, então
       // se o cliente mandar algo depois, a saudação não repete.
       //
       // Falhas aqui não podem derrubar o passo da automação: o log do
@@ -2560,23 +2583,51 @@ async function executeStep(
       // efeito colateral; se falhar, o agente ainda responderá ao
       // próximo inbound normalmente.
       if (contactForOpening) {
-        try {
-          const opening = await triggerAgentOpeningForContact({
+        if (classifier) {
+          const { triggerTabulationClassifyForContact } = await import(
+            "@/services/ai/tabulation-classify"
+          );
+          const classified = await triggerTabulationClassifyForContact({
             contactId: contactForOpening,
             agentUserId,
-            channel: "meta",
           });
-          if (opening.status === "skipped") {
-            log.info(
-              `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
-            );
-          } else {
-            log.info(
-              `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+          if (classified.status === "failed") {
+            throw new Error(
+              `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
             );
           }
-        } catch (err) {
-          log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
+          if (classified.status === "skipped") {
+            log.info(
+              `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
+            );
+            return { note: `classificação pulada (${classified.reason})` };
+          }
+          const label = classified.tabulationName ?? classified.tabulationId;
+          log.info(
+            `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
+          );
+          return {
+            note: `tabulou: ${label}`,
+          };
+        } else {
+          try {
+            const opening = await triggerAgentOpeningForContact({
+              contactId: contactForOpening,
+              agentUserId,
+              channel: "meta",
+            });
+            if (opening.status === "skipped") {
+              log.info(
+                `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
+              );
+            } else {
+              log.info(
+                `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+              );
+            }
+          } catch (err) {
+            log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
+          }
         }
       }
       return {};
@@ -3009,7 +3060,7 @@ async function executeStep(
             .catch(() => {});
         }
 
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId,
@@ -3320,7 +3371,7 @@ async function executeStep(
           },
         }).catch(() => {});
 
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId: tplConversationId,
           contactId: rt.contactId,
@@ -3526,7 +3577,7 @@ async function executeStep(
             ...(mediaChannelId ? { channelId: mediaChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId: mediaConversationId,
           contactId: rt.contactId,
@@ -3650,7 +3701,7 @@ async function executeStep(
             ...(interactiveChannelId ? { channelId: interactiveChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -3816,7 +3867,7 @@ async function executeStep(
             ...(listChannelId ? { channelId: listChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -3951,7 +4002,7 @@ async function executeStep(
             ...(flowChannelId ? { channelId: flowChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -4048,13 +4099,14 @@ async function executeStep(
         });
       }
 
-      await assertSafeOutboundUrl(finalUrl);
-      const res = await fetch(finalUrl, {
-        method,
-        headers: h,
-        body: bodyStr,
-        signal: AbortSignal.timeout(30_000),
-      });
+      // safeFetch valida a URL (anti-SSRF) antes da requisição e revalida
+      // cada salto de redirect (máx. 3), em vez de seguir às cegas.
+      const res = await safeFetch(
+        finalUrl,
+        { method, headers: h, body: bodyStr },
+        { timeoutMs: 30_000, maxRedirects: 3 },
+      );
+      await res.body?.cancel().catch(() => undefined);
       if (!res.ok) throw new Error(`webhook: HTTP ${res.status}`);
       return {};
     }
@@ -4362,7 +4414,7 @@ async function executeStep(
           const saved = await prisma.message.create({
             data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId, ...(questionChannelId ? { channelId: questionChannelId } : {}) }),
           });
-          sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
+          publishNewMessage({ organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
 
           if (resolveFailureGotoStepId(cfg)) {
             await awaitMetaDeliveryVerdict(saved.id, "question");
@@ -4672,7 +4724,7 @@ async function executeStep(
         try {
           const rowOrg = c.organizationId ?? orgId;
           if (rowOrg) {
-            sseBus.publish("conversation_timeline_updated", {
+            publishConversationTimelineUpdated({
               organizationId: rowOrg,
               conversationId: c.id,
               type: "CONVERSATION_TABULATED",
@@ -4686,8 +4738,62 @@ async function executeStep(
     }
 
     case "ask_ai_agent": {
-      // Rodava o motor antigo de agente, que foi removido.
-      throw new Error("ask_ai_agent: passo descontinuado");
+      // Chama um agente de IA com o prompt configurado (interpolando
+      // variáveis) e salva a resposta como variável de contexto pra
+      // usar nos próximos passos (ex: condition, send_whatsapp_message).
+      const agentId = readString(cfg, "agentId");
+      if (!agentId) throw new Error("ask_ai_agent: agentId não configurado");
+      const promptTemplate = readString(cfg, "promptTemplate") ?? "";
+      const variableName = readString(cfg, "saveToVariable") ?? "ai_response";
+
+      const vars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const prompt = vars
+        ? interpolateVariables(promptTemplate, vars)
+        : promptTemplate;
+      if (!prompt.trim()) throw new Error("ask_ai_agent: prompt vazio");
+
+      // import dinâmico pra evitar ciclo (runner → prisma → services).
+      const { runAgent } = await import("@/services/ai/runner");
+      const openDeal = rt.contactId
+        ? await prisma.deal.findFirst({
+            where: { contactId: rt.contactId, status: "OPEN" },
+            orderBy: { updatedAt: "desc" },
+            select: { id: true },
+          })
+        : null;
+      const conv = rt.contactId
+        ? await prisma.conversation.findFirst({
+            where: { contactId: rt.contactId, channel: "whatsapp" },
+            orderBy: { updatedAt: "desc" },
+            select: { id: true },
+          })
+        : null;
+
+      const result = await runAgent({
+        agentId,
+        source: "automation",
+        userMessage: prompt,
+        conversationId: conv?.id ?? null,
+        contactId: rt.contactId ?? null,
+        dealId: openDeal?.id ?? null,
+      });
+      if (result.status === "FAILED") {
+        throw new Error(`ask_ai_agent: ${result.error ?? "falha no agente"}`);
+      }
+
+      // Persiste a variável no contexto da automation (mesma lógica
+      // usada por `set_variable`).
+      if (rt.contactId) {
+        const ctx = await getActiveContext(rt.automationId, rt.contactId);
+        if (ctx) {
+          const next = { ...((ctx.variables as Record<string, unknown>) ?? {}) };
+          next[variableName] = result.text;
+          await advanceContext(ctx.id, ctx.currentStepId, next);
+        }
+      }
+      return {};
     }
 
     case "business_hours": {

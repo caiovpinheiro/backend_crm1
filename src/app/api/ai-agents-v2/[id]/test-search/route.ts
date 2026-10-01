@@ -5,6 +5,9 @@ import { getV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { searchV2Knowledge } from "@/services/ai-v2/tools";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/test-search");
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -53,7 +56,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         chunks: result.chunks,
       });
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/test-search]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/test-search]");
       return NextResponse.json(
         { message: err instanceof Error ? err.message : "Erro ao testar busca de materiais." },
         { status: 500 },

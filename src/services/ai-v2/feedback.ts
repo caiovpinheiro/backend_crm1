@@ -40,6 +40,9 @@ import {
   type ReplayItemFactsRow,
   type TurnLogRow,
 } from "./feedback-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.feedback");
 
 export type FeedbackParams = {
   days: 7 | 30 | 90;
@@ -503,7 +506,7 @@ export async function startFeedbackReport(args: {
       }
     }),
   ).catch(async (err) => {
-    console.error("[ai-v2 feedback] falhou:", err);
+    log.error({ err }, "[ai-v2 feedback] falhou");
     await db.$executeRawUnsafe(
       `UPDATE "ai_v2_feedback_reports" SET "status"='error', "error"=$2, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
       reportId, err instanceof Error ? err.message : String(err),
@@ -584,7 +587,7 @@ async function executeFeedback(args: {
         });
       }
     } catch (err) {
-      console.warn("[ai-v2 feedback] rótulo falhou:", err instanceof Error ? err.message : err);
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-v2 feedback] rótulo falhou");
     }
     await db.$executeRawUnsafe(
       `UPDATE "ai_v2_feedback_reports" SET "done"="done"+1, "inputTokens"=$2, "outputTokens"=$3, "costUsd"=$4, "updatedAt"=now() WHERE "id"=$1`,
@@ -727,7 +730,10 @@ async function executeFeedback(args: {
           };
         }
       } catch (err) {
-        console.warn("[ai-v2 feedback] recomendação falhou:", err instanceof Error ? err.message : err);
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[ai-v2 feedback] recomendação falhou",
+        );
       }
     }
     if (!summary) summary = summaryFor(category, g.conversations);

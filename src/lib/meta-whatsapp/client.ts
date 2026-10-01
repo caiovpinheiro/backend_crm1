@@ -8,6 +8,10 @@ import {
 } from "@/lib/meta-whatsapp/error-catalog";
 import { metrics, templatizeRoute } from "@/lib/metrics";
 import { whatsappUploadAudioMime } from "@/lib/audio-convert";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-whatsapp.client");
 
 /**
  * Emite métricas Prometheus de uma chamada à Graph API (contador + latência).
@@ -337,8 +341,16 @@ export class MetaWhatsAppClient {
         // sincronizada (thundering herd).
         const base = GRAPH_TRANSIENT_BACKOFF_MS * attempt;
         const delay = Math.floor(base * (0.5 + Math.random() * 0.5));
-        console.warn(
-          `[MetaWA] transient code=${isMetaGraphError(err) ? err.code : "?"} http=${isMetaGraphError(err) ? err.httpStatus : "?"} — retry ${attempt}/${maxAttempts - 1} em ${delay}ms (${path})`,
+        log.warn(
+          {
+            code: isMetaGraphError(err) ? err.code : "?",
+            http: isMetaGraphError(err) ? err.httpStatus : "?",
+            attempt,
+            maxRetries: maxAttempts - 1,
+            delayMs: delay,
+            path,
+          },
+          "[MetaWA] erro transiente — retry",
         );
         await sleep(delay);
       }
@@ -370,7 +382,7 @@ export class MetaWhatsAppClient {
         err instanceof Error &&
         (err.name === "TimeoutError" || err.name === "AbortError")
       ) {
-        console.error(`[MetaWA] timeout ${GRAPH_TIMEOUT_MS}ms em ${path}`);
+        log.error({ timeoutMs: GRAPH_TIMEOUT_MS, path }, "[MetaWA] timeout");
         throw new MetaGraphTimeoutError(
           `Tempo limite ao comunicar com a Meta (${GRAPH_TIMEOUT_MS}ms) em ${path}. Tente novamente.`,
         );
@@ -398,8 +410,17 @@ export class MetaWhatsAppClient {
       });
       // Log estruturado — seguindo recomendação oficial:
       // sempre incluir fbtrace_id + code pra correlação com Meta Support.
-      console.error(
-        `[MetaWA] ${res.status} ${path} code=${err.code ?? "?"} subcode=${err.subcode ?? "?"} fbtrace=${err.fbtraceId ?? "?"} type=${err.type ?? "?"}: ${err.details ?? err.message}`,
+      log.error(
+        {
+          status: res.status,
+          path,
+          code: err.code ?? "?",
+          subcode: err.subcode ?? "?",
+          fbtrace: err.fbtraceId ?? "?",
+          type: err.type ?? "?",
+          details: err.details ?? err.message,
+        },
+        "[MetaWA] erro Graph",
       );
       throw err;
     }
@@ -409,10 +430,7 @@ export class MetaWhatsAppClient {
     // templates com todos os componentes — caro em CPU e ruidoso em prod.
     // Gate por verbosidade (ver lib/debug-log). Erros continuam sempre logados.
     if (isVerboseLogging()) {
-      console.log(
-        "[meta-graph]",
-        JSON.stringify({ path, httpStatus: res.status, body: data }),
-      );
+      log.info({ path, httpStatus: res.status }, "[meta-graph] resposta");
     }
     return data as T;
   }
@@ -915,13 +933,22 @@ export class MetaWhatsAppClient {
         path: `${this.phoneNumberId}/media`,
         payload,
       });
-      console.error(
-        `[MetaWA] upload ${res.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"} mime=${uploadType} name=${safeName}: ${err.details ?? err.message}`,
+      log.error(
+        {
+          status: res.status,
+          code: err.code ?? "?",
+          fbtrace: err.fbtraceId ?? "?",
+          mime: uploadType,
+          name: safeName,
+          details: err.details ?? err.message,
+        },
+        "[MetaWA] upload falhou",
       );
       throw err;
     }
-    console.log(
-      `[MetaWA] upload ok id=${parsed.id} mime=${uploadType} bytes=${buffer.length} name=${safeName}`,
+    log.info(
+      { id: parsed.id, mime: uploadType, bytes: buffer.length, name: safeName },
+      "[MetaWA] upload ok",
     );
     return parsed.id;
   }
@@ -1061,8 +1088,14 @@ export class MetaWhatsAppClient {
         path: `${appId}/uploads`,
         payload,
       });
-      console.error(
-        `[MetaWA] resumable-upload sessão ${sessionRes.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
+      log.error(
+        {
+          status: sessionRes.status,
+          code: err.code ?? "?",
+          fbtrace: err.fbtraceId ?? "?",
+          details: err.details ?? err.message,
+        },
+        "[MetaWA] resumable-upload sessão falhou",
       );
       if (err.code === 100 && err.subcode === 33) {
         throw new Error(
@@ -1116,8 +1149,14 @@ export class MetaWhatsAppClient {
         path: sessionId,
         payload,
       });
-      console.error(
-        `[MetaWA] resumable-upload bytes ${uploadRes.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
+      log.error(
+        {
+          status: uploadRes.status,
+          code: err.code ?? "?",
+          fbtrace: err.fbtraceId ?? "?",
+          details: err.details ?? err.message,
+        },
+        "[MetaWA] resumable-upload bytes falhou",
       );
       throw err;
     }
@@ -1176,7 +1215,10 @@ export class MetaWhatsAppClient {
         }),
       });
     } catch (err) {
-      console.warn("[MetaWA] typing indicator failed:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[MetaWA] typing indicator failed",
+      );
     }
   }
 
@@ -1206,7 +1248,16 @@ export class MetaWhatsAppClient {
     // Caminho quente de blast: 1 JSON.stringify + write no stdout por
     // mensagem. Mesmo gate do `[meta-graph]` acima (ver lib/debug-log).
     if (isVerboseLogging()) {
-      console.log("[meta-send-template]", JSON.stringify(payload));
+      log.info(
+        {
+          template: templateName,
+          language: languageCode,
+          to: maskPhone(to),
+          recipient: recipient ?? null,
+          components: Array.isArray(components) ? components.length : 0,
+        },
+        "[meta-send-template] payload",
+      );
     }
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
@@ -1678,9 +1729,9 @@ export function metaClientFromConfig(
     try {
       token = decryptSecret(rawToken);
     } catch (err) {
-      console.error(
-        "[meta-whatsapp/client] falha ao decriptar accessToken; caindo para singleton:",
-        err instanceof Error ? err.message : err,
+      log.error(
+        { err: err instanceof Error ? err.message : err },
+        "[meta-whatsapp/client] falha ao decriptar accessToken; caindo para singleton",
       );
       return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
     }
@@ -1695,9 +1746,9 @@ export function metaClientFromConfig(
         ? decryptSecret(rawAppSecret)
         : rawAppSecret;
     } catch (err) {
-      console.warn(
-        "[meta-whatsapp/client] falha ao decriptar appSecret; upload de header usará só o accessToken:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[meta-whatsapp/client] falha ao decriptar appSecret; upload de header usará só o accessToken",
       );
     }
   }

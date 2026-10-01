@@ -31,7 +31,8 @@ vi.mock("@/lib/prisma", () => ({
     aIAgentKnowledgeDoc: { findMany: mocks.docFindMany },
   },
 }));
-vi.mock("@/lib/request-context", () => ({ getOrgIdOrNull: () => "org-1" }));
+// O logger estruturado lê o request-context; sem contexto ele só não anexa tenant.
+vi.mock("@/lib/request-context", () => ({ getOrgIdOrNull: () => "org-1", getRequestContext: () => undefined }));
 vi.mock("@/lib/cache", () => ({ cache: { tryClaim: vi.fn().mockResolvedValue(true) } }));
 vi.mock("@/services/ai/phone-allowlist", () => {
   const normalizePhoneDigits = (raw: string | null | undefined) => {

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { listLearnRuns, listLearnTabulations, startLearnRun } from "@/services/ai-v2/learn";
 import type { LearnParams } from "@/services/ai-v2/learn-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/learn");
 
 function parseParams(body: Record<string, unknown>): LearnParams | null {
   const topic = typeof body.topic === "string" ? body.topic.trim().slice(0, 200) : "";
@@ -33,7 +36,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       ]);
       return NextResponse.json({ runs, tabulations });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/learn]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/learn]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar as buscas." }, { status: 500 });
     }
   });
@@ -58,7 +61,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       if (msg === "NO_OPENAI_KEY") {
         return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure a chave da OpenAI do agente para buscar nas conversas." }, { status: 400 });
       }
-      console.error("[POST /api/ai-agents-v2/[id]/learn]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/learn]");
       return NextResponse.json({ message: msg }, { status: msg.startsWith("Já existe") ? 409 : 500 });
     }
   });

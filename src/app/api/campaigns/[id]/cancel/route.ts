@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { updateCampaignStatus } from "@/services/campaigns";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/cancel");
 
 export async function POST(
   _request: Request,
@@ -41,7 +44,7 @@ export async function POST(
 
       return NextResponse.json({ message: "Campanha cancelada.", status: "CANCELLED" });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao cancelar campanha." },
         { status: 500 },

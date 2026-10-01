@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/reports/phone-changes");
 
 /**
  * Relatório de troca de número do cliente (WhatsApp).
@@ -114,7 +117,7 @@ export async function GET(request: Request) {
       recent,
     });
   } catch (e) {
-    console.error("[reports/phone-changes]", e);
+    log.error({ err: e }, "[reports/phone-changes] falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao gerar relatório." },
       { status: 500 },

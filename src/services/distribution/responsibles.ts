@@ -21,6 +21,9 @@ import {
   type ScheduleLike,
 } from "./eligibility";
 import { getQueueCounts } from "./queue";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.responsibles");
 
 /** Linha de expediente já normalizada (sempre com os campos de sábado). */
 interface ScheduleRow {
@@ -61,10 +64,9 @@ async function loadSchedules(userIds: string[]): Promise<ScheduleRow[]> {
       },
     });
   } catch (e) {
-    console.warn(
-      "[distribution] AgentSchedule sem colunas de sábado — usando fallback " +
-        "(aplique a migration 20260801130000_add_agent_schedule_saturday).",
-      e,
+    log.warn(
+      { err: e },
+      "[distribution] AgentSchedule sem colunas de sábado — usando fallback (aplique a migration 20260801130000_add_agent_schedule_saturday).",
     );
     const base = await prisma.agentSchedule.findMany({
       where: { userId: { in: userIds } },

@@ -2,7 +2,7 @@
  * Tools de consulta do motor v2.
  * Nenhum domínio de cliente.
  *
- * Reutiliza services compartilhados (RAG, modelos internos) e
+ * Reutiliza services da v1 quando possível (RAG, modelos internos) e
  * implementa buscas locais para produtos e CRM. Todas as funções são
  * puros de entrada/saída para facilitar testes.
  */

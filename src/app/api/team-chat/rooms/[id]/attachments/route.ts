@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { sniffAttachment } from "@/lib/file-sniff";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { denyUnless, jsonError, viewerOf } from "../../../_guard";
 import { isOwnedStorageUrl, type TeamChatAttachmentKind } from "@/services/team-chat";
 import { prisma } from "@/lib/prisma";
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
+// SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (nunca ao
+// Content-Type do cliente). `application/octet-stream` saiu — binário
+// não reconhecido (exe, js, html renomeado) é recusado.
 const ALLOWED_PREFIXES = [
   "image/",
   "video/",
@@ -15,7 +19,9 @@ const ALLOWED_PREFIXES = [
   "application/msword",
   "application/vnd.openxmlformats-officedocument",
   "application/vnd.ms-excel",
-  "application/octet-stream",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.oasis.opendocument",
+  "application/zip",
   "text/plain",
   "text/csv",
 ];
@@ -36,28 +42,6 @@ function kindFromMime(mime: string, asSticker: boolean): TeamChatAttachmentKind 
   if (mime.startsWith("audio/")) return "audio";
   if (mime.startsWith("video/")) return "video";
   return "file";
-}
-
-function resolveMime(rawType: string, fileName: string): string {
-  const blobMime = rawType?.split(";")[0].trim();
-  if (blobMime && blobMime !== "application/octet-stream") return blobMime;
-  const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
-  const map: Record<string, string> = {
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    mp4: "video/mp4",
-    webm: "audio/webm",
-    ogg: "audio/ogg",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    pdf: "application/pdf",
-    txt: "text/plain",
-    csv: "text/csv",
-  };
-  return map[ext] || blobMime || "application/octet-stream";
 }
 
 export async function POST(
@@ -88,15 +72,16 @@ export async function POST(
     if (raw.size > MAX_FILE_SIZE) return jsonError("Arquivo muito grande (máx 16 MB).", 400);
 
     const fileName = (raw as File).name || "arquivo";
-    const mime = resolveMime(raw.type, fileName);
-    if (!ALLOWED_PREFIXES.some((p) => mime.startsWith(p))) {
-      return jsonError(`Tipo não suportado: ${mime}`, 400);
+    const buffer = Buffer.from(await raw.arrayBuffer());
+    // Tipo real pelos magic bytes; nome/Content-Type só desempatam containers.
+    const sniffed = sniffAttachment(buffer, { mime: raw.type, fileName });
+    if (!sniffed || !ALLOWED_PREFIXES.some((p) => sniffed.mime.startsWith(p))) {
+      return jsonError("Tipo de arquivo não suportado ou conteúdo não reconhecido.", 415);
     }
+    const mime = sniffed.mime;
 
     const asSticker = form.get("sticker") === "1" || form.get("sticker") === "true";
-    const ext = fileName.includes(".") ? fileName.split(".").pop()! : mime.split("/")[1] ?? "bin";
-    const safeFileName = generateFileName({ prefix: "orbita", ext });
-    const buffer = Buffer.from(await raw.arrayBuffer());
+    const safeFileName = generateFileName({ prefix: "orbita", ext: sniffed.ext });
     const saved = await saveFile({
       orgId: viewer.organizationId,
       bucket: "attachments",

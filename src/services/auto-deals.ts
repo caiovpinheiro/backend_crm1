@@ -30,6 +30,7 @@
  * a algum deal) e scripts de backfill manual.
  */
 
+import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -38,6 +39,9 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { nextDealNumber } from "@/services/deals";
 import { getNextOwner } from "@/services/lead-distribution";
 import { allocateStageSlug, isStageNumberUniqueViolation, nextStageNumber } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auto-deals");
 
 type EnsureOpenDealSource = "auto_whatsapp" | "auto_whatsapp_qr" | string;
 
@@ -165,7 +169,7 @@ export async function ensureOpenDealForContact(
     });
   }
   if (!pipeline) {
-    console.warn(`[${logTag}] nenhum pipeline encontrado — deal não criado para ${contactName}`);
+    log.warn({ logTag, contactId }, "nenhum pipeline encontrado — deal não criado");
     return { status: "skipped", reason: "no_pipeline" };
   }
 
@@ -256,6 +260,10 @@ export async function ensureOpenDealForContact(
     throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
   }
 
+  // O `new_message` só purga os pipelines onde o contato já tem deal, e
+  // este deal nasce em paralelo à mensagem — o card novo entra por aqui.
+  scheduleBoardInvalidation(getOrgIdOrThrow(), pipeline.id);
+
   fireTrigger("deal_created", {
     dealId: deal.id,
     contactId,
@@ -266,9 +274,9 @@ export async function ensureOpenDealForContact(
       source,
     },
   }).catch((err) =>
-    console.warn(`[${logTag}] fireTrigger deal_created error:`, err),
+    log.warn({ logTag, err }, "fireTrigger deal_created error"),
   );
 
-  console.log(`[${logTag}] Deal criado em "${incomingStage.name}" para ${contactName}`);
+  log.info({ logTag, stage: incomingStage.name, contactId, dealId: deal.id }, "Deal criado");
   return { status: "created", dealId: deal.id };
 }

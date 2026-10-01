@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/messages/[id]/favorite");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -59,7 +62,7 @@ export async function POST(request: Request, ctx: Ctx) {
 
       return NextResponse.json({ favorited: nextFavorited });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },
         { status: 500 },

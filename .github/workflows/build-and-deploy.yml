@@ -63,7 +63,8 @@ name: Build & Deploy
 #   Deploy webhook: copie do Easypanel (Settings do servico -> Deployments
 #     -> Deploy Hook) e coloque na secret correspondente ao serviço.
 #
-# Backend nao precisa de build args (o server so le env em runtime).
+# O unico build arg e GIT_SHA (commit da imagem: vira ENV GIT_SHA,
+# /app/BUILD_SHA e a label OCI `revision` — ver fim do Dockerfile).
 # BACKEND_PUBLIC_URL, DATABASE_URL, META_APP_SECRET etc. sao configurados
 # como envs runtime no Easypanel, nao no build.
 
@@ -256,6 +257,11 @@ jobs:
           # Em `main` a lista traz `latest` + `digitalocean` + sha (ver step
           # "Resolve environment"); nas outras branches, só a tag da branch + sha.
           tags: ${{ steps.env.outputs.IMAGE_REFS }}
+          # Commit real da imagem (antes o GIT_SHA era um valor fixo, igual
+          # em todos os serviços). O ARG fica no fim do Dockerfile: não
+          # invalida o cache das camadas pesadas.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           # Scope por branch + fallback pra main: builds de DEV_BRANCH
           # aproveitam camadas ja cacheadas por main quando o proprio
           # cache esta frio (antes DEV rodava ~5min vs 2min em main).

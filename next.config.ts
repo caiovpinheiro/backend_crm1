@@ -3,19 +3,15 @@ import { fileURLToPath } from "node:url";
 
 import type { NextConfig } from "next";
 
+import { baseSecurityHeaders } from "./src/lib/security-headers";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function securityHeaders(): { key: string; value: string }[] {
-  const headers: { key: string; value: string }[] = [
-    { key: "X-Frame-Options", value: "DENY" },
-    { key: "X-Content-Type-Options", value: "nosniff" },
-    { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-    {
-      key: "Permissions-Policy",
-      value: "payment=(), usb=(), geolocation=()",
-    },
-  ];
+  // SEC-15: X-Frame-Options/CSP Report-Only vêm de `src/lib/security-headers`
+  // (mesma fonte do middleware) — evita DENY aqui × SAMEORIGIN lá.
+  const headers: { key: string; value: string }[] = [...baseSecurityHeaders()];
   const url = process.env.NEXTAUTH_URL ?? "";
   if (process.env.NODE_ENV === "production" && url.startsWith("https://")) {
     headers.push({
@@ -28,6 +24,12 @@ function securityHeaders(): { key: string; value: string }[] {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // O pdf.js carrega o worker (pdf.worker.mjs) por import dinâmico e o
+  // rastreio do standalone não o segue: sem isto, ler PDF dos materiais
+  // falha em produção ("Setting up fake worker failed").
+  outputFileTracingIncludes: {
+    "/api/ai-agents/[id]/knowledge": ["./node_modules/pdfjs-dist/legacy/build/*.mjs"],
+  },
   // NOTA: NÃO listar `NEXTAUTH_URL` em `env` aqui. Isso inlinearia o valor
   // em build time e impediria trocar a URL via env var no Easypanel sem
   // rebuild. Este backend é só API (sem `next-auth/react` no client),
@@ -77,6 +79,10 @@ const nextConfig: NextConfig = {
     "@opentelemetry/semantic-conventions",
     "@opentelemetry/instrumentation-pino",
     "prom-client",
+    // pdf.js carrega o worker por import dinâmico relativo ao próprio
+    // arquivo: empacotado, o caminho quebra. Fica em node_modules.
+    "pdf-parse",
+    "pdfjs-dist",
   ],
   webpack: (config, { isServer, nextRuntime }) => {
     // 1) Bundle do Node server (route handlers, server components).

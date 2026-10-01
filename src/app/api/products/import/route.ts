@@ -9,6 +9,9 @@ import {
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/products/import");
 
 const MAX_ROWS = 20_000;
 
@@ -329,7 +332,7 @@ export async function POST(request: Request) {
       );
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json(
       { message: "Erro ao importar produtos." },
       { status: 500 },

@@ -34,12 +34,12 @@ export const defaultMetaMediaLookup: MetaMediaLookup = {
       select: {
         conversation: {
           select: {
-            channelRef: { select: { provider: true, config: true } },
+            channel: { select: { provider: true, config: true } },
           },
         },
       },
     });
-    const ch = msg?.conversation?.channelRef;
+    const ch = msg?.conversation?.channel;
     return ch ?? null;
   },
   async findContactAvatar(orgId, mediaUrl) {

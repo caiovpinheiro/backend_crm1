@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { invalidateWhatsappTemplateCatalog } from "@/lib/cache/keys";
 import { isMetaGraphError } from "@/lib/meta-whatsapp/client";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/meta/whatsapp/message-templates/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -64,7 +67,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       );
       return NextResponse.json(data ?? { success: true });
     } catch (e: unknown) {
-      console.error("[meta-templates] DELETE", e);
+      log.error({ err: e }, "[meta-templates] DELETE falhou");
       // `fbtrace_id` é o que o suporte da Meta pede para investigar uma
       // rejeição — sobe junto do texto para o operador poder copiar.
       if (isMetaGraphError(e)) {

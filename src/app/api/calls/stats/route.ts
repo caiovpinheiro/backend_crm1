@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getCallsStats } from "@/services/calls";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/calls/stats");
 
 /**
  * GET /api/calls/stats
@@ -33,7 +36,7 @@ export async function GET(request: Request) {
       const stats = await getCallsStats(filters);
       return NextResponse.json(stats);
     } catch (e) {
-      console.error("[calls] GET /stats:", e);
+      log.error({ err: e }, "[calls] GET /stats");
       return NextResponse.json(
         { message: "Erro ao calcular estatísticas de chamadas." },
         { status: 500 },

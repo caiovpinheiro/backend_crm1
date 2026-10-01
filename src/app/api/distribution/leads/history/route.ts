@@ -14,6 +14,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/leads/history");
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -56,7 +59,7 @@ export async function GET(request: Request) {
       });
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[GET /api/distribution/leads/history]", e);
+      log.error({ err: e }, "[GET /api/distribution/leads/history] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar histórico." },
         { status: 500 },

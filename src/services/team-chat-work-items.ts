@@ -4,7 +4,6 @@
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
 import { createActivity, deleteActivity, updateActivity } from "@/services/activities";
 import {
   previewLabelForRef,
@@ -13,10 +12,19 @@ import {
   type CrmCard,
 } from "@/services/team-chat-records";
 import {
+  publishTeamChatEvent,
   requireMember,
   sendSystemMessageThrottled,
   type TeamChatViewer,
 } from "@/services/team-chat";
+import {
+  workItemSseRoomCandidate,
+  workItemSseStakeholders,
+  type WorkItemSseOrigin,
+} from "@/services/team-chat-work-item-sse";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("team-chat-work-items");
 
 export const WORK_ITEM_TYPES = ["checklist", "ata", "pauta", "feedback", "meeting"] as const;
 export type WorkItemType = (typeof WORK_ITEM_TYPES)[number];
@@ -26,6 +34,10 @@ export type WorkItemEntryInput = {
   assigneeId?: string | null;
   dueAt?: string | null;
 };
+
+export type WorkItemCommandResult =
+  | { error: string; status: number }
+  | { workItem: ShapedWorkItem };
 
 export type ShapedWorkItem = {
   id: string;
@@ -64,6 +76,42 @@ export type ShapedEntry = {
 function parseIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.filter((x): x is string => typeof x === "string");
+}
+
+async function resolveWorkItemPublishRoomId(
+  item: WorkItemSseOrigin,
+): Promise<string | null> {
+  const hint = workItemSseRoomCandidate(item);
+  if (hint.kind === "room") return hint.roomId;
+  if (hint.kind === "lookup_message") {
+    const msg = await prisma.teamChatMessage.findFirst({
+      where: { id: hint.originId },
+      select: { roomId: true },
+    });
+    return msg?.roomId ?? null;
+  }
+  if (hint.kind === "lookup_meeting") {
+    const meeting = await prisma.teamChatWorkItem.findFirst({
+      where: { id: hint.originId },
+      select: { roomId: true, originType: true, originId: true },
+    });
+    if (!meeting) return null;
+    const nested = workItemSseRoomCandidate({
+      roomId: meeting.roomId,
+      originType: meeting.originType,
+      originId: meeting.originId,
+    });
+    if (nested.kind === "room") return nested.roomId;
+    if (nested.kind === "lookup_message") {
+      const msg = await prisma.teamChatMessage.findFirst({
+        where: { id: nested.originId },
+        select: { roomId: true },
+      });
+      return msg?.roomId ?? null;
+    }
+    return meeting.roomId;
+  }
+  return null;
 }
 
 async function resolveOrgAssignee(assigneeId?: string | null) {
@@ -289,7 +337,7 @@ async function loadCalendarState(id: string) {
     });
   } catch (err) {
     if (!isMissingCalendarColumn(err)) {
-      console.error("[team-chat] calendar load failed", err);
+      log.error({ err }, "[team-chat] calendar load failed");
     }
     return null;
   }
@@ -404,7 +452,7 @@ async function syncWorkItemCalendars(
     }
   } catch (err) {
     if (!isMissingCalendarColumn(err)) {
-      console.error("[team-chat] calendar sync failed", err);
+      log.error({ err }, "[team-chat] calendar sync failed");
     }
   }
 }
@@ -422,15 +470,30 @@ async function syncCalendarsIfReady(
   });
 }
 
-function publishWorkItem(organizationId: string, roomId: string | null, workItem: ShapedWorkItem) {
-  // Sem crmCard: o preview é resolvido por leitor no GET.
+async function publishWorkItem(
+  organizationId: string,
+  roomId: string | null,
+  workItem: ShapedWorkItem,
+) {
   const { crmCard: _card, ...safe } = workItem;
-  sseBus.publish("team_chat_work_item_updated", {
-    organizationId,
-    roomId,
-    workItemId: workItem.id,
-    workItem: { ...safe, crmCard: null },
+  const resolvedRoomId = await resolveWorkItemPublishRoomId({
+    roomId: roomId ?? workItem.roomId,
+    originType: workItem.originType,
+    originId: workItem.originId,
   });
+  const extra = resolvedRoomId
+    ? undefined
+    : workItemSseStakeholders(workItem);
+  await publishTeamChatEvent(
+    "team_chat_work_item_updated",
+    organizationId,
+    {
+      roomId: resolvedRoomId,
+      workItemId: workItem.id,
+      workItem: { ...safe, crmCard: null },
+    },
+    extra,
+  );
 }
 
 export function extractEntriesFromText(raw: string): { title: string; entries: WorkItemEntryInput[] } {
@@ -544,10 +607,10 @@ export async function createWorkItem(
       const { postWorkItemMessage } = await import("@/services/team-chat");
       await postWorkItemMessage(viewer, input.roomId, created.id, title);
     } catch (err) {
-      console.error("[team-chat] post work item message failed", err);
+      log.error({ err }, "[team-chat] post work item message failed");
     }
   }
-  publishWorkItem(viewer.organizationId, created.roomId, shaped);
+  await publishWorkItem(viewer.organizationId, created.roomId, shaped);
   return { workItem: shaped };
 }
 
@@ -617,14 +680,22 @@ export async function updateWorkItem(
   });
   await syncCalendarsIfReady(viewer, updated.id);
   const shaped = await shapeWorkItem(updated, viewer);
-  publishWorkItem(viewer.organizationId, updated.roomId, shaped);
+  await publishWorkItem(viewer.organizationId, updated.roomId, shaped);
   return { workItem: shaped };
 }
 
 export async function deleteWorkItem(viewer: TeamChatViewer, id: string) {
   const item = await prisma.teamChatWorkItem.findFirst({
     where: { id },
-    select: { id: true, roomId: true },
+    select: {
+      id: true,
+      roomId: true,
+      originType: true,
+      originId: true,
+      createdById: true,
+      participantIds: true,
+      entries: { select: { assigneeId: true } },
+    },
   });
   if (!item) return { error: "Item não encontrado.", status: 404 as const };
   if (item.roomId) {
@@ -640,13 +711,23 @@ export async function deleteWorkItem(viewer: TeamChatViewer, id: string) {
   for (const activityId of activityIds) {
     await removeCalendarActivity(activityId);
   }
-  await prisma.teamChatWorkItem.delete({ where: { id }, select: { id: true } });
-  sseBus.publish("team_chat_work_item_updated", {
-    organizationId: viewer.organizationId,
+  const resolvedRoomId = await resolveWorkItemPublishRoomId({
     roomId: item.roomId,
-    workItemId: id,
-    deleted: true,
+    originType: item.originType,
+    originId: item.originId,
   });
+  const extra = resolvedRoomId ? undefined : workItemSseStakeholders(item);
+  await prisma.teamChatWorkItem.delete({ where: { id }, select: { id: true } });
+  await publishTeamChatEvent(
+    "team_chat_work_item_updated",
+    viewer.organizationId,
+    {
+      roomId: resolvedRoomId,
+      workItemId: id,
+      deleted: true,
+    },
+    extra,
+  );
   return { ok: true as const, roomId: item.roomId };
 }
 
@@ -654,7 +735,7 @@ export async function addWorkItemEntry(
   viewer: TeamChatViewer,
   workItemId: string,
   input: WorkItemEntryInput,
-) {
+): Promise<WorkItemCommandResult> {
   const item = await prisma.teamChatWorkItem.findFirst({
     where: { id: workItemId },
     select: { id: true, roomId: true },
@@ -696,7 +777,7 @@ export async function updateWorkItemEntry(
     dueAt?: string | null;
     status?: "open" | "done";
   },
-) {
+): Promise<WorkItemCommandResult> {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
     select: {
@@ -773,7 +854,7 @@ export async function deleteWorkItemEntry(
   viewer: TeamChatViewer,
   workItemId: string,
   entryId: string,
-) {
+): Promise<WorkItemCommandResult> {
   const entry = await prisma.teamChatWorkItemEntry.findFirst({
     where: { id: entryId, workItemId },
     select: { id: true, workItem: { select: { roomId: true } } },
