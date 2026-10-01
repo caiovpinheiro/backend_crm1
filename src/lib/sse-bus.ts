@@ -1,7 +1,7 @@
 import IORedis from "ioredis";
 
+import { scheduleBoardInvalidationForMessage } from "@/lib/board-invalidation";
 import {
-  scheduleBoardInvalidation,
   scheduleTabCountsInvalidation,
   shouldInvalidateInboxTabCounts,
 } from "@/lib/cache/keys";
@@ -181,15 +181,15 @@ class SseBus {
     // Mensagem nova deixa o cache-aside do board (TTL 45s) desatualizado:
     // os cards do Kanban/Flow continuariam com a prévia e o "aguardando
     // resposta" anteriores. Purgar aqui cobre TODOS os produtores (envio
-    // manual, webhook Meta/Baileys, automação, IA) num ponto só. Feito
-    // antes do fan-out pra que o refetch disparado pelo SSE no cliente já
-    // encontre o cache limpo.
+    // manual, webhook Meta/Baileys, automação, IA) num ponto só. Só os
+    // pipelines onde o contato tem deal (ver `board-invalidation.ts`).
+    // Começa antes do fan-out; o refetch do cliente sai ~800ms depois do SSE.
     //
     // `message_status` (ticks entregue→lida) fica de fora de propósito: são
     // vários eventos por mensagem e o ganho no card não paga o recompute do
     // board. Esses ticks acompanham o TTL / o poll de 30s.
     if (event === "new_message") {
-      scheduleBoardInvalidation(orgId);
+      void scheduleBoardInvalidationForMessage(orgId, data);
     }
 
     // Badges: NÃO purgar em `new_message` (preview). O FE ainda recebe o
