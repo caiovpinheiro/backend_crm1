@@ -126,7 +126,7 @@ export async function isDistributionAutoOnInbound(): Promise<boolean> {
   try {
     return (await getOrgSettingBoolFresh(AUTO_ON_INBOUND_KEY, true)) !== false;
   } catch (e) {
-    console.error("[distribution] leitura de distribution.autoOnInbound falhou", e);
+    log.error({ err: e }, "[distribution] leitura de distribution.autoOnInbound falhou");
     return true;
   }
 }
