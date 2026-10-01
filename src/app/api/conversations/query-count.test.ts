@@ -195,7 +195,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       consultas: 17,
       fases: 10,
       redis: 8,
-      redisEmSerie: 7,
+      redisEmSerie: 6,
     });
   });
 
@@ -209,8 +209,8 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
     expect({ consultas: pg.count, fases: pg.phases, redis: redis.count, redisEmSerie: redis.phases }).toEqual({
       consultas: 17,
       fases: 10,
-      redis: 8,
-      redisEmSerie: 7,
+      redis: 9,
+      redisEmSerie: 6,
     });
   });
 
@@ -222,8 +222,8 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
     const { pg, redis } = measure("messages / admin, conversa de outro, flag on", warm.entries);
     expect({ consultas: pg.count, fases: pg.phases, redis: redis.count, redisEmSerie: redis.phases }).toEqual({
-      consultas: 16,
-      fases: 9,
+      consultas: 14,
+      fases: 8,
       redis: 7,
       redisEmSerie: 6,
     });
@@ -244,8 +244,8 @@ describe("GET /api/conversations — pré-checks antes da listagem", () => {
     expect({ consultas: pg.count, fases: pg.phases, redis: redis.count, redisEmSerie: redis.phases }).toEqual({
       consultas: 2,
       fases: 1,
-      redis: 7,
-      redisEmSerie: 4,
+      redis: 5,
+      redisEmSerie: 1,
     });
   });
 
@@ -263,8 +263,8 @@ describe("GET /api/conversations — pré-checks antes da listagem", () => {
     expect({ consultas: pg.count, fases: pg.phases, redis: redis.count, redisEmSerie: redis.phases }).toEqual({
       consultas: 2,
       fases: 1,
-      redis: 9,
-      redisEmSerie: 6,
+      redis: 5,
+      redisEmSerie: 1,
     });
   });
 
@@ -280,8 +280,8 @@ describe("GET /api/conversations — pré-checks antes da listagem", () => {
     expect({ consultas: pg.count, fases: pg.phases, redis: redis.count, redisEmSerie: redis.phases }).toEqual({
       consultas: 2,
       fases: 1,
-      redis: 7,
-      redisEmSerie: 4,
+      redis: 5,
+      redisEmSerie: 1,
     });
   });
 });

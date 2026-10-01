@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
-import { loadAuthzContext } from "@/lib/authz";
 import {
   andConversationWhere,
   conversationFunnelWhere,
   visibleStageIds,
 } from "@/lib/authz/funnel-visibility";
-import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
+import { authzContextOnce, scopeGrantsOnce } from "@/lib/authz/request-prechecks";
+import { canSeeInboxTab } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
+import { createRequestMemo } from "@/lib/request-memo";
 import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
 import {
   buildInboxFilterConditions,
@@ -45,20 +46,26 @@ export async function GET(request: Request) {
       // Loaders independentes em paralelo (antes: 4 awaits em série, cada
       // um com o seu round-trip Postgres/Redis antes da listagem).
       //
+      // `memo`: os quatro pedem insumos em comum (contexto authz, flag de
+      // escopo granular, grants). Com o memo da requisição cada um é lido
+      // uma vez e todas as idas ao Redis saem juntas — sem ele eram 7 a 9
+      // GETs, 4 a 6 em série dentro de cada loader.
+      //
       // `authz`: permissões efetivas (Authz v2) — conectam as roles custom
       // ao gating de abas do inbox. Admin/super-admin recebem `*` (todas as
       // abas). Sem isso, um MEMBER com role custom concedendo
       // `conversation:view` continuaria preso ao default legado (só
       // "esperando"/"respondidas").
+      const memo = createRequestMemo();
       const [grants, allowedChannelIds, authz, visibility] = await Promise.all([
-        getScopeGrants(),
-        listAllowedChannelIds(apiUser),
-        loadAuthzContext({
+        scopeGrantsOnce(memo),
+        listAllowedChannelIds(apiUser, memo),
+        authzContextOnce(memo, {
           userId: apiUser.id,
           organizationId: apiUser.organizationId,
           isSuperAdmin: apiUser.isSuperAdmin,
         }),
-        getVisibilityFilter(user),
+        getVisibilityFilter(user, { memo }),
       ]);
       const inboxPerms: ReadonlySet<string> =
         authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
