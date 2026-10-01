@@ -558,3 +558,32 @@ export function scheduleBoardInvalidation(
   }
   boardInvalidationWindows.set(windowKey, slot);
 }
+
+// ── Origem de tenant confiável no CORS ──────────────────────────
+//
+// "`https://{slug}.{base}` pode receber CORS com credenciais?" — org
+// existe, está ACTIVE e tem usuário com e-mail verificado (ver
+// `lib/cors-tenant-origin.ts`). Guarda também a resposta negativa, por
+// isso a versão por slug (`cache:v:cors_tenant_origin:<slug>`): verificar
+// o e-mail, aceitar convite ou mudar o status da org troca a versão e a
+// resposta antiga deixa de ser lida.
+
+function corsTenantOriginVersion(slug: string): string {
+  return cacheVersionName("cors_tenant_origin", slug);
+}
+
+export async function corsTenantOriginKey(slug: string): Promise<string> {
+  const version = await getCacheVersion(corsTenantOriginVersion(slug));
+  return `cors_tenant_origin:${slug}:v${version}`;
+}
+
+export async function invalidateCorsTenantOrigin(
+  slug: string | null | undefined,
+): Promise<void> {
+  if (!slug) return;
+  try {
+    await bumpCacheVersion(corsTenantOriginVersion(slug));
+  } catch {
+    /* best-effort */
+  }
+}

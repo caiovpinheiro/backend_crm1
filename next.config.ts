@@ -11,13 +11,7 @@ const __dirname = path.dirname(__filename);
 function securityHeaders(): { key: string; value: string }[] {
   // SEC-15: X-Frame-Options/CSP Report-Only vêm de `src/lib/security-headers`
   // (mesma fonte do middleware) — evita DENY aqui × SAMEORIGIN lá.
-  const headers: { key: string; value: string }[] = [
-    ...baseSecurityHeaders(),
-    {
-      key: "Permissions-Policy",
-      value: "payment=(), usb=(), geolocation=()",
-    },
-  ];
+  const headers: { key: string; value: string }[] = [...baseSecurityHeaders()];
   const url = process.env.NEXTAUTH_URL ?? "";
   if (process.env.NODE_ENV === "production" && url.startsWith("https://")) {
     headers.push({

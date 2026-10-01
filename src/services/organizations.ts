@@ -2,6 +2,7 @@ import { OrgStatus, Prisma, UserRole } from "@prisma/client";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { logAudit } from "@/lib/audit/log";
+import { invalidateCorsTenantOrigin } from "@/lib/cache/keys";
 import { issueOrganizationInvite } from "@/services/invites";
 
 /**
@@ -124,6 +125,8 @@ export async function updateOrganizationStatus(
     select: { id: true, name: true, slug: true, status: true },
   });
   await prismaBase.organization.update({ where: { id }, data: { status } });
+  // Suspender/reativar muda se o subdomínio é origem confiável no CORS.
+  await invalidateCorsTenantOrigin(before?.slug);
   await logAudit({
     entity: "organization",
     action: "update",
