@@ -389,6 +389,10 @@ export async function GET(request: Request, context: RouteContext) {
         ? { conversationId: { in: [conv.id, ...siblingActiveConversationIds] } }
         : { conversationId: conv.id };
 
+    // Mesmo recorte do `previousTickets` (encerrados ANTERIORES a este, do
+    // mesmo canal): `hasOlderTickets` só promete o que `?history=1` entrega.
+    // Sem o `createdAt`, um ticket encerrado mais novo fazia o chat pedir um
+    // histórico que nunca vinha.
     const olderTicketsProbe =
       !includeHistory && !before && conv.contactId
         ? prisma.conversation.findFirst({
@@ -396,6 +400,7 @@ export async function GET(request: Request, context: RouteContext) {
               contactId: conv.contactId,
               id: { not: conv.id },
               status: "RESOLVED",
+              createdAt: { lt: conv.createdAt },
               ...(conv.channel ? { channel: conv.channel } : {}),
             },
             select: { id: true },
