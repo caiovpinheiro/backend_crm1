@@ -76,6 +76,16 @@ vi.mock("@/lib/sse-bus", () => ({
   sseBus: { subscribe: mocks.subscribe },
 }));
 
+// Teto de conexões (SSE-2) tem teste próprio em `route.limit.test.ts`.
+vi.mock("@/lib/sse-connection-limit", () => ({
+  SSE_EVICTED_EVENT: "sse_connection_evicted",
+  SSE_HEARTBEAT_MS: 25_000,
+  acquireSseConnection: async () => ({
+    ok: true,
+    slot: { connId: "c", heartbeat: async () => undefined, release: async () => undefined },
+  }),
+}));
+
 import { GET } from "@/app/api/sse/messages/route";
 
 const ORG = "org1";
