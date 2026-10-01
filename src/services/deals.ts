@@ -16,6 +16,7 @@ import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/reques
 import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
+import { preferConversationWithLastMessage } from "@/services/deal-panel-conversation";
 import {
   logEvent,
   userIdForFk,
@@ -556,7 +557,17 @@ function sortConversationsActiveFirst<T extends { status: ConversationStatus }>(
   );
 }
 
-export async function getDealById(idOrNumber: string): Promise<DealDetail | null> {
+export async function getDealById(
+  idOrNumber: string,
+  opts?: {
+    /**
+     * Detalhe do painel (Kanban/Flow): sem ticket ativo, põe na frente o
+     * ticket com a última mensagem de chat do contato (uma consulta a mais,
+     * só nesse caso). As demais rotas não pedem.
+     */
+    conversationWithLastMessageFirst?: boolean;
+  },
+): Promise<DealDetail | null> {
   const isNumeric = /^\d+$/.test(idOrNumber);
   const orgId = getOrgIdOrThrow();
   const deal = (await prisma.deal.findUnique({
@@ -569,7 +580,13 @@ export async function getDealById(idOrNumber: string): Promise<DealDetail | null
     deal.contact.conversations = sortConversationsActiveFirst(
       deal.contact.conversations,
     );
-    await enrichContactsWithUserAvatarFallback([deal.contact]);
+    const [conversations] = await Promise.all([
+      opts?.conversationWithLastMessageFirst
+        ? preferConversationWithLastMessage(deal.contact.conversations)
+        : deal.contact.conversations,
+      enrichContactsWithUserAvatarFallback([deal.contact]),
+    ]);
+    deal.contact.conversations = conversations;
   }
   return deal;
 }
