@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getSegmentById, previewSegment, type SegmentFilters } from "@/services/segments";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/segments/[id]/preview");
 
 export async function GET(
   _request: Request,
@@ -21,7 +24,7 @@ export async function GET(
     const preview = await previewSegment(segment.filters as unknown as SegmentFilters);
     return NextResponse.json(preview);
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao fazer preview." },
       { status: 500 },

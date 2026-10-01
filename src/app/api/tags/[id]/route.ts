@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/tags/[id]");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -31,7 +34,7 @@ export async function PUT(request: Request, ctx: Ctx) {
     const tag = await prisma.tag.update({ where: { id }, data });
     return NextResponse.json(tag);
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2002") {
       return NextResponse.json({ message: "Já existe uma tag com este nome." }, { status: 409 });
     }
@@ -53,7 +56,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     await prisma.tag.delete({ where: { id } });
     return NextResponse.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao excluir tag." }, { status: 500 });
   }
 }

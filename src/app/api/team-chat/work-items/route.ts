@@ -4,6 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createWorkItem, listRoomWorkItems, WORK_ITEM_TYPES } from "@/services/team-chat-work-items";
 import { denyUnless, isServiceError, jsonError, viewerOf } from "../_guard";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/team-chat/work-items");
 
 const Entry = z.object({
   text: z.string().min(1).max(500),
@@ -51,7 +54,7 @@ export async function POST(request: Request) {
       if (isServiceError(result)) return jsonError(result.error, result.status);
       return NextResponse.json(result.workItem, { status: 201 });
     } catch (err) {
-      console.error("[team-chat] create work item failed", err);
+      log.error({ err }, "[team-chat] create work item failed");
       return jsonError("Não foi possível criar o item.", 500);
     }
   });

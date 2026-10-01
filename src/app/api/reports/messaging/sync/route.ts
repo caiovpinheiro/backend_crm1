@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { syncMetaPricing } from "@/services/meta-pricing-sync";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/reports/messaging/sync");
 
 /**
  * POST /api/reports/messaging/sync
@@ -59,7 +62,7 @@ export async function POST(request: Request) {
       ...result,
     });
   } catch (e) {
-    console.error("[reports/messaging/sync]", e);
+    log.error({ err: e }, "[reports/messaging/sync] falhou");
     return NextResponse.json(
       {
         ok: false,

@@ -13,6 +13,9 @@ import {
   resolveApi4ComGateway,
   upsertApi4ComWebhookWithUserToken,
 } from "@/services/telephony-providers/api4com";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions/connect-api4com");
 
 /**
  * POST /api/sip-extensions/connect-api4com
@@ -164,7 +167,7 @@ export async function POST(request: Request) {
       if (status === 400) {
         return NextResponse.json({ message: msg }, { status: 400 });
       }
-      console.error("[sip-extensions/connect-api4com]:", msg);
+      log.error({ err: msg }, "[sip-extensions/connect-api4com] falhou");
 
       if (/sip_extensions/i.test(msg) && /does not exist/i.test(msg)) {
         return NextResponse.json(

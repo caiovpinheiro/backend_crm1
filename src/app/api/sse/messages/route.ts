@@ -113,7 +113,7 @@ export async function GET(request: Request) {
           }),
       );
     } catch (e) {
-      console.error("[sse] falha ao montar o gate de card do inbox:", e);
+      log.error({ err: e }, "[sse] falha ao montar o gate de card do inbox");
     }
   }
 

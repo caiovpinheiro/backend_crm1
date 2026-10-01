@@ -6,6 +6,9 @@ import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { invalidateAuthzForUser } from "@/lib/authz";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/users/[id]/primary-role");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -137,7 +140,7 @@ export async function PUT(request: Request, context: RouteContext) {
     await invalidateAuthzForUser(targetOrgId, target.id);
     return NextResponse.json({ ok: true, role: { id: role.id, name: role.name } });
   } catch (e) {
-    console.error("[PUT /api/users/[id]/primary-role]", e);
+    log.error({ err: e }, "[PUT /api/users/[id]/primary-role]");
     return NextResponse.json({ message: "Erro ao definir função." }, { status: 500 });
   }
 }

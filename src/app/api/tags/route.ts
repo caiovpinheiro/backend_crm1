@@ -4,6 +4,9 @@ import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/tags");
 
 export async function GET(request: Request) {
   return withApiAuthContext(request, async (user) => {
@@ -56,7 +59,7 @@ export async function GET(request: Request) {
       const tags = await prisma.tag.findMany({ orderBy: { name: "asc" } });
       return NextResponse.json(tags);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar tags." }, { status: 500 });
     }
   });
@@ -95,7 +98,7 @@ export async function POST(request: Request) {
       });
       return NextResponse.json(tag, { status: 201 });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       if (
         typeof e === "object" &&
         e !== null &&

@@ -7,6 +7,9 @@ import {
   updateExtension,
   deleteExtension,
 } from "@/services/sip-extensions";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -102,7 +105,7 @@ export async function PUT(request: Request, context: RouteContext) {
       });
       return NextResponse.json({ extension: ext });
     } catch (e) {
-      console.error("[sip-extensions] PUT:", e);
+      log.error({ err: e }, "[sip-extensions] PUT falhou");
       return NextResponse.json({ message: "Erro ao atualizar ramal." }, { status: 500 });
     }
   });
@@ -131,7 +134,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       await deleteExtension(id);
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.error("[sip-extensions] DELETE:", e);
+      log.error({ err: e }, "[sip-extensions] DELETE falhou");
       return NextResponse.json({ message: "Erro ao remover ramal." }, { status: 500 });
     }
   });

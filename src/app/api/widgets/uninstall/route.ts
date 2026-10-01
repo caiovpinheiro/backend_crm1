@@ -7,6 +7,9 @@ import {
   InvalidWidgetSlugError,
   uninstallWidget,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/widgets/uninstall");
 
 /**
  * POST /api/widgets/uninstall
@@ -50,7 +53,7 @@ export async function POST(request: Request) {
       if (e instanceof InvalidWidgetSlugError) {
         return NextResponse.json({ message: "Widget inválido." }, { status: 400 });
       }
-      console.error("[POST /api/widgets/uninstall]", e);
+      log.error({ err: e }, "[POST /api/widgets/uninstall] falhou");
       return NextResponse.json(
         { message: "Erro ao remover widget." },
         { status: 500 },

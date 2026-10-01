@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { listWidgetsWithState } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/widgets");
 
 /**
  * GET /api/widgets
@@ -14,7 +17,7 @@ export async function GET() {
       const items = await listWidgetsWithState();
       return NextResponse.json({ items });
     } catch (e) {
-      console.error("[GET /api/widgets]", e);
+      log.error({ err: e }, "[GET /api/widgets] falhou");
       return NextResponse.json(
         { message: "Erro ao listar widgets." },
         { status: 500 },

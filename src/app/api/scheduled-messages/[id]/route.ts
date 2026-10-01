@@ -5,6 +5,9 @@ import {
   cancelScheduledMessage,
   getScheduledMessage,
 } from "@/services/scheduled-messages";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/scheduled-messages/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -38,7 +41,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
     const updated = await cancelScheduledMessage(id, uid);
     return NextResponse.json(updated);
   } catch (e) {
-    console.error("DELETE /api/scheduled-messages/:id error", e);
+    log.error({ err: e }, "DELETE /api/scheduled-messages/:id error");
     return NextResponse.json(
       { message: "Erro ao cancelar agendamento." },
       { status: 500 },

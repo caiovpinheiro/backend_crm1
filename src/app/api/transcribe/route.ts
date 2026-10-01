@@ -13,6 +13,9 @@ import {
   fetchAuthorizedAudioBuffer,
   MediaTooLargeError,
 } from "@/lib/fetch-authorized-audio";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/transcribe");
 
 const GROQ_TRANSCRIPTION_URL =
   "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -96,7 +99,7 @@ export async function POST(request: Request) {
         signal: AbortSignal.timeout(60_000),
       });
     } catch (err) {
-      console.error("[transcribe] Groq fetch error:", err);
+      log.error({ err }, "[transcribe] Groq fetch error");
       return NextResponse.json(
         { error: "Timeout ao conectar com o Groq." },
         { status: 504 },
@@ -105,7 +108,7 @@ export async function POST(request: Request) {
 
     if (!groqRes.ok) {
       const errBody = await groqRes.text().catch(() => "");
-      console.error(`[transcribe] Groq error ${groqRes.status}:`, errBody);
+      log.error({ status: groqRes.status, errBody }, "[transcribe] Groq error");
       return NextResponse.json(
         { error: `Groq retornou ${groqRes.status}: ${errBody.slice(0, 200)}` },
         { status: 502 },

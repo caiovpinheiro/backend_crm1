@@ -6,6 +6,9 @@ import {
   listPendingByConversation,
   ScheduledMessageValidationError,
 } from "@/services/scheduled-messages";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/scheduled-messages");
 
 /**
  * GET /api/scheduled-messages?conversationId=...
@@ -31,7 +34,7 @@ export async function GET(request: Request) {
     const items = await listPendingByConversation(conversationId);
     return NextResponse.json({ items });
   } catch (e) {
-    console.error("GET /api/scheduled-messages error", e);
+    log.error({ err: e }, "GET /api/scheduled-messages error");
     return NextResponse.json(
       { message: "Erro ao listar mensagens agendadas." },
       { status: 500 },
@@ -145,7 +148,7 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    console.error("POST /api/scheduled-messages error", e);
+    log.error({ err: e }, "POST /api/scheduled-messages error");
     return NextResponse.json(
       { message: "Erro ao criar mensagem agendada." },
       { status: 500 },

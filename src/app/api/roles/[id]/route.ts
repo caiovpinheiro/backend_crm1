@@ -4,6 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { deleteRole, getRoleById, updateRole } from "@/services/roles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/roles/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -73,7 +76,7 @@ export async function GET(_request: Request, context: RouteContext) {
       }
       return NextResponse.json(role);
     } catch (e) {
-      console.error("[GET /api/roles/[id]]", e);
+      log.error({ err: e }, "[GET /api/roles/[id]] falhou");
       return NextResponse.json(
         { message: "Erro ao buscar role." },
         { status: 500 },
@@ -119,7 +122,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       return NextResponse.json(role);
     } catch (e) {
-      console.error("[PUT /api/roles/[id]]", e);
+      log.error({ err: e }, "[PUT /api/roles/[id]] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao atualizar role." },
         { status: 400 },
@@ -150,7 +153,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       }
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[DELETE /api/roles/[id]]", e);
+      log.error({ err: e }, "[DELETE /api/roles/[id]] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao excluir role." },
         { status: 400 },
