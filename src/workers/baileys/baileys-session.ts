@@ -23,6 +23,7 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
 import { registerLidMapping, getMapSize, clearChannelMap, loadPersistedMappings, fixLidContacts } from "./lid-resolver";
+import { attachContactTyping, detachContactTyping } from "./contact-typing";
 
 const RECONNECT_MAX_RETRIES = 8;
 const RECONNECT_BASE_DELAY_MS = 2_000;
@@ -96,6 +97,10 @@ export class BaileysSession {
     });
 
     this.socket = sock;
+
+    // "digitando…" do contato: registra o listener de presença e zera a
+    // tabela de assinaturas (nada é assinado aqui — só por mensagem).
+    attachContactTyping(this.channelId, sock);
 
     sock.ev.on("creds.update", () => {
       const orgId = this.organizationId;
@@ -404,6 +409,7 @@ export class BaileysSession {
     this.clearQrTimer();
     this.groupCache.clear();
     clearChannelMap(this.channelId);
+    detachContactTyping(this.channelId);
     try {
       this.socket?.end(undefined);
     } catch {
@@ -424,6 +430,7 @@ export class BaileysSession {
       await this.waitForOpen(4_000);
     }
     this.destroyed = true;
+    detachContactTyping(this.channelId);
     try {
       if (this.socket) {
         await this.socket.logout();

@@ -15,6 +15,7 @@ import { logMessageFailed } from "@/services/activity-log";
 import { publishMessageStatus } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
+import { noteContactActivity } from "./contact-typing";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 
 export function startOutboundConsumer(
@@ -189,8 +190,27 @@ export function startOutboundConsumer(
       // delivered/read do Baileys não achavam a mensagem por wamid.
       const meta = await prismaBase.message.findUnique({
         where: { id: messageId },
-        select: { organizationId: true, conversationId: true },
+        select: {
+          organizationId: true,
+          conversationId: true,
+          conversation: {
+            select: { contactId: true, status: true, lastInboundAt: true },
+          },
+        },
       });
+      // "digitando…" do contato: resposta do CRM numa conversa aberta em
+      // que o contato JÁ escreveu renova/assina a presença do JID. Envio
+      // frio (sem inbound neste ticket) não assina — ver `contact-typing.ts`.
+      if (meta?.organizationId && meta.conversation?.contactId) {
+        noteContactActivity(channelId, {
+          jid,
+          organizationId: meta.organizationId,
+          conversationId: meta.conversationId,
+          contactId: meta.conversation.contactId,
+          conversationStatus: meta.conversation.status,
+          contactHasWritten: meta.conversation.lastInboundAt != null,
+        });
+      }
       if (meta?.organizationId && sent?.key?.id) {
         await withSystemContext(meta.organizationId, async () => {
           await prisma.message.update({

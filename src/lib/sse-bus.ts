@@ -57,7 +57,8 @@ import {
  * contato → pipelines de `board-invalidation.ts`).
  *
  * `typing`: throttle no servidor de 1 evento a cada 3 s por (conversa,
- * agente), publicado por `POST /api/conversations/:id/typing`.
+ * origem, agente). Agente: `POST /api/conversations/:id/typing`. Contato
+ * (`source: "contact"`): worker Baileys, `workers/baileys/contact-typing.ts`.
  * `scheduled_message_updated`: publicado ao criar, cancelar (manual ou
  * automático por resposta/encerramento), enviar e falhar; o cliente
  * invalida `["scheduled-messages", conversationId]`.
