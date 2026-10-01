@@ -16,6 +16,19 @@ const h = vi.hoisted(() => ({
   ),
 }));
 
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }));
+
+// O log saiu do `console` e foi para o logger estruturado: o teste espiona
+// o logger e mantém a mesma garantia sobre o que é (e não é) logado.
+vi.mock("@/lib/logger", () => ({
+  getLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  }),
+}));
+
 vi.mock("@prisma/client", () => ({
   Prisma: { join: (xs: unknown[]) => ({ __join: xs }) },
 }));
@@ -151,14 +164,13 @@ describe("sweepActivityAlertPushes", () => {
     h.getNextActivityAlert
       .mockRejectedValueOnce(new Error("fora de contexto"))
       .mockResolvedValue(null);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logWarn.mockClear();
 
     const result = await sweepActivityAlertPushes(NOW);
 
     expect(result.users).toBe(3);
     expect(h.getNextActivityAlert).toHaveBeenCalledTimes(3);
     expect(h.contexts).toEqual(["org-1", "org-1", "org-2"]);
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    expect(logWarn).toHaveBeenCalled();
   });
 });

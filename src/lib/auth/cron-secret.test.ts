@@ -5,6 +5,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { timingSafeEqualSpy } = vi.hoisted(() => ({ timingSafeEqualSpy: vi.fn() }));
+const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
+
+// O log saiu do `console` e foi para o logger estruturado: o teste espiona
+// o logger e mantém a mesma garantia sobre o que é (e não é) logado.
+vi.mock("@/lib/logger", () => ({
+  getLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warn,
+    error: vi.fn(),
+  }),
+}));
+
 
 vi.mock("node:crypto", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:crypto")>();
@@ -26,17 +39,15 @@ function req(url: string, headers?: Record<string, string>): Request {
 
 describe("requireCronSecret", () => {
   const originalSecret = process.env.CRON_SECRET;
-  let warn: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     process.env.CRON_SECRET = SECRET;
     resetCronSecretWarningsForTests();
-    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warn.mockClear();
   });
 
   afterEach(() => {
     process.env.CRON_SECRET = originalSecret;
-    warn.mockRestore();
   });
 
   it("503 quando CRON_SECRET nao esta configurado", async () => {
@@ -58,7 +69,7 @@ describe("requireCronSecret", () => {
     expect(requireCronSecret(req(url))).toBeNull();
     expect(requireCronSecret(req(url))).toBeNull();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain("DEPRECADO");
+    expect(JSON.stringify(warn.mock.calls[0])).toContain("DEPRECADO");
   });
 
   it("401 com segredo errado no header, mesmo com ?secret= certo", () => {

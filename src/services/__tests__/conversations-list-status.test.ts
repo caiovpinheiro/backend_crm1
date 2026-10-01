@@ -39,6 +39,19 @@ const h = vi.hoisted(() => {
   };
 });
 
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }));
+
+// O log saiu do `console` e foi para o logger estruturado: o teste espiona
+// o logger e mantém a mesma garantia sobre o que é (e não é) logado.
+vi.mock("@/lib/logger", () => ({
+  getLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  }),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $queryRaw: h.queryRaw,
@@ -549,10 +562,9 @@ describe("updateConversationStatusInDb", () => {
 
   it("falha ao devolver o deal não derruba o encerramento", async () => {
     h.resolveAgentVertical.mockRejectedValueOnce(new Error("vertical off"));
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logWarn.mockClear();
     const row = await withOrg(ORG, () => updateConversationStatusInDb("conv-1", "RESOLVED"));
     expect(row.status).toBe("RESOLVED");
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    expect(logWarn).toHaveBeenCalled();
   });
 });
