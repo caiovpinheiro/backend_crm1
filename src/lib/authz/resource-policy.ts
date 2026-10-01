@@ -21,20 +21,53 @@ import {
   type CrmActionKey,
   type ScopeGrants,
 } from "@/lib/authz/scope-grants";
+import { featureEnabledOnce, scopeGrantsOnce } from "@/lib/authz/request-prechecks";
 import { isFeatureEnabled } from "@/lib/feature-flags";
 import { prismaBase } from "@/lib/prisma-base";
+import { memoized, type RequestMemo } from "@/lib/request-memo";
 
 /**
  * IDs das roles (RBAC) atribuídas ao usuário. Usado para resolver grants de
  * canal por papel (eixo aditivo de `channel.*.roles`). Só é chamado quando a
  * flag de escopo granular está ligada.
  */
-async function getUserAssignedRoleIds(userId: string): Promise<string[]> {
-  const rows = await prismaBase.userRoleAssignment.findMany({
-    where: { userId },
-    select: { roleId: true },
+async function getUserAssignedRoleIds(
+  userId: string,
+  memo?: RequestMemo,
+): Promise<string[]> {
+  return memoized(memo, `role-ids:${userId}`, async () => {
+    const rows = await prismaBase.userRoleAssignment.findMany({
+      where: { userId },
+      select: { roleId: true },
+    });
+    return rows.map((r) => r.roleId);
   });
-  return rows.map((r) => r.roleId);
+}
+
+/** Algum eixo de canal (`view/send/initiate/manage/deny`) tem regra por papel? */
+function channelGrantsUseRoles(grants: ScopeGrants): boolean {
+  const channel = grants.channel;
+  if (!channel) return false;
+  return [channel.view, channel.send, channel.initiate, channel.manage, channel.deny].some(
+    (node) => node?.roles !== undefined && Object.keys(node.roles).length > 0,
+  );
+}
+
+/**
+ * Papéis do usuário para as regras de canal — só vai ao banco quando a
+ * resposta pode depender deles. Os papéis entram na decisão apenas como
+ * chave de `channel.*.roles[roleId]`, e ADMIN (enum legado) sai antes de
+ * olhar qualquer regra: para ADMIN, ou quando nenhum eixo tem regra por
+ * papel, `[]` produz exatamente o mesmo resultado que a lista real.
+ */
+async function roleIdsForChannelRules(
+  user: UserLike,
+  grants: ScopeGrants,
+  memo?: RequestMemo,
+): Promise<string[]> {
+  if (user.role === "ADMIN") return [];
+  if (!channelGrantsUseRoles(grants)) return [];
+  return getUserAssignedRoleIds(user.id, memo);
 }
 
 type UserLike = {
@@ -98,14 +131,21 @@ export async function requirePermissionForUser(
   return NextResponse.json({ message: "Acesso negado.", required: key }, { status: 403 });
 }
 
-export async function loadScopedPolicy(user: UserLike): Promise<{
+/**
+ * `memo` (opcional): memo da requisição — flag e grants são lidos uma vez
+ * por request, mesmo com várias checagens de canal/funil no mesmo handler.
+ */
+export async function loadScopedPolicy(
+  user: UserLike,
+  memo?: RequestMemo,
+): Promise<{
   enabled: boolean;
   grants: ScopeGrants;
 }> {
   if (!user.organizationId) return { enabled: false, grants: {} };
-  const enabled = await isFeatureEnabled("rbac_granular_scope_v1", user.organizationId);
+  const enabled = await featureEnabledOnce(memo, "rbac_granular_scope_v1", user.organizationId);
   if (!enabled) return { enabled: false, grants: {} };
-  return { enabled: true, grants: await getScopeGrants(user.organizationId) };
+  return { enabled: true, grants: await scopeGrantsOnce(memo, user.organizationId) };
 }
 
 export async function requirePipelineScope(
@@ -173,11 +213,12 @@ export async function canDoChannelAction(
   user: UserLike,
   action: "view" | "send" | "initiate" | "manage",
   channelId: string | null | undefined,
+  memo?: RequestMemo,
 ): Promise<boolean> {
   if (!channelId) return true;
-  const policy = await loadScopedPolicy(user);
+  const policy = await loadScopedPolicy(user, memo);
   if (!policy.enabled) return true;
-  const roleIds = await getUserAssignedRoleIds(user.id);
+  const roleIds = await roleIdsForChannelRules(user, policy.grants, memo);
   return canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
@@ -215,11 +256,12 @@ export async function requireChannelScope(
   user: UserLike,
   action: "view" | "send" | "initiate" | "manage",
   channelId: string | null | undefined,
+  memo?: RequestMemo,
 ): Promise<NextResponse | null> {
   if (!channelId) return null;
-  const policy = await loadScopedPolicy(user);
+  const policy = await loadScopedPolicy(user, memo);
   if (!policy.enabled) return null;
-  const roleIds = await getUserAssignedRoleIds(user.id);
+  const roleIds = await roleIdsForChannelRules(user, policy.grants, memo);
   const allowed = canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
@@ -241,10 +283,11 @@ export async function requireChannelScope(
  */
 export async function listAllowedChannelIds(
   user: UserLike,
+  memo?: RequestMemo,
 ): Promise<string[] | null> {
-  const policy = await loadScopedPolicy(user);
+  const policy = await loadScopedPolicy(user, memo);
   if (!policy.enabled) return null;
-  const roleIds = await getUserAssignedRoleIds(user.id);
+  const roleIds = await roleIdsForChannelRules(user, policy.grants, memo);
   return listAllowedChannelIdsForUser({
     grants: policy.grants,
     role: user.role,

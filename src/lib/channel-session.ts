@@ -103,7 +103,7 @@ function inboundAfterReset(
 async function lastInboundOnChannel(
   contactId: string,
   channelId: string,
-  opts?: { conversationId?: string },
+  opts?: { conversationId?: string; channel?: PreloadedChannel },
 ): Promise<Date | null> {
   const ticketInbound =
     opts?.conversationId != null
@@ -132,10 +132,14 @@ async function lastInboundOnChannel(
       orderBy: { createdAt: "desc" },
       select: { createdAt: true },
     }),
-    prisma.channel.findUnique({
-      where: { id: channelId },
-      select: { config: true },
-    }),
+    // Quem já leu o Channel `channelId` (ex.: junto com a conversa) passa
+    // a linha e poupa a consulta só do `config`.
+    opts?.channel
+      ? Promise.resolve(opts.channel)
+      : prisma.channel.findUnique({
+          where: { id: channelId },
+          select: { config: true },
+        }),
   ]);
   return inboundAfterReset(
     lastInMsg?.createdAt ?? null,
@@ -144,19 +148,32 @@ async function lastInboundOnChannel(
 }
 
 /**
+ * Linha do `Channel` que o chamador já tem em mãos — só o `config` é lido
+ * (corte `sessionResetAt`). Tem que ser a linha do `channelId` consultado.
+ */
+export type PreloadedChannel = { config: unknown };
+
+/**
  * Janela de 24h no canal da própria conversa. Sempre deriva das
  * mensagens inbound — nunca da coluna desnormalizada.
+ *
+ * `opts.channel`: o Channel `conv.channelId` já carregado (o GET /messages
+ * traz `channelRef` junto com a conversa) — evita reler o `config`.
  */
-export async function getConversationSession(conv: {
-  id: string;
-  contactId: string | null;
-  channel: string;
-  channelId?: string | null;
-  lastInboundAt?: Date | null;
-}): Promise<ChannelSessionInfo> {
+export async function getConversationSession(
+  conv: {
+    id: string;
+    contactId: string | null;
+    channel: string;
+    channelId?: string | null;
+    lastInboundAt?: Date | null;
+  },
+  opts: { channel?: PreloadedChannel } = {},
+): Promise<ChannelSessionInfo> {
   if (conv.contactId && conv.channelId) {
     return getContactChannelSession(conv.contactId, conv.channelId, {
       conversationId: conv.id,
+      channel: opts.channel,
     });
   }
 
@@ -172,10 +189,12 @@ export async function getConversationSession(conv: {
   });
   let lastInboundAt = lastInMsg?.createdAt ?? null;
   if (lastInboundAt && conv.channelId) {
-    const channel = await prisma.channel.findUnique({
-      where: { id: conv.channelId },
-      select: { config: true },
-    });
+    const channel =
+      opts.channel ??
+      (await prisma.channel.findUnique({
+        where: { id: conv.channelId },
+        select: { config: true },
+      }));
     lastInboundAt = inboundAfterReset(
       lastInboundAt,
       parseSessionResetAt(channel?.config),
@@ -190,7 +209,7 @@ export async function getConversationSession(conv: {
 export async function getContactChannelSession(
   contactId: string,
   channelId: string,
-  opts?: { conversationId?: string },
+  opts?: { conversationId?: string; channel?: PreloadedChannel },
 ): Promise<ChannelSessionInfo> {
   const lastInboundAt = await lastInboundOnChannel(contactId, channelId, opts);
   return sessionFromLastInbound(lastInboundAt);
