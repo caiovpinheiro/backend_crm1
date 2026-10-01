@@ -40,6 +40,7 @@ import {
   markAsSent,
 } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("scheduled-messages-worker");
 
@@ -71,9 +72,9 @@ export function startScheduledMessagesWorker() {
 
   // Primeiro tick só depois de 15s (dá tempo do servidor estabilizar
   // e da migration deploy, se recém-subiu).
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     void tick();
-    setInterval(() => void tick(), INTERVAL_MS);
+    scheduleBackgroundInterval(() => void tick(), INTERVAL_MS);
   }, 15_000);
 
   log.info({ tickMs: INTERVAL_MS }, "[scheduled-messages] worker iniciado");

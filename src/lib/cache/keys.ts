@@ -287,6 +287,42 @@ export async function invalidateWhatsappTemplateCatalog(
 /** Tamanho do hash de escopo (`inboxTabCountsScopeFp`). */
 export const INBOX_TAB_COUNTS_FP_LENGTH = 20;
 
+/**
+ * Janela em que um `Date` do escopo conta como o mesmo valor no hash.
+ * O `visibilityWhere` de MEMBER com a aba Automação embute
+ * `automationQueueDelayAgo()` (agora − 15 s); hasheado cru, a chave mudava
+ * a cada milissegundo e o cache dos contadores nunca acertava. A query
+ * continua usando o instante exato — só a chave é arredondada (a mesma
+ * tolerância de 15 s da fila).
+ */
+export const INBOX_TAB_COUNTS_FP_DATE_BUCKET_MS = 15_000;
+
+/** Hash do escopo das badges, com `Date` arredondado para baixo na janela. */
+export function inboxTabCountsFingerprint(scope: unknown): string {
+  const json = JSON.stringify(
+    scope,
+    function (this: Record<string, unknown>, key: string, value: unknown) {
+      // `value` já passou por `Date#toJSON`; o original está em `this[key]`.
+      const raw = this[key];
+      if (raw instanceof Date) {
+        const t = raw.getTime();
+        return Number.isFinite(t)
+          ? {
+              $date:
+                Math.floor(t / INBOX_TAB_COUNTS_FP_DATE_BUCKET_MS) *
+                INBOX_TAB_COUNTS_FP_DATE_BUCKET_MS,
+            }
+          : { $date: null };
+      }
+      return value;
+    },
+  );
+  return createHash("sha1")
+    .update(json)
+    .digest("hex")
+    .slice(0, INBOX_TAB_COUNTS_FP_LENGTH);
+}
+
 function inboxTabCountsVersion(orgId: string): string {
   return cacheVersionName("inbox_tab_counts", orgId);
 }

@@ -236,6 +236,13 @@ fi
 #
 # Workers são compilados via esbuild (npm run build:workers) e copiados para
 # /app/dist/workers no Dockerfile runner stage. Executar com `node` direto.
+
+# HEALTHCHECK (scripts/healthcheck.mjs) roda via `docker exec` e não herda o
+# que veio do /app/.env — grava o modo e a porta efetivos para ele.
+printf 'APP_MODE=%s\nPORT=%s\n' "$APP_MODE" "${PORT:-3000}" \
+  > "${HEALTHCHECK_STATE_FILE:-/tmp/healthcheck.env}" 2>/dev/null || \
+  echo "[entrypoint] aviso: não gravei o estado do healthcheck"
+
 case "$APP_MODE" in
   worker-*)
     echo "[entrypoint] worker sem HTTP — EasyPanel: desligar Tempo de inatividade zero (senão SIGTERM em ~2–4s)."

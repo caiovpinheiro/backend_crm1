@@ -24,6 +24,7 @@ import { cache } from "@/lib/cache";
 import { prismaBase } from "@/lib/prisma-base";
 import { publishSystemPresenceUpdate } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("system-presence");
 
@@ -388,9 +389,9 @@ export function startSystemPresenceSweeper() {
     }
   };
 
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     void tick();
-    setInterval(() => void tick(), SWEEP_INTERVAL_MS);
+    scheduleBackgroundInterval(() => void tick(), SWEEP_INTERVAL_MS);
   }, 12_000);
 
   log.info(

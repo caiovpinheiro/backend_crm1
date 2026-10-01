@@ -134,3 +134,8 @@ export function incrementCampaignCounter(
 export async function flushCampaignCounters(campaignId: string): Promise<void> {
   await flush(campaignId);
 }
+
+/** Flush de todo o buffer do processo — usado no shutdown do worker. */
+export async function flushAllCampaignCounters(): Promise<void> {
+  await Promise.all([...buffer().keys()].map((id) => flush(id)));
+}

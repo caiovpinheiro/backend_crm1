@@ -23,6 +23,7 @@ import {
   assertStageEntryFields,
   assignDealOwner,
   createDealEvent,
+  invalidateBoardsForPipelines,
   StageFieldsRequiredError,
   isValidDealStatus,
   markDealLost,
@@ -447,6 +448,15 @@ export async function POST(request: Request) {
             affected++;
           }
         }
+        // Mesmo purge do `moveDeal`: origem e destino.
+        if (affected > 0) {
+          await invalidateBoardsForPipelines([
+            stage.pipelineId,
+            ...deals
+              .filter((d) => d.stageId !== stageId)
+              .map((d) => d.stage.pipelineId),
+          ]);
+        }
       }
 
       if (action === "change_owner") {
@@ -589,8 +599,18 @@ export async function POST(request: Request) {
       }
 
       if (action === "delete") {
+        // Pipelines lidos antes do DELETE — depois não há mais o stage.
+        const doomed = await prisma.deal.findMany({
+          where: { id: { in: dealIds } },
+          select: { stage: { select: { pipelineId: true } } },
+        });
         const result = await prisma.deal.deleteMany({ where: { id: { in: dealIds } } });
         affected = result.count;
+        if (affected > 0) {
+          await invalidateBoardsForPipelines(
+            doomed.map((d) => d.stage?.pipelineId),
+          );
+        }
       }
 
       return NextResponse.json({ affected, action });
