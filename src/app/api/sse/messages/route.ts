@@ -33,8 +33,14 @@ export async function GET(request: Request) {
     organizationId?: string | null;
     isSuperAdmin?: boolean;
   };
+  const userId = sessionUser.id ?? null;
   const organizationId = sessionUser.organizationId ?? null;
   const isSuperAdmin = Boolean(sessionUser.isSuperAdmin);
+
+  // Sem userId nao ha como resolver audiencia de team-chat (fail-closed).
+  if (!userId) {
+    return sseError(request, "Não autorizado", 401);
+  }
 
   // Sessao sem org E sem super-admin = nao tem nada pra escutar.
   // Fail-closed: 403 explicito em vez de stream vazio silencioso.
@@ -59,7 +65,7 @@ export async function GET(request: Request) {
       }, 60_000);
 
       unsubscribe = sseBus.subscribe(
-        { organizationId, isSuperAdmin },
+        { organizationId, userId, isSuperAdmin },
         (event, envelope) => {
           void (async () => {
             try {

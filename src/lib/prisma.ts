@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prismaBase } from "@/lib/prisma-base";
 import {
+  assertUniqueWhereOrg,
   deepInjectOrgId,
   mergeWhere,
 } from "@/lib/prisma-tenant-helpers";
@@ -19,10 +20,11 @@ import {
  * Cliente Prisma com extension de organization-scope aplicada.
  *
  * Isolamento multi-tenant — camada 1 (aplicacao):
- *   - READ (find*, count, aggregate, groupBy): injeta where.organizationId
- *   - CREATE: injeta data.organizationId
- *   - UPDATE/DELETE: exige where.organizationId
- *   - UPSERT: injeta nos 3 (where, create, update)
+ *   - READ/UPDATE/DELETE: mergeWhere preserva o where original e AND com
+ *     organizationId da sessão (divergente → vazio, nunca substitui).
+ *   - CREATE: injeta data.organizationId; divergente lança TenantIsolationError
+ *   - UPDATE/updateMany: recusa organizationId divergente (não transfere org)
+ *   - UPSERT: mergeWhere no where + inject/assert nos ramos create/update
  *
  * Comportamento conforme o RequestContext atual:
  *   a) Contexto com super-admin=true  -> bypass total (sem injection)
@@ -76,7 +78,11 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "ShippingRange",
   "StakeholderRule",
   "DealLink",
+  // AgentPermission tem organizationId; findMany/raw SQL só por userId vazava
+  // a flag canConfigureFieldVisibility entre tenants (Fase 1).
+  "AgentPermission",
   // Cotas de desconto (PRD Cotas — Fase 1). Todos tenant-scoped.
+  "DiscountCategory",
   "DiscountQuota",
   "ProductMessageTemplate",
   "QuotaConsumptionPolicy",
@@ -107,6 +113,13 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DemandVote",
   "DemandEvent",
   "WhatsappCallEvent",
+  // Telefonia SIP / CDR / webhook de provedor — organizationId NOT NULL.
+  // Sem o set, findMany/get-by-id vazava Call/SipExtension/CallProviderConfig
+  // entre tenants (auditoria Fase 1).
+  "Call",
+  "CallEvent",
+  "SipExtension",
+  "CallProviderConfig",
   "ScheduledWhatsappCall",
   "ScheduledMessage",
   "Automation",
@@ -496,7 +509,6 @@ function extend(base: typeof prismaBase = prismaBase) {
             case "deleteMany":
             case "update":
             case "delete": {
-              a.where = mergeWhere(a.where, orgId);
               if (
                 numbered &&
                 (operation === "findUnique" ||
@@ -511,7 +523,11 @@ function extend(base: typeof prismaBase = prismaBase) {
                   orgId,
                 );
               }
-              if (operation === "update" && a.data) {
+              a.where = mergeWhere(a.where, orgId);
+              if (
+                (operation === "update" || operation === "updateMany") &&
+                a.data
+              ) {
                 a.data = deepInjectOrgId(a.data, orgId) as Record<
                   string,
                   unknown
@@ -567,13 +583,14 @@ function extend(base: typeof prismaBase = prismaBase) {
               break;
             }
             case "upsert": {
-              a.where = mergeWhere(a.where, orgId);
               if (numbered) {
                 a.where = rewriteNumericIdWhere(
                   a.where as Record<string, unknown> | undefined,
                   orgId,
                 );
               }
+              assertUniqueWhereOrg(a.where, orgId);
+              a.where = mergeWhere(a.where, orgId);
               if (a.create) {
                 a.create = deepInjectOrgId(a.create, orgId) as Record<
                   string,
