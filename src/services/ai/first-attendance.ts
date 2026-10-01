@@ -423,6 +423,16 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
+  // Agente desligado (nenhum AUTONOMOUS ativo): não tira o humano para
+  // "abrir espaço". A limpeza só existe quando há quem assumir.
+  const agent = await agentOnce();
+  if (!agent) {
+    logAi("first_attendance_no_agent", {
+      conversationId: args.conversationId,
+    });
+    return null;
+  }
+
   // Humano no chat SEM reply → libera para a IA (1º atendimento).
   // Herança de responsável antigo não deve bloquear o agente.
   if (conv.assignedToId && conv.assignedTo?.type === "HUMAN" && !conv.hasHumanReply) {
@@ -458,14 +468,6 @@ export async function tryAssignFirstAttendanceAi(args: {
         select: { id: true, assignedToId: true },
       });
     });
-  }
-
-  const agent = await agentOnce();
-  if (!agent) {
-    logAi("first_attendance_no_agent", {
-      conversationId: args.conversationId,
-    });
-    return null;
   }
 
   const orgId = getOrgIdOrNull();
