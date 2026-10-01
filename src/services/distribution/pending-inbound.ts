@@ -196,6 +196,14 @@ export async function maybeDistributeNewInboundTicket(input: {
   contactId: string;
   assignedToId?: string | null;
 }): Promise<void> {
+  // Widget desinstalado: este caminho não atribui, não tira responsável
+  // e não enfileira. O gate de executeDistribution fica tarde demais —
+  // a reavaliação de elegibilidade e o 1º atendimento rodavam antes dele
+  // e zeravam o dono (n8n/API) em org sem Distribuição Inteligente.
+  if (!(await hasOrganizationWidget("smart_distribution"))) {
+    return;
+  }
+
   const retiredConv = await prisma.conversation.findUnique({
     where: { id: input.conversationId },
     select: {
