@@ -18,6 +18,9 @@ import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
 import { startWhatsappOwnedSweepers } from "@/lib/sse-bus";
 import { getLogger } from "@/lib/logger";
+import { prismaBase } from "@/lib/prisma-base";
+import { stopBackgroundTimers } from "@/lib/background-timers";
+import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.campaign");
 
@@ -155,5 +158,20 @@ export function startCampaignWorkers() {
 }
 
 if (require.main === module) {
-  startCampaignWorkers();
+  const { attachWorker, outboundWorker } = startCampaignWorkers();
+  installGracefulShutdown({
+    name: "worker-whatsapp",
+    log,
+    steps: [
+      // Sweepers (presença, agendadas, IA, push, outbox): nenhum ciclo novo.
+      { name: "sweepers", run: () => stopBackgroundTimers() },
+      {
+        // close() espera o envio em andamento — sem isso o job vira stalled
+        // e outro worker reenvia a mensagem na Meta.
+        name: "workers",
+        run: () => Promise.all([attachWorker.close(), outboundWorker.close()]),
+      },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 }

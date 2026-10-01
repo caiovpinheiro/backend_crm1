@@ -49,6 +49,7 @@ import {
 } from "@/services/ai/retry-unanswered-ai-inbound";
 import { STUCK_INBOUND_MS } from "@/services/ai/stuck-inbound-distribution";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("ai-agent-inactivity-worker");
 
@@ -92,9 +93,9 @@ export function startAIAgentInactivityWorker() {
   };
 
   // Primeiro tick depois de 20s pra dar tempo do servidor subir.
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     void tick();
-    setInterval(() => void tick(), INTERVAL_MS);
+    scheduleBackgroundInterval(() => void tick(), INTERVAL_MS);
   }, 20_000);
 
   log.info(

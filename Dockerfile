@@ -111,4 +111,10 @@ RUN printf '%s' "${GIT_SHA}" > /app/BUILD_SHA
 # do EasyPanel pode ter sido criado como root). Depois ele faz drop pra
 # nextjs via `gosu` antes de executar `node server.js`.
 EXPOSE 3000
+# Mesma imagem para API e workers: o script decide pelo APP_MODE (API faz
+# GET /api/health; worker sai 0 — não tem HTTP). start-period de 300 s porque
+# a API roda `migrate deploy` no boot. Sem curl na imagem: usa o fetch do node.
+# Em compose com `healthcheck:` próprio, o do serviço substitui este.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+  CMD ["node", "/app/scripts/healthcheck.mjs"]
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
