@@ -28,6 +28,7 @@ const keepHumanAfterAutomationClose = vi.fn(async () => null);
 const tryAssignFirstAttendanceAi = vi.fn(async () => null);
 const humanWasAssignedInThisConversation = vi.fn(async () => false);
 const isDistributionAutoOnInbound = vi.fn(async () => true);
+const hasOrganizationWidget = vi.fn(async () => true);
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),
@@ -40,7 +41,7 @@ vi.mock("@/lib/request-context", () => ({
   getOrgIdOrNull: () => "org1",
 }));
 vi.mock("@/services/organization-widgets", () => ({
-  hasOrganizationWidget: vi.fn(async () => true),
+  hasOrganizationWidget: (...a: unknown[]) => hasOrganizationWidget(...a),
 }));
 vi.mock("@/services/ai/attendance-gate", () => ({
   isAiAttendanceEnabled: vi.fn(async () => false),
@@ -134,6 +135,7 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     departmentModes = new Map();
     vi.clearAllMocks();
     isDistributionAutoOnInbound.mockResolvedValue(true);
+    hasOrganizationWidget.mockResolvedValue(true);
   });
 
   it("conversa NOVA sem departamento: smart distribui (limitação registrada — leads não troca esse dono depois)", async () => {
@@ -271,6 +273,32 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
       assignedToId: null,
     });
 
+    expect(executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("widget desinstalado não distribui nem tira o responsável", async () => {
+    hasOrganizationWidget.mockResolvedValue(false);
+    conversations.set("c1", {
+      id: "c1",
+      contactId: "ct1",
+      assignedToId: "uSabrina",
+      assignedVia: null,
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c1",
+      contactId: "ct1",
+      assignedToId: "uSabrina",
+    });
+
+    const { clearOwnershipForRedistribution, isAssigneeCurrentlyEligible } =
+      await import("@/services/distribution/assignee-eligibility");
+    expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
+    expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
+    expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();
     expect(executeDistribution).not.toHaveBeenCalled();
   });
 });
