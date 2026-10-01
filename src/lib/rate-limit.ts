@@ -432,41 +432,9 @@ export async function enforceSessionApiRateLimit(opts: {
 }
 
 /**
- * Extrai o IP real do cliente respeitando `TRUSTED_PROXY_HOPS` — o
- * numero de proxies confiaveis na cadeia (ex.: EasyPanel/Traefik = 1;
- * Cloudflare -> nginx -> app = 2). O IP verdadeiro do cliente e o
- * (hops+1)-esimo a partir do fim de `X-Forwarded-For`; usar o primeiro
- * IP cegamente e vulneravel a spoofing (o atacante controla o comeco
- * da lista).
- *
- * Fallback: se XFF nao existir, tenta `X-Real-IP`. Se nada disponivel,
- * retorna `"0.0.0.0"` (rate-limit continua funcionando por bucket, mas
- * a granularidade cai — visivel via logs).
- *
- * Chamado dentro de handlers Node (nao middleware Edge).
+ * IP do cliente respeitando `TRUSTED_PROXY_HOPS` / `TRUSTED_PROXY_CIDRS`.
+ * A regra (e o porquê de não confiar no começo de `X-Forwarded-For`) está
+ * em `client-ip.ts`; reexportado aqui porque todo call-site de rate-limit
+ * importa deste módulo.
  */
-export function getClientIp(req: Request): string {
-  const hopsRaw = Number(process.env.TRUSTED_PROXY_HOPS ?? "1");
-  const hops = Number.isFinite(hopsRaw) && hopsRaw >= 0 ? hopsRaw : 1;
-
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const parts = xff
-      .split(",")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    if (parts.length > 0) {
-      // O IP do cliente e o (hops+1)-esimo contando do fim.
-      // Ex.: XFF = "spoof, client, proxy1"; hops=1 -> parts.length-1-1 = 1 -> "client".
-      const idx = parts.length - hops - 1;
-      if (idx >= 0 && parts[idx]) return parts[idx];
-      // Se hops estiver configurado alto demais e o array for menor,
-      // caimos no primeiro elemento em vez de "unknown" — melhor que
-      // agrupar todo mundo numa unica chave.
-      return parts[0];
-    }
-  }
-  const real = req.headers.get("x-real-ip");
-  if (real) return real.trim();
-  return "0.0.0.0";
-}
+export { getClientIp } from "@/lib/client-ip";
