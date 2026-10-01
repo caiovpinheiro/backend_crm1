@@ -28,12 +28,12 @@ import {
 const FP = "a".repeat(INBOX_TAB_COUNTS_FP_LENGTH);
 
 async function seed(orgId: string) {
-  await cache.set(inboxTabCountsKey(orgId, FP), { entrada: 1 }, 90);
+  await cache.set(await inboxTabCountsKey(orgId, FP), { entrada: 1 }, 90);
   await cache.set(inboxTabCountsHistKey(orgId, FP), { todos: 9 }, 600);
 }
 
 async function active(orgId: string) {
-  return cache.get(inboxTabCountsKey(orgId, FP));
+  return cache.get(await inboxTabCountsKey(orgId, FP));
 }
 
 beforeEach(() => {

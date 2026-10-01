@@ -128,7 +128,7 @@ beforeEach(() => {
 
 describe("cache do board com Redis no ar", () => {
   it("payload acima de 256 KB gzipado vai pro Redis e a 2ª carga vem do cache", async () => {
-    const key = boardDataKey("org-big", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-big", "pipe-1", "variant-a");
     const payload = incompressiblePayload(300_000);
     const loader = vi.fn(async () => payload);
     const hitsBefore = await boardHits();
@@ -145,7 +145,7 @@ describe("cache do board com Redis no ar", () => {
   });
 
   it("payload acima de 1 MB gzipado fica em memória e a 2ª carga vem do cache", async () => {
-    const key = boardDataKey("org-huge", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-huge", "pipe-1", "variant-a");
     const payload = incompressiblePayload(1_200_000);
     const loader = vi.fn(async () => payload);
     const hitsBefore = await boardHits();
@@ -164,14 +164,14 @@ describe("cache do board com Redis no ar", () => {
   });
 
   it("comprime fora da thread principal (sem gzipSync)", async () => {
-    const key = boardDataKey("org-gz", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-gz", "pipe-1", "variant-a");
     await cache.set(key, incompressiblePayload(50_000), 45);
     expect(gzippedBytesInRedis(key)).toBeGreaterThan(0);
     expect(zlib.gzipSync).not.toHaveBeenCalled();
   });
 
   it("descomprime fora da thread principal na leitura (sem gunzipSync)", async () => {
-    const key = boardDataKey("org-gunzip", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-gunzip", "pipe-1", "variant-a");
     const payload = incompressiblePayload(50_000);
     await cache.set(key, payload, 45);
     expect(gzippedBytesInRedis(key)).toBeGreaterThan(0);
@@ -181,7 +181,7 @@ describe("cache do board com Redis no ar", () => {
   });
 
   it("valor gzipado corrompido no Redis vira miss, sem derrubar o get", async () => {
-    const key = boardDataKey("org-corrupt", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-corrupt", "pipe-1", "variant-a");
     h.store.set(`cache:${key}`, "gz1:" + Buffer.from("nao-e-gzip").toString("base64"));
 
     expect(await cache.get(key)).toBeUndefined();
@@ -192,7 +192,7 @@ describe("cache do board com Redis no ar", () => {
   });
 
   it("cópia em memória some quando o valor passa a caber no Redis", async () => {
-    const key = boardDataKey("org-shrink", "pipe-1", "variant-a");
+    const key = await boardDataKey("org-shrink", "pipe-1", "variant-a");
     await cache.set(key, incompressiblePayload(1_200_000), 45);
     await cache.set(key, { columns: [] }, 45);
     expect(h.store.has(`cache:${key}`)).toBe(true);

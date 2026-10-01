@@ -2696,7 +2696,7 @@ export async function getBoardData(
     l: limitOptions ?? null,
   });
   return cache.wrap(
-    boardDataKey(orgId, pipelineId, variant),
+    await boardDataKey(orgId, pipelineId, variant),
     BOARD_CACHE_TTL_SEC,
     () =>
       computeBoardData(

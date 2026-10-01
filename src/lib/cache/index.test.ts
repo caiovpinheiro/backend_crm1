@@ -129,17 +129,18 @@ describe("shouldInvalidateInboxTabCounts", () => {
 });
 
 describe("boardDataKey", () => {
-  it("hasheia a variant — chave curta e estavel", () => {
+  it("hasheia a variant — chave curta e estavel", async () => {
     const variant = JSON.stringify({
       v: {},
       s: "ALL",
       f: { dealCustomFields: [{ name: "atualizado" }] },
       l: { perStage: 50 },
     });
-    const a = boardDataKey("org1", "pipe1", variant);
-    const b = boardDataKey("org1", "pipe1", variant);
+    const a = await boardDataKey("org1", "pipe1", variant);
+    const b = await boardDataKey("org1", "pipe1", variant);
     expect(a).toBe(b);
-    expect(a).toMatch(/^board:org1:pipe1:[a-f0-9]{20}$/);
+    // `v<versão da org>.<versão do pipeline>` entre o pipeline e o hash.
+    expect(a).toMatch(/^board:org1:pipe1:v[0-9a-z]+\.[0-9a-z]+:[a-f0-9]{20}$/);
     expect(a.length).toBeLessThan(80);
     expect(a.includes(variant)).toBe(false);
   });
