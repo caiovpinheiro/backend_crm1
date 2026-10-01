@@ -170,6 +170,23 @@ async function resolveMessageBoardScope(
   return scope;
 }
 
+let lastScopeFailureLogAt = 0;
+
+/**
+ * A falha vira purga da org inteira e evento sem escopo — funciona, mas
+ * custa caro se for permanente (consulta quebrada). Um log por minuto por
+ * processo deixa isso visível sem inundar numa queda do banco.
+ */
+function logScopeFailure(err: unknown): void {
+  const now = Date.now();
+  if (now - lastScopeFailureLogAt < 60_000) return;
+  lastScopeFailureLogAt = now;
+  console.error(
+    "[board-invalidation] contato → pipelines falhou; board da org purgado e new_message sem escopo:",
+    err instanceof Error ? err.message : err,
+  );
+}
+
 /**
  * Chamado por `sseBus.publish("new_message")`: agenda a purga do board
  * dos pipelines afetados e devolve o escopo que o barramento anexa ao
@@ -206,7 +223,8 @@ export async function scheduleBoardInvalidationForMessage(
   let scope: MessageBoardScope;
   try {
     scope = await resolveMessageBoardScope(orgId, contactId, conversationId);
-  } catch {
+  } catch (err) {
+    logScopeFailure(err);
     scheduleBoardInvalidation(orgId);
     return null;
   }

@@ -35,8 +35,9 @@
  *
  * Eventos (nome → payload → quem publica)
  * ───────────────────────────────────────
- * Ver `RealtimeEventMap` abaixo; a tabela com chamadores está no PR do
- * contrato (P-12) e é conferida por `realtime-contract.test.ts`.
+ * Ver `RealtimeEventMap` abaixo. `realtime-contract.test.ts` confere o
+ * formato que cada publisher emite; a tabela com os chamadores de cada
+ * evento está na descrição do PR do contrato (P-12).
  *
  * Fora deste contrato (transporte): `sse_access_revoked` (o barramento
  * fecha as conexões do usuário, `sseBus.revokeUser`) e
