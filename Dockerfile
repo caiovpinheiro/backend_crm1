@@ -6,6 +6,9 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-c
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
+# SheetJS versionado no repo (`xlsx` = file:vendor/xlsx-0.20.3.tgz): o
+# `npm ci` precisa do tarball antes do `COPY . .`.
+COPY vendor ./vendor
 # Preferir `npm ci` (lockfile). Retry + backoff: postinstall do `ffmpeg-static`
 # baixa binário do GitHub Releases e intermitentemente responde 504 (#1120/#1121).
 # `--legacy-peer-deps`: conflito conhecido entre `@hookform/resolvers@5.x`

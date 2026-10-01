@@ -4,6 +4,12 @@
  * requisição que pediu — passa a ser rejeitado com 401; o cliente deve ir
  * para o login.
  *
+ * Exceção (SV-2, `session-renewal.ts`): quando é o PRÓPRIO usuário que
+ * revoga (troca de senha no perfil, "sair dos outros dispositivos"), a
+ * rota devolve uma prova de uso único e a sessão que pediu pode se renovar
+ * para a versão nova. Reset administrativo, "esqueci a senha", erase e
+ * exclusão não emitem prova: derrubam tudo.
+ *
  * Quando incrementar:
  *   - troca de senha (perfil, reset administrativo, "esqueci a senha");
  *   - "sair de todos os dispositivos" (`POST /api/me/sessions/revoke-all`);

@@ -7,6 +7,12 @@
  * JWT na mesma chamada de `auth()` — sem query. Cache frio: uma consulta
  * mínima (`select sessionVersion`). Linha ausente ou erro no banco →
  * `null` ("sem veredito", fail-open; ver `sessionVersionMatches`).
+ *
+ * SV-2 (renovação da sessão atual): a claim de um token pode estar À
+ * FRENTE do cache deste processo — outra réplica incrementou a versão e
+ * renovou a sessão que fez o pedido, e o cache daqui ainda não expirou.
+ * Claim só sobe depois de conferida no banco (`session-renewal.ts`), então
+ * "claim > cache" quer dizer cache velho: relê o banco antes de decidir.
  */
 import { getLogger } from "@/lib/logger";
 import { prismaBase } from "@/lib/prisma-base";
@@ -20,9 +26,14 @@ import {
 
 const log = getLogger("auth");
 
-export async function loadSessionVersion(userId: string): Promise<number | null> {
-  const cached = getCachedSessionVersion(userId);
-  if (cached !== null) return cached;
+export async function loadSessionVersion(
+  userId: string,
+  opts: { fresh?: boolean } = {},
+): Promise<number | null> {
+  if (!opts.fresh) {
+    const cached = getCachedSessionVersion(userId);
+    if (cached !== null) return cached;
+  }
   try {
     const row = await prismaBase.user.findUnique({
       where: { id: userId },
@@ -43,6 +54,21 @@ export async function isSessionVersionCurrent(
   userId: string,
   tokenVersion: number,
 ): Promise<boolean> {
-  const known = await loadSessionVersion(userId);
-  return sessionVersionMatches(tokenVersion, known);
+  return sessionVersionMatches(
+    tokenVersion,
+    await resolveKnownSessionVersion(userId, tokenVersion, await loadSessionVersion(userId)),
+  );
+}
+
+/**
+ * Versão a comparar com a claim. Quando a claim está à frente de `known`
+ * (cache velho — ver SV-2 no topo), devolve a leitura direta do banco.
+ */
+export async function resolveKnownSessionVersion(
+  userId: string,
+  tokenVersion: number,
+  known: number | null,
+): Promise<number | null> {
+  if (known === null || tokenVersion <= known) return known;
+  return loadSessionVersion(userId, { fresh: true });
 }
