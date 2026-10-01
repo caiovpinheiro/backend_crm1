@@ -14,6 +14,9 @@ import {
   parseAdvancedDealFiltersFromParams,
 } from "@/services/kanban-filters";
 import { TRACKING_EXPORT_COLUMNS } from "@/lib/contact-tracking-fields";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/export");
 
 const MAX_ROWS = 100_000;
 const BATCH_SIZE = 400;
@@ -259,11 +262,7 @@ export async function GET(request: Request) {
                   );
                   exported += 1;
                 } catch (rowErr) {
-                  console.error(
-                    "[deals/export] linha ignorada",
-                    deal.id,
-                    rowErr,
-                  );
+                  log.error({ dealId: deal.id, err: rowErr }, "[deals/export] linha ignorada");
                 }
               }
 
@@ -271,7 +270,7 @@ export async function GET(request: Request) {
               if (batch.length < take) break;
             }
           } catch (e) {
-            console.error("[deals/export] stream error", e);
+            log.error({ err: e }, "[deals/export] stream error");
             try {
               controller.error(e);
               return;
@@ -297,7 +296,7 @@ export async function GET(request: Request) {
       });
     });
   } catch (e) {
-    console.error("[deals/export]", e);
+    log.error({ err: e }, "[deals/export] falhou");
     const detail = e instanceof Error ? e.message : "Erro desconhecido";
     return NextResponse.json(
       { message: `Erro ao exportar negócios: ${detail}` },

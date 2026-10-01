@@ -25,6 +25,9 @@ import {
   findOpenDealForContactInPipeline,
   isValidDealStatus,
 } from "@/services/deals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/leads");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -352,7 +355,7 @@ export async function POST(request: Request) {
   try {
     authResult = await authenticateApiRequest(request);
   } catch (e) {
-    console.error("[POST /api/leads] erro autenticando:", e);
+    log.error({ err: e }, "[POST /api/leads] erro autenticando");
     return NextResponse.json({ message: "Erro interno." }, { status: 500 });
   }
   if (!authResult.ok) return authResult.response;
@@ -590,7 +593,7 @@ export async function POST(request: Request) {
         { status: dealCreated || contactCreated ? 201 : 200 },
       );
     } catch (err: unknown) {
-      console.error("[POST /api/leads] erro:", err);
+      log.error({ err }, "[POST /api/leads] erro");
       if (typeof err === "object" && err !== null && "code" in err) {
         const code = (err as { code: string }).code;
         if (code === "P2002") {

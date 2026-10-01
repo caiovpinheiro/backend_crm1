@@ -30,6 +30,9 @@ import {
   resolveBoardDealIds,
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/bulk");
 
 const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "delete"] as const;
 type BulkAction = (typeof VALID_ACTIONS)[number];
@@ -592,7 +595,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json({ affected, action });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro na ação em massa." }, { status: 500 });
     }
   });

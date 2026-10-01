@@ -8,6 +8,9 @@ import {
 } from "@/lib/cockpit-access";
 import { getOrgIdOrThrow, runWithContext } from "@/lib/request-context";
 import { getAcademicCockpitCases } from "@/services/ai/cockpit-academic-cases";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/public/agent-cockpit/cases");
 
 function jsonWithCors(request: Request, body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -30,7 +33,7 @@ async function serveCases(request: Request) {
     const status = (e as { status?: number }).status === 400 ? 400 : 500;
     const message =
       e instanceof Error ? e.message : "Erro ao carregar os casos.";
-    console.error("[cockpit] falha ao listar casos", e);
+    log.error({ err: e }, "[cockpit] falha ao listar casos");
     return jsonWithCors(request, { message }, { status });
   }
 }

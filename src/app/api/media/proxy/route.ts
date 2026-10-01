@@ -9,6 +9,9 @@ import {
 } from "@/lib/media-byte-limits";
 import { resolveMetaMediaAccess } from "@/lib/meta-media-access";
 import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/media/proxy");
 
 export async function GET(request: Request) {
   const session = await auth();
@@ -83,7 +86,7 @@ export async function GET(request: Request) {
     if (err instanceof MediaTooLargeError) {
       return NextResponse.json({ message: err.message }, { status: 413 });
     }
-    console.error("[media-proxy] Error:", err);
+    log.error({ err }, "[media-proxy] Error");
     return NextResponse.json({ message: "Erro ao buscar mídia." }, { status: 502 });
   }
 }

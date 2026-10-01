@@ -21,6 +21,9 @@ import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
 import { enterRequestContext } from "@/lib/request-context";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/import");
 
 /**
  * Importação de NEGÓCIOS — fluxo ASSÍNCRONO (etl-worker), T3/M1.
@@ -198,7 +201,7 @@ export async function POST(request: Request) {
     if (e instanceof ImportFileError) {
       return NextResponse.json({ message: e.message }, { status: e.status });
     }
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao importar negócios." }, { status: 500 });
   }
 }

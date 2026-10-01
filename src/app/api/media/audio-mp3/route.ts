@@ -6,6 +6,9 @@ import {
   fetchAuthorizedAudioBuffer,
   MediaTooLargeError,
 } from "@/lib/fetch-authorized-audio";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/media/audio-mp3");
 
 export async function GET(request: Request) {
   const session = await auth();
@@ -79,7 +82,7 @@ export async function GET(request: Request) {
     if (err instanceof MediaTooLargeError) {
       return NextResponse.json({ message: err.message }, { status: 413 });
     }
-    console.error("[audio-mp3] Error:", err);
+    log.error({ err }, "[audio-mp3] Error");
     const message = err instanceof Error ? err.message : "Erro desconhecido.";
     return NextResponse.json({ message }, { status: 502 });
   }

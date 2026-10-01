@@ -13,6 +13,9 @@ import { z } from "zod";
 
 import { auth } from "@/lib/auth";
 import { saveDashboardPreferences } from "@/services/user-preferences";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/profile/preferences/dashboard");
 
 const bodySchema = z.object({
   blocks: z
@@ -54,7 +57,7 @@ export async function PATCH(request: Request) {
     );
     return NextResponse.json({ dashboard });
   } catch (e) {
-    console.error("[PATCH /api/profile/preferences/dashboard]", e);
+    log.error({ err: e }, "[PATCH /api/profile/preferences/dashboard] falhou");
     return NextResponse.json(
       { message: "Erro ao salvar preferências." },
       { status: 500 },

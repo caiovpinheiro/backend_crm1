@@ -8,6 +8,9 @@ import {
 } from "@/lib/cockpit-access";
 import { runWithContext } from "@/lib/request-context";
 import { getCockpitData } from "@/services/distribution/cockpit";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/public/agent-cockpit");
 
 function jsonWithCors(request: Request, body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -23,7 +26,7 @@ async function serveCockpitData(request: Request) {
     const data = await getCockpitData();
     return jsonWithCors(request, data);
   } catch (e) {
-    console.error("[cockpit] falha ao montar métricas", e);
+    log.error({ err: e }, "[cockpit] falha ao montar métricas");
     return jsonWithCors(
       request,
       { message: "Erro ao carregar o cockpit." },

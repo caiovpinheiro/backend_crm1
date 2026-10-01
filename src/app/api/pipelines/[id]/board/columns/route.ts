@@ -15,6 +15,9 @@ import {
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta, resolvePipelineByPublicRef } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]/board/columns");
 
 function parseBoardSortField(raw: unknown): BoardSortField | undefined {
   return raw === "createdAt" || raw === "position" || raw === "lastInteraction"
@@ -142,7 +145,7 @@ export async function POST(request: Request, context: RouteContext) {
       if (e instanceof BoardColumnPageError) {
         return NextResponse.json({ message: e.message, code: e.code }, { status: 400 });
       }
-      console.error("[board columns POST] erro ao carregar mais cards:", e);
+      log.error({ err: e }, "[board columns POST] erro ao carregar mais cards");
       const message = e instanceof Error ? e.message : "Erro ao carregar cards.";
       return NextResponse.json(
         { message: "Erro ao carregar cards.", detail: message },

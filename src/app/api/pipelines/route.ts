@@ -5,6 +5,9 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { canViewPipeline, canViewStage, loadAuthzContext } from "@/lib/authz";
 import { listAllowedPipelineIds, requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { createPipeline, getPipelines } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines");
 
 /** Prisma nem sempre mantém `instanceof` após o bundle; usa também `code` e mensagem. */
 function prismaFailureMessage(e: unknown): string | null {
@@ -74,7 +77,7 @@ export async function GET(request: Request) {
     return NextResponse.json(visible);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const hint = prismaFailureMessage(e);
     return NextResponse.json(
       { message: hint ?? "Erro ao listar pipelines." },
@@ -118,7 +121,7 @@ export async function POST(request: Request) {
     }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar pipeline." }, { status: 500 });
   }
 }

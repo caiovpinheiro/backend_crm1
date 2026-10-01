@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { extractTemplateComponents } from "@/lib/whatsapp-template-components";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/meta/whatsapp/call-permission-templates");
 
 type TemplateRow = {
   name?: string;
@@ -66,7 +69,7 @@ export async function GET() {
 
       return NextResponse.json({ items });
     } catch (e: unknown) {
-      console.error("[call-permission-templates] GET", e);
+      log.error({ err: e }, "[call-permission-templates] GET falhou");
       const msg = e instanceof Error ? e.message : "Erro ao listar templates.";
       return NextResponse.json({ message: msg }, { status: 502 });
     }

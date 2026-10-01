@@ -4,6 +4,9 @@ import { auth } from "@/lib/auth";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, markDealLost, markDealWon, reopenDeal } from "@/services/deals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/[id]/status");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -101,7 +104,7 @@ export async function PUT(request: Request, context: RouteContext) {
       throw err;
     }
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }

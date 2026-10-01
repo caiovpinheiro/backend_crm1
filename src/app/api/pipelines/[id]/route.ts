@@ -4,6 +4,9 @@ import { auth } from "@/lib/auth";
 import { loadAuthzContext, can } from "@/lib/authz";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { deletePipeline, getPipelineById, updatePipeline } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -40,7 +43,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
     return NextResponse.json(pipeline);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar pipeline." }, { status: 500 });
   }
 }
@@ -117,7 +120,7 @@ export async function PUT(request: Request, context: RouteContext) {
       throw err;
     }
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e) {
       const code = (e as { code: string }).code;
       if (code === "P2025") {
@@ -178,7 +181,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       throw e;
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao excluir pipeline." }, { status: 500 });
   }
 }

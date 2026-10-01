@@ -14,6 +14,9 @@ import {
   getDefaultPipelineId,
   resolvePipelineByPublicRef,
 } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/painel/deals");
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -85,7 +88,7 @@ export async function GET(request: Request) {
       );
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[api/painel/deals]", e);
+      log.error({ err: e }, "[api/painel/deals] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar o painel de negócios." },
         { status: 500 },

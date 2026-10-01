@@ -5,6 +5,9 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { getSystemActivityAggregate } from "@/services/system-activity";
 
 import { parsePeriod } from "./_period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/logs/system-usage");
 
 export const dynamic = "force-dynamic";
 
@@ -46,7 +49,7 @@ export async function GET(request: Request) {
       if (msg.includes("system_activity_sessions")) {
         return NextResponse.json({ items: [], pending: true });
       }
-      console.error("[logs/system-usage] erro:", err);
+      log.error({ err }, "[logs/system-usage] erro");
       return NextResponse.json(
         { message: "Erro ao carregar uso do sistema." },
         { status: 500 },
