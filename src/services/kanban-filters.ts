@@ -54,6 +54,41 @@ export async function findContactIdsByPhoneDigits(
 }
 
 /**
+ * Contatos SEM conversa ativa cuja conversa mais recente terminou com
+ * mensagem na direção pedida ("in" = do cliente). Complementa o filtro
+ * "Mensagem recebida/enviada" do Kanban, que para contatos com conversa
+ * ativa é resolvido no próprio where. Só contatos com negócio entram.
+ * Teto de 20 mil ids para o IN não estourar o limite de parâmetros.
+ */
+const CLOSED_ONLY_DIRECTION_CAP = 20000;
+export async function findClosedOnlyContactIdsByLastDirection(
+  dir: "in" | "out",
+): Promise<string[]> {
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return [];
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT c.id
+    FROM contacts c
+    JOIN LATERAL (
+      SELECT v."lastMessageDirection" AS d
+      FROM conversations v
+      WHERE v."contactId" = c.id
+      ORDER BY v."updatedAt" DESC
+      LIMIT 1
+    ) last ON true
+    WHERE c."organizationId" = ${orgId}
+      AND last.d = ${dir}
+      AND EXISTS (SELECT 1 FROM deals x WHERE x."contactId" = c.id)
+      AND NOT EXISTS (
+        SELECT 1 FROM conversations a
+        WHERE a."contactId" = c.id AND a.status <> 'RESOLVED'
+      )
+    LIMIT ${CLOSED_ONLY_DIRECTION_CAP}
+  `;
+  return rows.map((r) => r.id);
+}
+
+/**
  * Teto de candidatos por pré-query de busca. Termos genéricos ("a", "silva")
  * casariam com dezenas de milhares de contatos — o IN gigante degradaria a
  * query de deals mais do que ajudaria. Com o teto, a busca fica "melhor
@@ -897,30 +932,46 @@ export async function buildDealWhereFromFilters(
     if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
     const dir = filters.lastMessageDirection;
-    if (dir === "in" || dir === "out") {
-      // Só a conversa ATIVA conta. Antes bastava "alguma conversa" com a
-      // direção pedida: um contato com conversa antiga encerrada em que o
+    if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
+      // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma
+      // conversa" com a direção pedida: contato com conversa antiga em que o
       // cliente falou por último aparecia em "Mensagem recebida" mesmo com a
       // conversa atual respondida — o filtro mostrava recebidas E enviadas.
-      // Regra: tem conversa não encerrada com a direção pedida e NENHUMA
-      // conversa não encerrada com a direção oposta.
-      convSome.lastMessageDirection = dir;
-      if (convSome.status === undefined) convSome.status = { not: "RESOLVED" };
+      //
+      // Com conversa ativa: só as não encerradas contam (tem uma com a
+      // direção pedida e nenhuma com a oposta).
+      // Só com conversas encerradas: vale a mais recente.
       conditions.push({
-        contact: {
-          is: {
-            conversations: {
-              none: {
-                status: { not: "RESOLVED" },
-                lastMessageDirection: dir === "in" ? "out" : "in",
+        OR: [
+          {
+            contact: {
+              is: {
+                AND: [
+                  {
+                    conversations: {
+                      some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
+                    },
+                  },
+                  {
+                    conversations: {
+                      none: {
+                        status: { not: "RESOLVED" },
+                        lastMessageDirection: dir === "in" ? "out" : "in",
+                      },
+                    },
+                  },
+                ],
               },
             },
           },
-        },
+          { contactId: { in: await findClosedOnlyContactIdsByLastDirection(dir) } },
+        ],
       });
-    }
-    if (Object.keys(convSome).length > 0) {
-      conditions.push({ contact: { is: { conversations: { some: convSome } } } });
+    } else {
+      if (dir === "in" || dir === "out") convSome.lastMessageDirection = dir;
+      if (Object.keys(convSome).length > 0) {
+        conditions.push({ contact: { is: { conversations: { some: convSome } } } });
+      }
     }
   }
 
