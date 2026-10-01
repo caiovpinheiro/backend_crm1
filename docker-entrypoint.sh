@@ -137,9 +137,23 @@ fi
 # (worker-whatsapp, worker-leads) sobem em paralelo à API e podem ter race
 # condition se também tentarem aplicar migrations — basta um serviço aplicar.
 # Por isso o branch abaixo é restrito a APP_MODE=api.
+#
+# SKIP_PRISMA_MIGRATE: só pula quando o VALOR é afirmativo (1/true/yes/on).
+# Antes o teste era `[ -n ... ]` (variável existe?), então SKIP_PRISMA_MIGRATE=0
+# ou =false também pulava — em produção isso já deixou migration sem aplicar.
+# Vazio, ausente, 0, false, no, off ou qualquer outro valor → roda o migrate.
+# (Bloco entre os marcadores é exercitado por src/lib/docker-entrypoint.test.ts.)
+# >>> skip-prisma-migrate
+should_skip_prisma_migrate() {
+  case "${SKIP_PRISMA_MIGRATE:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# <<< skip-prisma-migrate
 if [ "$APP_MODE" = "api" ]; then
-  if [ -n "${SKIP_PRISMA_MIGRATE}" ]; then
-    echo "[entrypoint] SKIP_PRISMA_MIGRATE set — pulando migrate deploy."
+  if should_skip_prisma_migrate; then
+    echo "[entrypoint] SKIP_PRISMA_MIGRATE=${SKIP_PRISMA_MIGRATE} — pulando migrate deploy."
   elif [ -z "${DATABASE_URL}" ]; then
     echo "[entrypoint] DATABASE_URL vazio — pulando migrate deploy."
   else
