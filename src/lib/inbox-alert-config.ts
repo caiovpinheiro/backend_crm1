@@ -72,6 +72,27 @@ export const inboxAlertDepartmentKey = (id: string) =>
   `${INBOX_ALERT_KEY_PREFIX}department.${id}`;
 export const inboxAlertUserKey = (id: string) => `${INBOX_ALERT_KEY_PREFIX}user.${id}`;
 
+/**
+ * Quem recebe o aviso na aba do navegador (canal `tab`), definido pelo
+ * ADMIN para a organização inteira:
+ *   - `owner`      — só o responsável pela conversa;
+ *   - `department` — também as conversas dos departamentos do usuário
+ *                    (com ou sem responsável);
+ *   - `all`        — qualquer conversa que o usuário vê.
+ * Sem valor gravado (`null`) vale a coluna "Aba" da config por tipo.
+ * Só o cliente usa (o aviso da aba não tem lado servidor).
+ */
+export const INBOX_TAB_AUDIENCES = ["owner", "department", "all"] as const;
+export type InboxTabAudience = (typeof INBOX_TAB_AUDIENCES)[number];
+export const inboxTabAudienceSchema = z.enum(INBOX_TAB_AUDIENCES);
+const TAB_AUDIENCE_SUFFIX = "tabAudience";
+export const INBOX_TAB_AUDIENCE_KEY = `${INBOX_ALERT_KEY_PREFIX}${TAB_AUDIENCE_SUFFIX}`;
+
+export function parseInboxTabAudience(raw: string | null | undefined): InboxTabAudience | null {
+  const parsed = inboxTabAudienceSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 export function parseInboxAlertConfig(raw: string | null | undefined): InboxAlertConfig | null {
   if (!raw) return null;
   try {
@@ -97,6 +118,8 @@ function orConfigs(configs: InboxAlertConfig[]): InboxAlertConfig {
 export type OrgInboxAlertConfigs = {
   departments: Map<string, InboxAlertConfig>;
   users: Map<string, InboxAlertConfig>;
+  /** Público do aviso na aba; `null` = coluna "Aba" por tipo. */
+  tabAudience: InboxTabAudience | null;
 };
 
 export function resolveInboxAlertConfig(
@@ -119,6 +142,8 @@ const cacheKey = (orgId: string) => `inbox_alert_configs:${orgId}`;
 type CachedConfigs = {
   departments: Record<string, InboxAlertConfig>;
   users: Record<string, InboxAlertConfig>;
+  /** Ausente em entradas de cache gravadas antes do campo existir. */
+  tabAudience?: InboxTabAudience | null;
 };
 
 /**
@@ -136,8 +161,12 @@ export async function loadOrgInboxAlertConfigs(
         where: { organizationId, key: { startsWith: INBOX_ALERT_KEY_PREFIX } },
         select: { key: true, value: true },
       });
-      const out: CachedConfigs = { departments: {}, users: {} };
+      const out: CachedConfigs = { departments: {}, users: {}, tabAudience: null };
       for (const row of rows) {
+        if (row.key === INBOX_TAB_AUDIENCE_KEY) {
+          out.tabAudience = parseInboxTabAudience(row.value);
+          continue;
+        }
         const cfg = parseInboxAlertConfig(row.value);
         if (!cfg) continue;
         const rest = row.key.slice(INBOX_ALERT_KEY_PREFIX.length);
@@ -150,6 +179,7 @@ export async function loadOrgInboxAlertConfigs(
   return {
     departments: new Map(Object.entries(raw?.departments ?? {})),
     users: new Map(Object.entries(raw?.users ?? {})),
+    tabAudience: raw?.tabAudience ?? null,
   };
 }
 
@@ -165,4 +195,17 @@ export async function getEffectiveInboxAlertConfig(params: {
 }): Promise<InboxAlertConfig> {
   const configs = await loadOrgInboxAlertConfigs(params.organizationId);
   return resolveInboxAlertConfig(configs, params.userId, params.memberDepartmentIds);
+}
+
+/** Config efetiva do usuário + público do aviso na aba (rotas do cliente). */
+export async function getEffectiveInboxAlerts(params: {
+  organizationId: string;
+  userId: string;
+  memberDepartmentIds: readonly string[];
+}): Promise<{ config: InboxAlertConfig; tabAudience: InboxTabAudience | null }> {
+  const configs = await loadOrgInboxAlertConfigs(params.organizationId);
+  return {
+    config: resolveInboxAlertConfig(configs, params.userId, params.memberDepartmentIds),
+    tabAudience: configs.tabAudience,
+  };
 }
