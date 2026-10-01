@@ -15,6 +15,9 @@ import {
 import { prisma } from "@/lib/prisma";
 import { publishWhatsappCall } from "@/lib/realtime-events";
 import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/whatsapp-calls");
 
 export const maxDuration = 30;
 
@@ -132,7 +135,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     return NextResponse.json({ items, pendingAnswer, pendingOffer });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
     }
   });
@@ -269,7 +272,7 @@ export async function POST(request: Request, context: RouteContext) {
               }),
             });
           } catch (e) {
-            console.warn("[whatsapp-calls] persist initiate:", e);
+            log.warn({ err: e }, "[whatsapp-calls] persist initiate");
           }
         }
         return NextResponse.json(result);
@@ -347,11 +350,11 @@ export async function POST(request: Request, context: RouteContext) {
         signalingStatus: "ACCEPTED",
       });
     } catch (e) {
-      console.warn("[whatsapp-calls] persist accept:", e);
+      log.warn({ err: e }, "[whatsapp-calls] persist accept");
     }
     return NextResponse.json(result);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       const mapped = mapMetaWhatsappCallGraphError(e);
       return NextResponse.json({ message: mapped.message }, { status: mapped.status });
     }

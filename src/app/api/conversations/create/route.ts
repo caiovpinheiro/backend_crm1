@@ -391,7 +391,7 @@ export async function POST(request: Request) {
         },
       }, { status: 201 });
     } catch (e: unknown) {
-      console.error("Error creating conversation:", e);
+      log.error({ err: e }, "Error creating conversation");
       const msg = e instanceof Error ? e.message : "Erro ao criar conversa.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }

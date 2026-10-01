@@ -17,6 +17,9 @@ import {
 import { WhatsappCallConsentStatus } from "@prisma/client";
 
 import type { InboxMessageDto } from "../messages/route";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/call-permission");
 
 /** No background a Graph pode demorar; o request já foi respondido. */
 const GRAPH_BG_TIMEOUT_MS = 15_000;
@@ -99,7 +102,7 @@ async function dispatchCallPermissionTemplate(args: {
     );
     externalId = result.messages?.[0]?.id ?? null;
   } catch (e: unknown) {
-    console.error("[call-permission-template]", e);
+    log.error({ err: e }, "[call-permission-template] falhou");
     const msg =
       e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.";
     try {
@@ -123,7 +126,7 @@ async function dispatchCallPermissionTemplate(args: {
         timestamp: new Date(),
       });
     } catch (persistErr) {
-      console.error("[call-permission] persist fail", persistErr);
+      log.error({ err: persistErr }, "[call-permission] persist fail");
     }
     return { ok: false, message: msg };
   }
@@ -168,9 +171,9 @@ async function dispatchCallPermissionTemplate(args: {
           AND "organizationId" = ${args.orgIdFilter}
       `;
     } catch (err) {
-      console.warn(
-        "[call-permission] não resetou type/expiresAt (migration pendente?):",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[call-permission] não resetou type/expiresAt (migration pendente?)",
       );
     }
   }
@@ -306,10 +309,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";
-      console.log(
-        "[call-permission] send",
-        JSON.stringify({ conversationId: id, templateName, languageCode }),
-      );
+      log.info({ conversationId: id, templateName, languageCode }, "[call-permission] send");
 
       // Templates CALL_PERMISSIONS_REQUEST não usam WhatsApp Flow. Relistar
       // `message_templates` (preview + enrich) no POST estoura o timeout do
@@ -372,9 +372,9 @@ export async function POST(request: Request, context: RouteContext) {
       after(() =>
         pending
           .then((r) => {
-            if (!r.ok) console.error("[call-permission] bg fail", r.message);
+            if (!r.ok) log.error({ detail: r.message }, "[call-permission] bg fail");
           })
-          .catch((e) => console.error("[call-permission] bg", e)),
+          .catch((e) => log.error({ err: e }, "[call-permission] bg falhou")),
       );
       return NextResponse.json(
         {
@@ -384,7 +384,7 @@ export async function POST(request: Request, context: RouteContext) {
         { status: 202 },
       );
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       const msg = e instanceof Error ? e.message : "Erro ao solicitar permissão de chamada.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }
@@ -450,7 +450,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 
       return NextResponse.json({ consentStatus: status });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "PATCH falhou");
       return NextResponse.json({ message: "Erro ao atualizar consentimento." }, { status: 500 });
     }
   });

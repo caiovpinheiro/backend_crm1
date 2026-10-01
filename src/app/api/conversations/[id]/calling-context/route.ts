@@ -6,6 +6,9 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { classifyWhatsappCallEnd, wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { repairWhatsappCallConsentFromMessages } from "@/services/whatsapp-call-consent-webhook";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/calling-context");
 
 /**
  * Resolve o nome do template de Call Permission com fallback em cascata:
@@ -34,9 +37,9 @@ async function resolveCallPermissionTemplate(): Promise<string | null> {
     return cfg?.metaTemplateName ?? null;
   } catch (e) {
     // Tabela ausente (migration antiga) ou erro transitório — degrada para env.
-    console.warn(
-      "[calling-context] resolveCallPermissionTemplate fallback:",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[calling-context] resolveCallPermissionTemplate fallback",
     );
     return null;
   }
@@ -226,9 +229,9 @@ export async function GET(_request: Request, context: RouteContext) {
       }
     } catch (err) {
       // migration ainda não rodou — segue sem os campos novos (cliente cai no fallback 7d)
-      console.warn(
-        "[calling-context] type/expiresAt ausente (migration pendente):",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[calling-context] type/expiresAt ausente (migration pendente)",
       );
     }
 
@@ -274,9 +277,9 @@ export async function GET(_request: Request, context: RouteContext) {
           }
         }
       } catch (err) {
-        console.warn(
-          "[calling-context] repair consent:",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[calling-context] repair consent",
         );
       }
     }
@@ -412,7 +415,7 @@ export async function GET(_request: Request, context: RouteContext) {
       timeline,
     });
    } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao carregar contexto de chamada." }, { status: 500 });
    }
   });

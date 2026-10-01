@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getConversationById } from "@/services/conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -21,7 +24,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
       return NextResponse.json(row);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao carregar conversa." }, { status: 500 });
     }
   });

@@ -47,6 +47,9 @@ import {
   kickAiAfterInboxAssign,
 } from "@/services/ai/inbound-debounce";
 import { resetV2ConversationStateOwner } from "@/services/ai-v2/state";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/actions");
 
 async function resolveConversationAssignFlags(user: {
   id: string;
@@ -532,12 +535,10 @@ export async function POST(request: Request, context: RouteContext) {
                   scope: "distribution.transfer",
                   kind: "queue_unavailable",
                 });
-                console.warn(
-                  "[transfer] fila indisponível — departamento já persistido",
-                );
+                log.warn("[transfer] fila indisponível — departamento já persistido");
               }
             } catch (e) {
-              console.error("[transfer] falha ao acionar distribuição", e);
+              log.error({ err: e }, "[transfer] falha ao acionar distribuição");
             }
           }
         }
@@ -1104,7 +1105,7 @@ export async function POST(request: Request, context: RouteContext) {
         },
       });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       const msg = e instanceof Error ? e.message : "Erro ao atualizar conversa.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }

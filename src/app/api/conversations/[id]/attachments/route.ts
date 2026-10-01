@@ -32,6 +32,9 @@ import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conve
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/attachments");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -152,11 +155,9 @@ async function locateFromTemplateRow(
       if (!parsed) continue;
       const hit = await locateReusableStoredObject(parsed);
       if (hit) {
-        console.warn(
+        log.warn(
+          { orgId, bucket: hit.bucket, fileName: hit.fileName },
           "[attachments] reuse via template row",
-          orgId,
-          hit.bucket,
-          hit.fileName,
         );
         return hit;
       }
@@ -242,11 +243,9 @@ async function parseAttachmentRequest(
           fileName: importName,
           buffer: imported,
         });
-        console.warn(
+        log.warn(
+          { orgId: parsedReuse.orgId, bucket: parsedReuse.bucket, importName },
           "[attachments] reuse imported from STORAGE_FALLBACK_URL",
-          parsedReuse.orgId,
-          parsedReuse.bucket,
-          importName,
         );
         resolved = {
           url: saved.url,
@@ -257,11 +256,9 @@ async function parseAttachmentRequest(
       }
     }
     if (!resolved) {
-      console.warn(
+      log.warn(
+        { orgId: parsedReuse.orgId, bucket: parsedReuse.bucket, fileName: parsedReuse.fileName },
         "[attachments] reuse miss",
-        parsedReuse.orgId,
-        parsedReuse.bucket,
-        parsedReuse.fileName,
       );
       return {
         ok: false,
@@ -334,7 +331,7 @@ async function parseAttachmentRequest(
   try {
     form = await request.formData();
   } catch (err) {
-    console.error("[attachments] formData parse error:", err);
+    log.error({ err }, "[attachments] formData parse error");
     return {
       ok: false,
       response: NextResponse.json({ message: "Erro ao processar upload." }, { status: 400 }),
@@ -467,7 +464,7 @@ export async function POST(request: Request, context: RouteContext) {
         try {
           buffer = await blobToBuffer(raw);
         } catch (err) {
-          console.error("[attachments] buffer read error:", err);
+          log.error({ err }, "[attachments] buffer read error");
           return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
         }
 
@@ -564,7 +561,7 @@ export async function POST(request: Request, context: RouteContext) {
         fireTrigger("message_sent", {
           contactId: conv.contactId,
           data: { channel: "WhatsApp", content: caption || "[Anexo]" },
-        }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+        }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
         try {
           publishNewMessage({
@@ -580,10 +577,7 @@ export async function POST(request: Request, context: RouteContext) {
         }
 
         cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio de anexo (baileys):",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo (baileys)"),
         );
 
         return NextResponse.json({
@@ -672,10 +666,7 @@ export async function POST(request: Request, context: RouteContext) {
         if (!deferChat) publishChat();
 
         cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio de anexo:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo"),
         );
 
         const jobPayload = {
@@ -694,7 +685,7 @@ export async function POST(request: Request, context: RouteContext) {
         let queuedMetaError: string | null = null;
         if (!job) {
           const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-          console.warn("[meta-attach] enqueue falhou — marcando failed (sem sync na API)");
+          log.warn("[meta-attach] enqueue falhou — marcando failed (sem sync na API)");
           await prisma.message
             .updateMany({
               where: { id: msgRow.id, sendStatus: "pending" },
@@ -734,11 +725,12 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       if (!metaClient.configured) {
-        console.warn(
-          `[meta-attach] Meta API nao configurada para o canal (channel=${outboundChannelRef?.id ?? "ENV"}), midia salva apenas localmente`,
+        log.warn(
+          { channel: outboundChannelRef?.id ?? "ENV" },
+          "[meta-attach] Meta API nao configurada para o canal, midia salva apenas localmente",
         );
       } else if (!to && !recipient) {
-        console.warn("[meta-attach] Contato sem telefone nem BSUID WhatsApp");
+        log.warn("[meta-attach] Contato sem telefone nem BSUID WhatsApp");
       }
 
       const displayContent =
@@ -771,7 +763,7 @@ export async function POST(request: Request, context: RouteContext) {
       fireTrigger("message_sent", {
         contactId: conv.contactId,
         data: { channel: "WhatsApp", content: displayContent || "[Anexo]" },
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+      }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
       try {
         publishNewMessage({
@@ -787,10 +779,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-        console.warn(
-          "[scheduled-messages] falha ao cancelar apos envio de anexo:",
-          err,
-        ),
+        log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo"),
       );
 
       return NextResponse.json({
@@ -807,7 +796,7 @@ export async function POST(request: Request, context: RouteContext) {
         ...(reopenedConversationId ? { reopenedConversationId } : {}),
       }, { status: 201 });
     } catch (e: unknown) {
-      console.error("[attachments] Unhandled error:", e);
+      log.error({ err: e }, "[attachments] Unhandled error");
       const msg = e instanceof Error ? e.message : "Erro ao enviar anexo.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }
