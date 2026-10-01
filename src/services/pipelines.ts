@@ -480,9 +480,10 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
       await invalidatePipelineBoard(id);
       return pipeline;
     } catch (err) {
-      const message = duplicateDealsErrorMessage(err);
-      if (message) throw new Error(`DUPLICATE_DEALS:${message}`);
-      throw err;
+      const message =
+        duplicateDealsErrorMessage(err) ??
+        (err instanceof Error ? err.message : "erro desconhecido");
+      throw new Error(`DUPLICATE_DEALS:${message}`);
     }
   }
 

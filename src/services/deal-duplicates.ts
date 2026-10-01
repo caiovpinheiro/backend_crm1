@@ -36,25 +36,43 @@ export async function pipelineForbidsDuplicateDeals(
  * Mensagem estável para o PUT do funil. O Prisma embrulha coluna ausente
  * (P2022) e falha de SQL (P2010) sem texto útil na resposta HTTP.
  */
-export function duplicateDealsErrorMessage(err: unknown): string | null {
-  if (!err || typeof err !== "object") return null;
-  const e = err as {
-    code?: string;
-    message?: string;
-    meta?: { message?: string; column?: string };
-  };
-  if (e.code === "P2022" || /allowDuplicateDeals/i.test(e.message ?? "")) {
-    return 'Falta a coluna allowDuplicateDeals em pipelines. Rode: ALTER TABLE "pipelines" ADD COLUMN IF NOT EXISTS "allowDuplicateDeals" BOOLEAN NOT NULL DEFAULT true;';
+function flattenError(err: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let i = 0; i < 4 && cur && typeof cur === "object"; i += 1) {
+    const e = cur as {
+      code?: string;
+      message?: string;
+      meta?: { message?: string; code?: string };
+      cause?: unknown;
+    };
+    if (e.code) parts.push(String(e.code));
+    if (e.meta?.code) parts.push(String(e.meta.code));
+    if (typeof e.meta?.message === "string" && e.meta.message.trim()) {
+      parts.push(e.meta.message.trim());
+    }
+    if (typeof e.message === "string" && e.message.trim()) parts.push(e.message.trim());
+    cur = e.cause;
   }
-  if (e.code === "P2010") {
-    const detail = e.meta?.message || e.message || "erro de SQL";
-    return `Não consegui unir os negócios repetidos. ${detail}`.slice(0, 600);
-  }
-  return null;
+  return parts.join(" | ").slice(0, 700);
 }
 
-function duplicatePairsCte(orgId: string, pipelineId: string) {
-  return Prisma.sql`
+export function duplicateDealsErrorMessage(err: unknown): string | null {
+  const text = flattenError(err);
+  if (!text) return null;
+  if (/allowDuplicateDeals/i.test(text)) {
+    return 'Falta a coluna allowDuplicateDeals em pipelines. Rode: ALTER TABLE "pipelines" ADD COLUMN IF NOT EXISTS "allowDuplicateDeals" BOOLEAN NOT NULL DEFAULT true;';
+  }
+  return text;
+}
+
+async function runPairsSql(
+  tx: UnifyClient,
+  orgId: string,
+  pipelineId: string,
+  statement: string,
+) {
+  await tx.$executeRaw`
     WITH open_deals AS (
       SELECT
         d.id,
@@ -66,8 +84,8 @@ function duplicatePairsCte(orgId: string, pipelineId: string) {
       JOIN stages s ON s.id = d."stageId"
       WHERE d."organizationId" = ${orgId}
         AND s."pipelineId" = ${pipelineId}
-        AND d.status = 'OPEN'
-        AND d."dealRole" = 'COMMERCIAL'
+        AND d.status = 'OPEN'::"DealStatus"
+        AND d."dealRole" = 'COMMERCIAL'::"DealRole"
         AND d."contactId" IS NOT NULL
     ),
     ranked AS (
@@ -86,6 +104,7 @@ function duplicatePairsCte(orgId: string, pipelineId: string) {
       JOIN ranked k ON k."contactId" = r."contactId" AND k.rn = 1
       WHERE r.rn > 1
     )
+    ${Prisma.raw(statement)}
   `;
 }
 
@@ -93,40 +112,66 @@ function duplicatePairsCte(orgId: string, pipelineId: string) {
  * Apaga os OPEN comerciais repetidos do funil e devolve quantos saíram.
  * Roda na mesma transação de quem grava `allowDuplicateDeals = false`.
  *
- * Cada comando repete o CTE dos pares. Tabela temporária não serve aqui:
- * o Prisma manda o SQL como prepared statement, e o Postgres recusa
- * CREATE TEMP TABLE nesse protocolo — o PUT quebrava ao desligar a opção.
+ * Cada comando repete o CTE dos pares no mesmo prepared statement.
+ * Fragmento Prisma.sql aninhado e CREATE TEMP TABLE quebram nesse protocolo.
  */
 export async function unifyDuplicateOpenDealsInPipeline(
   tx: UnifyClient,
   pipelineId: string,
 ): Promise<number> {
   const orgId = getOrgIdOrThrow();
-  const cte = duplicatePairsCte(orgId, pipelineId);
+  const run = (statement: string) => runPairsSql(tx, orgId, pipelineId, statement);
 
   const counted = await tx.$queryRaw<Array<{ removed: number | bigint }>>`
-    ${cte}
+    WITH open_deals AS (
+      SELECT
+        d.id,
+        d."contactId",
+        s.position AS stage_position,
+        d."updatedAt",
+        d."createdAt"
+      FROM deals d
+      JOIN stages s ON s.id = d."stageId"
+      WHERE d."organizationId" = ${orgId}
+        AND s."pipelineId" = ${pipelineId}
+        AND d.status = 'OPEN'::"DealStatus"
+        AND d."dealRole" = 'COMMERCIAL'::"DealRole"
+        AND d."contactId" IS NOT NULL
+    ),
+    ranked AS (
+      SELECT
+        id,
+        "contactId",
+        row_number() OVER (
+          PARTITION BY "contactId"
+          ORDER BY stage_position DESC, "updatedAt" DESC, "createdAt" ASC
+        ) AS rn
+      FROM open_deals
+    ),
+    _dup_pairs AS (
+      SELECT r.id AS loser_id, k.id AS keeper_id
+      FROM ranked r
+      JOIN ranked k ON k."contactId" = r."contactId" AND k.rn = 1
+      WHERE r.rn > 1
+    )
     SELECT count(*)::int AS removed FROM _dup_pairs
   `;
   const removed = Number(counted[0]?.removed ?? 0);
   if (!removed) return 0;
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     INSERT INTO tags_on_deals ("dealId", "tagId")
     SELECT p.keeper_id, t."tagId"
     FROM tags_on_deals t
     JOIN _dup_pairs p ON p.loser_id = t."dealId"
     ON CONFLICT ("dealId", "tagId") DO NOTHING
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     DELETE FROM tags_on_deals
     WHERE "dealId" IN (SELECT loser_id FROM _dup_pairs)
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     DELETE FROM deal_custom_field_values v
     USING _dup_pairs p
     WHERE v."dealId" = p.loser_id
@@ -135,25 +180,22 @@ export async function unifyDuplicateOpenDealsInPipeline(
         WHERE k."dealId" = p.keeper_id
           AND k."customFieldId" = v."customFieldId"
       )
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE deal_custom_field_values v
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE v."dealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     UPDATE deal_products dp
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE dp."dealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     DELETE FROM deal_quotas q
     USING _dup_pairs p
     WHERE q."dealId" = p.loser_id
@@ -161,32 +203,28 @@ export async function unifyDuplicateOpenDealsInPipeline(
         SELECT 1 FROM deal_quotas k
         WHERE k."dealId" = p.keeper_id AND k."quotaId" = q."quotaId"
       )
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE deal_quotas q
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE q."dealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     UPDATE quota_movements m
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE m."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE inventory_movements m
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE m."dealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     DELETE FROM deal_links dl
     USING _dup_pairs p
     WHERE (dl."fromDealId" = p.loser_id AND dl."toDealId" = p.keeper_id)
@@ -203,27 +241,24 @@ export async function unifyDuplicateOpenDealsInPipeline(
            SELECT loser_id FROM _dup_pairs p2 WHERE p2.keeper_id = p.keeper_id
          )
        )
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     DELETE FROM deal_links dl
     USING _dup_pairs p, deal_links keep
     WHERE dl."fromDealId" = p.loser_id
       AND keep."fromDealId" = p.keeper_id
       AND keep."toDealId" = dl."toDealId"
       AND keep."linkType" = dl."linkType"
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     DELETE FROM deal_links dl
     USING _dup_pairs p, deal_links keep
     WHERE dl."toDealId" = p.loser_id
       AND keep."toDealId" = p.keeper_id
       AND keep."fromDealId" = dl."fromDealId"
       AND keep."linkType" = dl."linkType"
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     DELETE FROM deal_links
     WHERE id IN (
       SELECT id FROM (
@@ -238,9 +273,8 @@ export async function unifyDuplicateOpenDealsInPipeline(
       ) ranked
       WHERE ranked.rn > 1
     )
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     DELETE FROM deal_links
     WHERE id IN (
       SELECT id FROM (
@@ -255,86 +289,75 @@ export async function unifyDuplicateOpenDealsInPipeline(
       ) ranked
       WHERE ranked.rn > 1
     )
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE deal_links dl
     SET "fromDealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE dl."fromDealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE deal_links dl
     SET "toDealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE dl."toDealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     UPDATE deal_events e
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE e."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE activity_events e
     SET
       "dealId" = CASE WHEN e."dealId" = p.loser_id THEN p.keeper_id ELSE e."dealId" END,
       "entityId" = CASE
-        WHEN e."entityType" = 'DEAL' AND e."entityId" = p.loser_id THEN p.keeper_id
+        WHEN e."entityType" = 'DEAL'::"EventEntityType" AND e."entityId" = p.loser_id THEN p.keeper_id
         ELSE e."entityId"
       END
     FROM _dup_pairs p
     WHERE e."dealId" = p.loser_id
-       OR (e."entityType" = 'DEAL' AND e."entityId" = p.loser_id)
-  `;
-  await tx.$executeRaw`
-    ${cte}
+       OR (e."entityType" = 'DEAL'::"EventEntityType" AND e."entityId" = p.loser_id)
+  `);
+  await run(`
     UPDATE activities a
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE a."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE notes n
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE n."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE calls c
     SET deal_id = p.keeper_id
     FROM _dup_pairs p
     WHERE c.deal_id = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE automation_logs l
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE l."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE distribution_logs l
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE l."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE distribution_pending d
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE d."dealId" = p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE distribution_leads_assignments a
     SET
       "dealId" = CASE WHEN a."dealId" = p.loser_id THEN p.keeper_id ELSE a."dealId" END,
@@ -345,17 +368,15 @@ export async function unifyDuplicateOpenDealsInPipeline(
     FROM _dup_pairs p
     WHERE a."dealId" = p.loser_id
        OR a."targetKey" = 'deal:' || p.loser_id
-  `;
-  await tx.$executeRaw`
-    ${cte}
+  `);
+  await run(`
     UPDATE ai_agent_survey_responses s
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
     WHERE s."dealId" = p.loser_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     UPDATE deals k
     SET
       value = GREATEST(k.value, sub.max_value),
@@ -373,14 +394,12 @@ export async function unifyDuplicateOpenDealsInPipeline(
       GROUP BY p.keeper_id
     ) sub
     WHERE k.id = sub.keeper_id
-  `;
+  `);
 
-  await tx.$executeRaw`
-    ${cte}
+  await run(`
     DELETE FROM deals
     WHERE id IN (SELECT loser_id FROM _dup_pairs)
-      AND "organizationId" = ${orgId}
-  `;
+  `);
 
   return removed;
 }
