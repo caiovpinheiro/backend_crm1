@@ -49,7 +49,7 @@
   "src/services/activity-outbox.ts|TS2345|Argument of type 'Omit<PrismaClient<PrismaClientOptions, never, DefaultArgs>, \"$connect\" | \"$disconnect\" | \"$on\" | \"$transaction\" | \"$extends\">' is not assignable to parameter of type 'ActivityEventWriter'.": 1,
   "src/services/ai/__tests__/ai-test-commands.test.ts|TS2322|Type '{ position: number; label: string; action: string; }' is not assignable to type 'null'.": 1,
   "src/services/ai/__tests__/ai-test-commands.test.ts|TS2322|Type 'null' is not assignable to type 'number'.": 1,
-  "src/services/ai/tabulation-classify.ts|TS2367|This comparison appears to be unintentional because the types '\"on_human_handoff\" | \"on_close\"' and '\"close\" | \"human_handoff\"' have no overlap.": 1,
+  "src/services/ai/tabulation-classify.ts|TS2367|This comparison appears to be unintentional because the types '\"on_human_handoff\" | \"on_close\"' and '\"human_handoff\" | \"close\"' have no overlap.": 1,
   "src/services/api4com/provisioning.ts|TS18048|'config.webhookUrl' is possibly 'undefined'.": 2,
   "src/services/api4com/provisioning.ts|TS2322|Type 'string | undefined' is not assignable to type 'string'.": 1,
   "src/services/automation-context.ts|TS2345|Argument of type 'null' is not assignable to parameter of type '{ type: string; config: unknown; } | undefined'.": 1,
