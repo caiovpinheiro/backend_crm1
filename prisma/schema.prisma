@@ -2751,6 +2751,19 @@ model ActivityEvent {
   @@index([dealId], map: "activity_events_dealId_idx")
   @@index([actorUserId], map: "activity_events_actorUserId_idx")
   @@index([triggeredByUserId], map: "activity_events_triggeredByUserId_idx")
+  // Busca de idempotência da projeção da outbox (services/activity-outbox.ts):
+  // o índice REAL no banco é o PARCIAL "activity_events_org_idem_idx" em
+  // ("organizationId", "idempotencyKey") WHERE "idempotencyKey" IS NOT NULL,
+  // criado por SQL na migration 20261001150000_activity_events_org_idem_idx
+  // (em produção já existia, criado à mão por partição). O Prisma 6 não
+  // expressa índice parcial, então ele não aparece aqui.
+  // O @@unique abaixo ("activity_events_org_idempotency_idx") NÃO existe no
+  // banco — UNIQUE em tabela particionada exige a coluna de partição
+  // ("occurredAt") — e nenhum código usa a chave composta. Fica declarado só
+  // porque removê-lo muda os tipos gerados e desloca um TS2321 ("excessive
+  // stack depth") para services/pipelines.ts. Não usar findUnique/upsert por
+  // organizationId_idempotencyKey: a unicidade vem da outbox
+  // ("activity_outbox_org_idempotency_idx") + checagem antes do INSERT.
   @@unique([organizationId, idempotencyKey], map: "activity_events_org_idempotency_idx")
   @@map("activity_events")
 }
