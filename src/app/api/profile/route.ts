@@ -22,6 +22,10 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 
 import { auth } from "@/lib/auth";
+import {
+  SESSION_VERSION_BUMP,
+  notifySessionsRevoked,
+} from "@/lib/auth/session-revocation";
 import { CHAT_THEME_KEYS } from "@/lib/chat-theme";
 import { prisma } from "@/lib/prisma";
 
@@ -184,7 +188,18 @@ export async function PUT(request: Request) {
       );
     }
     data.hashedPassword = await bcrypt.hash(body.newPassword, 10);
+    // SV-1: senha nova derruba todas as sessões (inclusive esta) — o
+    // cliente volta ao login. Mesmo UPDATE da senha: sem janela entre os dois.
+    Object.assign(data, SESSION_VERSION_BUMP);
   }
+  const revokeSessions = () => {
+    if (!data.hashedPassword) return;
+    notifySessionsRevoked({
+      userId: session.user.id,
+      organizationId: session.user.organizationId ?? null,
+      reason: "password_change",
+    });
+  };
 
   try {
     const updated = await prisma.user.update({
@@ -192,6 +207,7 @@ export async function PUT(request: Request) {
       data,
       select: PROFILE_SELECT,
     });
+    revokeSessions();
     return NextResponse.json(updated);
   } catch (e) {
     if (!isMissingUserChatThemeColumn(e)) throw e;
@@ -211,6 +227,7 @@ export async function PUT(request: Request) {
       data: dataWithoutTheme,
       select: PROFILE_SELECT_CORE,
     });
+    revokeSessions();
     return NextResponse.json({
       ...updated,
       chatTheme: DEFAULT_CHAT_THEME_DB,

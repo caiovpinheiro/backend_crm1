@@ -5,9 +5,12 @@ import { UserRole } from "@prisma/client";
 
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
+import {
+  SESSION_VERSION_BUMP,
+  notifySessionsRevoked,
+} from "@/lib/auth/session-revocation";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
 import { disableTelephony } from "@/services/api4com/provisioning";
 
 const MIN_PASSWORD_LENGTH = 6;
@@ -91,6 +94,7 @@ export async function PUT(request: Request, context: RouteContext) {
       hashedPassword?: string;
       phone?: string | null;
       avatarUrl?: string | null;
+      sessionVersion?: { increment: number };
     } = {};
 
     if (b.name !== undefined) {
@@ -166,6 +170,8 @@ export async function PUT(request: Request, context: RouteContext) {
         );
       }
       data.hashedPassword = await bcrypt.hash(b.password, 10);
+      // SV-1: reset administrativo derruba as sessões do usuário.
+      data.sessionVersion = SESSION_VERSION_BUMP.sessionVersion;
     }
 
     if (Object.keys(data).length === 0) {
@@ -196,6 +202,12 @@ export async function PUT(request: Request, context: RouteContext) {
         // hard-lock de 24h (login_attempts) nao pode sobreviver a ele,
         // senao o admin troca a senha e o usuario segue bloqueado.
         await clearLoginLockout(user.email);
+        notifySessionsRevoked({
+          userId: id,
+          organizationId: r.session.user.organizationId ?? null,
+          reason: "password_change",
+          actorId: r.session.user.id,
+        });
       }
       return NextResponse.json(user);
     } catch (e) {
@@ -322,9 +334,14 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
       try {
         await prisma.user.delete({ where: { id: target.id } });
-        sseBus.revokeUser({
+        // SV-1: sem linha não há o que incrementar — o refresh do JWT
+        // trata "usuário não encontrado" como sessão inválida; aqui só
+        // zera os caches deste processo e fecha o SSE em todas as réplicas.
+        notifySessionsRevoked({
           userId: target.id,
           organizationId: target.organizationId,
+          reason: "user_deleted",
+          actorId: r.session.user.id,
         });
         return NextResponse.json({ ok: true });
       } catch (delErr) {
@@ -353,6 +370,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
               isErased: true,
               erasedAt: new Date(),
               role: "MEMBER",
+              ...SESSION_VERSION_BUMP,
             },
           });
           await prisma.distributionResponsible
@@ -368,9 +386,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
             "[users.delete] hard delete blocked by FK; soft-erased user",
             { userId: target.id, code },
           );
-          sseBus.revokeUser({
+          notifySessionsRevoked({
             userId: target.id,
             organizationId: target.organizationId,
+            reason: "user_erased",
+            actorId: r.session.user.id,
           });
           return NextResponse.json({ ok: true, softDeleted: true });
         }
