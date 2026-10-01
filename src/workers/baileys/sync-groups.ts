@@ -7,6 +7,9 @@ import {
   type BaileysGroupSnapshot,
 } from "@/services/whatsapp-groups";
 import type { BaileysManager } from "./baileys-manager";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.sync-groups");
 
 function phoneFromJid(jid: string): string | null {
   const [user, server] = jid.split("@");
@@ -65,6 +68,6 @@ export async function syncChannelGroups(manager: BaileysManager, channelId: stri
   const count = await withSystemContext(ch.organizationId, () =>
     replaceChannelGroups(ch.organizationId, channelId, snapshots),
   );
-  console.info(`[baileys:${channelId}] ${count} grupo(s) sincronizado(s)`);
+  log.info({ channelId, count }, "[baileys] grupo(s) sincronizado(s)");
   return count;
 }

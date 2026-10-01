@@ -17,6 +17,10 @@ import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
 import { noteContactActivity } from "./contact-typing";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.outbound-consumer");
 
 export function startOutboundConsumer(
   manager: BaileysManager,
@@ -129,8 +133,13 @@ export function startOutboundConsumer(
                   })
                   .catch(() => {});
               }
-              console.log(
-                `[baileys-outbound] áudio preparado (${prepared.payload.delivery}) ${buffer.length} -> ${audioBuffer.length} bytes`,
+              log.info(
+                {
+                  delivery: prepared.payload.delivery,
+                  inputBytes: buffer.length,
+                  outputBytes: audioBuffer.length,
+                },
+                "[baileys-outbound] áudio preparado",
               );
             }
 
@@ -178,9 +187,9 @@ export function startOutboundConsumer(
         "WhatsApp não confirmou o envio",
       );
       if (sent?.key?.id) {
-        console.info(`[baileys-outbound] enviado ${sent.key.id} → ${jid}`);
+        log.info({ messageId: sent.key.id, jid: maskPhone(jid) }, "[baileys-outbound] enviado");
       } else {
-        console.warn(`[baileys-outbound] send sem id de mensagem → ${jid}`);
+        log.warn({ jid: maskPhone(jid) }, "[baileys-outbound] send sem id de mensagem");
       }
 
       if (!messageId) return;
@@ -230,14 +239,14 @@ export function startOutboundConsumer(
   );
 
   worker.on("failed", (job, err) => {
-    console.error(`[baileys-outbound] job ${job?.id} falhou:`, err.message);
+    log.error({ jobId: job?.id, err: err.message }, "[baileys-outbound] job falhou");
   });
 
   worker.on("completed", (job) => {
-    console.info(`[baileys-outbound] job ${job.id} concluído`);
+    log.info({ jobId: job.id }, "[baileys-outbound] job concluído");
   });
 
-  console.info(`[baileys-outbound] ouvindo fila "${BAILEYS_OUTBOUND_QUEUE_NAME}"`);
+  log.info({ queue: BAILEYS_OUTBOUND_QUEUE_NAME }, "[baileys-outbound] ouvindo fila");
   return worker;
 }
 
