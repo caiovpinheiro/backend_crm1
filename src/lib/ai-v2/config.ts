@@ -342,6 +342,7 @@ export const v2AgentConfigSchema = z.object({
     deal: z.array(fieldConfigSchema).optional().default([]),
   }).optional().default({ contact: [], deal: [] }),
   dealSelection: z.enum(["latest", "ask"]).optional().default("latest"),
+  includeLostDeals: z.boolean().optional(),
   entry: entryConfigSchema.prefault({}),
   themes: z.array(themeSchema).optional().default([]),
   rules: z.array(ruleSchema).optional().default([]),

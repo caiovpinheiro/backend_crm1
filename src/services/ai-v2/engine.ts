@@ -1115,6 +1115,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
     contactTags: (loadedContext.contactRaw?.tags as string[] | undefined) ?? [],
     dealStageName: loadedContext.selectedDealRaw?.stageName as string | undefined,
+    dealStageId: loadedContext.selectedDealRaw?.stageId as string | undefined,
+    dealPipelineName: loadedContext.selectedDealRaw?.pipelineName as string | undefined,
     withinBusinessHours,
     mediaKinds: media ? [media.kind] : [],
     surveyReceived: counters.surveyPending,

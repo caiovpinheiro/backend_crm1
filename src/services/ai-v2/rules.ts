@@ -13,6 +13,8 @@ export type V2RuleEvaluationInput = {
   mediaKinds?: string[];
   contactTags?: string[];
   dealStageName?: string;
+  dealStageId?: string;
+  dealPipelineName?: string;
   withinBusinessHours: boolean;
   surveyReceived?: boolean;
 };
@@ -130,6 +132,30 @@ function containsKeywords(text: string, keywords: string[]): boolean {
   });
 }
 
+const sameText = (a: string | undefined, b: string) =>
+  !!a && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * Valor da condição "etapa do negócio": o nome da etapa, o id dela ou
+ * "Funil > Etapa". Só o nome casa com a etapa de mesmo nome em qualquer
+ * funil; as outras duas formas apontam uma etapa só.
+ */
+export function dealStageMatches(
+  value: string,
+  input: Pick<V2RuleEvaluationInput, "dealStageName" | "dealStageId" | "dealPipelineName">,
+): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (input.dealStageId && v === input.dealStageId) return true;
+  const cut = v.indexOf(">");
+  if (cut > 0) {
+    const pipeline = v.slice(0, cut);
+    const stage = v.slice(cut + 1);
+    if (sameText(input.dealPipelineName, pipeline) && sameText(input.dealStageName, stage)) return true;
+  }
+  return sameText(input.dealStageName, v);
+}
+
 function evaluateCondition(
   condition: V2RuleCondition,
   input: V2RuleEvaluationInput,
@@ -153,7 +179,7 @@ function evaluateCondition(
       result = condition.values?.some((v) => input.contactTags?.includes(v)) ?? false;
       break;
     case "deal_stage":
-      result = condition.values?.some((v) => input.dealStageName?.toLowerCase() === v.toLowerCase()) ?? false;
+      result = condition.values?.some((v) => dealStageMatches(v, input)) ?? false;
       break;
     case "field_equals": {
       const value = context.contact?.[condition.field ?? ""] ?? context.selectedDeal?.[condition.field ?? ""];

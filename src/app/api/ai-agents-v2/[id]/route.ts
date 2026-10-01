@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth, requirePermission } from "@/lib/auth-helpers";
+import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
+import { reindexFailedKnowledgeDocs } from "@/services/ai/knowledge-docs";
 import { getV2Agent, updateV2Agent, deleteV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { getLogger } from "@/lib/logger";
@@ -50,6 +51,13 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       anthropicApiKey?: string | null;
     };
     const agent = await updateV2Agent(id, r.session.user.organizationId!, body);
+    // Chave nova: os materiais que falharam por falta dela voltam a indexar.
+    const savedKey = [body.openaiApiKey, body.anthropicApiKey].some((k) => typeof k === "string" && k.trim() !== "");
+    if (savedKey) {
+      void runInSessionContext(r.session, () => reindexFailedKnowledgeDocs(id)).catch((err) => {
+        console.warn("[PUT /api/ai-agents-v2/[id]] reindexação dos materiais falhou:", err instanceof Error ? err.message : err);
+      });
+    }
     return NextResponse.json(agent);
   } catch (err) {
     log.error({ err }, "[PUT /api/ai-agents-v2/[id]] falhou");

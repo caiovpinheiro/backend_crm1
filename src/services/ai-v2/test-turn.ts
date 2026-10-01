@@ -421,6 +421,8 @@ export async function simulateV2Turn(
       // Como em produção: etiquetas do cliente e etapa do negócio carregados.
       contactTags: (context.contactRaw?.tags as string[] | undefined) ?? [],
       dealStageName: context.selectedDealRaw?.stageName as string | undefined,
+      dealStageId: context.selectedDealRaw?.stageId as string | undefined,
+      dealPipelineName: context.selectedDealRaw?.pipelineName as string | undefined,
       mediaKinds: ["text"],
     },
     context,

@@ -498,6 +498,11 @@ export interface V2AgentConfig {
   };
   /** Como escolher o negócio quando há mais de um aberto. */
   dealSelection: "latest" | "ask";
+  /**
+   * Sem negócio em andamento, usa o negócio perdido mais recente do contato.
+   * Desligado (padrão): negócio perdido não é carregado.
+   */
+  includeLostDeals?: boolean;
   entry: V2EntryConfig;
   themes: V2Theme[];
   rules: V2Rule[];
