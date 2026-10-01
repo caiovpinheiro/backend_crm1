@@ -28,6 +28,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/execute");
 
 const bodySchema = z.object({
   dealId: z.string().min(1).optional(),
@@ -147,15 +150,13 @@ export async function POST(request: Request) {
         scope: "distribution.execute",
         kind: "queue_unavailable",
       });
-      console.warn(
-        "[POST /api/distribution/execute] fila indisponível — sem fallback em prod",
-      );
+      log.warn("[POST /api/distribution/execute] fila indisponível — sem fallback em prod");
       return NextResponse.json(
         { message: "Fila de distribuição indisponível. Tente novamente." },
         { status: 503 },
       );
     } catch (e) {
-      console.error("[POST /api/distribution/execute]", e);
+      log.error({ err: e }, "[POST /api/distribution/execute] falhou");
       return NextResponse.json(
         { message: "Erro ao executar distribuição." },
         { status: 500 },

@@ -23,6 +23,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/leads/participants");
 
 const bulkSchema = z.object({
   userIds: z.array(z.string().min(1)).min(1).max(200),
@@ -63,7 +66,7 @@ export async function GET() {
       const participants = await getLeadsParticipants();
       return NextResponse.json({ participants });
     } catch (e) {
-      console.error("[GET /api/distribution/leads/participants]", e);
+      log.error({ err: e }, "[GET /api/distribution/leads/participants] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar participantes." },
         { status: 500 },
@@ -129,7 +132,7 @@ export async function POST(request: Request) {
       const participants = await getLeadsParticipants();
       return NextResponse.json({ ...result, participants });
     } catch (e) {
-      console.error("[POST /api/distribution/leads/participants]", e);
+      log.error({ err: e }, "[POST /api/distribution/leads/participants] falhou");
       return NextResponse.json(
         { message: "Erro ao adicionar participantes." },
         { status: 500 },

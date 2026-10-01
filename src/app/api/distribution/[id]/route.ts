@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { deleteDistributionRule, updateDistributionRule } from "@/services/lead-distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -36,7 +39,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     const updated = await updateDistributionRule(id, { isActive: b.isActive });
     return NextResponse.json(updated);
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PATCH falhou");
     if (e && typeof e === "object" && "code" in e && (e as { code?: string }).code === "P2025") {
       return NextResponse.json({ message: "Regra não encontrada." }, { status: 404 });
     }
@@ -59,7 +62,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
     await deleteDistributionRule(id);
     return NextResponse.json({ ok: true });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     if (e && typeof e === "object" && "code" in e && (e as { code?: string }).code === "P2025") {
       return NextResponse.json({ message: "Regra não encontrada." }, { status: 404 });
     }

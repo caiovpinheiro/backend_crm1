@@ -12,6 +12,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/department-stats");
 
 export async function GET() {
   return withOrgContext(async (session) => {
@@ -47,7 +50,7 @@ export async function GET() {
       const result = await getDistributionDepartmentStats();
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[GET /api/distribution/department-stats]", e);
+      log.error({ err: e }, "[GET /api/distribution/department-stats] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar estatísticas por departamento." },
         { status: 500 },
