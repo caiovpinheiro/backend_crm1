@@ -28,7 +28,9 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
-    const deal = await getDealById(id);
+    // `contact.conversations[0]` é a conversa que o painel abre: sem ticket
+    // ativo, a que tem a última mensagem do contato (a da prévia do card).
+    const deal = await getDealById(id, { conversationWithLastMessageFirst: true });
     if (!deal) {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }
