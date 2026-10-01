@@ -57,6 +57,7 @@ export function sendVerifyEmail(input: {
   to: string;
   code: string;
   organizationName?: string;
+  verifyUrl?: string;
 }): Promise<MailSendResult> {
   return trySend(input.to, verifyEmailTemplate(input));
 }

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { waitForMinResponseTime } from "@/lib/auth/uniform-response";
+import { runInBackground } from "@/lib/background";
 import { getClientIp, withRateLimit } from "@/lib/rate-limit";
 import { slugFromRequestHost } from "@/lib/tenant-url";
 import { resendEmailVerification } from "@/services/email-verification";
@@ -12,7 +14,13 @@ function hostOf(request: Request): string | null {
   return request.headers.get("host");
 }
 
+/**
+ * Mesmo desenho do forgot-password: corpo genérico e tempo uniforme. O
+ * código e o e-mail saem em segundo plano; a resposta não depende de a
+ * conta existir ou de estar pendente de confirmação.
+ */
 export async function POST(request: Request) {
+  const startedAt = Date.now();
   const rl = await withRateLimit({
     route: "auth.resend-verification",
     profile: "auth.public",
@@ -32,7 +40,11 @@ export async function POST(request: Request) {
     email = "";
   }
 
-  await resendEmailVerification({ email, organizationSlug });
+  runInBackground("auth.resend-verification", () =>
+    resendEmailVerification({ email, organizationSlug }),
+  );
+
+  await waitForMinResponseTime(startedAt);
   return NextResponse.json(
     {
       ok: true,

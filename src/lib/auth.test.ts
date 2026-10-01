@@ -60,7 +60,10 @@ vi.mock("./auth/backup-codes", () => ({ findMatchingBackupCode: vi.fn() }));
 vi.mock("./request-context", () => ({ enterRequestContext: vi.fn() }));
 vi.mock("./auth.config", () => ({ default: { callbacks: {} } }));
 // SV-2: prova de renovação em memória (sem Redis) e auditoria muda.
-vi.mock("@/lib/cache/redis-client", () => ({ getCacheClient: () => null }));
+vi.mock("@/lib/cache/redis-client", () => ({
+  getCacheClient: () => null,
+  waitUntilCacheReady: async () => false,
+}));
 vi.mock("@/lib/audit/log", () => ({ logAuditAsync: vi.fn() }));
 // O logger real lê o RequestContext, que aqui é mock parcial.
 vi.mock("@/lib/logger", () => ({
