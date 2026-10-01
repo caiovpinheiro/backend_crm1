@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Follow-up de silêncio da IA.
  */
 
@@ -95,7 +95,7 @@ export function formatLocalClockHint(now = new Date()): string {
     "",
     `HORÁRIO ATUAL (America/Sao_Paulo): ${String(h).padStart(2, "0")}:${String(minute).padStart(2, "0")} — agora é ${label}.`,
     `- Despedida/cumprimento DEVE ser "${wish}".`,
-    `- Se o aluno falar "à noite" / "depois" / "mais tarde" / "quando estiver estudando", isso é PLANO FUTURO — NÃO é o horário de agora.`,
+    `- Se o contato falar "à noite" / "depois" / "mais tarde" / "quando estiver estudando", isso é PLANO FUTURO — NÃO é o horário de agora.`,
     `- PROIBIDO dizer "boa noite" de manhã ou à tarde. PROIBIDO "bom dia" à tarde/noite.`,
   ].join("\n");
 }

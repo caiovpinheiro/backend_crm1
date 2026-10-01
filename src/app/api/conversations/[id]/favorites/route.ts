@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/favorites");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -60,7 +63,7 @@ export async function GET(_req: Request, ctx: Ctx) {
 
       return NextResponse.json({ items });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },
         { status: 500 },

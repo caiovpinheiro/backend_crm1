@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { recordHeartbeat } from "@/services/system-presence";
+import { recordHeartbeatThrottled } from "@/services/system-presence";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/agents/me/ping");
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +19,10 @@ export const dynamic = "force-dynamic";
  *   uso em `SystemUsageSession` — `AgentStatus` fica exclusivo do controle
  *   manual do agente (Online/Ausente/Offline).
  *
+ * Gravação limitada: várias abas / pings de foco do mesmo usuário viram no
+ * máximo 1 UPDATE a cada 45 s (`recordHeartbeatThrottled`); o limite de
+ * inatividade para aparecer offline é 300 s.
+ *
  * Compatível com o frontend antigo: a rota permanece em `/api/agents/me/ping`
  * e responde 200 igual antes.
  */
@@ -29,7 +36,12 @@ export async function POST() {
     }
 
     try {
-      const { created } = await recordHeartbeat({ userId, organizationId });
+      // No máximo 1 gravação por usuário a cada 45 s (claim no Redis); os
+      // pings intermediários respondem 200 sem tocar no banco.
+      const { created } = await recordHeartbeatThrottled({
+        userId,
+        organizationId,
+      });
       return NextResponse.json({ ok: true, systemOnline: true, created });
     } catch (err) {
       // Não spamar log em produção — geralmente indica migration pendente.
@@ -38,10 +50,7 @@ export async function POST() {
         (err.message.includes("system_usage_sessions") ||
           (err as { code?: string }).code === "P2021");
       if (!isMigrationPending) {
-        console.warn(
-          "[/api/agents/me/ping] falhou:",
-          err instanceof Error ? err.message : err,
-        );
+        log.warn({ err: err instanceof Error ? err.message : err }, "[/api/agents/me/ping] falhou");
       }
       return NextResponse.json(
         { ok: false, _migrationPending: true },

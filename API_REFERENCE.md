@@ -222,7 +222,7 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
 
 | Método | Path | Auth | Query / Body | Descrição |
 |--------|------|------|--------------|-----------|
-| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&page=1&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. |
+| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&cursor=&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. Paginação por cursor (keyset): a resposta traz `nextCursor` (opaco) e `hasMore`; mande-o de volta em `cursor` para a página seguinte — sem OFFSET, não repete nem pula item. `page=N` continua aceito (legado, usa OFFSET). Cursor ilegível → 400. |
 | POST | `/api/conversations/create` | sessão | `{ contactId, channelId?, message?, skipSend? }` | Cria conversa WhatsApp com um contato. `skipSend=true` apenas reserva a conversa sem mandar mensagem. |
 | GET | `/api/conversations/[id]` | Bearer/sessão | — | Detalhe de uma conversa (contato, canal, owner, status, tags). |
 | POST | `/api/conversations/bulk` | sessão | `{ ids: string[], action: "resolve"\|"reopen"\|"assign"\|"unassign"\|"snooze"\|"unsnooze", payload? }` | Operação em massa nas conversas. |
@@ -534,6 +534,7 @@ existe (e `items[]` já traz os deals com `contact`, `stage`, `owner`).
 | DELETE | `/api/pipelines/[id]` | — | Remove (somente se vazio). |
 | GET | `/api/pipelines/[id]/board` | `?status=&perStage=` | View Kanban com deals agrupados por stage. |
 | POST | `/api/pipelines/[id]/board` | `{ action, payload }` | Operações no board (reorder, bulk move). |
+| POST | `/api/pipelines/[id]/board/columns` | `{ status?, filters?, sort?, direction?, columns: [{ stageId, cursor, limit? }] }` | "Carregar mais" por cursor: devolve só os próximos cards de cada etapa pedida — `{ columns: [{ stageId, deals, totalCount, hasMore, nextCursor }] }`. `cursor` é o `nextCursor` que a etapa traz no board (ou na página anterior); `status`/`filters`/`sort` devem ser os do board. Não recarrega o board nem usa o cache dele. |
 | POST | `/api/pipelines/[id]/stages` | `{ name, color?, position?, isWon?, isLost? }` | Cria stage. |
 | PUT | `/api/pipelines/[id]/stages` | `{ stages: [{ id, position }] }` | Reordena stages. |
 | PUT | `/api/pipelines/[id]/stages/[stageId]` | `{ name?, color?, isWon?, isLost? }` | Edita stage. |
@@ -886,7 +887,7 @@ Response do POST:
 | GET | `/api/storage/[...path]` | sessão | Lê arquivo do storage (Meta-cached, signed URLs). |
 | GET | `/api/media/proxy` | sessão | `?url=` — proxy autenticado para mídia Meta (com refresh de URL expirada). |
 | GET | `/api/media/audio-mp3` | sessão | `?url=&name=` — converte mídia áudio (ogg/opus do WhatsApp) para MP3 e retorna stream. |
-| POST | `/api/media/transcribe` | sessão | **multipart**: `file` (áudio) ou `{ messageId }`. Transcreve áudio via provider IA. |
+| POST | `/api/transcribe` | sessão | `{ url }` — transcreve o áudio (Groq Whisper). Retorna `{ transcript }`. |
 
 ---
 
@@ -924,9 +925,10 @@ Response do POST:
 
 | Método | Path | Auth | Descrição |
 |--------|------|------|-----------|
-| GET | `/api/health` | público | `{ status: "ok", uptime, db: true/false, redis: true/false }`. |
-| HEAD | `/api/health` | público | Idem, headers apenas. |
-| GET | `/health` | público | Igual a `/api/health` (atalho). |
+| GET | `/api/health` | público | `{ status: "ok" \| "degraded" }`, 200 ou 503. Com `X-Health-Token`/`Authorization: Bearer` igual a `HEALTH_TOKEN`, ou sessão de super-admin: acrescenta `db`, `redis` (`ok`, `latencyMs`/`error`), `uptimeSec`, `timestamp`. Sem CORS. |
+| HEAD | `/api/health` | público | Só o status HTTP (200/503). |
+| GET | `/health` | público | Página HTML com o estado agregado; cartões de Postgres/Redis/uptime só com `HEALTH_TOKEN` ou super-admin. |
+| GET | `/api/internal/cors-origin` | interno | Loopback do middleware (CORS de subdomínio de organização). Sem a chave interna responde 404. |
 | GET | `/api/config/public` | público | Feature flags públicos + branding (logo, cores). Não exige auth. |
 | GET | `/api/cron/sync-meta-pricing` | `?secret=` ou header CRON | Job diário: sincroniza pricing Meta para todas as orgs. |
 | GET | `/api/metrics` | bearer admin | Prometheus metrics. |
@@ -1155,7 +1157,6 @@ GET     /api/me/data-export
 GET     /api/me/data-export/[id]
 GET     /api/media/audio-mp3
 GET     /api/media/proxy
-POST    /api/media/transcribe
 POST    /api/messages/[id]/reactions
 GET     /api/meta/whatsapp/call-permission-templates
 GET     /api/meta/whatsapp/message-templates
@@ -1181,6 +1182,7 @@ PUT     /api/pipelines/[id]
 DELETE  /api/pipelines/[id]
 GET     /api/pipelines/[id]/board
 POST    /api/pipelines/[id]/board
+POST    /api/pipelines/[id]/board/columns
 POST    /api/pipelines/[id]/stages
 PUT     /api/pipelines/[id]/stages
 PUT     /api/pipelines/[id]/stages/[stageId]
@@ -1255,6 +1257,7 @@ POST    /api/templates
 GET     /api/templates/[id]
 PUT     /api/templates/[id]
 DELETE  /api/templates/[id]
+POST    /api/transcribe
 POST    /api/uploads/automation-media
 GET     /api/uploads/[...path]
 GET     /api/users

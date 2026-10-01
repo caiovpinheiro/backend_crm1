@@ -16,6 +16,9 @@ import {
   getDashboardPreferences,
   getSidebarPreferenceBundle,
 } from "@/services/user-preferences";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/profile/preferences");
 
 export async function GET() {
   return withOrgContext(async (session) => {
@@ -44,7 +47,7 @@ export async function GET() {
         availableKeys: [...availableKeys],
       });
     } catch (e) {
-      console.error("[GET /api/profile/preferences]", e);
+      log.error({ err: e }, "[GET /api/profile/preferences] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar preferências." },
         { status: 500 },

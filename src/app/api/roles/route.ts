@@ -4,6 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { createRole, listRoles } from "@/services/roles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/roles");
 
 const sidebarItemSchema = z.object({
   key: z.string().min(1).max(100),
@@ -62,7 +65,7 @@ export async function GET() {
       const roles = await listRoles();
       return NextResponse.json(roles);
     } catch (e) {
-      console.error("[GET /api/roles]", e);
+      log.error({ err: e }, "[GET /api/roles] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao listar roles." },
         { status: 500 },
@@ -104,7 +107,7 @@ export async function POST(request: Request) {
       const role = await createRole(parsed.data);
       return NextResponse.json(role, { status: 201 });
     } catch (e) {
-      console.error("[POST /api/roles]", e);
+      log.error({ err: e }, "[POST /api/roles] falhou");
       const msg = e instanceof Error ? e.message : "Erro ao criar role.";
       const status = msg.includes("Unique constraint") ? 409 : 500;
       return NextResponse.json({ message: msg }, { status });

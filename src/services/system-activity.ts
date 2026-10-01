@@ -14,6 +14,9 @@
  */
 
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("system-activity");
 
 /** Janela de inatividade: 5 minutos. */
 export const SYSTEM_ACTIVITY_IDLE_MS = 5 * 60_000;
@@ -231,9 +234,9 @@ export function startSystemActivitySweeper() {
     try {
       await sweepInactiveActivitySessions();
     } catch (err) {
-      console.warn(
-        "[system-activity] sweeper falhou:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[system-activity] sweeper falhou",
       );
     }
   };
@@ -243,8 +246,9 @@ export function startSystemActivitySweeper() {
     setInterval(() => void tick(), SWEEP_INTERVAL_MS);
   }, SWEEP_BOOT_DELAY_MS);
 
-  console.info(
-    `[system-activity] sweeper iniciado (IDLE > ${SYSTEM_ACTIVITY_IDLE_MS}ms, tick ${SWEEP_INTERVAL_MS}ms)`,
+  log.info(
+    { idleMs: SYSTEM_ACTIVITY_IDLE_MS, tickMs: SWEEP_INTERVAL_MS },
+    "[system-activity] sweeper iniciado",
   );
 }
 

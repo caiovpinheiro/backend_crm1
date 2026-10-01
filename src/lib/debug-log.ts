@@ -24,15 +24,18 @@ function resolveLogArgs(args: unknown[]): unknown[] {
 
 /** console.log condicional — só emite quando `isVerboseLogging()`. */
 export function debugLog(...args: unknown[]): void {
+  // eslint-disable-next-line no-console -- gate de log verboso; testes afirmam literalmente a saída do console (pending-capacity-released)
   if (isVerboseLogging()) console.log(...resolveLogArgs(args));
 }
 
 /** console.info condicional — só emite quando `isVerboseLogging()`. */
 export function debugInfo(...args: unknown[]): void {
+  // eslint-disable-next-line no-console -- gate de log verboso; testes afirmam literalmente a saída do console (pending-capacity-released)
   if (isVerboseLogging()) console.info(...resolveLogArgs(args));
 }
 
 /** console.warn condicional — só emite quando `isVerboseLogging()`. */
 export function debugWarn(...args: unknown[]): void {
+  // eslint-disable-next-line no-console -- gate de log verboso; testes afirmam literalmente a saída do console (pending-capacity-released)
   if (isVerboseLogging()) console.warn(...resolveLogArgs(args));
 }

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getServiceOverview } from "@/services/dashboard-v2";
 import type { AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/service-overview");
 
 function parsePeriod(searchParams: URLSearchParams): AnalyticsPeriod {
   const fromS = searchParams.get("from");
@@ -24,7 +27,7 @@ export async function GET(request: Request) {
       const data = await getServiceOverview(period);
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[analytics/service-overview]", e);
+      log.error({ err: e }, "[analytics/service-overview] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar visão de atendimento." },
         { status: 500 },

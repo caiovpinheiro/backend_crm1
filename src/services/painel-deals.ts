@@ -29,6 +29,9 @@ import {
   type PainelDelta,
   type PainelRange,
 } from "@/services/painel-period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("painel-deals");
 
 /** Replica when healthy; primary if unset or tripped after a connect timeout. */
 function db() {
@@ -104,8 +107,8 @@ export type PainelFunnel = {
   stages: PainelFunnelStage[];
   empty: boolean;
   /**
-   * Chegadas no período, na org. Contato novo com deal conta 1.
-   * Só deal conta 1. Só contato conta 1.
+   * Chegadas no período, no funil selecionado.
+   * Contato novo com deal nesse funil conta 1. Só deal conta 1. Só contato conta 1.
    */
   novos: { count: number; value: number };
 };
@@ -720,7 +723,7 @@ export async function getPainelEvolution(
 ): Promise<PainelEvolution> {
   const orgId = getOrgIdOrThrow();
   await ensureTodayDealStageSnapshot().catch((e) => {
-    console.error("[painel/evolution] snapshot", e);
+    log.error({ err: e }, "[painel/evolution] snapshot");
   });
   const stages = (await loadStages(f.pipelineIds)).filter((s) => !s.isWon && !s.isLost);
   const days = eachDayKey(f.range.from, f.range.to);
@@ -949,7 +952,7 @@ export async function getPainelDealExceptions(
         }),
       })
       .catch((e) => {
-        console.error("[painel/deals] no_task", e);
+        log.error({ err: e }, "[painel/deals] no_task");
         return 0;
       }),
     db().deal.count({
@@ -1082,14 +1085,14 @@ async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
       try {
         return { ok: true, data: await fn() };
       } catch (retryErr) {
-        console.error("[painel/deals]", retryErr);
+        log.error({ err: retryErr }, "[painel/deals] falhou");
         return {
           ok: false,
           error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
         };
       }
     }
-    console.error("[painel/deals]", e);
+    log.error({ err: e }, "[painel/deals] falhou");
     return {
       ok: false,
       error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",

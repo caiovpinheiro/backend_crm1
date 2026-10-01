@@ -15,6 +15,7 @@ import type { SipExtension, TelephonyProvisioningStep } from "@prisma/client";
 
 import { encryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
+import { maskEmail, maskPhone } from "@/lib/pii-mask";
 import { prisma } from "@/lib/prisma";
 import {
   getOrCreateApi4ComProviderConfig,
@@ -307,7 +308,7 @@ async function createRemoteUser(ctx: ProvisionContext): Promise<string> {
       /phone/i.test(`${err.message} ${err.responseBody ?? ""}`) &&
       phone !== API4COM_FALLBACK_PHONE
     ) {
-      log.warn(`[prov] Telefone ${phone} recusado. Tentando ${API4COM_FALLBACK_PHONE}.`);
+      log.warn(`[prov] Telefone ${maskPhone(phone)} recusado. Tentando o fallback.`);
       try {
         return (await ctx.client.createUser({ ...payload, phone: API4COM_FALLBACK_PHONE })).id;
       } catch (retryErr) {
@@ -324,11 +325,11 @@ async function recoverExistingUser(
   err: unknown,
 ): Promise<string> {
   if (err instanceof Api4ComConflictError) {
-    log.warn(`[prov] Usuário ${email} já existe na Api4com (409). Recuperando...`);
+    log.warn(`[prov] Usuário ${maskEmail(email)} já existe na Api4com (409). Recuperando...`);
     const existing = await ctx.client.findUsers({ email });
     if (existing.length > 0) return existing[0].id;
     throw new Error(
-      `Conflito ao criar usuário (409), mas GET não retornou match para ${email}.`,
+      `Conflito ao criar usuário (409), mas GET não retornou match para ${maskEmail(email)}.`,
     );
   }
   throw err;

@@ -5,6 +5,10 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { channelSendsReadReceipts } from "@/lib/channels/config";
+import { publishTypingEvent } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/typing");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -31,9 +35,26 @@ export async function POST(_request: Request, context: RouteContext) {
       const conv = await prisma.conversation.findUnique({
         where: { id },
         select: {
+          organizationId: true,
+          contactId: true,
           channelRef: { select: { id: true, config: true } },
         },
       });
+
+      // Evento SSE `typing` para os OUTROS agentes da conversa — sai
+      // independente do canal (Meta sem config / sem recibo de leitura
+      // continua mostrando "digitando…" no CRM). Throttle por
+      // (conversa, agente) em `realtime-events.ts`.
+      if (conv?.organizationId) {
+        publishTypingEvent({
+          organizationId: conv.organizationId,
+          conversationId: id,
+          contactId: conv.contactId ?? null,
+          userId: session.user.id,
+          userName: session.user.name ?? null,
+        });
+      }
+
       const channelConfig = conv?.channelRef?.config as
         | Record<string, unknown>
         | null
@@ -66,7 +87,7 @@ export async function POST(_request: Request, context: RouteContext) {
 
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.warn("[typing] error:", e);
+      log.warn({ err: e }, "[typing] error");
       return NextResponse.json({ ok: false });
     }
   });

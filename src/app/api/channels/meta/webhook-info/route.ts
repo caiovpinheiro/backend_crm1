@@ -25,6 +25,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createChannel } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/meta/webhook-info");
 
 const CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -152,7 +155,7 @@ export async function POST(request: Request) {
       // VAZIO — o cliente estoura em `res.json()` ("Unexpected end of JSON
       // input") e a causa real (KEYRING_SECRET ausente, migration faltando,
       // Redis fora) nunca chega ao operador.
-      console.error("webhook-info: falha ao pre-criar canal:", e);
+      log.error({ err: e }, "webhook-info: falha ao pre-criar canal");
       const msg =
         e instanceof Error ? e.message : "Erro ao pre-criar canal Meta.";
       return NextResponse.json(

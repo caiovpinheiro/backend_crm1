@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
+import { isSafePartnerIframeSrc } from "@/lib/partner-iframe-url";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withRateLimit } from "@/lib/rate-limit";
+import { getTenantBaseDomain } from "@/lib/tenant-url";
 import { isValidWidgetSlug } from "@/lib/widget-catalog";
 import { issueWidgetSsoToken } from "@/services/widget-sso";
 
@@ -58,6 +60,17 @@ export async function GET(
       );
     }
     if (widget.status !== "ONLINE" || !widget.iframeUrl) {
+      return NextResponse.json(
+        { message: "Widget não está disponível." },
+        { status: 409 },
+      );
+    }
+    if (
+      !isSafePartnerIframeSrc(widget.iframeUrl, {
+        tenantBaseDomain: getTenantBaseDomain(),
+        apiOrigin: new URL(_request.url).origin,
+      })
+    ) {
       return NextResponse.json(
         { message: "Widget não está disponível." },
         { status: 409 },

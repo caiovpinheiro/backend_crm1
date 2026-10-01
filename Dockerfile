@@ -6,6 +6,9 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-c
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
+# SheetJS versionado no repo (`xlsx` = file:vendor/xlsx-0.20.3.tgz): o
+# `npm ci` precisa do tarball antes do `COPY . .`.
+COPY vendor ./vendor
 # Preferir `npm ci` (lockfile). Retry + backoff: postinstall do `ffmpeg-static`
 # baixa binário do GitHub Releases e intermitentemente responde 504 (#1120/#1121).
 # `--legacy-peer-deps`: conflito conhecido entre `@hookform/resolvers@5.x`
@@ -55,6 +58,10 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+# Leitura de PDF dos materiais: o rastreio do standalone não segue o import
+# dinâmico do worker do pdf.js; copia os pacotes inteiros.
+COPY --from=builder /app/node_modules/pdf-parse ./node_modules/pdf-parse
+COPY --from=builder /app/node_modules/pdfjs-dist ./node_modules/pdfjs-dist
 # Workers compilados (campaign-worker.js, …, baileys/index.js).
 # Executados com `node dist/workers/<name>.js` conforme APP_MODE.
 COPY --from=builder /app/dist/workers ./dist/workers
@@ -67,7 +74,11 @@ ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
   && cd /opt/prisma-cli \
   && npm install prisma@${PRISMA_VERSION} --omit=dev --no-audit --no-fund \
-  && chown -R nextjs:nodejs /opt/prisma-cli
+  && chown -R nextjs:nodejs /opt/prisma-cli \
+  # Disponibiliza `prisma` e `npx prisma` dentro do container manualmente.
+  && mkdir -p /app/node_modules \
+  && ln -s /opt/prisma-cli/node_modules/.bin/prisma /usr/local/bin/prisma \
+  && ln -s /opt/prisma-cli/node_modules/prisma /app/node_modules/prisma
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh \
@@ -81,6 +92,19 @@ RUN chmod +x /app/docker-entrypoint.sh \
 RUN mkdir -p /app/storage \
   && chown -R nextjs:nodejs /app/storage \
   && chmod -R 0775 /app/storage
+
+# SHA do commit que gerou a imagem (build arg do workflow Build & Deploy).
+# Fica no FIM do estágio de propósito: o valor muda a cada build e, aqui,
+# só invalida estas camadas minúsculas — npm ci / next build seguem em cache.
+#   - ENV GIT_SHA: lido pelo detalhe protegido de /api/health;
+#   - /app/BUILD_SHA: o entrypoint loga no boot e usa para corrigir um
+#     GIT_SHA fixo herdado do painel (env de runtime vence ENV da imagem);
+#   - label OCI: `docker inspect` mostra o commit sem subir o container.
+# Build local sem o arg: "unknown".
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+RUN printf '%s' "${GIT_SHA}" > /app/BUILD_SHA
 
 # IMPORTANTE: não setamos `USER nextjs` aqui. O entrypoint começa como
 # root para conseguir corrigir a ownership de `/app/storage` (o volume

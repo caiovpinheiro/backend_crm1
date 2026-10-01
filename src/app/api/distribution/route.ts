@@ -5,6 +5,9 @@ import {
   createDistributionRule,
   getDistributionRules,
 } from "@/services/lead-distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution");
 
 const MODES = new Set(["ROUND_ROBIN", "RULE_BASED", "MANUAL"]);
 
@@ -18,7 +21,7 @@ export async function GET() {
     const rules = await getDistributionRules();
     return NextResponse.json(rules);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao listar regras de distribuição." },
       { status: 500 }
@@ -77,7 +80,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(rule, { status: 201 });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json(
       { message: "Erro ao criar regra de distribuição." },
       { status: 500 }

@@ -6,6 +6,9 @@ import {
   createProviderConfig,
   listProviderConfigs,
 } from "@/services/call-provider-configs";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/call-provider-configs");
 
 const VALID_AUTH_MODES = new Set(["HMAC", "TOKEN"]);
 const VALID_RECORDING_DELIVERIES = new Set(["URL", "INLINE", "FETCH_LATER"]);
@@ -27,7 +30,7 @@ export async function GET(request: Request) {
       const configs = await listProviderConfigs();
       return NextResponse.json({ configs });
     } catch (e) {
-      console.error("[call-provider-configs] GET:", e);
+      log.error({ err: e }, "[call-provider-configs] GET falhou");
       return NextResponse.json({ message: "Erro ao listar configurações." }, { status: 500 });
     }
   });
@@ -113,7 +116,7 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({ config }, { status: 201 });
     } catch (e) {
-      console.error("[call-provider-configs] POST:", e);
+      log.error({ err: e }, "[call-provider-configs] POST falhou");
       return NextResponse.json({ message: "Erro ao criar configuração." }, { status: 500 });
     }
   });

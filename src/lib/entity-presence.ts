@@ -1,4 +1,4 @@
-import { sseBus } from "@/lib/sse-bus";
+import { publishEntityViewers } from "@/lib/realtime-events";
 
 /**
  * Presença efêmera "quem está vendo" (estilo Kommo). Registra, EM MEMÓRIA,
@@ -20,7 +20,18 @@ export type EntityViewer = {
   lastSeen: number;
 };
 
-const TTL_MS = 30_000; // viewer expira se ficar 30s sem heartbeat
+/**
+ * Viewer expira depois de `TTL_MS` sem heartbeat. O cliente bate a cada
+ * 25s, mas quem envia é só a aba LÍDER do navegador (eleita por Web Locks;
+ * `src/hooks/use-sse.ts` / `presence-sync.ts` no frontend), agregando as
+ * entidades abertas em todas as abas. Quando o líder fecha, a aba seguinte
+ * assume em < 2s — mas se o líder estava em segundo plano (timers
+ * estrangulados) o intervalo entre dois heartbeats pode passar de 60s.
+ * 90s cobre esse gap sem que o viewer suma e volte (30s derrubava). Sobe
+ * para 90s junto com a eleição de líder (MA-1/MA-2, set/26).
+ */
+export const ENTITY_PRESENCE_TTL_MS = 90_000;
+const TTL_MS = ENTITY_PRESENCE_TTL_MS;
 const REAP_MS = 10_000; // varredura de expiração
 
 type RoomMeta = { orgId: string; entityType: string; entityId: string };
@@ -42,7 +53,7 @@ function publicList(room: Map<string, EntityViewer> | undefined): EntityViewer[]
 function broadcast(key: string): void {
   const meta = keyMeta.get(key);
   if (!meta) return;
-  sseBus.publish("entity_viewers", {
+  publishEntityViewers({
     organizationId: meta.orgId,
     entityType: meta.entityType,
     entityId: meta.entityId,

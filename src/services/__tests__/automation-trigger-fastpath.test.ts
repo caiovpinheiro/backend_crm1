@@ -24,11 +24,15 @@ const { enqueueAutomation, dispatchIntegrationWebhooks, prismaMock } = vi.hoiste
       findMany: vi.fn(),
     },
     deal: { findFirst: vi.fn() },
+    // `shouldSkipIdleInboundAutomation` lê `conversation.closingProtocolEnabled`
+    // pelo org-settings; sem linha vale o padrão (protocolo desligado).
+    organizationSetting: { findUnique: vi.fn(async () => null) },
   },
 }));
 
 vi.mock("@/lib/request-context", () => ({
   getOrgIdOrNull: () => "org-fastpath",
+  getOrgIdOrThrow: () => "org-fastpath",
 }));
 
 vi.mock("@/lib/prisma-helpers", () => ({

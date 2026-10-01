@@ -19,6 +19,9 @@ import {
   type StorageBucket,
 } from "@/lib/storage/local";
 import { readPeerStorageBytes } from "@/lib/storage/upstream-fallback";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("storage.read-for-send");
 
 export type StoredMediaForSend = ReadFileResult & {
   fileName: string;
@@ -84,7 +87,7 @@ export async function readStoredMediaForSend(
         { orgId: parsed.orgId, bucket: parsed.bucket, fileName },
         peer,
       ).catch((err) => {
-        console.warn("[storage] write-through peer falhou:", err);
+        log.warn({ err }, "[storage] write-through peer falhou");
       });
       return {
         buffer: peer,

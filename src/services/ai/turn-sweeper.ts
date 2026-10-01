@@ -22,6 +22,12 @@
  * worker Baileys) — o claim atômico torna a concorrência inofensiva. A
  * rota `/api/cron/ai-turns-sweep` é a rede de segurança externa: se TODOS
  * os ticks estiverem mortos, o cron ainda drena a fila.
+ *
+ * Cadência (BD-12): 3 `findMany` por tick em 2+ processos. A 1 s eram
+ * ~6 consultas/s só de polling; o piso de debounce (`TURN_DEBOUNCE_FLOOR_MS`)
+ * e o fast path (`setTimeout` no processo que ingeriu) já garantem a
+ * latência do caso comum, então o sweeper pode andar a 3 s sem que o
+ * cliente perceba. Override: `AI_TURN_SWEEP_INTERVAL_MS`.
  */
 
 import { prismaBase } from "@/lib/prisma-base";
@@ -35,6 +41,9 @@ import {
   turnStaleMs,
   TURN_DEBOUNCE_FLOOR_MS,
 } from "@/services/ai/turn-manager";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.turn-sweeper");
 
 export type SweepResult = {
   promoted: number;
@@ -51,10 +60,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 function logSweep(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-turn-sweep]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-turn-sweep] ${event}`);
 }
 
 /**
@@ -129,7 +135,8 @@ export async function sweepConversationTurns(
   // contínuo o cliente não para de digitar e `lastMessageAt` nunca
   // envelhece — quem libera esse caso é o MAX_WAIT, que conta da
   // primeira mensagem. Como maxWaitMs >= debounceMs >= piso, esse filtro
-  // é um superconjunto seguro dos dois critérios.
+  // é um superconjunto seguro dos dois critérios. Índice:
+  // `conversation_turns(status, firstMessageAt)`.
   //
   // A decisão final (`isTurnDue`) usa as janelas CONGELADAS na linha —
   // zero lookup de org setting no sweeper.
@@ -184,6 +191,8 @@ export async function sweepConversationTurns(
 
 // ── Loop ────────────────────────────────────────────────────
 
+export const DEFAULT_SWEEP_INTERVAL_MS = 3000;
+
 let sweeperTimer: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
 
@@ -198,16 +207,17 @@ export function startAiTurnSweeper(opts: { force?: boolean } = {}): void {
   if (!opts.force && !isTurnManagerEnabled()) return;
   if ((process.env.AI_TURN_SWEEPER ?? "1").trim() === "0") return;
 
-  const intervalMs = envInt("AI_TURN_SWEEP_INTERVAL_MS", 1000);
+  const intervalMs = envInt("AI_TURN_SWEEP_INTERVAL_MS", DEFAULT_SWEEP_INTERVAL_MS);
   const tick = () => {
     // Sem sobreposição: um tick lento (LLM no meio) não empilha ticks.
     if (sweeping) return;
     sweeping = true;
     void sweepConversationTurns()
       .catch((err) => {
-        console.error("[ai-turn-sweep] tick falhou", {
-          err: err instanceof Error ? err.message : String(err),
-        });
+        log.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          "[ai-turn-sweep] tick falhou",
+        );
       })
       .finally(() => {
         sweeping = false;

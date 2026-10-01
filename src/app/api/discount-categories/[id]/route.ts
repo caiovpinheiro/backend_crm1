@@ -95,10 +95,22 @@ export async function PATCH(request: Request, ctx: Ctx) {
       patch.discountValue = v;
     }
     if (body.productId !== undefined) {
-      patch.productId =
-        typeof body.productId === "string" && body.productId.trim()
-          ? body.productId.trim()
-          : null;
+      if (typeof body.productId === "string" && body.productId.trim()) {
+        const productId = body.productId.trim();
+        const p = await prisma.product.findUnique({
+          where: { id: productId },
+          select: { id: true },
+        });
+        if (!p) {
+          return NextResponse.json(
+            { message: "Produto não encontrado." },
+            { status: 400 },
+          );
+        }
+        patch.productId = productId;
+      } else {
+        patch.productId = null;
+      }
     }
     if (body.exclusionGroup !== undefined) {
       patch.exclusionGroup =

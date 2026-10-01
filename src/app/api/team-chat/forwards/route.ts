@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { FORWARD_TYPES, forwardWithAnnotation } from "@/services/team-chat-forwards";
-import { denyUnless, jsonError, viewerOf } from "../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../_guard";
 
 const Body = z.object({
   sourceRoomId: z.string().min(1),
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
     const parsed = Body.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await forwardWithAnnotation(viewerOf(session), parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result, { status: 201 });
   });
 }

@@ -7,10 +7,14 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { getConversationLite } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/forward");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -175,8 +179,14 @@ export async function POST(request: Request, context: RouteContext) {
       try {
         const result = await metaClient.sendText(waTarget.to, content, waTarget.recipient);
         externalId = result.messages?.[0]?.id ?? null;
-        console.log(
-          `[meta-forward] channel=${targetConv.channelRef?.id ?? "ENV"} to=${waTarget.to ?? "—"}/${waTarget.recipient ?? "—"} wamid=${externalId}`,
+        log.info(
+          {
+            channel: targetConv.channelRef?.id ?? "ENV",
+            to: maskPhone(waTarget.to),
+            recipient: waTarget.recipient ?? null,
+            wamid: externalId,
+          },
+          "[meta-forward] enviado",
         );
         if (externalId) {
           await prisma.message.update({
@@ -217,7 +227,7 @@ export async function POST(request: Request, context: RouteContext) {
       }).catch(() => {});
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: targetConv.organizationId,
           conversationId: targetConversationId,
           contactId: targetConv.contactId,
@@ -231,10 +241,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       cancelPendingForConversation(targetConversationId, "agent_reply").catch(
         (err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos encaminhamento:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos encaminhamento"),
       );
 
       return NextResponse.json(
@@ -252,7 +259,7 @@ export async function POST(request: Request, context: RouteContext) {
         { status: 201 }
       );
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao encaminhar." },
         { status: 500 }

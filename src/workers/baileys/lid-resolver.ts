@@ -12,6 +12,10 @@
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.lid-resolver");
 
 const channelMaps = new Map<string, Map<string, string>>();
 
@@ -36,7 +40,7 @@ export function registerLidMapping(
     map.set(lid, phone);
 
     persistMapping(channelId, lid, phone).catch((e) =>
-      console.warn("[lid-resolver] persist error:", e),
+      log.warn({ err: e }, "[lid-resolver] persist error"),
     );
   }
 }
@@ -85,7 +89,7 @@ export async function loadPersistedMappings(channelId: string): Promise<number> 
     }
     return rows.length;
   } catch (e) {
-    console.warn("[lid-resolver] loadPersistedMappings error:", e);
+    log.warn({ err: e }, "[lid-resolver] loadPersistedMappings error");
     return 0;
   }
 }
@@ -139,8 +143,14 @@ export async function fixLidContacts(channelId: string): Promise<number> {
         });
 
         if (existing && existing.id !== c.id) {
-          console.info(
-            `[lid-resolver] contato ${c.id} com LID +${lid} já existe como ${existing.id} com +${phone} — merging conversations`,
+          log.info(
+            {
+              contactId: c.id,
+              lid: maskPhone(lid),
+              existingContactId: existing.id,
+              phone: maskPhone(phone),
+            },
+            "[lid-resolver] contato com LID já existe com o telefone — merging conversations",
           );
           await prisma.conversation.updateMany({
             where: { contactId: c.id },
@@ -158,11 +168,18 @@ export async function fixLidContacts(channelId: string): Promise<number> {
             data: { phone: correctPhone },
           });
           fixed++;
-          console.info(`[lid-resolver] corrigido contato ${c.id}: ${wrongPhone} → ${correctPhone}`);
+          log.info(
+            {
+              contactId: c.id,
+              wrongPhone: maskPhone(wrongPhone),
+              correctPhone: maskPhone(correctPhone),
+            },
+            "[lid-resolver] corrigido contato",
+          );
         }
       }
     } catch (e) {
-      console.warn(`[lid-resolver] fixLidContacts error for lid=${lid}:`, e);
+      log.warn({ lid: maskPhone(lid), err: e }, "[lid-resolver] fixLidContacts error");
     }
   }
   return fixed;

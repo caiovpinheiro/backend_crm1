@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getDashboardMetrics, type AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/dashboard");
 
 function parseOptionalPeriod(
   searchParams: URLSearchParams
@@ -40,7 +43,7 @@ export async function GET(request: Request) {
       const data = await getDashboardMetrics(period);
       return NextResponse.json(data);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar métricas do painel." },
         { status: 500 }

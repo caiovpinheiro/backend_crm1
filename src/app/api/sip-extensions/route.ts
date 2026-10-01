@@ -6,6 +6,9 @@ import {
   createOrUpdateExtension,
   listExtensions,
 } from "@/services/sip-extensions";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions");
 
 /**
  * GET /api/sip-extensions
@@ -24,7 +27,7 @@ export async function GET(request: Request) {
       const extensions = await listExtensions();
       return NextResponse.json({ extensions });
     } catch (e) {
-      console.error("[sip-extensions] GET:", e);
+      log.error({ err: e }, "[sip-extensions] GET falhou");
       return NextResponse.json(
         { message: "Erro ao listar ramais." },
         { status: 500 },
@@ -128,7 +131,14 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({ extension: ext }, { status: 201 });
     } catch (e) {
-      console.error("[sip-extensions] POST:", e);
+      const status = (e as { status?: number }).status;
+      if (status === 400) {
+        return NextResponse.json(
+          { message: e instanceof Error ? e.message : "Requisição inválida." },
+          { status: 400 },
+        );
+      }
+      log.error({ err: e }, "[sip-extensions] POST falhou");
       return NextResponse.json(
         { message: "Erro ao criar/atualizar ramal." },
         { status: 500 },

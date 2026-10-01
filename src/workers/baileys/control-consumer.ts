@@ -6,6 +6,9 @@ import {
   type BaileysControlPayload,
 } from "@/lib/queue";
 import type { BaileysManager } from "./baileys-manager";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.control-consumer");
 
 export function startControlConsumer(
   manager: BaileysManager,
@@ -17,7 +20,7 @@ export function startControlConsumer(
     BAILEYS_CONTROL_QUEUE_NAME,
     async (job: Job<BaileysControlPayload>) => {
       const { channelId, action } = job.data;
-      console.info(`[baileys-control] ${action} para canal ${channelId}`);
+      log.info({ action, channelId }, "[baileys-control] ação recebida");
 
       switch (action) {
         case "connect":
@@ -33,20 +36,20 @@ export function startControlConsumer(
           await manager.syncGroups(channelId);
           break;
         default:
-          console.warn(`[baileys-control] ação desconhecida: ${action}`);
+          log.warn({ action }, "[baileys-control] ação desconhecida");
       }
     },
     { connection },
   );
 
   worker.on("failed", (job, err) => {
-    console.error(`[baileys-control] job ${job?.id} falhou:`, err.message);
+    log.error({ jobId: job?.id, err: err.message }, "[baileys-control] job falhou");
   });
 
   worker.on("completed", (job) => {
-    console.info(`[baileys-control] job ${job.id} concluído`);
+    log.info({ jobId: job.id }, "[baileys-control] job concluído");
   });
 
-  console.info(`[baileys-control] ouvindo fila "${BAILEYS_CONTROL_QUEUE_NAME}"`);
+  log.info({ queue: BAILEYS_CONTROL_QUEUE_NAME }, "[baileys-control] ouvindo fila");
   return worker;
 }

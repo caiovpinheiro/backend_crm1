@@ -8,6 +8,9 @@
  */
 
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.ensure-schema");
 
 let checked = false;
 
@@ -74,7 +77,7 @@ export async function ensureV2AgentSchema(): Promise<void> {
     return;
   }
 
-  console.log("[ai-v2] schema guard: creating missing", needs.join(", "));
+  log.info({ needs: needs.join(", ") }, "[ai-v2] schema guard: creating missing");
 
   // Nomes iguais aos do schema.prisma (camelCase, sem @map). A versão
   // anterior criava "draft_config"/"version_number", que o Prisma não lê.

@@ -6,11 +6,11 @@
  * bancos da aplicacao. Serve como historico versionavel de performance
  * para consumo por IA (revisao de tendencia) e auditoria.
  *
- * Autenticacao: `Authorization: Bearer ${CRON_SECRET}` ou `?secret=`.
+ * Autenticacao: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
  * Como agendar (EasyPanel > Scheduled Service):
  *   Schedule: `0 * * * *` (a cada hora)
- *   Command:  curl -fsS "https://backend/api/cron/perf-snapshot?secret=$CRON_SECRET"
+ *   Command:  curl -fsS -H "Authorization: Bearer $CRON_SECRET" "https://backend/api/cron/perf-snapshot"
  *
  * Params opcionais:
  *   ?windowMinutes=60    janela de agregacao (default 60)
@@ -21,7 +21,11 @@ import { NextResponse } from "next/server";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { requireCronSecret } from "@/lib/auth/cron-secret";
 import { buildPerfReport, renderReportMarkdown } from "@/lib/perf/report";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/perf-snapshot");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,22 +40,10 @@ function envLabel(): string {
 
 export async function GET(request: Request) {
   try {
-    const expected = process.env.CRON_SECRET?.trim();
-    if (!expected) {
-      return NextResponse.json(
-        { ok: false, message: "CRON_SECRET nao configurado." },
-        { status: 503 },
-      );
-    }
+    const denied = requireCronSecret(request);
+    if (denied) return denied;
 
     const url = new URL(request.url);
-    const headerSecret = (request.headers.get("authorization") ?? "")
-      .replace(/^Bearer\s+/i, "")
-      .trim();
-    const provided = headerSecret || (url.searchParams.get("secret")?.trim() ?? "");
-    if (!provided || provided !== expected) {
-      return NextResponse.json({ ok: false, message: "Cron secret invalido." }, { status: 401 });
-    }
 
     const windowMinutes = clamp(Number(url.searchParams.get("windowMinutes") ?? "60"), 5, 720, 60);
     const keep = clamp(Number(url.searchParams.get("keep") ?? "168"), 1, 10_000, 168);
@@ -80,7 +72,7 @@ export async function GET(request: Request) {
       rotated,
     });
   } catch (e) {
-    console.error("[cron/perf-snapshot]", e);
+    log.error({ err: e }, "[cron/perf-snapshot] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no snapshot." },
       { status: 500 },

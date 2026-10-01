@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { denyUnless, jsonError } from "../_guard";
+import { denyUnless, isServiceError, jsonError } from "../_guard";
 import { ITEM_KINDS, PRIORITIES, createItem } from "@/services/demands";
 
 const CreateItem = z.object({
@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     const parsed = CreateItem.safeParse(body);
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await createItem(session.user.id, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.item, { status: 201 });
   });
 }

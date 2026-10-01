@@ -3,7 +3,7 @@
 // do Channel resolvido.
 import { prismaBase as prisma } from "@/lib/prisma-base";
 import { runWithContext, type RequestContext } from "@/lib/request-context";
-import { cache } from "@/lib/cache";
+import { webhookContextKey, wrapChannelLookup } from "@/lib/cache/keys";
 
 /**
  * Rotas de webhook (/api/webhooks/meta/*, /api/webhooks/baileys/*) nao
@@ -25,16 +25,16 @@ type WebhookCtxInput =
   | { by: "baileysSessionId"; value: string };
 
 // PR 5.1 — TTL de 5 min para resolucao de orgId/channelId. Mudancas
-// de canal (provider switch, phone change) sao raras e o helper de
-// invalidacao em services/channels.ts (`invalidateChannel`) eh chamado
-// imediatamente no caminho de update. TTL longo eh seguro.
+// de canal (provider switch, phone change) sao raras e a invalidacao em
+// services/channels.ts (`invalidateChannelLookups`, versao por org) eh
+// chamada imediatamente no caminho de update. TTL longo eh seguro.
 const RESOLVE_TTL_SEC = 300;
 
 export async function resolveOrgIdFromChannel(
   input: WebhookCtxInput,
 ): Promise<{ organizationId: string; channelId: string } | null> {
-  const cacheKey = `wh_ctx:${input.by}:${input.value}`;
-  return cache.wrap(cacheKey, RESOLVE_TTL_SEC, async () => {
+  const cacheKey = webhookContextKey(input.by, input.value);
+  return wrapChannelLookup(cacheKey, RESOLVE_TTL_SEC, async () => {
     if (input.by === "channelId") {
       const ch = await prisma.channel.findUnique({
         where: { id: input.value },

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { enqueueAutomation, getAutomationById } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]/run");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -133,7 +136,7 @@ export async function POST(request: Request, context: RouteContext) {
         automationName: automation.name,
       });
     } catch (e) {
-      console.error("[automations/run] erro:", e);
+      log.error({ err: e }, "[automations/run] erro");
       return NextResponse.json(
         { message: "Erro ao executar automacao." },
         { status: 500 },

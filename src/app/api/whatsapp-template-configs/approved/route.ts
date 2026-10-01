@@ -8,6 +8,9 @@ import {
 } from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/whatsapp-template-configs/approved");
 
 /**
  * Lista TODOS os templates APROVADOS da WABA da organização (via Graph), sem
@@ -168,7 +171,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json(out);
     } catch (e) {
-      console.error("[whatsapp-template-configs/approved]", e);
+      log.error({ err: e }, "[whatsapp-template-configs/approved] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar templates." },
         { status: 500 },

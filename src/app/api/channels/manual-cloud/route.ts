@@ -21,6 +21,9 @@ import {
   MetaProvisionError,
   provisionMetaCloudChannel,
 } from "@/services/channels-meta-provision";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/manual-cloud");
 
 export async function POST(request: Request) {
   return withOrgContext(async () => {
@@ -98,7 +101,7 @@ export async function POST(request: Request) {
       if (e instanceof MetaProvisionError) {
         return NextResponse.json({ message: e.message }, { status: e.status });
       }
-      console.error("Manual Cloud connect error:", e);
+      log.error({ err: e }, "Manual Cloud connect error");
       const msg =
         e instanceof Error ? e.message : "Erro ao conectar canal manual.";
       return NextResponse.json({ message: msg }, { status: 500 });

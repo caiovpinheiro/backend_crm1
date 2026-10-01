@@ -50,21 +50,25 @@
  *
  * ## Resiliencia
  *
- * ioredis multiplexa TODOS os GETs/SETs numa conexao so. `commandTimeout`
- * conta espera na fila: um GET grande (board ~500KB) atrasava authz/
- * inbox e disparava "Command timed out" em lote. Timeout envenena o
- * pipeline do ioredis (a resposta ainda chega). Por isso: timeout mais
- * folgado, `enableOfflineQueue: false`, reconnect no timeout, gzip em
- * payload grande, circuit breaker pra pular Redis uns segundos em vez
- * de pagar timeout em cada request.
+ * A conexao (timeouts, circuit breaker, db proprio via `REDIS_CACHE_URL`
+ * / `REDIS_CACHE_DB`) mora em `redis-client.ts`. Aqui: gzip em payload
+ * grande e fallback em memoria quando o Redis nao responde.
  */
-import { gzipSync, gunzipSync } from "node:zlib";
-
-import IORedis, { type Redis as IORedisClient } from "ioredis";
+import { promisify } from "node:util";
+import { gzip, gunzip } from "node:zlib";
 
 import { getLogger } from "@/lib/logger";
 import { metrics, safeLabel } from "@/lib/metrics";
-import { isRedisWritable, waitForRedisWritable } from "@/lib/redis-ready";
+
+import {
+  circuitIsOpen,
+  getCacheClient as getClient,
+  noteFailure,
+  noteSuccess,
+  waitUntilCacheReady,
+} from "./redis-client";
+
+export { waitUntilCacheReady };
 
 const log = getLogger("cache");
 
@@ -75,15 +79,24 @@ const LOCK_TTL_MS = 20_000;
 const STAMPEDE_RETRY_DELAY_MS = 150;
 const STAMPEDE_MAX_RETRIES = 50;
 
-const CONNECT_TIMEOUT_MS = 1_000;
-const COMMAND_TIMEOUT_MS = 2_000;
-const CIRCUIT_FAILURES_TO_OPEN = 5;
-const CIRCUIT_COOLDOWN_MS = 15_000;
-
 /** Prefixos ASCII que JSON.parse nunca aceita — valores gzipados. */
 const GZ_PREFIX = "gz1:";
 const GZ_MIN_BYTES = 8_192;
-const MAX_REDIS_VALUE_BYTES = 256_000;
+/**
+ * Teto do valor gzipado (antes do base64). Com 256 KB o board das orgs
+ * grandes nunca ia pro Redis e cada carga recalculava tudo. Acima disso
+ * o valor fica só no fallback em memória do processo.
+ */
+const MAX_REDIS_VALUE_BYTES = 1_000_000;
+
+/** gzip no threadpool do libuv — `gzipSync` travava a thread principal. */
+const gzipAsync = promisify(gzip);
+/**
+ * gunzip também no threadpool: o board chega a 1 MB gzipado (vários MB de
+ * JSON) e o `get` roda em cada carga — `gunzipSync` segurava a thread
+ * principal a cada hit, mais vezes que o `set`.
+ */
+const gunzipAsync = promisify(gunzip);
 
 /**
  * Libera o lock SÓ se o valor ainda é o token desta chamada
@@ -95,151 +108,21 @@ else
   return 0
 end`;
 
-let redis: IORedisClient | null = null;
-let redisDisabled = false;
-let consecutiveFailures = 0;
-let circuitOpenUntil = 0;
-let lastCircuitLogAt = 0;
-
-function circuitIsOpen(): boolean {
-  return Date.now() < circuitOpenUntil;
-}
-
-function isTimeoutError(err: unknown): boolean {
-  return err instanceof Error && /timed out/i.test(err.message);
-}
-
-function resetClient(): void {
-  if (!redis) return;
-  const client = redis;
-  redis = null;
-  try {
-    client.disconnect();
-  } catch {
-    /* best-effort */
-  }
-}
-
-function noteSuccess(): void {
-  consecutiveFailures = 0;
-}
-
-function noteFailure(err: unknown, key: string, op: string): void {
-  consecutiveFailures += 1;
-  if (isTimeoutError(err)) {
-    resetClient();
-  }
-  if (
-    consecutiveFailures === 1 ||
-    consecutiveFailures === CIRCUIT_FAILURES_TO_OPEN
-  ) {
-    log.warn({ err, key, op, consecutiveFailures }, `[cache] ${op} falhou — fallback memoria`);
-  }
-  if (consecutiveFailures >= CIRCUIT_FAILURES_TO_OPEN) {
-    circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
-    consecutiveFailures = 0;
-    resetClient();
-    log.warn(
-      { cooldownMs: CIRCUIT_COOLDOWN_MS, key, op },
-      "[cache] circuit aberto — Redis ignorado temporariamente",
-    );
-  }
-}
-
-function ensureClient(): IORedisClient | null {
-  if (redisDisabled) return null;
-  if (circuitIsOpen()) {
-    if (Date.now() - lastCircuitLogAt > 5_000) {
-      lastCircuitLogAt = Date.now();
-      log.warn(
-        { retryInMs: circuitOpenUntil - Date.now() },
-        "[cache] circuit aberto — usando memoria",
-      );
-    }
-    return null;
-  }
-  if (redis) {
-    const status = redis.status;
-    if (status === "end" || status === "close") {
-      resetClient();
-    } else {
-      return redis;
-    }
-  }
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    redisDisabled = true;
-    log.info("[cache] REDIS_URL ausente — usando fallback in-memory.");
-    return null;
-  }
-  try {
-    redis = new IORedis(url, {
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: false,
-      enableOfflineQueue: false,
-      connectTimeout: CONNECT_TIMEOUT_MS,
-      commandTimeout: COMMAND_TIMEOUT_MS,
-      keepAlive: 10_000,
-      // ioredis 5 manda CLIENT SETINFO no handshake; conexoes presas nisso
-      // ficaram 19h idle em prod e nunca ficaram ready.
-      disableClientInfo: true,
-      lazyConnect: false,
-      retryStrategy(times) {
-        if (circuitIsOpen()) return null;
-        return Math.min(times * 200, 2_000);
-      },
-    });
-    redis.on("error", (err) => {
-      if (Date.now() - lastCircuitLogAt > 5_000) {
-        lastCircuitLogAt = Date.now();
-        log.warn({ err }, "[cache] redis client error (continuando com fallback)");
-      }
-      if (isTimeoutError(err)) resetClient();
-    });
-    return redis;
-  } catch (err) {
-    log.warn({ err }, "[cache] falha ao criar redis client — fallback");
-    redisDisabled = true;
-    return null;
-  }
-}
-
-/**
- * Cliente só quando o socket já aceita comando. Com
- * `enableOfflineQueue: false`, GET/SET em `connecting` vira
- * "Stream isn't writeable" e o circuit abre no boot do worker.
- */
-function getClient(): IORedisClient | null {
-  const client = ensureClient();
-  if (!client) return null;
-  if (!isRedisWritable(client)) return null;
-  return client;
-}
-
-/** Workers: espera o Redis do cache ficar ready antes do 1º job. */
-export async function waitUntilCacheReady(
-  timeoutMs = 8_000,
-): Promise<boolean> {
-  const client = ensureClient();
-  if (!client) return false;
-  return waitForRedisWritable(client, timeoutMs);
-}
-
-function encode(value: unknown): string | null {
+async function encode(value: unknown): Promise<string | null> {
   const json = JSON.stringify(value);
   const jsonBytes = Buffer.byteLength(json, "utf8");
   if (jsonBytes < GZ_MIN_BYTES) return json;
-  const gz = gzipSync(Buffer.from(json, "utf8"), { level: 6 });
+  const gz = await gzipAsync(Buffer.from(json, "utf8"), { level: 6 });
   if (gz.length >= MAX_REDIS_VALUE_BYTES) {
     return null;
   }
   return GZ_PREFIX + gz.toString("base64");
 }
 
-function decode<T>(raw: string): T {
+async function decode<T>(raw: string): Promise<T> {
   if (raw.startsWith(GZ_PREFIX)) {
-    const json = gunzipSync(
-      Buffer.from(raw.slice(GZ_PREFIX.length), "base64"),
+    const json = (
+      await gunzipAsync(Buffer.from(raw.slice(GZ_PREFIX.length), "base64"))
     ).toString("utf8");
     return JSON.parse(json) as T;
   }
@@ -250,7 +133,12 @@ function decode<T>(raw: string): T {
 //
 // Map<key, { value, expiresAt }>. Sem LRU — limite simples por count
 // pra evitar leak em dev/test. Em prod com Redis saudavel, este Map
-// so e usado quando o circuit abre.
+// guarda o que o Redis não levou (payload acima do teto ou SET que
+// falhou) e é lido quando o Redis não tem a chave ou o circuit abre.
+// Vale por processo: um `del` feito em outro processo não limpa este Map,
+// e o TTL é o limite do stale. Família com versão (ver `versions.ts`) segue
+// a mesma regra aqui: a versão vai na chave, então o valor antigo deixa de
+// ser lido assim que este processo enxerga a versão nova.
 
 const MEMORY_MAX_ENTRIES = 1_000;
 const memoryStore = new Map<string, { value: unknown; expiresAt: number }>();
@@ -282,11 +170,33 @@ function memoryDel(key: string): void {
 
 export type CacheKey = string;
 
-export interface CacheOptions {
+export interface CacheOptions<T = unknown> {
   /** TTL em segundos. Default 60s. */
   ttlSec?: number;
   /** Pular cache (forca loader). Util pra debug. */
   skipCache?: boolean;
+  /**
+   * O valor em cache só vale se passar aqui; recusado conta como miss e o
+   * loader roda de novo. Para valores que carregam o próprio carimbo de
+   * validade (versão conferida depois da leitura).
+   */
+  accept?: (value: T) => boolean | Promise<boolean>;
+}
+
+type Accept<T> = CacheOptions<T>["accept"];
+
+/** `get` que trata valor recusado por `accept` como miss. */
+async function getAccepted<T>(
+  key: CacheKey,
+  accept: Accept<T>,
+): Promise<T | undefined> {
+  const value = await get<T>(key);
+  if (value === undefined || !accept) return value;
+  try {
+    return (await accept(value)) ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -302,12 +212,18 @@ export async function get<T>(key: CacheKey): Promise<T | undefined> {
     const raw = await client.get(fullKey);
     noteSuccess();
     if (!raw) {
+      // O `set` guarda aqui o que não coube no Redis (board grande).
+      const local = memoryGet<T>(fullKey);
+      if (local !== undefined) {
+        metrics.cacheHits?.inc({ key: safeLabel(key.split(":")[0]) });
+        return local;
+      }
       metrics.cacheMisses?.inc({ key: safeLabel(key.split(":")[0]) });
       return undefined;
     }
     metrics.cacheHits?.inc({ key: safeLabel(key.split(":")[0]) });
     try {
-      return decode<T>(raw);
+      return await decode<T>(raw);
     } catch (parseErr) {
       log.warn({ err: parseErr, key }, "[cache] decode falhou — tratando como miss");
       metrics.cacheMisses?.inc({ key: safeLabel(key.split(":")[0]) });
@@ -333,7 +249,7 @@ export async function set<T>(
     memorySet(fullKey, value, ttlSec);
     return;
   }
-  const payload = encode(value);
+  const payload = await encode(value);
   if (payload === null) {
     log.warn(
       { key, maxBytes: MAX_REDIS_VALUE_BYTES },
@@ -345,6 +261,8 @@ export async function set<T>(
   try {
     await client.set(fullKey, payload, "EX", ttlSec);
     noteSuccess();
+    // Cópia local antiga não pode responder quando esta chave sair do Redis.
+    memoryDel(fullKey);
   } catch (err) {
     noteFailure(err, key, "set");
     memorySet(fullKey, value, ttlSec);
@@ -370,9 +288,15 @@ export async function del(...keys: CacheKey[]): Promise<void> {
 }
 
 /**
- * Apaga todas as chaves matching um padrao (ex.: `channel:*`). USAR
- * COM CUIDADO — em prod com 1M+ chaves, `KEYS` trava o Redis. Aqui
- * usamos `SCAN` em batch.
+ * Apaga todas as chaves matching um padrao (ex.: `channel:*`).
+ *
+ * SÓ PARA USO ADMINISTRATIVO (script, manutenção). O `SCAN` percorre o
+ * keyspace inteiro do db — o custo é o total de chaves, não as que casam —
+ * e o `MATCH` é sempre restrito ao prefixo do cache (`cache:<padrao>`).
+ * Nenhum caminho da aplicação chama isto: invalidação de família é por
+ * versão (`bumpCacheVersion`, um INCR — ver `versions.ts` e `keys.ts`).
+ * Não inclui as versões (`cache:v:*`) de propósito: apagar uma versão
+ * equivale a invalidar a família, use o bump.
  */
 export async function delPattern(pattern: string): Promise<number> {
   const fullPattern = KEY_PREFIX + pattern;
@@ -428,19 +352,29 @@ export async function wrap<T>(
   key: CacheKey,
   ttlSec: number,
   loader: () => Promise<T>,
-  options: CacheOptions = {},
+  options: CacheOptions<T> = {},
 ): Promise<T> {
   if (options.skipCache) {
     return loader();
   }
 
-  const cached = await get<T>(key);
+  const cached = await getAccepted<T>(key, options.accept);
   if (cached !== undefined) return cached;
 
+  return loadShared(key, ttlSec, loader, options.accept);
+}
+
+/** Miss: um loader por chave neste processo (singleflight) + lock Redis. */
+function loadShared<T>(
+  key: CacheKey,
+  ttlSec: number,
+  loader: () => Promise<T>,
+  accept: Accept<T>,
+): Promise<T> {
   const existing = inflight.get(key);
   if (existing) return existing as Promise<T>;
 
-  const pending = loadAndStore(key, ttlSec, loader).finally(() => {
+  const pending = loadAndStore(key, ttlSec, loader, accept).finally(() => {
     inflight.delete(key);
   });
   inflight.set(key, pending);
@@ -451,6 +385,7 @@ async function loadAndStore<T>(
   key: CacheKey,
   ttlSec: number,
   loader: () => Promise<T>,
+  accept: Accept<T>,
 ): Promise<T> {
   const lockKey = LOCK_PREFIX + key;
   const client = getClient();
@@ -460,9 +395,7 @@ async function loadAndStore<T>(
     // for NOSSO (compare-and-delete via Lua). Sem isso, um loader lento
     // (> LOCK_TTL_MS) tinha o lock expirado, outro request adquiria, e o
     // primeiro liberava o lock do segundo — dois loaders concorrentes.
-    const lockToken = `${process.pid}:${Date.now()}:${Math.random()
-      .toString(36)
-      .slice(2)}`;
+    const lockToken = newLockToken();
     let acquired = false;
     let lockUnavailable = false;
     try {
@@ -480,7 +413,7 @@ async function loadAndStore<T>(
       for (let i = 0; i < STAMPEDE_MAX_RETRIES; i++) {
         await new Promise((r) => setTimeout(r, STAMPEDE_RETRY_DELAY_MS));
         if (circuitIsOpen()) break;
-        const retry = await get<T>(key);
+        const retry = await getAccepted<T>(key, accept);
         if (retry !== undefined) return retry;
         try {
           const again = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
@@ -495,7 +428,7 @@ async function loadAndStore<T>(
         }
       }
       if (!acquired) {
-        const late = await get<T>(key);
+        const late = await getAccepted<T>(key, accept);
         if (late !== undefined) return late;
         // Degrada em vez de estourar 500: chama o loader direto (sem
         // lock). Pior caso = alguns loaders concorrentes pontuais, que é
@@ -526,11 +459,169 @@ async function loadAndStore<T>(
   return value;
 }
 
+function newLockToken(): string {
+  return `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
+// ── Stale-while-revalidate ─────────────────────────────────────────
+//
+// `wrap` bloqueia a requisição que chega depois do TTL até o loader
+// terminar. Para leituras caras em que um número um pouco velho é aceito
+// (contadores das abas do inbox), `wrapSwr` devolve o valor vencido na
+// hora e recalcula em segundo plano:
+//
+//   idade < ttlSec                → fresco, devolve.
+//   ttlSec ≤ idade < ttl + stale  → devolve o vencido e dispara UMA
+//                                   revalidação por chave (singleflight no
+//                                   processo + lock Redis entre réplicas).
+//   ausente ou idade ≥ ttl+stale  → bloqueia e recalcula, como o `wrap`.
+//
+// Teto de staleness = ttlSec + staleSec: é o TTL da chave no Redis (e no
+// fallback em memória), então valor mais velho que isso nem existe mais.
+// O valor é guardado num envelope `{ swr: 1, at, v }` — não ler a mesma
+// chave com `get`/`wrap` (use `peekSwr`).
+
+export interface SwrOptions {
+  /** Segundos em que o valor é servido como fresco. */
+  ttlSec: number;
+  /** Segundos a mais em que o vencido ainda é servido enquanto revalida. */
+  staleSec: number;
+}
+
+type SwrEnvelope<T> = { swr: 1; at: number; v: T };
+
+function isSwrEnvelope<T>(value: unknown): value is SwrEnvelope<T> {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return rec.swr === 1 && typeof rec.at === "number" && "v" in rec;
+}
+
+/** Depois de revalidação que falhou: não tentar de novo antes disso. */
+const SWR_FAILURE_BACKOFF_MS = 5_000;
+/** Outra réplica está com o lock: não disputar de novo antes disso. */
+const SWR_LOCK_BUSY_BACKOFF_MS = 1_000;
+
+const swrRevalidating = new Map<string, Promise<void>>();
+const swrRetryAfter = new Map<string, number>();
+
+function swrBackoff(key: CacheKey, ms: number): void {
+  if (!swrRetryAfter.has(key) && swrRetryAfter.size >= MEMORY_MAX_ENTRIES) {
+    const oldest = swrRetryAfter.keys().next().value;
+    if (oldest !== undefined) swrRetryAfter.delete(oldest);
+  }
+  swrRetryAfter.set(key, Date.now() + ms);
+}
+
+/**
+ * Cache-aside com stale-while-revalidate. Mesma assinatura de `wrap`, com
+ * `{ ttlSec, staleSec }` no lugar do TTL.
+ */
+export async function wrapSwr<T>(
+  key: CacheKey,
+  options: SwrOptions,
+  loader: () => Promise<T>,
+): Promise<T> {
+  const freshMs = options.ttlSec * 1000;
+  const hardTtlSec = options.ttlSec + options.staleSec;
+  const load = async (): Promise<SwrEnvelope<T>> => {
+    const v = await loader();
+    return { swr: 1, at: Date.now(), v };
+  };
+
+  const cached = await get<SwrEnvelope<T>>(key);
+  if (isSwrEnvelope<T>(cached)) {
+    const age = Date.now() - cached.at;
+    if (age < freshMs) return cached.v;
+    if (age < hardTtlSec * 1000) {
+      revalidateInBackground(key, hardTtlSec, load);
+      return cached.v;
+    }
+  }
+
+  const stored = await loadShared<SwrEnvelope<T>>(
+    key,
+    hardTtlSec,
+    load,
+    // Enquanto espera o lock de outra réplica, só serve o que ela gravou.
+    (value) => isSwrEnvelope<T>(value) && Date.now() - value.at < freshMs,
+  );
+  return stored.v;
+}
+
+/** Lê o valor de uma chave `wrapSwr` (fresco ou vencido) sem recalcular. */
+export async function peekSwr<T>(key: CacheKey): Promise<T | undefined> {
+  const cached = await get<SwrEnvelope<T>>(key);
+  return isSwrEnvelope<T>(cached) ? cached.v : undefined;
+}
+
+/** Fire-and-forget: nunca lança nem segura quem chamou. */
+function revalidateInBackground<T>(
+  key: CacheKey,
+  hardTtlSec: number,
+  load: () => Promise<SwrEnvelope<T>>,
+): void {
+  if (swrRevalidating.has(key)) return;
+  const retryAfter = swrRetryAfter.get(key);
+  if (retryAfter !== undefined) {
+    if (Date.now() < retryAfter) return;
+    swrRetryAfter.delete(key);
+  }
+  const run = revalidate(key, hardTtlSec, load)
+    .catch((err) => {
+      // O valor vencido continua sendo servido até o teto.
+      log.warn({ err, key }, "[cache] revalidação em segundo plano falhou");
+      swrBackoff(key, SWR_FAILURE_BACKOFF_MS);
+    })
+    .finally(() => {
+      swrRevalidating.delete(key);
+    });
+  swrRevalidating.set(key, run);
+}
+
+async function revalidate<T>(
+  key: CacheKey,
+  hardTtlSec: number,
+  load: () => Promise<SwrEnvelope<T>>,
+): Promise<void> {
+  const lockKey = LOCK_PREFIX + key;
+  const lockToken = newLockToken();
+  const client = getClient();
+  let acquired = false;
+  if (client) {
+    try {
+      const reply = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
+      noteSuccess();
+      acquired = reply === "OK";
+      if (!acquired) {
+        // Outra réplica já está recalculando esta chave.
+        swrBackoff(key, SWR_LOCK_BUSY_BACKOFF_MS);
+        return;
+      }
+    } catch (err) {
+      // Sem lock: o singleflight deste processo basta.
+      noteFailure(err, key, "lock");
+    }
+  }
+  try {
+    await set(key, await load(), hardTtlSec);
+  } finally {
+    if (acquired && client) {
+      client
+        .eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockToken)
+        .catch(() => undefined);
+    }
+  }
+}
+
 function matchesGlob(input: string, pattern: string): boolean {
-  // Glob simplificado: `*` -> `.*`, escapa o resto.
+  // Glob simplificado (mesma semântica do MATCH do Redis): `*` -> `.*`,
+  // `?` -> um caractere, escapa o resto.
   const re = new RegExp(
     "^" +
-      pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") +
+      pattern
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".") +
       "$",
   );
   return re.test(input);
@@ -542,6 +633,8 @@ export const cache = {
   del,
   delPattern,
   wrap,
+  wrapSwr,
+  peekSwr,
   tryClaim,
   waitUntilReady: waitUntilCacheReady,
 };

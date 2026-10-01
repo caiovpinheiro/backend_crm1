@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { restoreV2AgentVersionToDraft } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/versions/[version]/restore");
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string; version: string }> }) {
   const { id, version } = await params;
@@ -21,7 +24,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Erro ao restaurar a versão.";
-    console.error("[POST /api/ai-agents-v2/[id]/versions/[version]/restore]", err);
+    log.error({ err }, "[POST /api/ai-agents-v2/[id]/versions/[version]/restore]");
     return NextResponse.json({ message }, { status: message === "Versão não encontrada." ? 404 : 500 });
   }
 }

@@ -19,12 +19,16 @@ import {
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
+import { getLogger } from "@/lib/logger";
+
 import { executeDistribution } from "./engine";
 import { isDistributionEnabled } from "./enabled";
 import {
   ensureConversationInWaitingQueue,
   isDistributionAutoOnInbound,
 } from "./pending-shared";
+
+const log = getLogger("distribution.pending-inbound");
 
 /** Pendência criada pelo passo, pela IA ou por redistribuição manual. */
 function pendingWasRequested(triggerSource: string | null | undefined): boolean {
@@ -250,7 +254,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       if ((dept as { distributionMode?: string } | null)?.distributionMode === "leads") return;
     }
   } catch (e) {
-    console.warn("[distribution] leads inbound guard skipped (migration drift?)", e);
+    log.warn({ err: e }, "[distribution] leads inbound guard skipped (migration drift?)");
   }
 
   // #region agent log
@@ -282,7 +286,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
   } catch (e) {
-    console.error("[distribution] keepHumanAfterAutomationClose failed", e);
+    log.error({ err: e }, "[distribution] keepHumanAfterAutomationClose failed");
   }
 
   // Herança de contato/deal NÃO pode burlar elegibilidade: offline /
@@ -303,10 +307,7 @@ export async function maybeDistributeNewInboundTicket(input: {
             contactId: input.contactId,
           });
         } catch (e) {
-          console.error(
-            "[distribution] clearOwnershipForRedistribution failed",
-            e,
-          );
+          log.error({ err: e }, "[distribution] clearOwnershipForRedistribution failed");
           return;
         }
         assignee = null;
@@ -401,10 +402,7 @@ export async function maybeDistributeNewInboundTicket(input: {
               contactId: input.contactId,
             });
           } catch (e) {
-            console.error(
-              "[distribution] clearOwnershipForRedistribution failed",
-              e,
-            );
+            log.error({ err: e }, "[distribution] clearOwnershipForRedistribution failed");
             return;
           }
           assignee = null;
@@ -445,10 +443,7 @@ export async function maybeDistributeNewInboundTicket(input: {
           contactId: input.contactId,
         });
       } catch (e) {
-        console.error(
-          "[distribution] clearOwnershipForRedistribution failed",
-          e,
-        );
+        log.error({ err: e }, "[distribution] clearOwnershipForRedistribution failed");
         return;
       }
         assignee = null;
@@ -487,7 +482,7 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
   } catch (e) {
-    console.error("[ai] tryAssignFirstAttendanceAi failed", e);
+    log.error({ err: e }, "[ai] tryAssignFirstAttendanceAi failed");
   }
 
   try {
@@ -603,7 +598,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     );
     // #endregion
   } catch (e) {
-    console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
+    log.error({ err: e }, "[distribution] maybeDistributeNewInboundTicket failed");
     // #region agent log
     debugWarn(
       "[DBG-e46688 maybeDist] threw",

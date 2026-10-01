@@ -29,6 +29,9 @@ import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { applyConfirmationIdentity, confirmationIdentityValues, renderMessage, defaultFormatter, buildVariableMap } from "@/lib/ai-v2/message-render";
 import { fieldMasks } from "@/lib/ai-v2/field-mask";
 import { getRequestContext, enterRequestContext } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.test-turn");
 
 export type V2TestTurnHistoryItem = { role: "user" | "assistant"; content: string };
 
@@ -520,7 +523,7 @@ export async function simulateV2Turn(
     llmResult = await callV2LLMTest(agentId, config, userMessage, history, context, themeId, effectiveStage === "idle" ? "active" : effectiveStage, { humanRequestWithQuestion });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn("[simulateV2Turn] LLM failed:", msg);
+    log.warn({ err: msg }, "[simulateV2Turn] LLM failed");
     noteV2Fact("handoffCause", "error", { keepFirst: true });
     llmResult = {
       output: {

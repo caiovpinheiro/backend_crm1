@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { DraftConflictError, saveV2AgentDraft } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/draft");
 
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -24,7 +27,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     if (err instanceof DraftConflictError) {
       return NextResponse.json({ message: err.message, code: err.code, draftVersion: err.draftVersion }, { status: 409 });
     }
-    console.error("[PUT /api/ai-agents-v2/[id]/draft]", err);
+    log.error({ err }, "[PUT /api/ai-agents-v2/[id]/draft]");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao salvar rascunho." },
       { status: 500 },

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getTabulationAnalytics } from "@/services/tabulation-analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/tabulations");
 
 function parseDate(raw: string | null): Date | null {
   if (!raw) return null;
@@ -71,7 +74,7 @@ export async function GET(request: Request) {
       });
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[analytics/tabulations]", e);
+      log.error({ err: e }, "[analytics/tabulations] falhou");
       // Rota restrita a gestor/admin: devolve a causa junto. Sem isso, a única
       // pista fica no log do container, e o painel some sem dizer por quê.
       return NextResponse.json(

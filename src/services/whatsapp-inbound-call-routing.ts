@@ -2,7 +2,10 @@ import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("whatsapp-inbound-call-routing");
 
 /** Auto-resposta quando a ligação de entrada não tem consultor humano responsável. */
 export const INBOUND_CALL_NO_AGENT_MESSAGE =
@@ -52,7 +55,7 @@ export async function rejectInboundCallWithoutAgent(params: {
     },
   });
   if (!conv?.channelRef || conv.channelRef.provider !== "META_CLOUD_API") {
-    console.warn("[inbound-call-routing] Canal não Meta — recusa automática omitida.");
+    log.warn("[inbound-call-routing] Canal não Meta — recusa automática omitida.");
     return;
   }
 
@@ -60,18 +63,18 @@ export async function rejectInboundCallWithoutAgent(params: {
     conv.channelRef.config as Record<string, unknown> | null | undefined,
   );
   if (!metaClient.configured) {
-    console.warn("[inbound-call-routing] Meta não configurado — recusa automática omitida.");
+    log.warn("[inbound-call-routing] Meta não configurado — recusa automática omitida.");
     return;
   }
 
   try {
     await metaClient.rejectCall(params.callId);
   } catch (e) {
-    console.warn("[inbound-call-routing] rejectCall falhou, tentando terminate:", e);
+    log.warn({ err: e }, "[inbound-call-routing] rejectCall falhou, tentando terminate");
     try {
       await metaClient.terminateCall(params.callId);
     } catch (e2) {
-      console.warn("[inbound-call-routing] terminateCall também falhou:", e2);
+      log.warn({ err: e2 }, "[inbound-call-routing] terminateCall também falhou");
     }
   }
 
@@ -108,7 +111,7 @@ export async function rejectInboundCallWithoutAgent(params: {
     .catch(() => {});
 
   if (!sendResult.failed && params.organizationId) {
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: params.organizationId,
       conversationId: params.conversationId,
       contactId: params.contactId,

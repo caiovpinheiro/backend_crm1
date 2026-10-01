@@ -9,6 +9,9 @@ import {
   normalizeHoursBeforeExpiry,
   WHATSAPP_SESSION_WINDOW_MS,
 } from "@/services/whatsapp-session-expiry";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("whatsapp-session-expiry-sweeper");
 
 const INTERVAL_MS =
   Number(process.env.AUTOMATION_SESSION_EXPIRY_INTERVAL_MS) || 60_000;
@@ -38,9 +41,9 @@ export function startWhatsappSessionExpirySweeper(): void {
 
   const tick = () => {
     void sweepWhatsappSessionExpiryTriggers().catch((error) => {
-      console.warn(
-        "[whatsapp-session-expiry] tick falhou:",
-        error instanceof Error ? error.message : error,
+      log.warn(
+        { err: error instanceof Error ? error.message : error },
+        "[whatsapp-session-expiry] tick falhou",
       );
     });
   };
@@ -48,7 +51,7 @@ export function startWhatsappSessionExpirySweeper(): void {
     tick();
     setInterval(tick, INTERVAL_MS);
   }, 20_000);
-  console.info(`[whatsapp-session-expiry] sweeper iniciado (tick=${INTERVAL_MS}ms)`);
+  log.info({ tickMs: INTERVAL_MS }, "[whatsapp-session-expiry] sweeper iniciado");
 }
 
 export async function sweepWhatsappSessionExpiryTriggers(
@@ -88,9 +91,19 @@ export async function sweepWhatsappSessionExpiryTriggers(
   const newestInbound = new Date(
     oldestInbound.getTime() + maxHours * 60 * 60 * 1000,
   );
+  const organizationIds = [...new Set(configured.map((a) => a.organizationId))];
 
   // A sessão atual do produto é por contato + tipo de canal, atravessando
   // tickets. O LATERAL escolhe o ticket Meta mais recente para o contexto.
+  //
+  // Só as orgs com automação configurada entram, e o corte inferior fica no
+  // WHERE (índice `messages(createdAt)`): antes ele estava só no HAVING e o
+  // Postgres agregava todas as mensagens de entrada de todas as orgs a cada
+  // minuto. Filtrar `m."createdAt" > oldest` antes do GROUP BY dá o mesmo
+  // resultado — o MAX de um grupo é > oldest exatamente quando o grupo tem
+  // alguma linha > oldest, e nesse caso o MAX das linhas filtradas é o
+  // mesmo MAX. O corte superior continua no HAVING: filtrá-lo no WHERE
+  // esconderia um inbound mais novo e faria a sessão parecer expirável.
   const candidates = await prismaBase.$queryRaw<SessionCandidate[]>(Prisma.sql`
     WITH sessions AS (
       SELECT
@@ -102,11 +115,12 @@ export async function sweepWhatsappSessionExpiryTriggers(
       JOIN "messages" m
         ON m."conversationId" = c."id"
        AND m."direction" = 'in'
-      WHERE c."contactId" IS NOT NULL
+       AND m."createdAt" > ${oldestInbound}
+      WHERE c."organizationId" IN (${Prisma.join(organizationIds)})
+        AND c."contactId" IS NOT NULL
         AND LOWER(c."channel") IN ('whatsapp', 'whatsapp_meta', 'meta_whatsapp')
       GROUP BY c."organizationId", c."contactId", c."channel"
-      HAVING MAX(m."createdAt") > ${oldestInbound}
-         AND MAX(m."createdAt") <= ${newestInbound}
+      HAVING MAX(m."createdAt") <= ${newestInbound}
     )
     SELECT
       s."organizationId",

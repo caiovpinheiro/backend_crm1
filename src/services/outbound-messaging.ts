@@ -29,7 +29,7 @@ import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { isBaileysChannel, sendWhatsAppText } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishOutboundNewMessage } from "@/lib/realtime-events";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
@@ -39,6 +39,9 @@ import { createConversationEvent } from "@/services/conversation-events";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("outbound-messaging");
 
 export type OutboundActor = {
   id: string;
@@ -163,25 +166,6 @@ function ensureChannelConnected(
   };
 }
 
-function publishNewMessage(
-  conv: Pick<ConversationLite, "id" | "organizationId" | "contactId">,
-  content: string,
-  timestamp: Date,
-): void {
-  try {
-    sseBus.publish("new_message", {
-      organizationId: conv.organizationId,
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      direction: "out",
-      content,
-      timestamp,
-    });
-  } catch {
-    // best-effort: nunca derruba o envio por falha de SSE
-  }
-}
-
 // ── Nota interna ─────────────────────────────
 
 /**
@@ -254,7 +238,7 @@ export async function createInternalNoteOnConversation(args: {
     });
   })();
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
 
   return {
     ok: true,
@@ -409,7 +393,7 @@ export async function sendTextToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -609,7 +593,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar botões pelo WhatsApp.";
-    console.error("[meta-send-interactive]", e);
+    log.error({ err: e }, "[meta-send-interactive] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -645,7 +629,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -917,7 +901,7 @@ export async function sendInteractiveListToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar lista pelo WhatsApp.";
-    console.error("[meta-send-list]", e);
+    log.error({ err: e }, "[meta-send-list] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -954,7 +938,7 @@ export async function sendInteractiveListToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -1137,7 +1121,7 @@ export async function sendFlowToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar formulário pelo WhatsApp.";
-    console.error("[meta-send-flow]", e);
+    log.error({ err: e }, "[meta-send-flow] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -1174,7 +1158,7 @@ export async function sendFlowToConversation(args: {
     });
   }
 
-  publishNewMessage(conv, displayContent, saved.createdAt);
+  publishOutboundNewMessage(conv, displayContent, saved.createdAt);
   await afterOutboundSideEffects(
     conv,
     args.actor.id,
@@ -1423,7 +1407,7 @@ export async function sendTemplateToConversation(
     // colunas opcionais em bases antigas
   }
 
-  publishNewMessage(conv, content, saved.createdAt);
+  publishOutboundNewMessage(conv, content, saved.createdAt);
 
   const priorPublic = await prisma.message.count({
     where: {
@@ -1452,11 +1436,11 @@ export async function sendTemplateToConversation(
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after outbound:", err);
+      log.warn({ err }, "[automation] cancel after outbound");
     }
   }
   cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio"),
   );
 
   const outboundPayload = {
@@ -1487,7 +1471,7 @@ export async function sendTemplateToConversation(
   let sendErrorMsg: string | undefined;
   if (!job) {
     const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-    console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+    log.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
     await prisma.message
       .updateMany({
         where: { id: saved.id, sendStatus: "pending" },
@@ -1535,7 +1519,7 @@ async function afterOutboundSideEffects(
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after outbound:", err);
+      log.warn({ err }, "[automation] cancel after outbound");
     }
   }
   const channelId = outboundChannelId || conv.channelId || null;
@@ -1547,8 +1531,8 @@ async function afterOutboundSideEffects(
       conversationId: conv.id,
       content,
     }),
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
   cancelPendingForConversation(conv.id, "agent_reply", actorId).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio"),
   );
 }

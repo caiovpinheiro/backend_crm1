@@ -1,4 +1,7 @@
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auth.lockout");
 
 /**
  * Lock-out exponencial pra brute-force protection (PR 4.1).
@@ -37,11 +40,20 @@ const SOFT_LOCK_START_AT = 5;
  * de credencial. Contar `locked` fazia o hard-lock de 24h se
  * auto-renovar a cada retry do usuario, e nem o reset de senha do
  * admin destravava (o admin nao limpa login_attempts).
+ * `email_unverified` CONTA — senha correta, e-mail nao confirmado. Para o
+ * cliente esse caso e identico a senha errada (mesmo codigo generico), e
+ * o bloqueio tem que acompanhar: se nao contasse, "nunca bloqueia" viraria
+ * o sinal de que a senha esta certa. Confirmar o e-mail limpa as falhas
+ * (`confirmEmailVerification` -> `clearLoginLockout`).
+ *
+ * O lockout e por E-MAIL DIGITADO, exista a conta ou nao (`no_user`
+ * conta): `account_locked` nao distingue conta real de e-mail inventado.
  */
 const FAILURE_OUTCOMES = new Set([
   "bad_password",
   "bad_mfa",
   "no_user",
+  "email_unverified",
 ]);
 
 export type LoginOutcome =
@@ -50,6 +62,7 @@ export type LoginOutcome =
   | "bad_password"
   | "bad_mfa"
   | "no_user"
+  | "email_unverified"
   | "locked"
   | "db_error";
 
@@ -181,7 +194,7 @@ export async function recordLoginAttempt(
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] recordLoginAttempt failed", err);
+    log.error({ err }, "[auth/lockout] recordLoginAttempt failed");
   }
 }
 
@@ -200,7 +213,7 @@ export async function clearFailuresOnSuccess(email: string): Promise<void> {
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] clearFailuresOnSuccess failed", err);
+    log.error({ err }, "[auth/lockout] clearFailuresOnSuccess failed");
   }
 }
 
@@ -223,6 +236,6 @@ export async function clearLoginLockout(email: string): Promise<void> {
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] clearLoginLockout failed", err);
+    log.error({ err }, "[auth/lockout] clearLoginLockout failed");
   }
 }

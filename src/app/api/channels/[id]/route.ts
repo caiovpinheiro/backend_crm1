@@ -5,6 +5,9 @@ import { auth } from "@/lib/auth";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { enqueueBaileysControl } from "@/lib/queue";
 import { deleteChannel, getChannelById, updateChannel } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -43,7 +46,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
     return NextResponse.json({ channel });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao carregar canal.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }
@@ -133,7 +136,7 @@ export async function PUT(request: Request, context: RouteContext) {
     const channel = await updateChannel(id, patch);
     return NextResponse.json({ channel });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     const msg = e instanceof Error ? e.message : "Erro ao atualizar canal.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }
@@ -171,7 +174,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       throw err;
     }
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     const msg = e instanceof Error ? e.message : "Erro ao excluir canal.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

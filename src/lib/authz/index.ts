@@ -35,7 +35,13 @@
 import { NextResponse } from "next/server";
 import { UserRole, type UserRole as UserRoleEnum } from "@prisma/client";
 
+import { invalidateJwtRefreshCache } from "@/lib/auth/jwt-refresh-cache";
 import { cache } from "@/lib/cache";
+import {
+  bumpCacheVersion,
+  cacheVersionName,
+  getCacheVersion,
+} from "@/lib/cache/versions";
 import { getLogger } from "@/lib/logger";
 import { prismaBase } from "@/lib/prisma-base";
 
@@ -44,10 +50,12 @@ import { PRESET_PERMISSIONS } from "./presets";
 
 const log = getLogger("authz");
 
-// Chave namespaced por org (`authz:<orgId>:user:<userId>`) para que
-// `invalidateAuthzForOrg` apague APENAS os users daquela org via
-// delPattern — antes era `authz:user:*` global, que derrubava o cache
-// de TODOS os tenants no mesmo Redis a cada edição de Role.
+// Chave namespaced por org e com a versão da org
+// (`authz:v2:<orgId>:g<versão>:user:<userId>`): `invalidateAuthzForOrg`
+// troca a versão (`cache:v:authz:<orgId>`, um INCR) e invalida APENAS os
+// users daquela org, sem SCAN — antes era `authz:user:*` global, que
+// derrubava o cache de TODOS os tenants no mesmo Redis a cada edição de
+// Role.
 const CACHE_TTL_SEC = 60;
 
 // ──────────────────────────────────────────────
@@ -141,8 +149,13 @@ const PERMISSIVE_GRANTS: RoleGrantContext = {
 // Carregamento + cache
 // ──────────────────────────────────────────────
 
-function cacheKey(organizationId: string, userId: string): string {
-  return `authz:v2:${organizationId}:user:${userId}`;
+function authzVersion(organizationId: string): string {
+  return cacheVersionName("authz", organizationId);
+}
+
+async function cacheKey(organizationId: string, userId: string): Promise<string> {
+  const version = await getCacheVersion(authzVersion(organizationId));
+  return `authz:v2:${organizationId}:g${version}:user:${userId}`;
 }
 
 /**
@@ -431,7 +444,7 @@ export async function loadAuthzContext(input: {
 
   const orgId = input.organizationId;
   const payload = await cache.wrap<CachedAuthzPayload>(
-    cacheKey(orgId, input.userId),
+    await cacheKey(orgId, input.userId),
     CACHE_TTL_SEC,
     () => loadFromDb(input.userId, orgId),
   );
@@ -610,19 +623,22 @@ export async function invalidateAuthzForUser(
   organizationId: string,
   userId: string,
 ): Promise<void> {
-  await cache.del(cacheKey(organizationId, userId));
+  // SS-2: o callback `jwt` também cacheia role/org por 30 s neste processo.
+  invalidateJwtRefreshCache(userId);
+  await cache.del(await cacheKey(organizationId, userId));
 }
 
 /**
  * Invalida cache de TODOS os users de uma org. Chame quando alterar
- * permissions de uma Role (afeta todos os assignments). Mais barato que
- * iterar por user ID porque usa `delPattern` em SCAN batch.
+ * permissions de uma Role (afeta todos os assignments). E um INCR da
+ * versao da org — nao itera por user ID nem varre o Redis.
  *
- * O pattern e namespaced por org (`authz:<orgId>:user:*`) — em deploys
- * multi-org no mesmo Redis, users de OUTRAS orgs nao sao afetados.
+ * A versao e por org (`cache:v:authz:<orgId>`) — em deploys multi-org no
+ * mesmo Redis, users de OUTRAS orgs nao sao afetados. Outro processo pode
+ * levar ate `CACHE_VERSION_MEMO_MS` (500 ms) para enxergar a versao nova.
  */
 export async function invalidateAuthzForOrg(organizationId: string): Promise<void> {
-  await cache.delPattern(`authz:v2:${organizationId}:user:*`);
+  await bumpCacheVersion(authzVersion(organizationId));
 }
 
 /**

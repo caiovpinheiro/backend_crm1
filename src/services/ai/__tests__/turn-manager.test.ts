@@ -218,14 +218,6 @@ const db = vi.hoisted(() => {
   };
 
   const message = {
-    findFirst: async ({
-      where,
-    }: {
-      where: { organizationId: string; id: string };
-    }) => {
-      const m = messages.get(where.id);
-      return m && m.organizationId === where.organizationId ? { ...m } : null;
-    },
     findMany: async ({
       where,
     }: {
@@ -331,6 +323,11 @@ vi.mock("@/lib/webhook-context", () => ({
 
 vi.mock("@/lib/org-settings", () => ({
   getOrgSetting: vi.fn(async () => null),
+  // O entrypoint de ingestão passa por `shouldSkipNewAiForIdleInbound` →
+  // `isClosingProtocolEnabled`, que lê este toggle. Sem o export o mock
+  // lançava e cada teste logava "[ai-turn] idle inbound check failed".
+  // `false` = protocolo de encerramento desligado (mesmo caminho de antes).
+  getOrgSettingBool: vi.fn(async () => false),
 }));
 
 vi.mock("@/services/ai/phone-allowlist", () => ({
@@ -345,36 +342,29 @@ vi.mock("@/services/ai/attendance-gate", () => ({
 }));
 
 const legacy = vi.hoisted(() => ({
+  scheduleAiReply: vi.fn(async () => {}),
   claimInboundMessageForAi: vi.fn(async () => true),
   collectUnansweredInboundText: vi.fn(async () => ""),
 }));
 
 vi.mock("@/services/ai/inbound-debounce", () => legacy);
 
-const redistribution = vi.hoisted(() => ({
-  scheduleInboundRedistribution: vi.fn(),
-}));
-
-vi.mock("@/services/ai/inbound-redistribution", () => redistribution);
-
 const agent = vi.hoisted(() => ({
   // Assinatura explícita: sem ela `mock.calls[0][0]` não tipa e as
   // asserções sobre o texto agregado viram `any`.
-  processV2Turn: vi.fn(
+  maybeReplyAsAIAgent: vi.fn(
     async (_args: {
       conversationId: string;
-      channel: string;
+      contactId: string;
       userMessage: string;
-      messageType?: string;
-      turnId: string;
-      messageIds: string[];
-      attempt?: number;
-      claimedAt?: Date | null;
+      channel: string;
+      inboundMessageIds?: string[];
+      turnId?: string;
     }) => {},
   ),
 }));
 
-vi.mock("@/services/ai-v2/engine", () => agent);
+vi.mock("@/services/ai/inbox-handler", () => agent);
 
 import {
   appendToOpenTurn,
@@ -390,24 +380,11 @@ import {
 } from "@/services/ai/turn-manager";
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
 
-const { processV2Turn } = agent;
-const { claimInboundMessageForAi } = legacy;
-const { scheduleInboundRedistribution } = redistribution;
+const { maybeReplyAsAIAgent } = agent;
+const { scheduleAiReply, claimInboundMessageForAi } = legacy;
 
 const CONV = "conv-1";
 const CONTACT = "contact-1";
-
-/** Conversa atribuída ao agente IA — o turno só roda com agente. */
-function assignToAgent() {
-  setConversation(CONV, {
-    organizationId: ORG,
-    assignedToId: "ai-user-1",
-    assignedTo: {
-      id: "ai-user-1",
-      aiAgentConfig: { id: "agent-1", engine: "simple" },
-    },
-  });
-}
 
 function addMessage(id: string, content: string, over: Partial<MessageRow> = {}) {
   messages.set(id, {
@@ -452,8 +429,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   claimInboundMessageForAi.mockResolvedValue(true);
   legacy.collectUnansweredInboundText.mockResolvedValue("");
-  processV2Turn.mockResolvedValue(undefined);
-  assignToAgent();
+  maybeReplyAsAIAgent.mockResolvedValue(undefined);
+  process.env.AI_TURN_MANAGER = "1";
   // O loop do sweeper é irrelevante aqui: os testes chamam o tick à mão.
   process.env.AI_TURN_SWEEPER = "0";
   vi.useFakeTimers();
@@ -462,6 +439,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  delete process.env.AI_TURN_MANAGER;
   delete process.env.AI_TURN_SWEEPER;
 });
 
@@ -475,8 +453,8 @@ describe("agregação de mensagens em turno", () => {
 
     expect(res.promoted).toBe(1);
     expect(res.dispatched).toBe(1);
-    expect(processV2Turn).toHaveBeenCalledTimes(1);
-    expect(processV2Turn.mock.calls[0][0]).toMatchObject({
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
+    expect(maybeReplyAsAIAgent.mock.calls[0][0]).toMatchObject({
       conversationId: CONV,
       userMessage: "Oi",
     });
@@ -503,11 +481,11 @@ describe("agregação de mensagens em turno", () => {
 
     // As Messages continuam individuais no banco — o turno só referencia.
     expect(messages.size).toBe(5);
-    expect(processV2Turn).toHaveBeenCalledTimes(1);
-    expect(processV2Turn.mock.calls[0][0].userMessage).toBe(
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
+    expect(maybeReplyAsAIAgent.mock.calls[0][0].userMessage).toBe(
       "Oi\npreciso\nde ajuda\ncom minha\nmatrícula",
     );
-    expect(processV2Turn.mock.calls[0][0].messageIds).toEqual([
+    expect(maybeReplyAsAIAgent.mock.calls[0][0].inboundMessageIds).toEqual([
       "m1",
       "m2",
       "m3",
@@ -526,8 +504,8 @@ describe("agregação de mensagens em turno", () => {
     await sweepConversationTurns();
 
     expect(turns.size).toBe(2);
-    expect(processV2Turn).toHaveBeenCalledTimes(2);
-    expect(processV2Turn.mock.calls[1][0].userMessage).toBe("outra dúvida");
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(2);
+    expect(maybeReplyAsAIAgent.mock.calls[1][0].userMessage).toBe("outra dúvida");
   });
 
   it("nova bolha reabre o turno que já estava READY (input não se perde)", async () => {
@@ -587,7 +565,7 @@ describe("janelas de debounce", () => {
 
     const res = await sweepConversationTurns();
     expect(res.promoted).toBe(1);
-    expect(processV2Turn).toHaveBeenCalledTimes(1);
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -719,7 +697,7 @@ describe("resiliência", () => {
 
     expect(res.dispatched).toBe(1);
     expect(turns.get(turnId)!.status).toBe("COMPLETED");
-    expect(processV2Turn).toHaveBeenCalledTimes(1);
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
   });
 
   it("PROCESSING travado é recuperado e reprocessado no mesmo tick", async () => {
@@ -729,7 +707,7 @@ describe("resiliência", () => {
     vi.advanceTimersByTime(1500);
     await promoteTurnToReady(turnId, ORG);
     await claimTurn(turnId, ORG, "worker-morto");
-    expect(processV2Turn).not.toHaveBeenCalled();
+    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
 
     // Passa do teto de PROCESSING (AI_TURN_STALE_MS; padrão = tentativas × tempo do modelo + 60 s = 240 s).
     vi.advanceTimersByTime(250_000);
@@ -744,7 +722,7 @@ describe("resiliência", () => {
     expect(turn.attempts).toBe(1);
     expect(turn.status).toBe("COMPLETED");
     expect(turn.claimedBy).not.toBe("worker-morto");
-    expect(processV2Turn).toHaveBeenCalledTimes(1);
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(1);
   });
 
   it("stale reclaim não rouba turno de worker que ainda está no prazo", async () => {
@@ -781,7 +759,7 @@ describe("resiliência", () => {
   });
 
   it("falha do agente devolve o turno para READY e o retry roda", async () => {
-    processV2Turn.mockRejectedValueOnce(new Error("LLM fora do ar"));
+    maybeReplyAsAIAgent.mockRejectedValueOnce(new Error("LLM fora do ar"));
 
     await ingest("m1", "Oi");
     vi.advanceTimersByTime(1500);
@@ -795,7 +773,7 @@ describe("resiliência", () => {
 
     await sweepConversationTurns();
     expect(turns.get(turnId)!.status).toBe("COMPLETED");
-    expect(processV2Turn).toHaveBeenCalledTimes(2);
+    expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -813,7 +791,7 @@ describe("cancelamento", () => {
 
     vi.advanceTimersByTime(1500);
     await sweepConversationTurns();
-    expect(processV2Turn).not.toHaveBeenCalled();
+    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
   });
 
   it("turno já em PROCESSING não é abortado pelo cancelamento", async () => {
@@ -833,7 +811,8 @@ describe("cancelamento", () => {
 });
 
 describe("entrypoint de ingestão", () => {
-  it("conversa com agente IA abre turno", async () => {
+  it("com a flag desligada delega para o debounce legado", async () => {
+    process.env.AI_TURN_MANAGER = "0";
     addMessage("m1", "Oi");
 
     await onInboundMessageForAi({
@@ -844,11 +823,51 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
-    expect(turns.size).toBe(1);
-    expect(scheduleInboundRedistribution).not.toHaveBeenCalled();
+    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
+    expect(turns.size).toBe(0);
   });
 
-  it("conversa com agente fora do motor atual não abre turno", async () => {
+  it("com a flag ligada abre turno e não toca no debounce legado", async () => {
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
+    expect(scheduleAiReply).not.toHaveBeenCalled();
+    expect(turns.size).toBe(1);
+  });
+
+  it("flag desligada + agente simple atribuído usa Turn Manager (não debounce v1)", async () => {
+    process.env.AI_TURN_MANAGER = "0";
+    setConversation(CONV, {
+      organizationId: ORG,
+      assignedToId: "ai-user-1",
+      assignedTo: {
+        id: "ai-user-1",
+        aiAgentConfig: { id: "agent-1", engine: "simple" },
+      },
+    });
+    addMessage("m1", "Oi");
+
+    await onInboundMessageForAi({
+      conversationId: CONV,
+      contactId: CONTACT,
+      messageId: "m1",
+      userMessage: "Oi",
+      channel: "meta",
+    });
+
+    expect(scheduleAiReply).not.toHaveBeenCalled();
+    expect(turns.size).toBe(1);
+  });
+
+  it("flag desligada + agente legacy usa debounce v1", async () => {
+    process.env.AI_TURN_MANAGER = "0";
     setConversation(CONV, {
       organizationId: ORG,
       assignedToId: "ai-user-1",
@@ -867,11 +886,12 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
+    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
     expect(turns.size).toBe(0);
-    expect(scheduleInboundRedistribution).not.toHaveBeenCalled();
   });
 
-  it("sem responsável + agente ativo: atribui e abre turno", async () => {
+  it("flag desligada + sem responsável + agente simple padrão atribui e usa Turn Manager", async () => {
+    process.env.AI_TURN_MANAGER = "0";
     setConversation(CONV, {
       organizationId: ORG,
       assignedToId: null,
@@ -893,10 +913,12 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
+    expect(scheduleAiReply).not.toHaveBeenCalled();
     expect(turns.size).toBe(1);
   });
 
-  it("atendimento IA desligado na org: não atribui e agenda a segunda passada da distribuição", async () => {
+  it("atendimento IA desligado na org: conversa nova não é atribuída ao agente simple", async () => {
+    process.env.AI_TURN_MANAGER = "0";
     attendanceGate.enabled = false;
     try {
       setConversation(CONV, {
@@ -920,11 +942,8 @@ describe("entrypoint de ingestão", () => {
         channel: "meta",
       });
 
+      expect(scheduleAiReply).toHaveBeenCalled();
       expect(turns.size).toBe(0);
-      expect(scheduleInboundRedistribution).toHaveBeenCalledWith({
-        conversationId: CONV,
-        contactId: CONTACT,
-      });
     } finally {
       attendanceGate.enabled = true;
     }

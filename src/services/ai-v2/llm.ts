@@ -54,6 +54,9 @@ import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./repl
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.llm");
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -347,7 +350,7 @@ async function prefetchKnowledge(args: {
   } catch (err) {
     traceStep("base", `Falha ao buscar na base: ${err instanceof Error ? err.message : String(err)}`);
     noteV2Fact("prefetch", { searchable: true, searched: false, reason: "error", docCount: docIds.length, queries: [query], found: 0 });
-    console.warn("[ai-v2] pré-busca na base falhou:", err instanceof Error ? err.message : err);
+    log.warn({ err: err instanceof Error ? err.message : err }, "[ai-v2] pré-busca na base falhou");
     return { query, chunks: [], searched: false, best: null };
   }
 }
@@ -488,7 +491,15 @@ export function buildV2ToolSet(args: {
           const msg = err instanceof Error ? err.message : String(err);
           // O erro volta ao modelo e vai para o log: sem ids internos. O
           // contexto (tinha ou não organização) fica só no log do servidor.
-          console.warn(`[ai-v2] ferramenta ${toolName} falhou (contexto na montagem: ${capturedCtx ? "sim" : "não"}; na falha: ${getRequestContext() ? "sim" : "não"}):`, msg);
+          log.warn(
+            {
+              toolName,
+              ctxNaMontagem: Boolean(capturedCtx),
+              ctxNaFalha: Boolean(getRequestContext()),
+              err: msg,
+            },
+            "[ai-v2] ferramenta falhou",
+          );
           const failure = { ok: false as const, error: msg };
           governor.record(toolName, input, failure);
           return failure;
@@ -700,7 +711,10 @@ const MALFORMED_REASON = "LLM não retornou JSON válido — fallback de erro ap
 function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
   const fallback = config.fallback?.error?.message ?? config.fallback?.noSource?.message;
   const reply = fallback || "Não consegui processar sua mensagem. Vou transferir para um atendente.";
-  console.warn("[ai-v2] LLM não retornou JSON válido. Fallback de erro aplicado. Texto bruto:", rawText.slice(0, 500));
+  log.warn(
+    { textLength: rawText.length },
+    "[ai-v2] LLM não retornou JSON válido. Fallback de erro aplicado.",
+  );
   return {
     reply,
     handoff: true,
@@ -724,7 +738,10 @@ function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string):
   if (/^[\s`]*(json)?[\s`]*[{[]/i.test(cleaned) || /"reply"\s*:/.test(cleaned)) {
     return buildErrorFallbackOutput(config, rawText);
   }
-  console.warn("[ai-v2] LLM não devolveu JSON válido. Usando texto livre como reply. Texto bruto:", cleaned.slice(0, 500));
+  log.warn(
+    { textLength: cleaned.length },
+    "[ai-v2] LLM não devolveu JSON válido. Usando texto livre como reply.",
+  );
   return {
     reply: cleaned.slice(0, 2000),
     handoff: false,
@@ -799,7 +816,7 @@ async function coerceV2OutputFromRawText(args: {
     return { inputTokens: result.inputTokens, outputTokens: result.outputTokens };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn("[ai-v2] Falha na normalização de JSON:", msg);
+    log.warn({ err: msg }, "[ai-v2] Falha na normalização de JSON");
     return { inputTokens: 0, outputTokens: 0 };
   }
 }
@@ -1181,7 +1198,10 @@ async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof 
     });
     return rows.map((r) => ({ id: r.id, name: r.pipeline?.name ? `${r.pipeline.name} › ${r.name}` : r.name }));
   } catch (err) {
-    console.warn("[ai-v2] Erro ao carregar as etapas das ações:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2] Erro ao carregar as etapas das ações",
+    );
     return [];
   }
 }
@@ -1223,13 +1243,19 @@ export async function callV2LLM(args: {
     // chamar knowledge_search e a contextualizar a resposta.
     promptDocIds.length > 0
       ? knowledgeDocTitleMapByIds(args.agentId, promptDocIds).catch((err) => {
-          console.warn("[ai-v2] Erro ao carregar títulos dos materiais:", err instanceof Error ? err.message : err);
+          log.warn(
+            { err: err instanceof Error ? err.message : err },
+            "[ai-v2] Erro ao carregar títulos dos materiais",
+          );
           return new Map<string, string>();
         })
       : Promise.resolve(new Map<string, string>()),
     // Mensagens prontas liberadas (assunto, senão globais) com o tipo de mídia.
     describeV2MessageModels(modelIds).catch((err) => {
-      console.warn("[ai-v2] Erro ao carregar mensagens prontas:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] Erro ao carregar mensagens prontas",
+      );
       return [] as V2MessageModelSummary[];
     }),
     actionStageNames(args.config, promptTheme),
@@ -1375,7 +1401,7 @@ export async function callV2LLM(args: {
     let wasExpanded = false;
     if (result.finishReason === "length") {
       wasExpanded = true;
-      console.warn("[ai-v2] LLM resposta cortada por length; expandindo maxOutputTokens");
+      log.warn("[ai-v2] LLM resposta cortada por length; expandindo maxOutputTokens");
       result = await generate(responseLengthToMaxTokens("long"));
     }
 
@@ -1423,9 +1449,15 @@ export async function callV2LLM(args: {
 
     if (!validated?.success) {
       if (!validated) {
-        console.warn("[ai-v2] LLM não devolveu JSON válido; normalizador também falhou. Texto:", text.slice(0, 500));
+        log.warn(
+          { textLength: text.length },
+          "[ai-v2] LLM não devolveu JSON válido; normalizador também falhou.",
+        );
       } else {
-        console.warn("[ai-v2] LLM devolveu JSON fora do schema:", validated.error.message, "texto:", text.slice(0, 500));
+        log.warn(
+          { err: validated.error.message, textLength: text.length },
+          "[ai-v2] LLM devolveu JSON fora do schema",
+        );
       }
       return {
         output: buildInvalidJsonFallbackOutput(args.config, text),
@@ -1443,7 +1475,7 @@ export async function callV2LLM(args: {
     if (rawMessageModel && typeof rawMessageModel === "object" && rawMessageModel !== null) {
       const rawId = (rawMessageModel as { id?: unknown }).id;
       if (rawId !== undefined && rawId !== null && typeof rawId !== "string") {
-        console.warn("[ai-v2] LLM devolveu messageModel.id inválido; ignorado.", rawId);
+        log.warn({ rawId }, "[ai-v2] LLM devolveu messageModel.id inválido; ignorado.");
       }
     }
 
@@ -1753,7 +1785,10 @@ export async function callV2LLM(args: {
         }
       }
     } catch (err) {
-      console.warn("[ai-v2] revisão de termos falhou:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] revisão de termos falhou",
+      );
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
     noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: false, forcedHandoff: true });
@@ -1803,7 +1838,10 @@ export async function callV2LLM(args: {
         return;
       }
     } catch (err) {
-      console.warn("[ai-v2] reescrita de repetição falhou:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] reescrita de repetição falhou",
+      );
     }
     r.output = { ...r.output, reply: repeatFallback(last, args.config) };
   }

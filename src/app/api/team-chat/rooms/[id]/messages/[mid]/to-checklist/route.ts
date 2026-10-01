@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createChecklistFromMessage } from "@/services/team-chat-work-items";
-import { denyUnless, jsonError, viewerOf } from "../../../../../_guard";
+import { denyUnless, isServiceError, jsonError, viewerOf } from "../../../../../_guard";
 
 const Body = z.object({
   title: z.string().trim().max(200).optional(),
@@ -31,7 +31,7 @@ export async function POST(
     const parsed = Body.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return jsonError("Dados inválidos.", 400);
     const result = await createChecklistFromMessage(viewerOf(session), id, mid, parsed.data);
-    if ("error" in result) return jsonError(result.error, result.status);
+    if (isServiceError(result)) return jsonError(result.error, result.status);
     return NextResponse.json(result.workItem, { status: 201 });
   });
 }

@@ -6,11 +6,8 @@
  *  - texto puro (`.txt`, `.md`, `.markdown`, `.csv`, `.tsv`): decode utf-8;
  *  - `.docx`: o arquivo é um ZIP de XML — abrimos `word/document.xml` com
  *    `fflate` (puro JS, sem binário nativo) e concatenamos os nós `<w:t>`.
- *
- * `.pdf` NÃO é suportado: as libs de extração (pdfjs-dist e derivados)
- * pesam dezenas de MB no bundle e ainda assim não resolvem PDF escaneado,
- * que exigiria OCR. Rejeitamos com mensagem explícita em vez de indexar
- * lixo binário.
+ *  - `.pdf`: extraído com `pdf-parse` (texto selecionável; PDFs escaneados
+ *    ou baseados em imagem exigiriam OCR e ainda não são suportados).
  *
  * O custo de extração é O(tamanho do arquivo) em memória e sem I/O de
  * rede — com o limite de 10 MB por upload isso fica na casa de dezenas de
@@ -19,6 +16,9 @@
  */
 
 import { unzipSync } from "fflate";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.knowledge-extract");
 
 /** Limite de bytes do arquivo enviado. */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -26,7 +26,7 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 /** Limite de caracteres do texto extraído — mesmo do POST JSON. */
 export const MAX_EXTRACTED_CHARS = 500_000;
 
-type SupportedExt = "txt" | "md" | "markdown" | "csv" | "tsv" | "docx";
+type SupportedExt = "txt" | "md" | "markdown" | "csv" | "tsv" | "docx" | "pdf";
 
 const PLAIN_TEXT_EXTS = new Set<SupportedExt>([
   "txt",
@@ -43,6 +43,7 @@ const MIME_BY_EXT: Record<SupportedExt, string> = {
   csv: "text/csv",
   tsv: "text/tab-separated-values",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pdf: "application/pdf",
 };
 
 export const SUPPORTED_EXTENSIONS = Object.keys(MIME_BY_EXT) as SupportedExt[];
@@ -140,6 +141,76 @@ function extractDocx(buffer: Buffer): string {
   return docxXmlToText(decodeText(Buffer.from(document)));
 }
 
+/**
+ * O pdf.js (dentro do pdf-parse 2.x) referencia DOMMatrix, ImageData e
+ * Path2D ao carregar, e só os tem no Node com o binário nativo do
+ * @napi-rs/canvas. Sem ele o import quebrava ("DOMMatrix is not defined")
+ * e a rota devolvia 500. Extrair texto não desenha nada: classes vazias
+ * bastam, e só entram quando o ambiente não tem as de verdade.
+ */
+function ensurePdfGlobals(): void {
+  const g = globalThis as Record<string, unknown>;
+  for (const name of ["DOMMatrix", "ImageData", "Path2D"]) {
+    if (typeof g[name] === "undefined") g[name] = class {};
+  }
+}
+
+/**
+ * PDF com mini-calendário ao lado de uma lista (calendário, escala, agenda):
+ * a extração junta as duas colunas e a linha vira "25 26 27 28 29 30 31 19
+ * Evento". O leitor tomava o 25 como a data do evento. Tira o cabeçalho de
+ * dias da semana ("D S T Q Q S S") e a sequência de dias consecutivos no
+ * começo da linha; sobra a linha do evento.
+ */
+export function stripCalendarGrid(text: string): string {
+  const WEEK_HEADER = /^\s*(?:[DSTQ]\s+){6}[DSTQ](?=\s|$)\s*/;
+  return text
+    .split("\n")
+    .map((line) => {
+      let l = line.replace(WEEK_HEADER, "");
+      // Linha só de números: sobra da grade, sem evento ao lado.
+      if (/^\s*(?:\d{1,2}\s*)+$/.test(l)) return "";
+      const m = /^\s*((?:\d{1,2}\s+){3,})/.exec(l);
+      if (m) {
+        const tokens = m[1].trim().split(/\s+/);
+        const nums = tokens.map(Number);
+        // Sequência de dias (n, n+1…) de uma semana: no máximo 7. O número
+        // seguinte, mesmo consecutivo, é o dia do evento.
+        let run = 1;
+        while (run < nums.length && run < 7 && nums[run] === nums[run - 1] + 1 && nums[run] <= 31) run++;
+        if (run >= 3) {
+          // Tokens originais: "07" continua "07".
+          const leftover = tokens.slice(run).join(" ");
+          l = [leftover, l.slice(m[0].length)].filter(Boolean).join(" ");
+        }
+      }
+      return l.trimEnd();
+    })
+    .filter((line) => line.trim() !== "")
+    .join("\n");
+}
+
+async function extractPdf(buffer: Buffer): Promise<string> {
+  let parser: { getText: (p?: object) => Promise<{ text?: string }>; destroy: () => Promise<void> } | undefined;
+  try {
+    ensurePdfGlobals();
+    const { PDFParse } = (await import("pdf-parse")) as unknown as {
+      PDFParse: new (opts: { data: Uint8Array }) => NonNullable<typeof parser>;
+    };
+    parser = new PDFParse({ data: new Uint8Array(buffer) });
+    // pageJoiner vazio: sem o marcador "-- 1 of N --" entre as páginas.
+    const result = await parser.getText({ pageJoiner: "" });
+    return stripCalendarGrid((result.text ?? "").replace(/\u0000/g, "").replace(/\r\n/g, "\n")).trim();
+  } catch (err) {
+    log.error({ err: err instanceof Error ? err.message : err }, "[knowledge] falha ao ler PDF");
+    throw new KnowledgeExtractError(
+      "Não foi possível extrair texto do PDF. Verifique se o arquivo não está corrompido ou é uma imagem escaneada.",
+    );
+  } finally {
+    await parser?.destroy().catch(() => undefined);
+  }
+}
+
 export type ExtractedDocument = {
   text: string;
   mimeType: string;
@@ -151,10 +222,10 @@ export type ExtractedDocument = {
  * `KnowledgeExtractError` com mensagem pronta para o usuário — o handler
  * traduz em HTTP 400.
  */
-export function extractKnowledgeText(
+export async function extractKnowledgeText(
   fileName: string,
   buffer: Buffer,
-): ExtractedDocument {
+): Promise<ExtractedDocument> {
   if (buffer.byteLength === 0) {
     throw new KnowledgeExtractError("Arquivo vazio.");
   }
@@ -165,11 +236,6 @@ export function extractKnowledgeText(
   }
 
   const ext = extensionOf(fileName);
-  if (ext === "pdf") {
-    throw new KnowledgeExtractError(
-      "PDF ainda não é suportado. Converta para .docx, .md ou .txt e envie novamente.",
-    );
-  }
   if (!(ext in MIME_BY_EXT)) {
     throw new KnowledgeExtractError(
       `Formato não suportado. Aceitamos ${SUPPORTED_EXTENSIONS.map((e) => `.${e}`).join(", ")}.`,
@@ -177,9 +243,14 @@ export function extractKnowledgeText(
   }
   const supported = ext as SupportedExt;
 
-  const text = PLAIN_TEXT_EXTS.has(supported)
-    ? decodeText(buffer).trim()
-    : extractDocx(buffer);
+  let text: string;
+  if (PLAIN_TEXT_EXTS.has(supported)) {
+    text = decodeText(buffer).trim();
+  } else if (supported === "pdf") {
+    text = await extractPdf(buffer);
+  } else {
+    text = extractDocx(buffer);
+  }
 
   if (text.length < 10) {
     throw new KnowledgeExtractError(

@@ -5,6 +5,7 @@ import {
   ensureSystemPresetRoles,
   syncUserRoleAssignment,
 } from "@/lib/authz/sync-user-role";
+import { normalizeOrganizationLogoUrl } from "@/lib/organization-logo-url";
 import { prismaBase } from "@/lib/prisma-base";
 import { nextUserNumber } from "@/lib/public-id";
 import { logAudit } from "@/lib/audit/log";
@@ -137,12 +138,24 @@ export async function updateBranding(
   organizationId: string,
   input: { logoUrl?: string | null; primaryColor?: string | null },
 ): Promise<void> {
+  const current = await prismaBase.organization.findUnique({
+    where: { id: organizationId },
+    select: { logoUrl: true },
+  });
+  const data: { logoUrl?: string | null; primaryColor?: string } = {};
+  if (input.primaryColor !== undefined) {
+    data.primaryColor = input.primaryColor?.trim() || "#1e3a8a";
+  }
+  if (input.logoUrl !== undefined) {
+    data.logoUrl = normalizeOrganizationLogoUrl(input.logoUrl, {
+      organizationId,
+      currentLogoUrl: current?.logoUrl ?? null,
+    });
+  }
+  if (Object.keys(data).length === 0) return;
   await prismaBase.organization.update({
     where: { id: organizationId },
-    data: {
-      logoUrl: input.logoUrl ?? null,
-      primaryColor: input.primaryColor?.trim() || "#1e3a8a",
-    },
+    data,
   });
 }
 

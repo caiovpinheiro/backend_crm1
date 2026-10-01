@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/diagnose");
 
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
 // (direto ou via service), avaliado ANTES da Prisma extension popular
@@ -118,7 +121,7 @@ export async function GET() {
 
       return NextResponse.json(checks);
     } catch (e) {
-      console.error("Diagnose error:", e);
+      log.error({ err: e }, "Diagnose error");
       return NextResponse.json(
         { message: "Erro no diagnóstico.", error: String(e) },
         { status: 500 }

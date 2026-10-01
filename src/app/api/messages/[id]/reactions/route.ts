@@ -5,6 +5,9 @@ import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/messages/[id]/reactions");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -140,7 +143,7 @@ export async function POST(request: Request, ctx: Ctx) {
               );
             } catch (e) {
               metaError = e instanceof Error ? e.message : String(e);
-              console.warn("[meta-reaction]", metaError);
+              log.warn({ err: metaError }, "[meta-reaction] falhou");
             }
           }
         }
@@ -148,7 +151,7 @@ export async function POST(request: Request, ctx: Ctx) {
 
       return NextResponse.json({ reactions: updated, metaError });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },
         { status: 500 },

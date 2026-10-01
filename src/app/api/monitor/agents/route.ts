@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/monitor/agents");
 
 export const dynamic = "force-dynamic";
 
@@ -111,9 +114,9 @@ export async function GET() {
 
     return NextResponse.json(rows);
   } catch (err) {
-    console.warn(
-      "[/api/monitor/agents] fallback (provável migration pendente):",
-      err instanceof Error ? err.message : err
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[/api/monitor/agents] fallback (provável migration pendente)",
     );
 
     // Fallback sem lastActivityAt (coluna ainda não existe em prod).

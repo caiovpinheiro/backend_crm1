@@ -9,6 +9,9 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx, withOrgMany } from "@/lib/prisma-helpers";
 import { getRequestContext } from "@/lib/request-context";
 import { seedDemandMocksIfEmpty } from "@/services/demands-mock-seed";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("demands");
 
 const USER_LITE = { select: { id: true, name: true, avatarUrl: true } } as const;
 
@@ -327,7 +330,7 @@ export async function listBoards() {
   try {
     await seedDemandMocksIfEmpty();
   } catch (err) {
-    console.error("[demands] seed mock failed", err);
+    log.error({ err }, "[demands] seed mock failed");
   }
   const boards = await prisma.demandBoard.findMany({
     where: { archivedAt: null },
@@ -405,7 +408,7 @@ export async function getBoard(boardId: string) {
   try {
     await seedDemandMocksIfEmpty();
   } catch (err) {
-    console.error("[demands] seed mock failed", err);
+    log.error({ err }, "[demands] seed mock failed");
   }
   const board = await prisma.demandBoard.findFirst({
     where: { id: boardId, archivedAt: null },

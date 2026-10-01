@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getCompanyFacets } from "@/services/companies";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/companies/facets");
 
 export async function GET(request: Request) {
   try {
@@ -13,7 +16,7 @@ export async function GET(request: Request) {
       return NextResponse.json(facets);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao carregar filtros de empresas." },
       { status: 500 },

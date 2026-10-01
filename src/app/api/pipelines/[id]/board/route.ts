@@ -14,6 +14,9 @@ import {
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta, resolvePipelineByPublicRef } from "@/services/pipelines";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]/board");
 
 /**
  * Aceita `sort` e `direction` vindos do client (GET via query string ou
@@ -139,7 +142,7 @@ export async function GET(request: Request, context: RouteContext) {
       );
       return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
-      console.error("[board GET] erro ao carregar quadro:", e);
+      log.error({ err: e }, "[board GET] erro ao carregar quadro");
       const message =
         e instanceof Error ? e.message : "Erro ao carregar quadro.";
       return NextResponse.json(
@@ -225,7 +228,7 @@ export async function POST(request: Request, context: RouteContext) {
       );
       return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
-      console.error("[board POST] erro ao carregar quadro com filtros:", e);
+      log.error({ err: e }, "[board POST] erro ao carregar quadro com filtros");
       const message =
         e instanceof Error ? e.message : "Erro ao carregar quadro.";
       return NextResponse.json(

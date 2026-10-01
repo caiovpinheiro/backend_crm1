@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { diagnoseV2Turn } from "@/services/ai-v2/diagnose";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/test-logs/[logId]/feedback");
 
 /** "Onde o agente errou" num turno de teste → diagnóstico do que corrigir. */
 export async function POST(
@@ -29,7 +32,7 @@ export async function POST(
       });
       return NextResponse.json({ feedback });
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/test-logs/[logId]/feedback]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/test-logs/[logId]/feedback]");
       const message = err instanceof Error ? err.message : "Erro ao diagnosticar.";
       const status = message === "Turno não encontrado." ? 404 : 500;
       return NextResponse.json({ message }, { status });

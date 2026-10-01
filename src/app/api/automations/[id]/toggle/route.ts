@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getAutomationById, toggleAutomation } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]/toggle");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -41,7 +44,7 @@ export async function POST(_request: Request, context: RouteContext) {
         throw err;
       }
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro ao alternar automação." }, { status: 500 });
     }
   });

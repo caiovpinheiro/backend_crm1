@@ -3,16 +3,25 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard";
 import {
+  IMPORT_MAX_BYTES,
+  IMPORT_MAX_ROWS,
+  ImportFileError,
+  importTooLargeMessage,
+} from "@/lib/import-file-guard";
+import {
   readDelimiterFlag,
   readTagFlag,
   readUpdateExistingFlag,
-  readUploadedTable,
+  readTableFromBuffer,
 } from "@/lib/import-helpers";
 import { validateContactImportHeaders } from "@/lib/contact-import-core";
 import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
 import { enterRequestContext } from "@/lib/request-context";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/contacts/import");
 
 /**
  * Importação de contatos — fluxo ASSÍNCRONO (ETL worker).
@@ -68,13 +77,30 @@ export async function POST(request: Request) {
       );
     }
 
+    // SEC2-4: teto de bytes explícito na rota (a UI limitava; a API não).
+    if (file.size > IMPORT_MAX_BYTES) {
+      return NextResponse.json(
+        { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+        { status: 413 },
+      );
+    }
+
     const delimiter = readDelimiterFlag(formData);
     const updateExisting = readUpdateExistingFlag(formData);
     const tagName = readTagFlag(formData);
 
     // Parseia uma vez para validar o cabeçalho e contar as linhas (total do
     // BulkOperation). O worker re-parseia o arquivo salvo no storage.
-    const { headers, rows } = await readUploadedTable(file, delimiter);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (buffer.length > IMPORT_MAX_BYTES) {
+      return NextResponse.json(
+        { message: importTooLargeMessage(IMPORT_MAX_BYTES) },
+        { status: 413 },
+      );
+    }
+    const { headers, rows } = await readTableFromBuffer(buffer, file.name, delimiter, {
+      maxRows: IMPORT_MAX_ROWS,
+    });
     const headerError = validateContactImportHeaders(headers);
     if (headerError) {
       return NextResponse.json({ message: headerError }, { status: 400 });
@@ -95,7 +121,6 @@ export async function POST(request: Request) {
           ? "ods"
           : "csv";
     const fileName = generateFileName({ prefix: "contacts", ext });
-    const buffer = Buffer.from(await file.arrayBuffer());
     await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
 
     // Cria o BulkOperation (fonte da verdade do progresso).
@@ -166,7 +191,10 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (e) {
-    console.error(e);
+    if (e instanceof ImportFileError) {
+      return NextResponse.json({ message: e.message }, { status: e.status });
+    }
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao importar contatos." }, { status: 500 });
   }
 }

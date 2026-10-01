@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { classifyWhatsappCallEnd, wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/whatsapp-calls/recent");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -166,7 +169,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     return NextResponse.json({ items });
     } catch (e) {
-      console.error("[whatsapp-calls/recent]", e);
+      log.error({ err: e }, "[whatsapp-calls/recent] falhou");
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
     }
   });

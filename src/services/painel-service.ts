@@ -31,6 +31,9 @@ import {
   type PainelDelta,
   type PainelRange,
 } from "@/services/painel-period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("painel-service");
 
 export type PainelBlock<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -258,14 +261,14 @@ async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
       try {
         return { ok: true, data: await fn() };
       } catch (retryErr) {
-        console.error("[painel/service]", retryErr);
+        log.error({ err: retryErr }, "[painel/service] falhou");
         return {
           ok: false,
           error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
         };
       }
     }
-    console.error("[painel/service]", e);
+    log.error({ err: e }, "[painel/service] falhou");
     return {
       ok: false,
       error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
@@ -1440,7 +1443,7 @@ export async function getPainelService(
     return sharedPromise.then(
       (shared) => (shared ? wrap(() => fn(shared)) : Promise.resolve(omit<T>())),
       (e) => {
-        console.error("[painel/service]", e);
+        log.error({ err: e }, "[painel/service] falhou");
         return omit<T>(e instanceof Error ? e.message : "Falha ao carregar este bloco.");
       },
     );

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getSalesForecast } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/forecast");
 
 export async function GET(request: Request) {
   try {
@@ -20,7 +23,7 @@ export async function GET(request: Request) {
     const data = await getSalesForecast(pipelineId);
     return NextResponse.json(data);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao carregar previsão de vendas." },
       { status: 500 }

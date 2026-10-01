@@ -1,6 +1,9 @@
 import IORedis, { type RedisOptions } from "ioredis";
 
 import { waitForRedisWritable } from "@/lib/redis-ready";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("queue-connection");
 
 /**
  * Conexão IORedis compartilhada para os novos workers/queues BullMQ.
@@ -57,7 +60,7 @@ export function getBullConnection(): IORedis {
   if (!cachedConnection) {
     cachedConnection = new IORedis(REDIS_URL, DEFAULT_OPTIONS);
     cachedConnection.on("error", (err) => {
-      console.error("[queue-connection] redis error:", err.message);
+      log.error({ err: err.message }, "[queue-connection] redis error");
     });
   }
   return cachedConnection;

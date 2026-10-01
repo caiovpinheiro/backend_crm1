@@ -15,6 +15,9 @@ import {
   getBullConnection,
   isRedisConfigured,
 } from "@/lib/queue-connection";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution-drain-queue");
 
 export const DISTRIBUTION_DRAIN_QUEUE_NAME = "distribution-drain" as const;
 export const DISTRIBUTION_DRAIN_JOB_NAME = "process-pending" as const;
@@ -96,10 +99,7 @@ export async function enqueueDistributionDrain(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/already exists|duplicat/i.test(msg)) return "exists";
-    console.warn(
-      "[queue] falha ao enfileirar distribution-drain:",
-      msg,
-    );
+    log.warn({ err: msg }, "[queue] falha ao enfileirar distribution-drain");
     return null;
   }
 }

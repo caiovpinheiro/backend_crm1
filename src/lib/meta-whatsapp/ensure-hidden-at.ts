@@ -1,6 +1,9 @@
 import { Prisma } from "@prisma/client";
 
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-whatsapp.ensure-hidden-at");
 
 /**
  * Auto-cura da migration `20260826150000_template_hidden_at`.
@@ -34,9 +37,9 @@ export async function ensureWhatsappTemplateHiddenAtColumn(): Promise<boolean> {
     hiddenAtColumnEnsured = true;
     return true;
   } catch (e) {
-    console.warn(
-      "[whatsapp-template-config] falha ao aplicar hidden_at (DDL):",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[whatsapp-template-config] falha ao aplicar hidden_at (DDL)",
     );
     return false;
   }

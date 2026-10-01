@@ -50,6 +50,28 @@ import {
   type RetryResult,
 } from "./pending-shared";
 import { cancelStalePendingOrphans } from "./pending-inbound";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.pending-drain");
+
+/**
+ * Conversas com `DistributionPending` PENDING — candidatas mesmo já
+ * atribuídas a um usuário IA. Query independente do departamento.
+ */
+async function loadPendingAiConversationIds(orgId: string): Promise<string[]> {
+  const rows = await prisma.distributionPending.findMany({
+    where: {
+      organizationId: orgId,
+      status: "PENDING",
+      conversationId: { not: null },
+    },
+    select: { conversationId: true },
+    take: 500,
+  });
+  return rows
+    .map((p) => p.conversationId)
+    .filter((id): id is string => Boolean(id));
+}
 
 export async function processPendingDistributionQueue(opts: {
   trigger: PendingQueueTrigger;
@@ -62,6 +84,19 @@ export async function processPendingDistributionQueue(opts: {
   }
 
   const state = getDrainState(orgId);
+
+  // BD-20: `getWaitingQueueWhere()` + `conversation.count` eram repetidos em
+  // até 3 saídas antecipadas e no fechamento da passada. Uma passada só
+  // precisa de um `where` e de um `count` da fila inteira — memoizados aqui
+  // e reusados por quem precisar.
+  let waitingWherePromise: ReturnType<typeof getWaitingQueueWhere> | null = null;
+  const waitingWhere = () =>
+    (waitingWherePromise ??= getWaitingQueueWhere());
+  let pendingCountPromise: Promise<number> | null = null;
+  const countPending = () =>
+    (pendingCountPromise ??= waitingWhere().then((where) =>
+      prisma.conversation.count({ where }),
+    ));
   if (triggerClearsFruitlessCooldown(opts.trigger)) {
     clearFruitlessCooldown(state, orgId);
   } else if (
@@ -125,9 +160,7 @@ export async function processPendingDistributionQueue(opts: {
   }
 
   if (state.running) {
-    const pending = await prisma.conversation.count({
-      where: await getWaitingQueueWhere(),
-    });
+    const pending = await countPending();
     if (opts.trigger === "manual") {
       return {
         resolved: 0,
@@ -191,7 +224,7 @@ export async function processPendingDistributionQueue(opts: {
         );
       }
     } catch (e) {
-      console.warn("[distribution] cancelStalePendingOrphans failed", e);
+      log.warn({ err: e }, "[distribution] cancelStalePendingOrphans failed");
     }
 
     // Toggle desligado: não varre a Entrada. Só drena quem o passo,
@@ -217,17 +250,12 @@ export async function processPendingDistributionQueue(opts: {
     try {
       views = await getDistributionResponsibles();
     } catch (e) {
-      console.warn(
-        "[distribution] processPending eligibility precheck failed",
-        e,
-      );
+      log.warn({ err: e }, "[distribution] processPending eligibility precheck failed");
     }
     const eligible = views.filter((r) => r.eligible);
 
     if (eligible.length === 0) {
-      const pending = await prisma.conversation.count({
-        where: await getWaitingQueueWhere(),
-      });
+      const pending = await countPending();
       debugInfo(
         "[distribution] processPending skip — nenhum consultor elegível",
         () => JSON.stringify({
@@ -254,9 +282,7 @@ export async function processPendingDistributionQueue(opts: {
     if (opts.userId) {
       const focus = views.find((r) => r.userId === opts.userId);
       if (!focus?.eligible) {
-        const pending = await prisma.conversation.count({
-          where: await getWaitingQueueWhere(),
-        });
+        const pending = await countPending();
         debugInfo(
           "[distribution] processPending skip — userId não elegível",
           () => JSON.stringify({
@@ -282,7 +308,7 @@ export async function processPendingDistributionQueue(opts: {
         for (const d of r.departments) deptSet.add(d.id);
       }
       const waitingDepts = await prisma.conversation.findMany({
-        where: await getWaitingQueueWhere(),
+        where: await waitingWhere(),
         select: { departmentId: true },
       });
       for (const w of waitingDepts) {
@@ -295,6 +321,10 @@ export async function processPendingDistributionQueue(opts: {
     let resolved = 0;
     let scanned = 0;
     const assignedDeltaByUser = new Map<string, number>();
+
+    // BD-20: independe do bucket — carregado UMA vez por passada em vez de
+    // um `findMany` (take 500) por departamento dentro de `drainBucket`.
+    const pendingAiConvIds = await loadPendingAiConversationIds(orgId);
 
     const drainBucket = async (departmentId: string | null) => {
       const inDept = eligibleInDeptScope(eligible, departmentId);
@@ -317,19 +347,6 @@ export async function processPendingDistributionQueue(opts: {
       );
 
       if (take <= 0) return;
-
-      const pendingOwnedByAi = await prisma.distributionPending.findMany({
-        where: {
-          organizationId: orgId,
-          status: "PENDING",
-          conversationId: { not: null },
-        },
-        select: { conversationId: true },
-        take: 500,
-      });
-      const pendingAiConvIds = pendingOwnedByAi
-        .map((p) => p.conversationId)
-        .filter((id): id is string => Boolean(id));
 
       const items = await prisma.conversation.findMany({
         where: {
@@ -440,13 +457,9 @@ export async function processPendingDistributionQueue(opts: {
             break;
           }
         } catch (e) {
-          console.error(
+          log.error(
+            { conversationId: it.id, trigger: opts.trigger, err: e },
             "[distribution] processPendingDistributionQueue item failed",
-            {
-              conversationId: it.id,
-              trigger: opts.trigger,
-              err: e,
-            },
           );
         }
       }
@@ -459,7 +472,9 @@ export async function processPendingDistributionQueue(opts: {
       await drainBucket(null);
     }
 
-    const waitingBase = await getWaitingQueueWhere();
+    const waitingBase = await waitingWhere();
+    // Contagem pós-drenagem: NÃO reusa o memo — a passada acabou de
+    // atribuir conversas e o número mudou.
     const pending = await prisma.conversation.count({
       where: waitingBase,
     });
@@ -613,6 +628,7 @@ export async function enqueueProcessPendingOrRun(opts: {
         fruitless = peeked.armed;
         if (peeked.ttlMs != null) ttlMs = peeked.ttlMs;
       } catch (e) {
+        // eslint-disable-next-line no-console -- teste afirma literalmente esta saída do console (pending-capacity-released)
         console.warn("[distribution] peek fruitless cooldown failed", e);
         fruitless = false;
       }
@@ -690,13 +706,9 @@ export async function enqueueProcessPendingOrRun(opts: {
     scope: "distribution.drain",
     kind: "queue_unavailable",
   });
-  console.warn(
+  log.warn(
+    { orgId, trigger: opts.trigger, userId: opts.userId ?? null },
     "[distribution] drain queue unavailable — skip sync fallback",
-    JSON.stringify({
-      orgId,
-      trigger: opts.trigger,
-      userId: opts.userId ?? null,
-    }),
   );
   return {
     resolved: 0,
@@ -772,10 +784,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
         },
         () => enqueueProcessPendingOrRun({ trigger, userId }),
       ).catch((e) => {
-        console.error(
-          "[distribution] scheduleProcessPendingDistributionQueue failed",
-          e,
-        );
+        log.error({ err: e }, "[distribution] scheduleProcessPendingDistributionQueue failed");
       });
     }, delayMs);
 

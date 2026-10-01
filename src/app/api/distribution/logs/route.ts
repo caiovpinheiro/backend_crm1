@@ -13,6 +13,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/logs");
 
 export async function GET(req: Request) {
   return withOrgContext(async (session) => {
@@ -51,7 +54,7 @@ export async function GET(req: Request) {
       const result = await getDistributionLogs({ cursor, limit });
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[GET /api/distribution/logs]", e);
+      log.error({ err: e }, "[GET /api/distribution/logs] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar o histórico de distribuições." },
         { status: 500 },

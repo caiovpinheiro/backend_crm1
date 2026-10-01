@@ -7,6 +7,9 @@ import {
   updateProviderConfig,
   deleteProviderConfig,
 } from "@/services/call-provider-configs";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/call-provider-configs/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -108,7 +111,7 @@ export async function PUT(request: Request, context: RouteContext) {
       const config = await updateProviderConfig(id, patch);
       return NextResponse.json({ config });
     } catch (e) {
-      console.error("[call-provider-configs] PUT:", e);
+      log.error({ err: e }, "[call-provider-configs] PUT falhou");
       return NextResponse.json({ message: "Erro ao atualizar configuração." }, { status: 500 });
     }
   });
@@ -137,7 +140,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       await deleteProviderConfig(id);
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.error("[call-provider-configs] DELETE:", e);
+      log.error({ err: e }, "[call-provider-configs] DELETE falhou");
       return NextResponse.json({ message: "Erro ao remover configuração." }, { status: 500 });
     }
   });

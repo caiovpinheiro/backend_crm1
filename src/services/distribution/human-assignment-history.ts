@@ -16,6 +16,9 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.human-assignment-history");
 
 /** Eventos que registram "fulano passou a ser responsável DESTA conversa". */
 const ASSIGNMENT_EVENT_TYPES = ["LEAD_DISTRIBUTED", "ASSIGNEE_CHANGED"];
@@ -70,10 +73,7 @@ export async function humanWasAssignedInThisConversation(
     // Feed indisponível: conservador — assume que houve atribuição e mantém
     // o consultor. Errar para "não soltar" só atrasa a IA; errar para o
     // outro lado tira o dono do atendimento em produção.
-    console.error(
-      "[distribution] humanWasAssignedInThisConversation failed",
-      e,
-    );
+    log.error({ err: e }, "[distribution] humanWasAssignedInThisConversation failed");
     return true;
   }
 }

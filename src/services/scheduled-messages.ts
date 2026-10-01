@@ -26,6 +26,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // prismaBase (sem scope) usado apenas por helpers de worker cross-tenant.
 import { prismaBase } from "@/lib/prisma-base";
 import { ScheduledMessageStatus } from "@prisma/client";
+import { publishScheduledMessageUpdated } from "@/lib/realtime-events";
 import { createDealEvent } from "@/services/deals";
 
 type ScheduledMessageEventType =
@@ -174,6 +175,15 @@ export async function createScheduledMessage(input: CreateScheduledMessageInput)
     }),
   });
 
+  // Banner de agendados das outras abas/agentes (SSE; sem isso só o poll
+  // de 60s mostrava o item novo).
+  publishScheduledMessageUpdated({
+    organizationId: created.organizationId,
+    conversationId: input.conversationId,
+    scheduledMessageId: created.id,
+    status: "PENDING",
+  });
+
   await logScheduledMessageEventOnDeals({
     conversationId: input.conversationId,
     userId: input.createdById,
@@ -241,7 +251,7 @@ export async function cancelPendingForConversation(
   // Se ninguém pendente, short-circuit (evita UPDATE desnecessário).
   const pendingIds = await prisma.scheduledMessage.findMany({
     where: { conversationId, status: ScheduledMessageStatus.PENDING },
-    select: { id: true },
+    select: { id: true, organizationId: true },
   });
   if (pendingIds.length === 0) return 0;
 
@@ -257,6 +267,16 @@ export async function cancelPendingForConversation(
       cancelledById,
     },
   });
+
+  if (result.count > 0) {
+    // Um evento por conversa (não por item): o cliente só invalida a lista.
+    publishScheduledMessageUpdated({
+      organizationId: pendingIds[0]?.organizationId,
+      conversationId,
+      scheduledMessageId: pendingIds.length === 1 ? pendingIds[0].id : null,
+      status: "CANCELLED",
+    });
+  }
 
   // Um evento por agendamento cancelado — assim o histórico do deal mostra
   // exatamente o que foi abortado, útil pra auditoria.
@@ -294,6 +314,13 @@ export async function cancelScheduledMessage(
       cancelReason: "manual",
       cancelledById,
     },
+  });
+
+  publishScheduledMessageUpdated({
+    organizationId: updated.organizationId,
+    conversationId: existing.conversationId,
+    scheduledMessageId: id,
+    status: "CANCELLED",
   });
 
   await logScheduledMessageEventOnDeals({
@@ -355,6 +382,13 @@ export async function markAsSent(
     },
   });
 
+  publishScheduledMessageUpdated({
+    organizationId: updated.organizationId,
+    conversationId: updated.conversationId,
+    scheduledMessageId: id,
+    status: "SENT",
+  });
+
   await logScheduledMessageEventOnDeals({
     conversationId: updated.conversationId,
     // Autor do agendamento vira o "autor" do evento SENT (worker é quem de
@@ -379,6 +413,14 @@ export async function markAsFailed(id: string, reason: string) {
       failedAt: new Date(),
       failureReason: reason.slice(0, 500),
     },
+  });
+
+  // FAILED também sai da lista de pendentes — o banner precisa saber.
+  publishScheduledMessageUpdated({
+    organizationId: updated.organizationId,
+    conversationId: updated.conversationId,
+    scheduledMessageId: id,
+    status: "FAILED",
   });
 
   await logScheduledMessageEventOnDeals({

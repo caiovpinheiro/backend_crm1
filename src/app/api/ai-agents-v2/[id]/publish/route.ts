@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { publishV2AgentVersion } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/publish");
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -22,7 +25,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     );
     return NextResponse.json(result);
   } catch (err) {
-    console.error("[POST /api/ai-agents-v2/[id]/publish]", err);
+    log.error({ err }, "[POST /api/ai-agents-v2/[id]/publish]");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao publicar agente." },
       { status: 500 },

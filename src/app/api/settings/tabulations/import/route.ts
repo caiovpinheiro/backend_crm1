@@ -3,6 +3,9 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { importFlat } from "@/services/tabulations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/tabulations/import");
 
 /**
  * POST /api/settings/tabulations/import
@@ -43,7 +46,7 @@ export async function POST(request: Request) {
       if (code === "DEPT_NOT_FOUND") {
         return NextResponse.json({ message: "Departamento não encontrado.", code }, { status: 404 });
       }
-      console.error("[tabulations][import]", e);
+      log.error({ err: e }, "[tabulations][import] falhou");
       return NextResponse.json({ message: "Erro ao importar tabulações." }, { status: 500 });
     }
   });

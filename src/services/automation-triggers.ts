@@ -1,6 +1,10 @@
 import { isAckOrGreetingText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { getActiveContext } from "@/services/automation-context";
 
@@ -13,6 +17,9 @@ import {
   dispatchIntegrationWebhooks,
   hasIntegrationWebhooks,
 } from "@/services/integration-webhooks";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("automation-triggers");
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (v !== null && typeof v === "object" && !Array.isArray(v)) {
@@ -135,9 +142,9 @@ export function emitConversationCreated(args: {
       data,
     });
   })().catch((err) => {
-    console.warn(
-      "Falha no gatilho conversation_created:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "Falha no gatilho conversation_created",
     );
   });
 }
@@ -362,9 +369,9 @@ export async function evaluateTriggerConditions(
 
     return true;
   } catch (err) {
-    console.error(
-      "[evaluateTriggerConditions] erro ao avaliar condições:",
-      err instanceof Error ? err.message : err,
+    log.error(
+      { err: err instanceof Error ? err.message : err },
+      "[evaluateTriggerConditions] erro ao avaliar condições",
     );
     // Fail-closed: erro ao avaliar → não dispara (não queremos rodar
     // automação ignorando um filtro que o operador definiu).
@@ -706,9 +713,9 @@ export async function fireTrigger(  event: string,
       dealId: context.dealId,
       data: context.data,
     }).catch((err) => {
-      console.warn(
-        "[fireTrigger] integration webhook dispatch failed:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[fireTrigger] integration webhook dispatch failed",
       );
     });
   }
@@ -730,17 +737,18 @@ export async function fireTrigger(  event: string,
       );
       if (await shouldSkipIdleInboundAutomation(asRecord(context.data))) {
         if (event !== "message_received") {
-          console.info(
-            `[fireTrigger] skip ${event} — inbound ocioso (ack/obrigado/confirmação) contact=${context.contactId ?? "-"}`,
+          log.info(
+            { event, contact: context.contactId ?? "-" },
+            "[fireTrigger] skip — inbound ocioso (ack/obrigado/confirmação)",
           );
           return;
         }
         idleInbound = true;
       }
     } catch (err) {
-      console.warn(
-        "[fireTrigger] idle inbound check failed:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[fireTrigger] idle inbound check failed",
       );
     }
   }
@@ -754,7 +762,7 @@ export async function fireTrigger(  event: string,
   try {
     automations = await listActiveAutomationsForTrigger(event);
   } catch (dbErr) {
-    console.error(`[fireTrigger] DB error:`, dbErr);
+    log.error({ err: dbErr }, "[fireTrigger] DB error");
     return;
   }
 
@@ -806,8 +814,14 @@ export async function fireTrigger(  event: string,
           const activeCtx = await getActiveContext(automation.id, enriched.contactId);
 
           if (activeCtx) {
-            console.info(
-              `[fireTrigger] skip "${automation.name}" (${event}) — execução já ativa (contexto=${activeCtx.id} contato=${enriched.contactId})`,
+            log.info(
+              {
+                automationName: automation.name,
+                event,
+                contexto: activeCtx.id,
+                contato: enriched.contactId,
+              },
+              "[fireTrigger] skip — execução já ativa",
             );
             // Registro recuperável no painel/API de logs da automação
             // (status SKIPPED) — serve de evidência de que a reentrada foi
@@ -848,10 +862,13 @@ export async function fireTrigger(  event: string,
         }
 
         await enqueueAutomation(automation.id, { ...enriched, event });
-        console.info(`[fireTrigger] "${automation.name}" disparada (${event})`);
+        log.info({ automationName: automation.name, event }, "[fireTrigger] automação disparada");
       }
     } catch (err) {
-      console.error(`[fireTrigger] Erro "${automation.name}":`, err instanceof Error ? err.message : err);
+      log.error(
+        { automationName: automation.name, err: err instanceof Error ? err.message : err },
+        "[fireTrigger] Erro na automação",
+      );
     }
   }
 }
@@ -885,14 +902,21 @@ export async function notifyDealStageChanged(
 ): Promise<void> {
   try {
     if (!dealId || !toStageId) return;
+    // Replay com handoff real: nenhuma automação da org roda por causa de
+    // um card de teste mudando de etapa.
+    if (isReplaySandboxActive()) {
+      recordBlockedEffect("automation_trigger", `deal_stage_changed:${dealId}`);
+      return;
+    }
     // Sem mudança real de etapa: não dispara (reordenar na mesma coluna,
     // patch redundante, etc.).
     if (fromStageId && fromStageId === toStageId) return;
 
     const depth = opts?.depth ?? 0;
     if (depth > MAX_STAGE_CHAIN_DEPTH) {
-      console.warn(
-        `[notifyDealStageChanged] encadeamento acima do teto (${depth}) — disparo suprimido p/ evitar loop (deal=${dealId})`,
+      log.warn(
+        { depth, deal: dealId },
+        "[notifyDealStageChanged] encadeamento acima do teto — disparo suprimido p/ evitar loop",
       );
       return;
     }
@@ -904,9 +928,9 @@ export async function notifyDealStageChanged(
       depth,
     });
   } catch (err) {
-    console.error(
-      "[notifyDealStageChanged] falha ao disparar stage_changed:",
-      err instanceof Error ? err.message : err,
+    log.error(
+      { err: err instanceof Error ? err.message : err },
+      "[notifyDealStageChanged] falha ao disparar stage_changed",
     );
   }
 }
@@ -945,9 +969,9 @@ export async function notifyTagAdded(opts: {
       depth: opts.depth ?? 0,
     });
   } catch (err) {
-    console.error(
-      "[notifyTagAdded] falha ao disparar tag_added:",
-      err instanceof Error ? err.message : err,
+    log.error(
+      { err: err instanceof Error ? err.message : err },
+      "[notifyTagAdded] falha ao disparar tag_added",
     );
   }
 }

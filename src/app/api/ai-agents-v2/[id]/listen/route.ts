@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { getListenState, startListen } from "@/services/ai-v2/listen";
 import type { ListenMode } from "@/services/ai-v2/listen-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/listen");
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -10,7 +13,7 @@ function fail(err: unknown, where: string) {
   const msg = err instanceof Error ? err.message : "Erro na escuta da equipe.";
   if (msg === "NO_OPENAI_KEY") return NextResponse.json({ code: msg, message: "Configure a chave do modelo do agente em Publicação." }, { status: 400 });
   const status = /não encontrad/.test(msg) ? 404 : /Já existe|Já está lendo|já foi decidida|atualizada por uma leitura/.test(msg) ? 409 : /Escolha|no máximo|não é da equipe|futuro|desligada|terminou|Informe/.test(msg) ? 400 : 500;
-  if (status === 500) console.error(`[${where}]`, err);
+  if (status === 500) log.error({ where, err }, "escuta da equipe falhou");
   return NextResponse.json({ message: msg }, { status });
 }
 

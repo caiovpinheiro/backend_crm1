@@ -6,9 +6,15 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishPresenceUpdate,
+  publishSupportTicketUpdated,
+} from "@/lib/realtime-events";
 import { enqueueProcessPendingOrRun } from "@/services/distribution";
 import { drainSupportQueue } from "@/services/support/distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/agents/[id]/status");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -81,7 +87,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       // #endregion
       if (statusChanged) {
         await recordPresenceTransition({ userId: id, nextStatus: status });
-        sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
+        publishPresenceUpdate({ organizationId: getOrgIdOrNull(), userId: id, status });
 
         // Alguém voltou a ficar ONLINE: drena a fila de espera da
         // Distribuição (leads que ficaram sem responsável elegível).
@@ -112,9 +118,9 @@ export async function PUT(req: Request, ctx: Ctx) {
             );
             // #endregion
           } catch (e) {
-            console.warn(
-              "[/api/agents/[id]/status] processPendingDistributionQueue falhou:",
-              e instanceof Error ? e.message : e,
+            log.warn(
+              { err: e instanceof Error ? e.message : e },
+              "[/api/agents/[id]/status] processPendingDistributionQueue falhou",
             );
             // #region agent log
             debugWarn(
@@ -136,7 +142,7 @@ export async function PUT(req: Request, ctx: Ctx) {
             if (orgId) {
               const assigned = await drainSupportQueue(orgId);
               for (const ticketId of assigned) {
-                sseBus.publish("support_ticket_updated", {
+                publishSupportTicketUpdated({
                   organizationId: orgId,
                   ticketId,
                   status: "OPEN",
@@ -144,9 +150,9 @@ export async function PUT(req: Request, ctx: Ctx) {
               }
             }
           } catch (e) {
-            console.warn(
-              "[/api/agents/[id]/status] drainSupportQueue falhou:",
-              e instanceof Error ? e.message : e,
+            log.warn(
+              { err: e instanceof Error ? e.message : e },
+              "[/api/agents/[id]/status] drainSupportQueue falhou",
             );
           }
         }
@@ -169,9 +175,9 @@ export async function PUT(req: Request, ctx: Ctx) {
           (err as { code?: string }).code === "P2025" ||
           (err as { code?: string }).code === "P2003");
       if (!isExpected) {
-        console.warn(
-          "[/api/agents/[id]/status PUT] falhou:",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[/api/agents/[id]/status PUT] falhou",
         );
         throw err;
       }

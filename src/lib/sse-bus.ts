@@ -1,12 +1,35 @@
 import IORedis from "ioredis";
 
 import {
-  scheduleBoardInvalidation,
+  scheduleBoardInvalidationForMessage,
+  withMessageBoardScope,
+  type MessageBoardScope,
+} from "@/lib/board-invalidation";
+import {
+  parseSseRedisMessage,
+  serializeSseRedisBody,
+  shouldDeliverSseEvent,
+  SSE_ACCESS_REVOKED,
+  isPrivateTeamChatEvent,
+  type SseListenerCtx,
+} from "@/lib/sse-audience";
+import {
   scheduleTabCountsInvalidation,
   shouldInvalidateInboxTabCounts,
 } from "@/lib/cache/keys";
-import { withInboxSseCard } from "@/lib/inbox-sse-card";
+import {
+  shouldAttachInboxSseCard,
+  withInboxSseCard,
+} from "@/lib/inbox-sse-card";
+import { redactNewMessageForUnlisted } from "@/lib/sse-redact";
 import { metrics, safeLabel } from "@/lib/metrics";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("sse-bus");
 
 /**
  * Multi-tenancy do SSE Bus
@@ -18,29 +41,149 @@ import { metrics, safeLabel } from "@/lib/metrics";
  * GETs subsequentes ja sao tenant-scoped, mas era um leak de METADADOS e
  * um side-channel de timing (da pra detectar atividade em outras orgs).
  *
- * Agora cada listener registra com `{ organizationId, isSuperAdmin }` e o
- * dispatcher so chama o listener se:
- *   - super-admin (vê tudo, pra debugger / painel /admin)
- *   - listener.organizationId === event.organizationId
+ * Agora cada listener registra com `{ organizationId, userId, isSuperAdmin }`.
+ * Atendimento: filtro por org (super-admin vê eventos de inbox da plataforma).
+ * Team-chat privado: só `audienceUserIds` resolvido no publisher pela
+ * membership da sala — `isSuperAdmin` não bypassa.
  *
  * Eventos sem organizationId no envelope (caminho legado) sao DROPADOS
  * com warning — fail-closed.
+ *
+ * Contrato dos eventos (`src/lib/realtime-events.ts`)
+ * ──────────────────────────────────────────────────
+ * Este arquivo é só o transporte. Os nomes de evento, o formato de cada
+ * payload e os publishers tipados ficam em `realtime-events.ts` — o único
+ * módulo da aplicação que chama `sseBus.publish`
+ * (`realtime-contract.test.ts` garante). O barramento acrescenta ao
+ * payload: `card`/`cardOmitted` (snapshot do card do inbox) e, em
+ * `new_message`, `pipelineIds`/`dealIds` (escopo do board, vindo do cache
+ * contato → pipelines de `board-invalidation.ts`).
+ *
+ * `typing`: throttle no servidor de 1 evento a cada 3 s por (conversa,
+ * origem, agente). Agente: `POST /api/conversations/:id/typing`. Contato
+ * (`source: "contact"`): worker Baileys, `workers/baileys/contact-typing.ts`.
+ * `scheduled_message_updated`: publicado ao criar, cancelar (manual ou
+ * automático por resposta/encerramento), enviar e falhar; o cliente
+ * invalida `["scheduled-messages", conversationId]`.
+ *
+ * Presença "quem está vendo" (`entity_viewers`, `src/lib/entity-presence.ts`):
+ * TTL do viewer 90s; heartbeat de 25s enviado só pela aba líder do
+ * navegador, que agrega as entidades abertas em todas as abas.
  */
 
 export type SseEventEnvelope = {
   organizationId: string | null;
   data: unknown;
+  audienceUserIds?: string[];
+  /**
+   * Frame SSE (`event: …\ndata: …\n\n`) já codificado, calculado UMA vez
+   * por `dispatch` e compartilhado por todos os listeners. A rota usa
+   * este buffer quando entrega `data` sem alteração para o usuário; só
+   * re-serializa quando o gate de visibilidade mudou o payload.
+   */
+  wire?: Uint8Array;
+};
+
+const sseFrameEncoder = new TextEncoder();
+
+/** Codifica um evento no formato de linha do SSE. */
+export function encodeSseFrame(event: string, data: unknown): Uint8Array {
+  return sseFrameEncoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+export type SsePublishOptions = {
+  audienceUserIds?: string[];
 };
 
 type Listener = (event: string, envelope: SseEventEnvelope) => void;
 
-type ListenerEntry = {
-  organizationId: string | null;
-  isSuperAdmin: boolean;
+type ListenerEntry = SseListenerCtx & {
   fn: Listener;
 };
 
 const REDIS_CHANNEL = "crm:sse:events";
+
+/**
+ * O `card` é enfeite (evita um GET na lista); o evento é obrigatório. Um
+ * `findFirst` preso (pool esgotado) não pode segurar o fan-out — sem teto o
+ * evento nunca chega ao browser e não sobra rastro de onde parou.
+ *
+ * O race libera o evento mas NÃO cancela a query: a conexão do pool segue
+ * ocupada até ela terminar. Timeout aqui em volume é sintoma de pool
+ * esgotado, não a doença.
+ */
+const INBOX_CARD_BUDGET_MS = 2_000;
+
+async function inboxSseCardWithinBudget(
+  event: string,
+  data: unknown,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      withInboxSseCard(event, data),
+      new Promise<unknown>((resolve) => {
+        timer = setTimeout(() => {
+          log.error(
+            { event, budgetMs: INBOX_CARD_BUDGET_MS },
+            "[sse-bus] card snapshot passou do orçamento — publicando sem card",
+          );
+          resolve(data);
+        }, INBOX_CARD_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Escopo do board (`pipelineIds`/`dealIds`) de um `new_message`: enfeite
+ * como o `card`. Vem do cache contato → pipelines (60 s) ou da consulta
+ * única que já existia para a purga do board; se ela travar, o evento sai
+ * sem escopo e o cliente usa o caminho antigo (casa o card pelo contato).
+ */
+async function boardScopeWithinBudget(
+  scope: Promise<MessageBoardScope | null>,
+): Promise<MessageBoardScope | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      scope,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), INBOX_CARD_BUDGET_MS);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * `cardOmitted: "budget"` quando o evento devia levar `card` e saiu sem ele
+ * (timeout, erro ou linha não achada). O cliente distingue isto de
+ * `"hidden"` (gate de visibilidade, na rota SSE): aqui ele busca o card
+ * antes de decidir o alerta; lá o usuário não pode ver a conversa.
+ */
+export function markInboxCardOmittedByBudget(
+  event: string,
+  original: unknown,
+  payload: unknown,
+): unknown {
+  if (!shouldAttachInboxSseCard(event, original)) return payload;
+  if (!payload || typeof payload !== "object") return payload;
+  const rec = payload as Record<string, unknown>;
+  if (rec.card && typeof rec.card === "object") return payload;
+  if (event === "new_message" && rec.direction === "in") {
+    metrics.sse.inboundWithoutCard.inc({ reason: "budget" });
+  }
+  const omitted = { ...rec, cardOmitted: "budget" };
+  // Sem card não há gate: ninguém sabe quem pode ver. Fail-closed no
+  // conteúdo — quem tem o thread aberto refaz o GET.
+  return event === "new_message" ? redactNewMessageForUnlisted(omitted) : omitted;
+}
 
 function sseRedisPubSubEnabled(): boolean {
   // Com REDIS_URL, liga pub/sub por padrão — necessário no EasyPanel
@@ -76,22 +219,7 @@ class SseBus {
       this.redisPub = new IORedis(url, { maxRetriesPerRequest: null });
       await this.redisSub.subscribe(REDIS_CHANNEL);
       this.redisSub.on("message", (_ch, msg) => {
-        try {
-          const parsed = JSON.parse(msg) as {
-            event?: string;
-            organizationId?: string | null;
-            data?: unknown;
-          };
-          if (typeof parsed.event !== "string") return;
-          const envelope: SseEventEnvelope = {
-            organizationId:
-              typeof parsed.organizationId === "string" ? parsed.organizationId : null,
-            data: parsed.data,
-          };
-          this.dispatch(parsed.event, envelope);
-        } catch {
-          /* ignore malformed */
-        }
+        this.ingestRedisMessage(msg);
       });
       this.redisReady = true;
     })();
@@ -99,7 +227,7 @@ class SseBus {
     try {
       await this.redisInitPromise;
     } catch (e) {
-      console.error("[sse-bus] falha ao ligar Redis pub/sub:", e);
+      log.error({ err: e }, "[sse-bus] falha ao ligar Redis pub/sub");
       this.redisInitPromise = null;
       this.redisReady = false;
       this.redisSub?.disconnect();
@@ -111,16 +239,15 @@ class SseBus {
   }
 
   /**
-   * Inscreve um listener com filtro por org. Chamada por
-   * /api/sse/messages com a sessao do usuario corrente.
-   *
-   * @param ctx.organizationId - tenant a filtrar. Se null + isSuperAdmin
-   *                              false, o listener nao recebe NADA
-   *                              (fail-closed para sessao sem org).
-   * @param ctx.isSuperAdmin   - true => recebe todos os eventos sem filtro.
+   * Inscreve um listener com filtro por org (atendimento) e por userId
+   * (team-chat privado / revogação).
    */
   subscribe(
-    ctx: { organizationId: string | null; isSuperAdmin: boolean },
+    ctx: {
+      organizationId: string | null;
+      userId: string | null;
+      isSuperAdmin: boolean;
+    },
     listener: Listener,
   ) {
     if (sseRedisPubSubEnabled()) {
@@ -130,6 +257,7 @@ class SseBus {
     }
     const entry: ListenerEntry = {
       organizationId: ctx.organizationId,
+      userId: ctx.userId,
       isSuperAdmin: ctx.isSuperAdmin,
       fn: listener,
     };
@@ -148,21 +276,71 @@ class SseBus {
   }
 
   /**
+   * Fecha conexões SSE deste usuário nesta instância e avisa as outras
+   * via Redis. Ordem: entregar `sse_access_revoked` → remover listeners
+   * locais → publicar no Redis (réplicas fazem o mesmo no dispatch).
+   */
+  revokeUser(args: { userId: string; organizationId: string | null }) {
+    const envelope: SseEventEnvelope = {
+      organizationId: args.organizationId,
+      data: { organizationId: args.organizationId, userId: args.userId },
+      audienceUserIds: [args.userId],
+    };
+    const targets = [...this.listeners].filter((e) => e.userId === args.userId);
+    for (const entry of targets) {
+      try {
+        entry.fn(SSE_ACCESS_REVOKED, envelope);
+      } catch {
+        /* ignore */
+      }
+      this.listeners.delete(entry);
+    }
+    void this.fanout(
+      SSE_ACCESS_REVOKED,
+      args.organizationId ?? "revoked",
+      envelope.data,
+      [args.userId],
+    );
+  }
+
+  /**
+   * Caminho da réplica: aplica o JSON já publicado em `crm:sse:events`.
+   * Testes usam isto para simular distribuição Redis sem broker.
+   */
+  ingestRedisMessage(raw: string) {
+    const parsed = parseSseRedisMessage(raw);
+    if (!parsed) return;
+    this.dispatch(parsed.event, {
+      organizationId: parsed.organizationId,
+      data: parsed.data,
+      audienceUserIds: parsed.audienceUserIds,
+    });
+  }
+
+  /**
    * Publica evento. `organizationId` eh OBRIGATORIO no envelope —
    * publishers que ainda nao foram migrados emitem warning e o evento
    * cai no chao (fail-closed pra evitar leak).
    *
-   * Ex.: sseBus.publish("new_message", { organizationId: conv.organizationId, conversationId, ... })
+   * Não chame direto: use o publisher do evento em `realtime-events.ts`
+   * (`publishNewMessage`, `publishConversationUpdated`, …).
    *
    * `new_message` / `conversation_updated` that can land a ticket in the
    * inbox list get an extra `card` field (slim list DTO). See
    * `withInboxSseCard`. Old clients ignore it.
    */
-  publish(event: string, data: unknown) {
+  publish(event: string, data: unknown, opts?: SsePublishOptions) {
     const orgId =
       data && typeof data === "object" && "organizationId" in data
         ? ((data as Record<string, unknown>).organizationId as string | null | undefined) ?? null
         : null;
+
+    // Replay com handoff real: o operador não pode ver conversa de teste
+    // aparecendo no inbox dele.
+    if (isReplaySandboxActive(orgId)) {
+      recordBlockedEffect("sse_publish", event);
+      return;
+    }
 
     if (!orgId) {
       // fail-closed: sem org, ninguem recebe (exceto super-admin se for
@@ -170,9 +348,25 @@ class SseBus {
       // _broadcast: true } e a flag _broadcast pode ser respeitada no
       // futuro). Por ora, dropamos e logamos pra detectar publishers
       // legados.
+      //
+      // Loga em produção também: o drop silencioso já apareceu como
+      // "mensagem não atualiza no chat" sem nenhum rastro no servidor.
+      log.error(
+        { event },
+        "[sse-bus] publish SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).",
+      );
+      return;
+    }
+
+    const audienceUserIds = opts?.audienceUserIds;
+    if (
+      isPrivateTeamChatEvent(event) &&
+      (!audienceUserIds || audienceUserIds.length === 0)
+    ) {
       if (process.env.NODE_ENV !== "production") {
-        console.warn(
-          `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
+        log.warn(
+          { event },
+          "[sse-bus] publish SEM audienceUserIds — dropado (team-chat fail-closed).",
         );
       }
       return;
@@ -181,15 +375,21 @@ class SseBus {
     // Mensagem nova deixa o cache-aside do board (TTL 45s) desatualizado:
     // os cards do Kanban/Flow continuariam com a prévia e o "aguardando
     // resposta" anteriores. Purgar aqui cobre TODOS os produtores (envio
-    // manual, webhook Meta/Baileys, automação, IA) num ponto só. Feito
-    // antes do fan-out pra que o refetch disparado pelo SSE no cliente já
-    // encontre o cache limpo.
+    // manual, webhook Meta/Baileys, automação, IA) num ponto só. Só os
+    // pipelines onde o contato tem deal (ver `board-invalidation.ts`).
+    // Começa antes do fan-out; o refetch do cliente sai ~800ms depois do SSE.
     //
     // `message_status` (ticks entregue→lida) fica de fora de propósito: são
     // vários eventos por mensagem e o ganho no card não paga o recompute do
     // board. Esses ticks acompanham o TTL / o poll de 30s.
+    //
+    // A mesma resolução (cache de 60 s ou UMA consulta) devolve o escopo
+    // que o fan-out anexa ao evento: `pipelineIds` / `dealIds`.
+    let boardScope: Promise<MessageBoardScope | null> | undefined;
     if (event === "new_message") {
-      scheduleBoardInvalidation(orgId);
+      boardScope = scheduleBoardInvalidationForMessage(orgId, data).catch(
+        () => null,
+      );
     }
 
     // Badges: NÃO purgar em `new_message` (preview). O FE ainda recebe o
@@ -204,31 +404,50 @@ class SseBus {
       organization: safeLabel(orgId),
     });
 
-    void this.fanout(event, orgId, data);
+    void this.fanout(event, orgId, data, audienceUserIds, boardScope);
   }
 
-  private async fanout(event: string, orgId: string, data: unknown) {
+  private async fanout(
+    event: string,
+    orgId: string,
+    data: unknown,
+    audienceUserIds?: string[],
+    boardScope?: Promise<MessageBoardScope | null>,
+  ) {
+    // Corre junto com o snapshot do card, não depois dele.
+    const scopeWithinBudget = boardScope
+      ? boardScopeWithinBudget(boardScope)
+      : null;
     let payload = data;
     try {
-      payload = await withInboxSseCard(event, data);
+      payload = await inboxSseCardWithinBudget(event, data);
     } catch (e) {
-      console.error("[sse-bus] inbox card snapshot:", e);
+      log.error({ err: e }, "[sse-bus] inbox card snapshot");
+    }
+    payload = markInboxCardOmittedByBudget(event, data, payload);
+    if (scopeWithinBudget) {
+      payload = withMessageBoardScope(payload, await scopeWithinBudget);
     }
 
-    const envelope: SseEventEnvelope = { organizationId: orgId, data: payload };
+    const envelope: SseEventEnvelope = {
+      organizationId: orgId,
+      data: payload,
+      audienceUserIds,
+    };
 
     if (sseRedisPubSubEnabled()) {
       try {
         await this.ensureRedis();
         if (!this.redisPub) return;
-        const body = JSON.stringify({
+        const body = serializeSseRedisBody({
           event,
           organizationId: orgId,
           data: payload,
+          audienceUserIds,
         });
         await this.redisPub.publish(REDIS_CHANNEL, body);
       } catch (e) {
-        console.error("[sse-bus] publish Redis:", e);
+        log.error({ err: e }, "[sse-bus] publish Redis");
       }
       return;
     }
@@ -237,19 +456,23 @@ class SseBus {
   }
 
   private dispatch(event: string, envelope: SseEventEnvelope) {
-    for (const entry of this.listeners) {
-      // super-admin recebe tudo (debug/admin panel)
-      // demais listeners: filtro estrito por org
-      if (
-        !entry.isSuperAdmin &&
-        entry.organizationId !== envelope.organizationId
-      ) {
+    for (const entry of [...this.listeners]) {
+      if (!shouldDeliverSseEvent(entry, event, envelope)) {
         continue;
+      }
+      // Serializa uma vez por evento, não uma vez por conexão: com N
+      // conexões na org eram N `JSON.stringify` + N `encode` do mesmo
+      // `card`. Só quando há pelo menos um destinatário.
+      if (!envelope.wire) {
+        envelope.wire = encodeSseFrame(event, envelope.data);
       }
       try {
         entry.fn(event, envelope);
       } catch {
         /* ignore */
+      }
+      if (event === SSE_ACCESS_REVOKED) {
+        this.listeners.delete(entry);
       }
     }
   }
@@ -297,9 +520,7 @@ function bootstrapBackgroundServices() {
       process.env.NEXT_PHASE !== "phase-production-build" &&
       process.env.CRM_SKIP_BACKGROUND_SERVERS !== "1"
     ) {
-      console.info(
-        "[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)",
-      );
+      log.info("[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)");
     }
     return;
   }
@@ -308,7 +529,7 @@ function bootstrapBackgroundServices() {
   // (inbox + health + 6 timers). Atrasa o 1º tick para o Postgres
   // aceitar conexões e o GET /conversations não ficar atrás da fila.
   const bootDelayMs = Number(process.env.API_SWEEPER_BOOT_DELAY_MS) || 25_000;
-  console.info(`[sse-bus] sweepers agendados em ${bootDelayMs}ms`);
+  log.info({ bootDelayMs }, "[sse-bus] sweepers agendados");
   setTimeout(() => startBackgroundSweepers(), bootDelayMs);
 }
 
@@ -321,31 +542,31 @@ export function startWhatsappOwnedSweepers() {
   import("@/services/system-presence")
     .then(({ startSystemPresenceSweeper }) => startSystemPresenceSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start system-presence sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start system-presence sweeper"),
     );
 
   import("@/services/system-activity")
     .then(({ startSystemActivitySweeper }) => startSystemActivitySweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start system-activity sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start system-activity sweeper"),
     );
 
   import("@/services/scheduled-messages-worker")
     .then(({ startScheduledMessagesWorker }) => startScheduledMessagesWorker())
     .catch((e) =>
-      console.error("[sse-bus] failed to start scheduled-messages worker:", e),
+      log.error({ err: e }, "[sse-bus] failed to start scheduled-messages worker"),
     );
 
   import("@/services/stale-outbound-sweeper")
     .then(({ startStaleOutboundSweeper }) => startStaleOutboundSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start stale outbound sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start stale outbound sweeper"),
     );
 
   import("@/services/ai-agent-inactivity-worker")
     .then(({ startAIAgentInactivityWorker }) => startAIAgentInactivityWorker())
     .catch((e) =>
-      console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
+      log.error({ err: e }, "[sse-bus] failed to start ai-agent inactivity worker"),
     );
 
   import("@/services/whatsapp-session-expiry-sweeper")
@@ -353,13 +574,13 @@ export function startWhatsappOwnedSweepers() {
       startWhatsappSessionExpirySweeper(),
     )
     .catch((e) =>
-      console.error("[sse-bus] failed to start session-expiry sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start session-expiry sweeper"),
     );
 
   import("@/services/activity-alert-push-sweeper")
     .then(({ startActivityAlertPushSweeper }) => startActivityAlertPushSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start activity-alert push sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start activity-alert push sweeper"),
     );
 
   // Só lê activity_outbox de tabulação e grava activity_events.
@@ -369,14 +590,28 @@ export function startWhatsappOwnedSweepers() {
       startTabulationOutboxProjector(),
     )
     .catch((e) =>
-      console.error("[sse-bus] failed to start tabulation outbox projector:", e),
+      log.error({ err: e }, "[sse-bus] failed to start tabulation outbox projector"),
+    );
+
+  // Consumidor de CONVERSATION_CLOSED da mesma outbox (filtro por tipo: não
+  // disputa linha com o projetor de tabulação). ACTIVITY_OUTBOX_WORKER=0
+  // desliga; lote/intervalo em ACTIVITY_OUTBOX_WORKER_BATCH/_INTERVAL_MS.
+  import("@/services/activity-outbox")
+    .then(({ startConversationClosedOutboxProjector }) =>
+      startConversationClosedOutboxProjector(),
+    )
+    .catch((e) =>
+      log.error(
+        { err: e },
+        "[sse-bus] failed to start conversation-closed outbox projector",
+      ),
     );
 }
 
 function startBackgroundSweepers() {
   import("@/services/automation-context")
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
-    .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
+    .catch((e) => log.error({ err: e }, "[sse-bus] failed to start timeout sweeper"));
 
   startWhatsappOwnedSweepers();
 }

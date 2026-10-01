@@ -24,7 +24,7 @@ import {
   type ProductWhatsAppSendMode,
 } from "@/lib/product-whatsapp-send-mode";
 import { isBaileysChannel } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishOutboundNewMessage } from "@/lib/realtime-events";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { logEvent } from "@/services/activity-log";
 import { cancelActiveContextsForContactIfAny } from "@/services/automation-context";
@@ -33,6 +33,9 @@ import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conve
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 import type { NextResponse } from "next/server";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("conversation-products");
 
 export type ProductSendActor = {
   id: string;
@@ -101,7 +104,7 @@ async function ensureRetailerInCatalog(
     productId: string;
     channelId: string;
   },
-): Promise<string> {
+): Promise<string | null> {
   try {
     const found = await client.findCatalogProductByRetailerId(
       args.catalogId,
@@ -117,7 +120,7 @@ async function ensureRetailerInCatalog(
       channelId: args.channelId,
       productRetailerId: args.retailerId,
     });
-    return link.productRetailerId;
+    return link.productRetailerId ?? null;
   } catch {
     return args.retailerId;
   }
@@ -125,25 +128,6 @@ async function ensureRetailerInCatalog(
 
 function actorName(actor: ProductSendActor): string {
   return actor.name?.trim() || actor.email?.trim() || "Agente";
-}
-
-function publishNewMessage(
-  conv: { id: string; organizationId: string; contactId: string | null },
-  content: string,
-  timestamp: Date,
-): void {
-  try {
-    sseBus.publish("new_message", {
-      organizationId: conv.organizationId,
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      direction: "out",
-      content,
-      timestamp,
-    });
-  } catch {
-    /* best-effort */
-  }
 }
 
 export async function sendProductsToConversation(args: {
@@ -292,10 +276,10 @@ export async function sendProductsToConversation(args: {
   const links = ordered.map((p) => p.metaLinks[0] ?? null);
   const missing = links.some((link) => !link?.metaCatalogId?.trim() || !link?.productRetailerId?.trim());
   if (missing) {
-    console.warn("[conversation-products] fallback legacy: vínculo Meta ausente", {
-      conversationId: conv.id,
-      productIds,
-    });
+    log.warn(
+      { conversationId: conv.id, productIds },
+      "[conversation-products] fallback legacy: vínculo Meta ausente",
+    );
     return {
       ok: true,
       used: "legacy",
@@ -307,11 +291,12 @@ export async function sendProductsToConversation(args: {
     };
   }
 
-  const catalogIds = new Set(links.map((l) => l!.metaCatalogId.trim()));
+  const catalogIds = new Set(links.map((l) => l!.metaCatalogId!.trim()));
   if (catalogIds.size !== 1) {
-    console.warn("[conversation-products] fallback legacy: catálogos Meta misturados", {
-      conversationId: conv.id,
-    });
+    log.warn(
+      { conversationId: conv.id },
+      "[conversation-products] fallback legacy: catálogos Meta misturados",
+    );
     return {
       ok: true,
       used: "legacy",
@@ -323,8 +308,8 @@ export async function sendProductsToConversation(args: {
     };
   }
 
-  const catalogId = [...catalogIds][0];
-  const retailerIds = links.map((l) => l!.productRetailerId.trim());
+  const catalogId = [...catalogIds][0]!;
+  const retailerIds = links.map((l) => l!.productRetailerId!.trim() as string);
   const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
   const metaClient = metaClientFromConfig(channelConfig, { allowEnvFallback: false });
   if (!metaClient.configured) {
@@ -408,10 +393,10 @@ export async function sendProductsToConversation(args: {
       .catch(() => {});
   } catch (err) {
     const reason = formatMetaSendError(err);
-    console.warn("[conversation-products] envio catálogo falhou — fallback legacy", {
-      conversationId: conv.id,
-      reason,
-    });
+    log.warn(
+      { conversationId: conv.id, reason },
+      "[conversation-products] envio catálogo falhou — fallback legacy",
+    );
     await prisma.message.delete({ where: { id: saved.id } }).catch(() => {});
     return {
       ok: true,
@@ -454,13 +439,13 @@ export async function sendProductsToConversation(args: {
     },
   });
 
-  publishNewMessage(conv, preview, saved.createdAt);
+  publishOutboundNewMessage(conv, preview, saved.createdAt);
 
   if (conv.contactId) {
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after catalog product:", err);
+      log.warn({ err }, "[automation] cancel after catalog product");
     }
   }
   fireTrigger("message_sent", {
@@ -471,9 +456,9 @@ export async function sendProductsToConversation(args: {
       conversationId: conv.id,
       content: preview,
     }),
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
   cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos produto Meta:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos produto Meta"),
   );
 
   return {

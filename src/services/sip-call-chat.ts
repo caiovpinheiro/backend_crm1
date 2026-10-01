@@ -13,7 +13,7 @@ import type { CallDirection } from "@prisma/client";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 
 const log = getLogger("sip-call-chat");
 
@@ -128,7 +128,7 @@ export async function logSipCallInConversation(
     })
     .catch(() => {});
 
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: input.organizationId,
     conversationId,
     contactId: input.contactId,

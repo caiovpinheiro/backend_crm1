@@ -7,7 +7,8 @@
  * os ids e materializa o texto concatenado quando o turno estabiliza. A IA
  * roda UMA vez, sobre o texto agregado.
  *
- * A fonte de verdade é o BANCO, não um `Map` de processo com `setTimeout`. Restart,
+ * Diferença central em relação ao `inbound-debounce` antigo: a fonte de
+ * verdade é o BANCO, não um `Map` de processo com `setTimeout`. Restart,
  * deploy, crash, worker diferente, múltiplas réplicas e retry convergem
  * para o mesmo estado porque todo mundo lê a mesma linha. O `setTimeout`
  * daqui é fast path de latência — se o processo morrer, o sweeper
@@ -30,13 +31,18 @@ import { resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
-import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
-import { scheduleInboundRedistribution } from "@/services/ai/inbound-redistribution";
 import { llmMaxAttempts, llmTimeoutMs } from "@/services/ai/llm-retry";
+import {
+  handleAiTestCommand,
+  parseAiTestCommand,
+} from "@/services/ai/test-mode";
 import {
   claimInboundMessageForAi,
   collectUnansweredInboundText,
 } from "@/services/ai/inbound-debounce";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.turn-manager");
 
 /** Piso da janela de debounce — o mesmo do debounce antigo. Debounce 0 */
 /** gera uma resposta por bolha (triplica "vou te conectar"). */
@@ -67,10 +73,7 @@ export type InboundTurnInput = {
 };
 
 function logTurn(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-turn]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-turn] ${event}`);
 }
 
 function envInt(name: string, fallback: number): number {
@@ -311,16 +314,21 @@ function isUniqueViolation(err: unknown): boolean {
 
 /**
  * Entrypoint dos 3 ingests de inbound (meta-webhook, messaging, baileys).
+ * Substitui `scheduleAiReply` nos call sites; com a flag desligada
+ * delega para o debounce antigo, então NÃO existem dois debounces
+ * concorrentes — só um caminho ativo por vez.
  */
 export async function onInboundMessageForAi(
   input: InboundTurnInput,
 ): Promise<void> {
-  // `#reset` ANTES de qualquer coisa — inclusive da allowlist. É o único
-  // ponto por onde os 3 ingests passam, então o comando funciona igual no
-  // Meta, no Baileys e no Messenger/Instagram, e vale mesmo quando a
-  // conversa ainda não é da IA. Recomeça o atendimento para quem está
-  // testando; número não autorizado segue o fluxo normal e nada na resposta
-  // revela que o comando existe.
+  // Comando de teste ANTES de qualquer coisa — inclusive da allowlist e da
+  // escolha entre turno e debounce. É o único ponto por onde os 3 ingests
+  // passam, então o comando funciona igual no Meta, no Baileys e no
+  // Messenger/Instagram, e vale mesmo quando a conversa ainda não é da IA.
+  // Telefone não autorizado devolve `false` e a mensagem segue o fluxo
+  // normal: nada na resposta revela que o comando existe.
+  // `#reset` (motor v2): recomeça o atendimento para quem está testando.
+  // Mesmo sigilo dos comandos de teste: número não autorizado segue normal.
   const { isV2ResetCommand } = await import("@/services/ai-v2/reset");
   if (isV2ResetCommand(input.userMessage)) {
     const { handleV2ResetCommand } = await import("@/services/ai-v2/reset");
@@ -330,7 +338,23 @@ export async function onInboundMessageForAi(
       messageId: input.messageId,
       channel: input.channel,
     }).catch((err) => {
-      console.error("[ai-v2] #reset falhou", err);
+      log.error({ err }, "[ai-v2] #reset falhou");
+      return false;
+    });
+    if (consumed) return;
+  }
+
+  const testCommand = parseAiTestCommand(input.userMessage);
+  if (testCommand) {
+    const consumed = await handleAiTestCommand({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      command: testCommand.command,
+      argument: testCommand.argument,
+      channel: input.channel,
+      messageId: input.messageId,
+    }).catch((err) => {
+      log.error({ err }, "[ai-test] comando falhou");
       return false;
     });
     if (consumed) return;
@@ -354,7 +378,7 @@ export async function onInboundMessageForAi(
         return;
       }
     } catch (e) {
-      console.error("[ai-turn] idle inbound check failed", e);
+      log.error({ err: e }, "[ai-turn] idle inbound check failed");
     }
   }
 
@@ -363,7 +387,8 @@ export async function onInboundMessageForAi(
 
   // Allowlist ANTES de resolver o agente v2: o resolver atribui a conversa
   // à IA, e um contato fora da allowlist ficava preso num agente que nunca
-  // responde.
+  // responde. Os dois caminhos (turno e debounce antigo) já descartavam
+  // esse contato, então sair aqui não muda o que a IA responde.
   try {
     const allowed = await isContactAllowedForAi(input.contactId);
     if (!allowed) {
@@ -374,27 +399,24 @@ export async function onInboundMessageForAi(
       return;
     }
   } catch (e) {
-    console.error("[ai-turn] phone allowlist check failed — blocking", e);
+    log.error({ err: e }, "[ai-turn] phone allowlist check failed — blocking");
     return;
   }
 
   const simpleAgent = await resolveV2AgentForConversation(
     input.conversationId,
   );
-  if (!simpleAgent) {
-    // Sem agente IA. Com a IA desligada na org, a conversa ganha a segunda
-    // passada da distribuição (depois de salesbot e automações).
-    if (!(await isAiAttendanceEnabled())) {
-      scheduleInboundRedistribution({
-        conversationId: input.conversationId,
-        contactId: input.contactId,
-      });
-    }
+  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
+
+  if (!useTurnManager) {
+    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
+    await scheduleAiReply(input);
     return;
   }
 
-  // Claim por messageId (webhook repetido / multi-pod): barra o
-  // reprocessamento ANTES de encostar no banco.
+  // Claim por messageId (webhook repetido / multi-pod). Continua sendo o
+  // mesmo claim Redis do debounce antigo: barra o reprocessamento ANTES
+  // de encostar no banco.
   const claimed = await claimInboundMessageForAi(input.messageId);
   if (!claimed) return;
 
@@ -408,7 +430,7 @@ export async function onInboundMessageForAi(
   // `APP_MODE=api`). Import dinâmico: o sweeper importa este módulo.
   void import("@/services/ai/turn-sweeper")
     .then(({ startAiTurnSweeper }) =>
-      startAiTurnSweeper({ force: true }),
+      startAiTurnSweeper({ force: Boolean(simpleAgent) }),
     )
     .catch(() => {
       /* fast path + cron cobrem */
@@ -433,10 +455,10 @@ export function armFastPath(turnId: string, dueAt: number): void {
   const timer = setTimeout(() => {
     fastPathTimers.delete(turnId);
     void promoteAndDispatchTurn(turnId).catch((err) => {
-      console.error("[ai-turn] fast path falhou", {
-        turnId,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      log.error(
+        { turnId, err: err instanceof Error ? err.message : String(err) },
+        "[ai-turn] fast path falhou",
+      );
     });
   }, delay);
   timer.unref?.();
@@ -460,7 +482,10 @@ export function clearFastPathTimers(): void {
   fastPathTimers.clear();
 }
 
-/** Verifica se a conversa está atribuída a um agente IA (motor v2). */
+/**
+ * Verifica se a conversa está atribuída a um agente que usa o motor
+ * simples (v2). Se não houver assignee, a v1 continua responsável.
+ */
 async function isSimpleEngineTurn(conversationId: string): Promise<boolean> {
   try {
     const conv = (await (prismaBase as unknown as {
@@ -477,10 +502,10 @@ async function isSimpleEngineTurn(conversationId: string): Promise<boolean> {
     })) as { assignedTo?: { aiAgentConfig?: { engine?: string } } } | null;
     return conv?.assignedTo?.aiAgentConfig?.engine === "simple";
   } catch (err) {
-    console.error("[ai-turn] isSimpleEngineTurn falhou", {
-      conversationId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      { conversationId, err: err instanceof Error ? err.message : String(err) },
+      "[ai-turn] isSimpleEngineTurn falhou",
+    );
     return false;
   }
 }
@@ -736,7 +761,11 @@ export async function dispatchReadyTurn(
   return true;
 }
 
-/** Executa o motor v2 com o texto agregado do turno. */
+/**
+ * Executa `maybeReplyAsAIAgent` com o texto agregado. NÃO reescreve o
+ * inbox-handler: só passa `userMessage` já concatenado + `turnId` para
+ * rastreabilidade no `AIAgentRun`.
+ */
 export async function runTurn(turn: {
   id: string;
   organizationId: string;
@@ -775,13 +804,7 @@ export async function runTurn(turn: {
         }
 
         const simple = await isSimpleEngineTurn(turn.conversationId);
-        if (!simple) {
-          // A conversa saiu do agente IA enquanto o turno acumulava.
-          logTurn("no_ai_assignee", {
-            turnId: turn.id,
-            conversationId: turn.conversationId,
-          });
-        } else {
+        if (simple) {
           const { processV2Turn } = await import("@/services/ai-v2/engine");
           await processV2Turn({
             conversationId: turn.conversationId,
@@ -795,6 +818,18 @@ export async function runTurn(turn: {
             // do teto) não pode continuar enviando em dois processos.
             attempt: turn.attempts,
             claimedAt: turn.claimedAt ?? null,
+          });
+        } else {
+          const { maybeReplyAsAIAgent } = await import(
+            "@/services/ai/inbox-handler"
+          );
+          await maybeReplyAsAIAgent({
+            conversationId: turn.conversationId,
+            contactId: turn.contactId ?? "",
+            userMessage: text,
+            channel: turn.channel === "baileys" ? "baileys" : "meta",
+            inboundMessageIds: messageIds,
+            turnId: turn.id,
           });
         }
 
@@ -810,16 +845,19 @@ export async function runTurn(turn: {
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[ai-turn] runTurn falhou", { turnId: turn.id, err: message });
+    log.error({ turnId: turn.id, err: message }, "[ai-turn] runTurn falhou");
     await failOrRetryTurn(turn.id, turn.organizationId, message);
     // Falhou: o retry e o turno seguinte ficam com o sweeper.
     return;
   }
   void dispatchDeferredTurn(turn.conversationId, turn.id).catch((err) => {
-    console.error("[ai-turn] turno seguinte falhou", {
-      conversationId: turn.conversationId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      {
+        conversationId: turn.conversationId,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "[ai-turn] turno seguinte falhou",
+    );
   });
 }
 
@@ -915,11 +953,10 @@ export async function invalidateOpenTurns(
     }
     return res.count;
   } catch (err) {
-    console.error("[ai-turn] invalidateOpenTurns falhou", {
-      conversationId,
-      reason,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      { conversationId, reason, err: err instanceof Error ? err.message : String(err) },
+      "[ai-turn] invalidateOpenTurns falhou",
+    );
     return 0;
   }
 }

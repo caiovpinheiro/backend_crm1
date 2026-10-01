@@ -5,6 +5,9 @@ import { requirePermission } from "@/lib/authz";
 import { parseKommoBot } from "@/lib/kommo-bot-parser";
 import { createAutomation, updateAutomation } from "@/services/automations";
 import type { Prisma } from "@prisma/client";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/import-kommo");
 
 // Bug 27/abr/26: este endpoint chamava `auth()` direto e os services
 // `createAutomation` / `updateAutomation` chamam `getOrgIdOrThrow()`
@@ -136,7 +139,7 @@ export async function POST(request: Request) {
       try {
         parsed = parseImportPayload(json);
       } catch (err) {
-        console.error("[import-kommo] Parse error:", err);
+        log.error({ err }, "[import-kommo] Parse error");
         return NextResponse.json(
           { message: `Erro ao parsear bot: ${err instanceof Error ? err.message : String(err)}` },
           { status: 400 },
@@ -201,7 +204,7 @@ export async function POST(request: Request) {
         { status: 201 },
       );
     } catch (e) {
-      console.error("[import-kommo]", e);
+      log.error({ err: e }, "[import-kommo] falhou");
       return NextResponse.json({ message: "Erro ao importar bot." }, { status: 500 });
     }
   });

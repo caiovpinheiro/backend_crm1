@@ -24,6 +24,10 @@ import {
   syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
 import { getHumanAttendanceForConversation } from "@/services/attendance-guards";
@@ -39,6 +43,9 @@ import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.engine");
 
 export type DistributionTriggerSource =
   | "SYSTEM"
@@ -176,6 +183,12 @@ export interface DistributionResult {
   selectedUserId: string | null;
   selectedUserName: string | null;
   evaluated: EvaluatedResponsibleSummary[];
+  /**
+   * Escolha resolvida sem atribuir (replay em sandbox). Quem lê o resultado
+   * precisa distinguir "o consultor recebeu" de "o consultor receberia" —
+   * sem isso o relatório do replay mente nas duas direções.
+   */
+  simulated?: boolean;
 }
 
 function toSummary(
@@ -263,9 +276,9 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
         select: { lastInboundAt: true },
       });
       if (!conv?.lastInboundAt) {
-        console.info(
+        log.info(
+          { conversationId: hydrated.conversationId },
           "[distribution] enqueuePending skip — sem inbound do aluno",
-          JSON.stringify({ conversationId: hydrated.conversationId }),
         );
         return;
       }
@@ -315,7 +328,7 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
     // quando alguém fica elegível (online/capacidade), no cron periódico
     // ou no botão manual.
   } catch (e) {
-    console.error("[distribution] falha ao enfileirar pendência", e);
+    log.error({ err: e }, "[distribution] falha ao enfileirar pendência");
   }
 }
 
@@ -333,7 +346,7 @@ async function resolvePendingFor(
       select: { type: true },
     });
     if (resolverUser?.type === "AI") {
-      console.warn("[distribution] resolvePendingFor skipped — userId is AI", { userId });
+      log.warn({ userId }, "[distribution] resolvePendingFor skipped — userId is AI");
       return;
     }
     await prisma.distributionPending.updateMany({
@@ -344,7 +357,7 @@ async function resolvePendingFor(
       data: { status: "RESOLVED", resolvedUserId: userId, resolvedAt: new Date() },
     });
   } catch (e) {
-    console.error("[distribution] falha ao resolver pendência", e);
+    log.error({ err: e }, "[distribution] falha ao resolver pendência");
   }
 }
 
@@ -430,7 +443,7 @@ async function emitDistributionEvent(
       },
     });
   } catch (e) {
-    console.error("[distribution] falha ao gravar evento no feed", e);
+    log.error({ err: e }, "[distribution] falha ao gravar evento no feed");
   }
 }
 
@@ -549,7 +562,7 @@ async function writeLog(
     });
   } catch (e) {
     // Log é observabilidade — nunca deve derrubar a distribuição.
-    console.error("[distribution] falha ao gravar DistributionLog", e);
+    log.error({ err: e }, "[distribution] falha ao gravar DistributionLog");
   }
 }
 
@@ -561,6 +574,18 @@ async function writeLog(
 export async function executeDistribution(
   rawInput: ExecuteDistributionInput,
 ): Promise<DistributionResult> {
+  // Replay com handoff real: resolve quem SERIA escolhido, sem atribuir.
+  // Um replay não pode colocar conversa de teste na fila de um consultor.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect(
+      "distribution_assign",
+      `conversationId=${rawInput.conversationId ?? "-"} dealId=${rawInput.dealId ?? "-"}`,
+    );
+    const { triggerSource: _ignored, ...simInput } = rawInput;
+    const simulated = await simulateDistribution(simInput);
+    return { ...simulated, simulated: true };
+  }
+
   if (!(await hasOrganizationWidget("smart_distribution"))) {
     return {
       success: false,
@@ -741,14 +766,14 @@ export async function executeDistribution(
           isAi: check.isAi,
         });
         if (keptInAttendance) {
-          console.warn(
-            "[distribution] redistribuição pulada — conversa em atendimento",
-            JSON.stringify({
+          log.warn(
+            {
               conversationId: input.conversationId,
               assignedToId: already.assignedToId,
               departamentoEsperado: explicitDeptIds,
               triggerSource: input.triggerSource,
-            }),
+            },
+            "[distribution] redistribuição pulada — conversa em atendimento",
           );
           await writeLog(
             input,
@@ -1092,6 +1117,8 @@ export async function executeDistribution(
   );
 
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
+  // Await: o card precisa estar no funil operacional assim que o consultor
+  // humano for responsável (fire-and-forget perdia corridas com o inbox).
   let selectedIsHuman = false;
   try {
     const assigneeType = await prisma.user.findUnique({
@@ -1101,6 +1128,30 @@ export async function executeDistribution(
     selectedIsHuman = assigneeType?.type === "HUMAN";
   } catch {
     selectedIsHuman = false;
+  }
+
+  if (
+    selectedIsHuman &&
+    (input.triggerSource === "AI_AGENT" ||
+      (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
+  ) {
+    try {
+      // Funil operacional é refino de vertical: quem define é o pack do
+      // agente da conversa. Sem pack, o card não muda de etapa — nunca
+      // aplicamos o funil de uma organização em outra.
+      const { resolveAgentVerticalForConversation } = await import(
+        "@/services/ai/agent-vertical"
+      );
+      const { ops } = await resolveAgentVerticalForConversation(
+        input.conversationId ?? null,
+      );
+      await ops.moveOpenDealToEmAtendimento?.({
+        dealId: assignedDealId,
+        contactId: input.contactId ?? null,
+      });
+    } catch (e) {
+      log.error({ err: e }, "[distribution] moveOpenDealToEmAtendimento failed");
+    }
   }
 
   // Saudação pós-distribuição (`lead_distributed`): HUMAN assumindo vindo
@@ -1150,20 +1201,20 @@ export async function executeDistribution(
           triggerSource: input.triggerSource,
         },
       }).catch((err) =>
-        console.warn(
-          "[distribution] fireTrigger lead_distributed:",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[distribution] fireTrigger lead_distributed",
         ),
       );
     }
   } else if (selectedIsHuman && !priorWasHuman && !sessionOpenForFreeText) {
-    console.info(
-      "[distribution] skip lead_distributed — sessão 24h fechada",
-      JSON.stringify({
+    log.info(
+      {
         conversationId: input.conversationId ?? null,
         triggerSource: input.triggerSource,
         selectedUserId: selected.userId,
-      }),
+      },
+      "[distribution] skip lead_distributed — sessão 24h fechada",
     );
   }
 

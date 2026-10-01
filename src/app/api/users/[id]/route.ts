@@ -5,9 +5,16 @@ import { UserRole } from "@prisma/client";
 
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
+import {
+  SESSION_VERSION_BUMP,
+  notifySessionsRevoked,
+} from "@/lib/auth/session-revocation";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { disableTelephony } from "@/services/api4com/provisioning";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/users/[id]");
 
 const MIN_PASSWORD_LENGTH = 6;
 
@@ -90,6 +97,7 @@ export async function PUT(request: Request, context: RouteContext) {
       hashedPassword?: string;
       phone?: string | null;
       avatarUrl?: string | null;
+      sessionVersion?: { increment: number };
     } = {};
 
     if (b.name !== undefined) {
@@ -165,6 +173,8 @@ export async function PUT(request: Request, context: RouteContext) {
         );
       }
       data.hashedPassword = await bcrypt.hash(b.password, 10);
+      // SV-1: reset administrativo derruba as sessões do usuário.
+      data.sessionVersion = SESSION_VERSION_BUMP.sessionVersion;
     }
 
     if (Object.keys(data).length === 0) {
@@ -195,6 +205,12 @@ export async function PUT(request: Request, context: RouteContext) {
         // hard-lock de 24h (login_attempts) nao pode sobreviver a ele,
         // senao o admin troca a senha e o usuario segue bloqueado.
         await clearLoginLockout(user.email);
+        notifySessionsRevoked({
+          userId: id,
+          organizationId: r.session.user.organizationId ?? null,
+          reason: "password_change",
+          actorId: r.session.user.id,
+        });
       }
       return NextResponse.json(user);
     } catch (e) {
@@ -210,7 +226,7 @@ export async function PUT(request: Request, context: RouteContext) {
       throw e;
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     return NextResponse.json({ message: "Erro ao atualizar usuário." }, { status: 500 });
   }
 }
@@ -316,11 +332,20 @@ export async function DELETE(_request: Request, context: RouteContext) {
           WHERE requested_by_id = ${target.id}
         `;
       } catch (rawErr) {
-        console.warn("[users.delete] discount_requests reassign skipped", rawErr);
+        log.warn({ err: rawErr }, "[users.delete] discount_requests reassign skipped");
       }
 
       try {
         await prisma.user.delete({ where: { id: target.id } });
+        // SV-1: sem linha não há o que incrementar — o refresh do JWT
+        // trata "usuário não encontrado" como sessão inválida; aqui só
+        // zera os caches deste processo e fecha o SSE em todas as réplicas.
+        notifySessionsRevoked({
+          userId: target.id,
+          organizationId: target.organizationId,
+          reason: "user_deleted",
+          actorId: r.session.user.id,
+        });
         return NextResponse.json({ ok: true });
       } catch (delErr) {
         // Fallback: se ainda houver FK obscura, anonimiza e esconde da Equipe
@@ -348,6 +373,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
               isErased: true,
               erasedAt: new Date(),
               role: "MEMBER",
+              ...SESSION_VERSION_BUMP,
             },
           });
           await prisma.distributionResponsible
@@ -359,10 +385,16 @@ export async function DELETE(_request: Request, context: RouteContext) {
           await prisma.agentStatus
             .deleteMany({ where: { userId: target.id } })
             .catch(() => null);
-          console.warn(
-            "[users.delete] hard delete blocked by FK; soft-erased user",
+          log.warn(
             { userId: target.id, code },
+            "[users.delete] hard delete blocked by FK; soft-erased user",
           );
+          notifySessionsRevoked({
+            userId: target.id,
+            organizationId: target.organizationId,
+            reason: "user_erased",
+            actorId: r.session.user.id,
+          });
           return NextResponse.json({ ok: true, softDeleted: true });
         }
         throw delErr;
@@ -384,7 +416,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
           { status: 409 },
         );
       }
-      console.error("[users.delete] failed", e);
+      log.error({ err: e }, "[users.delete] failed");
       const detail = e instanceof Error ? e.message : String(e);
       return NextResponse.json(
         { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },
@@ -392,7 +424,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       );
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     const detail = e instanceof Error ? e.message : String(e);
     return NextResponse.json(
       { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getCall, updateCall } from "@/services/calls";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/calls/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -27,7 +30,7 @@ export async function GET(request: Request, context: RouteContext) {
       }
       return NextResponse.json({ call });
     } catch (e) {
-      console.error("[calls] GET [id]:", e);
+      log.error({ err: e }, "[calls] GET [id] falhou");
       return NextResponse.json({ message: "Erro ao buscar chamada." }, { status: 500 });
     }
   });
@@ -84,7 +87,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       const call = await updateCall(id, patch);
       return NextResponse.json({ call });
     } catch (e) {
-      console.error("[calls] PATCH [id]:", e);
+      log.error({ err: e }, "[calls] PATCH [id] falhou");
       return NextResponse.json({ message: "Erro ao atualizar chamada." }, { status: 500 });
     }
   });

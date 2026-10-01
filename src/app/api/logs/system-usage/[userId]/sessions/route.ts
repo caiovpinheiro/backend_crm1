@@ -6,6 +6,9 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { listSystemActivitySessions } from "@/services/system-activity";
 
 import { parsePeriod } from "../../_period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/logs/system-usage/[userId]/sessions");
 
 export const dynamic = "force-dynamic";
 
@@ -81,7 +84,7 @@ export async function GET(
           pending: true,
         });
       }
-      console.error("[logs/system-usage/sessions] erro:", err);
+      log.error({ err }, "[logs/system-usage/sessions] erro");
       return NextResponse.json(
         { message: "Erro ao carregar sessões." },
         { status: 500 },

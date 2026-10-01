@@ -863,3 +863,68 @@ describe("applyActivityAlertAction (mock)", () => {
     if (!result.ok) expect(result.status).toBe(403);
   });
 });
+
+describe("getNextActivityAlert janela/teto/activityIds (BD-8)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    deliveryStore.activities = [];
+    deliveryStore.states = [];
+    deliveryStore.deptMembers = [];
+    deliveryPrisma.activity.findMany.mockClear();
+    vi.doMock("@/lib/prisma", () => ({ prisma: deliveryPrisma }));
+    vi.doMock("@/services/task-visibility", () => ({
+      getUserDepartmentIds: async () => [],
+    }));
+  });
+
+  it("filtra por janela inferior (lookback) e restringe a activityIds", async () => {
+    const { getNextActivityAlert, ALERT_LOOKBACK_MS } = await import(
+      "@/services/activity-alerts"
+    );
+    await getNextActivityAlert("user_1", "org_1", {
+      now: NOW,
+      activityIds: ["act_x", "act_y"],
+    });
+    const args = deliveryPrisma.activity.findMany.mock.calls[0][0] as {
+      where: { scheduledAt: { gte: Date; lte: Date }; id?: { in: string[] } };
+    };
+    expect(args.where.scheduledAt.gte).toEqual(
+      new Date(NOW.getTime() - ALERT_LOOKBACK_MS),
+    );
+    expect(args.where.id).toEqual({ in: ["act_x", "act_y"] });
+  });
+
+  it("activityIds vazio não consulta", async () => {
+    const { getNextActivityAlert } = await import("@/services/activity-alerts");
+    const r = await getNextActivityAlert("user_1", "org_1", {
+      now: NOW,
+      activityIds: [],
+    });
+    expect(r).toBeNull();
+    expect(deliveryPrisma.activity.findMany).not.toHaveBeenCalled();
+  });
+
+  it("respeita o teto de páginas", async () => {
+    for (let i = 0; i < 6; i++) {
+      deliveryStore.activities.push({
+        id: `act_${i}`,
+        organizationId: "org_1",
+        title: "x",
+        type: "TASK",
+        completed: false,
+        // fora do horizonte de kind (já mostrado) — nada entregável
+        scheduledAt: DUE_AT,
+        userId: "outro",
+        departmentId: null,
+      });
+    }
+    const { getNextActivityAlert } = await import("@/services/activity-alerts");
+    const r = await getNextActivityAlert("user_1", "org_1", {
+      now: NOW,
+      pageSize: 2,
+      maxPages: 2,
+    });
+    expect(r).toBeNull();
+    expect(deliveryPrisma.activity.findMany).toHaveBeenCalledTimes(2);
+  });
+});

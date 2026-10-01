@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/my");
 
 export async function GET(request: Request) {
   try {
@@ -33,7 +36,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json(tasks);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar tarefas." }, { status: 500 });
   }
 }

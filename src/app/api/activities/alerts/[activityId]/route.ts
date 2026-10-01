@@ -5,6 +5,9 @@ import {
   applyActivityAlertAction,
   type AlertKind,
 } from "@/services/activity-alerts";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/alerts/[activityId]");
 
 type RouteContext = { params: Promise<{ activityId: string }> };
 
@@ -74,7 +77,7 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ ok: true });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao atualizar alerta." }, { status: 500 });
   }
 }

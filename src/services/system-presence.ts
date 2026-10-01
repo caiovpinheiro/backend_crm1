@@ -20,8 +20,12 @@
  * global (sem ctx), e evita overhead da extension em hot path.
  */
 
+import { cache } from "@/lib/cache";
 import { prismaBase } from "@/lib/prisma-base";
-import { sseBus } from "@/lib/sse-bus";
+import { publishSystemPresenceUpdate } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("system-presence");
 
 /**
  * Cadência do heartbeat (client) — 180s, pausado com aba oculta.
@@ -90,7 +94,7 @@ export async function recordHeartbeat(params: {
   `;
   const row = rows[0];
   if (row?.created) {
-    sseBus.publish("system_presence_update", {
+    publishSystemPresenceUpdate({
       organizationId,
       userId,
       systemOnline: true,
@@ -99,6 +103,63 @@ export async function recordHeartbeat(params: {
     return { sessionId: row.id, created: true };
   }
   return { sessionId: row?.id ?? "", created: false };
+}
+
+/**
+ * Intervalo mínimo entre GRAVAÇÕES de heartbeat do mesmo usuário.
+ *
+ * O ping chega a cada ~90 s por aba, mais um imediato a cada foco/volta de
+ * visibilidade; com várias abas eram dezenas de UPDATE por minuto em
+ * `system_usage_sessions` só para empurrar `lastHeartbeatAt` alguns segundos.
+ *
+ * 45 s é seguro porque o usuário só é dado como offline (sweeper e
+ * `getSystemPresenceMap`) depois de `SYSTEM_PRESENCE_STALE_MS` = 300 s sem
+ * heartbeat gravado: pular pings por até 45 s atrasa `lastHeartbeatAt` no
+ * máximo 45 s. Regra: limite de inatividade ≥ 90 s → 45 s; se um dia o
+ * limite cair abaixo de 90 s, o intervalo passa a ser metade dele.
+ */
+export const SYSTEM_PRESENCE_PING_WRITE_INTERVAL_SEC = Math.max(
+  1,
+  Math.min(45, Math.floor(SYSTEM_PRESENCE_STALE_MS / 2_000)),
+);
+
+/** Chave do claim (no Redis fica `cache:presence:ping:<userId>`). */
+export function presencePingClaimKey(userId: string): string {
+  return `presence:ping:${userId}`;
+}
+
+/**
+ * Heartbeat com no máximo 1 gravação por usuário a cada
+ * `SYSTEM_PRESENCE_PING_WRITE_INTERVAL_SEC`.
+ *
+ * `SET presence:ping:<userId> 1 NX EX 45` (`cache.tryClaim`): só quem ganha
+ * o claim grava. Vale entre réplicas da API porque o claim mora no Redis.
+ * Sem Redis (ou com ele fora do ar) o `tryClaim` cai no mapa em memória do
+ * processo: cada processo continua gravando pelo menos 1x por janela, então
+ * a presença nunca fica mais velha do que com Redis.
+ *
+ * Se a gravação falha, o claim é solto para o próximo ping tentar de novo
+ * (senão um erro de banco deixaria o usuário 45 s sem heartbeat).
+ */
+export async function recordHeartbeatThrottled(params: {
+  userId: string;
+  organizationId: string;
+  at?: Date;
+}): Promise<{ created: boolean; written: boolean }> {
+  const key = presencePingClaimKey(params.userId);
+  const claimed = await cache.tryClaim(
+    key,
+    SYSTEM_PRESENCE_PING_WRITE_INTERVAL_SEC,
+  );
+  if (!claimed) return { created: false, written: false };
+
+  try {
+    const { created } = await recordHeartbeat(params);
+    return { created, written: true };
+  } catch (err) {
+    await cache.del(key).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -133,7 +194,7 @@ export async function sweepStaleSessions(): Promise<{ closed: number }> {
   `;
 
   for (const row of closed) {
-    sseBus.publish("system_presence_update", {
+    publishSystemPresenceUpdate({
       organizationId: row.organizationId,
       userId: row.userId,
       systemOnline: false,
@@ -320,9 +381,9 @@ export function startSystemPresenceSweeper() {
     try {
       await sweepStaleSessions();
     } catch (err) {
-      console.warn(
-        "[system-presence] sweeper falhou:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[system-presence] sweeper falhou",
       );
     }
   };
@@ -332,7 +393,8 @@ export function startSystemPresenceSweeper() {
     setInterval(() => void tick(), SWEEP_INTERVAL_MS);
   }, 12_000);
 
-  console.info(
-    `[system-presence] sweeper iniciado (STALE > ${SYSTEM_PRESENCE_STALE_MS}ms, tick ${SWEEP_INTERVAL_MS}ms)`,
+  log.info(
+    { staleMs: SYSTEM_PRESENCE_STALE_MS, tickMs: SWEEP_INTERVAL_MS },
+    "[system-presence] sweeper iniciado",
   );
 }

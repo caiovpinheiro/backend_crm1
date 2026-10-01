@@ -4,6 +4,9 @@ import { auth } from "@/lib/auth";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { CRM_META_APP_ID } from "@/lib/meta-constants";
 import { getChannelById } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]/meta-health");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -72,7 +75,7 @@ export async function GET(_request: Request, context: RouteContext) {
       phoneError,
     });
   } catch (e: unknown) {
-    console.error("meta-health error:", e);
+    log.error({ err: e }, "meta-health error");
     const msg = e instanceof Error ? e.message : "Erro no health-check.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

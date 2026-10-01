@@ -19,6 +19,9 @@ import {
   type AutomationLike,
 } from "@/lib/automation-auditor";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]/audit");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -80,7 +83,7 @@ export async function GET(request: Request, context: RouteContext) {
 
       return NextResponse.json({ ...report, crossConflicts });
     } catch (e) {
-      console.error("[audit automation]", e);
+      log.error({ err: e }, "[audit automation] falhou");
       return NextResponse.json({ message: "Erro ao auditar automação." }, { status: 500 });
     }
   });

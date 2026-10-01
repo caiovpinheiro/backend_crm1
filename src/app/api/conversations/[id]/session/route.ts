@@ -5,6 +5,9 @@ import { getContactChannelSession, getConversationSession } from "@/lib/channel-
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { getConversationLite } from "@/services/conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/session");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -88,7 +91,7 @@ export async function GET(request: Request, context: RouteContext) {
       });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao consultar sessão.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

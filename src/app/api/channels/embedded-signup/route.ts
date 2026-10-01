@@ -6,6 +6,9 @@ import {
   MetaProvisionError,
   provisionMetaCloudChannel,
 } from "@/services/channels-meta-provision";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/embedded-signup");
 
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
@@ -69,7 +72,21 @@ export async function POST(request: Request) {
           typeof tokenData.error === "object" && tokenData.error !== null
             ? ((tokenData.error as Record<string, unknown>).message as string)
             : "Falha ao trocar código por token.";
-        console.error("Embedded Signup token exchange error:", tokenData);
+        // SEC2-5: só código/tipo do erro — o corpo da Meta pode carregar
+        // fragmentos do fluxo OAuth (code, trace) que não devem ir pro log.
+        const metaErr =
+          typeof tokenData.error === "object" && tokenData.error !== null
+            ? (tokenData.error as Record<string, unknown>)
+            : {};
+        log.error(
+          {
+            status: tokenRes.status,
+            code: metaErr.code ?? null,
+            type: metaErr.type ?? null,
+            subcode: metaErr.error_subcode ?? null,
+          },
+          "Embedded Signup token exchange error",
+        );
         return NextResponse.json({ message: errMsg }, { status: 400 });
       }
 
@@ -109,7 +126,7 @@ export async function POST(request: Request) {
       if (e instanceof MetaProvisionError) {
         return NextResponse.json({ message: e.message }, { status: e.status });
       }
-      console.error("Embedded Signup error:", e);
+      log.error({ err: e }, "Embedded Signup error");
       const msg =
         e instanceof Error ? e.message : "Erro no Embedded Signup.";
       return NextResponse.json({ message: msg }, { status: 500 });

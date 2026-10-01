@@ -4,10 +4,10 @@
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
 import { isChannelKind } from "@/services/team-chat-records";
 import {
   createRoom,
+  publishTeamChatEvent,
   requireMember,
   sendMessage,
   type TeamChatViewer,
@@ -128,8 +128,7 @@ export async function forwardWithAnnotation(
   });
 
   const shaped = shapeForward(row);
-  sseBus.publish("team_chat_forward_updated", {
-    organizationId: viewer.organizationId,
+  await publishTeamChatEvent("team_chat_forward_updated", viewer.organizationId, {
     roomId: destRoomId,
     forward: shaped,
   });
@@ -174,8 +173,7 @@ export async function respondForward(
   });
 
   const shaped = shapeForward(updated);
-  sseBus.publish("team_chat_forward_updated", {
-    organizationId: viewer.organizationId,
+  await publishTeamChatEvent("team_chat_forward_updated", viewer.organizationId, {
     roomId: row.destRoomId,
     forward: shaped,
   });

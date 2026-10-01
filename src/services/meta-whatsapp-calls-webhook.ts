@@ -1,7 +1,10 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishNewMessage,
+  publishWhatsappCall,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logEvent } from "@/services/activity-log";
@@ -20,6 +23,9 @@ import {
   parseCallBizOpaque,
   wasWhatsappCallPickedUp,
 } from "@/lib/whatsapp-call-chat";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-whatsapp-calls-webhook");
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -98,7 +104,7 @@ async function resolveCallTicket(
       contact,
     };
   } catch (e) {
-    console.warn("[meta-webhook] call webhook sem contato resolvível:", e);
+    log.warn({ err: e }, "[meta-webhook] call webhook sem contato resolvível");
     return null;
   }
 }
@@ -173,7 +179,7 @@ export async function processMetaWhatsappCallsWebhook(
           contactId: contact.id,
         }),
       });
-      sseBus.publish("whatsapp_call", {
+      publishWhatsappCall({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
@@ -216,7 +222,7 @@ export async function processMetaWhatsappCallsWebhook(
               data: { updatedAt: new Date(), lastMessageDirection: "out" },
             })
             .catch(() => {});
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: sseOrgId(conv.organizationId),
             conversationId: conv.id,
             contactId: contact.id,
@@ -227,7 +233,7 @@ export async function processMetaWhatsappCallsWebhook(
         }
       }
     } catch (e) {
-      console.warn("[meta-webhook] call signaling:", e);
+      log.warn({ err: e }, "[meta-webhook] call signaling");
     }
   }
 
@@ -297,8 +303,14 @@ export async function processMetaWhatsappCallsWebhook(
         : undefined;
 
     if (event === "connect") {
-      console.info(
-        `[meta-webhook] call connect id=${callId} dir=${direction || "?"} conv=${conv.id} sdp=${sessionPayload ? sessionPayload.sdp_type : "none"}`,
+      log.info(
+        {
+          callId,
+          dir: direction || "?",
+          conv: conv.id,
+          sdp: sessionPayload ? sessionPayload.sdp_type : "none",
+        },
+        "[meta-webhook] call connect",
       );
     }
 
@@ -345,7 +357,7 @@ export async function processMetaWhatsappCallsWebhook(
           contactId: contact.id,
           organizationId: sseOrgId(conv.organizationId),
         }).catch((e) =>
-          console.warn("[meta-webhook] recusa de ligação sem responsável:", e),
+          log.warn({ err: e }, "[meta-webhook] recusa de ligação sem responsável"),
         );
       }
     }
@@ -440,7 +452,7 @@ export async function processMetaWhatsappCallsWebhook(
         }).catch(() => {});
       }
 
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
@@ -502,7 +514,7 @@ export async function processMetaWhatsappCallsWebhook(
               data: { updatedAt: new Date(), lastMessageDirection: callMessageDirection },
             })
             .catch(() => {});
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: sseOrgId(conv.organizationId),
             conversationId: conv.id,
             contactId: contact.id,
@@ -511,7 +523,7 @@ export async function processMetaWhatsappCallsWebhook(
             timestamp: endDate,
           });
         } catch (e) {
-          console.warn("[meta-webhook] mensagem timeline gravação:", e);
+          log.warn({ err: e }, "[meta-webhook] mensagem timeline gravação");
         }
       }
 
@@ -521,7 +533,7 @@ export async function processMetaWhatsappCallsWebhook(
     }
 
     if (!skipInboundRingSse) {
-      sseBus.publish("whatsapp_call", {
+      publishWhatsappCall({
         organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
@@ -549,7 +561,7 @@ export async function processMetaWhatsappCallsWebhook(
           terminateStatus,
         });
       } catch (e) {
-        console.warn("[meta-webhook] call closed log/trigger:", e);
+        log.warn({ err: e }, "[meta-webhook] call closed log/trigger");
       }
     }
   }
@@ -639,7 +651,7 @@ async function emitWhatsappCallClosed(params: {
       to: params.toWa,
     },
   }).catch((err) =>
-    console.warn("[meta-webhook] logEvent de chamada WhatsApp:", err),
+    log.warn({ err }, "[meta-webhook] logEvent de chamada WhatsApp"),
   );
 
   const trigger = isInbound ? "call_received" : "call_made";
@@ -660,6 +672,6 @@ async function emitWhatsappCallClosed(params: {
       to: params.toWa,
     },
   }).catch((err) =>
-    console.warn("[meta-webhook] fireTrigger de chamada WhatsApp:", err),
+    log.warn({ err }, "[meta-webhook] fireTrigger de chamada WhatsApp"),
   );
 }

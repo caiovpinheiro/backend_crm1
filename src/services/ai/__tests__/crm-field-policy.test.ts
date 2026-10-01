@@ -12,6 +12,12 @@ import {
   type CrmFieldDescriptor,
   type CrmFieldValue,
 } from "@/services/ai/crm-field-policy";
+import {
+  emptyToolPolicy,
+  isEmptyToolPolicy,
+  normalizeToolConfig,
+  normalizeToolPolicy,
+} from "@/lib/ai-agents/steering";
 
 function field(
   name: string,
@@ -291,5 +297,32 @@ describe("orientação e configuração", () => {
     expect(
       describeCrmExposure({ readableKeys: ["deal.curso"], citableKeys: [], orgWide: false }),
     ).toContain("deal.curso");
+  });
+
+  it("toolConfig carrega a allowlist do operador", () => {
+    const policy = normalizeToolPolicy({
+      readableFields: ["deal.curso", "deal.polo", "  ", "deal.curso"],
+      allowOrgWideSearch: true,
+      sensitiveTerms: ["rgm"],
+    });
+    expect(policy.readableFields).toEqual(["deal.curso", "deal.polo"]);
+    expect(policy.allowOrgWideSearch).toBe(true);
+    expect(policy.sensitiveTerms).toEqual(["rgm"]);
+  });
+
+  it("policy default não libera nada nem é persistida", () => {
+    const base = emptyToolPolicy();
+    expect(base.readableFields).toEqual([]);
+    expect(base.allowOrgWideSearch).toBe(false);
+    expect(base.sensitiveTerms).toEqual([]);
+    expect(isEmptyToolPolicy(base)).toBe(true);
+    expect(normalizeToolConfig({ search_crm_records: {} })).toEqual({});
+  });
+
+  it("allowlist salva sobrevive ao normalize do toolConfig", () => {
+    const config = normalizeToolConfig({
+      search_crm_records: { readableFields: ["deal.curso"] },
+    });
+    expect(config.search_crm_records.readableFields).toEqual(["deal.curso"]);
   });
 });

@@ -8,7 +8,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // (cross-tenant). Os outros helpers deste arquivo sao chamados de
 // API routes / webhooks que ja tem contexto montado.
 import { prismaBase } from "@/lib/prisma-base";
-import { sseBus } from "@/lib/sse-bus";
+import { publishAutomationState } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 
 const log = getLogger("automation-context");
@@ -44,7 +44,7 @@ export async function pausedAutomationConversationId(
  * ativas de um contato mudou — o frontend invalida o cache do chip
  * "robô em execução". Best-effort: nunca derruba o fluxo da automação.
  */
-function publishAutomationState(row: {
+function notifyAutomationState(row: {
   organizationId?: string | null;
   contactId?: string | null;
   automationId?: string | null;
@@ -60,7 +60,7 @@ function publishAutomationState(row: {
         : typeof row.createdAt === "string"
           ? row.createdAt
           : null;
-    sseBus.publish("automation_state", {
+    publishAutomationState({
       organizationId: row.organizationId,
       contactId: row.contactId,
       automationId: row.automationId ?? null,
@@ -630,7 +630,7 @@ export async function closeStrandedContext(automationId: string, contactId: stri
     where: { id: ctx.id },
     data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
   });
-  publishAutomationState(row);
+  notifyAutomationState(row);
   return row;
 }
 
@@ -673,7 +673,7 @@ export async function createContext(
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
     }),
   });
-  publishAutomationState(row);
+  notifyAutomationState(row);
   return row;
 }
 
@@ -690,7 +690,7 @@ export async function advanceContext(
       where: { id: contextId },
       data: { status: "COMPLETED", variables: vars, currentStepId: null, timeoutAt: null },
     });
-    publishAutomationState(done);
+    notifyAutomationState(done);
     return done;
   }
 
@@ -702,7 +702,7 @@ export async function advanceContext(
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
     },
   });
-  publishAutomationState(advanced);
+  notifyAutomationState(advanced);
   return advanced;
 }
 
@@ -711,7 +711,7 @@ export async function pauseContext(contextId: string) {
     where: { id: contextId },
     data: { status: "PAUSED" },
   });
-  publishAutomationState(row);
+  notifyAutomationState(row);
   return row;
 }
 
@@ -734,7 +734,7 @@ export async function cancelContext(contextId: string) {
     where: { id: contextId },
     data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
   });
-  publishAutomationState(row);
+  notifyAutomationState(row);
   return row;
 }
 
@@ -787,7 +787,7 @@ export async function timeoutContext(contextId: string) {
     where: { id: contextId },
     data: { status: "TIMED_OUT", timeoutAt: null },
   });
-  publishAutomationState(row);
+  notifyAutomationState(row);
   return row;
 }
 
@@ -1786,13 +1786,13 @@ export async function sweepStaleRunningContexts(): Promise<number> {
           where: { id: ctx.id },
           data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
         });
-        publishAutomationState(row);
+        notifyAutomationState(row);
       });
       closed++;
     } catch (err) {
-      console.error(
-        `[automation-context] sweepStaleRunningContexts error for ${ctx.id}:`,
-        err,
+      log.error(
+        { contextId: ctx.id, err },
+        "[automation-context] sweepStaleRunningContexts error",
       );
     }
   }
@@ -1817,7 +1817,7 @@ export async function sweepExpiredTimeouts(): Promise<number> {
       await withSystemContext(ctx.organizationId, () => processTimeout(ctx.id));
       processed++;
     } catch (err) {
-      console.error(`[automation-context] sweepExpiredTimeouts error for ${ctx.id}:`, err);
+      log.error({ contextId: ctx.id, err }, "[automation-context] sweepExpiredTimeouts error");
     }
   }
   const stale = await sweepStaleRunningContexts();
@@ -1830,13 +1830,13 @@ export function startTimeoutSweeper(intervalMs = 30_000) {
   if (_sweepInterval) return;
   _sweepInterval = setInterval(() => {
     sweepExpiredTimeouts().catch((err) =>
-      console.error("[automation-context] sweeper error:", err)
+      log.error({ err }, "[automation-context] sweeper error")
     );
   }, intervalMs);
   if (typeof _sweepInterval === "object" && "unref" in _sweepInterval) {
     (_sweepInterval as NodeJS.Timeout).unref();
   }
-  console.info(`[automation-context] timeout sweeper started (every ${intervalMs}ms)`);
+  log.info({ intervalMs }, "[automation-context] timeout sweeper started");
 }
 
 export function stopTimeoutSweeper() {

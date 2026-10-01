@@ -7,6 +7,7 @@
  * documento compartilhado entre agentes nem entre tenants.
  */
 
+import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
@@ -20,6 +21,9 @@ import {
   resolveAgentTimezone,
 } from "@/services/ai/human-queue-policy";
 import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.knowledge-docs");
 
 export const MAX_CONTENT_CHARS = 500_000;
 export const MAX_TITLE_CHARS = 200;
@@ -184,12 +188,17 @@ async function requireAgentTimezone(agentId: string): Promise<string> {
     where: { id: agentId },
     select: {
       id: true,
+      inboxPolicy: true,
       businessHours: true,
+      verticalPack: true,
     },
   });
   if (!agent) throw new KnowledgeDocError("Agente não encontrado.", 404);
   return resolveAgentTimezone(
-    humanQueueContextFromAgent({ businessHours: agent.businessHours }),
+    humanQueueContextFromAgent({
+      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy, agent.verticalPack),
+      businessHours: agent.businessHours,
+    }),
   );
 }
 
@@ -449,10 +458,13 @@ export async function healLegacyKnowledgeDocs(agentId: string): Promise<number> 
   });
   for (const doc of legacy) {
     await reindexKnowledgeDoc(agentId, doc.id).catch((err) => {
-      console.warn(`[ai] autocorreção de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+      log.warn(
+        { doc: doc.id, err: err instanceof Error ? err.message : err },
+        "[ai] autocorreção de material falhou",
+      );
     });
   }
-  if (legacy.length > 0) console.info(`[ai] ${legacy.length} material(is) em JSON reindexado(s) agent=${agentId}`);
+  if (legacy.length > 0) log.info({ count: legacy.length, agent: agentId }, "[ai] materiais em JSON reindexados");
   return legacy.length;
 }
 
@@ -502,7 +514,7 @@ export async function reindexFailedKnowledgeDocs(agentId: string): Promise<numbe
       await reindexKnowledgeDoc(agentId, doc.id);
       done += 1;
     } catch (err) {
-      console.warn(`[ai] reindexação de material falhou doc=${doc.id}:`, err instanceof Error ? err.message : err);
+      log.warn({ err, doc: doc.id, agent: agentId }, "[ai] reindexação de material falhou");
     }
   }
   return done;

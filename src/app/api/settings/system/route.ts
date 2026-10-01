@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireSuperAdmin } from "@/lib/auth-helpers";
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/system");
 
 /**
  * `/api/settings/system` — chaves GLOBAIS da plataforma EduIT.
@@ -51,7 +54,7 @@ export async function GET(request: Request) {
     for (const s of settings) map[s.key] = s.value;
     return NextResponse.json(map);
   } catch (err) {
-    console.error("[settings/system] GET falhou:", err);
+    log.error({ err }, "[settings/system] GET falhou");
     return NextResponse.json(
       { message: "Erro ao buscar configuração." },
       { status: 500 },
@@ -95,7 +98,7 @@ export async function PUT(request: Request) {
     });
     return NextResponse.json(setting);
   } catch (err) {
-    console.error("[settings/system] PUT falhou:", err);
+    log.error({ err }, "[settings/system] PUT falhou");
     return NextResponse.json(
       { message: "Erro ao salvar configuração." },
       { status: 500 },

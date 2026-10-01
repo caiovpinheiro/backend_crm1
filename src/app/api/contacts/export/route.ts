@@ -6,6 +6,9 @@ import { TRACKING_EXPORT_COLUMNS } from "@/lib/contact-tracking-fields";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
 import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/contacts/export");
 
 const MAX_ROWS = 100_000;
 
@@ -156,7 +159,7 @@ export async function GET(request: Request) {
       });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao exportar contatos." }, { status: 500 });
   }
 }

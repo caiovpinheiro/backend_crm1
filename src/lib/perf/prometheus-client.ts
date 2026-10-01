@@ -1,3 +1,7 @@
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("perf.prometheus-client");
+
 /**
  * Cliente minimo da HTTP API do Prometheus (query e query_range).
  *
@@ -80,7 +84,7 @@ export async function promInstant(
       timestamp: Number(r.value[0]) || 0,
     }));
   } catch (err) {
-    console.warn("[prom] instant query failed:", err instanceof Error ? err.message : err);
+    log.warn({ err: err instanceof Error ? err.message : err }, "[prom] instant query failed");
     return [];
   }
 }
@@ -116,7 +120,7 @@ export async function promRange(
       values: r.values.map(([t, v]) => ({ t, v: Number(v) || 0 })),
     }));
   } catch (err) {
-    console.warn("[prom] range query failed:", err instanceof Error ? err.message : err);
+    log.warn({ err: err instanceof Error ? err.message : err }, "[prom] range query failed");
     return [];
   }
 }

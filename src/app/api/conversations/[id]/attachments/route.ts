@@ -9,12 +9,13 @@ import {
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
 } from "@/lib/audio-convert";
+import { sniffAttachment } from "@/lib/file-sniff";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { enqueueMetaAttach } from "@/lib/queue";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import {
   generateFileName,
   locateReusableStoredObject,
@@ -31,17 +32,24 @@ import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conve
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/attachments");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
+// SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (nunca ao
+// Content-Type do cliente). `application/octet-stream` saiu.
 const ALLOWED_PREFIXES = [
   "image/", "video/", "audio/",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument",
   "application/vnd.ms-excel",
-  "application/octet-stream",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.oasis.opendocument",
+  "application/zip",
   "text/plain", "text/csv",
 ];
 
@@ -147,11 +155,9 @@ async function locateFromTemplateRow(
       if (!parsed) continue;
       const hit = await locateReusableStoredObject(parsed);
       if (hit) {
-        console.warn(
+        log.warn(
+          { orgId, bucket: hit.bucket, fileName: hit.fileName },
           "[attachments] reuse via template row",
-          orgId,
-          hit.bucket,
-          hit.fileName,
         );
         return hit;
       }
@@ -237,11 +243,9 @@ async function parseAttachmentRequest(
           fileName: importName,
           buffer: imported,
         });
-        console.warn(
+        log.warn(
+          { orgId: parsedReuse.orgId, bucket: parsedReuse.bucket, importName },
           "[attachments] reuse imported from STORAGE_FALLBACK_URL",
-          parsedReuse.orgId,
-          parsedReuse.bucket,
-          importName,
         );
         resolved = {
           url: saved.url,
@@ -252,11 +256,9 @@ async function parseAttachmentRequest(
       }
     }
     if (!resolved) {
-      console.warn(
+      log.warn(
+        { orgId: parsedReuse.orgId, bucket: parsedReuse.bucket, fileName: parsedReuse.fileName },
         "[attachments] reuse miss",
-        parsedReuse.orgId,
-        parsedReuse.bucket,
-        parsedReuse.fileName,
       );
       return {
         ok: false,
@@ -329,7 +331,7 @@ async function parseAttachmentRequest(
   try {
     form = await request.formData();
   } catch (err) {
-    console.error("[attachments] formData parse error:", err);
+    log.error({ err }, "[attachments] formData parse error");
     return {
       ok: false,
       response: NextResponse.json({ message: "Erro ao processar upload." }, { status: 400 }),
@@ -457,24 +459,31 @@ export async function POST(request: Request, context: RouteContext) {
         }
 
         fileName = raw.name || "file";
-        mimeBase = resolveMime(raw.type, fileName);
-
-        if (!ALLOWED_PREFIXES.some((p) => mimeBase.startsWith(p))) {
-          return NextResponse.json({ message: `Tipo não suportado: ${mimeBase}` }, { status: 400 });
-        }
 
         let buffer: Buffer;
         try {
           buffer = await blobToBuffer(raw);
         } catch (err) {
-          console.error("[attachments] buffer read error:", err);
+          log.error({ err }, "[attachments] buffer read error");
           return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
         }
 
-        const storeExt = fileName.includes(".")
-          ? fileName.split(".").pop()!
-          : mimeBase.split("/").pop() ?? "bin";
-        const safeFileName = generateFileName({ prefix: "att", ext: storeExt });
+        // Tipo real pelos magic bytes. O MIME declarado (já normalizado por
+        // `resolveMime`, que trata ".mp4 / WhatsApp Video" como vídeo) só
+        // desempata containers ambíguos (mp4 áudio×vídeo, zip docx×xlsx).
+        const sniffed = sniffAttachment(buffer, {
+          mime: resolveMime(raw.type, fileName),
+          fileName,
+        });
+        if (!sniffed || !ALLOWED_PREFIXES.some((p) => sniffed.mime.startsWith(p))) {
+          return NextResponse.json(
+            { message: "Tipo de arquivo não suportado ou conteúdo não reconhecido." },
+            { status: 415 },
+          );
+        }
+        mimeBase = sniffed.mime;
+
+        const safeFileName = generateFileName({ prefix: "att", ext: sniffed.ext });
 
         // PR 1.3: storage prefixado por org. Antes: `public/uploads/<file>`
         // (servido estático sem auth). Agora: `<STORAGE_ROOT>/<orgId>/attachments/<file>`,
@@ -552,10 +561,10 @@ export async function POST(request: Request, context: RouteContext) {
         fireTrigger("message_sent", {
           contactId: conv.contactId,
           data: { channel: "WhatsApp", content: caption || "[Anexo]" },
-        }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+        }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
         try {
-          sseBus.publish("new_message", {
+          publishNewMessage({
             organizationId: conv.organizationId,
             conversationId: conv.id,
             contactId: conv.contactId,
@@ -568,10 +577,7 @@ export async function POST(request: Request, context: RouteContext) {
         }
 
         cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio de anexo (baileys):",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo (baileys)"),
         );
 
         return NextResponse.json({
@@ -644,7 +650,7 @@ export async function POST(request: Request, context: RouteContext) {
           source.mode === "reuse" && source.deferChatUntilSent === true;
         const publishChat = () => {
           try {
-            sseBus.publish("new_message", {
+            publishNewMessage({
               organizationId: conv.organizationId,
               conversationId: conv.id,
               contactId: conv.contactId,
@@ -660,10 +666,7 @@ export async function POST(request: Request, context: RouteContext) {
         if (!deferChat) publishChat();
 
         cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio de anexo:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo"),
         );
 
         const jobPayload = {
@@ -682,7 +685,7 @@ export async function POST(request: Request, context: RouteContext) {
         let queuedMetaError: string | null = null;
         if (!job) {
           const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-          console.warn("[meta-attach] enqueue falhou — marcando failed (sem sync na API)");
+          log.warn("[meta-attach] enqueue falhou — marcando failed (sem sync na API)");
           await prisma.message
             .updateMany({
               where: { id: msgRow.id, sendStatus: "pending" },
@@ -722,11 +725,12 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       if (!metaClient.configured) {
-        console.warn(
-          `[meta-attach] Meta API nao configurada para o canal (channel=${outboundChannelRef?.id ?? "ENV"}), midia salva apenas localmente`,
+        log.warn(
+          { channel: outboundChannelRef?.id ?? "ENV" },
+          "[meta-attach] Meta API nao configurada para o canal, midia salva apenas localmente",
         );
       } else if (!to && !recipient) {
-        console.warn("[meta-attach] Contato sem telefone nem BSUID WhatsApp");
+        log.warn("[meta-attach] Contato sem telefone nem BSUID WhatsApp");
       }
 
       const displayContent =
@@ -759,10 +763,10 @@ export async function POST(request: Request, context: RouteContext) {
       fireTrigger("message_sent", {
         contactId: conv.contactId,
         data: { channel: "WhatsApp", content: displayContent || "[Anexo]" },
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+      }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -775,10 +779,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       cancelPendingForConversation(conv.id, "agent_reply").catch((err) =>
-        console.warn(
-          "[scheduled-messages] falha ao cancelar apos envio de anexo:",
-          err,
-        ),
+        log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio de anexo"),
       );
 
       return NextResponse.json({
@@ -795,7 +796,7 @@ export async function POST(request: Request, context: RouteContext) {
         ...(reopenedConversationId ? { reopenedConversationId } : {}),
       }, { status: 201 });
     } catch (e: unknown) {
-      console.error("[attachments] Unhandled error:", e);
+      log.error({ err: e }, "[attachments] Unhandled error");
       const msg = e instanceof Error ? e.message : "Erro ao enviar anexo.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }

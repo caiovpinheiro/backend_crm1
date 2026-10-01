@@ -1,0 +1,732 @@
+/**
+ * Handoff do agente IA — um motor, três destinos.
+ *
+ * Departamento → Distribuição Inteligente (pool humano).
+ * Pessoa nomeada → cluster se elegível; senão fila do departamento dela.
+ * Agente IA nomeado → cluster naquele user (fora do rodízio humano).
+ *
+ * Sem `assign_owner` cru: cluster + CAS (humano) iguais ao motor smart.
+ */
+
+import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
+import { createConversationEvent } from "@/services/conversation-events";
+import {
+  isReplaySandboxActive,
+  recordBlockedEffect,
+} from "@/services/ai/replay-sandbox";
+import { assignOwnerToContactClusterTx, createDealEvent } from "@/services/deals";
+import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
+import {
+  executeDepartmentHandoff,
+  resolveDepartmentByNameGeneric,
+  type DepartmentHandoffResult,
+} from "@/services/ai/department-handoff";
+import {
+  loadConversationPeerHistory,
+  peerAlreadyAttended,
+} from "@/services/ai/conversation-peers";
+import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
+import { isAssigneeCurrentlyEligible } from "@/services/distribution/assignee-eligibility";
+import { claimConversationAssignmentTx } from "@/services/distribution/claim";
+import type { InboxPolicy, ToolPolicy } from "@/lib/ai-agents/steering";
+import { listAllows, listBlocks, normalizeInboxPolicy } from "@/lib/ai-agents/steering";
+import type { VerticalPackOps } from "@/verticals/types";
+
+export type HandoffTargetKind = "department" | "user" | "ai_agent";
+
+export type OrchestratedHandoffArgs = {
+  conversationId: string;
+  contactId: string | null;
+  dealId?: string | null;
+  fromAgentUserId: string;
+  fromAgentName?: string | null;
+  target: HandoffTargetKind;
+  /** Nome ou id, conforme o destino. */
+  name: string;
+  reason?: string;
+  userMessage?: string | null;
+  policy?: InboxPolicy | null;
+  toolPolicy?: ToolPolicy | null;
+  ops?: VerticalPackOps | null;
+  handoffBy?: "orchestrator_code" | "tool";
+  /** Resultado do gate de fila humana (null para destino ai_agent). */
+  gateDecision?: "allowed" | null;
+  /** Como o pedido de humano foi reconhecido — auditoria do gate. */
+  gateMatchedBy?: "keyword" | "model_assertion" | null;
+};
+
+export type OrchestratedHandoffResult = {
+  target: HandoffTargetKind;
+  assigned: boolean;
+  assignedTo: string | null;
+  assignedUserId: string | null;
+  assignedUserType: "HUMAN" | "AI" | null;
+  departmentName: string | null;
+  queuedWaiting: boolean;
+  distributionReason: string | null;
+  fallback: "department_queue" | null;
+  error?: string;
+  /** Destino resolvido sem atribuir (replay em sandbox). */
+  simulated?: boolean;
+};
+
+export const SELF_AI_HANDOFF_ERROR =
+  "Esse é você mesmo. Siga o atendimento ou escolha outro agente.";
+
+function fold(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .trim();
+}
+
+export function namesFoldEqual(a: string, b: string): boolean {
+  const fa = fold(a);
+  const fb = fold(b);
+  return fa.length > 0 && fa === fb;
+}
+
+export function excludeSelfFromAgentNames(
+  names: string[],
+  selfName: string | null | undefined,
+): string[] {
+  return names.filter((n) => n.trim() && !namesFoldEqual(n, selfName ?? ""));
+}
+
+export function formatAiHandoffDestinations(names: string[]): string {
+  if (names.length === 0) {
+    return " Só para outro agente da organização, nunca para você mesmo.";
+  }
+  return ` Destinos válidos: ${names.join(", ")}.`;
+}
+
+/// Quantas passagens entre agentes IA uma conversa aguenta antes de a
+/// troca virar sintoma, e não roteamento.
+export const MAX_AI_HANDOFFS_PER_CONVERSATION = 4;
+
+export const AI_HANDOFF_CAP_ERROR =
+  "Esta conversa já passou por agentes demais. Não transfira de novo: resolva com o que você tem ou encaminhe para um humano.";
+
+/**
+ * O teto de repetição do `ToolCallGovernor` é por run, então cada turno
+ * novo reabre o orçamento de transferências e dois agentes podem ficar se
+ * devolvendo a conversa indefinidamente. Aqui o escopo é a CONVERSA.
+ *
+ * A contagem sai dos runs já gravados (`HANDOFF_COMPLETED`), que é o
+ * mesmo rastro que a auditoria lê — sem tabela nova e sem contador em
+ * memória, que não sobrevive a worker reiniciado.
+ */
+export async function aiHandoffCapReached(
+  conversationId?: string | null,
+): Promise<boolean> {
+  if (!conversationId) return false;
+  const done = await prisma.aIAgentRun.count({
+    where: { conversationId, outcome: "HANDOFF_COMPLETED" },
+  });
+  return done >= MAX_AI_HANDOFFS_PER_CONVERSATION;
+}
+
+export function selfAiDestinationError(args: {
+  wanted: string;
+  selfName?: string | null;
+  selfUserId?: string | null;
+  destUserId?: string | null;
+}): string | null {
+  if (
+    args.destUserId &&
+    args.selfUserId &&
+    args.destUserId === args.selfUserId
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  if (
+    args.wanted.trim() &&
+    args.selfName?.trim() &&
+    namesFoldEqual(args.wanted, args.selfName)
+  ) {
+    return SELF_AI_HANDOFF_ERROR;
+  }
+  return null;
+}
+
+/** nameGate + bloqueio do próprio agente (produção e teste). */
+export function aiAgentDestinationGate(args: {
+  allowedAgentNames: string[];
+  name: string;
+  fromAgentName?: string | null;
+}): string | null {
+  const allowed = excludeSelfFromAgentNames(
+    args.allowedAgentNames,
+    args.fromAgentName,
+  );
+  const blocked = args.fromAgentName?.trim()
+    ? [args.fromAgentName.trim()]
+    : [];
+  return nameGate(allowed, blocked, args.name, "Agente IA");
+}
+
+function looksLikeId(raw: string): boolean {
+  return /^c[a-z0-9]{20,}$/i.test(raw.trim());
+}
+
+function nameGate(
+  list: string[],
+  blocked: string[],
+  name: string,
+  kindLabel: string,
+): string | null {
+  if (listBlocks(blocked, name)) {
+    return `${kindLabel} "${name}" está bloqueado para este agente.`;
+  }
+  if (!listAllows(list, name)) {
+    return `${kindLabel} "${name}" não liberado. Permitidos: ${list.join(", ")}.`;
+  }
+  return null;
+}
+
+type ResolvedUser = {
+  id: string;
+  name: string;
+  type: "HUMAN" | "AI";
+};
+
+async function resolveOrgUser(args: {
+  name: string;
+  type: "HUMAN" | "AI";
+}): Promise<{ user: ResolvedUser } | { error: string }> {
+  const orgId = getOrgIdOrThrow();
+  const needle = args.name.trim();
+  if (!needle) return { error: `${args.type === "AI" ? "Agente" : "Pessoa"} sem nome.` };
+
+  const baseWhere = {
+    organizationId: orgId,
+    type: args.type,
+    ...(args.type === "AI"
+      ? { aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" as const } }
+      : {}),
+  };
+
+  if (looksLikeId(needle)) {
+    const byId = await prisma.user.findFirst({
+      where: { ...baseWhere, id: needle },
+      select: { id: true, name: true, type: true },
+    });
+    if (byId && (byId.type === "HUMAN" || byId.type === "AI")) {
+      return { user: { id: byId.id, name: byId.name, type: byId.type } };
+    }
+  }
+
+  const rows = await prisma.user.findMany({
+    where: baseWhere,
+    select: { id: true, name: true, type: true },
+    orderBy: { name: "asc" },
+    take: 80,
+  });
+  const n = fold(needle);
+  const exact = rows.filter((r) => fold(r.name) === n);
+  if (exact.length === 1 && (exact[0].type === "HUMAN" || exact[0].type === "AI")) {
+    return { user: { id: exact[0].id, name: exact[0].name, type: exact[0].type } };
+  }
+  if (exact.length > 1) {
+    return {
+      error: `Há mais de um ${args.type === "AI" ? "agente" : "usuário"} chamado "${needle}". Use o nome completo.`,
+    };
+  }
+  const contains = rows.filter(
+    (r) => fold(r.name).includes(n) || n.includes(fold(r.name)),
+  );
+  if (contains.length === 1 && (contains[0].type === "HUMAN" || contains[0].type === "AI")) {
+    return {
+      user: { id: contains[0].id, name: contains[0].name, type: contains[0].type },
+    };
+  }
+  if (contains.length > 1) {
+    return {
+      error: `Nome "${needle}" é ambíguo. Opções: ${contains.map((r) => r.name).join(", ")}.`,
+    };
+  }
+  const labels = rows.slice(0, 12).map((r) => r.name);
+  const kind = args.type === "AI" ? "Agente IA" : "Pessoa";
+  if (labels.length === 0) {
+    return { error: `${kind} "${needle}" não encontrado nesta organização.` };
+  }
+  return {
+    error: `${kind} "${needle}" não encontrado. Disponíveis: ${labels.join(", ")}.`,
+  };
+}
+
+async function firstDepartmentOfUser(
+  userId: string,
+): Promise<{ id: string; name: string } | null> {
+  const row = await prisma.departmentMember.findFirst({
+    where: { userId },
+    select: { department: { select: { id: true, name: true } } },
+    orderBy: { department: { name: "asc" } },
+  });
+  return row?.department ?? null;
+}
+
+function fromDepartmentResult(
+  dept: DepartmentHandoffResult,
+  fallback: OrchestratedHandoffResult["fallback"],
+): OrchestratedHandoffResult {
+  const distribution = dept.distribution;
+  const queuedWaiting =
+    distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+    distribution?.reason === "NO_DEPARTMENT";
+  return {
+    target: "department",
+    assigned: Boolean(distribution?.success),
+    assignedTo: distribution?.selectedUserName ?? null,
+    assignedUserId: distribution?.selectedUserId ?? null,
+    assignedUserType: distribution?.success ? "HUMAN" : null,
+    departmentName: dept.departmentName,
+    queuedWaiting,
+    distributionReason: distribution?.reason ?? null,
+    fallback,
+  };
+}
+
+async function assignNamedHuman(args: {
+  conversationId: string;
+  contactId: string | null;
+  dealId?: string | null;
+  user: ResolvedUser;
+  reason: string;
+}): Promise<OrchestratedHandoffResult> {
+  const orgId = getOrgIdOrThrow();
+
+  // Replay em sandbox: transferir para um humano NOMEADO penduraria a
+  // conversa de teste no inbox dele. Resolve o destino e devolve como
+  // entregue-simulado — para o QA o agente encaminhou, que é o que se testa.
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("human_assignment", `named_user=${args.user.id}`);
+    return {
+      target: "user",
+      assigned: true,
+      simulated: true,
+      assignedTo: args.user.name,
+      assignedUserId: args.user.id,
+      assignedUserType: "HUMAN",
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+    };
+  }
+
+  const claimed = await prisma.$transaction(async (tx) => {
+    const ok = await claimConversationAssignmentTx(tx, {
+      conversationId: args.conversationId,
+      userId: args.user.id,
+      via: "smart",
+    });
+    if (!ok) return false;
+    await assignOwnerToContactClusterTx(tx, {
+      userId: args.user.id,
+      via: "smart",
+      contactId: args.contactId,
+      dealId: args.dealId,
+      conversationId: args.conversationId,
+    });
+    await tx.distributionResponsible.upsert({
+      where: {
+        organizationId_userId: { organizationId: orgId, userId: args.user.id },
+      },
+      update: { lastExecutionAt: new Date() },
+      create: {
+        organizationId: orgId,
+        userId: args.user.id,
+        lastExecutionAt: new Date(),
+      },
+    });
+    return true;
+  });
+
+  if (!claimed) {
+    return {
+      target: "user",
+      assigned: false,
+      assignedTo: null,
+      assignedUserId: null,
+      assignedUserType: null,
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: "ASSIGN_RACE",
+      fallback: null,
+      error: "Outro fluxo atribuiu a conversa no mesmo instante. Tente de novo.",
+    };
+  }
+
+  await createConversationEvent({
+    conversationId: args.conversationId,
+    action: "distribuicao",
+    text: `Conversa atribuída a ${args.user.name}`,
+    actor: "Agente IA",
+    authorType: "bot",
+    dedupeStartsWith: ["Conversa atribuída a"],
+    dedupeWindowMs: 2 * 60 * 1000,
+  }).catch(() => null);
+
+  return {
+    target: "user",
+    assigned: true,
+    assignedTo: args.user.name,
+    assignedUserId: args.user.id,
+    assignedUserType: "HUMAN",
+    departmentName: null,
+    queuedWaiting: false,
+    distributionReason: "ASSIGNED",
+    fallback: null,
+  };
+}
+
+async function assignNamedAi(args: {
+  conversationId: string;
+  contactId: string | null;
+  dealId?: string | null;
+  user: ResolvedUser;
+  fromAgentUserId: string;
+  by: "orchestrator_code" | "tool";
+  reason?: string;
+  /** Início do handoff — quem recebe não se apresenta no meio do atendimento. */
+  startedAt?: Date | null;
+}): Promise<OrchestratedHandoffResult> {
+  await prisma.$transaction((tx) =>
+    assignOwnerToContactClusterTx(tx, {
+      userId: args.user.id,
+      via: "ai_handoff",
+      contactId: args.contactId,
+      dealId: args.dealId,
+      conversationId: args.conversationId,
+    }),
+  );
+
+  const destLabel = args.user.name;
+  await createConversationEvent({
+    conversationId: args.conversationId,
+    action: "distribuicao",
+    text: `Conversa transferida para o agente ${destLabel} (from=${args.fromAgentUserId} to=${args.user.id} by=${args.by})`,
+    actor: "Agente IA",
+    authorType: "bot",
+    actorUserId: args.fromAgentUserId,
+    dedupeStartsWith: [`Conversa transferida para o agente ${destLabel}`],
+    dedupeWindowMs: 2 * 60 * 1000,
+  }).catch(() => null);
+
+  if (args.dealId) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transferred_to_ai_agent",
+      reason: args.reason ?? null,
+      targetAgentUserId: args.user.id,
+      targetAgentName: args.user.name,
+      by: args.by,
+      fromAgentUserId: args.fromAgentUserId,
+      toAgentUserId: args.user.id,
+    }).catch(() => {});
+  }
+
+  if (args.contactId) {
+    const dest = await prisma.user.findUnique({
+      where: { id: args.user.id },
+      select: {
+        aiAgentConfig: { select: { inboxPolicy: true, verticalPack: true } },
+      },
+    });
+    const destPolicy = dest?.aiAgentConfig
+      ? normalizeInboxPolicy(
+          dest.aiAgentConfig.inboxPolicy,
+          dest.aiAgentConfig.verticalPack,
+        )
+      : null;
+    if (destPolicy?.speakOnAiTransfer) {
+      await triggerAgentOpeningForContact({
+        contactId: args.contactId,
+        agentUserId: args.user.id,
+        handoffStartedAt: args.startedAt ?? null,
+      }).catch(() => null);
+    }
+  }
+
+  return {
+    target: "ai_agent",
+    assigned: true,
+    assignedTo: args.user.name,
+    assignedUserId: args.user.id,
+    assignedUserType: "AI",
+    departmentName: null,
+    queuedWaiting: false,
+    distributionReason: "ASSIGNED",
+    fallback: null,
+  };
+}
+
+/**
+ * Transferência IA→IA que não tem para onde ir vira fila humana, com o
+ * departamento inferido pelo contexto (mesmo caminho de `transfer_to_human`).
+ */
+async function handoffToHumanQueue(
+  args: OrchestratedHandoffArgs,
+  reason: string,
+  why: string,
+): Promise<OrchestratedHandoffResult> {
+  const deptResult = await executeDepartmentHandoff({
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    dealId: args.dealId,
+    userMessage: args.userMessage,
+    departmentName: null,
+    reason: `${reason} (${why})`,
+    policy: args.policy,
+    ops: args.ops,
+  });
+  return fromDepartmentResult(deptResult, "department_queue");
+}
+
+export async function executeOrchestratedHandoff(
+  args: OrchestratedHandoffArgs,
+): Promise<OrchestratedHandoffResult> {
+  const name = args.name.trim();
+  const reason = args.reason?.trim() || "Handoff via agente IA";
+  const tool = args.toolPolicy;
+  const startedAt = new Date();
+
+  // Auditoria do gate de fila humana: registra se a transferência passou
+  // por keyword da config ou pela afirmação do modelo. Sem isso não dá
+  // para revisar depois o que o modelo alegou.
+  if (args.dealId && args.gateDecision) {
+    createDealEvent(args.dealId, args.fromAgentUserId, "AI_AGENT_ACTION", {
+      action: "transfer_gate",
+      target: args.target,
+      name,
+      reason,
+      gateDecision: args.gateDecision,
+      matchedBy: args.gateMatchedBy ?? null,
+    }).catch(() => {});
+  }
+
+  if (args.target === "department") {
+    if (tool) {
+      const gate = name
+        ? nameGate(tool.allowedDepartments, tool.blockedDepartments, name, "Departamento")
+        : null;
+      if (gate) {
+        return {
+          target: "department",
+          assigned: false,
+          assignedTo: null,
+          assignedUserId: null,
+          assignedUserType: null,
+          departmentName: null,
+          queuedWaiting: false,
+          distributionReason: null,
+          fallback: null,
+          error: gate,
+        };
+      }
+    }
+    if (name) {
+      const dept = await resolveDepartmentByNameGeneric(name, args.policy);
+      if (!dept) {
+        return {
+          target: "department",
+          assigned: false,
+          assignedTo: null,
+          assignedUserId: null,
+          assignedUserType: null,
+          departmentName: null,
+          queuedWaiting: false,
+          distributionReason: "NO_DEPARTMENT",
+          fallback: null,
+          error: `Departamento "${name}" não encontrado nesta organização.`,
+        };
+      }
+    }
+    const deptResult = await executeDepartmentHandoff({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      dealId: args.dealId,
+      userMessage: args.userMessage,
+      departmentName: name || null,
+      reason,
+      policy: args.policy,
+      ops: args.ops,
+    });
+    return fromDepartmentResult(deptResult, null);
+  }
+
+  if (args.target === "user") {
+    if (tool) {
+      const gate = nameGate(
+        tool.allowedUserNames,
+        [],
+        name,
+        "Pessoa",
+      );
+      if (gate) {
+        return {
+          target: "user",
+          assigned: false,
+          assignedTo: null,
+          assignedUserId: null,
+          assignedUserType: null,
+          departmentName: null,
+          queuedWaiting: false,
+          distributionReason: null,
+          fallback: null,
+          error: gate,
+        };
+      }
+    }
+    const resolved = await resolveOrgUser({ name, type: "HUMAN" });
+    if ("error" in resolved) {
+      return {
+        target: "user",
+        assigned: false,
+        assignedTo: null,
+        assignedUserId: null,
+        assignedUserType: null,
+        departmentName: null,
+        queuedWaiting: false,
+        distributionReason: null,
+        fallback: null,
+        error: resolved.error,
+      };
+    }
+    const check = await isAssigneeCurrentlyEligible(resolved.user.id);
+    if (check.eligible) {
+      return assignNamedHuman({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: args.dealId,
+        user: resolved.user,
+        reason,
+      });
+    }
+    const dept = await firstDepartmentOfUser(resolved.user.id);
+    const deptResult = await executeDepartmentHandoff({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      dealId: args.dealId,
+      userMessage: args.userMessage,
+      departmentName: dept?.name ?? null,
+      reason: `${reason} (${resolved.user.name} indisponível — fila do departamento)`,
+      policy: args.policy,
+      ops: args.ops,
+    });
+    return fromDepartmentResult(deptResult, "department_queue");
+  }
+
+  if (!(await isAiAttendanceEnabled())) {
+    return {
+      target: "ai_agent",
+      assigned: false,
+      assignedTo: null,
+      assignedUserId: null,
+      assignedUserType: null,
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+      error: "Atendimento por IA está desligado nesta organização.",
+    };
+  }
+  // Ficar sem destino IA não pode terminar em erro devolvido ao modelo: ele
+  // reformula e tenta de novo, e o contato continua girando. A saída é a
+  // mesma da tool de humano — fila da Distribuição Inteligente.
+  if (await aiHandoffCapReached(args.conversationId)) {
+    return handoffToHumanQueue(args, reason, "teto de transferências entre agentes");
+  }
+  if (
+    peerAlreadyAttended(
+      await loadConversationPeerHistory(args.conversationId),
+      { name },
+    )
+  ) {
+    return handoffToHumanQueue(args, reason, `${name} já atendeu esta conversa`);
+  }
+  {
+    const selfErr = selfAiDestinationError({
+      wanted: name,
+      selfName: args.fromAgentName,
+      selfUserId: args.fromAgentUserId,
+    });
+    if (selfErr) {
+      return {
+        target: "ai_agent",
+        assigned: false,
+        assignedTo: null,
+        assignedUserId: null,
+        assignedUserType: null,
+        departmentName: null,
+        queuedWaiting: false,
+        distributionReason: null,
+        fallback: null,
+        error: selfErr,
+      };
+    }
+  }
+  if (tool) {
+    const gate = aiAgentDestinationGate({
+      allowedAgentNames: tool.allowedAgentNames,
+      name,
+      fromAgentName: args.fromAgentName,
+    });
+    if (gate) {
+      return {
+        target: "ai_agent",
+        assigned: false,
+        assignedTo: null,
+        assignedUserId: null,
+        assignedUserType: null,
+        departmentName: null,
+        queuedWaiting: false,
+        distributionReason: null,
+        fallback: null,
+        error: gate,
+      };
+    }
+  }
+  const resolved = await resolveOrgUser({ name, type: "AI" });
+  if ("error" in resolved) {
+    return {
+      target: "ai_agent",
+      assigned: false,
+      assignedTo: null,
+      assignedUserId: null,
+      assignedUserType: null,
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+      error: resolved.error,
+    };
+  }
+  if (resolved.user.id === args.fromAgentUserId) {
+    return {
+      target: "ai_agent",
+      assigned: false,
+      assignedTo: null,
+      assignedUserId: null,
+      assignedUserType: null,
+      departmentName: null,
+      queuedWaiting: false,
+      distributionReason: null,
+      fallback: null,
+      error: SELF_AI_HANDOFF_ERROR,
+    };
+  }
+  return assignNamedAi({
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    dealId: args.dealId,
+    user: resolved.user,
+    fromAgentUserId: args.fromAgentUserId,
+    by: args.handoffBy ?? "tool",
+    reason,
+    startedAt,
+  });
+}
+

@@ -5,6 +5,9 @@ import { loadAuthzContext, can } from "@/lib/authz";
 import { requireStageScope } from "@/lib/authz/resource-policy";
 import { runWithContext } from "@/lib/request-context";
 import { deleteStage, getStageInPipeline, updateStage } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]/stages/[stageId]");
 
 type RouteContext = { params: Promise<{ id: string; stageId: string }> };
 
@@ -193,7 +196,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e) {
       const code = (e as { code: string }).code;
       if (code === "P2025") {
@@ -265,7 +268,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Estágio não encontrado." }, { status: 404 });
     }

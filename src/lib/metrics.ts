@@ -71,6 +71,26 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // `new_message` de entrada que chegou ao cliente sem `card`. `budget` é
+  // por evento (snapshot estourou/falhou no bus); `hidden` é por conexão
+  // (o gate de visibilidade tirou o card daquele usuário).
+  const sseInboundWithoutCard = new Counter({
+    name: "crm_sse_inbound_without_card_total",
+    help: "new_message de entrada sem card no SSE, por motivo.",
+    labelNames: ["reason"] as const,
+    registers: [registry],
+  });
+
+  // Teto de conexões SSE (`sse-connection-limit.ts`). `org_limit` = nova
+  // conexão recusada com 429; `user_limit_evicted` = conexão mais antiga do
+  // usuário encerrada para a nova entrar. Conexões abertas: `crm_sse_subscribers`.
+  const sseConnectionsRejected = new Counter({
+    name: "crm_sse_connections_rejected_total",
+    help: "Conexões SSE recusadas (teto por org) ou encerradas pelo teto por usuário, por motivo.",
+    labelNames: ["reason"] as const,
+    registers: [registry],
+  });
+
   const bullmqJobs = new Counter({
     name: "crm_bullmq_jobs_total",
     help: "Jobs BullMQ por status terminal.",
@@ -202,7 +222,12 @@ function buildMetrics(registry: Registry): AppMetrics {
 
   return {
     http: { requests: httpRequests, duration: httpDuration },
-    sse: { subscribers: sseSubscribers, messages: sseMessages },
+    sse: {
+      subscribers: sseSubscribers,
+      messages: sseMessages,
+      inboundWithoutCard: sseInboundWithoutCard,
+      connectionsRejected: sseConnectionsRejected,
+    },
     bullmq: { jobs: bullmqJobs, duration: bullmqDuration, queueDepth: bullmqQueueDepth },
     meta: { calls: metaApi, duration: metaApiDuration },
     messages: { inbound: inboundMessages, outbound: outboundMessages },
@@ -228,6 +253,8 @@ export type AppMetrics = {
   sse: {
     subscribers: Gauge<"organization" | "channel">;
     messages: Counter<"event" | "organization">;
+    inboundWithoutCard: Counter<"reason">;
+    connectionsRejected: Counter<"reason">;
   };
   bullmq: {
     jobs: Counter<"queue" | "status">;

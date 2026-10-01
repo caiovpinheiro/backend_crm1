@@ -4,7 +4,12 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
-import { inboxTabCountsKey, invalidateInboxTabCounts } from "@/lib/cache/keys";
+import {
+  INBOX_TAB_COUNTS_FP_LENGTH,
+  inboxTabCountsHistKey,
+  inboxTabCountsKey,
+  scheduleTabCountsInvalidation,
+} from "@/lib/cache/keys";
 import {
   resolveConversationId,
   userHasConversationAccess,
@@ -31,7 +36,21 @@ import {
   getOrgIdOrThrow,
   getRequestContext,
 } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  InvalidListCursorError,
+  encodeListCursor,
+  listKeysetSql,
+  listKeysetWhere,
+  listSortColumnSql,
+  parseListCursor,
+  type ListCursor,
+  type ListSortBy,
+  type ListSortOrder,
+} from "@/services/conversation-list-cursor";
+import {
+  publishConversationTimelineUpdated,
+  publishConversationUpdated,
+} from "@/lib/realtime-events";
 import { logEvent, userIdForFk } from "@/services/activity-log";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { parseSessionResetAt } from "@/lib/channel-session";
@@ -43,6 +62,8 @@ import {
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+
+const log = getLogger("conversations");
 /**
  * Badges aceitam stale até o TTL. Não invalidar em cada `new_message`
  * (preview) — isso matava o Redis e o `?counts=1` seguinte recomputava
@@ -51,6 +72,25 @@ import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/servic
  * 90s é rede de segurança se a invalidação falhar.
  */
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
+
+/**
+ * Stale-while-revalidate: passados os 90 s, a requisição recebe o número
+ * vencido na hora e a consulta roda em segundo plano (uma por chave), em
+ * vez de segurar a carga do inbox. Teto de staleness = 90 + 90 = 180 s;
+ * além disso (ou depois de uma invalidação por mudança de aba, que troca a
+ * versão da chave) a requisição recalcula antes de responder, como antes.
+ */
+const TAB_COUNTS_STALE_SEC = 90;
+
+/**
+ * Abas históricas (todos/resolvidos/finalizados) varrem todas as conversas
+ * da org, inclusive fechadas (~620 ms). Cache próprio (`:hist`), fora da
+ * invalidação por mudança de aba: podem ficar até 10 min desatualizadas.
+ */
+const TAB_COUNTS_HIST_CACHE_TTL_SEC = 600;
+
+/** SWR da histórica: vencida, ainda é servida por mais 5 min (teto 15 min). */
+const TAB_COUNTS_HIST_STALE_SEC = 300;
 
 /**
  * 1ª página de Encerradas: em vez de DISTINCT ON em todo o histórico
@@ -139,8 +179,9 @@ export type GetConversationsParams = {
   page?: number;
   perPage?: number;
   /**
-   * Keyset da próxima página (`${sortValMs}_${id}`). Preferir sobre
-   * `page`/`skip` — OFFSET desloca quando chega mensagem no topo.
+   * Keyset da próxima página — o `nextCursor` opaco da resposta anterior
+   * (ver `conversation-list-cursor.ts`). Preferir sobre `page`/`skip` —
+   * OFFSET desloca quando chega mensagem no topo e relê tudo o que pula.
    * Sem cursor, `page` continua válido (clientes velhos).
    */
   cursor?: string;
@@ -1056,88 +1097,6 @@ export async function getFilteredConversationIds(
   return rows.map((r) => r.id);
 }
 
-function listSortColumnSql(
-  sortBy: "updatedAt" | "createdAt" | "unreadCount",
-): Prisma.Sql {
-  if (sortBy === "createdAt") return Prisma.sql`c."createdAt"`;
-  if (sortBy === "unreadCount") return Prisma.sql`c."unreadCount"`;
-  return Prisma.sql`c."updatedAt"`;
-}
-
-type ListCursor = { sortVal: Date | number; id: string };
-
-/** `${sortValMs|n}_${id}` — opaco pro cliente; bate com o ORDER BY da lista. */
-function parseListCursor(
-  raw: string | undefined | null,
-  sortBy: "updatedAt" | "createdAt" | "unreadCount",
-): ListCursor | null {
-  if (!raw) return null;
-  const sep = raw.lastIndexOf("_");
-  if (sep <= 0) return null;
-  const valPart = raw.slice(0, sep);
-  const id = raw.slice(sep + 1);
-  if (!id) return null;
-  if (sortBy === "unreadCount") {
-    const n = Number(valPart);
-    return Number.isFinite(n) ? { sortVal: n, id } : null;
-  }
-  const asNum = Number(valPart);
-  if (Number.isFinite(asNum) && asNum > 1e11) return { sortVal: new Date(asNum), id };
-  const d = new Date(valPart);
-  return Number.isNaN(d.getTime()) ? null : { sortVal: d, id };
-}
-
-function encodeListCursor(
-  sortVal: Date | number | string | null | undefined,
-  id: string,
-): string | null {
-  if (sortVal == null || !id) return null;
-  if (typeof sortVal === "number") return `${sortVal}_${id}`;
-  const d = sortVal instanceof Date ? sortVal : new Date(sortVal);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${d.getTime()}_${id}`;
-}
-
-function cursorAfterRepsSql(cursor: ListCursor, sortOrder: "asc" | "desc"): Prisma.Sql {
-  const val = cursor.sortVal;
-  if (sortOrder === "desc") {
-    return Prisma.sql`(reps.sort_val < ${val} OR (reps.sort_val = ${val} AND reps.id < ${cursor.id}))`;
-  }
-  return Prisma.sql`(reps.sort_val > ${val} OR (reps.sort_val = ${val} AND reps.id > ${cursor.id}))`;
-}
-
-function cursorAfterColSql(
-  sortCol: Prisma.Sql,
-  cursor: ListCursor,
-  sortOrder: "asc" | "desc",
-): Prisma.Sql {
-  const val = cursor.sortVal;
-  if (sortOrder === "desc") {
-    return Prisma.sql`(${sortCol} < ${val} OR (${sortCol} = ${val} AND c.id < ${cursor.id}))`;
-  }
-  return Prisma.sql`(${sortCol} > ${val} OR (${sortCol} = ${val} AND c.id > ${cursor.id}))`;
-}
-
-function passesListCursor(
-  sortVal: Date | number | null | undefined,
-  id: string,
-  cursor: ListCursor,
-  sortOrder: "asc" | "desc",
-): boolean {
-  if (sortVal == null) return false;
-  const a =
-    sortVal instanceof Date
-      ? sortVal.getTime()
-      : typeof sortVal === "number"
-        ? sortVal
-        : new Date(sortVal).getTime();
-  const b =
-    cursor.sortVal instanceof Date ? cursor.sortVal.getTime() : Number(cursor.sortVal);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  if (sortOrder === "desc") return a < b || (a === b && id < cursor.id);
-  return a > b || (a === b && id > cursor.id);
-}
-
 type CollapsedConversationPage = {
   /** Até `take` IDs a partir de `skip` (já colapsados). */
   ids: string[];
@@ -1154,88 +1113,155 @@ function inboxClosedCardGroupSql() {
   END`;
 }
 
-/**
- * Uma página colapsada por contato+canal em SQL (`DISTINCT ON`).
- * Fallback: scan em lotes Prisma se o `where` não traduzir.
- */
-async function findCollapsedConversationPage(args: {
+type ListPageArgs = {
   where: Prisma.ConversationWhereInput;
   collapse: boolean;
-  sortBy: "updatedAt" | "createdAt" | "unreadCount";
-  sortOrder: "asc" | "desc";
+  sortBy: ListSortBy;
+  sortOrder: ListSortOrder;
+  /** Só para o cliente antigo (`page` sem `cursor`). Com cursor é ignorado. */
   skip: number;
   take: number;
   cursor?: ListCursor | null;
-}): Promise<CollapsedConversationPage> {
+};
+
+/**
+ * SQL de uma página de IDs da lista. `whereSql` é o `where` da lista já
+ * traduzido (alias `c`, com `organizationId`).
+ *
+ * Com `cursor` (keyset) nenhuma variante usa OFFSET:
+ *
+ *  - sem colapso: `WHERE … AND (chave, id) < (cursor) ORDER BY … LIMIT n`.
+ *  - com colapso (Encerradas/Resolvendo, 1 card por contato+canal): devolve
+ *    só o REPRESENTANTE de cada grupo — a linha sem irmã mais nova no mesmo
+ *    escopo (`NOT EXISTS`) — depois do cursor. Lê na ordem do índice e para
+ *    no `LIMIT`; antes era `DISTINCT ON` sobre todas as conversas do escopo
+ *    a cada página.
+ *
+ * Sem cursor: 1ª página (sem OFFSET) ou, para o cliente antigo que ainda
+ * manda `page`, o caminho com OFFSET de sempre.
+ */
+export function buildConversationListPageSql(
+  args: Omit<ListPageArgs, "where"> & { whereSql: Prisma.Sql },
+): Prisma.Sql {
+  const { whereSql, sortBy, sortOrder, take } = args;
+  const sortCol = listSortColumnSql(sortBy);
+  const sortDir = sortOrder === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+  const cursor = args.cursor ?? null;
+  const skip = cursor ? 0 : args.skip;
+
+  if (!args.collapse) {
+    if (cursor) {
+      return Prisma.sql`
+        SELECT c.id
+        FROM conversations c
+        WHERE (${whereSql}) AND ${listKeysetSql(sortBy, cursor, sortOrder)}
+        ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+        LIMIT ${take}
+      `;
+    }
+    const offset = skip > 0 ? Prisma.sql`OFFSET ${skip}` : Prisma.empty;
+    return Prisma.sql`
+      SELECT c.id
+      FROM conversations c
+      WHERE (${whereSql})
+      ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+      LIMIT ${take} ${offset}
+    `;
+  }
+
+  if (cursor) {
+    // Irmã "melhor" = a que o DISTINCT ON escolheria no lugar desta linha.
+    const better = sortOrder === "desc" ? Prisma.sql`>` : Prisma.sql`<`;
+    return Prisma.sql`
+      SELECT o.id
+      FROM (
+        SELECT
+          c.id,
+          ${sortCol} AS sort_val,
+          c."contactId" AS contact_id,
+          COALESCE(c.channel, '') AS chan
+        FROM conversations c
+        WHERE (${whereSql}) AND ${listKeysetSql(sortBy, cursor, sortOrder)}
+      ) o
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM conversations c
+        WHERE (${whereSql})
+          AND c."contactId" = o.contact_id
+          AND COALESCE(c.channel, '') = o.chan
+          AND (${sortCol}, c.id) ${better} (o.sort_val, o.id)
+      )
+      ORDER BY o.sort_val ${sortDir}, o.id ${sortDir}
+      LIMIT ${take}
+    `;
+  }
+
+  if (skip === 0) {
+    return Prisma.sql`
+      SELECT reps.id
+      FROM (
+        SELECT DISTINCT ON (inner_c.grp)
+          inner_c.id,
+          inner_c.sort_val
+        FROM (
+          SELECT
+            c.id,
+            ${sortCol} AS sort_val,
+            ${inboxClosedCardGroupSql()} AS grp
+          FROM conversations c
+          WHERE ${whereSql}
+          ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
+          LIMIT ${COLLAPSE_FIRST_PAGE_SCAN}
+        ) inner_c
+        ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
+      ) reps
+      ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
+      LIMIT ${take}
+    `;
+  }
+
+  // Cliente antigo (`page` ≥ 2 sem cursor): colapsa o escopo e pula `skip`.
+  return Prisma.sql`
+    SELECT reps.id
+    FROM (
+      SELECT DISTINCT ON (inner_c.grp)
+        inner_c.id,
+        inner_c.sort_val
+      FROM (
+        SELECT
+          c.id,
+          ${sortCol} AS sort_val,
+          ${inboxClosedCardGroupSql()} AS grp
+        FROM conversations c
+        WHERE ${whereSql}
+      ) inner_c
+      ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
+    ) reps
+    ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
+    LIMIT ${take} OFFSET ${skip}
+  `;
+}
+
+/**
+ * Uma página de IDs da lista (colapsada por contato+canal quando
+ * `collapse`). Fallback: varredura em lotes pelo Prisma se o `where` não
+ * traduzir para SQL.
+ */
+async function findCollapsedConversationPage(
+  args: ListPageArgs,
+): Promise<CollapsedConversationPage> {
   const orgId = getOrgIdOrNull();
   const skip = args.cursor ? 0 : args.skip;
   if (orgId) {
     const scoped: Prisma.ConversationWhereInput = {
       AND: [args.where, { organizationId: orgId }],
     };
-    const sql = sqlConversationWhere(scoped, orgId);
-    if (sql) {
-      const sortCol = listSortColumnSql(args.sortBy);
-      const sortDir = args.sortOrder === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
-      const cursorPred = args.cursor
-        ? cursorAfterRepsSql(args.cursor, args.sortOrder)
-        : Prisma.sql`TRUE`;
-      const rowCursorPred = args.cursor
-        ? cursorAfterColSql(sortCol, args.cursor, args.sortOrder)
-        : Prisma.sql`TRUE`;
+    const whereSql = sqlConversationWhere(scoped, orgId);
+    if (whereSql) {
       try {
-        const firstPageCollapse =
-          args.collapse && !args.cursor && skip === 0;
-        const rows = args.collapse
-          ? firstPageCollapse
-            ? await prisma.$queryRaw<{ id: string }[]>`
-                SELECT reps.id
-                FROM (
-                  SELECT DISTINCT ON (inner_c.grp)
-                    inner_c.id,
-                    inner_c.sort_val
-                  FROM (
-                    SELECT
-                      c.id,
-                      ${sortCol} AS sort_val,
-                      ${inboxClosedCardGroupSql()} AS grp
-                    FROM conversations c
-                    WHERE ${sql}
-                    ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
-                    LIMIT ${COLLAPSE_FIRST_PAGE_SCAN}
-                  ) inner_c
-                  ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
-                ) reps
-                ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
-                LIMIT ${args.take}
-              `
-            : await prisma.$queryRaw<{ id: string }[]>`
-              SELECT reps.id
-              FROM (
-                SELECT DISTINCT ON (inner_c.grp)
-                  inner_c.id,
-                  inner_c.sort_val
-                FROM (
-                  SELECT
-                    c.id,
-                    ${sortCol} AS sort_val,
-                    ${inboxClosedCardGroupSql()} AS grp
-                  FROM conversations c
-                  WHERE ${sql}
-                ) inner_c
-                ORDER BY inner_c.grp, inner_c.sort_val ${sortDir}, inner_c.id ${sortDir}
-              ) reps
-              WHERE ${cursorPred}
-              ORDER BY reps.sort_val ${sortDir}, reps.id ${sortDir}
-              LIMIT ${args.take} OFFSET ${skip}
-            `
-          : await prisma.$queryRaw<{ id: string }[]>`
-              SELECT c.id
-              FROM conversations c
-              WHERE ${sql} AND ${rowCursorPred}
-              ORDER BY ${sortCol} ${sortDir}, c.id ${sortDir}
-              LIMIT ${args.take} OFFSET ${skip}
-            `;
+        const rows = await prisma.$queryRaw<{ id: string }[]>(
+          buildConversationListPageSql({ ...args, whereSql }),
+        );
         const ids = rows.map((r) => r.id);
         const hasMore = ids.length === args.take;
         const emptyPastEnd = skip > 0 && ids.length === 0;
@@ -1256,30 +1282,38 @@ async function findCollapsedConversationPage(args: {
   return scanCollapsedRepIdsJs(args);
 }
 
-async function scanCollapsedRepIdsJs(args: {
-  where: Prisma.ConversationWhereInput;
-  collapse: boolean;
-  sortBy: "updatedAt" | "createdAt" | "unreadCount";
-  sortOrder: "asc" | "desc";
-  skip: number;
-  take: number;
-  cursor?: ListCursor | null;
-}): Promise<CollapsedConversationPage> {
-  const needReps = args.cursor ? args.take : args.skip + args.take;
+/**
+ * Fallback sem SQL cru: lotes pelo Prisma, cada lote começando DEPOIS do
+ * último item do anterior (keyset) — antes era `skip: <já lidos>`, um
+ * OFFSET que crescia a cada lote.
+ *
+ * Com cursor o primeiro lote já começa depois dele. No modo colapsado isso
+ * exige saber quais grupos já tiveram representante numa página anterior:
+ * uma consulta por lote procura irmãs dos candidatos antes do cursor.
+ */
+async function scanCollapsedRepIdsJs(
+  args: ListPageArgs,
+): Promise<CollapsedConversationPage> {
+  const cursor = args.cursor ?? null;
+  const needReps = cursor ? args.take : args.skip + args.take;
   const BATCH = 500;
   const HARD_CAP = 8_000;
   const seenGroups = new Set<string>();
   const repIds: string[] = [];
   let scanned = 0;
   let exhausted = false;
+  let after: ListCursor | null = cursor;
   const orderBy: Prisma.ConversationOrderByWithRelationInput[] = [
     { [args.sortBy]: args.sortOrder },
     { id: args.sortOrder },
   ];
 
   while (repIds.length < needReps && scanned < HARD_CAP) {
+    const take = Math.min(BATCH, HARD_CAP - scanned);
     const batch = await prisma.conversation.findMany({
-      where: args.where,
+      where: after
+        ? { AND: [args.where, listKeysetWhere(args.sortBy, after, args.sortOrder)] }
+        : args.where,
       orderBy,
       select: {
         id: true,
@@ -1290,33 +1324,51 @@ async function scanCollapsedRepIdsJs(args: {
         createdAt: true,
         unreadCount: true,
       },
-      skip: scanned,
-      take: Math.min(BATCH, HARD_CAP - scanned),
+      take,
     });
     if (batch.length === 0) {
       exhausted = true;
       break;
     }
     scanned += batch.length;
-    if (batch.length < BATCH) exhausted = true;
+    if (batch.length < take) exhausted = true;
+    const tail = batch[batch.length - 1]!;
+    after = { sortVal: tail[args.sortBy], id: tail.id };
+
+    if (args.collapse && cursor) {
+      const contactIds = [
+        ...new Set(
+          batch
+            .filter((r) => r.contactId && !seenGroups.has(inboxClosedCardGroupKey(r)))
+            .map((r) => r.contactId as string),
+        ),
+      ];
+      if (contactIds.length > 0) {
+        const shown = await prisma.conversation.findMany({
+          where: {
+            AND: [
+              args.where,
+              { contactId: { in: contactIds } },
+              { NOT: listKeysetWhere(args.sortBy, cursor, args.sortOrder) },
+            ],
+          },
+          select: { id: true, contactId: true, channel: true },
+        });
+        for (const s of shown) seenGroups.add(inboxClosedCardGroupKey(s));
+      }
+    }
 
     for (const r of batch) {
       const groupKey = args.collapse ? inboxClosedCardGroupKey(r) : `id:${r.id}`;
       if (seenGroups.has(groupKey)) continue;
       seenGroups.add(groupKey);
-      if (
-        args.cursor &&
-        !passesListCursor(r[args.sortBy], r.id, args.cursor, args.sortOrder)
-      ) {
-        continue;
-      }
       repIds.push(r.id);
       if (repIds.length >= needReps) break;
     }
     if (exhausted) break;
   }
 
-  const ids = args.cursor
+  const ids = cursor
     ? repIds.slice(0, args.take)
     : repIds.slice(args.skip, args.skip + args.take);
   const capped = !exhausted && scanned >= HARD_CAP;
@@ -1324,7 +1376,7 @@ async function scanCollapsedRepIdsJs(args: {
   return {
     ids,
     hasMore,
-    knownTotal: !args.cursor && exhausted && !capped ? repIds.length : null,
+    knownTotal: !cursor && exhausted && !capped ? repIds.length : null,
   };
 }
 
@@ -1457,6 +1509,7 @@ export async function getConversations(
   const sortBy = params.sortBy ?? "updatedAt";
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
+  if (params.cursor && !cursor) throw new InvalidListCursorError();
 
   // Colapso SQL só em Encerradas/Resolvidos. `todos` / sem aba / filas
   // OPEN: ORDER BY + LIMIT (1ª página) — DISTINCT ON em OPEN+RESOLVED
@@ -1500,7 +1553,7 @@ export async function getConversations(
         : sortBy === "unreadCount"
           ? last.unreadCount
           : last.updatedAt;
-  const nextCursor = hasMore && last ? encodeListCursor(sortVal, last.id) : null;
+  const nextCursor = hasMore && last ? encodeListCursor(sortBy, sortVal, last.id) : null;
 
   return { items, total, page, perPage, hasMore, nextCursor };
 }
@@ -1990,7 +2043,7 @@ function inboxTabCountsScopeFp(args: {
         }),
       )
       .digest("hex")
-      .slice(0, 20);
+      .slice(0, INBOX_TAB_COUNTS_FP_LENGTH);
   } catch {
     return null;
   }
@@ -2016,8 +2069,8 @@ async function peekCachedTabTotal(
     collapseByContact: collapse,
   });
   if (!fp) return null;
-  const cached = await cache.get<Record<InboxTab, number>>(
-    inboxTabCountsKey(orgId, fp),
+  const cached = await cache.peekSwr<Record<InboxTab, number>>(
+    await inboxTabCountsKey(orgId, fp),
   );
   if (!cached) return null;
   const n = cached[tab];
@@ -2058,9 +2111,9 @@ export async function getTabCounts(
     );
   }
 
-  return cache.wrap(
-    inboxTabCountsKey(orgId, scopeFp),
-    TAB_COUNTS_CACHE_TTL_SEC,
+  return cache.wrapSwr(
+    await inboxTabCountsKey(orgId, scopeFp),
+    { ttlSec: TAB_COUNTS_CACHE_TTL_SEC, staleSec: TAB_COUNTS_STALE_SEC },
     () => computeTabCounts(
       visibilityWhere,
       todosMemberCategoryTabs,
@@ -2068,6 +2121,7 @@ export async function getTabCounts(
       filterConditions,
       search,
       collapseByContact,
+      inboxTabCountsHistKey(orgId, scopeFp),
     ),
   );
 }
@@ -2079,7 +2133,28 @@ function tabCountExpr(tabCond: Prisma.Sql, collapse: boolean): Prisma.Sql {
   return Prisma.sql`COUNT(*) FILTER (WHERE ${tabCond})::int`;
 }
 
-async function tryComputeTabCountsOneSql(args: {
+/** Consulta histórica: todas as conversas do escopo, inclusive fechadas. */
+type HistTabCounts = {
+  /** Só MEMBER (OR das categorias). ADMIN soma abertas + resolvidos + finalizados. */
+  todos: number | null;
+  resolvidos: number;
+  finalizados: number;
+};
+
+/** Consulta ativa: só conversas abertas (closedAt e followUpAt nulos). */
+type ActiveTabCounts = Record<
+  | "entrada"
+  | "esperando"
+  | "respondidas"
+  | "agente_ia"
+  | "automacao"
+  | "erro"
+  | "abertas"
+  | "ligar",
+  number
+>;
+
+type TabCountsScope = {
   visibilityCollapsed?: Prisma.ConversationWhereInput;
   todosMemberCategoryTabs?: InboxCategoryTab[] | null;
   allowedChannelIds?: string[] | null;
@@ -2087,217 +2162,176 @@ async function tryComputeTabCountsOneSql(args: {
   searchWhere: Prisma.ConversationWhereInput | null;
   countAgentReply: boolean;
   collapseByContact: boolean;
-}): Promise<Record<InboxTab, number> | null> {
+  assigneeIdsByType: AssigneeIdsByType;
+};
+
+function tabCountsSharedWhere(
+  scope: TabCountsScope,
+  orgId: string,
+): Prisma.ConversationWhereInput[] {
+  const shared: Prisma.ConversationWhereInput[] = [{ organizationId: orgId }];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    shared.push(scope.visibilityCollapsed);
+  }
+  if (scope.allowedChannelIds) {
+    shared.push({ channelId: { in: scope.allowedChannelIds } });
+  }
+  if (scope.extra.length > 0) shared.push(...scope.extra);
+  if (scope.searchWhere) shared.push(scope.searchWhere);
+  return shared;
+}
+
+function memberTodosTabs(scope: TabCountsScope): InboxCategoryTab[] | null {
+  return scope.todosMemberCategoryTabs && scope.todosMemberCategoryTabs.length > 0
+    ? scope.todosMemberCategoryTabs
+    : null;
+}
+
+// Encerradas / Resolvendo: DISTINCT contato+canal (sem channelId).
+// Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
+// MEMBER = COUNT das filas permitidas. Varre todas as conversas da org.
+async function tryComputeHistTabCountsOneSql(
+  scope: TabCountsScope,
+): Promise<HistTabCounts | null> {
   const orgId = getOrgIdOrNull();
   if (!orgId) return null;
 
-  const shared: Prisma.ConversationWhereInput[] = [{ organizationId: orgId }];
-  if (args.visibilityCollapsed && Object.keys(args.visibilityCollapsed).length > 0) {
-    shared.push(args.visibilityCollapsed);
-  }
-  if (args.allowedChannelIds) {
-    shared.push({ channelId: { in: args.allowedChannelIds } });
-  }
-  if (args.extra.length > 0) shared.push(...args.extra);
-  if (args.searchWhere) shared.push(args.searchWhere);
-
-  const sharedSql = sqlConversationWhere({ AND: shared }, orgId);
-  if (!sharedSql) return null;
-
-  const tabSql = (where: Prisma.ConversationWhereInput): Prisma.Sql | null =>
-    sqlConversationWhere(where, orgId);
-
-  const entrada = tabSql(tabToWhere("entrada", args.countAgentReply));
-  const esperando = tabSql(tabToWhere("esperando", args.countAgentReply));
-  const respondidas = tabSql(tabToWhere("respondidas", args.countAgentReply));
-  const agenteIa = tabSql(tabToWhere("agente_ia", args.countAgentReply));
-  const automacao = tabSql(tabToWhere("automacao", args.countAgentReply));
-  const resolvidos = tabSql(tabToWhere("resolvidos", args.countAgentReply));
-  const finalizados = tabSql(tabToWhere("finalizados", args.countAgentReply));
-  const erro = tabSql(tabToWhere("erro", args.countAgentReply));
-  const abertas = tabSql(activeInboxQueueGuardWhere());
-  const ligar = tabSql(ligarTabWhere());
-  const todosWhere =
-    args.todosMemberCategoryTabs && args.todosMemberCategoryTabs.length > 0
-      ? {
-          OR: args.todosMemberCategoryTabs.map((t) =>
-            tabToWhere(t, args.countAgentReply),
-          ),
-        }
-      : null;
-  const todos = todosWhere ? tabSql(todosWhere) : Prisma.sql`TRUE`;
-
-  if (
-    !entrada ||
-    !esperando ||
-    !respondidas ||
-    !agenteIa ||
-    !automacao ||
-    !resolvidos ||
-    !finalizados ||
-    !erro ||
-    !abertas ||
-    !ligar ||
-    !todos
-  ) {
-    return null;
-  }
-
-  const collapse = args.collapseByContact;
-  const openSql = sqlConversationWhere(
-    { AND: [...shared, { closedAt: null, followUpAt: null }] },
+  const sharedSql = sqlConversationWhere(
+    { AND: tabCountsSharedWhere(scope, orgId) },
     orgId,
   );
-  if (!openSql) return null;
+  if (!sharedSql) return null;
 
-  // Encerradas / Resolvendo: DISTINCT contato+canal (sem channelId).
-  // Admin "todos" = abertas + fechadas únicas (mesmo número de antes).
-  // MEMBER = COUNT das filas permitidas. Abas OPEN usam o índice
-  // parcial conversations_inbox_open_idx (closedAt/followUpAt nulos).
+  const resolvidos = sqlConversationWhere(
+    tabToWhere("resolvidos", scope.countAgentReply),
+    orgId,
+  );
+  const finalizados = sqlConversationWhere(
+    tabToWhere("finalizados", scope.countAgentReply),
+    orgId,
+  );
+  const memberTabs = memberTodosTabs(scope);
+  const todos = memberTabs
+    ? sqlConversationWhere(
+        { OR: memberTabs.map((t) => tabToWhere(t, scope.countAgentReply)) },
+        orgId,
+      )
+    : Prisma.sql`TRUE`;
+  if (!resolvidos || !finalizados || !todos) return null;
+
+  const collapse = scope.collapseByContact;
   try {
-    const [allRows, openRows] = await Promise.all([
-      prisma.$queryRaw<
-        [{ todos: number; resolvidos: number; finalizados: number }]
-      >`
-        SELECT
-          ${
-            args.todosMemberCategoryTabs?.length
-              ? Prisma.sql`${tabCountExpr(todos, false)} AS todos`
-              : Prisma.sql`COUNT(*)::int AS todos`
-          },
-          ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
-          ${tabCountExpr(finalizados, collapse)} AS finalizados
-        FROM conversations c
-        WHERE ${sharedSql}
-      `,
-      prisma.$queryRaw<
-        [{
-          entrada: number;
-          esperando: number;
-          respondidas: number;
-          agente_ia: number;
-          automacao: number;
-          erro: number;
-          abertas: number;
-          ligar: number;
-        }]
-      >`
-        SELECT
-          ${tabCountExpr(entrada, false)} AS entrada,
-          ${tabCountExpr(esperando, false)} AS esperando,
-          ${tabCountExpr(respondidas, false)} AS respondidas,
-          ${tabCountExpr(agenteIa, false)} AS agente_ia,
-          ${tabCountExpr(automacao, false)} AS automacao,
-          ${tabCountExpr(erro, false)} AS erro,
-          ${tabCountExpr(abertas, false)} AS abertas,
-          ${tabCountExpr(ligar, false)} AS ligar
-        FROM conversations c
-        WHERE ${openSql}
-      `,
-    ]);
-    const all = allRows[0];
-    const open = openRows[0];
-    if (!all || !open) return null;
+    const rows = await prisma.$queryRaw<
+      [{ todos: number; resolvidos: number; finalizados: number }]
+    >`
+      SELECT
+        ${
+          memberTabs
+            ? Prisma.sql`${tabCountExpr(todos, false)} AS todos`
+            : Prisma.sql`COUNT(*)::int AS todos`
+        },
+        ${tabCountExpr(resolvidos, collapse)} AS resolvidos,
+        ${tabCountExpr(finalizados, collapse)} AS finalizados
+      FROM conversations c
+      WHERE ${sharedSql}
+    `;
+    const row = rows[0];
+    if (!row) return null;
     return {
-      entrada: open.entrada ?? 0,
-      esperando: open.esperando ?? 0,
-      respondidas: open.respondidas ?? 0,
-      agente_ia: open.agente_ia ?? 0,
-      automacao: open.automacao ?? 0,
-      resolvidos: all.resolvidos ?? 0,
-      finalizados: all.finalizados ?? 0,
-      erro: open.erro ?? 0,
-      todos: args.todosMemberCategoryTabs?.length
-        ? (all.todos ?? 0)
-        : (open.abertas ?? 0) + (all.resolvidos ?? 0) + (all.finalizados ?? 0),
-      abertas: open.abertas ?? 0,
-      ligar: open.ligar ?? 0,
+      todos: memberTabs ? (row.todos ?? 0) : null,
+      resolvidos: row.resolvidos ?? 0,
+      finalizados: row.finalizados ?? 0,
     };
   } catch (err) {
     getLogger("conversations").warn(
-      { err },
+      { err, part: "hist" },
       "tab counts one-SQL failed — falling back to sequential COUNT",
     );
     return null;
   }
 }
 
-async function computeTabCounts(
-  visibilityWhere?: Prisma.ConversationWhereInput,
-  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
-  allowedChannelIds?: string[] | null,
-  filterConditions?: Prisma.ConversationWhereInput[],
-  search?: string | null,
-  collapseByContact = true,
-): Promise<Record<InboxTab, number>> {
-  const extra = filterConditions ?? [];
-  const searchWhere = await buildConversationSearchWhere(search);
-  const [countAgentReply, assigneeIdsByType] = await Promise.all([
-    countAgentReplyAsAnswered(),
-    loadAssigneeIdsByType(),
-  ]);
-  const visibilityCollapsed =
-    visibilityWhere && Object.keys(visibilityWhere).length > 0
-      ? rewriteAssignedToType(visibilityWhere, assigneeIdsByType)
-      : visibilityWhere;
+// Abas OPEN usam o índice parcial conversations_inbox_open_idx
+// (closedAt/followUpAt nulos).
+async function tryComputeActiveTabCountsOneSql(
+  scope: TabCountsScope,
+): Promise<ActiveTabCounts | null> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return null;
 
-  const oneSql = await tryComputeTabCountsOneSql({
-    visibilityCollapsed,
-    todosMemberCategoryTabs,
-    allowedChannelIds,
-    extra,
-    searchWhere,
-    countAgentReply,
-    collapseByContact,
+  const tabSql = (where: Prisma.ConversationWhereInput): Prisma.Sql | null =>
+    sqlConversationWhere(where, orgId);
+
+  const entrada = tabSql(tabToWhere("entrada", scope.countAgentReply));
+  const esperando = tabSql(tabToWhere("esperando", scope.countAgentReply));
+  const respondidas = tabSql(tabToWhere("respondidas", scope.countAgentReply));
+  const agenteIa = tabSql(tabToWhere("agente_ia", scope.countAgentReply));
+  const automacao = tabSql(tabToWhere("automacao", scope.countAgentReply));
+  const erro = tabSql(tabToWhere("erro", scope.countAgentReply));
+  const abertas = tabSql(activeInboxQueueGuardWhere());
+  const ligar = tabSql(ligarTabWhere());
+  if (
+    !entrada ||
+    !esperando ||
+    !respondidas ||
+    !agenteIa ||
+    !automacao ||
+    !erro ||
+    !abertas ||
+    !ligar
+  ) {
+    return null;
+  }
+
+  const openSql = tabSql({
+    AND: [...tabCountsSharedWhere(scope, orgId), { closedAt: null, followUpAt: null }],
   });
-  if (oneSql) return oneSql;
+  if (!openSql) return null;
 
-  // Fallback: where não traduziu (filtro raro). Paraleliza COUNT se o
-  // pool (DB_POOL_MAX) couber; senão sequencial — a agregada (oneSql)
-  // já foi tentada acima e falhou por where não traduzível.
-  const lightTabs = TAB_LIST.filter(
-    (t) => t !== "finalizados" && t !== "resolvidos",
-  );
-  const countTab = async (tab: InboxCategoryTab) => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(tabToWhere(tab, countAgentReply));
-    if (allowedChannelIds) {
-      conditions.push({ channelId: { in: allowedChannelIds } });
-    }
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(
-      conditions,
-      collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
-      assigneeIdsByType,
+  try {
+    const rows = await prisma.$queryRaw<[ActiveTabCounts]>`
+      SELECT
+        ${tabCountExpr(entrada, false)} AS entrada,
+        ${tabCountExpr(esperando, false)} AS esperando,
+        ${tabCountExpr(respondidas, false)} AS respondidas,
+        ${tabCountExpr(agenteIa, false)} AS agente_ia,
+        ${tabCountExpr(automacao, false)} AS automacao,
+        ${tabCountExpr(erro, false)} AS erro,
+        ${tabCountExpr(abertas, false)} AS abertas,
+        ${tabCountExpr(ligar, false)} AS ligar
+      FROM conversations c
+      WHERE ${openSql}
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      entrada: row.entrada ?? 0,
+      esperando: row.esperando ?? 0,
+      respondidas: row.respondidas ?? 0,
+      agente_ia: row.agente_ia ?? 0,
+      automacao: row.automacao ?? 0,
+      erro: row.erro ?? 0,
+      abertas: row.abertas ?? 0,
+      ligar: row.ligar ?? 0,
+    };
+  } catch (err) {
+    getLogger("conversations").warn(
+      { err, part: "active" },
+      "tab counts one-SQL failed — falling back to sequential COUNT",
     );
-  };
-  const countAbertas = () => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(activeInboxQueueGuardWhere());
-    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  };
-  const countLigar = () => {
-    const conditions: Prisma.ConversationWhereInput[] = [];
-    if (visibilityCollapsed && Object.keys(visibilityCollapsed).length > 0) {
-      conditions.push(visibilityCollapsed);
-    }
-    conditions.push(ligarTabWhere());
-    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
-    if (extra.length > 0) conditions.push(...extra);
-    if (searchWhere) conditions.push(searchWhere);
-    return countConversationsLikeList(conditions, false, assigneeIdsByType);
-  };
+    return null;
+  }
+}
 
+// ── Fallback: where não traduziu para SQL (filtro raro) ────────────
+//
+// Paraleliza COUNT se o pool (DB_POOL_MAX) couber; senão sequencial.
+
+const TAB_COUNTS_LIGHT_TABS = TAB_LIST.filter(
+  (t) => t !== "finalizados" && t !== "resolvidos",
+);
+
+function tabCountsRunSequential(): boolean {
   // Mirror de defaultPoolMax em prisma-base (api=20) — sem export novo.
   const poolMax = (() => {
     const raw = process.env.DB_POOL_MAX?.trim();
@@ -2316,58 +2350,179 @@ async function computeTabCounts(
     if (mode === "worker-automation") return 6;
     return 4;
   })();
-  const parallelBudget = lightTabs.length + 4; // +resolvidos +finalizados +abertas +ligar
+  const parallelBudget = TAB_COUNTS_LIGHT_TABS.length + 4; // +resolvidos +finalizados +abertas +ligar
+  return poolMax < parallelBudget;
+}
 
-  let lightResults: Array<readonly [InboxCategoryTab, number]>;
+function countTabFallback(scope: TabCountsScope, tab: InboxCategoryTab): Promise<number> {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    conditions.push(scope.visibilityCollapsed);
+  }
+  conditions.push(tabToWhere(tab, scope.countAgentReply));
+  if (scope.allowedChannelIds) {
+    conditions.push({ channelId: { in: scope.allowedChannelIds } });
+  }
+  if (scope.extra.length > 0) conditions.push(...scope.extra);
+  if (scope.searchWhere) conditions.push(scope.searchWhere);
+  return countConversationsLikeList(
+    conditions,
+    scope.collapseByContact && (tab === "finalizados" || tab === "resolvidos"),
+    scope.assigneeIdsByType,
+  );
+}
+
+/** `abertas` / `ligar`: guard da fila no lugar da aba. */
+function countGuardFallback(
+  scope: TabCountsScope,
+  guard: Prisma.ConversationWhereInput,
+): Promise<number> {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (scope.visibilityCollapsed && Object.keys(scope.visibilityCollapsed).length > 0) {
+    conditions.push(scope.visibilityCollapsed);
+  }
+  conditions.push(guard);
+  if (scope.allowedChannelIds) conditions.push({ channelId: { in: scope.allowedChannelIds } });
+  if (scope.extra.length > 0) conditions.push(...scope.extra);
+  if (scope.searchWhere) conditions.push(scope.searchWhere);
+  return countConversationsLikeList(conditions, false, scope.assigneeIdsByType);
+}
+
+async function computeHistTabCountsFallback(scope: TabCountsScope): Promise<HistTabCounts> {
   let resolvidos: number;
   let finalizados: number;
+  if (tabCountsRunSequential()) {
+    resolvidos = await countTabFallback(scope, "resolvidos");
+    finalizados = await countTabFallback(scope, "finalizados");
+  } else {
+    [resolvidos, finalizados] = await Promise.all([
+      countTabFallback(scope, "resolvidos"),
+      countTabFallback(scope, "finalizados"),
+    ]);
+  }
+  const memberTabs = memberTodosTabs(scope);
+  const todos = memberTabs
+    ? await countTodosTab(
+        scope.visibilityCollapsed,
+        memberTabs,
+        scope.allowedChannelIds,
+        scope.extra,
+        scope.searchWhere,
+        scope.countAgentReply,
+        false,
+        scope.assigneeIdsByType,
+      )
+    : null;
+  return { todos, resolvidos, finalizados };
+}
+
+async function computeActiveTabCountsFallback(
+  scope: TabCountsScope,
+): Promise<ActiveTabCounts> {
+  let lightResults: Array<readonly [InboxCategoryTab, number]>;
   let abertas: number;
   let ligar: number;
 
-  if (poolMax < parallelBudget) {
+  if (tabCountsRunSequential()) {
     lightResults = [];
-    for (const tab of lightTabs) {
-      lightResults.push([tab, await countTab(tab)]);
+    for (const tab of TAB_COUNTS_LIGHT_TABS) {
+      lightResults.push([tab, await countTabFallback(scope, tab)]);
     }
-    resolvidos = await countTab("resolvidos");
-    finalizados = await countTab("finalizados");
-    abertas = await countAbertas();
-    ligar = await countLigar();
+    abertas = await countGuardFallback(scope, activeInboxQueueGuardWhere());
+    ligar = await countGuardFallback(scope, ligarTabWhere());
   } else {
-    const [light, res, fin, ab, lig] = await Promise.all([
+    const [light, ab, lig] = await Promise.all([
       Promise.all(
-        lightTabs.map(async (tab) => [tab, await countTab(tab)] as const),
+        TAB_COUNTS_LIGHT_TABS.map(
+          async (tab) => [tab, await countTabFallback(scope, tab)] as const,
+        ),
       ),
-      countTab("resolvidos"),
-      countTab("finalizados"),
-      countAbertas(),
-      countLigar(),
+      countGuardFallback(scope, activeInboxQueueGuardWhere()),
+      countGuardFallback(scope, ligarTabWhere()),
     ]);
     lightResults = light;
-    resolvidos = res;
-    finalizados = fin;
     abertas = ab;
     ligar = lig;
   }
 
-  const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
-  record.resolvidos = resolvidos;
-  record.finalizados = finalizados;
-  record.todos = todosMemberCategoryTabs?.length
-    ? await countTodosTab(
-        visibilityCollapsed,
-        todosMemberCategoryTabs,
-        allowedChannelIds,
-        extra,
-        searchWhere,
-        countAgentReply,
-        false,
-        assigneeIdsByType,
-      )
-    : abertas + resolvidos + finalizados;
-  record.abertas = abertas;
-  record.ligar = ligar;
-  return record;
+  const light = Object.fromEntries(lightResults) as Omit<ActiveTabCounts, "abertas" | "ligar">;
+  return { ...light, abertas, ligar };
+}
+
+/**
+ * As duas consultas rodam em paralelo. A histórica (~620 ms) tem cache
+ * próprio em `histCacheKey` (TTL 10 min, SWR): quando só a ativa expira,
+ * roda apenas a consulta das abertas (~95 ms). Cada parte cai no COUNT
+ * sequencial sozinha se o where dela não traduzir para SQL.
+ */
+async function computeTabCounts(
+  visibilityWhere?: Prisma.ConversationWhereInput,
+  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
+  allowedChannelIds?: string[] | null,
+  filterConditions?: Prisma.ConversationWhereInput[],
+  search?: string | null,
+  collapseByContact = true,
+  /** Sem chave (escopo sem hash), calcula a histórica sem cache. */
+  histCacheKey?: string,
+): Promise<Record<InboxTab, number>> {
+  const extra = filterConditions ?? [];
+  const searchWhere = await buildConversationSearchWhere(search);
+  const [countAgentReply, assigneeIdsByType] = await Promise.all([
+    countAgentReplyAsAnswered(),
+    loadAssigneeIdsByType(),
+  ]);
+  const visibilityCollapsed =
+    visibilityWhere && Object.keys(visibilityWhere).length > 0
+      ? rewriteAssignedToType(visibilityWhere, assigneeIdsByType)
+      : visibilityWhere;
+
+  const scope: TabCountsScope = {
+    visibilityCollapsed,
+    todosMemberCategoryTabs,
+    allowedChannelIds,
+    extra,
+    searchWhere,
+    countAgentReply,
+    collapseByContact,
+    assigneeIdsByType,
+  };
+
+  const computeHist = async () =>
+    (await tryComputeHistTabCountsOneSql(scope)) ??
+    computeHistTabCountsFallback(scope);
+  const computeActive = async () =>
+    (await tryComputeActiveTabCountsOneSql(scope)) ??
+    computeActiveTabCountsFallback(scope);
+
+  const [hist, active] = await Promise.all([
+    histCacheKey
+      ? cache.wrapSwr(
+          histCacheKey,
+          {
+            ttlSec: TAB_COUNTS_HIST_CACHE_TTL_SEC,
+            staleSec: TAB_COUNTS_HIST_STALE_SEC,
+          },
+          computeHist,
+        )
+      : computeHist(),
+    computeActive(),
+  ]);
+
+  return {
+    entrada: active.entrada,
+    esperando: active.esperando,
+    respondidas: active.respondidas,
+    agente_ia: active.agente_ia,
+    automacao: active.automacao,
+    resolvidos: hist.resolvidos,
+    finalizados: hist.finalizados,
+    erro: active.erro,
+    todos: memberTodosTabs(scope)
+      ? (hist.todos ?? 0)
+      : active.abertas + hist.resolvidos + hist.finalizados,
+    abertas: active.abertas,
+    ligar: active.ligar,
+  };
 }
 
 export async function linkContactToConversation(conversationId: string, contactId: string) {
@@ -2687,7 +2842,7 @@ export async function assignConversationsInline(params: {
         },
       }).catch(() => undefined);
       try {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: params.organizationId,
           conversationId,
           assignedToId: nextId,
@@ -2695,7 +2850,7 @@ export async function assignConversationsInline(params: {
             ? { type: result.conversation.assignedTo.type }
             : null,
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: params.organizationId,
           conversationId,
           type: "ASSIGNEE_CHANGED",
@@ -2709,7 +2864,7 @@ export async function assignConversationsInline(params: {
   }
 
   if (updated > 0) {
-    void invalidateInboxTabCounts(params.organizationId);
+    scheduleTabCountsInvalidation(params.organizationId);
   }
 
   return { updated, skipped };
@@ -2829,6 +2984,33 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
+/**
+ * Devolve o deal do funil Atendimento à origem acadêmica. Sem vertical
+ * no agente/org, é no-op. Encerrar conversa (humano, lote, automação, IA)
+ * tem que limpar a fila — não só o close da IA.
+ */
+async function restoreDealAfterConversationResolved(args: {
+  conversationId: string;
+  contactId: string | null;
+  organizationId: string | null;
+}): Promise<void> {
+  if (!args.contactId || !args.organizationId) return;
+  try {
+    const { resolveAgentVerticalForConversation } = await import(
+      "@/services/ai/agent-vertical"
+    );
+    const agent = await resolveAgentVerticalForConversation(
+      args.conversationId,
+      args.organizationId,
+    );
+    await agent.ops.restoreDealToAcademicOrigin?.({
+      contactId: args.contactId,
+    });
+  } catch (e) {
+    log.warn({ err: e }, "[conversations] restoreDeal after close failed");
+  }
+}
+
 export async function updateConversationStatusInTx(
   _tx: ScopedTx,
   id: string,
@@ -2903,7 +3085,12 @@ export async function updateConversationStatusInDb(
 
   // Snapshot ANTES do update: precisamos de quem era o atendente para
   // logar a remoção e limpar deal/contato (abaixo).
-  let clearedAssignee: { id: string; name: string | null } | null = null;
+  let clearedAssignee: {
+    id: string;
+    name: string | null;
+    archetype?: string | null;
+    enabledTools?: string[] | null;
+  } | null = null;
   let closeContactId: string | null = null;
   if (status === "RESOLVED" && extra?.clearAssignedTo) {
     const prev = await prisma.conversation.findUnique({
@@ -2911,13 +3098,20 @@ export async function updateConversationStatusInDb(
       select: {
         assignedToId: true,
         contactId: true,
-        assignedTo: { select: { name: true } },
+        assignedTo: {
+          select: {
+            name: true,
+            aiAgentConfig: { select: { archetype: true, enabledTools: true } },
+          },
+        },
       },
     });
     if (prev?.assignedToId) {
       clearedAssignee = {
         id: prev.assignedToId,
         name: prev.assignedTo?.name ?? null,
+        archetype: prev.assignedTo?.aiAgentConfig?.archetype ?? null,
+        enabledTools: prev.assignedTo?.aiAgentConfig?.enabledTools ?? null,
       };
       closeContactId = prev.contactId ?? null;
     }
@@ -2938,14 +3132,16 @@ export async function updateConversationStatusInDb(
   });
 
   // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
+  // Coalescido na janela de 15 s (`scheduleTabCountsInvalidation`): o
+  // `conversation_updated` publicado abaixo cai na mesma janela, então a
+  // mudança de status não vira duas purgas (SCAN) no Redis.
   if (status === "RESOLVED" || status === "OPEN") {
-    const orgId = getOrgIdOrNull();
-    if (orgId) void invalidateInboxTabCounts(orgId);
+    scheduleTabCountsInvalidation(getOrgIdOrNull());
   }
 
   if (followUp) {
     try {
-      sseBus.publish("conversation_updated", {
+      publishConversationUpdated({
         organizationId: updated.organizationId,
         conversationId: id,
         status: updated.status,
@@ -2977,30 +3173,50 @@ export async function updateConversationStatusInDb(
   // deals.ts é pesado e este arquivo é importado por webhooks quentes.
   if (clearedAssignee) {
     const orgId = getOrgIdOrNull();
-    await logEvent({
-      type: "ASSIGNEE_CHANGED",
-      entityType: "CONVERSATION",
-      entityId: id,
-      entityLabel: updated.externalId ?? null,
-      conversationId: id,
-      contactId: closeContactId,
-      field: "assignedTo",
-      oldValue: clearedAssignee.name,
-      newValue: null,
-      meta: {
-        fromUserId: clearedAssignee.id,
-        toUserId: null,
-        reason: "conversation_closed",
-      },
-    });
-    try {
-      sseBus.publish("conversation_timeline_updated", {
-        organizationId: orgId,
-        conversationId: id,
-        type: "ASSIGNEE_CHANGED",
+    const { isTabulationClassifier } = await import(
+      "@/lib/ai-agents/tabulation-classifier"
+    );
+    const { isFarewellCloser } = await import(
+      "@/lib/ai-agents/farewell-closer"
+    );
+    // Classificador / despedida só carimbam. O Encerrar tira o responsável
+    // e o log "X removida da conversa" parece que a ação caiu.
+    const skipUnassignLog =
+      isTabulationClassifier({
+        archetype: clearedAssignee.archetype,
+        enabledTools: clearedAssignee.enabledTools,
+        name: clearedAssignee.name,
+      }) ||
+      isFarewellCloser({
+        archetype: clearedAssignee.archetype,
+        name: clearedAssignee.name,
       });
-    } catch {
-      /* best-effort */
+    if (!skipUnassignLog) {
+      await logEvent({
+        type: "ASSIGNEE_CHANGED",
+        entityType: "CONVERSATION",
+        entityId: id,
+        entityLabel: updated.externalId ?? null,
+        conversationId: id,
+        contactId: closeContactId,
+        field: "assignedTo",
+        oldValue: clearedAssignee.name,
+        newValue: null,
+        meta: {
+          fromUserId: clearedAssignee.id,
+          toUserId: null,
+          reason: "conversation_closed",
+        },
+      });
+      try {
+        publishConversationTimelineUpdated({
+          organizationId: orgId,
+          conversationId: id,
+          type: "ASSIGNEE_CHANGED",
+        });
+      } catch {
+        /* best-effort */
+      }
     }
     if (closeContactId) {
       const { clearContactOwnershipOnClose } = await import("@/services/deals");
@@ -3010,6 +3226,14 @@ export async function updateConversationStatusInDb(
         actorUserId: userIdForFk(getRequestContext()?.userId),
       }).catch(() => {});
     }
+  }
+
+  if (status === "RESOLVED" && !followUp) {
+    await restoreDealAfterConversationResolved({
+      conversationId: id,
+      contactId: updated.contactId ?? updated.contact?.id ?? closeContactId,
+      organizationId: updated.organizationId,
+    });
   }
 
   return updated;
@@ -3204,6 +3428,14 @@ export async function resolveConversationsInline(params: {
     });
     updated += toResolve.length;
 
+    for (const conv of toResolve) {
+      await restoreDealAfterConversationResolved({
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        organizationId: conv.organizationId,
+      });
+    }
+
     if (!params.keepAgent) {
       const pairs = new Map<string, { contactId: string; userId: string }>();
       for (const conv of toResolve) {
@@ -3316,13 +3548,13 @@ export async function resolveConversationsInline(params: {
       }
 
       try {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           status: "RESOLVED",
           closedAt: new Date().toISOString(),
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           type: "CONVERSATION_CLOSED",
@@ -3335,9 +3567,7 @@ export async function resolveConversationsInline(params: {
 
   if (updated > 0) {
     const orgId = getOrgIdOrNull();
-    if (orgId) {
-      void invalidateInboxTabCounts(orgId);
-    }
+    scheduleTabCountsInvalidation(orgId);
     void import("@/services/distribution/pending")
       .then((m) =>
         m.scheduleProcessPendingDistributionQueue({

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { IMPORT_LIMITS, parseTranscript, transcriptTextFromFile } from "@/services/ai-v2/replay-import";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/replay/parse");
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
@@ -62,7 +65,7 @@ export async function POST(request: Request) {
       }
       return NextResponse.json({ transcripts: out, limits: IMPORT_LIMITS });
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/replay/parse]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/replay/parse]");
       return NextResponse.json({ message: "Não consegui ler as conversas anexadas." }, { status: 500 });
     }
   });

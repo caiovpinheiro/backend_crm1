@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { softDeleteLossReason, updateLossReason } from "@/services/loss-reasons";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/loss-reasons/[id]");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -20,7 +23,7 @@ export async function PUT(request: Request, ctx: Ctx) {
       if (e instanceof Error && e.message === "EMPTY_UPDATE") {
         return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
       }
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       return NextResponse.json({ message: "Erro ao atualizar motivo." }, { status: 500 });
     }
   });
@@ -33,7 +36,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
       await softDeleteLossReason(id);
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "DELETE falhou");
       return NextResponse.json({ message: "Erro ao desativar motivo." }, { status: 500 });
     }
   });

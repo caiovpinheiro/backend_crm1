@@ -9,6 +9,9 @@ import {
   type DashboardResult,
 } from "@/services/dashboard";
 import { resolvePipelineByPublicRef } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/dashboard");
 
 /**
  * GET /api/dashboard
@@ -204,7 +207,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[api/dashboard]", e);
+      log.error({ err: e }, "[api/dashboard] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar o dashboard." },
         { status: 500 },

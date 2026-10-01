@@ -8,6 +8,9 @@ import { executeDistribution } from "@/services/distribution";
 import { isAgentAvailable } from "@/services/lead-distribution";
 import type { V2Destination } from "@/lib/ai-v2/types";
 import { traceStep } from "./trace";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.handoff");
 
 type HandoffArgs = {
   conversationId: string;
@@ -27,7 +30,7 @@ export async function simpleHandoff(args: HandoffArgs): Promise<void> {
     // fila repetia a execução e a conversa continuava com a IA. Agora ela
     // vai para a fila da equipe (sem responsável) e o rastro explica.
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai-v2] transferência falhou; conversa devolvida à fila da equipe:", msg);
+    log.error({ err: msg }, "[ai-v2] transferência falhou; conversa devolvida à fila da equipe");
     traceStep("transferência", `Transferência para ${args.destination.type}${args.destination.id ? ` (${args.destination.id})` : ""} falhou (${msg}) → conversa devolvida à fila da equipe`);
     await releaseFromAi(args.conversationId).catch(() => undefined);
     return;
@@ -44,7 +47,10 @@ export async function simpleHandoff(args: HandoffArgs): Promise<void> {
       const { requeueTurnForAssignee } = await import("@/services/ai/turn-manager");
       await requeueTurnForAssignee(args.turnId);
     } catch (err) {
-      console.warn("[ai-v2] turno para o agente de destino não foi criado:", err instanceof Error ? err.message : err);
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] turno para o agente de destino não foi criado",
+      );
     }
   }
 }

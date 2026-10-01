@@ -12,6 +12,9 @@
  */
 
 import { isReusableVideoFileName, parseStoragePath } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("storage.upstream-fallback");
 
 export const STORAGE_FALLBACK_TIMEOUT_MS = 700;
 export const STORAGE_FALLBACK_VIDEO_TIMEOUT_MS = 15_000;
@@ -99,8 +102,9 @@ function buildUpstreamHeaders(
     const cookieNames = cookieHeader
       ? cookieHeader.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean)
       : [];
-    console.warn(
-      `[storage] upstream fallback sem sessao: cookies recebidos=[${cookieNames.join(",")}]`,
+    log.warn(
+      { cookieNames: cookieNames.join(",") },
+      "[storage] upstream fallback sem sessao: cookies recebidos",
     );
     return null;
   }
@@ -141,8 +145,9 @@ export async function tryUpstreamFallback(
     });
     if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "(no body)");
-      console.warn(
-        `[storage] upstream fallback ${upstream.status} para ${joined}: ${errBody.slice(0, 200)}`,
+      log.warn(
+        { status: upstream.status, path: joined, errBody: errBody.slice(0, 200) },
+        "[storage] upstream fallback falhou",
       );
       return null;
     }
@@ -164,7 +169,7 @@ export async function tryUpstreamFallback(
     out.set("X-Storage-Source", "upstream-fallback");
     return new Response(upstream.body, { status: upstream.status, headers: out });
   } catch (err) {
-    console.warn("[storage] upstream fallback erro:", err);
+    log.warn({ err }, "[storage] upstream fallback erro");
     return null;
   }
 }
@@ -195,7 +200,7 @@ export async function readUpstreamFallbackBytes(
     const buf = Buffer.from(await upstream.arrayBuffer());
     return buf.length ? buf : null;
   } catch (err) {
-    console.warn("[storage] upstream fallback bytes erro:", err);
+    log.warn({ err }, "[storage] upstream fallback bytes erro");
     return null;
   }
 }
@@ -219,15 +224,13 @@ export async function readPeerStorageBytes(joined: string): Promise<Buffer | nul
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!upstream.ok) {
-        console.warn(
-          `[storage] peer ${upstream.status} ${base} ${joined}`,
-        );
+        log.warn({ status: upstream.status, base, path: joined }, "[storage] peer respondeu erro");
         continue;
       }
       const buf = Buffer.from(await upstream.arrayBuffer());
       if (buf.length) return buf;
     } catch (err) {
-      console.warn("[storage] peer read erro:", base, err);
+      log.warn({ base, err }, "[storage] peer read erro");
     }
   }
   return null;

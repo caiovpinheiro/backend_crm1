@@ -63,6 +63,9 @@ import {
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { ensureV2AgentSchema } from "./ensure-schema";
 import { checkV2CostCap } from "./cost-guard";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.engine");
 
 function mapV2AutonomyToPrisma(mode: V2AgentConfig["autonomyMode"]): "AUTONOMOUS" | "DRAFT" {
   return mode === "auto" ? "AUTONOMOUS" : "DRAFT";
@@ -194,7 +197,7 @@ async function loadAgentConfig(agentConfigId: string): Promise<{ config: V2Agent
     const config = normalizeV2Config(row.simpleConfig);
     return { config, active: row.active ?? true, versionId: row.id };
   } catch (err) {
-    console.error("[ai-v2] invalid config", err);
+    log.error({ err }, "[ai-v2] invalid config");
     return null;
   }
 }
@@ -453,7 +456,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   try {
     await ensureV2AgentSchema();
   } catch (err) {
-    console.error("[ai-v2] ensureV2AgentSchema falhou", err);
+    log.error({ err }, "[ai-v2] ensureV2AgentSchema falhou");
   }
   const resolved = await resolveV2AgentForConversation(input.conversationId);
   if (!resolved) {
@@ -480,8 +483,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false, error: "Conversation without contact" };
   }
 
-  // Kill-switch da org: não responde e manda o ticket para a distribuição
-  // humana.
+  // Kill-switch da org: mesmo comportamento do v1 (inbox-handler) — não
+  // responde e manda o ticket para a distribuição humana.
   if (!(await isAiAttendanceEnabled())) {
     const { maybeDistributeNewInboundTicket } = await import("@/services/distribution");
     await maybeDistributeNewInboundTicket({
@@ -2550,7 +2553,7 @@ async function createInitialDeal(contactId: string): Promise<string | null> {
     } as any);
     return (deal as { id?: string } | null)?.id ?? null;
   } catch (err) {
-    console.error("[ai-v2] createInitialDeal falhou", err);
+    log.error({ err }, "[ai-v2] createInitialDeal falhou");
     return null;
   }
 }

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { listV2TestConversations } from "@/services/ai-v2/test-logs";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/test-logs");
 
 /** Conversas dos números de teste do agente, com o rastro de cada turno. */
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -20,7 +23,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       });
       return NextResponse.json(result);
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/test-logs]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/test-logs]");
       return NextResponse.json(
         { message: err instanceof Error ? err.message : "Erro ao listar conversas de teste." },
         { status: 500 },

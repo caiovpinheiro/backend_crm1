@@ -7,6 +7,9 @@ import {
   InvalidWidgetSlugError,
   installWidget,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/widgets/install");
 
 /**
  * POST /api/widgets/install
@@ -52,7 +55,7 @@ export async function POST(request: Request) {
       if (e instanceof InvalidWidgetSlugError) {
         return NextResponse.json({ message: "Widget inválido." }, { status: 400 });
       }
-      console.error("[POST /api/widgets/install]", e);
+      log.error({ err: e }, "[POST /api/widgets/install] falhou");
       return NextResponse.json(
         { message: "Erro ao instalar widget." },
         { status: 500 },

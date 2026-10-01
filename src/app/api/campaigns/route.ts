@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getCampaigns, createCampaign, type CreateCampaignInput } from "@/services/campaigns";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns");
 
 const CAMPAIGN_TYPES = new Set(["TEMPLATE", "TEXT", "AUTOMATION"]);
 
@@ -22,7 +25,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json(result);
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao listar campanhas." },
         { status: 500 },
@@ -74,7 +77,7 @@ export async function POST(request: Request) {
       const campaign = await createCampaign(input);
       return NextResponse.json({ campaign }, { status: 201 });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao criar campanha." },
         { status: 500 },

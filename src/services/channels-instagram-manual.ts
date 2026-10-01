@@ -20,6 +20,9 @@ import {
   parseChannelConfig,
   updateChannel,
 } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("channels-instagram-manual");
 
 const GRAPH_API_VERSION = "v21.0";
 const IG_GRAPH = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
@@ -118,9 +121,9 @@ async function subscribePageMessages(
   const subRes = await fetch(subUrl.toString(), { method: "POST" });
   if (subRes.ok) return true;
   const subErr = (await subRes.json().catch(() => ({}))) as { error?: GraphErr };
-  console.warn(
-    "[provisionInstagramManual] page subscribed_apps non-fatal:",
-    subErr.error?.message || `HTTP ${subRes.status}`,
+  log.warn(
+    { errMessage: subErr.error?.message || `HTTP ${subRes.status}` },
+    "[provisionInstagramManual] page subscribed_apps non-fatal",
   );
   return false;
 }
@@ -135,9 +138,9 @@ async function subscribeIgLoginMessages(
   const subRes = await fetch(subUrl.toString(), { method: "POST" });
   if (subRes.ok) return true;
   const subErr = (await subRes.json().catch(() => ({}))) as { error?: GraphErr };
-  console.warn(
-    "[provisionInstagramManual] ig subscribed_apps non-fatal:",
-    subErr.error?.message || `HTTP ${subRes.status}`,
+  log.warn(
+    { errMessage: subErr.error?.message || `HTTP ${subRes.status}` },
+    "[provisionInstagramManual] ig subscribed_apps non-fatal",
   );
   return false;
 }

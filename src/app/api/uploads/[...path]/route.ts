@@ -21,7 +21,7 @@ import { NextResponse } from "next/server";
 import pathModule from "path";
 
 import { auth } from "@/lib/auth";
-import { prismaBase } from "@/lib/prisma-base";
+import { resolveLegacyUploadOrgId } from "@/lib/legacy-upload-org";
 
 const MIME_TYPES: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
@@ -35,50 +35,6 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 type RouteContext = { params: Promise<{ path: string[] }> };
-
-/**
- * Resolve o `organizationId` "dono" de um arquivo legacy a partir do
- * filename relativo (e.g. `1730000000-abc123.jpg` ou
- * `avatars/u_xyz.jpg` ou `call-recordings/call-123.webm`).
- *
- * Retorna null se nenhuma referência foi encontrada — caller deve
- * tratar como 404 (arquivo órfão sem dono = não-servir, defensivo).
- */
-async function resolveLegacyOrgId(filenameRelative: string): Promise<string | null> {
-  const candidates = [
-    `/uploads/${filenameRelative}`,
-    `/uploads/${filenameRelative}?`, // tolera querystrings
-  ];
-
-  // 1) Mensagem com mediaUrl correspondente (pega organizationId via conversation).
-  for (const url of candidates) {
-    const msg = await prismaBase.message.findFirst({
-      where: {
-        OR: [{ mediaUrl: url }, { mediaUrl: { startsWith: url } }],
-      },
-      select: { conversation: { select: { organizationId: true } } },
-    });
-    if (msg?.conversation?.organizationId) {
-      return msg.conversation.organizationId;
-    }
-  }
-
-  // 2) Avatar de usuário (User.avatarUrl). Lookup tolera ?v=... no fim.
-  const userMatch = await prismaBase.user.findFirst({
-    where: { avatarUrl: { startsWith: candidates[0] } },
-    select: { organizationId: true },
-  });
-  if (userMatch?.organizationId) return userMatch.organizationId;
-
-  // 3) Avatar de contato (Contact.avatarUrl).
-  const contactMatch = await prismaBase.contact.findFirst({
-    where: { avatarUrl: { startsWith: candidates[0] } },
-    select: { organizationId: true },
-  });
-  if (contactMatch?.organizationId) return contactMatch.organizationId;
-
-  return null;
-}
 
 export async function GET(_request: Request, context: RouteContext) {
   const session = await auth();
@@ -102,7 +58,7 @@ export async function GET(_request: Request, context: RouteContext) {
   const isSuperAdmin = Boolean(sUser.isSuperAdmin);
 
   if (!isSuperAdmin) {
-    const ownerOrgId = await resolveLegacyOrgId(fileName);
+    const ownerOrgId = await resolveLegacyUploadOrgId(fileName);
     if (!ownerOrgId) {
       // Arquivo sem referência no DB ⇒ órfão. Não servimos.
       return NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 });
