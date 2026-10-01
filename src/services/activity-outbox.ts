@@ -533,6 +533,9 @@ export async function projectTabulationOutboxBatch(
 //     conversa (muito menos nas antigas da fila acumulada).
 // ─────────────────────────────────────────────────────────────────────────
 
+/** Formato de `process.env` sem exigir `NODE_ENV` (testes passam objetos parciais). */
+type EnvLike = Record<string, string | undefined>;
+
 const CLOSED_PROJECTOR_DEFAULT_BATCH = 100;
 const CLOSED_PROJECTOR_MAX_BATCH = 500;
 const CLOSED_PROJECTOR_DEFAULT_INTERVAL_MS = 5_000;
@@ -546,7 +549,7 @@ const CLOSED_PROJECTOR_MIN_INTERVAL_MS = 1_000;
  * seq scan nas partições de `activity_events`.
  */
 export function isActivityOutboxWorkerEnabled(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EnvLike = process.env,
 ): boolean {
   const raw = (env.ACTIVITY_OUTBOX_WORKER ?? "").trim().toLowerCase();
   return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
@@ -565,7 +568,7 @@ function intFromEnv(
 
 /** Lote (`ACTIVITY_OUTBOX_WORKER_BATCH`, padrão 100, teto 500). */
 export function activityOutboxWorkerBatch(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EnvLike = process.env,
 ): number {
   return intFromEnv(
     env.ACTIVITY_OUTBOX_WORKER_BATCH,
@@ -577,7 +580,7 @@ export function activityOutboxWorkerBatch(
 
 /** Intervalo (`ACTIVITY_OUTBOX_WORKER_INTERVAL_MS`, padrão 5 s, piso 1 s). */
 export function activityOutboxWorkerIntervalMs(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EnvLike = process.env,
 ): number {
   return intFromEnv(
     env.ACTIVITY_OUTBOX_WORKER_INTERVAL_MS,
@@ -735,7 +738,7 @@ export async function projectConversationClosedOutboxBatch(
  * `ACTIVITY_OUTBOX_WORKER` desligado não consulta nem grava nada.
  */
 export async function runConversationClosedProjectorTick(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EnvLike = process.env,
 ): Promise<number> {
   if (!isActivityOutboxWorkerEnabled(env)) return 0;
   return projectConversationClosedOutboxBatch(activityOutboxWorkerBatch(env));
@@ -754,7 +757,7 @@ export function resetConversationClosedProjectorForTests(): void {
  * está desligada (nenhum timer é criado).
  */
 export function startConversationClosedOutboxProjector(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EnvLike = process.env,
 ): boolean {
   if (!isActivityOutboxWorkerEnabled(env)) {
     log.info(
