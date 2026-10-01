@@ -31,6 +31,8 @@
  * em `RATE_LIMIT_PROFILES` pra evitar mágica espalhada.
  */
 
+import { createHash } from "node:crypto";
+
 import { NextResponse } from "next/server";
 import {
   RateLimiterMemory,
@@ -127,6 +129,18 @@ export const RATE_LIMIT_PROFILES = {
    * `auth.public`, no máximo 120/h por IP. Login legítimo gasta 1-2 por sessão.
    */
   "auth.lookup.hourly": { points: 120, durationSec: 3600 },
+  /**
+   * Tenant-lookup por E-MAIL (chave = hash do e-mail, nunca o e-mail cru):
+   * barra a consulta repetida do mesmo endereço a partir de vários IPs.
+   * Conta igual para e-mail cadastrado ou não. Login legítimo gasta 1-2.
+   */
+  "auth.lookup.email": { points: 10, durationSec: 600 },
+  /**
+   * Reenvio do código de verificação disparado pelo LOGIN (senha correta +
+   * e-mail não confirmado), por usuário. Roda em segundo plano; estourado,
+   * só deixa de enviar (o login responde igual).
+   */
+  "auth.verify-resend": { points: 3, durationSec: 3600 },
   /** Convites: previne enumeration. 30 tentativas/hora/IP. */
   "auth.invite": { points: 30, durationSec: 3600 },
   /** Bulk-ops (import contatos, export). 5/min/org. */
@@ -145,11 +159,23 @@ export const RATE_LIMIT_PROFILES = {
 
 export type RateLimitProfile = keyof typeof RATE_LIMIT_PROFILES;
 
+/**
+ * Perfis "duros": rotas públicas de autenticação. Com Redis fora do ar o
+ * `consume` NÃO libera (fail-open) — cai num limiter em memória do processo
+ * (`insuranceLimiter`), com o mesmo teto. Os demais perfis seguem fail-open:
+ * derrubar a API autenticada inteira por causa do Redis é pior.
+ */
+function isHardProfile(profile: RateLimitProfile): boolean {
+  return profile.startsWith("auth.");
+}
+
 type RateLimiterCacheKey = string;
 
 const limiterCache = new Map<RateLimiterCacheKey, RateLimiterAbstract>();
 
 let sharedRedis: import("ioredis").Redis | null = null;
+/** Só testes: cliente falso para exercitar o caminho Redis (ver setter). */
+let redisOverrideForTests: unknown = null;
 
 export function getRateLimitRedis(): import("ioredis").Redis | null {
   return getRedisOrNull();
@@ -171,7 +197,9 @@ function getProfileConfig(profile: RateLimitProfile): {
 function getRedisOrNull(): import("ioredis").Redis | null {
   // Vitest: memória, senão REDIS_URL do shell faria o consume ir pro Redis
   // e fake timers não expirariam a janela.
-  if (process.env.VITEST === "true") return null;
+  if (process.env.VITEST === "true") {
+    return redisOverrideForTests as import("ioredis").Redis | null;
+  }
   if (sharedRedis) return sharedRedis;
   const url = process.env.REDIS_URL?.trim();
   if (!url) return null;
@@ -212,6 +240,15 @@ function getLimiter(profile: RateLimitProfile): RateLimiterAbstract {
       blockDuration: 0,
       inMemoryBlockOnConsumed: cfg.points + 1,
       inMemoryBlockDuration: cfg.durationSec,
+      ...(isHardProfile(profile)
+        ? {
+            insuranceLimiter: new RateLimiterMemory({
+              keyPrefix: `rl:${profile}`,
+              points: cfg.points,
+              duration: cfg.durationSec,
+            }),
+          }
+        : {}),
     };
     limiter = new RateLimiterRedis(opts);
   } else {
@@ -229,6 +266,13 @@ function getLimiter(profile: RateLimitProfile): RateLimiterAbstract {
 export function resetRateLimitersForTests(): void {
   limiterCache.clear();
   sharedRedis = null;
+  redisOverrideForTests = null;
+}
+
+/** Só testes. Injeta um cliente Redis falso (o Vitest usa memória por padrão). */
+export function setRateLimitRedisForTests(client: unknown): void {
+  limiterCache.clear();
+  redisOverrideForTests = client;
 }
 
 export type RateLimitDecision = {
@@ -300,7 +344,15 @@ export async function consumeRateLimit(
   }
 }
 
-export type RateLimitScope = "org" | "user" | "ip";
+/**
+ * Identificador opaco para chave de rate-limit a partir de dado pessoal
+ * (e-mail): a chave vai para o Redis e para o log de rejeição.
+ */
+export function hashRateLimitId(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 32);
+}
+
+export type RateLimitScope = "org" | "user" | "ip" | "email";
 
 export type WithRateLimitOpts = {
   /** Identificador da rota (template, não path). Vai pro key e pra métrica. */
@@ -309,7 +361,7 @@ export type WithRateLimitOpts = {
   profile: RateLimitProfile;
   /** Scope da chave — fonte do "id". */
   scope: RateLimitScope;
-  /** Id estável (orgId, userId, ipv4/ipv6). */
+  /** Id estável (orgId, userId, ipv4/ipv6; `email` = hash, ver `hashRateLimitId`). */
   id: string | null | undefined;
   /** Pontos a consumir. Default 1. Use >1 pra rotas pesadas (ex.: bulk import = 10). */
   points?: number;
