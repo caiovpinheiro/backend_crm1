@@ -18,6 +18,8 @@ const h = vi.hoisted(() => {
     sessionRpm: vi.fn().mockResolvedValue(null as Response | null),
     orgRpm: vi.fn().mockResolvedValue(null as Response | null),
     assignmentsFindMany: vi.fn().mockResolvedValue([] as unknown[]),
+    // SV-1: `select { sessionVersion }` do requireAuth com cache frio.
+    userFindUnique: vi.fn().mockResolvedValue(null as unknown),
   };
 });
 
@@ -39,7 +41,7 @@ vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: h.orgRpm }));
 vi.mock("@/lib/prisma-base", () => ({
   prismaBase: {
     userRoleAssignment: { findMany: h.assignmentsFindMany },
-    user: { findUnique: vi.fn().mockResolvedValue(null) },
+    user: { findUnique: h.userFindUnique },
     role: { findFirst: vi.fn().mockResolvedValue(null) },
   },
 }));
@@ -65,6 +67,7 @@ import {
   userOrgFilter,
   withOrgContext,
 } from "@/lib/auth-helpers";
+import { clearSessionVersionCacheForTests } from "@/lib/auth/session-version";
 import {
   enterRequestContext,
   getRequestContext,
@@ -79,10 +82,12 @@ function session(over: Partial<{
   isSuperAdmin: boolean;
   name: string | null;
   email: string | null;
+  sessionVersion: number;
 }> = {}) {
   userSeq += 1;
   return {
     user: {
+      ...(over.sessionVersion === undefined ? {} : { sessionVersion: over.sessionVersion }),
       id: over.id ?? `user-${userSeq}`,
       name: over.name === undefined ? "Ana" : over.name,
       email: over.email === undefined ? "ana@x.com" : over.email,
@@ -104,9 +109,11 @@ async function bodyOf(res: Response): Promise<Record<string, unknown>> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearSessionVersionCacheForTests();
   h.sessionRpm.mockResolvedValue(null);
   h.orgRpm.mockResolvedValue(null);
   h.assignmentsFindMany.mockResolvedValue([]);
+  h.userFindUnique.mockResolvedValue(null);
 });
 
 describe("requireAuth", () => {
@@ -119,6 +126,56 @@ describe("requireAuth", () => {
     expect(await bodyOf(r.response)).toEqual({ message: "Não autorizado." });
     expect(h.requireAuthFail).toHaveBeenCalledWith("no_session");
     expect(h.sessionRpm).not.toHaveBeenCalled();
+  });
+
+  it("token zerado pelo callback jwt (user sem id) → 401 `no_session`", async () => {
+    h.auth.mockResolvedValue({ user: { name: undefined, email: undefined, image: undefined } });
+    const r = await fresh(() => requireAuth());
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.response.status).toBe(401);
+    expect(h.requireAuthFail).toHaveBeenCalledWith("no_session");
+    expect(h.userFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("SV-1: banco incrementou sessionVersion → 401 `session_revoked` antes do rate limit", async () => {
+    h.auth.mockResolvedValue(session({ id: "user-sv", sessionVersion: 1 }));
+    h.userFindUnique.mockResolvedValue({ sessionVersion: 2 });
+    const r = await fresh(() => requireAuth());
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.response.status).toBe(401);
+    expect(await bodyOf(r.response)).toEqual({
+      message: "Sessão expirada. Entre novamente.",
+      code: "SESSION_REVOKED",
+    });
+    expect(h.requireAuthFail).toHaveBeenCalledWith("session_revoked");
+    expect(h.userFindUnique).toHaveBeenCalledWith({
+      where: { id: "user-sv" },
+      select: { sessionVersion: true },
+    });
+    expect(h.sessionRpm).not.toHaveBeenCalled();
+  });
+
+  it("SV-1: versão igual passa e fica em cache; token antigo sem claim vale 0", async () => {
+    h.userFindUnique.mockResolvedValue({ sessionVersion: 1 });
+    h.auth.mockResolvedValue(session({ id: "user-sv2", sessionVersion: 1 }));
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+    expect(h.userFindUnique).toHaveBeenCalledTimes(1);
+
+    // Claim ausente (token de antes do deploy) × banco ainda em 0: válido.
+    h.userFindUnique.mockResolvedValue({ sessionVersion: 0 });
+    h.auth.mockResolvedValue(session({ id: "user-old" }));
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+  });
+
+  it("SV-1: sem veredito (linha ausente / banco fora) deixa passar", async () => {
+    h.auth.mockResolvedValue(session({ id: "user-nv", sessionVersion: 5 }));
+    h.userFindUnique.mockResolvedValue(null);
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+    h.userFindUnique.mockRejectedValue(new Error("db down"));
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
   });
 
   it("usuário comum sem organizationId → 401 (estado corrompido, não confia no JWT)", async () => {

@@ -23,6 +23,12 @@ import {
   setJwtRefreshSnapshot,
   type JwtRefreshSnapshot,
 } from "./auth/jwt-refresh-cache";
+import {
+  getCachedSessionVersion,
+  sessionVersionFromClaim,
+  sessionVersionMatches,
+  setCachedSessionVersion,
+} from "./auth/session-version";
 import { getClientIp, withRateLimit } from "./rate-limit";
 
 /** Código em `signIn(..., { redirect: false })` → `result.code` quando o Prisma falha (ex.: BD parada). */
@@ -131,6 +137,7 @@ const nextAuth = NextAuth({
               mfaSecret: true,
               mfaEnabledAt: true,
               emailVerifiedAt: true,
+              sessionVersion: true,
               organization: { select: { slug: true } },
             },
           });
@@ -310,6 +317,8 @@ const nextAuth = NextAuth({
           organizationId: user.organizationId,
           organizationSlug,
           isSuperAdmin: user.isSuperAdmin,
+          // SV-1: vai para o JWT; o banco incrementa para revogar.
+          sessionVersion: sessionVersionFromClaim(user.sessionVersion),
           // NextAuth lê `image` como o avatar do usuário (mapeia pra
           // `session.user.image`). Espelhamos `User.avatarUrl` aqui pra
           // que a foto cadastrada em `/settings/profile` apareça em
@@ -331,6 +340,9 @@ const nextAuth = NextAuth({
           (user as { organizationSlug?: string | null }).organizationSlug ?? null;
         token.isSuperAdmin = Boolean((user as { isSuperAdmin?: boolean }).isSuperAdmin);
         token.picture = (user as { image?: string | null }).image ?? null;
+        token.sessionVersion = sessionVersionFromClaim(
+          (user as { sessionVersion?: unknown }).sessionVersion,
+        );
       } else if (token.id) {
         const userId = token.id as string;
         // Refresh role + avatarUrl + organizationId/slug do banco — garante
@@ -355,6 +367,7 @@ const nextAuth = NextAuth({
                 organizationId: true,
                 isSuperAdmin: true,
                 isErased: true,
+                sessionVersion: true,
                 organization: { select: { status: true, slug: true } },
               },
             });
@@ -373,8 +386,18 @@ const nextAuth = NextAuth({
                       isSuperAdmin: dbUser.isSuperAdmin,
                       picture: dbUser.avatarUrl ?? null,
                     };
-              setJwtRefreshSnapshot(userId, snapshot);
+              // SV-1: a mesma consulta prima o cache de versão (60 s) —
+              // a comparação abaixo e o `requireAuth` não voltam ao banco.
+              setCachedSessionVersion(
+                userId,
+                sessionVersionFromClaim(dbUser.sessionVersion),
+              );
+            } else {
+              // Linha não existe mais (hard delete em DELETE /api/users/[id]
+              // = remoção da org): sessão inválida, e o estado fica em cache.
+              snapshot = { invalid: true };
             }
+            setJwtRefreshSnapshot(userId, snapshot);
           } catch (err) {
             console.error("[auth] jwt role refresh failed", err);
           }
@@ -390,6 +413,18 @@ const nextAuth = NextAuth({
           token.organizationSlug = snapshot.organizationSlug;
           token.isSuperAdmin = snapshot.isSuperAdmin;
           token.picture = snapshot.picture;
+        }
+        // SV-1: token emitido antes do último `revokeUserSessions` (troca
+        // de senha, "sair de todos os dispositivos", erase). Só o cache
+        // deste processo — primado logo acima; frio apenas quando o banco
+        // falhou (fail-open, como o refresh). `null` limpa o cookie.
+        if (
+          !sessionVersionMatches(
+            sessionVersionFromClaim(token.sessionVersion),
+            getCachedSessionVersion(userId),
+          )
+        ) {
+          return null;
         }
       }
       return token;
@@ -410,6 +445,9 @@ const nextAuth = NextAuth({
         // `session.user.image` recebe `undefined` mesmo com a foto
         // já no banco.
         session.user.image = (token.picture as string | null | undefined) ?? null;
+        // SV-1: o `requireAuth` compara esta claim com o banco.
+        (session.user as { sessionVersion?: number }).sessionVersion =
+          sessionVersionFromClaim(token.sessionVersion);
       }
       return session;
     },

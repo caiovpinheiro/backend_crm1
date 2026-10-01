@@ -11,6 +11,8 @@ import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
 import { enforceSessionApiRateLimit } from "@/lib/rate-limit";
 import { auth } from "./auth";
+import { sessionVersionFromClaim } from "./auth/session-version";
+import { isSessionVersionCurrent } from "./auth/session-version-check";
 import {
   loadAuthzContext,
   can,
@@ -54,6 +56,8 @@ export type AppSession = {
     /// Habilita bypass da RLS e acesso a /admin/organizations.
     isSuperAdmin: boolean;
     image?: string | null;
+    /// SV-1: claim do JWT. Ausente (token antigo) = 0.
+    sessionVersion?: number;
   };
 };
 
@@ -82,12 +86,31 @@ function sessionHumanActor(session: AppSession): ContextActor {
  */
 export async function requireAuth(): Promise<AuthResult<AppSession>> {
   const session = (await auth()) as AppSession | null;
-  if (!session?.user) {
+  // Token invalidado pelo callback `jwt` vira `{}` -> `user` sem `id`.
+  if (!session?.user || typeof session.user.id !== "string" || !session.user.id) {
     await logApiAccessRequireAuthFail("no_session");
     return {
       ok: false,
       response: NextResponse.json(
         { message: "Não autorizado." },
+        { status: 401 },
+      ),
+    };
+  }
+  // SV-1: sessão revogada (troca de senha, "sair de todos os dispositivos",
+  // erase). O callback `jwt` já derruba no mesmo processo; aqui é a rede
+  // para cache frio. Sem veredito (linha ausente/banco fora) deixa passar.
+  if (
+    !(await isSessionVersionCurrent(
+      session.user.id,
+      sessionVersionFromClaim(session.user.sessionVersion),
+    ))
+  ) {
+    await logApiAccessRequireAuthFail("session_revoked");
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { message: "Sessão expirada. Entre novamente.", code: "SESSION_REVOKED" },
         { status: 401 },
       ),
     };
