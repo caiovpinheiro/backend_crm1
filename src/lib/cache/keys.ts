@@ -40,6 +40,130 @@ export async function invalidateChannel(id: string): Promise<void> {
   await cache.del(channelKey(id));
 }
 
+// ── Lookups de canal dos webhooks (`wh_ctx:*`, `meta_wh:*`) ─────
+//
+// Respondem "de que org/canal é este identificador?" (phone_number_id,
+// entry.id, sessionId…) e guardam os appSecrets para validar a assinatura.
+// Antes, qualquer create/update/delete de canal de QUALQUER org apagava
+// tudo com `delPattern("meta_wh:*")` + `delPattern("wh_ctx:*")` (SCAN do
+// Redis inteiro, e as outras orgs perdiam o cache junto).
+//
+// Agora a invalidação é por org, com versão (`cache:v:channel:<org>`):
+//
+// - appSecrets de uma org: a versão da org vai na chave.
+// - identificador → org: a org é a RESPOSTA do lookup, então não dá pra
+//   pôr a versão dela na chave. O valor guardado leva um carimbo
+//   `{ o: org, v: versão }` e só vale se a versão da org `o` ainda for a
+//   mesma (`wrapChannelLookup`).
+// - "não mapeado" (`o: null`) e a lista global de appSecrets (webhook sem
+//   slug) não pertencem a org nenhuma: usam a versão `cache:v:channel:_all`,
+//   que sobe a cada escrita de canal — é o que cobre o POST que cacheou
+//   "não mapeado" pouco antes do onboarding do canal novo.
+//
+// Limite conhecido: se a org B cadastra um identificador que está em cache
+// apontando para a org A (mesmo número em duas orgs), a entrada da org A
+// não é invalidada e vale até o TTL (60 s `meta_wh`, 300 s `wh_ctx`).
+
+/** Escopo "qualquer org" da família `channel`. */
+const CHANNEL_ANY_ORG = "_all";
+
+function channelVersion(orgId: string | null): string {
+  return cacheVersionName("channel", orgId ?? CHANNEL_ANY_ORG);
+}
+
+export type WebhookContextLookupBy =
+  | "channelId"
+  | "phoneNumber"
+  | "metaPhoneNumberId"
+  | "baileysSessionId";
+
+// O `s` marca o formato carimbado: um processo ainda na versão anterior
+// (deploy em andamento) lê as chaves antigas e não tropeça no valor novo.
+export function webhookContextKey(by: WebhookContextLookupBy, value: string): string {
+  return `wh_ctx:s:${by}:${value}`;
+}
+
+export function metaWebhookPhoneKey(phoneNumberId: string): string {
+  return `meta_wh:s:phone:${phoneNumberId}`;
+}
+
+export function metaWebhookMessagingKey(platform: string, entryId: string): string {
+  return `meta_wh:s:msg:${platform}:${entryId}`;
+}
+
+/** `orgId` nulo = webhook sem slug (appSecrets de todas as orgs). */
+export async function metaWebhookSecretsKey(orgId: string | null): Promise<string> {
+  const version = await getCacheVersion(channelVersion(orgId));
+  return `meta_wh:secrets:${orgId ?? "global"}:v${version}`;
+}
+
+type StampedChannelLookup<T> = {
+  /** Org do resultado; `null` = identificador não mapeado. */
+  o: string | null;
+  /** Versão de `channel:<o>` (ou `channel:_all`) quando foi gravado. */
+  v: string;
+  d: T | null;
+};
+
+function isStampedChannelLookup(value: unknown): value is StampedChannelLookup<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return (
+    (rec.o === null || typeof rec.o === "string") &&
+    typeof rec.v === "string" &&
+    "d" in rec
+  );
+}
+
+/**
+ * Cache-aside de um lookup identificador → org/canal. A entrada só vale
+ * enquanto a versão de canais da org do resultado não mudar.
+ */
+export async function wrapChannelLookup<T extends { organizationId: string }>(
+  key: string,
+  ttlSec: number,
+  loader: () => Promise<T | null>,
+): Promise<T | null> {
+  const entry = await cache.wrap<StampedChannelLookup<T>>(
+    key,
+    ttlSec,
+    async () => {
+      // Lida ANTES da consulta: canal criado durante ela já deixa o "não
+      // mapeado" vencido. Para o resultado positivo a org só é conhecida
+      // depois — fica a mesma janela de corrida do delete-depois-do-load.
+      const anyOrgVersion = await getCacheVersion(channelVersion(null));
+      const d = await loader();
+      const o = d?.organizationId ?? null;
+      const v = o ? await getCacheVersion(channelVersion(o)) : anyOrgVersion;
+      return { o, v, d };
+    },
+    {
+      accept: async (cached) =>
+        isStampedChannelLookup(cached) &&
+        cached.v === (await getCacheVersion(channelVersion(cached.o))),
+    },
+  );
+  return entry.d;
+}
+
+/**
+ * Chame em todo create/update/delete de canal. Invalida os lookups e os
+ * appSecrets da org do canal, mais os "não mapeado" e a lista global de
+ * appSecrets. Dois INCR — não toca nas entradas das outras orgs.
+ */
+export async function invalidateChannelLookups(
+  orgId: string | null | undefined,
+): Promise<void> {
+  try {
+    await bumpCacheVersion(
+      ...(orgId ? [channelVersion(orgId)] : []),
+      channelVersion(null),
+    );
+  } catch {
+    /* best-effort — o TTL cobre a falha */
+  }
+}
+
 // ── AIAgentConfig ───────────────────────────────────────────────
 //
 // 1:1 com User. Carregado em cada turn de bot.

@@ -168,11 +168,33 @@ function memoryDel(key: string): void {
 
 export type CacheKey = string;
 
-export interface CacheOptions {
+export interface CacheOptions<T = unknown> {
   /** TTL em segundos. Default 60s. */
   ttlSec?: number;
   /** Pular cache (forca loader). Util pra debug. */
   skipCache?: boolean;
+  /**
+   * O valor em cache só vale se passar aqui; recusado conta como miss e o
+   * loader roda de novo. Para valores que carregam o próprio carimbo de
+   * validade (versão conferida depois da leitura).
+   */
+  accept?: (value: T) => boolean | Promise<boolean>;
+}
+
+type Accept<T> = CacheOptions<T>["accept"];
+
+/** `get` que trata valor recusado por `accept` como miss. */
+async function getAccepted<T>(
+  key: CacheKey,
+  accept: Accept<T>,
+): Promise<T | undefined> {
+  const value = await get<T>(key);
+  if (value === undefined || !accept) return value;
+  try {
+    return (await accept(value)) ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -322,19 +344,29 @@ export async function wrap<T>(
   key: CacheKey,
   ttlSec: number,
   loader: () => Promise<T>,
-  options: CacheOptions = {},
+  options: CacheOptions<T> = {},
 ): Promise<T> {
   if (options.skipCache) {
     return loader();
   }
 
-  const cached = await get<T>(key);
+  const cached = await getAccepted<T>(key, options.accept);
   if (cached !== undefined) return cached;
 
+  return loadShared(key, ttlSec, loader, options.accept);
+}
+
+/** Miss: um loader por chave neste processo (singleflight) + lock Redis. */
+function loadShared<T>(
+  key: CacheKey,
+  ttlSec: number,
+  loader: () => Promise<T>,
+  accept: Accept<T>,
+): Promise<T> {
   const existing = inflight.get(key);
   if (existing) return existing as Promise<T>;
 
-  const pending = loadAndStore(key, ttlSec, loader).finally(() => {
+  const pending = loadAndStore(key, ttlSec, loader, accept).finally(() => {
     inflight.delete(key);
   });
   inflight.set(key, pending);
@@ -345,6 +377,7 @@ async function loadAndStore<T>(
   key: CacheKey,
   ttlSec: number,
   loader: () => Promise<T>,
+  accept: Accept<T>,
 ): Promise<T> {
   const lockKey = LOCK_PREFIX + key;
   const client = getClient();
@@ -374,7 +407,7 @@ async function loadAndStore<T>(
       for (let i = 0; i < STAMPEDE_MAX_RETRIES; i++) {
         await new Promise((r) => setTimeout(r, STAMPEDE_RETRY_DELAY_MS));
         if (circuitIsOpen()) break;
-        const retry = await get<T>(key);
+        const retry = await getAccepted<T>(key, accept);
         if (retry !== undefined) return retry;
         try {
           const again = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
@@ -389,7 +422,7 @@ async function loadAndStore<T>(
         }
       }
       if (!acquired) {
-        const late = await get<T>(key);
+        const late = await getAccepted<T>(key, accept);
         if (late !== undefined) return late;
         // Degrada em vez de estourar 500: chama o loader direto (sem
         // lock). Pior caso = alguns loaders concorrentes pontuais, que é
