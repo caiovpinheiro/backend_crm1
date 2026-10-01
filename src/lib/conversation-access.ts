@@ -40,7 +40,7 @@ export const CONVERSATION_ACCESS_SELECT = {
   channelId: true,
   contactId: true,
   organizationId: true,
-} satisfies Prisma.ConversationSelect;
+} as const;
 
 export type ConversationAccessRow = {
   id: string;
