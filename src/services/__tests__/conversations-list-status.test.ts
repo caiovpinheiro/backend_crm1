@@ -362,11 +362,21 @@ describe("getConversations — colapso por contato+canal", () => {
     return out;
   }
 
+  /** `$queryRaw` recebe um template (strings, ...values) ou um `Prisma.Sql`. */
+  function rawText(call: unknown[]): string {
+    const [first] = call as [TemplateStringsArray | Prisma.Sql];
+    return Array.isArray(first)
+      ? first.join("?")
+      : (first as Prisma.Sql).strings.join("?");
+  }
+
+  function rawValues(call: unknown[]): unknown[] {
+    const [first, ...rest] = call as [TemplateStringsArray | Prisma.Sql, ...unknown[]];
+    return Array.isArray(first) ? rest : [...(first as Prisma.Sql).values];
+  }
+
   function rawSqls(): string[] {
-    return h.queryRaw.mock.calls.map((call) => {
-      const [strings] = call as unknown as [TemplateStringsArray];
-      return strings.join("?");
-    });
+    return h.queryRaw.mock.calls.map((call) => rawText(call));
   }
 
   it("Encerradas: DISTINCT ON contato+canal limitado à org do contexto", async () => {
@@ -375,13 +385,10 @@ describe("getConversations — colapso por contato+canal", () => {
     const sqls = rawSqls();
     const collapsed = sqls.find((s) => s.includes("DISTINCT ON"));
     expect(collapsed).toBeDefined();
-    const call = h.queryRaw.mock.calls.find((c) => {
-      const [strings] = c as unknown as [TemplateStringsArray];
-      return strings.join("?").includes("DISTINCT ON");
-    })!;
+    const call = h.queryRaw.mock.calls.find((c) => rawText(c).includes("DISTINCT ON"))!;
     // organizationId da org do contexto entra como parâmetro do SQL
     // (os fragmentos `Prisma.sql` aninhados carregam seus próprios `values`).
-    expect(flattenSqlValues(call.slice(1))).toContain(ORG);
+    expect(flattenSqlValues(rawValues(call))).toContain(ORG);
   });
 
   it("Resolvendo também colapsa; fila quente e união mista não", async () => {

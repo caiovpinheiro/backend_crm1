@@ -11,6 +11,7 @@ import { canSeeInboxTab } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { createRequestMemo } from "@/lib/request-memo";
 import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
+import { InvalidListCursorError } from "@/services/conversation-list-cursor";
 import {
   buildInboxFilterConditions,
   findSessionExpiringConversationIds,
@@ -324,6 +325,11 @@ export async function GET(request: Request) {
 
       return NextResponse.json(result);
     } catch (e) {
+      // Cursor ilegível ou de outra ordenação: erro do cliente, não 500 —
+      // e não cai em silêncio na 1ª página (o scroll infinito repetiria).
+      if (e instanceof InvalidListCursorError) {
+        return NextResponse.json({ message: e.message }, { status: 400 });
+      }
       console.error(e);
       return NextResponse.json({ message: "Erro ao listar conversas." }, { status: 500 });
     }
