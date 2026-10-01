@@ -459,6 +459,8 @@ describe("coluna por cursor — ordem e empates", () => {
       ["s2", ["e-2", "e-3"], false],
     ]);
     expect(pages[1]!.nextCursor).toBeNull();
+    // total ATUAL da etapa (mesmo where do board) vem junto com a página
+    expect(pages.map((p) => p.totalCount)).toEqual([12, 3]);
   });
 });
 
@@ -520,6 +522,15 @@ describe("coluna por cursor — escopo", () => {
     const u1 = S1_BY_POSITION.filter((id) => byId(id).ownerId === "u1");
     expect(u1).toHaveLength(9);
     expect(pages.flat()).toEqual(u1);
+
+    // o total devolvido com a página respeita a mesma visibilidade
+    const cursor = encodeBoardColumnCursor({ sort: "position", direction: "asc", position: 0, id: "a" });
+    const [page] = await withOrg(() =>
+      getBoardColumnPages(PIPELINE, visibility, undefined, undefined, {
+        columns: [{ stageId: "s1", cursor, limit: 2 }],
+      }),
+    );
+    expect(page!.totalCount).toBe(9);
   });
 
   it("status padrão OPEN: card LOST da etapa nunca entra", async () => {
@@ -624,7 +635,12 @@ describe("coluna por cursor — custo", () => {
     // de conversa/mensagem; produtos sempre)
     expect(h.stageFindMany).toHaveBeenCalledTimes(1);
     expect(h.dealFindMany).toHaveBeenCalledTimes(1);
-    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    // contagem só das etapas pedidas (o board conta o funil inteiro)
+    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
+    expect(
+      (h.dealGroupBy.mock.calls[0]![0] as { where: { AND: unknown[] } }).where.AND[1],
+    ).toEqual({ stageId: { in: ["s1"] } });
+    expect(page!.totalCount).toBe(12);
 
     vi.clearAllMocks();
     const legacy = await withOrg(() =>

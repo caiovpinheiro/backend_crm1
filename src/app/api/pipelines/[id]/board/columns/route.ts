@@ -51,7 +51,7 @@ type RouteContext = { params: Promise<{ id: string }> };
  * POST /api/pipelines/:id/board/columns
  *   { status?, filters?, sort?, direction?,
  *     columns: [{ stageId, cursor, limit? }] }
- * →  { columns: [{ stageId, deals, nextCursor, hasMore }] }
+ * →  { columns: [{ stageId, deals, totalCount, nextCursor, hasMore }] }
  *
  * `cursor` é o `nextCursor` que a etapa trouxe no board (GET/POST /board) ou
  * na página anterior. `status`/`filters`/`sort`/`direction` têm de ser os

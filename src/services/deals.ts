@@ -3414,10 +3414,11 @@ export function buildLastInteractionColumnPageSql(args: {
 /**
  * Próximos cards de uma ou mais etapas, a partir do cursor de cada uma.
  *
- * Custo de uma etapa: 1 consulta das etapas pedidas + 1 página de deals
- * (`lastInteraction`: 1 ranking + 1 hidratação) + o enriquecimento dos
- * cards devolvidos (3 consultas + avatar), feito UMA vez para todas as
- * etapas do pedido. Não passa pelo cache do board.
+ * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem (total
+ * atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
+ * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (3
+ * consultas + avatar), feito UMA vez para todas as etapas do pedido. Não
+ * passa pelo cache do board.
  *
  * Etapa que não é do pipeline (ou não existe) é ignorada — fica fora da
  * resposta. Quem chama (a rota) filtra antes as etapas que o usuário não
@@ -3490,6 +3491,20 @@ export async function getBoardColumnPages(
     orderBy: { position: "asc" },
   });
 
+  // Total ATUAL de cada etapa pedida (o do board pode ter até 45 s de cache):
+  // o cliente recalcula "faltam N" sem recarregar o board. Em voo junto com
+  // as páginas.
+  const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
+    stagesRaw.length === 0
+      ? Promise.resolve([])
+      : prisma.deal.groupBy({
+          by: ["stageId"],
+          where: {
+            AND: [dealWhere, { stageId: { in: stagesRaw.map((s) => s.id) } }],
+          },
+          _count: { _all: true },
+        });
+
   const hasMoreByStage = new Map<string, boolean>();
   const lastAtByDealId = new Map<string, Date | null>();
   let stages: BoardStageWithDeals[];
@@ -3554,7 +3569,12 @@ export async function getBoardColumnPages(
     });
   }
 
-  const enrichCard = await loadBoardCardEnrichment(stages, now);
+  const [totalsGroups, enrichCard] = await Promise.all([
+    totalsPromise,
+    loadBoardCardEnrichment(stages, now),
+  ]);
+  const totalsByStage = new Map<string, number>();
+  for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
 
   return stages.map((stage) => {
     const hasMore = hasMoreByStage.get(stage.id) ?? false;
@@ -3562,6 +3582,7 @@ export async function getBoardColumnPages(
     return {
       stageId: stage.id,
       deals: stage.deals.map((deal) => enrichCard(stage, deal)),
+      totalCount: totalsByStage.get(stage.id) ?? 0,
       hasMore,
       nextCursor:
         hasMore && lastDeal
