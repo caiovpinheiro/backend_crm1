@@ -16,6 +16,9 @@ import {
   type MetaGraphErrorPayload,
 } from "@/lib/meta-whatsapp/client";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-messaging.client");
 
 const GRAPH_VERSION = "v21.0";
 const GRAPH_TIMEOUT_MS = 20_000;
@@ -173,9 +176,9 @@ export function messagingClientFromConfig(
     try {
       token = decryptSecret(rawToken);
     } catch (err) {
-      console.error(
-        "[meta-messaging/client] falha ao decriptar accessToken:",
-        err instanceof Error ? err.message : err,
+      log.error(
+        { err: err instanceof Error ? err.message : err },
+        "[meta-messaging/client] falha ao decriptar accessToken",
       );
       token = "";
     }
