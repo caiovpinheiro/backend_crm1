@@ -63,6 +63,21 @@ export default [
     },
   },
   {
+    // Log do backend passa pelo logger estruturado (`getLogger` de
+    // `src/lib/logger`): JSON por linha, tenant automatico e redaction.
+    // `console.*` solto volta a ser erro para nao regredir. Excecoes:
+    //   - `src/scripts/**`: CLIs que escrevem direto no terminal;
+    //   - pontos isolados (instrumentation/Edge, codigo de cliente, saidas
+    //     que testes afirmam literalmente) levam `eslint-disable-next-line
+    //     no-console -- <motivo>` na propria linha.
+    // `scripts/**` (raiz) fica fora deste bloco por nao estar em `src/`.
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/scripts/**"],
+    rules: {
+      "no-console": "error",
+    },
+  },
+  {
     files: ["tests/**/*.{ts,tsx}", "**/*.test.{ts,tsx}"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",

@@ -604,6 +604,7 @@ export async function enqueueProcessPendingOrRun(opts: {
         fruitless = peeked.armed;
         if (peeked.ttlMs != null) ttlMs = peeked.ttlMs;
       } catch (e) {
+        // eslint-disable-next-line no-console -- teste afirma literalmente esta saída do console (pending-capacity-released)
         console.warn("[distribution] peek fruitless cooldown failed", e);
         fruitless = false;
       }
