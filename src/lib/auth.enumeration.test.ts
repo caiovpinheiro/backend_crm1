@@ -139,7 +139,10 @@ vi.mock("./auth/totp", () => ({ verifyTotp: vi.fn() }));
 vi.mock("./auth/backup-codes", () => ({ findMatchingBackupCode: vi.fn() }));
 vi.mock("./request-context", () => ({ enterRequestContext: vi.fn() }));
 vi.mock("./auth.config", () => ({ default: { callbacks: {} } }));
-vi.mock("@/lib/cache/redis-client", () => ({ getCacheClient: () => null }));
+vi.mock("@/lib/cache/redis-client", () => ({
+  getCacheClient: () => null,
+  waitUntilCacheReady: async () => false,
+}));
 vi.mock("@/lib/audit/log", () => ({ logAuditAsync: vi.fn() }));
 vi.mock("@/lib/logger", () => ({
   getLogger: () => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() }),
