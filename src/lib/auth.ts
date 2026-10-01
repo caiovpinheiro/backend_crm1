@@ -35,6 +35,8 @@ import {
   sessionRenewalProofFrom,
 } from "./auth/session-renewal";
 import { getClientIp, withRateLimit } from "./rate-limit";
+import { runInBackground } from "@/lib/background";
+import { resendVerificationOnLogin } from "@/services/email-verification";
 import { maskEmail } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
 
@@ -57,11 +59,6 @@ class MfaRequired extends CredentialsSignin {
 
 class MfaInvalid extends CredentialsSignin {
   code = "mfa_invalid";
-}
-
-/** Signup recente: e-mail ainda não confirmado. */
-class EmailUnverified extends CredentialsSignin {
-  code = "email_unverified";
 }
 
 /** SEC-12: IP estourou o limiter `auth.credentials` (antes do lockout/bcrypt). */
@@ -204,12 +201,29 @@ const nextAuth = NextAuth({
           return null;
         }
 
+        // Senha correta, e-mail ainda não confirmado. O cliente recebe a
+        // MESMA falha genérica de senha errada / conta inexistente
+        // (`code=credentials`): o antigo `email_unverified` dizia a quem
+        // tentava que a conta existe (pentest out/2026). Para o titular
+        // não ficar sem saída, o código de verificação é reenviado aqui,
+        // em segundo plano (teto `auth.verify-resend` por usuário) — o
+        // tempo de resposta não muda. A tentativa conta para o lockout
+        // como qualquer outra falha (ver `FAILURE_OUTCOMES`).
         if (
           !user.isSuperAdmin &&
           user.type === "HUMAN" &&
           !user.emailVerifiedAt
         ) {
-          throw new EmailUnverified();
+          await recordLoginAttempt({
+            email,
+            userId: user.id,
+            outcome: "email_unverified",
+          });
+          const unverifiedUserId = user.id;
+          runInBackground("auth.login.verify-resend", () =>
+            resendVerificationOnLogin({ userId: unverifiedUserId }),
+          );
+          return null;
         }
 
         // PR 4.1: MFA enforcement. Se o user habilitou MFA, exige

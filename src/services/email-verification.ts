@@ -1,6 +1,9 @@
+import { clearLoginLockout } from "@/lib/auth/lockout";
 import { generateNumericCode, hashSecret } from "@/lib/auth/token-hash";
 import { sendVerifyEmail } from "@/lib/mail/send";
 import { prismaBase } from "@/lib/prisma-base";
+import { consumeRateLimit } from "@/lib/rate-limit";
+import { buildTenantUrl } from "@/lib/tenant-url";
 
 const TTL_MS = 30 * 60 * 1000;
 
@@ -8,6 +11,8 @@ export async function issueEmailVerification(input: {
   userId: string;
   email: string;
   organizationName?: string;
+  /** Página onde digitar o código (o e-mail passa a trazer o link). */
+  verifyUrl?: string;
 }): Promise<{ sent: boolean }> {
   const { raw, hash } = generateNumericCode(6);
   const now = new Date();
@@ -26,8 +31,53 @@ export async function issueEmailVerification(input: {
     to: input.email,
     code: raw,
     organizationName: input.organizationName,
+    verifyUrl: input.verifyUrl,
   });
   return { sent: mail.sent };
+}
+
+/**
+ * Reenvio disparado pelo LOGIN: senha correta, e-mail não confirmado.
+ *
+ * O login responde a mesma falha genérica de senha errada (não revela que
+ * a conta existe), então a tela não pode mais mandar a pessoa para a
+ * verificação. Quem resolve é este e-mail: código novo + link da página
+ * de confirmação. Roda em segundo plano (`runInBackground`), com teto por
+ * usuário (`auth.verify-resend`, 3/h) — estourado, só não envia.
+ */
+export async function resendVerificationOnLogin(input: {
+  userId: string;
+}): Promise<{ sent: boolean }> {
+  const decision = await consumeRateLimit(
+    `user:${input.userId}:auth.verify-resend`,
+    "auth.verify-resend",
+  );
+  if (!decision.allowed) return { sent: false };
+
+  const user = await prismaBase.user.findUnique({
+    where: { id: input.userId },
+    select: {
+      id: true,
+      email: true,
+      type: true,
+      isErased: true,
+      emailVerifiedAt: true,
+      organization: { select: { name: true, slug: true } },
+    },
+  });
+  if (!user || user.type !== "HUMAN" || user.isErased || user.emailVerifiedAt) {
+    return { sent: false };
+  }
+
+  const slug = user.organization?.slug;
+  return issueEmailVerification({
+    userId: user.id,
+    email: user.email,
+    organizationName: user.organization?.name,
+    verifyUrl: slug
+      ? `${buildTenantUrl(slug)}/verify-email?email=${encodeURIComponent(user.email)}`
+      : undefined,
+  });
 }
 
 const GENERIC_OK = { ok: true as const };
@@ -114,6 +164,9 @@ export async function confirmEmailVerification(input: {
       data: { emailVerifiedAt: new Date() },
     });
   });
+  // Tentativas de login antes de confirmar contam como falha (resposta
+  // genérica); confirmado o e-mail, o titular não pode ficar bloqueado.
+  await clearLoginLockout(user.email);
 
   return { userId: user.id, email: user.email };
 }
