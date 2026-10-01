@@ -3,6 +3,9 @@
  * Usado só quando o peer ainda não tem routingScope preenchido.
  */
 import type { PeerAiAgent } from "@/lib/ai-agents/coordinator-route";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("verticals.academic.coordinator-pick");
 
 function fold(s: string): string {
   return s
@@ -57,14 +60,9 @@ export function pickAcademicCoordinatorPeer(
     usable.find((p) => re.test(fold(p.routingScope ?? ""))) ?? null;
 
   if (!usable.some((p) => p.routingScope?.trim())) {
-    console.warn(
-      "[ai]",
-      JSON.stringify({
-        event: "routing_scope_missing",
-        pack: "academic",
-        topic,
-        peers: usable.map((p) => p.id),
-      }),
+    log.warn(
+      { event: "routing_scope_missing", pack: "academic", topic, peers: usable.map((p) => p.id) },
+      "[ai] routing_scope_missing",
     );
     return null;
   }

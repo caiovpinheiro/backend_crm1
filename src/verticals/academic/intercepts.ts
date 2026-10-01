@@ -78,6 +78,9 @@ import {
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("verticals.academic.intercepts");
 
 function hit(
   interceptName: string,
@@ -611,7 +614,7 @@ export async function runAcademicInterceptPipeline(
               // Já enviou o link — deixa o LLM atender o follow-up.
             }
           } catch (e) {
-            console.error("[ai] inaugural class link intercept failed", e);
+            log.error({ err: e }, "[ai] inaugural class link intercept failed");
           }
       return null;
     })();

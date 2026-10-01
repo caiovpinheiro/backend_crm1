@@ -16,6 +16,9 @@
 
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { getOrgSettingsByPrefix } from "@/lib/org-settings";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("verticals.academic.tenant-config");
 
 export const ACADEMIC_SETTING_PREFIX = "vertical.academic.";
 
@@ -82,7 +85,7 @@ function parseRoster(raw: string | undefined): AcademicTenantConfig["deptRoster"
       }))
       .filter((r) => r.depts.length > 0);
   } catch {
-    console.warn("[academic] vertical.academic.deptRoster inválido (JSON)");
+    log.warn("[academic] vertical.academic.deptRoster inválido (JSON)");
     return [];
   }
 }
@@ -120,20 +123,20 @@ export async function loadAcademicTenantConfig(): Promise<AcademicTenantConfig> 
     byOrg.set(orgId, cfg);
     if (!cfg.institutionName && !warnedOrgs.has(orgId)) {
       warnedOrgs.add(orgId);
-      console.warn(
-        "[academic]",
-        JSON.stringify({
+      log.warn(
+        {
           event: "tenant_config_missing",
           orgId,
           key: `${ACADEMIC_SETTING_PREFIX}${SETTING_KEYS.institutionName}`,
-        }),
+        },
+        "[academic] tenant_config_missing",
       );
     }
     return cfg;
   } catch (e) {
-    console.warn(
-      "[academic] loadAcademicTenantConfig failed:",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[academic] loadAcademicTenantConfig failed",
     );
     return byOrg.get(orgId) ?? EMPTY_ACADEMIC_TENANT_CONFIG;
   }
