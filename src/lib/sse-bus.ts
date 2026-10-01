@@ -41,6 +41,32 @@ import {
  *
  * Eventos sem organizationId no envelope (caminho legado) sao DROPADOS
  * com warning — fail-closed.
+ *
+ * Contrato dos eventos leves do chat (set/26, `src/lib/realtime-events.ts`)
+ * ──────────────────────────────────────────────────────────────────────
+ * `typing` — um agente está digitando na conversa. Para os OUTROS agentes
+ * da org (o cliente ignora o próprio `userId`). Throttle no servidor: no
+ * máximo 1 evento a cada 3s por (conversa, agente). Publicado por
+ * `POST /api/conversations/:id/typing`, independente de o canal Meta
+ * repassar o indicador ao contato. Payload:
+ *   { organizationId, conversationId, contactId: string | null,
+ *     userId: string | null, userName: string | null,
+ *     source: "agent" | "contact", until: ISO }
+ * `until` = agora + 5s; o cliente esconde "digitando…" ao passar dele.
+ * `source: "contact"` está reservado: nem o webhook da Meta (Cloud API
+ * não entrega typing do contato) nem o worker Baileys (não assina
+ * `presence.update`) publicam hoje.
+ *
+ * `scheduled_message_updated` — a lista de agendamentos PENDENTES da
+ * conversa mudou. Publicado ao criar, cancelar (manual ou automático por
+ * resposta/encerramento), enviar e falhar. O cliente invalida
+ * `["scheduled-messages", conversationId]`; não há item no payload.
+ *   { organizationId, conversationId, scheduledMessageId: string | null,
+ *     status: "PENDING" | "CANCELLED" | "SENT" | "FAILED" }
+ *
+ * Presença "quem está vendo" (`entity_viewers`, `src/lib/entity-presence.ts`):
+ * TTL do viewer 90s; heartbeat de 25s enviado só pela aba líder do
+ * navegador, que agrega as entidades abertas em todas as abas.
  */
 
 export type SseEventEnvelope = {
