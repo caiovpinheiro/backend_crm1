@@ -67,6 +67,8 @@ export type SeedOptions = {
   departments?: Partial<Record<FixtureUserKey, string[]>>;
   /** `visibility.MANAGER` / `visibility.MEMBER` / `unassigned.*`. */
   settings?: Record<string, string>;
+  /** Ajuste livre depois do seed (papéis, grants de funil, departamentos…). */
+  mutate?: (db: FakeDb) => void;
 };
 
 export function seedInbox(opts: SeedOptions = {}): FakeDb {
@@ -381,6 +383,7 @@ export function seedInbox(opts: SeedOptions = {}): FakeDb {
     messageId: "m4",
   });
 
+  opts.mutate?.(db);
   return db;
 }
 
