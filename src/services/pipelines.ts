@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import {
+  duplicateDealsErrorMessage,
   invalidatePipelineBoard,
   unifyDuplicateOpenDealsInPipeline,
 } from "@/services/deal-duplicates";
@@ -457,26 +458,32 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
   }
 
   if (data.allowDuplicateDeals === false) {
-    const pipeline = await prisma.$transaction(
-      async (tx) => {
-        if (data.isDefault === true) {
-          await tx.pipeline.updateMany({
-            where: { id: { not: id } },
-            data: { isDefault: false },
+    try {
+      const pipeline = await prisma.$transaction(
+        async (tx) => {
+          if (data.isDefault === true) {
+            await tx.pipeline.updateMany({
+              where: { id: { not: id } },
+              data: { isDefault: false },
+            });
+          }
+          const updated = await tx.pipeline.update({
+            where: { id },
+            data: payload,
+            include: { stages: { orderBy: { position: "asc" } } },
           });
-        }
-        const updated = await tx.pipeline.update({
-          where: { id },
-          data: payload,
-          include: { stages: { orderBy: { position: "asc" } } },
-        });
-        const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(tx, id);
-        return Object.assign(updated, { duplicatesRemoved });
-      },
-      { timeout: 120_000 },
-    );
-    await invalidatePipelineBoard(id);
-    return pipeline;
+          const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(tx, id);
+          return Object.assign(updated, { duplicatesRemoved });
+        },
+        { timeout: 120_000 },
+      );
+      await invalidatePipelineBoard(id);
+      return pipeline;
+    } catch (err) {
+      const message = duplicateDealsErrorMessage(err);
+      if (message) throw new Error(`DUPLICATE_DEALS:${message}`);
+      throw err;
+    }
   }
 
   if (data.isDefault === true) {
