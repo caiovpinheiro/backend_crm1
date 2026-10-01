@@ -1,12 +1,16 @@
 import { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
-import { loadAuthzContext } from "@/lib/authz";
-import { isFeatureEnabled } from "@/lib/feature-flags";
-import { getOrgSettingsByPrefix } from "@/lib/org-settings";
+import type { AuthzContext } from "@/lib/authz";
+import {
+  authzContextOnce,
+  featureEnabledOnce,
+  orgSettingsByPrefixOnce,
+} from "@/lib/authz/request-prechecks";
 import { prisma } from "@/lib/prisma";
 import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { memoized, type RequestMemo } from "@/lib/request-memo";
 
 export type VisibilityMode = "all" | "own";
 
@@ -53,12 +57,12 @@ const UNASSIGNED_DEFAULTS: Record<AppUserRole, boolean> = {
  * `getOrgSettingsByPrefix`, que é cacheado por (orgId, prefixo) e
  * invalidado em `setVisibilityForRole`.
  */
-async function loadVisibilityMap(): Promise<Map<string, string>> {
-  return getOrgSettingsByPrefix("visibility.");
+async function loadVisibilityMap(memo?: RequestMemo): Promise<Map<string, string>> {
+  return orgSettingsByPrefixOnce(memo, "visibility.");
 }
 
-async function loadUnassignedMap(): Promise<Map<string, string>> {
-  return getOrgSettingsByPrefix("unassigned.");
+async function loadUnassignedMap(memo?: RequestMemo): Promise<Map<string, string>> {
+  return orgSettingsByPrefixOnce(memo, "unassigned.");
 }
 
 function getUnassignedForRole(
@@ -110,31 +114,50 @@ export function composeDepartmentScope(
  * - ADMIN → `null` (vê todos os departamentos, sem restrição).
  * - Demais papéis → `allowedDepartmentIds` se configurado; senão `null`
  *   (opt-in: enquanto o admin não escopar o agente, nada muda).
+ *
+ * `memo` (opcional): memo da requisição — a mesma leitura serve a todos os
+ * pré-checks do request.
  */
 export async function getDepartmentScopeForConversations(
-  user: SessionUser
+  user: SessionUser,
+  memo?: RequestMemo,
 ): Promise<string[] | null> {
   if (user.role === "ADMIN") return null;
-  try {
-    const perm = await prisma.agentPermission.findUnique({
-      where: { userId: user.id },
-      select: { allowedDepartmentIds: true },
-    });
-    const ids = perm?.allowedDepartmentIds ?? [];
-    return ids.length > 0 ? ids : null;
-  } catch {
-    // Tabela/coluna ausente (migração pendente) ou fora de contexto — sem restrição.
-    return null;
-  }
+  return memoized(memo, `dept-scope:${user.id}`, async () => {
+    try {
+      const perm = await prisma.agentPermission.findUnique({
+        where: { userId: user.id },
+        select: { allowedDepartmentIds: true },
+      });
+      const ids = perm?.allowedDepartmentIds ?? [];
+      return ids.length > 0 ? ids : null;
+    } catch {
+      // Tabela/coluna ausente (migração pendente) ou fora de contexto — sem restrição.
+      return null;
+    }
+  });
 }
 
+/**
+ * Filtro de visibilidade (own/all, pool livre, departamento) do usuário.
+ *
+ * Os insumos são independentes entre si e saem juntos: escopo de
+ * departamento (Postgres), as duas famílias de settings, o contexto authz
+ * e — só para papéis que podem cair no "own" compartilhado — a flag de
+ * escopo granular (Redis). Antes eram 4 a 6 idas em série.
+ *
+ * `opts.memo`: memo da requisição. Com ele, authz/flag/settings/departamento
+ * são lidos uma vez por request mesmo que a rota também os peça.
+ */
 export async function getVisibilityFilter(
-  user: SessionUser
+  user: SessionUser,
+  opts: { memo?: RequestMemo } = {},
 ): Promise<VisibilityResult> {
   const role = user.role;
-  const deptScope = await getDepartmentScopeForConversations(user);
+  const memo = opts.memo;
 
   if (!role || !DEFAULTS[role]) {
+    const deptScope = await getDepartmentScopeForConversations(user, memo);
     return {
       canSeeAll: true,
       dealWhere: {},
@@ -143,29 +166,47 @@ export async function getVisibilityFilter(
     };
   }
 
-  const [settings, unassignedSettings] = await Promise.all([
-    loadVisibilityMap(),
-    loadUnassignedMap(),
-  ]);
+  // Papel personalizado pode ampliar (nunca reduzir) a visibilidade do
+  // papel legado. Fora de RequestContext (jobs) ou se a leitura falhar,
+  // permanece a visibilidade do papel legado — `null` aqui.
+  let orgId: string | null = null;
+  if (role !== "ADMIN") {
+    try {
+      orgId = getOrgIdOrThrow();
+    } catch {
+      orgId = null;
+    }
+  }
+  const authzPromise: Promise<AuthzContext | null> = orgId
+    ? authzContextOnce(memo, {
+        userId: user.id,
+        organizationId: orgId,
+        isSuperAdmin: false,
+      }).catch(() => null)
+    : Promise.resolve(null);
+  // A flag só decide o "own estrito" de quem não é MEMBER (MEMBER já é
+  // estrito) nem ADMIN (sempre "all").
+  const granularPromise: Promise<boolean> =
+    orgId && role !== "MEMBER"
+      ? featureEnabledOnce(memo, "rbac_granular_scope_v1", orgId).catch(() => false)
+      : Promise.resolve(false);
+
+  const [deptScope, settings, unassignedSettings, authzCtx, granularScope] =
+    await Promise.all([
+      getDepartmentScopeForConversations(user, memo),
+      loadVisibilityMap(memo),
+      loadUnassignedMap(memo),
+      authzPromise,
+      granularPromise,
+    ]);
   let mode = getModeForRole(settings, role);
   // Ver ou não os itens SEM responsável (pool livre). Eixo ortogonal a own/all.
   let includeUnassigned = getUnassignedForRole(unassignedSettings, role);
 
-  // Papel personalizado pode ampliar (nunca reduzir) a visibilidade do
-  // papel legado. OR entre os papéis atribuídos; default false não muda nada.
-  if (role !== "ADMIN") {
-    try {
-      const orgId = getOrgIdOrThrow();
-      const ctx = await loadAuthzContext({
-        userId: user.id,
-        organizationId: orgId,
-        isSuperAdmin: false,
-      });
-      if (ctx.seeTeam) mode = "all";
-      if (ctx.seeUnassigned) includeUnassigned = true;
-    } catch {
-      // Fora de RequestContext — permanece a visibilidade do papel legado.
-    }
+  // OR entre os papéis atribuídos; default false não muda nada.
+  if (authzCtx) {
+    if (authzCtx.seeTeam) mode = "all";
+    if (authzCtx.seeUnassigned) includeUnassigned = true;
   }
 
   // Deal sem dono só aparece quando o papel pode ver o pool livre; caso
@@ -213,20 +254,14 @@ export async function getVisibilityFilter(
    *   - sharedInbox=false → estritamente as atribuídas a ele.
    */
   let strictOwnInbox = role === "MEMBER";
-  if (!strictOwnInbox) {
-    try {
-      const orgId = getOrgIdOrThrow();
-      if (await isFeatureEnabled("rbac_granular_scope_v1", orgId)) {
-        const ctx = await loadAuthzContext({
-          userId: user.id,
-          organizationId: orgId,
-          isSuperAdmin: false,
-        });
-        if (!ctx.isAdmin && !ctx.sharedInbox) strictOwnInbox = true;
-      }
-    } catch {
-      // Fora de RequestContext (ex.: jobs) — mantém comportamento compartilhado.
-    }
+  if (
+    !strictOwnInbox &&
+    granularScope &&
+    authzCtx &&
+    !authzCtx.isAdmin &&
+    !authzCtx.sharedInbox
+  ) {
+    strictOwnInbox = true;
   }
 
   // Conversa ATRIBUÍDA ao agente é SEMPRE visível — inclusive sem departamento
