@@ -30,7 +30,7 @@ vi.mock("@/lib/authz/funnel-visibility", () => ({
   conversationBlockedByFunnel: vi.fn(),
   funnelScopeOf: () => null,
 }));
-vi.mock("@/lib/browser-api-cors", () => ({ applyBrowserApiCors: () => undefined }));
+vi.mock("@/lib/browser-api-cors-node", () => ({ applyBrowserApiCors: async () => undefined }));
 vi.mock("@/lib/inbox-sse-card-visibility", () => ({
   allowAllInboxSseCards: () => true,
   buildInboxSseCardGate: vi.fn(async () => () => true),
