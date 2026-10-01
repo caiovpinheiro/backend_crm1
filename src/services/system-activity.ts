@@ -15,6 +15,7 @@
 
 import { prismaBase } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
+import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
 const log = getLogger("system-activity");
 
@@ -241,9 +242,9 @@ export function startSystemActivitySweeper() {
     }
   };
 
-  setTimeout(() => {
+  scheduleBackgroundTimeout(() => {
     void tick();
-    setInterval(() => void tick(), SWEEP_INTERVAL_MS);
+    scheduleBackgroundInterval(() => void tick(), SWEEP_INTERVAL_MS);
   }, SWEEP_BOOT_DELAY_MS);
 
   log.info(
