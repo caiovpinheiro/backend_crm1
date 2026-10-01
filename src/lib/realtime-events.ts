@@ -148,7 +148,7 @@ export type TypingEventPayload = {
   organizationId: string;
   conversationId: string;
   contactId: string | null;
-  /** Quem está digitando. `null` quando é o contato (reservado). */
+  /** Quem está digitando. `null` quando é o contato (canal Baileys). */
   userId: string | null;
   userName: string | null;
   source: "agent" | "contact";
@@ -426,11 +426,13 @@ export const TYPING_THROTTLE_MS = 3_000;
 /** Quanto tempo o cliente mostra "digitando…" a partir de cada evento. */
 export const TYPING_TTL_MS = 5_000;
 
-// `${conversationId}:${userId}` → epoch ms do último evento publicado.
-// Chave por agente (e não só por conversa) de propósito: dois agentes
-// digitando ao mesmo tempo na mesma conversa precisam aparecer um para
-// o outro; com a chave só por conversa o segundo cairia sempre no
-// throttle do primeiro.
+// `${conversationId}:${source}:${userId}` → epoch ms do último evento
+// publicado. Chave por agente (e não só por conversa) de propósito: dois
+// agentes digitando ao mesmo tempo na mesma conversa precisam aparecer um
+// para o outro; com a chave só por conversa o segundo cairia sempre no
+// throttle do primeiro. A origem entra na chave para o contato
+// (`source: "contact"`, sem `userId`) ter a própria janela e nunca
+// disputar com um agente.
 const lastTypingAt = new Map<string, number>();
 const TYPING_MAP_PRUNE_AT = 2_000;
 
@@ -448,10 +450,11 @@ export function __resetTypingThrottleForTests(): void {
 
 /**
  * Publica `typing` para a org, no máximo 1 a cada `TYPING_THROTTLE_MS`
- * por (conversa, agente). Devolve `true` quando publicou. Para os OUTROS
- * agentes (o cliente ignora o próprio `userId`); `until` = agora + 5 s.
- * `source: "contact"` está reservado: nem o webhook da Meta nem o worker
- * Baileys publicam hoje.
+ * por (conversa, origem, agente). Devolve `true` quando publicou. Para os
+ * OUTROS agentes (o cliente ignora o próprio `userId`); `until` = agora +
+ * 5 s. `source: "contact"` (`userId`/`userName` nulos) vem do worker
+ * Baileys (`workers/baileys/contact-typing.ts`); o webhook da Meta não
+ * publica.
  */
 export function publishTypingEvent(args: {
   organizationId: string;
@@ -463,7 +466,8 @@ export function publishTypingEvent(args: {
   now?: number;
 }): boolean {
   const now = args.now ?? Date.now();
-  const key = `${args.conversationId}:${args.userId ?? "contact"}`;
+  const source = args.source ?? "agent";
+  const key = `${args.conversationId}:${source}:${args.userId ?? ""}`;
   const last = lastTypingAt.get(key);
   if (last !== undefined && now - last < TYPING_THROTTLE_MS) return false;
   lastTypingAt.set(key, now);
@@ -475,7 +479,7 @@ export function publishTypingEvent(args: {
     contactId: args.contactId,
     userId: args.userId,
     userName: args.userName?.trim() || null,
-    source: args.source ?? "agent",
+    source,
     until: new Date(now + TYPING_TTL_MS).toISOString(),
   };
   publish("typing", payload);
