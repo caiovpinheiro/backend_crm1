@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { V2_MODELS } from "@/lib/ai-v2/models";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/catalogs");
 
 export async function GET() {
   const r = await requireAuth();
@@ -148,7 +151,7 @@ export async function GET() {
       })),
     });
   } catch (err) {
-    console.error("[GET /api/ai-agents-v2/catalogs]", err);
+    log.error({ err }, "[GET /api/ai-agents-v2/catalogs] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao carregar catálogos." },
       { status: 500 },

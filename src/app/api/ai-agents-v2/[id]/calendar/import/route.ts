@@ -7,6 +7,9 @@ import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { getV2Agent } from "@/services/ai-v2/agents";
 import { importCalendarText } from "@/services/ai-v2/calendar-import";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/calendar/import");
 
 /**
  * Lê um calendário (arquivo PDF/TXT/CSV/DOCX ou texto colado) e devolve os
@@ -56,7 +59,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   } catch (err) {
     if (err instanceof KnowledgeExtractError) return NextResponse.json({ message: err.message }, { status: 400 });
     const message = err instanceof Error ? err.message : "Não foi possível ler o calendário.";
-    console.error("[POST /api/ai-agents-v2/[id]/calendar/import]", err);
+    log.error({ err }, "[POST /api/ai-agents-v2/[id]/calendar/import]");
     return NextResponse.json({ message }, { status: 500 });
   }
 }

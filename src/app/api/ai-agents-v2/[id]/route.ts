@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAuth, requirePermission } from "@/lib/auth-helpers";
 import { getV2Agent, updateV2Agent, deleteV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]");
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -14,7 +17,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   try {
     await ensureV2AgentSchema();
     const orgId = r.session.user.organizationId!;
-    console.log(`[GET /api/ai-agents-v2/[id]] id=${id} orgId=${orgId} userId=${r.session.user.id}`);
+    log.info({ id, orgId, userId: r.session.user.id }, "[GET /api/ai-agents-v2/[id]] requisição");
     const agent = await getV2Agent(id, orgId);
     if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
     return NextResponse.json({
@@ -22,7 +25,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       config: agent.draftConfig ?? agent.publishedConfig,
     });
   } catch (err) {
-    console.error("[GET /api/ai-agents-v2/[id]]", err);
+    log.error({ err }, "[GET /api/ai-agents-v2/[id]] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao buscar agente v2." },
       { status: 500 },
@@ -49,7 +52,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     const agent = await updateV2Agent(id, r.session.user.organizationId!, body);
     return NextResponse.json(agent);
   } catch (err) {
-    console.error("[PUT /api/ai-agents-v2/[id]]", err);
+    log.error({ err }, "[PUT /api/ai-agents-v2/[id]] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao atualizar agente v2." },
       { status: 500 },
@@ -68,7 +71,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     await deleteV2Agent(id, r.session.user.organizationId!);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("[DELETE /api/ai-agents-v2/[id]]", err);
+    log.error({ err }, "[DELETE /api/ai-agents-v2/[id]] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao deletar agente v2." },
       { status: 500 },

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { deleteMaterialAttachment, updateMaterialAttachment } from "@/services/ai-v2/material-attachments";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/materials/[docId]/attachments/[attachmentId]");
 
 type Params = { params: Promise<{ id: string; docId: string; attachmentId: string }> };
 
@@ -27,7 +30,10 @@ export async function PATCH(request: Request, { params }: Params) {
       if (!attachment) return NextResponse.json({ message: "Anexo não encontrado." }, { status: 404 });
       return NextResponse.json({ attachment });
     } catch (err) {
-      console.error("[PATCH /api/ai-agents-v2/[id]/materials/[docId]/attachments/[attachmentId]]", err);
+      log.error(
+        { err },
+        "[PATCH /api/ai-agents-v2/[id]/materials/[docId]/attachments/[attachmentId]]",
+      );
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao salvar o anexo." }, { status: 500 });
     }
   });
@@ -46,7 +52,10 @@ export async function DELETE(_request: Request, { params }: Params) {
       if (!ok) return NextResponse.json({ message: "Anexo não encontrado." }, { status: 404 });
       return NextResponse.json({ ok: true });
     } catch (err) {
-      console.error("[DELETE /api/ai-agents-v2/[id]/materials/[docId]/attachments/[attachmentId]]", err);
+      log.error(
+        { err },
+        "[DELETE /api/ai-agents-v2/[id]/materials/[docId]/attachments/[attachmentId]]",
+      );
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao remover o anexo." }, { status: 500 });
     }
   });

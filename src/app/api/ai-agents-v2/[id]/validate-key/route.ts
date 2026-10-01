@@ -7,6 +7,9 @@ import { v2AuxModel, v2ModelProvider } from "@/lib/ai-v2/models";
 import { getModel } from "@/services/ai/provider";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { generateText } from "ai";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/validate-key");
 
 /**
  * Valida as chaves do agente com uma chamada mínima: a OpenAI sempre (busca
@@ -57,7 +60,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       }
       return NextResponse.json({ ok: true });
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/validate-key]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/validate-key]");
       const message = err instanceof Error ? err.message : "Erro ao validar chave.";
       return NextResponse.json({ ok: false, error: "INVALID_KEY", message }, { status: 200 });
     }

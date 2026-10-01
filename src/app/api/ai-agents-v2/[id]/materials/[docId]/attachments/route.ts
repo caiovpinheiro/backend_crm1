@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { addMaterialAttachment, listMaterialAttachments, MATERIAL_ATTACHMENT_LIMITS } from "@/services/ai-v2/material-attachments";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/materials/[docId]/attachments");
 
 type Params = { params: Promise<{ id: string; docId: string }> };
 
@@ -17,7 +20,7 @@ export async function GET(_request: Request, { params }: Params) {
       const attachments = await listMaterialAttachments(r.session.user.organizationId!, id, docId);
       return NextResponse.json({ attachments, limits: MATERIAL_ATTACHMENT_LIMITS });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/materials/[docId]/attachments]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/materials/[docId]/attachments]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar os anexos." }, { status: 500 });
     }
   });
@@ -46,7 +49,10 @@ export async function POST(request: Request, { params }: Params) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Erro ao anexar.";
       const status = msg.includes("não encontrado") ? 404 : msg.includes("inválido") || msg.includes("até") ? 400 : 500;
-      if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/materials/[docId]/attachments]", err);
+      if (status === 500) log.error(
+        { err },
+        "[POST /api/ai-agents-v2/[id]/materials/[docId]/attachments]",
+      );
       return NextResponse.json({ message: msg }, { status });
     }
   });

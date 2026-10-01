@@ -15,6 +15,9 @@ import {
 } from "@/services/ai-v2/replay";
 import { IMPORT_LIMITS } from "@/services/ai-v2/replay-import";
 import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/replay");
 
 function parseTranscripts(body: Record<string, unknown>): ReplayTranscript[] {
   const list = Array.isArray(body.transcripts) ? body.transcripts : [];
@@ -54,7 +57,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       const runs = await listReplayRuns(r.session.user.organizationId!, id);
       return NextResponse.json({ runs, limits: REPLAY_LIMITS });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/replay]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/replay]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar comparações." }, { status: 500 });
     }
   });
@@ -126,7 +129,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         return NextResponse.json({ code: "NO_ANTHROPIC_KEY", message: "Para testar um modelo Claude, cadastre a chave Anthropic do agente em Publicação." }, { status: 400 });
       }
       const status = msg.includes("em andamento") ? 409 : msg.includes("não encontrado") ? 404 : 500;
-      if (status === 500) console.error("[POST /api/ai-agents-v2/[id]/replay]", err);
+      if (status === 500) log.error({ err }, "[POST /api/ai-agents-v2/[id]/replay]");
       return NextResponse.json({ message: msg }, { status });
     }
   });

@@ -4,6 +4,9 @@ import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-
 import { getV2Agent } from "@/services/ai-v2/agents";
 import { buildAgentRulesMarkdown, detectConfigGaps } from "@/services/ai-v2/rules-export";
 import { loadExportNames } from "@/services/ai-v2/rules-export-names";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/export");
 
 /**
  * Regras do agente para revisar ou analisar gaps.
@@ -47,7 +50,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         },
       });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/export]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/export]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao exportar." }, { status: 500 });
     }
   });

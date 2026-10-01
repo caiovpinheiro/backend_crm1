@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { cancelReplay, getReplayRun } from "@/services/ai-v2/replay";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/replay/[runId]");
 
 type Ctx = { params: Promise<{ id: string; runId: string }> };
 
@@ -17,7 +20,7 @@ export async function GET(_request: Request, { params }: Ctx) {
       if (!result) return NextResponse.json({ message: "Comparação não encontrada." }, { status: 404 });
       return NextResponse.json(result);
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/replay/[runId]]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/replay/[runId]]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao carregar comparação." }, { status: 500 });
     }
   });
@@ -35,7 +38,7 @@ export async function DELETE(_request: Request, { params }: Ctx) {
       if (!ok) return NextResponse.json({ message: "Esta comparação não está em andamento." }, { status: 409 });
       return NextResponse.json({ ok: true });
     } catch (err) {
-      console.error("[DELETE /api/ai-agents-v2/[id]/replay/[runId]]", err);
+      log.error({ err }, "[DELETE /api/ai-agents-v2/[id]/replay/[runId]]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao interromper." }, { status: 500 });
     }
   });

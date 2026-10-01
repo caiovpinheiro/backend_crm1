@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { listV2TurnLogs } from "@/services/ai-v2/log";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/logs");
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -24,7 +27,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       });
       return NextResponse.json({ logs });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/logs]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/logs]");
       return NextResponse.json(
         { message: err instanceof Error ? err.message : "Erro ao listar logs v2." },
         { status: 500 },
