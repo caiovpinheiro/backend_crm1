@@ -19,12 +19,45 @@ import {
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 
-import { executeDistribution } from "./engine";
-import { isDistributionEnabled } from "./enabled";
-import { ensureConversationInWaitingQueue } from "./pending-shared";
 import { getLogger } from "@/lib/logger";
 
+import { executeDistribution } from "./engine";
+import { isDistributionEnabled } from "./enabled";
+import {
+  ensureConversationInWaitingQueue,
+  isDistributionAutoOnInbound,
+} from "./pending-shared";
+
 const log = getLogger("distribution.pending-inbound");
+
+/** Pendência criada pelo passo, pela IA ou por redistribuição manual. */
+function pendingWasRequested(triggerSource: string | null | undefined): boolean {
+  const src = triggerSource ?? "";
+  return (
+    src.includes("AUTOMATION") ||
+    src.includes("MANUAL") ||
+    src.includes("AI_AGENT")
+  );
+}
+
+/**
+ * `distribution.autoOnInbound=false`: o webhook não distribui sozinho.
+ * Quem já está na fila porque a automação / IA / operador pediu, segue.
+ */
+async function systemInboundMayDistribute(
+  conversationId: string,
+  contactId: string,
+): Promise<boolean> {
+  if (await isDistributionAutoOnInbound()) return true;
+  const queued = await prisma.distributionPending.findFirst({
+    where: {
+      status: "PENDING",
+      OR: [{ conversationId }, { contactId }],
+    },
+    select: { triggerSource: true },
+  });
+  return pendingWasRequested(queued?.triggerSource);
+}
 
 /**
  * Marca como RESOLVED as pendências cuja conversa NÃO precisa mais ser
@@ -277,7 +310,13 @@ export async function maybeDistributeNewInboundTicket(input: {
         );
         // Fora do expediente a IA pode falar, mas o lead entra na espera
         // para distribuir quando o primeiro consultor ficar elegível.
-        if (!isHumanAttendanceWindowOpen()) {
+        if (
+          !isHumanAttendanceWindowOpen() &&
+          (await systemInboundMayDistribute(
+            input.conversationId,
+            input.contactId,
+          ))
+        ) {
           await ensureConversationInWaitingQueue({
             conversationId: input.conversationId,
             contactId: input.contactId,
@@ -419,7 +458,13 @@ export async function maybeDistributeNewInboundTicket(input: {
           aiUserId,
         }),
       );
-      if (!isHumanAttendanceWindowOpen()) {
+      if (
+        !isHumanAttendanceWindowOpen() &&
+        (await systemInboundMayDistribute(
+          input.conversationId,
+          input.contactId,
+        ))
+      ) {
         await ensureConversationInWaitingQueue({
           conversationId: input.conversationId,
           contactId: input.contactId,
@@ -441,8 +486,15 @@ export async function maybeDistributeNewInboundTicket(input: {
     );
     // #endregion
     if (!widgetActive) {
-      // IA off e sem widget: ainda assim o aluno não pode ficar sem fila.
-      if (!(await isAiAttendanceEnabled())) {
+      // IA off e sem widget: ainda assim o aluno não pode ficar sem fila,
+      // salvo com o toggle de inbound desligado.
+      if (
+        !(await isAiAttendanceEnabled()) &&
+        (await systemInboundMayDistribute(
+          input.conversationId,
+          input.contactId,
+        ))
+      ) {
         await ensureConversationInWaitingQueue({
           conversationId: input.conversationId,
           contactId: input.contactId,
@@ -460,9 +512,21 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
 
-    // Sempre tenta distribuir / enfileirar inbound sem dono. O flag
-    // autoOnInbound=false prendia o aluno em Entrada até alguém clicar.
-    //
+    // Toggle desligado: só distribui quem a automação, a IA ou o operador
+    // já enfileirou. Inbound sem esse pedido fica na Entrada.
+    if (
+      !(await systemInboundMayDistribute(
+        input.conversationId,
+        input.contactId,
+      ))
+    ) {
+      debugWarn(
+        "[DBG-e46688 maybeDist] skip autoOnInbound=false",
+        () => JSON.stringify({ convId: input.conversationId }),
+      );
+      return;
+    }
+
     // Já na fila (domingo / fora do expediente): não reexecuta. O webhook
     // + IA off chamam isto 2× por mensagem e o /logs virava rajada de
     // "Distribuição pendente". Drena quando alguém ficar elegível.

@@ -162,14 +162,42 @@ export async function getOrgSettingOrDefault<T extends string>(
  * Atalho boolean — armazenado como string `"true"`/`"false"`. Qualquer
  * outro valor (incluindo null) cai pro default.
  */
+function coerceOrgBool(value: unknown, defaultValue: boolean): boolean {
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+  }
+  return defaultValue;
+}
+
 export async function getOrgSettingBool(
   key: string,
   defaultValue: boolean,
 ): Promise<boolean> {
   const value = await getOrgSetting(key);
-  if (value === "true") return true;
-  if (value === "false") return false;
-  return defaultValue;
+  return coerceOrgBool(value, defaultValue);
+}
+
+/**
+ * Lê a chave direto no banco, sem o cache de 60s.
+ * O motor de distribuição usa isto: um cache antigo de `"true"` (ou o
+ * JSON `false` decodificado como boolean, que o coerce antigo tratava
+ * como ausente e caía no default ligado) mantinha o toggle desligado
+ * na tela e o motor rodando.
+ */
+export async function getOrgSettingBoolFresh(
+  key: string,
+  defaultValue: boolean,
+): Promise<boolean> {
+  const orgId = getOrgIdOrThrow();
+  const row = await prisma.organizationSetting.findFirst({
+    where: { key, organizationId: orgId },
+    select: { value: true },
+  });
+  return coerceOrgBool(row?.value ?? null, defaultValue);
 }
 
 export async function setOrgSettingBool(

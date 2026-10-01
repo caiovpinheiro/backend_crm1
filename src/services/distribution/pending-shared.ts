@@ -28,7 +28,7 @@ import {
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
 import { debugInfo, debugWarn } from "@/lib/debug-log";
-import { getOrgSettingBool } from "@/lib/org-settings";
+import { getOrgSettingBoolFresh } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 import {
@@ -123,16 +123,52 @@ export const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
 const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
 
 export async function isDistributionAutoOnInbound(): Promise<boolean> {
-  return getOrgSettingBool(AUTO_ON_INBOUND_KEY, true);
+  try {
+    return (await getOrgSettingBoolFresh(AUTO_ON_INBOUND_KEY, true)) !== false;
+  } catch (e) {
+    console.error("[distribution] leitura de distribution.autoOnInbound falhou", e);
+    return true;
+  }
 }
 
 /**
- * Filtro da fila de espera: toda conversa OPEN sem responsável (com inbound).
- * `autoOnInbound=false` só deixava de CRIAR pending sozinho — se a drenagem
- * também ignorar esses cards, o aluno fica em Entrada até o dia seguinte.
+ * Pendências pedidas de verdade (passo da automação, IA ou redistribuição
+ * manual). `SYSTEM` sozinho é o inbound automático — com o toggle desligado
+ * isso não autoriza distribuir.
+ */
+export async function listRequestedPendingConversationIds(): Promise<string[]> {
+  const rows = await prisma.distributionPending.findMany({
+    where: {
+      status: "PENDING",
+      conversationId: { not: null },
+      OR: [
+        { triggerSource: { contains: "AUTOMATION" } },
+        { triggerSource: { contains: "MANUAL" } },
+        { triggerSource: { contains: "AI_AGENT" } },
+      ],
+    },
+    select: { conversationId: true },
+  });
+  return rows
+    .map((r) => r.conversationId)
+    .filter((id): id is string => Boolean(id));
+}
+
+/**
+ * Filtro da fila de espera.
+ * - autoOnInbound true: toda conversa OPEN sem responsável (com inbound).
+ * - false: só quem já passou por execute_distribution / redistribuição
+ *   manual / IA e ficou em DistributionPending.
  */
 export async function getWaitingQueueWhere(): Promise<Prisma.ConversationWhereInput> {
-  return ABERTA_SEM_RESPONSAVEL;
+  if (await isDistributionAutoOnInbound()) return ABERTA_SEM_RESPONSAVEL;
+  const ids = await listRequestedPendingConversationIds();
+  if (ids.length === 0) return { id: { equals: "__no_distribution_pending__" } };
+  return {
+    id: { in: ids },
+    ...activeInboxQueueGuardWhere(),
+    assignedToId: null,
+  };
 }
 
 /** Garante linha na fila de espera sem redistribuir (não tira a IA). */
@@ -226,33 +262,40 @@ export async function getPendingDistributions(opts: {
 
   // Inclui também conversas OPEN sem dono enfileiradas MANUALMENTE mesmo
   // sem lastInboundAt (redistribuição p/ depto com fila cheia).
-  const manualPending = await prisma.distributionPending.findMany({
-    where: {
-      status: "PENDING",
-      triggerSource: "MANUAL",
-      conversationId: { not: null },
-    },
-    select: { conversationId: true },
-    take: 500,
-  });
+  const autoOnInbound = await isDistributionAutoOnInbound();
+  const manualPending = autoOnInbound
+    ? await prisma.distributionPending.findMany({
+        where: {
+          status: "PENDING",
+          triggerSource: "MANUAL",
+          conversationId: { not: null },
+        },
+        select: { conversationId: true },
+        take: 500,
+      })
+    : [];
   const manualConvIds = manualPending
     .map((p) => p.conversationId)
     .filter((id): id is string => Boolean(id));
 
-  const baseWhere: Prisma.ConversationWhereInput = {
-    OR: [
-      ABERTA_SEM_RESPONSAVEL,
-      ...(manualConvIds.length > 0
-        ? [
-            {
-              id: { in: manualConvIds },
-              ...activeInboxQueueGuardWhere(),
-              assignedToId: null,
-            },
-          ]
-        : []),
-    ],
-  };
+  // Toggle desligado: a fila só lista quem o passo / IA / manual enfileirou.
+  // Senão a aba mostra a Entrada inteira e o retry distribui sem automação.
+  const baseWhere: Prisma.ConversationWhereInput = autoOnInbound
+    ? {
+        OR: [
+          ABERTA_SEM_RESPONSAVEL,
+          ...(manualConvIds.length > 0
+            ? [
+                {
+                  id: { in: manualConvIds },
+                  ...activeInboxQueueGuardWhere(),
+                  assignedToId: null,
+                },
+              ]
+            : []),
+        ],
+      }
+    : await getWaitingQueueWhere();
 
   const where: Prisma.ConversationWhereInput = cursor
     ? {
