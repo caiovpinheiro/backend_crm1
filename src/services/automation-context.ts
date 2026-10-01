@@ -1790,9 +1790,9 @@ export async function sweepStaleRunningContexts(): Promise<number> {
       });
       closed++;
     } catch (err) {
-      console.error(
-        `[automation-context] sweepStaleRunningContexts error for ${ctx.id}:`,
-        err,
+      log.error(
+        { contextId: ctx.id, err },
+        "[automation-context] sweepStaleRunningContexts error",
       );
     }
   }
@@ -1817,7 +1817,7 @@ export async function sweepExpiredTimeouts(): Promise<number> {
       await withSystemContext(ctx.organizationId, () => processTimeout(ctx.id));
       processed++;
     } catch (err) {
-      console.error(`[automation-context] sweepExpiredTimeouts error for ${ctx.id}:`, err);
+      log.error({ contextId: ctx.id, err }, "[automation-context] sweepExpiredTimeouts error");
     }
   }
   const stale = await sweepStaleRunningContexts();
@@ -1830,13 +1830,13 @@ export function startTimeoutSweeper(intervalMs = 30_000) {
   if (_sweepInterval) return;
   _sweepInterval = setInterval(() => {
     sweepExpiredTimeouts().catch((err) =>
-      console.error("[automation-context] sweeper error:", err)
+      log.error({ err }, "[automation-context] sweeper error")
     );
   }, intervalMs);
   if (typeof _sweepInterval === "object" && "unref" in _sweepInterval) {
     (_sweepInterval as NodeJS.Timeout).unref();
   }
-  console.info(`[automation-context] timeout sweeper started (every ${intervalMs}ms)`);
+  log.info({ intervalMs }, "[automation-context] timeout sweeper started");
 }
 
 export function stopTimeoutSweeper() {

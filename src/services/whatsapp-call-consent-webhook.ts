@@ -7,6 +7,9 @@ import {
   getCallPermissionAcceptButtonIds,
   getCallPermissionAcceptButtonTitlesFromEnv,
 } from "@/lib/call-permission-env";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("whatsapp-call-consent-webhook");
 
 /** Títulos comuns do botão de templates de permissão de chamada (PT/EN). */
 const BUILTIN_ACCEPT_TITLE_SNIPPETS = [
@@ -250,9 +253,9 @@ async function applyGrant(
       `;
     }
   } catch (err) {
-    console.warn(
-      "[whatsapp-call-consent] migration pendente para type/expiresAt:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[whatsapp-call-consent] migration pendente para type/expiresAt",
     );
   }
 
@@ -274,9 +277,9 @@ async function applyGrant(
         channel: "whatsapp",
       },
     }).catch((err) =>
-      console.warn(
-        "[whatsapp-call-consent] fireTrigger:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[whatsapp-call-consent] fireTrigger",
       ),
     );
   }
@@ -384,9 +387,9 @@ export async function ensureWhatsappCallConsentForOutbound(
   try {
     await repairWhatsappCallConsentFromMessages(conversationId);
   } catch (err) {
-    console.warn(
-      "[whatsapp-call-consent] repair on initiate:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[whatsapp-call-consent] repair on initiate",
     );
   }
 
@@ -464,9 +467,9 @@ export async function maybeDenyWhatsappCallConsent(
         AND "organizationId" = ${orgId}
     `;
   } catch (err) {
-    console.warn(
-      "[whatsapp-call-consent] migration pendente para type/expiresAt (deny):",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[whatsapp-call-consent] migration pendente para type/expiresAt (deny)",
     );
   }
 

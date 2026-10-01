@@ -48,6 +48,9 @@ import {
   retryUnansweredAiInbound,
 } from "@/services/ai/retry-unanswered-ai-inbound";
 import { STUCK_INBOUND_MS } from "@/services/ai/stuck-inbound-distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-agent-inactivity-worker");
 
 /**
  * Ops do agente atribuído à conversa. Sem vertical, `{}`: o encerramento
@@ -75,7 +78,7 @@ let started = false;
 export function startAIAgentInactivityWorker() {
   if (started) return;
   if (process.env.AI_AGENT_INACTIVITY_WORKER === "0") {
-    console.info("[ai-inactivity] worker desativado via env");
+    log.info("[ai-inactivity] worker desativado via env");
     return;
   }
   started = true;
@@ -84,10 +87,7 @@ export function startAIAgentInactivityWorker() {
     try {
       await tickOnce();
     } catch (err) {
-      console.warn(
-        "[ai-inactivity] tick falhou:",
-        err instanceof Error ? err.message : err,
-      );
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-inactivity] tick falhou");
     }
   };
 
@@ -97,8 +97,13 @@ export function startAIAgentInactivityWorker() {
     setInterval(() => void tick(), INTERVAL_MS);
   }, 20_000);
 
-  console.info(
-    `[ai-inactivity] worker iniciado (tick=${INTERVAL_MS}ms, nudgeMs=${envMs("AI_AGENT_IDLE_NUDGE_MS", IDLE_NUDGE_MS)}, closeAfterNudgeMs=${envMs("AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS", IDLE_CLOSE_AFTER_NUDGE_MS)})`,
+  log.info(
+    {
+      tickMs: INTERVAL_MS,
+      nudgeMs: envMs("AI_AGENT_IDLE_NUDGE_MS", IDLE_NUDGE_MS),
+      closeAfterNudgeMs: envMs("AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS", IDLE_CLOSE_AFTER_NUDGE_MS),
+    },
+    "[ai-inactivity] worker iniciado",
   );
 }
 
@@ -266,9 +271,9 @@ async function processIdleAiOnly(
               kind: "farewell",
             }),
           ).catch((e) => {
-            console.warn(
-              `[ai-inactivity] aviso de encerramento falhou conv=${row.conversation_id}:`,
-              e instanceof Error ? e.message : e,
+            log.warn(
+              { conv: row.conversation_id, err: e instanceof Error ? e.message : e },
+              "[ai-inactivity] aviso de encerramento falhou",
             );
           });
         }
@@ -303,23 +308,25 @@ async function processIdleAiOnly(
         if (sent.status === "sent") {
           nudged++;
         } else {
-          console.warn(
-            `[ai-inactivity] check-in não enviado conv=${row.conversation_id} status=${sent.status}` +
-              ("reason" in sent ? ` reason=${sent.reason}` : ""),
+          log.warn(
+            {
+              conv: row.conversation_id,
+              status: sent.status,
+              ...("reason" in sent ? { reason: sent.reason } : {}),
+            },
+            "[ai-inactivity] check-in não enviado",
           );
         }
       }
     } catch (err) {
-      console.error(
-        `[ai-inactivity] falha idle conv=${row.conversation_id}:`,
-        err instanceof Error ? err.message : err,
+      log.error(
+        { conv: row.conversation_id, err: err instanceof Error ? err.message : err },
+        "[ai-inactivity] falha idle",
       );
     }
   }
   if (closed > 0 || nudged > 0) {
-    console.info(
-      `[ai-inactivity] tick — check-ins=${nudged} encerradas=${closed}`,
-    );
+    log.info({ checkIns: nudged, encerradas: closed }, "[ai-inactivity] tick");
   }
   return { closed, nudged };
 }
@@ -333,7 +340,7 @@ export async function tickOnce(now: Date = new Date()) {
   await import("@/services/ai-v2/inactivity")
     .then(({ processIdleV2 }) => processIdleV2(now))
     .catch((err) =>
-      console.warn("[ai-inactivity] v2 falhou:", err instanceof Error ? err.message : err),
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-inactivity] v2 falhou"),
     );
 
   // Aluno escreveu e a IA nunca respondeu (timer do debounce morreu num
@@ -349,9 +356,9 @@ export async function tickOnce(now: Date = new Date()) {
     const r = await retryUnansweredAiInbound({ now, apply: true, retryMs });
     retried = r.retried;
   } catch (err) {
-    console.warn(
-      "[ai-inactivity] retry de inbound sem resposta falhou:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-inactivity] retry de inbound sem resposta falhou",
     );
   }
 
@@ -363,14 +370,12 @@ export async function tickOnce(now: Date = new Date()) {
       stuckMs: envMs("AI_AGENT_STUCK_INBOUND_MS", STUCK_INBOUND_MS),
     });
     if (!queued) {
-      console.warn(
-        "[ai-inactivity] stuck-inbound não enfileirado (Redis/fila down)",
-      );
+      log.warn("[ai-inactivity] stuck-inbound não enfileirado (Redis/fila down)");
     }
   } catch (err) {
-    console.warn(
-      "[ai-inactivity] enqueue stuck-inbound falhou:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-inactivity] enqueue stuck-inbound falhou",
     );
   }
 
@@ -419,14 +424,14 @@ export async function tickOnce(now: Date = new Date()) {
       await withSystemContext(row.organization_id, () => dispatchOne(row));
       handed++;
     } catch (err) {
-      console.error(
-        `[ai-inactivity] falha processando conv=${row.conversation_id}:`,
-        err instanceof Error ? err.message : err,
+      log.error(
+        { conv: row.conversation_id, err: err instanceof Error ? err.message : err },
+        "[ai-inactivity] falha processando",
       );
     }
   }
   if (handed > 0) {
-    console.info(`[ai-inactivity] tick concluído — transferidas=${handed}`);
+    log.info({ transferidas: handed }, "[ai-inactivity] tick concluído");
   }
   return { processed: rows.length, handed, closed, retried };
 }
@@ -465,7 +470,7 @@ async function dispatchOne(row: ExpiredRow) {
       text,
       kind: "farewell",
     }).catch((e) => {
-      console.warn("[ai-inactivity] farewell falhou:", e);
+      log.warn({ err: e }, "[ai-inactivity] farewell falhou");
     });
   }
 

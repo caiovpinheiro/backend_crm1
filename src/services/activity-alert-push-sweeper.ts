@@ -24,6 +24,9 @@ import {
   PRE_DUE_WINDOW_MS,
   getNextActivityAlert,
 } from "@/services/activity-alerts";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("activity-alert-push-sweeper");
 
 const INTERVAL_MS =
   Number(process.env.ACTIVITY_ALERT_PUSH_INTERVAL_MS) || 300_000;
@@ -40,9 +43,9 @@ export function startActivityAlertPushSweeper(): void {
 
   const tick = () => {
     void sweepActivityAlertPushes().catch((error) => {
-      console.warn(
-        "[activity-alert-push] tick falhou:",
-        error instanceof Error ? error.message : error,
+      log.warn(
+        { err: error instanceof Error ? error.message : error },
+        "[activity-alert-push] tick falhou",
       );
     });
   };
@@ -50,9 +53,9 @@ export function startActivityAlertPushSweeper(): void {
     tick();
     setInterval(tick, INTERVAL_MS);
   }, 30_000);
-  console.info(
-    `[activity-alert-push] sweeper iniciado (tick=${INTERVAL_MS}ms, ` +
-      `fcm=${isFcmConfigured() ? "configurado" : "AUSENTE"})`,
+  log.info(
+    { tickMs: INTERVAL_MS, fcm: isFcmConfigured() ? "configurado" : "AUSENTE" },
+    "[activity-alert-push] sweeper iniciado",
   );
 }
 
@@ -156,9 +159,9 @@ export async function sweepActivityAlertPushes(
         now,
       );
     } catch (error) {
-      console.warn(
-        `[activity-alert-push] falha ao listar candidatas da org ${organizationId}:`,
-        error instanceof Error ? error.message : error,
+      log.warn(
+        { organizationId, err: error instanceof Error ? error.message : error },
+        "[activity-alert-push] falha ao listar candidatas da org",
       );
       continue;
     }
@@ -186,9 +189,9 @@ export async function sweepActivityAlertPushes(
           }
         });
       } catch (error) {
-        console.warn(
-          `[activity-alert-push] falha no usuario ${userId}:`,
-          error instanceof Error ? error.message : error,
+        log.warn(
+          { userId, err: error instanceof Error ? error.message : error },
+          "[activity-alert-push] falha no usuario",
         );
       }
     }

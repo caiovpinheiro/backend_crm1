@@ -27,6 +27,9 @@ import {
   onDealReverted as onDealRevertedQuotas,
   onDealWon as onDealWonQuotas,
 } from "@/services/quota";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("product-fulfillment");
 
 function toQty(value: unknown): number {
   const n = Math.round(Number(value ?? 0));
@@ -198,10 +201,10 @@ export async function onDealWon(dealId: string): Promise<void> {
       }
     }
   } catch (err) {
-    console.warn("[product-fulfillment] onDealWon falhou:", {
-      dealId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { dealId, err: err instanceof Error ? err.message : String(err) },
+      "[product-fulfillment] onDealWon falhou",
+    );
   }
 
   // Cotas de desconto (RN-07): consome/confirma cotas SELECTED/RESERVED.
@@ -211,10 +214,10 @@ export async function onDealWon(dealId: string): Promise<void> {
   try {
     await onDealWonQuotas(dealId);
   } catch (err) {
-    console.warn("[product-fulfillment] onDealWon (quotas) falhou:", {
-      dealId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { dealId, err: err instanceof Error ? err.message : String(err) },
+      "[product-fulfillment] onDealWon (quotas) falhou",
+    );
   }
 }
 
@@ -227,10 +230,10 @@ export async function onDealReverted(dealId: string): Promise<void> {
   try {
     await reverse(dealId, { note: "Estorno por reabertura/perda do deal" });
   } catch (err) {
-    console.warn("[product-fulfillment] onDealReverted falhou:", {
-      dealId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { dealId, err: err instanceof Error ? err.message : String(err) },
+      "[product-fulfillment] onDealReverted falhou",
+    );
   }
 
   // Cotas de desconto (RN-07): devolve saldo de RESERVED/CONSUMED e marca
@@ -239,10 +242,10 @@ export async function onDealReverted(dealId: string): Promise<void> {
   try {
     await onDealRevertedQuotas(dealId);
   } catch (err) {
-    console.warn("[product-fulfillment] onDealReverted (quotas) falhou:", {
-      dealId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { dealId, err: err instanceof Error ? err.message : String(err) },
+      "[product-fulfillment] onDealReverted (quotas) falhou",
+    );
   }
 }
 

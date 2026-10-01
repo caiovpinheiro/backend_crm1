@@ -1,6 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { notifyTagAdded } from "@/services/automation-triggers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("tags");
 
 export type CreateTagInput = {
   name: string;
@@ -64,8 +67,9 @@ export async function applyExistingTagToContact(args: {
       select: { id: true },
     });
     if (!tag) {
-      console.error(
-        `${args.source}: tag "${name}" não existe no CRM — crie a tag antes de usá-la.`,
+      log.error(
+        { source: args.source, tag: name },
+        "tag não existe no CRM — crie a tag antes de usá-la.",
       );
       return false;
     }
@@ -77,7 +81,7 @@ export async function applyExistingTagToContact(args: {
     await addTagToContact(args.contactId, tag.id);
     return true;
   } catch (err) {
-    console.error(`${args.source}: falha ao marcar tag`, err);
+    log.error({ source: args.source, err }, "falha ao marcar tag");
     return false;
   }
 }

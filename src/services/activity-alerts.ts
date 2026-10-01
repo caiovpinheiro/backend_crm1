@@ -9,6 +9,9 @@
 
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentIds } from "@/services/task-visibility";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("activity-alerts");
 
 export const PRE_DUE_WINDOW_MS = 15 * 60 * 1000;
 export const SNOOZE_MS = 10 * 60 * 1000;
@@ -53,7 +56,7 @@ function notifyActivityAlertPush(userId: string, alert: ActivityAlertDto): void 
       }),
     )
     .catch((err) => {
-      console.error("[activity-alerts] push failed (non-fatal):", err);
+      log.error({ err }, "[activity-alerts] push failed (non-fatal)");
     });
 }
 

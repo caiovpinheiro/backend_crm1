@@ -28,6 +28,9 @@ import {
   type ContextActor,
 } from "@/lib/request-context";
 import { mirrorConversationChatEvent } from "@/services/conversation-event-mirror";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("activity-log");
 
 /**
  * M7/M8 — quando `IMPORT_SKIP_ACTIVITY_LOG` está setado (truthy), suprime a
@@ -267,12 +270,15 @@ export async function logEvent(input: LogEventInput): Promise<void> {
     // ATENCAO: logEvent jamais deve derrubar a request principal.
     // Falhas de FK / org context ausente / DB indisponivel sao
     // logadas mas suprimidas.
-    console.warn("[activity-log] logEvent failed:", {
-      type: input.type,
-      entityType: input.entityType,
-      entityId: input.entityId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      {
+        type: input.type,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "[activity-log] logEvent failed",
+    );
   }
 }
 
@@ -378,9 +384,9 @@ export async function logEventRaw(
   try {
     await prisma.activityEvent.create({ data });
   } catch (err) {
-    console.warn("[activity-log] logEventRaw failed:", {
-      type: data.type,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      { type: data.type, err: err instanceof Error ? err.message : String(err) },
+      "[activity-log] logEventRaw failed",
+    );
   }
 }

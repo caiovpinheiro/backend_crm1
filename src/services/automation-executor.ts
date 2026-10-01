@@ -2432,7 +2432,7 @@ async function executeStep(
               },
             });
           } catch (e) {
-            console.warn("[leads] falha ao avançar occurrence do contexto", e);
+            log.warn({ err: e }, "[leads] falha ao avançar occurrence do contexto");
           }
         }
 

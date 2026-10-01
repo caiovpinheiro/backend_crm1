@@ -39,6 +39,9 @@ import { createConversationEvent } from "@/services/conversation-events";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("outbound-messaging");
 
 export type OutboundActor = {
   id: string;
@@ -590,7 +593,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar botões pelo WhatsApp.";
-    console.error("[meta-send-interactive]", e);
+    log.error({ err: e }, "[meta-send-interactive] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -898,7 +901,7 @@ export async function sendInteractiveListToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar lista pelo WhatsApp.";
-    console.error("[meta-send-list]", e);
+    log.error({ err: e }, "[meta-send-list] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -1118,7 +1121,7 @@ export async function sendFlowToConversation(args: {
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar formulário pelo WhatsApp.";
-    console.error("[meta-send-flow]", e);
+    log.error({ err: e }, "[meta-send-flow] falhou");
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
@@ -1433,11 +1436,11 @@ export async function sendTemplateToConversation(
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after outbound:", err);
+      log.warn({ err }, "[automation] cancel after outbound");
     }
   }
   cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio"),
   );
 
   const outboundPayload = {
@@ -1468,7 +1471,7 @@ export async function sendTemplateToConversation(
   let sendErrorMsg: string | undefined;
   if (!job) {
     const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-    console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+    log.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
     await prisma.message
       .updateMany({
         where: { id: saved.id, sendStatus: "pending" },
@@ -1516,7 +1519,7 @@ async function afterOutboundSideEffects(
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after outbound:", err);
+      log.warn({ err }, "[automation] cancel after outbound");
     }
   }
   const channelId = outboundChannelId || conv.channelId || null;
@@ -1528,8 +1531,8 @@ async function afterOutboundSideEffects(
       conversationId: conv.id,
       content,
     }),
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
   cancelPendingForConversation(conv.id, "agent_reply", actorId).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio"),
   );
 }

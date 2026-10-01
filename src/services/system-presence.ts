@@ -22,6 +22,9 @@
 
 import { prismaBase } from "@/lib/prisma-base";
 import { publishSystemPresenceUpdate } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("system-presence");
 
 /**
  * Cadência do heartbeat (client) — 180s, pausado com aba oculta.
@@ -320,9 +323,9 @@ export function startSystemPresenceSweeper() {
     try {
       await sweepStaleSessions();
     } catch (err) {
-      console.warn(
-        "[system-presence] sweeper falhou:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[system-presence] sweeper falhou",
       );
     }
   };
@@ -332,7 +335,8 @@ export function startSystemPresenceSweeper() {
     setInterval(() => void tick(), SWEEP_INTERVAL_MS);
   }, 12_000);
 
-  console.info(
-    `[system-presence] sweeper iniciado (STALE > ${SYSTEM_PRESENCE_STALE_MS}ms, tick ${SWEEP_INTERVAL_MS}ms)`,
+  log.info(
+    { staleMs: SYSTEM_PRESENCE_STALE_MS, tickMs: SWEEP_INTERVAL_MS },
+    "[system-presence] sweeper iniciado",
   );
 }

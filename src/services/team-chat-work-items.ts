@@ -22,6 +22,9 @@ import {
   workItemSseStakeholders,
   type WorkItemSseOrigin,
 } from "@/services/team-chat-work-item-sse";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("team-chat-work-items");
 
 export const WORK_ITEM_TYPES = ["checklist", "ata", "pauta", "feedback", "meeting"] as const;
 export type WorkItemType = (typeof WORK_ITEM_TYPES)[number];
@@ -334,7 +337,7 @@ async function loadCalendarState(id: string) {
     });
   } catch (err) {
     if (!isMissingCalendarColumn(err)) {
-      console.error("[team-chat] calendar load failed", err);
+      log.error({ err }, "[team-chat] calendar load failed");
     }
     return null;
   }
@@ -449,7 +452,7 @@ async function syncWorkItemCalendars(
     }
   } catch (err) {
     if (!isMissingCalendarColumn(err)) {
-      console.error("[team-chat] calendar sync failed", err);
+      log.error({ err }, "[team-chat] calendar sync failed");
     }
   }
 }
@@ -604,7 +607,7 @@ export async function createWorkItem(
       const { postWorkItemMessage } = await import("@/services/team-chat");
       await postWorkItemMessage(viewer, input.roomId, created.id, title);
     } catch (err) {
-      console.error("[team-chat] post work item message failed", err);
+      log.error({ err }, "[team-chat] post work item message failed");
     }
   }
   await publishWorkItem(viewer.organizationId, created.roomId, shaped);
