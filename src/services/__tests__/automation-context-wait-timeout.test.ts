@@ -41,6 +41,14 @@ const h = vi.hoisted(() => {
   };
 });
 
+const { logError } = vi.hoisted(() => ({ logError: vi.fn() }));
+
+// O log saiu do `console` e foi para o logger estruturado: o teste espiona
+// o logger e mantém a mesma garantia (o erro de um contexto é logado).
+vi.mock("@/lib/logger", () => ({
+  getLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: logError }),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     automationContext: h.ctx,
@@ -415,13 +423,12 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       if (args.where.id === "ctx-err") throw new Error("db down");
       return ctxRow();
     });
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    logError.mockClear();
 
     const n = await sweepExpiredTimeouts();
     expect(n).toBe(1);
     expect(h.continueFromStep).toHaveBeenCalledTimes(1);
-    expect(error).toHaveBeenCalled();
-    error.mockRestore();
+    expect(logError).toHaveBeenCalled();
   });
 
   it("contextos RUNNING sem timer e parados há mais de 2 min são fechados (vazamento)", async () => {
