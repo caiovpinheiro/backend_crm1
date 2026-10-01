@@ -17,7 +17,9 @@ export const runtime = "nodejs";
  *  - Sem credencial: `{ "status": "ok" | "degraded" }`, 200 ou 503. Todos
  *    os consumidores conhecidos só olham o status HTTP.
  *  - Com `HEALTH_TOKEN` (`X-Health-Token` ou `Authorization: Bearer`) ou
- *    sessão de super-admin: detalhe de Postgres/Redis, latências, uptime.
+ *    sessão de super-admin: detalhe de Postgres/Redis, latências, uptime
+ *    e o commit da imagem (`gitSha`, do build arg GIT_SHA). O commit NÃO
+ *    sai na resposta pública.
  *  - Sempre `Cache-Control: no-store` pra evitar resposta carimbada por
  *    Traefik/CDN.
  *
@@ -41,6 +43,7 @@ export async function GET(request: Request) {
       db: snapshot.db,
       redis: snapshot.redis,
       uptimeSec: healthUptimeSec(),
+      gitSha: process.env.GIT_SHA?.trim() || null,
       timestamp: new Date().toISOString(),
     },
     { status: httpStatus, headers: NO_STORE },

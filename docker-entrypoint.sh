@@ -66,6 +66,27 @@ fi
 APP_MODE="${APP_MODE:-api}"
 echo "[entrypoint] APP_MODE=${APP_MODE}"
 
+# SHA do commit da imagem. O Dockerfile grava /app/BUILD_SHA a partir do
+# build arg GIT_SHA (workflow Build & Deploy). Um GIT_SHA fixo no painel
+# (ou no /app/.env) vence o ENV da imagem e ficava igual em todos os
+# serviços, de todos os deploys — aqui o valor da IMAGEM prevalece e sai no
+# log de boot de cada serviço (API e workers).
+# (Bloco entre os marcadores é exercitado por src/lib/docker-entrypoint.test.ts.)
+# >>> build-sha
+BUILD_SHA_FILE="${BUILD_SHA_FILE:-/app/BUILD_SHA}"
+if [ -s "$BUILD_SHA_FILE" ]; then
+  IMAGE_GIT_SHA="$(tr -d '[:space:]' < "$BUILD_SHA_FILE")"
+  if [ -n "$IMAGE_GIT_SHA" ] && [ "$IMAGE_GIT_SHA" != "unknown" ]; then
+    if [ -n "${GIT_SHA}" ] && [ "${GIT_SHA}" != "unknown" ] && [ "${GIT_SHA}" != "$IMAGE_GIT_SHA" ]; then
+      echo "[entrypoint] aviso: GIT_SHA do ambiente (${GIT_SHA}) difere do da imagem — usando o da imagem. Remova a variável fixa do painel."
+    fi
+    GIT_SHA="$IMAGE_GIT_SHA"
+    export GIT_SHA
+  fi
+fi
+echo "[entrypoint] build: GIT_SHA=${GIT_SHA:-unknown}"
+# <<< build-sha
+
 # Gate de criptografia. A chave de provedor de IA por agente é gravada em
 # AES-256-GCM com chave derivada de ENCRYPTION_KEY → NEXTAUTH_SECRET →
 # AUTH_SECRET (src/lib/secret-crypto.ts).
@@ -137,9 +158,23 @@ fi
 # (worker-whatsapp, worker-leads) sobem em paralelo à API e podem ter race
 # condition se também tentarem aplicar migrations — basta um serviço aplicar.
 # Por isso o branch abaixo é restrito a APP_MODE=api.
+#
+# SKIP_PRISMA_MIGRATE: só pula quando o VALOR é afirmativo (1/true/yes/on).
+# Antes o teste era `[ -n ... ]` (variável existe?), então SKIP_PRISMA_MIGRATE=0
+# ou =false também pulava — em produção isso já deixou migration sem aplicar.
+# Vazio, ausente, 0, false, no, off ou qualquer outro valor → roda o migrate.
+# (Bloco entre os marcadores é exercitado por src/lib/docker-entrypoint.test.ts.)
+# >>> skip-prisma-migrate
+should_skip_prisma_migrate() {
+  case "${SKIP_PRISMA_MIGRATE:-0}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# <<< skip-prisma-migrate
 if [ "$APP_MODE" = "api" ]; then
-  if [ -n "${SKIP_PRISMA_MIGRATE}" ]; then
-    echo "[entrypoint] SKIP_PRISMA_MIGRATE set — pulando migrate deploy."
+  if should_skip_prisma_migrate; then
+    echo "[entrypoint] SKIP_PRISMA_MIGRATE=${SKIP_PRISMA_MIGRATE} — pulando migrate deploy."
   elif [ -z "${DATABASE_URL}" ]; then
     echo "[entrypoint] DATABASE_URL vazio — pulando migrate deploy."
   else

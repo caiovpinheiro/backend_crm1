@@ -93,6 +93,19 @@ RUN mkdir -p /app/storage \
   && chown -R nextjs:nodejs /app/storage \
   && chmod -R 0775 /app/storage
 
+# SHA do commit que gerou a imagem (build arg do workflow Build & Deploy).
+# Fica no FIM do estágio de propósito: o valor muda a cada build e, aqui,
+# só invalida estas camadas minúsculas — npm ci / next build seguem em cache.
+#   - ENV GIT_SHA: lido pelo detalhe protegido de /api/health;
+#   - /app/BUILD_SHA: o entrypoint loga no boot e usa para corrigir um
+#     GIT_SHA fixo herdado do painel (env de runtime vence ENV da imagem);
+#   - label OCI: `docker inspect` mostra o commit sem subir o container.
+# Build local sem o arg: "unknown".
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+RUN printf '%s' "${GIT_SHA}" > /app/BUILD_SHA
+
 # IMPORTANTE: não setamos `USER nextjs` aqui. O entrypoint começa como
 # root para conseguir corrigir a ownership de `/app/storage` (o volume
 # do EasyPanel pode ter sido criado como root). Depois ele faz drop pra

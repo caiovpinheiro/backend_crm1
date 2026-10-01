@@ -211,9 +211,13 @@ export async function runActivityOutboxOnce(
 }
 
 /**
- * Loop do worker de outbox. Deve ser executado em processo dedicado
- * (ex.: worker-activity-outbox). Para Next.js runtime, prefira chamadas
- * explicitas em cron/health-check ou worker BullMQ.
+ * Loop genérico da outbox. NÃO LIGAR em worker: nunca teve chamador e, do
+ * jeito que está, `pollAndProjectActivityOutbox` (a) pega TODOS os tipos —
+ * disputaria `CONVERSATION_TABULATED` com o projetor de tabulação; (b) faz
+ * `FOR UPDATE SKIP LOCKED` fora de transação, então o lock cai antes da
+ * projeção; (c) projeta via `runLogEvent`, com `occurredAt` = agora e
+ * espelho no chat. Os consumidores em uso são `startTabulationOutboxProjector`
+ * e `startConversationClosedOutboxProjector`, um por tipo.
  */
 export async function startActivityOutboxWorker(
   intervalMs = 5_000,
@@ -501,6 +505,288 @@ export async function projectTabulationOutboxBatch(
   }
 
   return projected;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Projetor de CONVERSATION_CLOSED
+//
+// Todo encerramento humano grava `CONVERSATION_CLOSED` na outbox (rota
+// `conversations/[id]/actions`) e, desde que a outbox entrou (17/09/2026),
+// nada consumia esse tipo: `startActivityOutboxWorker` nunca teve chamador
+// e o projetor de tabulação filtra `CONVERSATION_TABULATED`. Resultado: a
+// fila só crescia (a limpeza apaga apenas linhas processadas) e o
+// encerramento humano não chegava a `activity_events` — "quem encerrou" no
+// separador de ticket e as contagens por `type = 'CONVERSATION_CLOSED'`
+// ficavam sem ele.
+//
+// Mesmo desenho do projetor de tabulação, de propósito:
+//   - filtro por tipo no SQL (`= 'CONVERSATION_CLOSED'`): os dois projetores
+//     nunca disputam a mesma linha;
+//   - a linha é travada com `FOR UPDATE SKIP LOCKED` DENTRO da transação que
+//     grava o evento e marca `processedAt` (duas réplicas do worker não
+//     projetam a mesma linha);
+//   - checagem por (`organizationId`, `idempotencyKey`) antes do INSERT —
+//     é a consulta coberta pelo índice `activity_events_org_idem_idx`;
+//   - `occurredAt` = `createdAt` da outbox (hora do encerramento, não a da
+//     projeção): a fila acumulada entra com a data certa;
+//   - NÃO espelha no chat: um job em segundo plano não cria `Message` em
+//     conversa (muito menos nas antigas da fila acumulada).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Formato de `process.env` sem exigir `NODE_ENV` (testes passam objetos parciais). */
+type EnvLike = Record<string, string | undefined>;
+
+const CLOSED_PROJECTOR_DEFAULT_BATCH = 100;
+const CLOSED_PROJECTOR_MAX_BATCH = 500;
+const CLOSED_PROJECTOR_DEFAULT_INTERVAL_MS = 5_000;
+const CLOSED_PROJECTOR_MIN_INTERVAL_MS = 1_000;
+
+/**
+ * `ACTIVITY_OUTBOX_WORKER`: ligado por padrão; `0`/`false`/`off`/`no`
+ * desliga. Em produção só deve ficar ligado com o índice
+ * `activity_events_org_idem_idx` presente (migration
+ * 20261001150000_activity_events_org_idem_idx) — sem ele cada projeção faz
+ * seq scan nas partições de `activity_events`.
+ */
+export function isActivityOutboxWorkerEnabled(
+  env: EnvLike = process.env,
+): boolean {
+  const raw = (env.ACTIVITY_OUTBOX_WORKER ?? "").trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
+}
+
+function intFromEnv(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const n = Number.parseInt((raw ?? "").trim(), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Lote (`ACTIVITY_OUTBOX_WORKER_BATCH`, padrão 100, teto 500). */
+export function activityOutboxWorkerBatch(
+  env: EnvLike = process.env,
+): number {
+  return intFromEnv(
+    env.ACTIVITY_OUTBOX_WORKER_BATCH,
+    CLOSED_PROJECTOR_DEFAULT_BATCH,
+    1,
+    CLOSED_PROJECTOR_MAX_BATCH,
+  );
+}
+
+/** Intervalo (`ACTIVITY_OUTBOX_WORKER_INTERVAL_MS`, padrão 5 s, piso 1 s). */
+export function activityOutboxWorkerIntervalMs(
+  env: EnvLike = process.env,
+): number {
+  return intFromEnv(
+    env.ACTIVITY_OUTBOX_WORKER_INTERVAL_MS,
+    CLOSED_PROJECTOR_DEFAULT_INTERVAL_MS,
+    CLOSED_PROJECTOR_MIN_INTERVAL_MS,
+    10 * 60_000,
+  );
+}
+
+function asClosedPayload(value: Prisma.JsonValue): LogEventInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const payload = value as unknown as LogEventInput;
+  if (payload.type !== "CONVERSATION_CLOSED") return null;
+  if (!payload.entityType || !payload.entityId) return null;
+  return payload;
+}
+
+/**
+ * Copia só `CONVERSATION_CLOSED` da outbox para `activity_events`.
+ * Devolve quantas linhas viraram evento neste lote.
+ */
+export async function projectConversationClosedOutboxBatch(
+  batchSize = CLOSED_PROJECTOR_DEFAULT_BATCH,
+): Promise<number> {
+  const candidates = await prismaBase.$queryRaw<{ id: string }[]>`
+    SELECT id
+    FROM "activity_outbox"
+    WHERE "processedAt" IS NULL
+      AND "deadLetterAt" IS NULL
+      AND "scheduledFor" <= CURRENT_TIMESTAMP
+      AND payload->>'type' = 'CONVERSATION_CLOSED'
+    ORDER BY "scheduledFor", id
+    LIMIT ${batchSize}
+  `;
+
+  let projected = 0;
+  for (const candidate of candidates) {
+    try {
+      const wrote = await prismaBase.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<TabulationOutboxClaim[]>`
+          SELECT id, "organizationId", payload, "createdAt", attempts, "maxAttempts"
+          FROM "activity_outbox"
+          WHERE id = ${candidate.id}
+            AND "processedAt" IS NULL
+            AND "deadLetterAt" IS NULL
+          FOR UPDATE SKIP LOCKED
+        `;
+        const row = locked[0];
+        if (!row) return null;
+
+        const payload = asClosedPayload(row.payload);
+        if (!payload) {
+          await tx.activityOutbox.update({
+            where: { id: row.id },
+            data: {
+              deadLetterAt: new Date(),
+              lastError: "payload de encerramento inválido",
+              attempts: row.attempts + 1,
+            },
+          });
+          return null;
+        }
+
+        if (payload.idempotencyKey) {
+          const existing = await tx.activityEvent.findFirst({
+            where: {
+              organizationId: row.organizationId,
+              idempotencyKey: payload.idempotencyKey,
+            },
+            select: { id: true },
+          });
+          if (existing) {
+            await tx.activityOutbox.update({
+              where: { id: row.id },
+              data: { processedAt: new Date() },
+            });
+            return null;
+          }
+        }
+
+        const meta =
+          payload.meta && typeof payload.meta === "object" ? payload.meta : {};
+        // Payload novo traz `actorUserId`; a fila anterior a esta mudança
+        // não — aí o id sai do `deal_events` do mesmo encerramento.
+        const actorUserId =
+          userIdForFk(payload.actorUserId) ??
+          (payload.conversationId
+            ? await actorUserIdFromDealClose(tx, row, payload.conversationId)
+            : null);
+        const rawActor = payload.actorType ?? "HUMAN";
+        const actorType: ActorType = ACTOR_TYPES.has(rawActor)
+          ? (rawActor as ActorType)
+          : "HUMAN";
+        const label =
+          typeof payload.actor?.label === "string" ? payload.actor.label : null;
+
+        await tx.activityEvent.create({
+          data: {
+            organizationId: row.organizationId,
+            occurredAt: row.createdAt,
+            type: "CONVERSATION_CLOSED",
+            entityType: payload.entityType,
+            entityId: payload.entityId,
+            entityLabel: payload.entityLabel ?? null,
+            dealId: payload.dealId ?? null,
+            contactId: payload.contactId ?? null,
+            conversationId: payload.conversationId ?? null,
+            tabulationId: metaString(meta, "tabulationId"),
+            actorType,
+            actorUserId,
+            actorLabel: label,
+            field: payload.field ?? null,
+            oldValue: payload.oldValue ?? null,
+            newValue: payload.newValue ?? null,
+            meta: meta as Prisma.InputJsonValue,
+            ...(payload.idempotencyKey
+              ? { idempotencyKey: payload.idempotencyKey }
+              : {}),
+          },
+        });
+        await tx.activityOutbox.update({
+          where: { id: row.id },
+          data: { processedAt: new Date() },
+        });
+        return row.organizationId;
+      });
+      if (wrote) {
+        projected++;
+        metrics.activityOutbox.processed.inc(
+          { organization: wrote, status: "ok" },
+          1,
+        );
+      }
+    } catch (err) {
+      const current = await prismaBase.activityOutbox.findUnique({
+        where: { id: candidate.id },
+        select: { attempts: true, maxAttempts: true, processedAt: true },
+      });
+      if (!current || current.processedAt) continue;
+      const errorText = err instanceof Error ? err.message : String(err);
+      await postponeOutboxRow(
+        candidate.id,
+        current.attempts,
+        current.maxAttempts,
+        errorText,
+      );
+    }
+  }
+
+  return projected;
+}
+
+/**
+ * Um tick do consumidor de `CONVERSATION_CLOSED`. Com
+ * `ACTIVITY_OUTBOX_WORKER` desligado não consulta nem grava nada.
+ */
+export async function runConversationClosedProjectorTick(
+  env: EnvLike = process.env,
+): Promise<number> {
+  if (!isActivityOutboxWorkerEnabled(env)) return 0;
+  return projectConversationClosedOutboxBatch(activityOutboxWorkerBatch(env));
+}
+
+let conversationClosedProjectorStarted = false;
+
+/** Só para testes: permite iniciar o timer de novo. */
+export function resetConversationClosedProjectorForTests(): void {
+  conversationClosedProjectorStarted = false;
+}
+
+/**
+ * Timer do consumidor de `CONVERSATION_CLOSED`, no mesmo processo do
+ * projetor de tabulação (`worker-whatsapp`). Devolve `false` quando a env
+ * está desligada (nenhum timer é criado).
+ */
+export function startConversationClosedOutboxProjector(
+  env: EnvLike = process.env,
+): boolean {
+  if (!isActivityOutboxWorkerEnabled(env)) {
+    log.info(
+      "[activity-outbox] consumidor de CONVERSATION_CLOSED desligado (ACTIVITY_OUTBOX_WORKER=0)",
+    );
+    return false;
+  }
+  if (conversationClosedProjectorStarted) return true;
+  conversationClosedProjectorStarted = true;
+
+  const intervalMs = activityOutboxWorkerIntervalMs(env);
+  const batch = activityOutboxWorkerBatch(env);
+  log.info(
+    { intervalMs, batch },
+    "[activity-outbox] consumidor de CONVERSATION_CLOSED ligado",
+  );
+
+  const tick = () => {
+    void projectConversationClosedOutboxBatch(batch)
+      .catch((err) => {
+        log.error({ err }, "[activity-outbox] conversation-closed tick failed");
+      })
+      .finally(() => {
+        setTimeout(tick, intervalMs);
+      });
+  };
+
+  setTimeout(tick, 0);
+  return true;
 }
 
 let tabulationProjectorStarted = false;
