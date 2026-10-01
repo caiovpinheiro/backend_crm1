@@ -26,6 +26,31 @@ function asRecord(v: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** URL da grade: https público ou arquivo já gravado no storage da org. */
+function readCourseGrade(course: Record<string, unknown>): {
+  gradeUrl: string | null;
+  gradeFileName: string | null;
+  gradeMime: string | null;
+} {
+  const raw = typeof course.gradeUrl === "string" ? course.gradeUrl.trim() : "";
+  const ok =
+    raw.startsWith("https://") ||
+    raw.startsWith("/api/storage/") ||
+    raw.startsWith("/uploads/");
+  if (!raw || !ok) {
+    return { gradeUrl: null, gradeFileName: null, gradeMime: null };
+  }
+  const fileName =
+    typeof course.gradeFileName === "string" && course.gradeFileName.trim()
+      ? course.gradeFileName.trim()
+      : null;
+  const mime =
+    typeof course.gradeMime === "string" && course.gradeMime.trim()
+      ? course.gradeMime.trim()
+      : null;
+  return { gradeUrl: raw, gradeFileName: fileName, gradeMime: mime };
+}
+
 type CapabilityDraft = {
   capabilityKey: string;
   mode: string;
@@ -465,6 +490,7 @@ export async function PUT(request: Request, context: RouteContext) {
           level: level as never,
           grau,
           semester: semesterResolved,
+          ...readCourseGrade(course),
           postSalePipelineId,
           channel,
           discountPercent,
@@ -475,6 +501,7 @@ export async function PUT(request: Request, context: RouteContext) {
           level: level as never,
           grau,
           semester: semesterResolved,
+          ...readCourseGrade(course),
           postSalePipelineId,
           channel,
           discountPercent,

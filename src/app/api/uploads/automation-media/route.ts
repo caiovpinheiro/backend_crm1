@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import {
   extForMime,
+  sniffAttachment,
   sniffAudioMime,
   sniffDocMime,
   sniffImageMime,
@@ -70,20 +71,23 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    const origName = (file as { name?: string }).name ?? "file";
     const sniffed = sniffMime(buffer);
-    if (!sniffed) {
+    const office = sniffed
+      ? null
+      : sniffAttachment(buffer, { fileName: origName, mime: file.type });
+    if (!sniffed && (!office || office.mime === "application/zip")) {
       return NextResponse.json(
         {
           message:
-            "Tipo de arquivo não permitido. Aceito: imagem (JPG/PNG/WEBP/GIF), vídeo (MP4/WEBM/MOV), áudio (MP3/M4A/OGG/WEBM/WAV) ou PDF.",
+            "Tipo de arquivo não permitido. Aceito: imagem, vídeo, áudio, PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, TXT ou CSV.",
         },
         { status: 415 },
       );
     }
 
-    const mime = sniffed;
-    const ext = extForMime(sniffed);
-    const origName = (file as { name?: string }).name ?? "file";
+    const mime = sniffed ?? office!.mime;
+    const ext = sniffed ? extForMime(sniffed) : office!.ext;
     const safeName = generateFileName({ prefix: "auto", ext });
 
     const saved = await saveFile({

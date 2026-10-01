@@ -31,10 +31,10 @@ const LEVEL_LABEL: Record<CourseLevelValue, string> = {
 const MODE_LABEL: Record<string, string> = {
   EAD: "EAD",
   IN_PERSON: "Presencial",
-  HYBRID: "Híbrido",
+  HYBRID: "Semi-Presencial",
 };
 
-/** Rótulo da modalidade do curso (EAD, Presencial, Híbrido). */
+/** Rótulo da modalidade do curso (EAD, Presencial, Semi-Presencial). */
 export function formatCourseMode(mode: string | null | undefined): string {
   if (!mode) return "";
   return MODE_LABEL[mode] ?? "";
@@ -56,7 +56,8 @@ const COURSE_VARIABLES: MessageVariable[] = [
   { key: "nivel", label: "Nível", sample: "Graduação" },
   { key: "grau", label: "Grau", sample: "Bacharelado" },
   { key: "modalidade", label: "Modalidade", sample: "EAD" },
-  { key: "duracao", label: "Duração", sample: "8º semestre" },
+  { key: "duracao", label: "Duração", sample: "8 semestres" },
+  { key: "grade", label: "Grade curricular", sample: "https://exemplo.com/grade.pdf" },
   { key: "parcelas", label: "Parcelas", sample: "12" },
 ];
 
@@ -110,7 +111,11 @@ function pricingOptions(raw: unknown, fallbackPrice: number): PricingOption[] {
   });
 }
 
-/** Texto de duração do curso: pós em meses, graduação em semestre. */
+function formatGraduationSemesters(semester: number): string {
+  return Number(semester) === 1 ? "1 semestre" : `${semester} semestres`;
+}
+
+/** Texto de duração do curso: pós em meses, graduação em semestres. */
 export function formatCourseDuration(args: {
   level: string | null | undefined;
   semester: number | null | undefined;
@@ -126,7 +131,7 @@ export function formatCourseDuration(args: {
   if (level === "POSTGRADUATE" && matched?.months != null) return `${matched.months} meses`;
   const semester = args.semester;
   if (semester != null && Number.isFinite(Number(semester)) && Number(semester) > 0) {
-    return level === "POSTGRADUATE" ? `${semester} meses` : `${semester}º semestre`;
+    return level === "POSTGRADUATE" ? `${semester} meses` : formatGraduationSemesters(semester);
   }
   return "";
 }
@@ -199,7 +204,14 @@ export async function renderProductMessageForProduct(args: {
   unitPrice?: number | null;
   discount?: number | null;
   quantity?: number | null;
-}): Promise<{ templateId: string | null; templateName: string | null; text: string | null }> {
+}): Promise<{
+  templateId: string | null;
+  templateName: string | null;
+  text: string | null;
+  gradeUrl: string | null;
+  gradeFileName: string | null;
+  gradeMime: string | null;
+}> {
   const product = await prisma.product.findUnique({
     where: { id: args.productId },
     select: {
@@ -217,6 +229,9 @@ export async function renderProductMessageForProduct(args: {
           mode: true,
           semester: true,
           pricingOptions: true,
+          gradeUrl: true,
+          gradeFileName: true,
+          gradeMime: true,
         },
       },
       customValues: {
@@ -227,8 +242,11 @@ export async function renderProductMessageForProduct(args: {
       },
     },
   });
+  const gradeUrl = product?.courseConfig?.gradeUrl?.trim() || null;
+  const gradeFileName = product?.courseConfig?.gradeFileName?.trim() || null;
+  const gradeMime = product?.courseConfig?.gradeMime?.trim() || null;
   if (!product || !isProductKind(product.kind)) {
-    return { templateId: null, templateName: null, text: null };
+    return { templateId: null, templateName: null, text: null, gradeUrl, gradeFileName, gradeMime };
   }
 
   const level =
@@ -236,7 +254,9 @@ export async function renderProductMessageForProduct(args: {
       ? product.courseConfig.level
       : null;
   const template = await resolveProductMessageTemplate({ kind: product.kind, courseLevel: level });
-  if (!template) return { templateId: null, templateName: null, text: null };
+  if (!template) {
+    return { templateId: null, templateName: null, text: null, gradeUrl, gradeFileName, gradeMime };
+  }
 
   const base = args.unitPrice != null && Number.isFinite(args.unitPrice) ? args.unitPrice : Number(product.price) || 0;
   const discount = Math.min(100, Math.max(0, args.discount ?? 0));
@@ -267,6 +287,7 @@ export async function renderProductMessageForProduct(args: {
     grau: product.courseConfig?.grau?.trim() ?? "",
     modalidade: product.courseConfig?.mode ? MODE_LABEL[product.courseConfig.mode] ?? product.courseConfig.mode : "",
     duracao: duration,
+    grade: gradeUrl ?? "",
     parcelas: matched?.installments != null ? String(matched.installments) : "",
   };
 
@@ -279,5 +300,8 @@ export async function renderProductMessageForProduct(args: {
     templateId: template.id,
     templateName: template.name,
     text: renderProductMessage(template.content, values).trim() || null,
+    gradeUrl,
+    gradeFileName,
+    gradeMime,
   };
 }

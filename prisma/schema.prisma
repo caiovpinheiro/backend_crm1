@@ -2062,6 +2062,10 @@ model CourseConfig {
   grau               String?
   /// Semestre do curso (número inteiro positivo).
   semester           Int?
+  /// Grade curricular: URL https ou arquivo no storage (qualquer tipo aceito no upload).
+  gradeUrl           String?
+  gradeFileName      String?
+  gradeMime          String?
   postSalePipelineId String?
   /// Canal comercial do curso (texto livre, ex.: WhatsApp, Indicação).
   /// Mantido como espelho da 1ª opção de `pricingOptions` (compat).
