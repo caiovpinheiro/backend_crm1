@@ -42,8 +42,9 @@ import { can, loadAuthzContext, requirePermission } from "@/lib/authz";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
   DEFAULT_INBOX_ALERT_CONFIG,
-  getEffectiveInboxAlertConfig,
+  getEffectiveInboxAlerts,
   type InboxAlertConfig,
+  type InboxTabAudience,
 } from "@/lib/inbox-alert-config";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -121,6 +122,8 @@ export type BootstrapOrganization = {
 export type BootstrapAlertConfig = {
   config: InboxAlertConfig;
   departmentIds: string[];
+  /** Público do aviso na aba (org); `null` = coluna "Aba" por tipo. */
+  tabAudience: InboxTabAudience | null;
 };
 
 /** Mesmo shape de `GET /api/agents/:id/status` (fallback OFFLINE incluso). */
@@ -299,19 +302,19 @@ async function loadOrganization(
 async function loadAlertConfig(user: MeBootstrapUser): Promise<BootstrapAlertConfig> {
   const organizationId = user.organizationId;
   if (!organizationId) {
-    return { config: DEFAULT_INBOX_ALERT_CONFIG, departmentIds: [] };
+    return { config: DEFAULT_INBOX_ALERT_CONFIG, departmentIds: [], tabAudience: null };
   }
   const rows = await prisma.departmentMember.findMany({
     where: { userId: user.id, organizationId },
     select: { departmentId: true },
   });
   const departmentIds = rows.map((r) => r.departmentId);
-  const config = await getEffectiveInboxAlertConfig({
+  const { config, tabAudience } = await getEffectiveInboxAlerts({
     organizationId,
     userId: user.id,
     memberDepartmentIds: departmentIds,
   });
-  return { config, departmentIds };
+  return { config, departmentIds, tabAudience };
 }
 
 async function loadAgentStatus(userId: string): Promise<BootstrapAgentStatus> {

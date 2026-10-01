@@ -26,7 +26,7 @@ vi.mock("@/lib/authz", () => ({
 vi.mock("@/lib/authz/resource-policy", () => ({ requirePermissionForUser: vi.fn() }));
 vi.mock("@/lib/inbox-alert-config", () => ({
   DEFAULT_INBOX_ALERT_CONFIG: {},
-  getEffectiveInboxAlertConfig: vi.fn(),
+  getEffectiveInboxAlerts: vi.fn(),
 }));
 vi.mock("@/services/email-accounts", () => ({
   resolveEmailAccess: vi.fn(),

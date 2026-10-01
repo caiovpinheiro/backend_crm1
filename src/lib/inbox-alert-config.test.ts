@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_INBOX_ALERT_CONFIG,
   parseInboxAlertConfig,
+  parseInboxTabAudience,
   resolveInboxAlertConfig,
   type InboxAlertConfig,
   type OrgInboxAlertConfigs,
@@ -25,6 +26,21 @@ const configs = (
 ): OrgInboxAlertConfigs => ({
   departments: new Map(Object.entries(departments)),
   users: new Map(Object.entries(users)),
+  tabAudience: null,
+});
+
+describe("parseInboxTabAudience", () => {
+  it("aceita owner / department / all", () => {
+    expect(parseInboxTabAudience("owner")).toBe("owner");
+    expect(parseInboxTabAudience("department")).toBe("department");
+    expect(parseInboxTabAudience("all")).toBe("all");
+  });
+
+  it("vazio ou desconhecido → null (vale a coluna Aba por tipo)", () => {
+    expect(parseInboxTabAudience(null)).toBeNull();
+    expect(parseInboxTabAudience("")).toBeNull();
+    expect(parseInboxTabAudience("todos")).toBeNull();
+  });
 });
 
 describe("resolveInboxAlertConfig", () => {
