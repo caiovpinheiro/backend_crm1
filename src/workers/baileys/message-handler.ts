@@ -31,6 +31,7 @@ import {
 } from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
+import { noteContactActivity } from "./contact-typing";
 import {
   appendWhatsAppGroupMessage,
   findWhatsAppGroupByJid,
@@ -704,6 +705,18 @@ export async function handleBaileysMessage(
     );
 
     if (!msgCreated) return;
+
+    // "digitando…" do contato: mensagem nova numa conversa aberta assina
+    // (ou renova) a presença deste JID. Só memória + 1 nó no socket; a
+    // política (TTL, teto, ritmo) está em `contact-typing.ts`.
+    noteContactActivity(channelId, {
+      jid: rawJid,
+      resolvedJid: jid,
+      organizationId: channelOwner.organizationId,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      conversationStatus: conversation.status,
+    });
 
     const inboundAt = new Date();
     await prisma.conversation.update({
