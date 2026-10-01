@@ -236,8 +236,15 @@ function createProbe() {
     unlink(...keys: string[]) {
       return this.del(...keys);
     }
-    scan() {
-      return track("redis", "SCAN", [], () => ["0", [] as string[]]);
+    scan(_cursor: string, _match: string, pattern: string) {
+      return track("redis", `SCAN ${pattern}`, [pattern], () => {
+        const body = pattern
+          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+          .replace(/\*/g, ".*")
+          .replace(/\?/g, ".");
+        const re = new RegExp(`^${body}$`);
+        return ["0", [...redisStore.keys()].filter((k) => re.test(k))];
+      });
     }
     eval(_script: string, _n: number, key: string, token: string) {
       return track("redis", `EVAL ${key}`, [key], () => {

@@ -309,4 +309,10 @@ export const INBOX_SCHEMA: FakeDbSchema = {
   activityEvent: {
     actorUser: { kind: "one", table: "user", localKey: "actorUserId" },
   },
+  whatsappFlowDefinition: {
+    screens: { kind: "many", table: "whatsappFlowScreen", foreignKey: "flowId" },
+  },
+  whatsappFlowScreen: {
+    fields: { kind: "many", table: "whatsappFlowField", foreignKey: "screenId" },
+  },
 };

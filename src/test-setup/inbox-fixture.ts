@@ -48,6 +48,8 @@ export const SCOPED_FIXTURE_MODELS: ReadonlySet<string> = new Set([
   "userRoleAssignment",
   "role",
   "activityEvent",
+  "whatsAppTemplateConfig",
+  "whatsappFlowDefinition",
 ]);
 
 export const SCOPE_GRANTS_KEY = "permissions.scope.grants.v1";
