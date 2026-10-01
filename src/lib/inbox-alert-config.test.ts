@@ -15,6 +15,7 @@ const off = { sound: false, toast: false, native: false, tab: false };
 const cfg = (over: Partial<InboxAlertConfig>): InboxAlertConfig => ({
   mine: off,
   queue: off,
+  ai: off,
   others: off,
   ...over,
 });
@@ -50,6 +51,22 @@ describe("resolveInboxAlertConfig", () => {
     expect(resolveInboxAlertConfig(configs({ a }), "u1", ["a", "sem_config"])).toEqual(a);
   });
 
+  it("config gravada antes do tipo ai: ai vale o padrão (não avisa)", () => {
+    const old = JSON.stringify({ mine: off, queue: off, others: { ...off, tab: true } });
+    expect(parseInboxAlertConfig(old)?.ai).toEqual(off);
+  });
+
+  it("push: conversa com a IA só vai para quem ligou Windows em ai", () => {
+    const withAi = cfg({ ai: { ...off, native: true } });
+    const out = inboxPushCandidates({
+      conversation: { assignedToId: "ia", assignedToType: "AI", departmentId: "d1" },
+      userIds: ["u1", "u2"],
+      departmentsByUser: new Map(),
+      configs: configs({}, { u1: withAi, u2: cfg({ others: { ...off, native: true } }) }),
+    });
+    expect(out).toEqual([{ userId: "u1", needsVisibility: true }]);
+  });
+
   it("JSON inválido é ignorado", () => {
     expect(parseInboxAlertConfig("{")).toBeNull();
     expect(parseInboxAlertConfig(JSON.stringify({ mine: off }))).toBeNull();
@@ -71,7 +88,7 @@ describe("push: tipo e candidatos", () => {
     expect(inboxAlertKindFor(conv({ assignedToId: "u2" }), "u1", ["d1"])).toBe("others");
     expect(
       inboxAlertKindFor(conv({ assignedToId: "ia", assignedToType: "AI" }), "u1", ["d1"]),
-    ).toBe("others");
+    ).toBe("ai");
   });
 
   it("padrão: push só para o responsável", () => {

@@ -4,7 +4,7 @@
  * com o mesmo público do alerta in-page.
  *
  * - `mine`: responsável da conversa (sempre pode vê-la).
- * - `queue` / `others`: além da config, passa pelo mesmo gate de
+ * - `queue` / `ai` / `others`: além da config, passa pelo mesmo gate de
  *   visibilidade do card do SSE — ninguém recebe push de conversa que não
  *   pode listar.
  *
@@ -31,8 +31,8 @@ export function inboxAlertKindFor(
 ): InboxAlertKind {
   if (conversation.assignedToId && conversation.assignedToId === userId) return "mine";
   const isAi = String(conversation.assignedToType ?? "").toUpperCase() === "AI";
+  if (isAi) return "ai";
   if (
-    !isAi &&
     !conversation.assignedToId &&
     conversation.departmentId &&
     memberDepartmentIds.includes(conversation.departmentId)

@@ -9,6 +9,7 @@ import {
   inboxAlertUserKey,
   invalidateOrgInboxAlertConfigs,
   loadOrgInboxAlertConfigs,
+  withInboxAlertDefaults,
 } from "@/lib/inbox-alert-config";
 import { deleteOrgSetting, setOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -98,7 +99,8 @@ export async function PUT(req: Request) {
     if (!parsed.success) {
       return NextResponse.json({ message: "Dados inválidos." }, { status: 400 });
     }
-    const { scope, id, config } = parsed.data;
+    const { scope, id } = parsed.data;
+    const config = parsed.data.config ? withInboxAlertDefaults(parsed.data.config) : null;
 
     // O alvo tem que ser da org (a chave leva o id cru).
     const exists =

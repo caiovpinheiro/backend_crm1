@@ -5,7 +5,9 @@
  * Tipos de conversa (para quem recebe):
  *   - `mine`   — atribuída ao usuário;
  *   - `queue`  — sem responsável, num departamento de que ele é membro;
- *   - `others` — qualquer outra que ele pode ver (outro agente, fila da IA).
+ *   - `ai`     — atendida por um agente de IA (padrão: não avisa);
+ *   - `others` — qualquer outra que ele pode ver (outro agente, fila de
+ *                outro departamento, sem departamento).
  *
  * Canais por tipo: `sound` (bip), `toast` (in-page), `native` (notificação
  * do sistema — a da página com a aba oculta E o Web Push/FCM do servidor)
@@ -25,7 +27,7 @@ import { z } from "zod";
 import { cache } from "@/lib/cache";
 import { prismaBase } from "@/lib/prisma-base";
 
-export const INBOX_ALERT_KINDS = ["mine", "queue", "others"] as const;
+export const INBOX_ALERT_KINDS = ["mine", "queue", "ai", "others"] as const;
 export type InboxAlertKind = (typeof INBOX_ALERT_KINDS)[number];
 
 export const INBOX_ALERT_CHANNELS = ["sound", "toast", "native", "tab"] as const;
@@ -37,6 +39,7 @@ export type InboxAlertConfig = Record<InboxAlertKind, InboxAlertChannels>;
 export const DEFAULT_INBOX_ALERT_CONFIG: InboxAlertConfig = {
   mine: { sound: true, toast: true, native: true, tab: true },
   queue: { sound: false, toast: true, native: false, tab: false },
+  ai: { sound: false, toast: false, native: false, tab: false },
   others: { sound: false, toast: false, native: false, tab: false },
 };
 
@@ -47,11 +50,22 @@ const channelsSchema = z.object({
   tab: z.boolean(),
 });
 
+/**
+ * `ai` é opcional: configs gravadas antes do tipo existir não o têm — sem
+ * ele, vale o padrão (não avisa), igual ao comportamento de antes.
+ */
 export const inboxAlertConfigSchema = z.object({
   mine: channelsSchema,
   queue: channelsSchema,
+  ai: channelsSchema.optional(),
   others: channelsSchema,
 });
+
+export function withInboxAlertDefaults(
+  cfg: z.infer<typeof inboxAlertConfigSchema>,
+): InboxAlertConfig {
+  return { ...cfg, ai: cfg.ai ?? { ...DEFAULT_INBOX_ALERT_CONFIG.ai } };
+}
 
 export const INBOX_ALERT_KEY_PREFIX = "inboxAlerts.";
 export const inboxAlertDepartmentKey = (id: string) =>
@@ -62,7 +76,7 @@ export function parseInboxAlertConfig(raw: string | null | undefined): InboxAler
   if (!raw) return null;
   try {
     const parsed = inboxAlertConfigSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
+    return parsed.success ? withInboxAlertDefaults(parsed.data) : null;
   } catch {
     return null;
   }
