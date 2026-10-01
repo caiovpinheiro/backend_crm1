@@ -1,11 +1,10 @@
-import { createHash } from "crypto";
 import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
 import {
-  INBOX_TAB_COUNTS_FP_LENGTH,
+  inboxTabCountsFingerprint,
   inboxTabCountsHistKey,
   inboxTabCountsKey,
   scheduleTabCountsInvalidation,
@@ -2030,20 +2029,17 @@ function inboxTabCountsScopeFp(args: {
   collapseByContact: boolean;
 }): string | null {
   try {
-    return createHash("sha1")
-      .update(
-        JSON.stringify({
-          k: 11,
-          v: args.visibilityWhere ?? null,
-          m: args.todosMemberCategoryTabs ?? null,
-          c: args.allowedChannelIds ?? null,
-          f: args.filterConditions ?? [],
-          s: args.search?.trim() || null,
-          g: args.collapseByContact,
-        }),
-      )
-      .digest("hex")
-      .slice(0, INBOX_TAB_COUNTS_FP_LENGTH);
+    // `Date` do escopo (ex.: corte da aba Automação) entra arredondado —
+    // ver `inboxTabCountsFingerprint`.
+    return inboxTabCountsFingerprint({
+      k: 12,
+      v: args.visibilityWhere ?? null,
+      m: args.todosMemberCategoryTabs ?? null,
+      c: args.allowedChannelIds ?? null,
+      f: args.filterConditions ?? [],
+      s: args.search?.trim() || null,
+      g: args.collapseByContact,
+    });
   } catch {
     return null;
   }
