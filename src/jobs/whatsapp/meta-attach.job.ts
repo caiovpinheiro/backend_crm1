@@ -29,6 +29,10 @@ import {
 } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("jobs.whatsapp.meta-attach");
 
 export type MetaAttachResult = {
   sendStatus: "sent" | "failed";
@@ -265,8 +269,9 @@ export async function processMetaAttach(
 
   if (kind === "audio") {
     const inputExt = guessInputExt(payload.mime);
-    console.log(
-      `[meta-attach] Convertendo audio ${payload.mime} (.${inputExt}) para formato aceito pela Meta`,
+    log.info(
+      { mime: payload.mime, inputExt },
+      "[meta-attach] Convertendo audio para formato aceito pela Meta",
     );
     const prepared = await prepareWhatsAppAudio(
       storeBuffer,
@@ -278,8 +283,9 @@ export async function processMetaAttach(
     }
     const blocked = metaCloudAudioUploadBlocked(prepared.payload);
     if (blocked) {
-      console.warn(
-        `[meta-attach] Áudio não enviável à Meta (${prepared.payload.failReason ?? prepared.payload.mime})`,
+      log.warn(
+        { failReason: prepared.payload.failReason ?? prepared.payload.mime },
+        "[meta-attach] Áudio não enviável à Meta",
       );
       return markFailed(payload, blocked, {
         messageType: "audio",
@@ -292,8 +298,15 @@ export async function processMetaAttach(
     uploadMime = prepared.payload.mime;
     uploadName = prepared.payload.fileName;
     storeBuffer = prepared.payload.buffer;
-    console.log(
-      `[meta-attach] Preparo OK (${audioDelivery}), ${originalBytes} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+    log.info(
+      {
+        audioDelivery,
+        originalBytes,
+        storedBytes: storeBuffer.length,
+        mime: uploadMime,
+        voice: sendAsVoice,
+      },
+      "[meta-attach] Preparo OK",
     );
   }
 
@@ -346,12 +359,22 @@ export async function processMetaAttach(
       recipient,
     );
     externalId = result.messages?.[0]?.id ?? null;
-    console.log(
-      `[meta-attach] Enviado ${mediaType} (${to ?? "—"}/${recipient ?? "—"}) | channel=${channel?.id ?? "ENV"} | mime=${uploadMime} | mediaId=${mediaId} | wamid=${externalId} | voice=${sendAsVoice}`,
+    log.info(
+      {
+        mediaType,
+        to: maskPhone(to),
+        recipient: recipient ?? null,
+        channel: channel?.id ?? "ENV",
+        mime: uploadMime,
+        mediaId,
+        wamid: externalId,
+        voice: sendAsVoice,
+      },
+      "[meta-attach] Enviado",
     );
   } catch (err) {
     const errMsg = formatMetaSendError(err);
-    console.error("[meta-attach] Falha ao enviar para Meta:", errMsg);
+    log.error({ err: errMsg }, "[meta-attach] Falha ao enviar para Meta");
     metaSendError = errMsg;
   }
 
@@ -390,7 +413,7 @@ export async function processMetaAttach(
   fireTrigger("message_sent", {
     contactId: msg.conversation.contactId,
     data: { channel: "WhatsApp", content: payload.caption || "[Anexo]" },
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
   return {
     sendStatus: "sent",
