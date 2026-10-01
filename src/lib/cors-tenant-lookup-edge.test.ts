@@ -112,6 +112,47 @@ describe("lookupTenantOriginFromEdge", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("origem confirmada há pouco segue confiável se a consulta falhar; um não explícito derruba na hora", async () => {
+    fetchMock.mockResolvedValueOnce(answer(true));
+    expect(await lookupTenantOriginFromEdge("eduit")).toBe(true);
+
+    vi.advanceTimersByTime(61_000);
+    fetchMock.mockRejectedValueOnce(new Error("timeout"));
+    expect(await lookupTenantOriginFromEdge("eduit")).toBe(true);
+
+    vi.advanceTimersByTime(3_001);
+    fetchMock.mockResolvedValueOnce(answer(false));
+    expect(await lookupTenantOriginFromEdge("eduit")).toBe(false);
+
+    // Passada a tolerância (10 min sem confirmação), falha volta a negar.
+    resetCorsTenantLookupForTests();
+    fetchMock.mockResolvedValueOnce(answer(true));
+    expect(await lookupTenantOriginFromEdge("acme")).toBe(true);
+    vi.advanceTimersByTime(10 * 60_000 + 1);
+    fetchMock.mockRejectedValueOnce(new Error("timeout"));
+    expect(await lookupTenantOriginFromEdge("acme")).toBe(false);
+  });
+
+  it("flood de subdomínios aleatórios: teto de consultas por segundo e positivos preservados", async () => {
+    fetchMock.mockImplementation(async (input) =>
+      answer(new URL(String(input)).searchParams.get("slug") === "eduit"),
+    );
+    expect(await lookupTenantOriginFromEdge("eduit")).toBe(true);
+
+    for (let i = 0; i < 5_000; i += 1) {
+      expect(await lookupTenantOriginFromEdge(`flood-${i}`)).toBe(false);
+    }
+    // 1 (eduit) + no máximo o teto de 40 consultas no mesmo segundo.
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(41);
+    expect(await lookupTenantOriginFromEdge("eduit")).toBe(true);
+
+    // Janela seguinte: volta a consultar.
+    vi.advanceTimersByTime(1_001);
+    const before = fetchMock.mock.calls.length;
+    await lookupTenantOriginFromEdge("flood-novo");
+    expect(fetchMock.mock.calls.length).toBe(before + 1);
+  });
+
   it("resposta sem `trusted: true` literal é negativa", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ trusted: "true" }), { status: 200 }),

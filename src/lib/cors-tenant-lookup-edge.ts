@@ -11,9 +11,16 @@
  *    somando o cache da rota);
  *  - não confiável: 10 s (org nova fica confiável logo após verificar o
  *    e-mail; a rota interna invalida o cache dela na hora);
- *  - erro (rota fora, timeout): origem negada, nova tentativa em 3 s.
+ *  - erro (rota fora, timeout): origem negada, nova tentativa em 3 s —
+ *    exceto se a origem foi confirmada há menos de 10 min: aí segue
+ *    confiável (uma oscilação do banco não derruba o CORS de quem já
+ *    estava usando). Um "não" explícito da rota vale na hora.
  *
- * Chamadas simultâneas do mesmo slug compartilham uma consulta só.
+ * Chamadas simultâneas do mesmo slug compartilham uma consulta só. O
+ * `Origin` vem do cliente: para um flood de subdomínios aleatórios não
+ * virar uma consulta ao banco por request, há um teto de consultas por
+ * segundo (acima dele a origem desconhecida é negada sem consultar) e os
+ * negativos ficam num mapa separado, que não expulsa os positivos.
  *
  * A rota interna exige o header `x-crm-internal-key`, derivado do
  * `AUTH_SECRET` (HMAC) — sem segredo configurado não há consulta e toda
@@ -29,12 +36,19 @@ const KEY_CONTEXT = "crm:cors-tenant-origin-lookup:v1";
 const TRUSTED_TTL_MS = 60_000;
 const UNTRUSTED_TTL_MS = 10_000;
 const ERROR_TTL_MS = 3_000;
+const STALE_TRUST_MS = 10 * 60_000;
 const LOOKUP_TIMEOUT_MS = 2_000;
-const MAX_ENTRIES = 2_000;
+const MAX_TRUSTED_ENTRIES = 5_000;
+const MAX_UNTRUSTED_ENTRIES = 2_000;
+const MAX_LOOKUPS_PER_SECOND = 40;
 
-type Entry = { trusted: boolean; expiresAt: number };
+type TrustedEntry = { expiresAt: number; confirmedAt: number };
 
-const memory = new Map<string, Entry>();
+/** slug → confirmado como confiável. */
+const trustedMemory = new Map<string, TrustedEntry>();
+/** slug → até quando vale o "não confiável" (ou o erro). */
+const untrustedMemory = new Map<string, number>();
+let lookupWindow = { startedAt: 0, count: 0 };
 const inFlight = new Map<string, Promise<boolean>>();
 let keyMemo: { secret: string; key: string } | null = null;
 let lastFailureLogAt = 0;
@@ -90,9 +104,50 @@ function lookupBaseUrl(): string {
   return `http://127.0.0.1:${port}`;
 }
 
-function remember(slug: string, trusted: boolean, ttlMs: number): void {
-  if (!memory.has(slug) && memory.size >= MAX_ENTRIES) memory.clear();
-  memory.set(slug, { trusted, expiresAt: Date.now() + ttlMs });
+function setUntrustedUntil(slug: string, until: number): void {
+  trustedMemory.delete(slug);
+  if (!untrustedMemory.has(slug) && untrustedMemory.size >= MAX_UNTRUSTED_ENTRIES) {
+    untrustedMemory.clear();
+  }
+  untrustedMemory.set(slug, until);
+}
+
+function rememberTrusted(slug: string): void {
+  const now = Date.now();
+  if (!trustedMemory.has(slug) && trustedMemory.size >= MAX_TRUSTED_ENTRIES) {
+    trustedMemory.clear();
+  }
+  trustedMemory.set(slug, { expiresAt: now + TRUSTED_TTL_MS, confirmedAt: now });
+  untrustedMemory.delete(slug);
+}
+
+function rememberUntrusted(slug: string): void {
+  setUntrustedUntil(slug, Date.now() + UNTRUSTED_TTL_MS);
+}
+
+/**
+ * Consulta sem resposta: nega por `ERROR_TTL_MS`, salvo origem confirmada
+ * há pouco, que segue confiável pelo mesmo intervalo.
+ */
+function rememberFailure(slug: string): boolean {
+  const now = Date.now();
+  const known = trustedMemory.get(slug);
+  if (known && now - known.confirmedAt < STALE_TRUST_MS) {
+    known.expiresAt = now + ERROR_TTL_MS;
+    return true;
+  }
+  setUntrustedUntil(slug, now + ERROR_TTL_MS);
+  return false;
+}
+
+function takeLookupBudget(): boolean {
+  const now = Date.now();
+  if (now - lookupWindow.startedAt >= 1_000) {
+    lookupWindow = { startedAt: now, count: 0 };
+  }
+  if (lookupWindow.count >= MAX_LOOKUPS_PER_SECOND) return false;
+  lookupWindow.count += 1;
+  return true;
 }
 
 async function fetchTrusted(slug: string): Promise<boolean> {
@@ -100,8 +155,7 @@ async function fetchTrusted(slug: string): Promise<boolean> {
     const key = await deriveCorsLookupKey();
     if (!key) {
       warnLookupFailure("AUTH_SECRET ausente");
-      remember(slug, false, ERROR_TTL_MS);
-      return false;
+      return rememberFailure(slug);
     }
     const res = await fetch(
       `${lookupBaseUrl()}${CORS_LOOKUP_PATH}?slug=${encodeURIComponent(slug)}`,
@@ -114,26 +168,38 @@ async function fetchTrusted(slug: string): Promise<boolean> {
     );
     if (!res.ok) {
       warnLookupFailure(`HTTP ${res.status}`);
-      remember(slug, false, ERROR_TTL_MS);
-      return false;
+      return rememberFailure(slug);
     }
     const body = (await res.json()) as { trusted?: unknown };
-    const trusted = body.trusted === true;
-    remember(slug, trusted, trusted ? TRUSTED_TTL_MS : UNTRUSTED_TTL_MS);
-    return trusted;
+    if (body.trusted === true) {
+      rememberTrusted(slug);
+      return true;
+    }
+    rememberUntrusted(slug);
+    return false;
   } catch (err) {
     warnLookupFailure(err instanceof Error ? err.name : "erro");
-    remember(slug, false, ERROR_TTL_MS);
-    return false;
+    return rememberFailure(slug);
   }
 }
 
 export const lookupTenantOriginFromEdge: TenantOriginLookup = (slug) => {
-  const hit = memory.get(slug);
-  if (hit && hit.expiresAt > Date.now()) return Promise.resolve(hit.trusted);
+  const now = Date.now();
+  const trusted = trustedMemory.get(slug);
+  if (trusted && trusted.expiresAt > now) return Promise.resolve(true);
+  const untrustedUntil = untrustedMemory.get(slug);
+  if (untrustedUntil !== undefined && untrustedUntil > now) return Promise.resolve(false);
 
   const pending = inFlight.get(slug);
   if (pending) return pending;
+
+  // Acima do teto: não consulta. Não grava negativo (o mapa não deve encher
+  // com slugs de flood); origem confirmada há pouco segue valendo.
+  if (!takeLookupBudget()) {
+    return Promise.resolve(
+      Boolean(trusted && now - trusted.confirmedAt < STALE_TRUST_MS),
+    );
+  }
 
   const p = fetchTrusted(slug).finally(() => {
     inFlight.delete(slug);
@@ -143,7 +209,9 @@ export const lookupTenantOriginFromEdge: TenantOriginLookup = (slug) => {
 };
 
 export function resetCorsTenantLookupForTests(): void {
-  memory.clear();
+  trustedMemory.clear();
+  untrustedMemory.clear();
+  lookupWindow = { startedAt: 0, count: 0 };
   inFlight.clear();
   keyMemo = null;
   lastFailureLogAt = 0;
