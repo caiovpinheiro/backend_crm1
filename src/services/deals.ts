@@ -25,6 +25,16 @@ import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallb
 import { cache } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
+  boardColumnKeysetWhere,
+  boardColumnOrderBy,
+  encodeBoardColumnCursor,
+  normalizeBoardCursorSort,
+  parseBoardColumnCursor,
+  type BoardColumnCursor,
+  type BoardCursorDirection,
+  type BoardCursorSort,
+} from "@/services/board-column-cursor";
+import {
   buildDealSearchOr,
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
@@ -1910,11 +1920,13 @@ function buildBoardDealOrderBy(
     const dir: BoardSortDirection = sortDirection === "desc" ? "desc" : "asc";
     // `position` como tiebreaker mantém ordem estável quando vários
     // deals têm o mesmo timestamp (importações em lote, seeds).
-    return [{ createdAt: dir }, { position: "asc" }];
+    // `id` fecha a ordem total (igual ao `boardRankOrderBySql`): sem ele,
+    // empate em `position` deixava o corte da página indefinido.
+    return [{ createdAt: dir }, { position: "asc" }, { id: "asc" }];
   }
   // `lastInteraction` não cai aqui — segue por caminho próprio em
   // `loadBoardStagesByLastInteraction`. Fallback estável.
-  return [{ position: "asc" }];
+  return [{ position: "asc" }, { id: "asc" }];
 }
 
 /** Campos do Deal incluídos em cada card do board. Reusado pelo caminho
@@ -2227,7 +2239,13 @@ export function translateDealWhereToSql(
   return sqlAndAll(parts);
 }
 
-type BoardRankedRow = { id: string; stageId: string; rn: number };
+type BoardRankedRow = {
+  id: string;
+  stageId: string;
+  rn: number;
+  /** Só no ranking por `lastInteraction` (chave do cursor da etapa). */
+  last_at?: Date | string | null;
+};
 
 /** `ORDER BY` da janela por etapa; `id` como último desempate estável. */
 function boardRankOrderBySql(
@@ -2324,6 +2342,7 @@ export function buildLastInteractionRankedSql(args: {
       SELECT
         c.id,
         c."stageId",
+        li.last_at,
         ROW_NUMBER() OVER (
           PARTITION BY c."stageId"
           ORDER BY li.last_at ${dir} NULLS LAST, c."position" ASC, c.id ASC
@@ -2337,7 +2356,7 @@ export function buildLastInteractionRankedSql(args: {
       ) li ON TRUE
       WHERE c.scan_rn <= ${args.scanCap}
     )
-    SELECT r.id, r."stageId", r.rn
+    SELECT r.id, r."stageId", r.rn, r.last_at
     FROM ranked r
     WHERE r.rn <= ${args.maxPerStage}
     ORDER BY r."stageId", r.rn
@@ -2476,6 +2495,12 @@ async function loadBoardStagesByLastInteraction(
   perStage: number,
   offsetByStage: Record<string, number>,
   direction: BoardSortDirection,
+  /**
+   * Saída opcional: `last_at` de cada card ranqueado pelo SQL (insumo do
+   * cursor da etapa). O fallback em memória não preenche — sem cursor,
+   * o cliente pagina pelo `offsetByStage` antigo.
+   */
+  lastAtOut?: Map<string, Date | null>,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
   const stagesRaw = await prisma.stage.findMany({
@@ -2498,6 +2523,12 @@ async function loadBoardStagesByLastInteraction(
         maxPerStage,
       }),
     );
+    if (lastAtOut) {
+      for (const row of rows) {
+        if (row.last_at === undefined) continue;
+        lastAtOut.set(row.id, row.last_at === null ? null : new Date(row.last_at));
+      }
+    }
     return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
   }
 
@@ -2709,15 +2740,17 @@ export async function getBoardData(
   );
 }
 
-async function computeBoardData(
-  pipelineId: string,
-  visibilityWhere?: Prisma.DealWhereInput | null,
-  statusFilter?: DealStatus | "ALL",
-  advancedFilters?: AdvancedDealFilters,
-  limitOptions?: BoardLimitOptions,
-) {
-  const now = new Date();
-
+/**
+ * `where` dos cards do board: status (padrão `OPEN`), visibilidade do
+ * usuário e filtros avançados, sempre em AND. O board inteiro e o
+ * “Carregar mais” por cursor usam ESTE where — a visibilidade não tem como
+ * divergir entre a 1ª carga e as páginas seguintes.
+ */
+async function buildBoardDealWhere(
+  visibilityWhere: Prisma.DealWhereInput | null | undefined,
+  statusFilter: DealStatus | "ALL" | undefined,
+  advancedFilters: AdvancedDealFilters | undefined,
+): Promise<Prisma.DealWhereInput> {
   const conditions: Prisma.DealWhereInput[] = [];
 
   if (statusFilter && statusFilter !== "ALL") {
@@ -2736,8 +2769,27 @@ async function computeBoardData(
     for (const c of advConditions) conditions.push(c);
   }
 
-  const dealWhere: Prisma.DealWhereInput =
-    conditions.length === 0 ? {} : conditions.length === 1 ? conditions[0] : { AND: conditions };
+  return conditions.length === 0
+    ? {}
+    : conditions.length === 1
+      ? (conditions[0] as Prisma.DealWhereInput)
+      : { AND: conditions };
+}
+
+async function computeBoardData(
+  pipelineId: string,
+  visibilityWhere?: Prisma.DealWhereInput | null,
+  statusFilter?: DealStatus | "ALL",
+  advancedFilters?: AdvancedDealFilters,
+  limitOptions?: BoardLimitOptions,
+) {
+  const now = new Date();
+
+  const dealWhere = await buildBoardDealWhere(
+    visibilityWhere,
+    statusFilter,
+    advancedFilters,
+  );
 
   const perStage = Math.min(
     MAX_BOARD_COLUMN_LIMIT,
@@ -2747,6 +2799,10 @@ async function computeBoardData(
   const sortField = limitOptions?.sortField;
   const sortDirection: BoardSortDirection =
     limitOptions?.sortDirection === "desc" ? "desc" : "asc";
+  const cursorSort = normalizeBoardCursorSort(sortField, sortDirection);
+  // `lastInteraction`: a chave de ordenação (`last_at`) só existe no SQL;
+  // o caminho ranqueado devolve por card para montar o cursor da etapa.
+  const lastAtByDealId = new Map<string, Date | null>();
   // Construído uma vez e reusado nas 2 queries de deals (stages.deals
   // + branch de "Carregar mais"). Default cai em `position asc` =
   // comportamento histórico.
@@ -2781,6 +2837,7 @@ async function computeBoardData(
       perStage,
       offsetByStage,
       sortDirection,
+      lastAtByDealId,
     );
   } else {
     // 1) Etapas leves; 2) cards de TODAS as colunas numa consulta só
@@ -2815,6 +2872,76 @@ async function computeBoardData(
         );
   }
 
+  // ⚡ [jul/26] Antes estas etapas eram AWAITADAS em série (totais →
+  // produtos → última mensagem → métricas → avatares): a latência do board
+  // virava a SOMA de ~5 round-trips ao Postgres. São independentes entre
+  // si, então rodam em paralelo — `loadBoardCardEnrichment` dispara as
+  // consultas dos cards no mesmo tick; `metricsPromise`/`totalsPromise` já
+  // voam desde antes do findMany de stages.
+  const [totalsGroups, metrics, enrichCard] = await Promise.all([
+    totalsPromise,
+    metricsPromise,
+    loadBoardCardEnrichment(stages, now),
+  ]);
+
+  const totalsByStage = new Map<string, number>();
+  for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
+
+  const metricsMap = new Map(metrics.map((m) => [m.stageId, m]));
+
+  // Stage `isIncoming` (Leads de entrada) é a fase de captura e DEVE
+  // ficar sempre visível. Antes filtrávamos por `stage.deals.length > 0`,
+  // mas esse array é a slice PÓS-filtro (status=OPEN padrão, visibility,
+  // filtros avançados). Qualquer filtro ativo escondia a coluna inteira
+  // mesmo havendo leads no banco — bug reportado: "existem leads em
+  // leads de entrada, mas a fase do funil não aparece".
+  return stages
+    .map((stage) => {
+      const metric = metricsMap.get(stage.id);
+      const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
+      // `extra` agora representa "quantos cards adicionais foram pedidos".
+      // O total carregado é o tamanho real do array.
+      const loadedCount = stage.deals.length;
+      const hasMore = loadedCount < totalCount;
+      // Cursor depois do último card carregado: o “Carregar mais” pede só os
+      // próximos N desta etapa (`getBoardColumnPages`). `null` = nada a
+      // carregar, ou ordenação sem cursor neste caminho (cliente usa o
+      // `offsetByStage` antigo).
+      const lastDeal = stage.deals[stage.deals.length - 1];
+      const nextCursor =
+        hasMore && lastDeal
+          ? boardCursorAfterDeal(cursorSort.sort, cursorSort.direction, lastDeal, lastAtByDealId)
+          : null;
+      return {
+        ...stage,
+        conversionRate: metric?.conversionRate ?? 0,
+        avgDaysInStage: metric?.avgDaysInStage ?? 0,
+        totalCount,
+        loadedCount,
+        hasMore,
+        nextCursor,
+        deals: stage.deals.map((deal) => enrichCard(stage, deal)),
+      };
+    });
+}
+
+/**
+ * Enriquecimento dos cards do board: produto, última mensagem (qualquer
+ * lado e do cliente), não lidas, canal, prévia “N aguardando” e avatar.
+ *
+ * Recebe as etapas JÁ paginadas (só os cards que vão sair) e devolve a
+ * função que monta o card final. Usado pelo board inteiro
+ * (`computeBoardData`) e pelo “Carregar mais” por cursor
+ * (`getBoardColumnPages`) — o card tem o mesmo formato nos dois.
+ *
+ * As 3 consultas + avatar saem juntas (`Promise.all`); as promessas são
+ * criadas antes do primeiro `await`, então quem chama pode pôr esta função
+ * num `Promise.all` com outras consultas sem serializar nada.
+ */
+async function loadBoardCardEnrichment(
+  stages: readonly BoardStageWithDeals[],
+  now: Date,
+) {
   // IDs/contatos derivados das colunas já carregadas — insumo das
   // consultas de enriquecimento abaixo.
   const allDealIds = stages.flatMap((s) => s.deals.map((d) => d.id));
@@ -2985,21 +3112,15 @@ async function computeBoardData(
         `
       : Promise.resolve([]);
 
-  const [totalsGroups, dealProducts, convs, msgRows, metrics] =
-    await Promise.all([
-      totalsPromise,
-      productsPromise,
-      convsPromise,
-      msgsPromise,
-      metricsPromise,
-      // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
-      // homônimo quando o Contact não tem avatarUrl). Independe das demais;
-      // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
-      enrichContactsWithUserAvatarFallback(allContacts),
-    ]);
-
-  const totalsByStage = new Map<string, number>();
-  for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
+  const [dealProducts, convs, msgRows] = await Promise.all([
+    productsPromise,
+    convsPromise,
+    msgsPromise,
+    // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
+    // homônimo quando o Contact não tem avatarUrl). Independe das demais;
+    // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
+    enrichContactsWithUserAvatarFallback(allContacts),
+  ]);
 
   const productMap = new Map<string, string>();
   const productTypeMap = new Map<string, string>();
@@ -3097,96 +3218,357 @@ async function computeBoardData(
     });
   }
 
-  const metricsMap = new Map(metrics.map((m) => [m.stageId, m]));
+  return (
+    stage: Pick<BoardStageRaw, "rottingDays">,
+    deal: BoardStageWithDeals["deals"][number],
+  ) => {
+    const threshold = addDays(deal.updatedAt, stage.rottingDays);
+    const isRotting = now.getTime() > threshold.getTime();
+    const lastMsg = deal.contactId ? lastMsgMap.get(deal.contactId) : undefined;
+    const unread = deal.contactId
+      ? (unreadMap.get(deal.contactId) ?? 0)
+      : 0;
+    const awaitingRaw = deal.contactId
+      ? (awaitingByContact.get(deal.contactId) ?? [])
+      : [];
+    // Mais antigas → mais novas no tooltip (leitura cronológica).
+    // Quantidade = min(unread, cap); se unread=0 mas última é inbound,
+    // mantém só a última no preview (comportamento antigo).
+    const awaitingTake =
+      unread > 0
+        ? Math.min(unread, AWAITING_PREVIEW_CAP)
+        : lastMsg?.direction === "in"
+          ? 1
+          : 0;
+    const awaitingMessages =
+      awaitingTake > 0
+        ? awaitingRaw
+            .slice(0, awaitingTake)
+            .slice()
+            .reverse()
+            .map((m) => ({
+              content: m.content,
+              createdAt: m.createdAt,
+            }))
+        : [];
+    const tags = deal.tags?.map((t: { tag: { id: string; name: string; color: string } }) => t.tag) ?? [];
+    const pendingActivities = deal.activities?.length ?? 0;
+    const hasOverdueActivity = deal.activities?.some(
+      (a) => a.scheduledAt && new Date(a.scheduledAt).getTime() < now.getTime()
+    ) ?? false;
+    return {
+      ...deal,
+      activities: undefined,
+      isRotting,
+      productName: productMap.get(deal.id) ?? null,
+      productType: (productTypeMap.get(deal.id) as "PRODUCT" | "SERVICE") ?? null,
+      tags,
+      pendingActivities,
+      hasOverdueActivity,
+      unreadCount: unread,
+      lastMessage: lastMsg
+        ? {
+            id: lastMsg.id,
+            externalId: lastMsg.externalId,
+            content: lastMsg.content,
+            createdAt: lastMsg.createdAt,
+            direction: lastMsg.direction,
+            sendStatus: lastMsg.sendStatus,
+            sendError: lastMsg.sendError,
+          }
+        : null,
+      awaitingMessages,
+      lastInboundMessage: deal.contactId
+        ? lastInMap.get(deal.contactId) ?? null
+        : null,
+      channel: deal.contactId
+        ? channelMap.get(deal.contactId)?.channel ?? null
+        : null,
+    };
+  };
+}
 
-  // Stage `isIncoming` (Leads de entrada) é a fase de captura e DEVE
-  // ficar sempre visível. Antes filtrávamos por `stage.deals.length > 0`,
-  // mas esse array é a slice PÓS-filtro (status=OPEN padrão, visibility,
-  // filtros avançados). Qualquer filtro ativo escondia a coluna inteira
-  // mesmo havendo leads no banco — bug reportado: "existem leads em
-  // leads de entrada, mas a fase do funil não aparece".
-  return stages
-    .map((stage) => {
-      const metric = metricsMap.get(stage.id);
-      const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
-      // `extra` agora representa "quantos cards adicionais foram pedidos".
-      // O total carregado é o tamanho real do array.
-      const loadedCount = stage.deals.length;
-      const hasMore = loadedCount < totalCount;
-      return {
-        ...stage,
-        conversionRate: metric?.conversionRate ?? 0,
-        avgDaysInStage: metric?.avgDaysInStage ?? 0,
-        totalCount,
-        loadedCount,
-        hasMore,
-        deals: stage.deals.map((deal) => {
-          const threshold = addDays(deal.updatedAt, stage.rottingDays);
-          const isRotting = now.getTime() > threshold.getTime();
-          const lastMsg = deal.contactId ? lastMsgMap.get(deal.contactId) : undefined;
-          const unread = deal.contactId
-            ? (unreadMap.get(deal.contactId) ?? 0)
-            : 0;
-          const awaitingRaw = deal.contactId
-            ? (awaitingByContact.get(deal.contactId) ?? [])
-            : [];
-          // Mais antigas → mais novas no tooltip (leitura cronológica).
-          // Quantidade = min(unread, cap); se unread=0 mas última é inbound,
-          // mantém só a última no preview (comportamento antigo).
-          const awaitingTake =
-            unread > 0
-              ? Math.min(unread, AWAITING_PREVIEW_CAP)
-              : lastMsg?.direction === "in"
-                ? 1
-                : 0;
-          const awaitingMessages =
-            awaitingTake > 0
-              ? awaitingRaw
-                  .slice(0, awaitingTake)
-                  .slice()
-                  .reverse()
-                  .map((m) => ({
-                    content: m.content,
-                    createdAt: m.createdAt,
-                  }))
-              : [];
-          const tags = deal.tags?.map((t: { tag: { id: string; name: string; color: string } }) => t.tag) ?? [];
-          const pendingActivities = deal.activities?.length ?? 0;
-          const hasOverdueActivity = deal.activities?.some(
-            (a) => a.scheduledAt && new Date(a.scheduledAt).getTime() < now.getTime()
-          ) ?? false;
-          return {
-            ...deal,
-            activities: undefined,
-            isRotting,
-            productName: productMap.get(deal.id) ?? null,
-            productType: (productTypeMap.get(deal.id) as "PRODUCT" | "SERVICE") ?? null,
-            tags,
-            pendingActivities,
-            hasOverdueActivity,
-            unreadCount: unread,
-            lastMessage: lastMsg
-              ? {
-                  id: lastMsg.id,
-                  externalId: lastMsg.externalId,
-                  content: lastMsg.content,
-                  createdAt: lastMsg.createdAt,
-                  direction: lastMsg.direction,
-                  sendStatus: lastMsg.sendStatus,
-                  sendError: lastMsg.sendError,
-                }
-              : null,
-            awaitingMessages,
-            lastInboundMessage: deal.contactId
-              ? lastInMap.get(deal.contactId) ?? null
-              : null,
-            channel: deal.contactId
-              ? channelMap.get(deal.contactId)?.channel ?? null
-              : null,
-          };
-        }),
-      };
+// ---------------------------------------------------------------------------
+// "Carregar mais" de uma coluna por cursor (keyset) — P-14 / BD-17.
+//
+// Antes: cada clique refazia o board INTEIRO com `perStage + extra` na
+// coluna expandida (`offsetByStage`) e, como o offset entra na variante do
+// cache, criava uma chave nova por clique. Agora o cliente manda o
+// `nextCursor` da etapa e recebe só os próximos N cards dela — sem cache
+// (nada de chave por página) e com o MESMO where do board
+// (`buildBoardDealWhere`). O `offsetByStage` continua aceito no POST /board
+// para clientes antigos. Semântica e formato: `board-column-cursor.ts`.
+// ---------------------------------------------------------------------------
+
+/** Cards por página do "Carregar mais" quando o cliente não informa. */
+const DEFAULT_BOARD_COLUMN_PAGE = 20;
+/** Etapas por requisição (um funil tem dezenas de etapas, não centenas). */
+const MAX_BOARD_COLUMNS_PER_REQUEST = 60;
+
+export type BoardColumnPageErrorCode =
+  | "invalid_request"
+  | "invalid_cursor"
+  | "cursor_unsupported";
+
+/** Erro do cliente na paginação por cursor — a rota responde 400 com `code`. */
+export class BoardColumnPageError extends Error {
+  constructor(
+    readonly code: BoardColumnPageErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BoardColumnPageError";
+  }
+}
+
+export type BoardColumnPageRequest = {
+  stageId: string;
+  /** `nextCursor` da etapa (do board ou da página anterior). */
+  cursor: string;
+  /** Quantos cards devolver (padrão 20, teto `MAX_BOARD_COLUMN_LIMIT`). */
+  limit?: number;
+};
+
+function boardCursorAfterDeal(
+  sort: BoardCursorSort,
+  direction: BoardCursorDirection,
+  deal: { id: string; position: number; createdAt: Date },
+  lastAtByDealId: ReadonlyMap<string, Date | null>,
+): string | null {
+  if (sort === "lastInteraction") {
+    // Sem o `last_at` do SQL não há chave completa → sem cursor.
+    if (!lastAtByDealId.has(deal.id)) return null;
+    return encodeBoardColumnCursor({
+      sort,
+      direction,
+      position: deal.position,
+      id: deal.id,
+      lastAt: lastAtByDealId.get(deal.id) ?? null,
     });
+  }
+  return encodeBoardColumnCursor({
+    sort,
+    direction,
+    position: deal.position,
+    id: deal.id,
+    createdAt: sort === "createdAt" ? new Date(deal.createdAt) : undefined,
+  });
+}
+
+/**
+ * Página de UMA etapa em `lastInteraction`: mesmos candidatos do board (os
+ * `scanCap` deals mais recentemente mexidos da etapa), mesma ordem
+ * (`last_at <dir> NULLS LAST, position, id`) e só o que vem depois do
+ * cursor. Devolve `last_at` para montar o cursor seguinte.
+ */
+export function buildLastInteractionColumnPageSql(args: {
+  orgId: string;
+  stageId: string;
+  whereSql: Prisma.Sql;
+  direction: BoardSortDirection;
+  scanCap: number;
+  cursor: BoardColumnCursor;
+  take: number;
+}): Prisma.Sql {
+  const desc = args.direction === "desc";
+  const dir = desc ? Prisma.raw("DESC") : Prisma.raw("ASC");
+  const afterPosition = Prisma.sql`(r."position", r.id) > (${args.cursor.position}::double precision, ${args.cursor.id})`;
+  const lastAt = args.cursor.lastAt ?? null;
+  // NULLS LAST nas duas direções: depois de um card com `last_at` vêm os de
+  // `last_at` "pior", os empatados adiante na posição e todos os sem conversa;
+  // depois de um card sem conversa, só os sem conversa adiante na posição.
+  const keyset =
+    lastAt === null
+      ? Prisma.sql`(r.last_at IS NULL AND ${afterPosition})`
+      : desc
+        ? Prisma.sql`(r.last_at < ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`
+        : Prisma.sql`(r.last_at > ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`;
+  return Prisma.sql`
+    WITH candidates AS (
+      SELECT d.id, d."contactId", d."position"
+      FROM deals d
+      WHERE d."organizationId" = ${args.orgId}
+        AND d."stageId" = ${args.stageId}
+        AND (${args.whereSql})
+      ORDER BY d."updatedAt" DESC, d.id DESC
+      LIMIT ${args.scanCap}
+    ),
+    ranked AS (
+      SELECT c.id, c."position", li.last_at
+      FROM candidates c
+      LEFT JOIN LATERAL (
+        SELECT MAX(cv."updatedAt") AS last_at
+        FROM conversations cv
+        WHERE cv."organizationId" = ${args.orgId}
+          AND cv."contactId" = c."contactId"
+      ) li ON TRUE
+    )
+    SELECT r.id, r.last_at
+    FROM ranked r
+    WHERE ${keyset}
+    ORDER BY r.last_at ${dir} NULLS LAST, r."position" ASC, r.id ASC
+    LIMIT ${args.take}
+  `;
+}
+
+/**
+ * Próximos cards de uma ou mais etapas, a partir do cursor de cada uma.
+ *
+ * Custo de uma etapa: 1 consulta das etapas pedidas + 1 página de deals
+ * (`lastInteraction`: 1 ranking + 1 hidratação) + o enriquecimento dos
+ * cards devolvidos (3 consultas + avatar), feito UMA vez para todas as
+ * etapas do pedido. Não passa pelo cache do board.
+ *
+ * Etapa que não é do pipeline (ou não existe) é ignorada — fica fora da
+ * resposta. Quem chama (a rota) filtra antes as etapas que o usuário não
+ * pode ver.
+ */
+export async function getBoardColumnPages(
+  pipelineId: string,
+  visibilityWhere: Prisma.DealWhereInput | string | null | undefined,
+  statusFilter: DealStatus | "ALL" | undefined,
+  advancedFilters: AdvancedDealFilters | undefined,
+  opts: {
+    sortField?: BoardSortField;
+    sortDirection?: BoardSortDirection;
+    columns: readonly BoardColumnPageRequest[];
+  },
+) {
+  const now = new Date();
+  const { sort, direction } = normalizeBoardCursorSort(
+    opts.sortField,
+    opts.sortDirection,
+  );
+
+  if (opts.columns.length === 0 || opts.columns.length > MAX_BOARD_COLUMNS_PER_REQUEST) {
+    throw new BoardColumnPageError(
+      "invalid_request",
+      `Informe de 1 a ${MAX_BOARD_COLUMNS_PER_REQUEST} etapas.`,
+    );
+  }
+  // Valida tudo antes da primeira consulta.
+  const requests = new Map<string, { cursor: BoardColumnCursor; limit: number }>();
+  for (const col of opts.columns) {
+    if (typeof col?.stageId !== "string" || col.stageId.length === 0) {
+      throw new BoardColumnPageError("invalid_request", "Etapa inválida.");
+    }
+    if (requests.has(col.stageId)) continue;
+    const cursor = parseBoardColumnCursor(col.cursor, sort, direction);
+    if (!cursor) {
+      throw new BoardColumnPageError("invalid_cursor", "Cursor inválido.");
+    }
+    const rawLimit =
+      typeof col.limit === "number" && Number.isFinite(col.limit)
+        ? Math.floor(col.limit)
+        : DEFAULT_BOARD_COLUMN_PAGE;
+    requests.set(col.stageId, {
+      cursor,
+      limit: Math.min(MAX_BOARD_COLUMN_LIMIT, Math.max(1, rawLimit)),
+    });
+  }
+
+  const normalizedWhere =
+    typeof visibilityWhere === "string"
+      ? { ownerId: visibilityWhere }
+      : visibilityWhere ?? null;
+  const dealWhere = await buildBoardDealWhere(
+    normalizedWhere,
+    statusFilter,
+    advancedFilters,
+  );
+  const whereSql =
+    sort === "lastInteraction" ? translateDealWhereToSql(dealWhere) : null;
+  if (sort === "lastInteraction" && !whereSql) {
+    throw new BoardColumnPageError(
+      "cursor_unsupported",
+      "Paginação por cursor indisponível para este filtro com ordenação por última interação.",
+    );
+  }
+
+  const stagesRaw = await prisma.stage.findMany({
+    where: { pipelineId, id: { in: [...requests.keys()] } },
+    orderBy: { position: "asc" },
+  });
+
+  const hasMoreByStage = new Map<string, boolean>();
+  const lastAtByDealId = new Map<string, Date | null>();
+  let stages: BoardStageWithDeals[];
+
+  if (sort === "lastInteraction" && whereSql) {
+    const orgId = getOrgIdOrThrow();
+    const idsByStage = new Map<string, string[]>();
+    await mapWithConcurrency(
+      stagesRaw,
+      BOARD_STAGE_FALLBACK_CONCURRENCY,
+      async (stage) => {
+        const req = requests.get(stage.id)!;
+        const rows = await prisma.$queryRaw<
+          { id: string; last_at: Date | string | null }[]
+        >(
+          buildLastInteractionColumnPageSql({
+            orgId,
+            stageId: stage.id,
+            whereSql,
+            direction,
+            scanCap: LAST_INTERACTION_STAGE_SCAN_CAP,
+            cursor: req.cursor,
+            take: req.limit + 1,
+          }),
+        );
+        hasMoreByStage.set(stage.id, rows.length > req.limit);
+        const page = rows.slice(0, req.limit);
+        for (const row of page) {
+          lastAtByDealId.set(row.id, row.last_at == null ? null : new Date(row.last_at));
+        }
+        idsByStage.set(
+          stage.id,
+          page.map((row) => row.id),
+        );
+      },
+    );
+    stages = await hydrateBoardStages(stagesRaw, idsByStage);
+  } else {
+    const orderBy = boardColumnOrderBy(sort, direction);
+    const dealsByStage = await mapWithConcurrency(
+      stagesRaw,
+      BOARD_STAGE_FALLBACK_CONCURRENCY,
+      (stage) => {
+        const req = requests.get(stage.id)!;
+        return prisma.deal.findMany({
+          // AND explícito: `stageId` da etapa nunca sobrescreve um `stageId`
+          // que a visibilidade de funil já tenha posto no where.
+          where: {
+            AND: [dealWhere, { stageId: stage.id }, boardColumnKeysetWhere(req.cursor)],
+          },
+          orderBy,
+          take: req.limit + 1,
+          include: BOARD_DEAL_INCLUDE,
+        });
+      },
+    );
+    stages = stagesRaw.map((stage, i) => {
+      const limit = requests.get(stage.id)!.limit;
+      const rows = dealsByStage[i] ?? [];
+      hasMoreByStage.set(stage.id, rows.length > limit);
+      return { ...stage, deals: rows.slice(0, limit) };
+    });
+  }
+
+  const enrichCard = await loadBoardCardEnrichment(stages, now);
+
+  return stages.map((stage) => {
+    const hasMore = hasMoreByStage.get(stage.id) ?? false;
+    const lastDeal = stage.deals[stage.deals.length - 1];
+    return {
+      stageId: stage.id,
+      deals: stage.deals.map((deal) => enrichCard(stage, deal)),
+      hasMore,
+      nextCursor:
+        hasMore && lastDeal
+          ? boardCursorAfterDeal(sort, direction, lastDeal, lastAtByDealId)
+          : null,
+    };
+  });
 }
 
 /**
@@ -3201,6 +3583,7 @@ export const __boardInternal = {
   loadLastInteractionIdsPerStage,
   hydrateBoardStages,
   boardRankOrderBySql,
+  buildBoardDealOrderBy,
   BOARD_STAGE_FALLBACK_CONCURRENCY,
   LAST_INTERACTION_STAGE_SCAN_CAP,
 };
