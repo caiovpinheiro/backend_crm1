@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getPainelInsights } from "@/services/painel-insights";
 import { computePainelRange } from "@/services/painel-period";
 import { getDefaultPipelineId } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/painel/insights");
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +40,7 @@ export async function GET(request: Request) {
       });
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[api/painel/insights]", e);
+      log.error({ err: e }, "[api/painel/insights] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Falha ao carregar os cards." },
         { status: 500 },

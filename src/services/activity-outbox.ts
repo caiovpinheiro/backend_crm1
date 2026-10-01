@@ -22,6 +22,9 @@ import {
   userIdForFk,
   type LogEventInput,
 } from "@/services/activity-log";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("activity-outbox");
 
 export type ActivityOutboxInput = LogEventInput & {
   /**
@@ -161,9 +164,9 @@ export async function pollAndProjectActivityOutbox(
           { organization: row.organizationId, status: "dead_letter" },
           1,
         );
-        console.error(
-          `[activity-outbox] DEAD LETTER id=${row.id} org=${row.organizationId} attempts=${nextAttempt}`,
-          { error: errorText },
+        log.error(
+          { id: row.id, org: row.organizationId, attempts: nextAttempt, error: errorText },
+          "[activity-outbox] DEAD LETTER",
         );
       } else {
         const backoff =
@@ -223,7 +226,7 @@ export async function startActivityOutboxWorker(
     try {
       await pollAndProjectActivityOutbox(batchSize);
     } catch (err) {
-      console.error("[activity-outbox] tick failed", err);
+      log.error({ err }, "[activity-outbox] tick failed");
     }
     if (!stopped) {
       handle = setTimeout(tick, intervalMs);
@@ -530,7 +533,7 @@ export async function runTabulationProjectorTick(
     try {
       cleaned = await cleanupActivityOutbox();
     } catch (err) {
-      console.error("[activity-outbox] cleanup failed", err);
+      log.error({ err }, "[activity-outbox] cleanup failed");
     }
   }
   return { projected, cleaned };
@@ -544,7 +547,7 @@ export function startTabulationOutboxProjector(intervalMs = 5_000): void {
   const tick = () => {
     void runTabulationProjectorTick()
       .catch((err) => {
-        console.error("[activity-outbox] tabulation tick failed", err);
+        log.error({ err }, "[activity-outbox] tabulation tick failed");
       })
       .finally(() => {
         setTimeout(tick, intervalMs);

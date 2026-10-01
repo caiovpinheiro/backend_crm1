@@ -105,6 +105,7 @@ export function createInfisicalProvider(): SecretsProvider {
       // pra detectar dependencias acidentais.
       const fallback = process.env[key]?.trim();
       if (fallback) {
+        // eslint-disable-next-line no-console -- carregado pelo instrumentation (bundle Edge), antes de o logger existir
         console.warn(
           `[secrets/infisical] fallback to process.env for ${key} (cache miss; provider not prefetched yet?)`,
         );
@@ -116,6 +117,7 @@ export function createInfisicalProvider(): SecretsProvider {
     if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) {
       // Stale-while-revalidate: serve o stale e dispara refresh em background.
       void prefetch().catch((err) => {
+        // eslint-disable-next-line no-console -- carregado pelo instrumentation (bundle Edge), antes de o logger existir
         console.error("[secrets/infisical] refresh failed", err);
       });
     }

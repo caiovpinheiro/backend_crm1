@@ -13,6 +13,9 @@ import {
   MAX_UPLOAD_BYTES,
   titleFromFileName,
 } from "@/services/ai/knowledge-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents/[id]/knowledge");
 
 /**
  * GET — lista paginada dos documentos de conhecimento do agente.
@@ -84,7 +87,7 @@ export async function POST(
       }
       // Sem isto o erro sobe como 500 sem corpo JSON e a tela só mostra
       // "Servidor temporariamente indisponível".
-      console.error("[POST /api/ai-agents/[id]/knowledge]", e);
+      log.error({ err: e }, "[POST /api/ai-agents/[id]/knowledge]");
       return NextResponse.json(
         { message: "Não foi possível adicionar o material. Tente de novo ou envie em outro formato." },
         { status: 500 },

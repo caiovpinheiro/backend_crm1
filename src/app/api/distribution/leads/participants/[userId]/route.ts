@@ -19,6 +19,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/leads/participants/[userId]");
 
 type RouteContext = { params: Promise<{ userId: string }> };
 
@@ -92,7 +95,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       return NextResponse.json({ participant });
     } catch (e) {
-      console.error("[PUT /api/distribution/leads/participants/[userId]]", e);
+      log.error({ err: e }, "[PUT /api/distribution/leads/participants/[userId]] falhou");
       return NextResponse.json(
         { message: "Erro ao salvar participante." },
         { status: 500 },

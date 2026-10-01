@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { enqueueCampaignDispatch } from "@/lib/queue";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/launch");
 
 export async function POST(
   _request: Request,
@@ -107,7 +110,7 @@ export async function POST(
         status: newStatus,
       });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao lançar campanha." },
         { status: 500 },

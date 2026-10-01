@@ -18,6 +18,10 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { loadAcademicTenantConfig } from "@/verticals/academic/tenant-config";
+import { maskEmail } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("verticals.academic.ensure-dept-roster");
 
 /** Limite de fila alinhado ao seed de consultores (~volume DataCrazy). */
 const QUEUE_LIMIT = 25;
@@ -254,24 +258,24 @@ export async function ensureAcademicDepartmentRoster(opts?: {
       synced += 1;
     }
 
-    console.info(
-      "[ai-attend]",
-      JSON.stringify({
+    log.info(
+      {
         event: "academic_dept_roster_synced",
         orgId,
         roster: roster.length,
         synced,
-        missing,
+        missing: missing.map((m) => maskEmail(m)),
         depts: Object.fromEntries(
           Object.entries(deptMap).map(([k, id]) => [k, id]),
         ),
-      }),
+      },
+      "[ai-attend] academic_dept_roster_synced",
     );
     return { synced, missing };
   } catch (e) {
-    console.warn(
-      "[ai-attend] ensureAcademicDepartmentRoster failed:",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[ai-attend] ensureAcademicDepartmentRoster failed",
     );
     lastSyncAt.delete(orgId);
     return null;

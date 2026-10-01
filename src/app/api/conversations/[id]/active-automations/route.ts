@@ -5,6 +5,9 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { getContactActiveContexts } from "@/services/automation-context";
 import { labelForActiveStep } from "@/services/automation-step-labels";
 import { getConversationLite } from "@/services/conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/active-automations");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -68,7 +71,7 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ items });
     });
   } catch (e) {
-    console.error("[active-automations] error:", e);
+    log.error({ err: e }, "[active-automations] error");
     return NextResponse.json({ message: "Erro ao buscar automações ativas." }, { status: 500 });
   }
 }

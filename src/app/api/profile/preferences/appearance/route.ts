@@ -11,6 +11,9 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { saveAppearancePreferences } from "@/services/user-preferences";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/profile/preferences/appearance");
 
 const bodySchema = z.object({
   theme: z.enum(["light", "dark"]),
@@ -40,7 +43,7 @@ export async function PATCH(request: Request) {
       );
       return NextResponse.json({ appearance });
     } catch (e) {
-      console.error("[PATCH /api/profile/preferences/appearance]", e);
+      log.error({ err: e }, "[PATCH /api/profile/preferences/appearance] falhou");
       return NextResponse.json(
         { message: "Erro ao salvar preferências." },
         { status: 500 },

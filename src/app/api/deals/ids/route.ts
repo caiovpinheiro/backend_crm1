@@ -12,6 +12,9 @@ import {
 import { getVisibilityFilter } from "@/lib/visibility";
 import { isValidDealStatus, resolveBoardDealIds } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/ids");
 
 const MAX_IDS = 5000;
 
@@ -90,7 +93,7 @@ export async function POST(request: Request) {
         capped: resolved.capped,
       });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: "Erro ao resolver negócios." },
         { status: 500 },

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/quick-replies/groups");
 
 export async function GET() {
   try {
@@ -23,7 +26,7 @@ export async function GET() {
       return NextResponse.json([]);
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar grupos." }, { status: 500 });
   }
 }
@@ -50,7 +53,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json(group, { status: 201 });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar grupo." }, { status: 500 });
   }
 }

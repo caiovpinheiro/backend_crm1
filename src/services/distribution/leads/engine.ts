@@ -39,6 +39,9 @@ import {
   claimDealAssignmentTx,
 } from "../claim";
 import { isLeadsDistributionEnabled } from "./enabled";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.leads.engine");
 
 export type LeadsDistributionReason =
   | "ASSIGNED"
@@ -256,7 +259,7 @@ async function recordExecution(
     }
   } catch (e) {
     // Idempotência é rede de segurança; nunca derruba a distribuição.
-    console.error("[leads] falha ao gravar execution", e);
+    log.error({ err: e }, "[leads] falha ao gravar execution");
   }
 }
 
@@ -581,9 +584,9 @@ export async function executeLeadsDistribution(
       contactId: target.contactId ?? undefined,
       data: { fromOwnerId, toOwnerId: slot.userId },
     }).catch((err) =>
-      console.warn(
-        "[leads] fireTrigger agent_changed:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[leads] fireTrigger agent_changed",
       ),
     );
   }
@@ -617,14 +620,14 @@ export async function executeLeadsDistribution(
             mode: "leads",
           },
         }).catch((err) =>
-          console.warn(
-            "[leads] fireTrigger lead_distributed:",
-            err instanceof Error ? err.message : err,
+          log.warn(
+            { err: err instanceof Error ? err.message : err },
+            "[leads] fireTrigger lead_distributed",
           ),
         );
       }
     } catch (e) {
-      console.warn("[leads] lead_distributed guard falhou", e);
+      log.warn({ err: e }, "[leads] lead_distributed guard falhou");
     }
   }
 
@@ -654,7 +657,7 @@ export async function executeLeadsDistribution(
       type: input.triggerSource === "AUTOMATION" ? "AUTOMATION" : "SYSTEM",
       label: "Distribuição por Leads",
     },
-  }).catch((e) => console.error("[leads] logEvent falhou", e));
+  }).catch((e) => log.error({ err: e }, "[leads] logEvent falhou"));
 
   return {
     success: true,

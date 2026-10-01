@@ -5,6 +5,9 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { BaileysSession } from "./baileys-session";
 import { syncChannelGroups } from "./sync-groups";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.baileys-manager");
 
 /**
  * Manages multiple Baileys sessions (one per BAILEYS_MD channel).
@@ -22,7 +25,7 @@ export class BaileysManager {
       select: { id: true, organizationId: true },
     });
 
-    console.info(`[baileys-manager] ${channels.length} canal(is) BAILEYS_MD para reconectar`);
+    log.info({ count: channels.length }, "[baileys-manager] canais BAILEYS_MD para reconectar");
 
     for (const ch of channels) {
       await withSystemContext(ch.organizationId, () => this.connect(ch.id));
@@ -32,7 +35,7 @@ export class BaileysManager {
   async connect(channelId: string): Promise<void> {
     const existing = this.sessions.get(channelId);
     if (existing?.socket) {
-      console.info(`[baileys-manager] Sessão ${channelId} já existe — ignorando`);
+      log.info({ channelId }, "[baileys-manager] Sessão já existe — ignorando");
       return;
     }
 
@@ -41,18 +44,18 @@ export class BaileysManager {
       select: { organizationId: true, provider: true },
     });
     if (!ch || ch.provider !== "BAILEYS_MD") {
-      console.warn(`[baileys-manager] canal ${channelId} ausente ou não é BAILEYS_MD`);
+      log.warn({ channelId }, "[baileys-manager] canal ausente ou não é BAILEYS_MD");
       return;
     }
 
-    console.info(`[baileys-manager] Iniciando sessão ${channelId}`);
+    log.info({ channelId }, "[baileys-manager] Iniciando sessão");
     const session = new BaileysSession(channelId);
     this.sessions.set(channelId, session);
 
     try {
       await withSystemContext(ch.organizationId, () => session.connect());
     } catch (err) {
-      console.error(`[baileys-manager] Erro ao conectar ${channelId}:`, err);
+      log.error({ channelId, err }, "[baileys-manager] Erro ao conectar");
       await withSystemContext(ch.organizationId, () =>
         prisma.channel.update({
           where: { id: channelId },
@@ -78,8 +81,9 @@ export class BaileysManager {
         select: { organizationId: true, provider: true },
       });
       if (!ch || ch.provider !== "BAILEYS_MD") return;
-      console.info(
-        `[baileys-manager] Sem sessão em memória — reabrindo ${channelId} só para desvincular o aparelho`,
+      log.info(
+        { channelId },
+        "[baileys-manager] Sem sessão em memória — reabrindo só para desvincular o aparelho",
       );
       session = new BaileysSession(channelId);
       this.sessions.set(channelId, session);
@@ -99,7 +103,7 @@ export class BaileysManager {
 
   async shutdownAll(): Promise<void> {
     for (const [id, session] of this.sessions) {
-      console.info(`[baileys-manager] Encerrando sessão ${id}`);
+      log.info({ channelId: id }, "[baileys-manager] Encerrando sessão");
       await session.disconnect().catch(() => {});
     }
     this.sessions.clear();

@@ -14,6 +14,9 @@ import {
   isValidDealStatus,
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals");
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -126,7 +129,7 @@ export async function GET(request: Request) {
     });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar negócios." }, { status: 500 });
   }
 }
@@ -251,7 +254,7 @@ export async function POST(request: Request) {
     }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     if (typeof e === "object" && e !== null && "code" in e) {
       const code = (e as { code: string }).code;
       if (code === "P2003") {

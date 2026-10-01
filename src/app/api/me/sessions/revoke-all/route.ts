@@ -25,6 +25,9 @@ import { requireAuth } from "@/lib/auth-helpers";
 import { issueSessionRenewal } from "@/lib/auth/session-renewal";
 import { revokeUserSessions } from "@/lib/auth/session-revocation";
 import { sessionVersionFromClaim } from "@/lib/auth/session-version";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/me/sessions/revoke-all");
 
 export const dynamic = "force-dynamic";
 
@@ -69,7 +72,7 @@ export async function POST(request: Request) {
       ...(sessionRenewal ? { sessionRenewal } : {}),
     });
   } catch (e) {
-    console.error("[POST /api/me/sessions/revoke-all]", e);
+    log.error({ err: e }, "[POST /api/me/sessions/revoke-all] falhou");
     return NextResponse.json(
       { message: "Não foi possível encerrar as sessões. Tente novamente." },
       { status: 500 },

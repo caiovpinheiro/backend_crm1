@@ -43,6 +43,9 @@ import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.engine");
 
 export type DistributionTriggerSource =
   | "SYSTEM"
@@ -273,9 +276,9 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
         select: { lastInboundAt: true },
       });
       if (!conv?.lastInboundAt) {
-        console.info(
+        log.info(
+          { conversationId: hydrated.conversationId },
           "[distribution] enqueuePending skip — sem inbound do aluno",
-          JSON.stringify({ conversationId: hydrated.conversationId }),
         );
         return;
       }
@@ -325,7 +328,7 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
     // quando alguém fica elegível (online/capacidade), no cron periódico
     // ou no botão manual.
   } catch (e) {
-    console.error("[distribution] falha ao enfileirar pendência", e);
+    log.error({ err: e }, "[distribution] falha ao enfileirar pendência");
   }
 }
 
@@ -343,7 +346,7 @@ async function resolvePendingFor(
       select: { type: true },
     });
     if (resolverUser?.type === "AI") {
-      console.warn("[distribution] resolvePendingFor skipped — userId is AI", { userId });
+      log.warn({ userId }, "[distribution] resolvePendingFor skipped — userId is AI");
       return;
     }
     await prisma.distributionPending.updateMany({
@@ -354,7 +357,7 @@ async function resolvePendingFor(
       data: { status: "RESOLVED", resolvedUserId: userId, resolvedAt: new Date() },
     });
   } catch (e) {
-    console.error("[distribution] falha ao resolver pendência", e);
+    log.error({ err: e }, "[distribution] falha ao resolver pendência");
   }
 }
 
@@ -440,7 +443,7 @@ async function emitDistributionEvent(
       },
     });
   } catch (e) {
-    console.error("[distribution] falha ao gravar evento no feed", e);
+    log.error({ err: e }, "[distribution] falha ao gravar evento no feed");
   }
 }
 
@@ -559,7 +562,7 @@ async function writeLog(
     });
   } catch (e) {
     // Log é observabilidade — nunca deve derrubar a distribuição.
-    console.error("[distribution] falha ao gravar DistributionLog", e);
+    log.error({ err: e }, "[distribution] falha ao gravar DistributionLog");
   }
 }
 
@@ -763,14 +766,14 @@ export async function executeDistribution(
           isAi: check.isAi,
         });
         if (keptInAttendance) {
-          console.warn(
-            "[distribution] redistribuição pulada — conversa em atendimento",
-            JSON.stringify({
+          log.warn(
+            {
               conversationId: input.conversationId,
               assignedToId: already.assignedToId,
               departamentoEsperado: explicitDeptIds,
               triggerSource: input.triggerSource,
-            }),
+            },
+            "[distribution] redistribuição pulada — conversa em atendimento",
           );
           await writeLog(
             input,
@@ -1147,7 +1150,7 @@ export async function executeDistribution(
         contactId: input.contactId ?? null,
       });
     } catch (e) {
-      console.error("[distribution] moveOpenDealToEmAtendimento failed", e);
+      log.error({ err: e }, "[distribution] moveOpenDealToEmAtendimento failed");
     }
   }
 
@@ -1198,20 +1201,20 @@ export async function executeDistribution(
           triggerSource: input.triggerSource,
         },
       }).catch((err) =>
-        console.warn(
-          "[distribution] fireTrigger lead_distributed:",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[distribution] fireTrigger lead_distributed",
         ),
       );
     }
   } else if (selectedIsHuman && !priorWasHuman && !sessionOpenForFreeText) {
-    console.info(
-      "[distribution] skip lead_distributed — sessão 24h fechada",
-      JSON.stringify({
+    log.info(
+      {
         conversationId: input.conversationId ?? null,
         triggerSource: input.triggerSource,
         selectedUserId: selected.userId,
-      }),
+      },
+      "[distribution] skip lead_distributed — sessão 24h fechada",
     );
   }
 

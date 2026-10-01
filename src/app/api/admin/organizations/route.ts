@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 
 import { requireSuperAdmin } from "@/lib/auth-helpers";
 import { listOrganizations } from "@/services/organizations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/admin/organizations");
 
 export async function GET(request: Request) {
   const r = await requireSuperAdmin();
@@ -20,7 +23,7 @@ export async function GET(request: Request) {
     const organizations = await listOrganizations({ search, status });
     return NextResponse.json({ organizations });
   } catch (e) {
-    console.error("[admin/organizations GET]", e);
+    log.error({ err: e }, "[admin/organizations GET] falhou");
     const msg = e instanceof Error ? e.message : "Erro ao listar organizações.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

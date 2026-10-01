@@ -10,7 +10,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/audio-convert", () => ({ WHATSAPP_VIDEO_MAX_BYTES: 16 * 1024 * 1024 }));
 vi.mock("@/lib/queue", () => ({ enqueueMetaAttach: mocks.enqueue }));
-vi.mock("@/lib/request-context", () => ({ getOrgIdOrThrow: () => "org-1" }));
+// O logger estruturado lê o request-context; sem contexto ele só não anexa tenant.
+vi.mock("@/lib/request-context", () => ({ getOrgIdOrThrow: () => "org-1", getRequestContext: () => undefined }));
 vi.mock("@/lib/prisma-helpers", () => ({ withOrgFromCtx: (d: unknown) => d }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {

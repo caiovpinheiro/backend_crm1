@@ -19,6 +19,9 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createConversationEvent } from "@/services/conversation-events";
 import { executeDistribution } from "@/services/distribution/engine";
 import type { VerticalPackOps } from "@/verticals/types";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.department-handoff");
 
 export type ResolvedDepartment = { id: string; name: string };
 
@@ -272,7 +275,7 @@ export async function executeGenericDepartmentHandoff(
       }
       if (dealId) await assignDealOwner(dealId, selectedUserId);
     } catch (e) {
-      console.warn("[department-handoff] align deal owner failed", e);
+      log.warn({ err: e }, "[department-handoff] align deal owner failed");
     }
   }
 

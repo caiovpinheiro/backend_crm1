@@ -14,6 +14,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { replayStuckAiInbox } from "@/services/ai/replay-stuck-inbox";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/replay-stuck-ai");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -46,7 +49,7 @@ export async function GET(request: Request) {
     const result = await replayStuckAiInbox(parseOpts(request, false));
     return NextResponse.json({ ...result, ok: true as const });
   } catch (e) {
-    console.error("[cron/replay-stuck-ai]", e);
+    log.error({ err: e }, "[cron/replay-stuck-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no replay." },
       { status: 500 },
@@ -61,7 +64,7 @@ export async function POST(request: Request) {
     const result = await replayStuckAiInbox(parseOpts(request, true));
     return NextResponse.json({ ...result, ok: true as const });
   } catch (e) {
-    console.error("[cron/replay-stuck-ai]", e);
+    log.error({ err: e }, "[cron/replay-stuck-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no replay." },
       { status: 500 },

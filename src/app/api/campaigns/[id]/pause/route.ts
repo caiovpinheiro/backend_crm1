@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { updateCampaignStatus } from "@/services/campaigns";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/pause");
 
 export async function POST(
   _request: Request,
@@ -34,7 +37,7 @@ export async function POST(
       await updateCampaignStatus(id, "PAUSED");
       return NextResponse.json({ message: "Campanha pausada.", status: "PAUSED" });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao pausar campanha." },
         { status: 500 },

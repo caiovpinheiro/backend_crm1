@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/products/export");
 
 const MAX_ROWS = 100_000;
 
@@ -109,7 +112,7 @@ export async function GET(request: Request) {
       });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao exportar produtos." }, { status: 500 });
   }
 }

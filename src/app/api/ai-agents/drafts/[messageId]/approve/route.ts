@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { publishMessageUpdated } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents/drafts/[messageId]/approve");
 
 const APPROVE_SEND_TIMEOUT_MS = 25_000;
 
@@ -143,7 +146,7 @@ export async function POST(
       });
       return NextResponse.json(approved);
     } catch (err) {
-      console.error("[ai-draft-approve] unexpected error:", err);
+      log.error({ err }, "[ai-draft-approve] unexpected error");
       return NextResponse.json(
         { message: "Erro ao aprovar rascunho do agente." },
         { status: 500 },

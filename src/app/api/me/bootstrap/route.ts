@@ -24,6 +24,9 @@ import {
   computeBootstrapEtag,
   etagMatches,
 } from "@/services/me-bootstrap";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/me/bootstrap");
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +55,7 @@ export async function GET(request: Request) {
         },
       });
     } catch (e) {
-      console.error("[GET /api/me/bootstrap]", e);
+      log.error({ err: e }, "[GET /api/me/bootstrap] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar o bootstrap." },
         { status: 500 },

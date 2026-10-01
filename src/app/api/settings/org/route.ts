@@ -23,6 +23,9 @@ import {
   getOrgSettingsByPrefix,
   setOrgSetting,
 } from "@/lib/org-settings";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/org");
 
 // Bug 24/jun/26: usávamos `requireAuth` / `requireAdmin` direto. Os helpers
 // validam role mas NÃO populam o AsyncLocalStorage do `RequestContext`. Como
@@ -76,7 +79,7 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     } catch (err) {
-      console.error("[settings/org] GET falhou:", err);
+      log.error({ err }, "[settings/org] GET falhou");
       return NextResponse.json(
         { message: "Erro ao ler configuração." },
         { status: 500 },
@@ -108,7 +111,7 @@ export async function PUT(request: Request) {
       await setOrgSetting(key, value);
       return NextResponse.json({ key, value });
     } catch (err) {
-      console.error("[settings/org] PUT falhou:", err);
+      log.error({ err }, "[settings/org] PUT falhou");
       return NextResponse.json(
         { message: "Erro ao salvar configuração." },
         { status: 500 },
@@ -133,7 +136,7 @@ export async function DELETE(request: Request) {
       await deleteOrgSetting(key);
       return NextResponse.json({ ok: true });
     } catch (err) {
-      console.error("[settings/org] DELETE falhou:", err);
+      log.error({ err }, "[settings/org] DELETE falhou");
       return NextResponse.json(
         { message: "Erro ao remover configuração." },
         { status: 500 },

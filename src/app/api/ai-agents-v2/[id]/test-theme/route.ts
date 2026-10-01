@@ -6,6 +6,9 @@ import { getV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { explainV2ThemeRecognition } from "@/services/ai-v2/theme-semantic";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/test-theme");
 
 /**
  * Testar reconhecimento de assunto: qual assunto uma mensagem pegaria.
@@ -49,7 +52,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         semantic: !!apiKey,
       });
     } catch (err) {
-      console.error("[POST /api/ai-agents-v2/[id]/test-theme]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/test-theme]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao testar o reconhecimento." }, { status: 500 });
     }
   });

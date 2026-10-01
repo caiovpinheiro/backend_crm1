@@ -1,6 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { NextResponse } from "next/server";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auth.cron-secret");
 
 /**
  * Autenticação única das rotas `/api/cron/*` (SEC-20).
@@ -79,8 +82,9 @@ export function requireCronSecret(request: Request): NextResponse | null {
     const last = lastQueryWarnAtByRoute.get(url.pathname) ?? 0;
     if (now - last >= QUERY_WARN_WINDOW_MS) {
       lastQueryWarnAtByRoute.set(url.pathname, now);
-      console.warn(
-        `[cron] ${url.pathname}: CRON_SECRET recebido por ?secret= (DEPRECADO — vaza em logs de proxy). Migre o agendador para o header "Authorization: Bearer".`,
+      log.warn(
+        { pathname: url.pathname },
+        '[cron] CRON_SECRET recebido por ?secret= (DEPRECADO — vaza em logs de proxy). Migre o agendador para o header "Authorization: Bearer".',
       );
     }
   }

@@ -1,4 +1,7 @@
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("campaign-counters");
 
 /**
  * Contadores denormalizados da Campaign (sentCount/deliveredCount/readCount/
@@ -61,9 +64,9 @@ async function flush(campaignId: string): Promise<void> {
     // não precisa de filtro de tenant (id é global único).
     await prismaBase.campaign.update({ where: { id: campaignId }, data });
   } catch (err) {
-    console.warn(
-      `[campaign-counters] flush falhou campaign=${campaignId}:`,
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { campaign: campaignId, err: err instanceof Error ? err.message : err },
+      "[campaign-counters] flush falhou",
     );
     return;
   }
@@ -94,8 +97,9 @@ export async function maybeCompleteCampaign(campaignId: string): Promise<void> {
     where: { id: campaignId },
     data: { status: "COMPLETED", completedAt: new Date() },
   });
-  console.info(
-    `[campaign-send] Campaign ${campaignId} completed: ${campaign.sentCount} sent, ${campaign.failedCount} failed`,
+  log.info(
+    { campaignId, sentCount: campaign.sentCount, failedCount: campaign.failedCount },
+    "[campaign-send] Campaign completed",
   );
 }
 

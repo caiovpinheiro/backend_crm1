@@ -22,6 +22,9 @@ import {
   isHumanAttendanceWindowOpen,
   type HumanQueueContext,
 } from "@/services/ai/human-queue-policy";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.audio-inbound");
 
 /** `Message.messageType` gravados para áudio/voz nos canais WhatsApp. */
 const AUDIO_MESSAGE_TYPES = new Set(["audio", "ptt", "voice", "voice_note"]);
@@ -110,7 +113,7 @@ export async function detectInboundAudio(args: {
       if (!isNoiseText(m.content)) hasTranscript = true;
     }
   } catch (e) {
-    console.error("[ai] detectInboundAudio failed", e);
+    log.error({ err: e }, "[ai] detectInboundAudio failed");
   }
 
   // Fallback: sem linha no banco (ex.: caminho sem persistência), o texto

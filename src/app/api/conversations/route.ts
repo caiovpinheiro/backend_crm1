@@ -23,6 +23,9 @@ import {
   type InboxCategoryTab,
   type InboxTab,
 } from "@/services/conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations");
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -330,7 +333,7 @@ export async function GET(request: Request) {
       if (e instanceof InvalidListCursorError) {
         return NextResponse.json({ message: e.message }, { status: 400 });
       }
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar conversas." }, { status: 500 });
     }
   });

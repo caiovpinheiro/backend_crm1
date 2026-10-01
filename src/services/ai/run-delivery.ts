@@ -13,6 +13,9 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.run-delivery");
 
 /** Motivos de descarte — chave estável para métrica, texto para o operador. */
 export const RUN_DISCARD_REASONS = {
@@ -67,10 +70,13 @@ export async function markRunResponseDiscarded(args: {
       },
     });
   } catch (err) {
-    console.warn("[ai] markRunResponseDiscarded falhou", {
-      runId: args.runId,
-      reason: args.reason,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      {
+        runId: args.runId,
+        reason: args.reason,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "[ai] markRunResponseDiscarded falhou",
+    );
   }
 }

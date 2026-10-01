@@ -6,6 +6,9 @@ import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { nextUserNumber } from "@/lib/public-id";
 import { getSystemPresenceMap } from "@/services/system-presence";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/users");
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
 
@@ -90,7 +93,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json(shaped);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar usuários." }, { status: 500 });
   }
 }
@@ -168,7 +171,7 @@ export async function POST(request: Request) {
       throw e;
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar usuário." }, { status: 500 });
   }
 }

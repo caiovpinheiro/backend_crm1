@@ -15,12 +15,13 @@
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.phone-allowlist");
 
 function logAi(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-attend]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-attend] ${event}`);
 }
 
 /** Normaliza para dígitos BR comparáveis (remove +55 / zeros à esquerda). */
@@ -130,9 +131,9 @@ export async function isContactAllowedForAi(
 
   logAi("phone_allowlist_block", {
     contactId,
-    phone: contact.phone ?? null,
+    phone: maskPhone(contact.phone),
     reason: "not_in_allowlist",
-    allowlist: [...phones],
+    allowlist: [...phones].map((p) => maskPhone(p)),
   });
   return false;
 }

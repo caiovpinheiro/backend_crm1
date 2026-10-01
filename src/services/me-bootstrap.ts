@@ -66,6 +66,9 @@ import {
   type DashboardPreferences,
   type SidebarPreferences,
 } from "@/services/user-preferences";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("me-bootstrap");
 
 // ──────────────────────────────────────────────
 // Tipos do contrato
@@ -388,9 +391,9 @@ async function settle<T>(
     return await fn();
   } catch (e) {
     failed.push(name);
-    console.error(
-      `[me-bootstrap] bloco ${name} falhou:`,
-      e instanceof Error ? e.message : e,
+    log.error(
+      { bloco: name, err: e instanceof Error ? e.message : e },
+      "[me-bootstrap] bloco falhou",
     );
     return null;
   }

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { syncApi4ComCalls } from "@/services/call-sync-api4com";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/calls/sync");
 
 /**
  * POST /api/calls/sync
@@ -24,7 +27,7 @@ export async function POST(request: Request) {
       const result = await syncApi4ComCalls(authResult.user.id);
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[calls] sync:", e);
+      log.error({ err: e }, "[calls] sync");
       return NextResponse.json(
         { ok: false, message: "Erro ao sincronizar chamadas." },
         { status: 500 },

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { userOrgFilter, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/kanban/filter-options");
 
 /**
  * Metadados para alimentar o painel de filtros do Kanban em uma única chamada.
@@ -99,7 +102,7 @@ export async function GET() {
         lossReasons,
       });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar opções de filtro." },
         { status: 500 },

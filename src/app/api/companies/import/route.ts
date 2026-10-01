@@ -17,6 +17,9 @@ import {
 import { prisma } from "@/lib/prisma";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/companies/import");
 
 const MAX_ROWS = 10_000;
 
@@ -161,7 +164,7 @@ export async function POST(request: Request) {
     if (e instanceof ImportFileError) {
       return NextResponse.json({ message: e.message }, { status: e.status });
     }
-    console.error("[companies/import]", e);
+    log.error({ err: e }, "[companies/import] falhou");
     return NextResponse.json(
       { message: "Erro ao importar empresas." },
       { status: 500 },

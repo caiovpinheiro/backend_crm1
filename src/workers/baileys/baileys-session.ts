@@ -24,6 +24,10 @@ import { usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
 import { registerLidMapping, getMapSize, clearChannelMap, loadPersistedMappings, fixLidContacts } from "./lid-resolver";
 import { attachContactTyping, detachContactTyping } from "./contact-typing";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys.baileys-session");
 
 const RECONNECT_MAX_RETRIES = 8;
 const RECONNECT_BASE_DELAY_MS = 2_000;
@@ -58,7 +62,7 @@ export class BaileysSession {
         select: { organizationId: true },
       });
       if (!ch) {
-        console.error(`[baileys:${this.channelId}] channel não existe — abortando connect`);
+        log.error({ channelId: this.channelId }, "[baileys] channel não existe — abortando connect");
         return;
       }
       this.organizationId = ch.organizationId;
@@ -68,7 +72,10 @@ export class BaileysSession {
 
     const loaded = await loadPersistedMappings(this.channelId);
     if (loaded > 0) {
-      console.info(`[baileys:${this.channelId}] carregou ${loaded} mapeamentos LID→phone do banco`);
+      log.info(
+        { channelId: this.channelId, loaded },
+        "[baileys] carregou mapeamentos LID→phone do banco",
+      );
     }
 
     const { state, saveCreds } = await usePostgresAuthState(this.channelId);
@@ -77,10 +84,16 @@ export class BaileysSession {
     try {
       const latest = await fetchLatestBaileysVersion();
       version = latest.version;
-      console.info(`[baileys:${this.channelId}] usando versão WA ${version.join(".")}`);
+      log.info(
+        { channelId: this.channelId, version: version.join(".") },
+        "[baileys] usando versão WA",
+      );
     } catch {
       version = [2, 3000, 1034074495];
-      console.warn(`[baileys:${this.channelId}] fallback para versão ${version.join(".")}`);
+      log.warn(
+        { channelId: this.channelId, version: version.join(".") },
+        "[baileys] fallback para versão",
+      );
     }
 
     const sock = makeWASocket({
@@ -120,12 +133,21 @@ export class BaileysSession {
           newMappings++;
         }
       }
-      console.info(
-        `[baileys:${this.channelId}] contacts.upsert: ${contacts.length} contatos, ${newMappings} LIDs mapeados (total ${getMapSize(this.channelId)})`,
+      log.info(
+        {
+          channelId: this.channelId,
+          contacts: contacts.length,
+          newMappings,
+          total: getMapSize(this.channelId),
+        },
+        "[baileys] contacts.upsert: LIDs mapeados",
       );
       if (newMappings > 0) {
         fixLidContacts(this.channelId).then((fixed) => {
-          if (fixed > 0) console.info(`[baileys:${this.channelId}] ${fixed} contatos com LID corrigidos`);
+          if (fixed > 0) log.info(
+            { channelId: this.channelId, fixed },
+            "[baileys] contatos com LID corrigidos",
+          );
         }).catch(() => {});
       }
     });
@@ -162,7 +184,10 @@ export class BaileysSession {
       if (type !== "notify") return;
       const orgId = this.organizationId;
       if (!orgId) {
-        console.warn(`[baileys:${this.channelId}] mensagens recebidas sem organizationId cacheado — descartando`);
+        log.warn(
+          { channelId: this.channelId },
+          "[baileys] mensagens recebidas sem organizationId cacheado — descartando",
+        );
         return;
       }
       for (const msg of messages) {
@@ -199,8 +224,9 @@ export class BaileysSession {
 
     const orgId = this.organizationId;
     if (!orgId) {
-      console.warn(
-        `[baileys:${this.channelId}] status ${s} sem organizationId cacheado — descartando`,
+      log.warn(
+        { channelId: this.channelId, status: s },
+        "[baileys] status sem organizationId cacheado — descartando",
       );
       return;
     }
@@ -240,7 +266,7 @@ export class BaileysSession {
         });
       });
     } catch (err) {
-      console.warn(`[baileys:${this.channelId}] Erro ao atualizar status:`, err);
+      log.warn({ channelId: this.channelId, err }, "[baileys] Erro ao atualizar status");
     }
   }
 
@@ -250,7 +276,7 @@ export class BaileysSession {
   ): Promise<void> {
     const orgId = this.organizationId;
     if (!orgId) {
-      console.warn(`[baileys:${this.channelId}] patchChannel sem organizationId`);
+      log.warn({ channelId: this.channelId }, "[baileys] patchChannel sem organizationId");
       return;
     }
     await withSystemContext(orgId, async () => {
@@ -280,17 +306,17 @@ export class BaileysSession {
       try {
         const qrDataUri = await QRCode.toDataURL(qr, { margin: 1 });
         await this.patchChannel({ status: "QR_READY", qrCode: qrDataUri }, "QR_READY");
-        console.info(`[baileys:${this.channelId}] QR code gerado`);
+        log.info({ channelId: this.channelId }, "[baileys] QR code gerado");
 
         this.qrTimer = setTimeout(() => {
-          console.info(`[baileys:${this.channelId}] QR expirado — timeout`);
+          log.info({ channelId: this.channelId }, "[baileys] QR expirado — timeout");
           void this.patchChannel(
             { status: "DISCONNECTED", qrCode: null },
             "DISCONNECTED",
           );
         }, QR_TIMEOUT_MS);
       } catch (e) {
-        console.error(`[baileys:${this.channelId}] erro ao gerar QR:`, e);
+        log.error({ channelId: this.channelId, err: e }, "[baileys] erro ao gerar QR");
       }
     }
 
@@ -309,7 +335,7 @@ export class BaileysSession {
         },
         "CONNECTED",
       );
-      console.info(`[baileys:${this.channelId}] conectado — ${phone ?? "sem número"}`);
+      log.info({ channelId: this.channelId, phone: maskPhone(phone) }, "[baileys] conectado");
       const { enqueueBaileysControl } = await import("@/lib/queue");
       void enqueueBaileysControl({ channelId: this.channelId, action: "sync-groups" });
     }
@@ -324,7 +350,7 @@ export class BaileysSession {
       const loggedOut = statusCode === DisconnectReason.loggedOut;
 
       if (loggedOut) {
-        console.info(`[baileys:${this.channelId}] deslogado — limpando sessão`);
+        log.info({ channelId: this.channelId }, "[baileys] deslogado — limpando sessão");
         const orgId = this.organizationId;
         if (orgId) {
           await withSystemContext(orgId, async () => {
@@ -345,7 +371,7 @@ export class BaileysSession {
       }
 
       if (this.retryCount >= RECONNECT_MAX_RETRIES) {
-        console.error(`[baileys:${this.channelId}] máximo de tentativas atingido — FAILED`);
+        log.error({ channelId: this.channelId }, "[baileys] máximo de tentativas atingido — FAILED");
         await this.patchChannel({ status: "FAILED", qrCode: null }, "FAILED");
         this.socket = null;
         return;
@@ -353,8 +379,14 @@ export class BaileysSession {
 
       const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, this.retryCount);
       this.retryCount++;
-      console.info(
-        `[baileys:${this.channelId}] desconectado (status=${statusCode}) — reconectando em ${delay}ms (tentativa ${this.retryCount})`,
+      log.info(
+        {
+          channelId: this.channelId,
+          status: statusCode,
+          delayMs: delay,
+          tentativa: this.retryCount,
+        },
+        "[baileys] desconectado — reconectando",
       );
 
       await this.patchChannel({ status: "CONNECTING" }, "CONNECTING");
@@ -388,9 +420,9 @@ export class BaileysSession {
         ]);
         this.rememberGroup(meta);
       } catch (err) {
-        console.warn(
-          `[baileys:${this.channelId}] groupMetadata ${jid} falhou:`,
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { channelId: this.channelId, jid, err: err instanceof Error ? err.message : err },
+          "[baileys] groupMetadata falhou",
         );
       }
     }
@@ -434,10 +466,10 @@ export class BaileysSession {
     try {
       if (this.socket) {
         await this.socket.logout();
-        console.info(`[baileys:${this.channelId}] logout enviado ao WhatsApp`);
+        log.info({ channelId: this.channelId }, "[baileys] logout enviado ao WhatsApp");
       }
     } catch (err) {
-      console.warn(`[baileys:${this.channelId}] logout falhou:`, err);
+      log.warn({ channelId: this.channelId, err }, "[baileys] logout falhou");
       try {
         this.socket?.end(undefined);
       } catch {

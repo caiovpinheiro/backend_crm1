@@ -29,6 +29,9 @@ import {
   distributeStuckInbound,
   type StuckInboundOptions,
 } from "@/services/ai/stuck-inbound-distribution";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/distribute-stuck-inbound");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -88,9 +91,7 @@ async function enqueueApply(opts: StuckInboundOptions) {
     scope: "distribution.stuck-inbound",
     kind: "queue_unavailable",
   });
-  console.warn(
-    "[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback",
-  );
+  log.warn("[cron/distribute-stuck-inbound] fila indisponível — skip sync fallback");
   return NextResponse.json(
     { ok: false, message: "Fila de distribuição indisponível." },
     { status: 503 },
@@ -106,7 +107,7 @@ export async function GET(request: Request) {
     const result = await distributeStuckInbound(opts);
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/distribute-stuck-inbound]", e);
+    log.error({ err: e }, "[cron/distribute-stuck-inbound] falhou");
     return NextResponse.json(
       {
         ok: false,
@@ -128,7 +129,7 @@ export async function POST(request: Request) {
     }
     return enqueueApply(opts);
   } catch (e) {
-    console.error("[cron/distribute-stuck-inbound]", e);
+    log.error({ err: e }, "[cron/distribute-stuck-inbound] falhou");
     return NextResponse.json(
       {
         ok: false,

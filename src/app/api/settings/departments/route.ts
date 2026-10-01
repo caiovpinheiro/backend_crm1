@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { z } from "zod";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/departments");
 
 const CreateSchema = z.object({
   name: z.string().min(1).max(100),
@@ -118,7 +121,7 @@ export async function POST(request: Request) {
       });
       return NextResponse.json(department, { status: 201 });
     } catch (err) {
-      console.error("[POST /settings/departments]", err);
+      log.error({ err }, "[POST /settings/departments] falhou");
       const message =
         err instanceof Error && err.message.includes("does not exist")
           ? "A tabela de departamentos ainda não existe. Aguarde a migração ser aplicada."

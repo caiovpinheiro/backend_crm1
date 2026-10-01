@@ -6,6 +6,9 @@ import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { channelSendsReadReceipts } from "@/lib/channels/config";
 import { publishConversationUpdated } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/read");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -65,14 +68,14 @@ export async function POST(_request: Request, context: RouteContext) {
 
         if (lastInbound?.externalId) {
           metaClient.markAsRead(lastInbound.externalId).catch((err) =>
-            console.warn("[read] markAsRead failed:", err instanceof Error ? err.message : err)
+            log.warn({ err: err instanceof Error ? err.message : err }, "[read] markAsRead failed")
           );
         }
       }
 
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro ao marcar como lido." }, { status: 500 });
     }
   });

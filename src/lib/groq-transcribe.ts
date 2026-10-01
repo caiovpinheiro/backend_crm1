@@ -4,6 +4,9 @@
  */
 
 import { convertToMp3 } from "@/lib/audio-convert";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("groq-transcribe");
 
 export const GROQ_MODEL =
   process.env.GROQ_TRANSCRIBE_MODEL?.trim() || "whisper-large-v3-turbo";
@@ -109,7 +112,7 @@ export async function transcribeGroq(
     }
   } catch { /* ignora parse error */ }
 
-  console.warn(`[transcribe/groq] ${res.status}: ${msg}`);
+  log.warn({ status: res.status, err: msg }, "[transcribe/groq] falhou");
 
   if (res.status === 400 && /file|format|decode|invalid/i.test(msg)) {
     return { retryWithMp3: true };

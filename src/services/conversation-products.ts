@@ -33,6 +33,9 @@ import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conve
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 import type { NextResponse } from "next/server";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("conversation-products");
 
 export type ProductSendActor = {
   id: string;
@@ -273,10 +276,10 @@ export async function sendProductsToConversation(args: {
   const links = ordered.map((p) => p.metaLinks[0] ?? null);
   const missing = links.some((link) => !link?.metaCatalogId?.trim() || !link?.productRetailerId?.trim());
   if (missing) {
-    console.warn("[conversation-products] fallback legacy: vínculo Meta ausente", {
-      conversationId: conv.id,
-      productIds,
-    });
+    log.warn(
+      { conversationId: conv.id, productIds },
+      "[conversation-products] fallback legacy: vínculo Meta ausente",
+    );
     return {
       ok: true,
       used: "legacy",
@@ -290,9 +293,10 @@ export async function sendProductsToConversation(args: {
 
   const catalogIds = new Set(links.map((l) => l!.metaCatalogId!.trim()));
   if (catalogIds.size !== 1) {
-    console.warn("[conversation-products] fallback legacy: catálogos Meta misturados", {
-      conversationId: conv.id,
-    });
+    log.warn(
+      { conversationId: conv.id },
+      "[conversation-products] fallback legacy: catálogos Meta misturados",
+    );
     return {
       ok: true,
       used: "legacy",
@@ -389,10 +393,10 @@ export async function sendProductsToConversation(args: {
       .catch(() => {});
   } catch (err) {
     const reason = formatMetaSendError(err);
-    console.warn("[conversation-products] envio catálogo falhou — fallback legacy", {
-      conversationId: conv.id,
-      reason,
-    });
+    log.warn(
+      { conversationId: conv.id, reason },
+      "[conversation-products] envio catálogo falhou — fallback legacy",
+    );
     await prisma.message.delete({ where: { id: saved.id } }).catch(() => {});
     return {
       ok: true,
@@ -441,7 +445,7 @@ export async function sendProductsToConversation(args: {
     try {
       await cancelActiveContextsForContactIfAny(conv.contactId);
     } catch (err) {
-      console.warn("[automation] cancel after catalog product:", err);
+      log.warn({ err }, "[automation] cancel after catalog product");
     }
   }
   fireTrigger("message_sent", {
@@ -452,9 +456,9 @@ export async function sendProductsToConversation(args: {
       conversationId: conv.id,
       content: preview,
     }),
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
   cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos produto Meta:", err),
+    log.warn({ err }, "[scheduled-messages] falha ao cancelar apos produto Meta"),
   );
 
   return {

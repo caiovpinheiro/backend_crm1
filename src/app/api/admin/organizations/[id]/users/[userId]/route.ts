@@ -32,6 +32,9 @@ import { NextResponse } from "next/server";
 import { requireSuperAdmin } from "@/lib/auth-helpers";
 import { prismaBase } from "@/lib/prisma-base";
 import { requestErase } from "@/services/lgpd";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/admin/organizations/[id]/users/[userId]");
 
 type Ctx = { params: Promise<{ id: string; userId: string }> };
 
@@ -114,7 +117,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Erro ao excluir usuario.";
-    console.error("[admin/users DELETE]", err);
+    log.error({ err }, "[admin/users DELETE] falhou");
     return NextResponse.json({ message: msg }, { status: 500 });
   }
 }

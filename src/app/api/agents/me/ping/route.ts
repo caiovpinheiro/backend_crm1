@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { recordHeartbeat } from "@/services/system-presence";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/agents/me/ping");
 
 export const dynamic = "force-dynamic";
 
@@ -38,10 +41,7 @@ export async function POST() {
         (err.message.includes("system_usage_sessions") ||
           (err as { code?: string }).code === "P2021");
       if (!isMigrationPending) {
-        console.warn(
-          "[/api/agents/me/ping] falhou:",
-          err instanceof Error ? err.message : err,
-        );
+        log.warn({ err: err instanceof Error ? err.message : err }, "[/api/agents/me/ping] falhou");
       }
       return NextResponse.json(
         { ok: false, _migrationPending: true },

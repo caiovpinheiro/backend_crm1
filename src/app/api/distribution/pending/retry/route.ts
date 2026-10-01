@@ -14,6 +14,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/pending/retry");
 
 export async function POST() {
   return withOrgContext(async (session) => {
@@ -48,7 +51,7 @@ export async function POST() {
       const result = await enqueueProcessPendingOrRun({ trigger: "manual" });
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[POST /api/distribution/pending/retry]", e);
+      log.error({ err: e }, "[POST /api/distribution/pending/retry] falhou");
       return NextResponse.json(
         { message: "Erro ao reprocessar a fila de espera." },
         { status: 500 },

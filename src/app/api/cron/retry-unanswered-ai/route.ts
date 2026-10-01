@@ -18,6 +18,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { retryUnansweredAiInbound } from "@/services/ai/retry-unanswered-ai-inbound";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/retry-unanswered-ai");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -58,7 +61,7 @@ export async function GET(request: Request) {
     const result = await retryUnansweredAiInbound(parseOpts(request, false));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/retry-unanswered-ai]", e);
+    log.error({ err: e }, "[cron/retry-unanswered-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na varredura." },
       { status: 500 },
@@ -73,7 +76,7 @@ export async function POST(request: Request) {
     const result = await retryUnansweredAiInbound(parseOpts(request, true));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/retry-unanswered-ai]", e);
+    log.error({ err: e }, "[cron/retry-unanswered-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na varredura." },
       { status: 500 },

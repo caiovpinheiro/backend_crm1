@@ -9,6 +9,9 @@ import {
 } from "@/lib/authz/resource-policy";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, moveDeal, StageFieldsRequiredError } from "@/services/deals";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/[id]/move");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -192,7 +195,7 @@ export async function POST(request: Request, context: RouteContext) {
         throw err;
       }
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro ao mover negócio." }, { status: 500 });
     }
   });

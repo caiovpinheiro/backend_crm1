@@ -10,6 +10,9 @@ import {
   type SniffedMime,
 } from "@/lib/file-sniff";
 import { generateFileName, saveFile, storageDriver } from "@/lib/storage/local";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/uploads/automation-media");
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
 
@@ -92,15 +95,13 @@ export async function POST(request: Request) {
       fileName: safeName,
       buffer,
     });
-    console.info(
+    log.info(
+      { driver: storageDriver(), absolutePath: saved.absolutePath, bytes: buffer.length },
       "[automation-media] saved",
-      storageDriver(),
-      saved.absolutePath,
-      buffer.length,
     );
     return NextResponse.json({ url: saved.url, fileName: origName, mimeType: mime });
   } catch (e) {
-    console.error("[automation-media] upload error:", e);
+    log.error({ err: e }, "[automation-media] upload error");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro interno." },
       { status: 500 },

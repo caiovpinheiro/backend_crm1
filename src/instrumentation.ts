@@ -24,6 +24,7 @@ export async function register() {
       const { startOtel } = await import("@/lib/otel-sdk");
       await startOtel();
     } catch (err) {
+      // eslint-disable-next-line no-console -- instrumentation também é empacotado para o runtime Edge; o logger (pino + AsyncLocalStorage) não pode entrar aqui
       console.warn("[instrumentation] OTel SDK falhou ao iniciar:", err);
     }
   }
@@ -36,6 +37,7 @@ export async function register() {
     const { secrets } = await import("@/lib/secrets");
     await secrets.prefetch();
   } catch (err) {
+    // eslint-disable-next-line no-console -- instrumentation também é empacotado para o runtime Edge; o logger (pino + AsyncLocalStorage) não pode entrar aqui
     console.warn("[instrumentation] secrets.prefetch falhou:", err);
   }
 
@@ -48,6 +50,7 @@ export async function register() {
     );
     warnPublicDoManagedHosts();
   } catch (err) {
+    // eslint-disable-next-line no-console -- instrumentation também é empacotado para o runtime Edge; o logger (pino + AsyncLocalStorage) não pode entrar aqui
     console.warn("[instrumentation] warn-public-do-managed-hosts falhou:", err);
   }
 }

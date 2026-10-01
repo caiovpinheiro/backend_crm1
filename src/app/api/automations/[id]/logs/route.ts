@@ -3,6 +3,9 @@ import { type NextRequest, NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getAutomationById, getAutomationLogs } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]/logs");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -50,7 +53,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
         headers: { "Cache-Control": "no-store, max-age=0" },
       });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar logs da automação." }, { status: 500 });
     }
   });

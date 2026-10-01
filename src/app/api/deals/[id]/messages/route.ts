@@ -56,6 +56,9 @@ import {
   type OutboundResult,
 } from "@/services/outbound-messaging";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/deals/[id]/messages");
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -437,7 +440,7 @@ export async function POST(request: Request, ctx: Ctx) {
         }),
       );
     } catch (e) {
-      console.error("[deals/:id/messages]", e);
+      log.error({ err: e }, "[deals/:id/messages] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao enviar mensagem." },
         { status: 500 },

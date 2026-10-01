@@ -6,6 +6,9 @@ import {
   aggregateMetaPricing,
   getLastPricingSyncAt,
 } from "@/services/meta-pricing-sync";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/reports/messaging");
 
 const TEMPLATE_CONTENT_RE =
   /📋 Modelo de mensagem|📞 Pedido de permissão|\[Template:\s*.+\]/i;
@@ -299,7 +302,7 @@ export async function GET(request: Request) {
       },
     });
   } catch (e) {
-    console.error("[reports/messaging]", e);
+    log.error({ err: e }, "[reports/messaging] falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao gerar relatório." },
       { status: 500 },

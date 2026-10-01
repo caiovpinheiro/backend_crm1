@@ -20,6 +20,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/responsibles/[userId]");
 
 type RouteContext = { params: Promise<{ userId: string }> };
 
@@ -165,7 +168,7 @@ export async function PATCH(request: Request, context: RouteContext) {
             }),
           ]);
         } catch (e) {
-          console.error("[PATCH responsibles] falha ao sincronizar departamentos", e);
+          log.error({ err: e }, "[PATCH responsibles] falha ao sincronizar departamentos");
           return NextResponse.json(
             { message: "Erro ao atualizar departamentos do responsável." },
             { status: 500 },
@@ -230,10 +233,9 @@ export async function PATCH(request: Request, context: RouteContext) {
           // Fallback: colunas de sábado ainda não migradas neste ambiente
           // (P2022). Salva o expediente sem os campos de sábado para não
           // quebrar a edição do consultor; sábado assume desligado.
-          console.warn(
-            "[PATCH responsibles] AgentSchedule sem colunas de sábado — " +
-              "salvando sem elas (aplique a migration 20260801130000).",
-            e,
+          log.warn(
+            { err: e },
+            "[PATCH responsibles] AgentSchedule sem colunas de sábado — salvando sem elas (aplique a migration 20260801130000).",
           );
           const existing = await prisma.agentSchedule.findUnique({
             where: { userId },
@@ -344,7 +346,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         schedule,
       });
     } catch (e) {
-      console.error("[PATCH /api/distribution/responsibles/[userId]]", e);
+      log.error({ err: e }, "[PATCH /api/distribution/responsibles/[userId]] falhou");
       return NextResponse.json(
         { message: "Erro ao atualizar responsável." },
         { status: 500 },

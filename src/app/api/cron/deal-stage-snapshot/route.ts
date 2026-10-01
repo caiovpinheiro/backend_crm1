@@ -16,6 +16,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { recordDealStageSnapshots } from "@/services/painel-snapshots";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/deal-stage-snapshot");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -28,7 +31,7 @@ export async function GET(request: Request) {
     const result = await recordDealStageSnapshots();
     return NextResponse.json({ ok: true, ...result, retentionDays: 400 });
   } catch (e) {
-    console.error("[cron/deal-stage-snapshot]", e);
+    log.error({ err: e }, "[cron/deal-stage-snapshot] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no snapshot." },
       { status: 500 },

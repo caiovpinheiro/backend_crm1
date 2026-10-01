@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/slash-shortcuts");
 
 /**
  * Preferências pessoais do agente sobre os atalhos "/" (menu "Mensagens
@@ -42,7 +45,7 @@ export async function GET() {
       }));
       return NextResponse.json({ items });
     } catch (e) {
-      console.error("[slash-shortcuts GET]", e);
+      log.error({ err: e }, "[slash-shortcuts GET] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },
         { status: 500 },
@@ -147,7 +150,7 @@ export async function POST(request: Request) {
         useCount: created.useCount,
       });
     } catch (e) {
-      console.error("[slash-shortcuts POST]", e);
+      log.error({ err: e }, "[slash-shortcuts POST] falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },
         { status: 500 },

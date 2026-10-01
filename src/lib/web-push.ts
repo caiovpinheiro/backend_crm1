@@ -9,6 +9,9 @@ import webpush from "web-push";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("web-push");
 
 /**
  * Wrapper do `web-push` (RFC 8030) com:
@@ -37,9 +40,7 @@ function ensureConfigured(): boolean {
     process.env.VAPID_SUBJECT?.trim() || "mailto:admin@eduit.com.br";
 
   if (!publicKey || !privateKey) {
-    console.warn(
-      "[web-push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY ausentes — push desativado.",
-    );
+    log.warn("[web-push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY ausentes — push desativado.");
     return false;
   }
 
@@ -77,9 +78,8 @@ let fcmSkipWarned = false;
 function warnFcmSkippedOnce(): void {
   if (fcmSkipWarned) return;
   fcmSkipWarned = true;
-  console.warn(
-    "[web-push] token FCM ignorado: credencial do Firebase ausente ou invalida " +
-      "(FCM_ENABLED / FCM_PROJECT_ID / FCM_SERVICE_ACCOUNT_JSON|PATH).",
+  log.warn(
+    "[web-push] token FCM ignorado: credencial do Firebase ausente ou invalida (FCM_ENABLED / FCM_PROJECT_ID / FCM_SERVICE_ACCOUNT_JSON|PATH).",
   );
 }
 
@@ -160,7 +160,7 @@ export async function sendPushToUser(
           prisma.webPushSubscription
             .update({ where: { id: sub.id }, data: { failedAt: new Date() } })
             .catch(() => {});
-          console.error("[web-push] send failed:", status, err);
+          log.error({ status, err }, "[web-push] send failed");
         }
       }
     }),
@@ -265,7 +265,7 @@ async function resolveInboundPushTargets(conversation: {
       if (gate(card)) targets.push(c.userId);
     } catch (err) {
       // Fail-closed: sem gate, sem push de conversa que não é dele.
-      console.error("[web-push] gate de visibilidade falhou:", err);
+      log.error({ err }, "[web-push] gate de visibilidade falhou");
     }
   }
   return targets;
@@ -328,6 +328,6 @@ export async function notifyInboundMessage(params: {
       },
     });
   } catch (err) {
-    console.error("[web-push] notifyInboundMessage failed (non-fatal):", err);
+    log.error({ err }, "[web-push] notifyInboundMessage failed (non-fatal)");
   }
 }

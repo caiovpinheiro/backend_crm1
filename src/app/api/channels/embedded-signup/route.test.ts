@@ -9,6 +9,19 @@ const { provisionMetaCloudChannel } = vi.hoisted(() => ({
   provisionMetaCloudChannel: vi.fn(),
 }));
 
+const { logError } = vi.hoisted(() => ({ logError: vi.fn() }));
+
+// O log saiu do `console` e foi para o logger estruturado: o teste espiona
+// o logger e mantém a mesma garantia sobre o que é (e não é) logado.
+vi.mock("@/lib/logger", () => ({
+  getLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: logError,
+  }),
+}));
+
 vi.mock("@/lib/auth-helpers", () => ({
   withOrgContext: (fn: () => unknown) => fn(),
 }));
@@ -109,7 +122,7 @@ describe("POST /api/channels/embedded-signup", () => {
         }),
       })) as unknown as typeof fetch,
     );
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logError.mockClear();
 
     const { POST } = await import("./route");
     const res = await POST(
@@ -120,8 +133,8 @@ describe("POST /api/channels/embedded-signup", () => {
 
     // SEC2-5: o log leva só código/tipo do erro — nunca o corpo da Meta
     // (message/fbtrace_id podem carregar fragmentos do fluxo OAuth).
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    const logged = JSON.stringify(errorSpy.mock.calls[0]);
+    expect(logError).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(logError.mock.calls[0]);
     expect(logged).toContain("OAuthException");
     expect(logged).toContain("100");
     expect(logged).not.toContain("invalid code");

@@ -4,6 +4,9 @@ import { startListenSweeper } from "@/services/ai-v2/listen";
 import { BaileysManager } from "./baileys-manager";
 import { startOutboundConsumer } from "./outbound-consumer";
 import { startControlConsumer } from "./control-consumer";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.baileys");
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -13,23 +16,23 @@ const outboundWorker = startOutboundConsumer(manager, redisUrl);
 const controlWorker = startControlConsumer(manager, redisUrl);
 
 async function startup() {
-  console.info("[baileys-worker] Iniciando...");
+  log.info("[baileys-worker] Iniciando...");
   // Turn Manager (AI_TURN_MANAGER=1): este processo ingere o inbound
   // Baileys, então o turno nasce aqui e precisa de quem o promova.
   // No-op com a flag desligada.
   startAiTurnSweeper();
   startListenSweeper();
   await manager.startAll();
-  console.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
+  log.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
 }
 
 async function shutdown() {
-  console.info("[baileys-worker] Encerrando...");
+  log.info("[baileys-worker] Encerrando...");
   await manager.shutdownAll();
   await outboundWorker.close();
   await controlWorker.close();
   await prisma.$disconnect();
-  console.info("[baileys-worker] Encerrado");
+  log.info("[baileys-worker] Encerrado");
 }
 
 process.on("SIGINT", () => {
@@ -41,6 +44,6 @@ process.on("SIGTERM", () => {
 });
 
 void startup().catch((err) => {
-  console.error("[baileys-worker] Falha na inicialização:", err);
+  log.error({ err }, "[baileys-worker] Falha na inicialização");
   process.exit(1);
 });

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { getActionsReport, parseActionReportFilters } from "@/services/ai-v2/actions-report";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/actions-report");
 
 /** Ações do agente no período, filtradas e paginadas. */
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -22,7 +25,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       });
       return NextResponse.json(data);
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/actions-report]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/actions-report]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao carregar o relatório." }, { status: 500 });
     }
   });

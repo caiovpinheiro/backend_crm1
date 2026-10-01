@@ -5,6 +5,9 @@ import { ensureWhatsappTemplateHiddenAtColumn } from "@/lib/meta-whatsapp/ensure
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/whatsapp-template-configs/hidden");
 
 /**
  * Ocultar/reexibir template no CRM — independente da Meta.
@@ -77,7 +80,7 @@ export async function GET(request: Request) {
       const usage = await findAutomationUsage(name);
       return NextResponse.json(usage);
     } catch (e) {
-      console.error("[whatsapp-template-configs/hidden] GET", e);
+      log.error({ err: e }, "[whatsapp-template-configs/hidden] GET falhou");
       return NextResponse.json(
         { message: "Erro ao consultar uso do template." },
         { status: 500 },
@@ -138,7 +141,7 @@ export async function POST(request: Request) {
       const usage = await findAutomationUsage(metaTemplateName);
       return NextResponse.json({ config, ...usage });
     } catch (e) {
-      console.error("[whatsapp-template-configs/hidden] POST", e);
+      log.error({ err: e }, "[whatsapp-template-configs/hidden] POST falhou");
       return NextResponse.json(
         { message: "Erro ao ocultar template." },
         { status: 500 },

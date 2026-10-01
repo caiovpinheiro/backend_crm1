@@ -22,6 +22,9 @@ import type {
   MediaInboundAction,
 } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.media-inbound");
 
 /** Quanto mais grave, maior — decide quando o lote mistura tipos. */
 const ACTION_SEVERITY: Record<MediaInboundAction, number> = {
@@ -104,7 +107,7 @@ export async function evaluateInboundMedia(args: {
       if (probe.kind) kinds.add(probe.kind);
     }
   } catch (e) {
-    console.error("[ai] evaluateInboundMedia failed", e);
+    log.error({ err: e }, "[ai] evaluateInboundMedia failed");
   }
 
   // Fallback sem linha no banco: o texto agregado denuncia a mídia pelo

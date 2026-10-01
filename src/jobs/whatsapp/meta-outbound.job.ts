@@ -18,6 +18,10 @@ import { isMetaOutboundTemplate, type MetaOutboundPayload } from "@/lib/queue";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { publishOutboundStatus } from "@/lib/outbound-status-signal";
 import { publishMessageStatus } from "@/lib/realtime-events";
+import { maskPhone } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("jobs.whatsapp.meta-outbound");
 
 export type MetaOutboundResult = {
   sendStatus: "sent" | "failed";
@@ -97,7 +101,7 @@ async function afterSuccessfulSend(
       conversationId: payload.conversationId,
       content: payload.content,
     }),
-  }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+  }).catch((err) => log.warn({ err }, "[automation trigger] message_sent"));
 
   return {
     sendStatus: "sent",
@@ -178,8 +182,16 @@ async function processMetaOutboundTemplate(
       waTarget.recipient,
     );
     const externalId = result.messages?.[0]?.id ?? null;
-    console.log(
-      `[meta-send-template] template=${tpl.templateName} channel=${payload.channelId ?? "ENV"} to=${waTarget.to ?? "—"}/${waTarget.recipient ?? "—"} wamid=${externalId} flowEnrich=${tpl.knownHasFlowButton !== false}`,
+    log.info(
+      {
+        template: tpl.templateName,
+        channel: payload.channelId ?? "ENV",
+        to: maskPhone(waTarget.to),
+        recipient: waTarget.recipient ?? null,
+        wamid: externalId,
+        flowEnrich: tpl.knownHasFlowButton !== false,
+      },
+      "[meta-send-template] enviado",
     );
 
     await prisma.message.update({

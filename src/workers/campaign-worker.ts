@@ -17,6 +17,9 @@ import {
 import { processMetaAttach } from "@/jobs/whatsapp/meta-attach.job";
 import { processMetaOutbound } from "@/jobs/whatsapp/meta-outbound.job";
 import { startWhatsappOwnedSweepers } from "@/lib/sse-bus";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.campaign");
 
 function envPositiveInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -80,9 +83,13 @@ export function startCampaignWorkers() {
     { connection, concurrency: attachConcurrency },
   );
   attachWorker.on("failed", (job, err) => {
-    console.error(
-      `[meta-attach] job ${job?.id} falhou (attempt ${job?.attemptsMade}):`,
-      err instanceof Error ? err.message : err,
+    log.error(
+      {
+        jobId: job?.id,
+        attemptsMade: job?.attemptsMade,
+        err: err instanceof Error ? err.message : err,
+      },
+      "[meta-attach] job falhou",
     );
     if (!job?.data) return;
     const attempts = job.opts.attempts ?? 1;
@@ -99,7 +106,7 @@ export function startCampaignWorkers() {
     );
   });
   attachWorker.on("completed", (job) => {
-    console.info(`[meta-attach] job ${job.id} concluído`);
+    log.info({ jobId: job.id }, "[meta-attach] job concluído");
   });
 
   const outboundConcurrency = envPositiveInt("META_OUTBOUND_CONCURRENCY", 4);
@@ -113,9 +120,13 @@ export function startCampaignWorkers() {
     { connection: connection.duplicate(), concurrency: outboundConcurrency },
   );
   outboundWorker.on("failed", (job, err) => {
-    console.error(
-      `[meta-outbound] job ${job?.id} falhou (attempt ${job?.attemptsMade}):`,
-      err instanceof Error ? err.message : err,
+    log.error(
+      {
+        jobId: job?.id,
+        attemptsMade: job?.attemptsMade,
+        err: err instanceof Error ? err.message : err,
+      },
+      "[meta-outbound] job falhou",
     );
     if (!job?.data) return;
     const attempts = job.opts.attempts ?? 1;
@@ -132,17 +143,13 @@ export function startCampaignWorkers() {
     );
   });
   outboundWorker.on("completed", (job) => {
-    console.info(`[meta-outbound] job ${job.id} concluído`);
+    log.info({ jobId: job.id }, "[meta-outbound] job concluído");
   });
 
-  console.info(
-    `[campaign-worker] inbox Meta started (meta-attach concurrency=${attachConcurrency}, meta-outbound concurrency=${outboundConcurrency})`,
-  );
+  log.info({ attachConcurrency, outboundConcurrency }, "[campaign-worker] inbox Meta started");
 
   startWhatsappOwnedSweepers();
-  console.info(
-    "[campaign-worker] sweepers sessão/stale/presença/agendadas/IA/push iniciados",
-  );
+  log.info("[campaign-worker] sweepers sessão/stale/presença/agendadas/IA/push iniciados");
 
   return { attachWorker, outboundWorker };
 }

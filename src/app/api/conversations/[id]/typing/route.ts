@@ -6,6 +6,9 @@ import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { channelSendsReadReceipts } from "@/lib/channels/config";
 import { publishTypingEvent } from "@/lib/realtime-events";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/typing");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -84,7 +87,7 @@ export async function POST(_request: Request, context: RouteContext) {
 
       return NextResponse.json({ ok: true });
     } catch (e) {
-      console.warn("[typing] error:", e);
+      log.warn({ err: e }, "[typing] error");
       return NextResponse.json({ ok: false });
     }
   });

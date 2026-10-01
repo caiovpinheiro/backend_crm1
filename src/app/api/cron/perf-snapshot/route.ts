@@ -23,6 +23,9 @@ import path from "node:path";
 
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 import { buildPerfReport, renderReportMarkdown } from "@/lib/perf/report";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/perf-snapshot");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -69,7 +72,7 @@ export async function GET(request: Request) {
       rotated,
     });
   } catch (e) {
-    console.error("[cron/perf-snapshot]", e);
+    log.error({ err: e }, "[cron/perf-snapshot] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no snapshot." },
       { status: 500 },

@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getSegments, createSegment } from "@/services/segments";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/segments");
 
 export async function GET() {
   try {
@@ -12,7 +15,7 @@ export async function GET() {
     const segments = await getSegments();
     return NextResponse.json({ segments });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao listar segmentos." },
       { status: 500 },
@@ -37,7 +40,7 @@ export async function POST(request: Request) {
     const segment = await createSegment(name, filters as never);
     return NextResponse.json({ segment }, { status: 201 });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro ao criar segmento." },
       { status: 500 },

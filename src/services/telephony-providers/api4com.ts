@@ -13,6 +13,9 @@
  */
 
 import { normalizePhone } from "@/lib/phone";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("telephony-providers.api4com");
 
 const API4COM_BASE = "https://api.api4com.com/api/v1";
 
@@ -114,7 +117,7 @@ async function api4comFetch<T>(
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error("[api4com] fetch failed:", path, detail);
+    log.error({ path, detail }, "[api4com] fetch failed");
     return {
       ok: false,
       field: path === "/dialer" ? "phone" : "email",

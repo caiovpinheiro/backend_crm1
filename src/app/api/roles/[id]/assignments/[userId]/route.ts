@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { removeRoleAssignment } from "@/services/roles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/roles/[id]/assignments/[userId]");
 
 type RouteContext = { params: Promise<{ id: string; userId: string }> };
 
@@ -28,7 +31,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       }
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[DELETE /api/roles/[id]/assignments/[userId]]", e);
+      log.error({ err: e }, "[DELETE /api/roles/[id]/assignments/[userId]]");
       return NextResponse.json(
         { message: "Erro ao remover atribuição." },
         { status: 500 },

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { syncMetaPricing } from "@/services/meta-pricing-sync";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/sync-meta-pricing");
 
 /**
  * GET /api/cron/sync-meta-pricing
@@ -45,7 +48,7 @@ export async function GET(request: Request) {
       ...result,
     });
   } catch (e) {
-    console.error("[cron/sync-meta-pricing]", e);
+    log.error({ err: e }, "[cron/sync-meta-pricing] falhou");
     return NextResponse.json(
       {
         ok: false,

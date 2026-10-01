@@ -72,6 +72,9 @@ import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.pending-shared");
 
 export interface PendingDistributionView {
   id: string;
@@ -434,7 +437,7 @@ export function armFruitlessCooldown(
   // Sem timer para o fim da janela — outbound não reabre scan sozinho.
   cancelCapacityReleasedRetry(state);
   void publishFruitlessCooldown(orgId, reason).catch((e) => {
-    console.warn("[distribution] publish fruitless cooldown failed", e);
+    log.warn({ err: e }, "[distribution] publish fruitless cooldown failed");
   });
 }
 
@@ -444,7 +447,7 @@ export function clearFruitlessCooldown(state: DrainState, orgId?: string) {
   state.cooldownSkipLogged = false;
   if (!orgId) return;
   void clearPublishedFruitlessCooldown(orgId).catch((e) => {
-    console.warn("[distribution] clear fruitless cooldown failed", e);
+    log.warn({ err: e }, "[distribution] clear fruitless cooldown failed");
   });
 }
 
@@ -489,7 +492,7 @@ export async function bypassFruitlessIfUserHasSlot(
     );
     return true;
   } catch (e) {
-    console.warn("[distribution] capacity_released slot check failed", e);
+    log.warn({ err: e }, "[distribution] capacity_released slot check failed");
     return false;
   }
 }

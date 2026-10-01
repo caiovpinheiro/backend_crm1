@@ -1,4 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("crypto.secrets");
 
 /**
  * App-layer encryption para segredos sensiveis (tokens, chaves, etc.) que
@@ -104,9 +107,7 @@ export function encryptSecret(plain: string): string {
   const key = getKey();
   if (!key) {
     if (process.env.NODE_ENV !== "test") {
-      console.warn(
-        "[crypto/secrets] encryptSecret chamado sem KEYRING_SECRET — gravando em plaintext (apenas dev).",
-      );
+      log.warn("[crypto/secrets] encryptSecret chamado sem KEYRING_SECRET — gravando em plaintext (apenas dev).");
     }
     return plain;
   }

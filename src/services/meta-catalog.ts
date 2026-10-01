@@ -10,6 +10,9 @@ import { parseStoragePath, presignStoredGetUrl } from "@/lib/storage/local";
 import {
   parseChannelConfigDecrypted,
 } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-catalog");
 
 export type MetaCatalogReason =
   | "NO_CHANNEL"
@@ -166,10 +169,10 @@ export async function detectWabaProductCatalog(
     };
   } catch (err) {
     const mapped = safeGraphMessage(err);
-    console.warn("[meta-catalog] listProductCatalogs falhou", {
-      channelId: channel.id,
-      reason: mapped.reason,
-    });
+    log.warn(
+      { channelId: channel.id, reason: mapped.reason },
+      "[meta-catalog] listProductCatalogs falhou",
+    );
     return {
       connected: false,
       catalogId: null,

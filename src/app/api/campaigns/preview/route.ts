@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { previewSegment, type SegmentFilters } from "@/services/segments";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/preview");
 
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
@@ -14,7 +17,7 @@ export async function POST(request: Request) {
       const preview = await previewSegment(filters);
       return NextResponse.json(preview);
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao fazer preview." },
         { status: 500 },

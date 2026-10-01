@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getMyCredentials } from "@/services/sip-extensions";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/sip-extensions/me/credentials");
 
 /**
  * GET /api/sip-extensions/me/credentials
@@ -32,7 +35,10 @@ export async function GET(request: Request) {
       return NextResponse.json({ credentials });
     } catch (e) {
       // Log sem incluir os dados da resposta
-      console.error("[sip-extensions/me/credentials] Erro ao obter credenciais:", (e as Error)?.message ?? e);
+      log.error(
+        { err: (e as Error)?.message ?? e },
+        "[sip-extensions/me/credentials] Erro ao obter credenciais",
+      );
       return NextResponse.json(
         { message: "Erro ao obter credenciais." },
         { status: 500 },

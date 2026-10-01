@@ -8,6 +8,9 @@ import {
   updateActivityComment,
 } from "@/services/activity-comments";
 import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/[id]/comments/[commentId]");
 
 type RouteContext = { params: Promise<{ id: string; commentId: string }> };
 
@@ -104,7 +107,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     return NextResponse.json({ message: "Erro ao editar comentário." }, { status: 500 });
   }
 }
@@ -142,7 +145,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       }
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao excluir comentário." }, { status: 500 });
   }
 }

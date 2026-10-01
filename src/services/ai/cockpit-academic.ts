@@ -5,6 +5,9 @@
 
 import { prismaBase } from "@/lib/prisma-base";
 import { IDLE_NUDGE_SIGNATURE } from "@/services/ai/idle-followup";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.cockpit-academic");
 
 export type NamedCount = { name: string; n: number };
 
@@ -340,7 +343,7 @@ export async function getAcademicCockpitMetrics(args: {
       },
     };
   } catch (e) {
-    console.error("[cockpit] métricas do agente acadêmico falharam", e);
+    log.error({ err: e }, "[cockpit] métricas do agente acadêmico falharam");
     return {
       ...EMPTY,
       saude: { ...EMPTY.saude, attendingNow: args.attendingNow },

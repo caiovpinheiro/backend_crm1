@@ -22,6 +22,9 @@ import { requireManager } from "@/lib/auth-helpers";
 import { extForMime, sniffImageMime } from "@/lib/file-sniff";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { setOrganizationLogo } from "@/services/onboarding";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/organization/logo");
 
 const MAX_LOGO_SIZE = 4 * 1024 * 1024;
 
@@ -82,7 +85,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ url: saved.url, mimeType: sniffed });
   } catch (error) {
-    console.error("[organization/logo] upload failed", error);
+    log.error({ err: error }, "[organization/logo] upload failed");
     return NextResponse.json(
       { message: "Erro ao salvar o ícone." },
       { status: 500 },
@@ -104,7 +107,7 @@ export async function DELETE() {
     await setOrganizationLogo(orgId, null);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error("[organization/logo] delete failed", error);
+    log.error({ err: error }, "[organization/logo] delete failed");
     return NextResponse.json(
       { message: "Erro ao remover o ícone." },
       { status: 500 },

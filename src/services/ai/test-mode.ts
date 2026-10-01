@@ -43,6 +43,9 @@ import { phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { normalizePhoneDigits } from "@/services/ai/phone-allowlist";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.test-mode");
 
 /** Janela do modo. Ninguém deixa conversa real presa em teste por esquecimento. */
 export const TEST_MODE_TTL_MINUTES = 30;
@@ -336,10 +339,7 @@ export function testReplayNothingMessage(): string {
 // ── Comando vindo do WhatsApp ───────────────────────────────
 
 function logTest(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-test]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-test] ${event}`);
 }
 
 export type HandleTestCommandInput = {

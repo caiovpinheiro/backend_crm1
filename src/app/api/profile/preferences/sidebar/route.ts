@@ -19,6 +19,9 @@ import {
   computeAvailableKeys,
   saveSidebarPreferences,
 } from "@/services/user-preferences";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/profile/preferences/sidebar");
 
 const itemSchema = z.object({
   key: z.string().min(1).max(100),
@@ -82,7 +85,7 @@ export async function PATCH(request: Request) {
         availableKeys: [...availableKeys],
       });
     } catch (e) {
-      console.error("[PATCH /api/profile/preferences/sidebar]", e);
+      log.error({ err: e }, "[PATCH /api/profile/preferences/sidebar] falhou");
       return NextResponse.json(
         { message: "Erro ao salvar o menu." },
         { status: 500 },

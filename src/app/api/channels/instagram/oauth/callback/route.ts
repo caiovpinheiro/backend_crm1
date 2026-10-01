@@ -14,6 +14,9 @@ import {
   handleCallback,
   verifyState,
 } from "@/services/channels-instagram-oauth";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/instagram/oauth/callback");
 
 function html(body: string, status = 200): Response {
   return new Response(body, {
@@ -110,7 +113,7 @@ export async function GET(request: Request) {
         : e instanceof Error
           ? e.message
           : "Erro no callback OAuth.";
-    console.error("[ig-oauth/callback]", e);
+    log.error({ err: e }, "[ig-oauth/callback] falhou");
     return renderResult(false, { message: msg }, msg, targetOrigin);
   }
 }

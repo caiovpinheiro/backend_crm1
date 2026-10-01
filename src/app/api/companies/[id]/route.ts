@@ -7,6 +7,9 @@ import {
   getCompanyById,
   updateCompany,
 } from "@/services/companies";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/companies/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -29,7 +32,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
     return NextResponse.json(company);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar empresa." }, { status: 500 });
   }
 }
@@ -112,7 +115,7 @@ export async function PUT(request: Request, context: RouteContext) {
     const company = await updateCompany(id, payload);
     return NextResponse.json(company);
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Empresa não encontrada." }, { status: 404 });
     }
@@ -140,7 +143,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
     await deleteCompany(id);
     return NextResponse.json({ ok: true });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Empresa não encontrada." }, { status: 404 });
     }

@@ -8,6 +8,9 @@ import {
   getContacts,
   isValidLifecycleStage,
 } from "@/services/contacts";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/contacts");
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function parseIntParam(v: string | null, fallback: number) {
@@ -125,7 +128,7 @@ export async function GET(request: Request) {
     return NextResponse.json(result);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json(
       { message: "Erro ao listar contatos." },
       { status: 500 }
@@ -227,7 +230,7 @@ export async function POST(request: Request) {
     return NextResponse.json(contact, { status: 201 });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2002") {
       return NextResponse.json(
         { message: "Violação de unicidade." },

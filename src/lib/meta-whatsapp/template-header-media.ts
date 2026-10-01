@@ -14,6 +14,9 @@
 import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
 import { resolveTemplateHeaderMediaFormat } from "@/lib/meta-whatsapp/enrich-template-flow";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("meta-whatsapp.template-header-media");
 
 export class TemplateHeaderMediaError extends Error {
   readonly name = "TemplateHeaderMediaError";
@@ -278,8 +281,14 @@ export async function injectTemplateHeaderMediaComponent(
   });
 
   const out = [headerComponent, ...withoutExistingHeader];
-  console.log(
-    `[template-header-media] template=${args.templateName} format=${headerFormat} mode=id id=${mediaParam.id.slice(0, 12)}`,
+  log.info(
+    {
+      template: args.templateName,
+      format: headerFormat,
+      mode: "id",
+      id: mediaParam.id.slice(0, 12),
+    },
+    "[template-header-media] header resolvido",
   );
   return out;
 }

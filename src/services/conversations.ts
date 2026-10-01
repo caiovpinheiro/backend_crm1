@@ -62,6 +62,8 @@ import {
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+
+const log = getLogger("conversations");
 /**
  * Badges aceitam stale até o TTL. Não invalidar em cada `new_message`
  * (preview) — isso matava o Redis e o `?counts=1` seguinte recomputava
@@ -3005,7 +3007,7 @@ async function restoreDealAfterConversationResolved(args: {
       contactId: args.contactId,
     });
   } catch (e) {
-    console.warn("[conversations] restoreDeal after close failed", e);
+    log.warn({ err: e }, "[conversations] restoreDeal after close failed");
   }
 }
 

@@ -4,6 +4,9 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { safeFetch } from "@/lib/safe-fetch";
 import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("integration-webhooks");
 
 export const INTEGRATION_WEBHOOK_EVENTS = [
   "agent_changed",
@@ -65,9 +68,9 @@ export async function hasIntegrationWebhooks(event: string): Promise<boolean> {
     });
     exists = row != null;
   } catch (err) {
-    console.warn(
-      "[integration-webhooks] exists check failed:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[integration-webhooks] exists check failed",
     );
     return false;
   }
@@ -259,9 +262,9 @@ export async function dispatchIntegrationWebhooks(
       select: { id: true, url: true, secret: true },
     });
   } catch (err) {
-    console.warn(
-      "[integration-webhooks] list failed:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[integration-webhooks] list failed",
     );
     return;
   }
@@ -289,15 +292,16 @@ export async function dispatchIntegrationWebhooks(
           { timeoutMs: DISPATCH_TIMEOUT_MS, maxRedirects: 0 },
         );
         if (!res.ok) {
-          console.warn(
-            `[integration-webhooks] ${hook.id} ${event} → HTTP ${res.status}`,
+          log.warn(
+            { hookId: hook.id, event, status: res.status },
+            "[integration-webhooks] resposta HTTP não-ok",
           );
         }
         await res.body?.cancel().catch(() => undefined);
       } catch (err) {
-        console.warn(
-          `[integration-webhooks] ${hook.id} ${event} failed:`,
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { hookId: hook.id, event, err: err instanceof Error ? err.message : err },
+          "[integration-webhooks] failed",
         );
       }
     }),

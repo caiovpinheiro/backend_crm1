@@ -1,6 +1,9 @@
 import { Prisma } from "@prisma/client";
 
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("email-schema-ensure");
 
 /**
  * Auto-cura das migrations de e-mail (`outlook_rules`, `spam_folder`).
@@ -38,9 +41,9 @@ export async function ensureEmailSpamFolder(): Promise<boolean> {
     spamFolderEnsured = true;
     return true;
   } catch (e) {
-    console.warn(
-      "[email] falha ao aplicar pasta Spam (enum):",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[email] falha ao aplicar pasta Spam (enum)",
     );
     return false;
   }
@@ -69,9 +72,9 @@ export async function ensureEmailOutlookColumns(): Promise<boolean> {
     outlookColumnsEnsured = true;
     return spamOk;
   } catch (e) {
-    console.warn(
-      "[email] falha ao aplicar colunas Outlook (DDL):",
-      e instanceof Error ? e.message : e,
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[email] falha ao aplicar colunas Outlook (DDL)",
     );
     return false;
   }

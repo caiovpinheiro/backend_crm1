@@ -18,6 +18,9 @@
 import type { Channel } from "@prisma/client";
 
 import { createChannel, getChannelById, updateChannel } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("channels-meta-provision");
 
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
@@ -127,7 +130,7 @@ export async function provisionMetaCloudChannel(
       typeof errObj.message === "string"
         ? errObj.message
         : "Falha ao assinar o app ao WABA (subscribed_apps).";
-    console.error("[provisionMetaCloudChannel] subscribed_apps error:", subErr);
+    log.error({ err: subErr }, "[provisionMetaCloudChannel] subscribed_apps error");
     throw new MetaProvisionError(
       `Não foi possível assinar o webhook no WABA: ${msg}. Verifique o Token de acesso e as permissões (whatsapp_business_management).`,
       400,
@@ -150,13 +153,10 @@ export async function provisionMetaCloudChannel(
       phoneRegistered = true;
     } else {
       const regErr = (await regRes.json().catch(() => ({}))) as Record<string, unknown>;
-      console.warn(
-        "[provisionMetaCloudChannel] phone register non-fatal error:",
-        regErr,
-      );
+      log.warn({ err: regErr }, "[provisionMetaCloudChannel] phone register non-fatal error");
     }
   } catch (err) {
-    console.warn("[provisionMetaCloudChannel] phone register threw (non-fatal):", err);
+    log.warn({ err }, "[provisionMetaCloudChannel] phone register threw (non-fatal)");
   }
 
   // 3. Metadados do número (display_phone_number / verified_name).

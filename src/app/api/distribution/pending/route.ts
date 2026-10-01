@@ -14,6 +14,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/pending");
 
 export async function GET(req: Request) {
   return withOrgContext(async (session) => {
@@ -52,7 +55,7 @@ export async function GET(req: Request) {
       const result = await getPendingDistributions({ cursor, limit });
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[GET /api/distribution/pending]", e);
+      log.error({ err: e }, "[GET /api/distribution/pending] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar a fila de espera." },
         { status: 500 },

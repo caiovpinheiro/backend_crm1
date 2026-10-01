@@ -8,6 +8,9 @@ import {
   type FeedbackParams,
 } from "@/services/ai-v2/feedback";
 import type { FeedbackSourceType } from "@/services/ai-v2/feedback-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/ai-agents-v2/[id]/feedback");
 
 const SOURCES: FeedbackSourceType[] = ["turn", "test_turn", "replay_point"];
 
@@ -31,7 +34,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       const reports = await listFeedbackReports(r.session.user.organizationId!, id);
       return NextResponse.json({ reports });
     } catch (err) {
-      console.error("[GET /api/ai-agents-v2/[id]/feedback]", err);
+      log.error({ err }, "[GET /api/ai-agents-v2/[id]/feedback]");
       return NextResponse.json({ message: err instanceof Error ? err.message : "Erro ao listar relatórios." }, { status: 500 });
     }
   });
@@ -58,7 +61,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       if (msg === "NO_OPENAI_KEY") {
         return NextResponse.json({ code: "NO_OPENAI_KEY", message: "Configure uma chave válida do modelo para gerar o relatório." }, { status: 400 });
       }
-      console.error("[POST /api/ai-agents-v2/[id]/feedback]", err);
+      log.error({ err }, "[POST /api/ai-agents-v2/[id]/feedback]");
       return NextResponse.json({ message: msg }, { status: msg.startsWith("Já existe") ? 409 : 500 });
     }
   });

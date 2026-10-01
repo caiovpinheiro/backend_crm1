@@ -16,6 +16,9 @@ import {
   type InboxPolicy,
 } from "@/lib/ai-agents/steering";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("verticals.academic.department-routing");
 
 export type AcademicDeptKey = keyof typeof ACADEMIC_DEPARTMENT_ALIASES;
 
@@ -160,10 +163,7 @@ export async function shouldBlockAcolhimentoFromMatricula(
     }
     return { block: false };
   } catch (e) {
-    console.warn(
-      "[academic-handoff] shouldBlockAcolhimentoFromMatricula failed",
-      e,
-    );
+    log.warn({ err: e }, "[academic-handoff] shouldBlockAcolhimentoFromMatricula failed");
     return { block: false };
   }
 }
@@ -397,7 +397,7 @@ export async function moveOpenDealToEmAtendimento(args: {
     ).catch(() => {});
     return { moved: true, stageId: stage.id, dealId };
   } catch (e) {
-    console.error("[academic-handoff] moveOpenDealToEmAtendimento failed", e);
+    log.error({ err: e }, "[academic-handoff] moveOpenDealToEmAtendimento failed");
     return { moved: false, stageId: stage.id, dealId };
   }
 }
@@ -607,7 +607,7 @@ export async function restoreDealToAcademicOrigin(args: {
     ).catch(() => {});
     return { moved: true, reason: "MOVED", dealId, stageId: originStage.id };
   } catch (e) {
-    console.error("[academic-closure] restoreDealToAcademicOrigin failed", e);
+    log.error({ err: e }, "[academic-closure] restoreDealToAcademicOrigin failed");
     return { moved: false, reason: "ERROR", dealId };
   }
 }
@@ -1001,7 +1001,7 @@ export async function executeAcademicDepartmentHandoff(args: {
         await assignDealOwner(dealId, selectedUserId);
       }
     } catch (e) {
-      console.warn("[academic-handoff] align deal owner failed", e);
+      log.warn({ err: e }, "[academic-handoff] align deal owner failed");
     }
   }
 

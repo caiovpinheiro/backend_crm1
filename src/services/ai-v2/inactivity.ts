@@ -11,6 +11,9 @@ import { prismaBase } from "@/lib/prisma-base";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
 import type { V2AgentConfig, V2InactivityConfig } from "@/lib/ai-v2/types";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.inactivity");
 
 export const NUDGE_MESSAGE_DEFAULT = "Ainda está por aí? Se precisar de algo, é só me responder.";
 
@@ -210,9 +213,12 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
         }),
       );
     } catch (err) {
-      console.warn(`[ai-v2 inatividade] conv=${row.conversation_id}:`, err instanceof Error ? err.message : err);
+      log.warn(
+        { conv: row.conversation_id, err: err instanceof Error ? err.message : err },
+        "[ai-v2 inatividade] falhou",
+      );
     }
   }
-  if (nudged + closed > 0) console.info(`[ai-v2 inatividade] avisos=${nudged} encerradas=${closed}`);
+  if (nudged + closed > 0) log.info({ avisos: nudged, encerradas: closed }, "[ai-v2 inatividade] resumo");
   return { nudged, closed };
 }

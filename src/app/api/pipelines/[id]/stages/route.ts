@@ -5,6 +5,9 @@ import { loadAuthzContext, can } from "@/lib/authz";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { runWithContext } from "@/lib/request-context";
 import { createStage, getPipelineMeta, reorderStages } from "@/services/pipelines";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/pipelines/[id]/stages");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -140,7 +143,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2003") {
       return NextResponse.json({ message: "Referência inválida." }, { status: 400 });
     }
@@ -210,7 +213,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     return NextResponse.json({ message: "Erro ao reordenar estágios." }, { status: 500 });
   }
 }

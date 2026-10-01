@@ -15,6 +15,9 @@ import {
   parseDay,
   SNAPSHOT_RETENTION_DAYS,
 } from "@/services/painel-period";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("painel-snapshots");
 
 export async function recordDealStageSnapshots(now = new Date()): Promise<{
   orgs: number;
@@ -112,7 +115,7 @@ async function recordOrgSnapshot(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/42P01|deal_stage_daily_snapshots/i.test(msg)) {
-      console.error("[painel/snapshots] tabela ausente — rode a migration deal_stage_daily_snapshots");
+      log.error("[painel/snapshots] tabela ausente — rode a migration deal_stage_daily_snapshots");
       return { rows: 0, pruned: 0 };
     }
     throw e;

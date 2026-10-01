@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { getSystemUsageAggregate } from "@/services/system-presence";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/system-usage");
 
 export const dynamic = "force-dynamic";
 
@@ -62,7 +65,7 @@ export async function GET(request: Request) {
       if (msg.includes("system_usage_sessions")) {
         return NextResponse.json({ items: [], pending: true });
       }
-      console.error("[analytics/system-usage] erro:", err);
+      log.error({ err }, "[analytics/system-usage] erro");
       return NextResponse.json(
         { message: "Erro ao carregar uso do sistema." },
         { status: 500 },

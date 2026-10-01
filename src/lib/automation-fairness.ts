@@ -4,6 +4,9 @@ import IORedis from "ioredis";
 
 import { prismaBase } from "@/lib/prisma-base";
 import type { AutomationJobPayload } from "@/lib/queue";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("automation-fairness");
 
 /**
  * Justiça multi-tenant da fila `automation-jobs` — admission control por org.
@@ -73,7 +76,7 @@ function getRedis(): IORedis | null {
   if (!globalForFairness.automationFairRedis) {
     const client = new IORedis(url, { maxRetriesPerRequest: null });
     client.on("error", (err) => {
-      console.warn("[automation-fair] redis error:", err.message);
+      log.warn({ err: err.message }, "[automation-fair] redis error");
     });
     globalForFairness.automationFairRedis = client;
   }
@@ -171,8 +174,13 @@ async function pumpOrg(orgId: string, add: AutomationAddFn): Promise<number> {
     try {
       await add(env.p, env.j);
     } catch (err) {
-      console.warn(
-        `[automation-fair] pump org=${orgId}: queue.add falhou (${err instanceof Error ? err.message : err}) — ${items.length - admitted} item(ns) seguem no backlog`,
+      log.warn(
+        {
+          org: orgId,
+          err: err instanceof Error ? err.message : err,
+          pendentes: items.length - admitted,
+        },
+        "[automation-fair] pump: queue.add falhou — itens seguem no backlog",
       );
       break;
     }
@@ -226,9 +234,9 @@ export async function releaseAutomationSlot(
     if (jobId) await r.srem(INFLIGHT_PREFIX + orgId, jobId);
     await pumpOrg(orgId, add);
   } catch (err) {
-    console.warn(
-      `[automation-fair] release org=${orgId} falhou (sweeper reconcilia):`,
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { org: orgId, err: err instanceof Error ? err.message : err },
+      "[automation-fair] release falhou (sweeper reconcilia)",
     );
   }
 }
@@ -280,13 +288,13 @@ export async function sweepAutomationFairness(
         await r.del(INFLIGHT_PREFIX + orgId);
       }
     } catch (err) {
-      console.warn(
-        `[automation-fair] sweep org=${orgId} falhou:`,
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { org: orgId, err: err instanceof Error ? err.message : err },
+        "[automation-fair] sweep falhou",
       );
     }
   }
   if (pumped > 0) {
-    console.info(`[automation-fair] sweep admitiu ${pumped} job(s) de backlog`);
+    log.info({ pumped }, "[automation-fair] sweep admitiu jobs de backlog");
   }
 }

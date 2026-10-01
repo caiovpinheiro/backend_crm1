@@ -7,6 +7,9 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("missed-call-schedule-offer");
 
 function templateName(): string | null {
   const n = process.env.META_WHATSAPP_CALL_SCHEDULE_TEMPLATE_NAME?.trim();
@@ -54,7 +57,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
   const metaClient = metaClientFromConfig(channelConfig);
 
   if (!metaClient.configured) {
-    console.warn("[missed-call-schedule] Canal sem credenciais Meta — template não enviado.");
+    log.warn("[missed-call-schedule] Canal sem credenciais Meta — template não enviado.");
     return;
   }
 
@@ -67,7 +70,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
 
   const waTarget = await getContactWhatsAppTargets(params.contactId);
   if (!waTarget?.to && !waTarget?.recipient) {
-    console.warn("[missed-call-schedule] Contacto sem telefone/BSUID — template não enviado.");
+    log.warn("[missed-call-schedule] Contacto sem telefone/BSUID — template não enviado.");
     return;
   }
 
@@ -85,7 +88,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
     /* ignore */
   }
   if (!templateGraphId) {
-    console.warn(`[meta-flow-enrich] template config não encontrada para nome=${name}`);
+    log.warn({ templateName: name }, "[meta-flow-enrich] template config não encontrada");
   }
 
   let resolvedFlowToken: string | null = null;
@@ -105,7 +108,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
       waTarget.recipient
     );
   } catch (e) {
-    console.error("[missed-call-schedule] Falha ao enviar template:", e);
+    log.error({ err: e }, "[missed-call-schedule] Falha ao enviar template");
     return;
   }
 

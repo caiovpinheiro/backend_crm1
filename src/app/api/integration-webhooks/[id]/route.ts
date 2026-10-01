@@ -6,6 +6,9 @@ import {
   deleteIntegrationWebhook,
   getIntegrationWebhook,
 } from "@/services/integration-webhooks";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/integration-webhooks/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -26,7 +29,7 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json(row);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar webhook." }, { status: 500 });
   }
 }
@@ -52,7 +55,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       return NextResponse.json({ ok: true });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao remover webhook." }, { status: 500 });
   }
 }

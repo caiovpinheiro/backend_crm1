@@ -9,6 +9,9 @@ import {
   normalizeHoursBeforeExpiry,
   WHATSAPP_SESSION_WINDOW_MS,
 } from "@/services/whatsapp-session-expiry";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("whatsapp-session-expiry-sweeper");
 
 const INTERVAL_MS =
   Number(process.env.AUTOMATION_SESSION_EXPIRY_INTERVAL_MS) || 60_000;
@@ -38,9 +41,9 @@ export function startWhatsappSessionExpirySweeper(): void {
 
   const tick = () => {
     void sweepWhatsappSessionExpiryTriggers().catch((error) => {
-      console.warn(
-        "[whatsapp-session-expiry] tick falhou:",
-        error instanceof Error ? error.message : error,
+      log.warn(
+        { err: error instanceof Error ? error.message : error },
+        "[whatsapp-session-expiry] tick falhou",
       );
     });
   };
@@ -48,7 +51,7 @@ export function startWhatsappSessionExpirySweeper(): void {
     tick();
     setInterval(tick, INTERVAL_MS);
   }, 20_000);
-  console.info(`[whatsapp-session-expiry] sweeper iniciado (tick=${INTERVAL_MS}ms)`);
+  log.info({ tickMs: INTERVAL_MS }, "[whatsapp-session-expiry] sweeper iniciado");
 }
 
 export async function sweepWhatsappSessionExpiryTriggers(

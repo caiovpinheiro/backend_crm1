@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { getAutomationListSummary } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/summary");
 
 /**
  * GET /api/automations/summary
@@ -18,7 +21,7 @@ export async function GET() {
       const summary = await getAutomationListSummary();
       return NextResponse.json(summary);
     } catch (e) {
-      console.error("[GET /api/automations/summary]", e);
+      log.error({ err: e }, "[GET /api/automations/summary] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar resumo de automações." },
         { status: 500 },

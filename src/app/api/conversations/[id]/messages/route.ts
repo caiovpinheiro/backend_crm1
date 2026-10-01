@@ -46,6 +46,9 @@ import {
   extractLegacyBracketTemplateName,
 } from "@/lib/whatsapp-outbound-template-label";
 import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/conversations/[id]/messages");
 
 const FLOW_RESPONSE_MARK = /resposta\s+do\s+formul/i;
 
@@ -71,7 +74,7 @@ async function stopAutomationsAfterHumanReply(
   try {
     await cancelActiveContextsForContactIfAny(contactId);
   } catch (err) {
-    console.warn("[automation] cancel after human reply:", err);
+    log.warn({ err }, "[automation] cancel after human reply");
   }
 }
 
@@ -868,7 +871,7 @@ export async function GET(request: Request, context: RouteContext) {
     });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     const msg = e instanceof Error ? e.message : "Erro ao carregar mensagens.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }
@@ -1184,7 +1187,7 @@ export async function POST(request: Request, context: RouteContext) {
             conversationId: conv.id,
             content,
           }),
-        }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+        }).catch((err) => log.warn({ err }, "[automation trigger] message_sent")),
       );
 
       if (!sendRes.failed) {
@@ -1218,10 +1221,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
         (err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio manual:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
       );
 
       return NextResponse.json(
@@ -1339,10 +1339,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
         (err) =>
-          console.warn(
-            "[scheduled-messages] falha ao cancelar apos envio manual:",
-            err,
-          ),
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
       );
       cancelAiReplyDebounce(conv.id, "human_outbound");
 
@@ -1364,7 +1361,7 @@ export async function POST(request: Request, context: RouteContext) {
       if (!job) {
         // Sem fail-open sync na API — mensagem fica failed; UI pode reenviar.
         const errMsg = "Fila de envio indisponível (Redis). Tente novamente.";
-        console.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
+        log.warn("[meta-outbound] enqueue falhou — marcando failed (sem sync na API)");
         await prisma.message
           .updateMany({
             where: { id: saved.id, sendStatus: "pending" },
@@ -1447,7 +1444,7 @@ export async function POST(request: Request, context: RouteContext) {
           conversationId: conv.id,
           content,
         }),
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+      }).catch((err) => log.warn({ err }, "[automation trigger] message_sent")),
     );
 
     // Log unificado de atividade (Activity Log) — fire-and-forget.
@@ -1493,10 +1490,7 @@ export async function POST(request: Request, context: RouteContext) {
     // cancelledById=null porque o cancelamento é automático, não manual.
     cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
       (err) =>
-        console.warn(
-          "[scheduled-messages] falha ao cancelar apos envio manual:",
-          err,
-        ),
+        log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
     );
     // Humano respondeu: invalida debounce do Agente IA pendente.
     cancelAiReplyDebounce(conv.id, "human_outbound");
@@ -1520,7 +1514,7 @@ export async function POST(request: Request, context: RouteContext) {
     }, { status: 201 });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     const msg = e instanceof Error ? e.message : "Erro ao enviar mensagem.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

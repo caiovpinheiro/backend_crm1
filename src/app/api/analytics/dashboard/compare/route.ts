@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getDashboardMetrics, type AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/dashboard/compare");
 
 // Bug 24/abr/26: usavamos `auth()` direto e o handler chamava
 // `getDashboardMetrics` que depende de `getOrgIdOrThrow()` — sem o
@@ -46,7 +49,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json({ current, previous });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar comparação de métricas." },
         { status: 500 },

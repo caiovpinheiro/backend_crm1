@@ -9,6 +9,9 @@ import {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/whatsapp-template-configs");
 
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
 // (direto ou via service), avaliado ANTES da Prisma extension popular
@@ -31,7 +34,7 @@ export async function GET() {
       }
       return NextResponse.json(configs);
     } catch (e) {
-      console.error("[whatsapp-template-configs] GET", e);
+      log.error({ err: e }, "[whatsapp-template-configs] GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar templates." },
         { status: 500 },
@@ -148,7 +151,7 @@ export async function PUT(request: Request) {
 
       return NextResponse.json(config);
     } catch (e) {
-      console.error("[whatsapp-template-configs] PUT", e);
+      log.error({ err: e }, "[whatsapp-template-configs] PUT falhou");
       return NextResponse.json(
         { message: "Erro ao salvar template." },
         { status: 500 },

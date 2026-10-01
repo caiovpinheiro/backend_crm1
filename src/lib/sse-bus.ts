@@ -27,6 +27,9 @@ import {
   isReplaySandboxActive,
   recordBlockedEffect,
 } from "@/services/ai/replay-sandbox";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("sse-bus");
 
 /**
  * Multi-tenancy do SSE Bus
@@ -121,8 +124,9 @@ async function inboxSseCardWithinBudget(
       withInboxSseCard(event, data),
       new Promise<unknown>((resolve) => {
         timer = setTimeout(() => {
-          console.error(
-            `[sse-bus] card snapshot de "${event}" passou de ${INBOX_CARD_BUDGET_MS}ms — publicando sem card`,
+          log.error(
+            { event, budgetMs: INBOX_CARD_BUDGET_MS },
+            "[sse-bus] card snapshot passou do orçamento — publicando sem card",
           );
           resolve(data);
         }, INBOX_CARD_BUDGET_MS);
@@ -223,7 +227,7 @@ class SseBus {
     try {
       await this.redisInitPromise;
     } catch (e) {
-      console.error("[sse-bus] falha ao ligar Redis pub/sub:", e);
+      log.error({ err: e }, "[sse-bus] falha ao ligar Redis pub/sub");
       this.redisInitPromise = null;
       this.redisReady = false;
       this.redisSub?.disconnect();
@@ -347,8 +351,9 @@ class SseBus {
       //
       // Loga em produção também: o drop silencioso já apareceu como
       // "mensagem não atualiza no chat" sem nenhum rastro no servidor.
-      console.error(
-        `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
+      log.error(
+        { event },
+        "[sse-bus] publish SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).",
       );
       return;
     }
@@ -359,8 +364,9 @@ class SseBus {
       (!audienceUserIds || audienceUserIds.length === 0)
     ) {
       if (process.env.NODE_ENV !== "production") {
-        console.warn(
-          `[sse-bus] publish "${event}" SEM audienceUserIds — dropado (team-chat fail-closed).`,
+        log.warn(
+          { event },
+          "[sse-bus] publish SEM audienceUserIds — dropado (team-chat fail-closed).",
         );
       }
       return;
@@ -416,7 +422,7 @@ class SseBus {
     try {
       payload = await inboxSseCardWithinBudget(event, data);
     } catch (e) {
-      console.error("[sse-bus] inbox card snapshot:", e);
+      log.error({ err: e }, "[sse-bus] inbox card snapshot");
     }
     payload = markInboxCardOmittedByBudget(event, data, payload);
     if (scopeWithinBudget) {
@@ -441,7 +447,7 @@ class SseBus {
         });
         await this.redisPub.publish(REDIS_CHANNEL, body);
       } catch (e) {
-        console.error("[sse-bus] publish Redis:", e);
+        log.error({ err: e }, "[sse-bus] publish Redis");
       }
       return;
     }
@@ -514,9 +520,7 @@ function bootstrapBackgroundServices() {
       process.env.NEXT_PHASE !== "phase-production-build" &&
       process.env.CRM_SKIP_BACKGROUND_SERVERS !== "1"
     ) {
-      console.info(
-        "[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)",
-      );
+      log.info("[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)");
     }
     return;
   }
@@ -525,7 +529,7 @@ function bootstrapBackgroundServices() {
   // (inbox + health + 6 timers). Atrasa o 1º tick para o Postgres
   // aceitar conexões e o GET /conversations não ficar atrás da fila.
   const bootDelayMs = Number(process.env.API_SWEEPER_BOOT_DELAY_MS) || 25_000;
-  console.info(`[sse-bus] sweepers agendados em ${bootDelayMs}ms`);
+  log.info({ bootDelayMs }, "[sse-bus] sweepers agendados");
   setTimeout(() => startBackgroundSweepers(), bootDelayMs);
 }
 
@@ -538,31 +542,31 @@ export function startWhatsappOwnedSweepers() {
   import("@/services/system-presence")
     .then(({ startSystemPresenceSweeper }) => startSystemPresenceSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start system-presence sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start system-presence sweeper"),
     );
 
   import("@/services/system-activity")
     .then(({ startSystemActivitySweeper }) => startSystemActivitySweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start system-activity sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start system-activity sweeper"),
     );
 
   import("@/services/scheduled-messages-worker")
     .then(({ startScheduledMessagesWorker }) => startScheduledMessagesWorker())
     .catch((e) =>
-      console.error("[sse-bus] failed to start scheduled-messages worker:", e),
+      log.error({ err: e }, "[sse-bus] failed to start scheduled-messages worker"),
     );
 
   import("@/services/stale-outbound-sweeper")
     .then(({ startStaleOutboundSweeper }) => startStaleOutboundSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start stale outbound sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start stale outbound sweeper"),
     );
 
   import("@/services/ai-agent-inactivity-worker")
     .then(({ startAIAgentInactivityWorker }) => startAIAgentInactivityWorker())
     .catch((e) =>
-      console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
+      log.error({ err: e }, "[sse-bus] failed to start ai-agent inactivity worker"),
     );
 
   import("@/services/whatsapp-session-expiry-sweeper")
@@ -570,13 +574,13 @@ export function startWhatsappOwnedSweepers() {
       startWhatsappSessionExpirySweeper(),
     )
     .catch((e) =>
-      console.error("[sse-bus] failed to start session-expiry sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start session-expiry sweeper"),
     );
 
   import("@/services/activity-alert-push-sweeper")
     .then(({ startActivityAlertPushSweeper }) => startActivityAlertPushSweeper())
     .catch((e) =>
-      console.error("[sse-bus] failed to start activity-alert push sweeper:", e),
+      log.error({ err: e }, "[sse-bus] failed to start activity-alert push sweeper"),
     );
 
   // Só lê activity_outbox de tabulação e grava activity_events.
@@ -586,14 +590,14 @@ export function startWhatsappOwnedSweepers() {
       startTabulationOutboxProjector(),
     )
     .catch((e) =>
-      console.error("[sse-bus] failed to start tabulation outbox projector:", e),
+      log.error({ err: e }, "[sse-bus] failed to start tabulation outbox projector"),
     );
 }
 
 function startBackgroundSweepers() {
   import("@/services/automation-context")
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
-    .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
+    .catch((e) => log.error({ err: e }, "[sse-bus] failed to start timeout sweeper"));
 
   startWhatsappOwnedSweepers();
 }

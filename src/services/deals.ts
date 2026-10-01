@@ -39,6 +39,9 @@ import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("deals");
 
 /**
  * Valida o motivo da perda no contexto do funil.
@@ -72,9 +75,9 @@ export async function assertLostReasonAllowed(
       );
     }
   } catch (e) {
-    console.warn(
-      "[deals/assertLostReasonAllowed] Falha lendo allowOther; permitindo:",
-      (e as Error)?.message ?? e,
+    log.warn(
+      { err: (e as Error)?.message ?? e },
+      "[deals/assertLostReasonAllowed] Falha lendo allowOther; permitindo",
     );
     return;
   }
@@ -182,9 +185,9 @@ export async function createDealEventsMany(
         ),
       });
     } catch (err) {
-      console.warn(
-        "[createDealEventsMany] falha ao gravar deal_events em lote:",
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[createDealEventsMany] falha ao gravar deal_events em lote",
       );
     }
   }
@@ -1686,11 +1689,10 @@ export async function moveDeal(
   // Funil B2C de candidatos: reserva/contratação ao entrar nos estágios da vaga.
   void import("@/services/product-fulfillment").then((m) =>
     m.onCandidateStageMove(dealId, targetStageId).catch((err) => {
-      console.warn("[deals.moveDeal] onCandidateStageMove falhou:", {
-        dealId,
-        targetStageId,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      log.warn(
+        { dealId, targetStageId, err: err instanceof Error ? err.message : String(err) },
+        "[deals.moveDeal] onCandidateStageMove falhou",
+      );
     }),
   );
 

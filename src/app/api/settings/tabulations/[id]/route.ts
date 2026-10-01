@@ -3,6 +3,9 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { deleteNode, updateNode } from "@/services/tabulations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/tabulations/[id]");
 
 const UpdateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
@@ -40,7 +43,7 @@ export async function PUT(request: Request, ctx: Ctx) {
       if (code === "PARENT_INVALID" || code === "CYCLE") {
         return NextResponse.json({ message: (e as Error).message, code }, { status: 400 });
       }
-      console.error("[tabulations][PUT]", e);
+      log.error({ err: e }, "[tabulations][PUT] falhou");
       return NextResponse.json(
         { message: "Erro ao atualizar tabulacao." },
         { status: 500 },
@@ -63,7 +66,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
       if (code === "NOT_FOUND") {
         return NextResponse.json({ message: "Nao encontrada." }, { status: 404 });
       }
-      console.error("[tabulations][DELETE]", e);
+      log.error({ err: e }, "[tabulations][DELETE] falhou");
       return NextResponse.json(
         { message: "Erro ao remover tabulacao." },
         { status: 500 },

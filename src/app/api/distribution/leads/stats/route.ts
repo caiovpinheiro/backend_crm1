@@ -15,6 +15,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/leads/stats");
 
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
@@ -54,7 +57,7 @@ export async function GET(request: Request) {
       });
       return NextResponse.json(stats);
     } catch (e) {
-      console.error("[GET /api/distribution/leads/stats]", e);
+      log.error({ err: e }, "[GET /api/distribution/leads/stats] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar indicadores." },
         { status: 500 },

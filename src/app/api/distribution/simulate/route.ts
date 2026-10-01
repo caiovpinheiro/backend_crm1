@@ -17,6 +17,9 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/distribution/simulate");
 
 const bodySchema = z.object({
   distributionType: z.string().trim().max(100).nullable().optional(),
@@ -71,7 +74,7 @@ export async function POST(request: Request) {
       });
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[POST /api/distribution/simulate]", e);
+      log.error({ err: e }, "[POST /api/distribution/simulate] falhou");
       return NextResponse.json(
         { message: "Erro ao simular distribuição." },
         { status: 500 },

@@ -8,6 +8,9 @@ import {
   getCampaignById,
   listCampaignRecipientsForExport,
 } from "@/services/campaigns";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/campaigns/[id]/recipients/export");
 
 function slugPart(value: string): string {
   return value
@@ -69,7 +72,7 @@ export async function GET(
         },
       });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao exportar destinatários." },
         { status: 500 },

@@ -17,6 +17,9 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { resolveAgentVerticalForConversation } from "@/services/ai/agent-vertical";
 import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.stuck-inbound-distribution");
 
 export const STUCK_INBOUND_MS = 15 * 60 * 1000;
 
@@ -248,16 +251,17 @@ export async function distributeStuckInbound(
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
       });
-      console.error(
-        `[ai-stuck-inbound] falha conv=${row.conversation_id}:`,
-        err instanceof Error ? err.message : err,
+      log.error(
+        { conv: row.conversation_id, err: err instanceof Error ? err.message : err },
+        "[ai-stuck-inbound] falha",
       );
     }
   }
 
   if (distributed > 0 || queued > 0) {
-    console.info(
-      `[ai-stuck-inbound] distribuídas=${distributed} enfileiradas=${queued} de ${items.length} candidatas`,
+    log.info(
+      { distribuidas: distributed, enfileiradas: queued, candidatas: items.length },
+      "[ai-stuck-inbound] resumo",
     );
   }
 

@@ -12,6 +12,9 @@ import {
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { disableTelephony } from "@/services/api4com/provisioning";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/users/[id]");
 
 const MIN_PASSWORD_LENGTH = 6;
 
@@ -223,7 +226,7 @@ export async function PUT(request: Request, context: RouteContext) {
       throw e;
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     return NextResponse.json({ message: "Erro ao atualizar usuário." }, { status: 500 });
   }
 }
@@ -329,7 +332,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
           WHERE requested_by_id = ${target.id}
         `;
       } catch (rawErr) {
-        console.warn("[users.delete] discount_requests reassign skipped", rawErr);
+        log.warn({ err: rawErr }, "[users.delete] discount_requests reassign skipped");
       }
 
       try {
@@ -382,9 +385,9 @@ export async function DELETE(_request: Request, context: RouteContext) {
           await prisma.agentStatus
             .deleteMany({ where: { userId: target.id } })
             .catch(() => null);
-          console.warn(
-            "[users.delete] hard delete blocked by FK; soft-erased user",
+          log.warn(
             { userId: target.id, code },
+            "[users.delete] hard delete blocked by FK; soft-erased user",
           );
           notifySessionsRevoked({
             userId: target.id,
@@ -413,7 +416,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
           { status: 409 },
         );
       }
-      console.error("[users.delete] failed", e);
+      log.error({ err: e }, "[users.delete] failed");
       const detail = e instanceof Error ? e.message : String(e);
       return NextResponse.json(
         { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },
@@ -421,7 +424,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       );
     }
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     const detail = e instanceof Error ? e.message : String(e);
     return NextResponse.json(
       { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },

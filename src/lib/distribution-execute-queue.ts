@@ -24,6 +24,9 @@ import type {
 } from "@/services/distribution/redistribute";
 
 import { allowInlineDistributionFallback } from "@/lib/distribution-drain-queue";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution-execute-queue");
 
 export const DISTRIBUTION_EXECUTE_QUEUE_NAME = "distribution-execute" as const;
 export const DISTRIBUTION_EXECUTE_JOB_NAME = "execute" as const;
@@ -169,7 +172,7 @@ async function addOrReuse(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!jobId || !/already exists|duplicat/i.test(msg)) {
-      console.warn("[queue] falha ao enfileirar distribution-execute:", msg);
+      log.warn({ err: msg }, "[queue] falha ao enfileirar distribution-execute");
       return null;
     }
     const existing = await queue.getJob(jobId);
@@ -183,10 +186,7 @@ async function addOrReuse(
       } catch (retryErr) {
         const retryMsg =
           retryErr instanceof Error ? retryErr.message : String(retryErr);
-        console.warn(
-          "[queue] falha ao reenfileirar distribution-execute:",
-          retryMsg,
-        );
+        log.warn({ err: retryMsg }, "[queue] falha ao reenfileirar distribution-execute");
         return null;
       }
     }

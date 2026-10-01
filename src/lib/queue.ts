@@ -2,6 +2,9 @@ import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
 import { debugInfo } from "@/lib/debug-log";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("queue");
 
 export const AUTOMATION_JOBS_QUEUE_NAME = "automation-jobs" as const;
 export const BAILEYS_OUTBOUND_QUEUE_NAME = "baileys-outbound" as const;
@@ -475,8 +478,9 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
     if (!queue) {
       // Redis down: mesmo padrão de meta-outbound — fallback sync pra
       // não perder o disparo. Com Redis no ar a API só enfileira.
-      console.warn(
-        `[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — fallback inline (automationId=${payload.automationId})`,
+      log.warn(
+        { automationId: payload.automationId },
+        "[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — fallback inline",
       );
       await executeAutomationDirect(payload);
       return null;
@@ -497,13 +501,16 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
         const err = new Error(
           `[queue] Redis do admission control indisponível — não enfileirando automação ${payload.automationId}`,
         );
-        console.error(err.message);
+        log.error(
+          { automationId: payload.automationId },
+          "[queue] Redis do admission control indisponível — não enfileirando automação",
+        );
         throw err;
       }
       // "fallback" → segue pro enqueue direto abaixo.
     }
 
-    console.info(`[queue] Enfileirando automação ${payload.automationId} no BullMQ`);
+    log.info({ automationId: payload.automationId }, "[queue] Enfileirando automação no BullMQ");
     return addAutomationJobNow(payload);
   }
 
@@ -513,7 +520,10 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
     await executeAutomationDirect(payload);
     debugInfo(`[queue] Automação ${payload.automationId} executada inline OK (${Date.now() - startMs}ms)`);
   } catch (err) {
-    console.error(`[queue] ✗ Automação ${payload.automationId} FALHOU inline (${Date.now() - startMs}ms):`, err);
+    log.error(
+      { automationId: payload.automationId, elapsedMs: Date.now() - startMs, err },
+      "[queue] ✗ Automação FALHOU inline",
+    );
   }
   return null;
 }
@@ -524,8 +534,9 @@ async function executeAutomationDirect(payload: AutomationJobPayload) {
   if (readAutomationWorkerMode() === "external" && readAppMode() === "api") {
     const queue = getQueue();
     if (queue) {
-      console.warn(
-        `[queue] executeAutomationDirect bloqueado na API — reenfileirando ${payload.automationId}`,
+      log.warn(
+        { automationId: payload.automationId },
+        "[queue] executeAutomationDirect bloqueado na API — reenfileirando",
       );
       return addAutomationJobNow(payload);
     }
@@ -563,7 +574,7 @@ function getBaileysControlQueue(): Queue<BaileysControlPayload> | null {
 export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
   const queue = getBaileysOutboundQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enviar via Baileys");
+    log.warn("[queue] Redis indisponível — não é possível enviar via Baileys");
     return null;
   }
   return queue.add("send", payload, {
@@ -577,7 +588,7 @@ export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
 export async function enqueueBaileysControl(payload: BaileysControlPayload) {
   const queue = getBaileysControlQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível controlar sessão Baileys");
+    log.warn("[queue] Redis indisponível — não é possível controlar sessão Baileys");
     return null;
   }
   return queue.add(payload.action, payload, {
@@ -615,7 +626,7 @@ function getCampaignSendQueue(): Queue<CampaignSendPayload> | null {
 export async function enqueueCampaignDispatch(payload: CampaignDispatchPayload, delay?: number) {
   const queue = getCampaignDispatchQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível disparar campanha");
+    log.warn("[queue] Redis indisponível — não é possível disparar campanha");
     return null;
   }
   return queue.add("dispatch", payload, {
@@ -642,7 +653,7 @@ function campaignSendJobOptions(): JobsOptions {
 export async function enqueueCampaignSend(payload: CampaignSendPayload) {
   const queue = getCampaignSendQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
+    log.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
     return null;
   }
   return queue.add("send", payload, campaignSendJobOptions());
@@ -652,7 +663,7 @@ export async function enqueueCampaignSend(payload: CampaignSendPayload) {
 export async function enqueueCampaignSendBulk(payloads: CampaignSendPayload[]) {
   const queue = getCampaignSendQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
+    log.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
     return null;
   }
   if (payloads.length === 0) return [];
@@ -702,9 +713,7 @@ export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
 ) {
   const queue = getLeadsBulkQueue();
   if (!queue) {
-    console.warn(
-      "[queue] Redis indisponível — não é possível enfileirar leads-bulk",
-    );
+    log.warn("[queue] Redis indisponível — não é possível enfileirar leads-bulk");
     return null;
   }
   const attempts = readPositiveInt(process.env.LEADS_BULK_MAX_ATTEMPTS, 5);
@@ -777,7 +786,7 @@ export async function enqueueImportEtl(
 ) {
   const queue = getImportEtlQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enfileirar import-etl");
+    log.warn("[queue] Redis indisponível — não é possível enfileirar import-etl");
     return null;
   }
   const attempts = readPositiveInt(process.env.IMPORT_ETL_MAX_ATTEMPTS, 3);
@@ -823,7 +832,7 @@ export async function enqueueMetaWebhookEvent(
 ) {
   const queue = getMetaWebhookQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-webhook");
+    log.warn("[queue] Redis indisponível — não é possível enfileirar meta-webhook");
     return null;
   }
   const attempts = readPositiveInt(process.env.META_WEBHOOK_MAX_ATTEMPTS, 5);
@@ -859,7 +868,7 @@ function getMetaAttachQueue(): Queue<MetaAttachPayload> | null {
 export async function enqueueMetaAttach(payload: MetaAttachPayload) {
   const queue = getMetaAttachQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-attach");
+    log.warn("[queue] Redis indisponível — não é possível enfileirar meta-attach");
     return null;
   }
   const attempts = readPositiveInt(process.env.META_ATTACH_MAX_ATTEMPTS, 3);
@@ -873,9 +882,9 @@ export async function enqueueMetaAttach(payload: MetaAttachPayload) {
       backoff: { type: "exponential", delay: backoffDelay },
     });
   } catch (err) {
-    console.warn(
-      "[queue] falha ao enfileirar meta-attach — caller deve fazer fallback síncrono:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[queue] falha ao enfileirar meta-attach — caller deve fazer fallback síncrono",
     );
     return null;
   }
@@ -903,7 +912,7 @@ function getMetaOutboundQueue(): Queue<MetaOutboundPayload> | null {
 export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
   const queue = getMetaOutboundQueue();
   if (!queue) {
-    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-outbound");
+    log.warn("[queue] Redis indisponível — não é possível enfileirar meta-outbound");
     return null;
   }
   const attempts = readPositiveInt(process.env.META_OUTBOUND_MAX_ATTEMPTS, 3);
@@ -920,9 +929,9 @@ export async function enqueueMetaOutbound(payload: MetaOutboundPayload) {
     // Contrato: null → caller faz sendText síncrono. Sem isso, add()
     // throw vira 500 depois da mensagem já persistida como pending
     // (toast "erro ao enviar" + relógio eterno se o worker não pegar).
-    console.warn(
-      "[queue] falha ao enfileirar meta-outbound — caller deve fazer fallback síncrono:",
-      err instanceof Error ? err.message : err,
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[queue] falha ao enfileirar meta-outbound — caller deve fazer fallback síncrono",
     );
     return null;
   }

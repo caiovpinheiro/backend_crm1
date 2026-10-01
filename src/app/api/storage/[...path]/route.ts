@@ -28,6 +28,9 @@ import {
 import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
 import { authorizeStorageObject } from "@/lib/storage-object-access";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/storage/[...path]");
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -246,7 +249,7 @@ export async function GET(request: Request, context: RouteContext) {
         },
         buf,
       ).catch((err) => {
-        console.warn("[storage] write-through do fallback falhou:", err);
+        log.warn({ err }, "[storage] write-through do fallback falhou");
       });
       const headers = new Headers(fallback.headers);
       headers.delete("X-Storage-Tenant");

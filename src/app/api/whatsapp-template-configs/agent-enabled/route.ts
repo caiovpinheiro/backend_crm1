@@ -14,6 +14,9 @@ import {
 } from "@/lib/meta-whatsapp/list-message-templates-index";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/whatsapp-template-configs/agent-enabled");
 
 type GraphMap = Map<string, MessageTemplateGraphHit>;
 type GraphEntries = Array<[string, MessageTemplateGraphHit]>;
@@ -130,7 +133,7 @@ export async function GET(request: Request) {
 
       return NextResponse.json(enriched);
     } catch (e) {
-      console.error("[whatsapp-template-configs/agent-enabled]", e);
+      log.error({ err: e }, "[whatsapp-template-configs/agent-enabled] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar templates." },
         { status: 500 },

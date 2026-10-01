@@ -34,6 +34,9 @@ import {
   normalizeInboxPolicy,
 } from "@/lib/ai-agents/steering";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai.inbound-debounce");
 
 /** 2500ms cortava quem digita no celular: uma pausa de 3s no meio da */
 /** frase e o agente respondia a pergunta pela metade. */
@@ -66,10 +69,7 @@ export type ScheduleAiReplyInput = {
 };
 
 function logAi(event: string, payload: Record<string, unknown>) {
-  console.info(
-    "[ai-attend]",
-    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
-  );
+  log.info({ event, ...payload }, `[ai-attend] ${event}`);
 }
 
 async function resolveDebounceMs(): Promise<number> {
@@ -133,11 +133,10 @@ export function cancelAiReplyDebounce(
       invalidateOpenTurns(conversationId, reason),
     )
     .catch((err) => {
-      console.error("[ai-attend] invalidateOpenTurns falhou", {
-        conversationId,
-        reason,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      log.error(
+        { conversationId, reason, err: err instanceof Error ? err.message : String(err) },
+        "[ai-attend] invalidateOpenTurns falhou",
+      );
     });
   logAi("debounce_cancelled", { conversationId, reason, hadPending: Boolean(slot) });
 }
@@ -166,7 +165,7 @@ export async function scheduleAiReply(
       return;
     }
   } catch (e) {
-    console.error("[ai] phone allowlist check failed — blocking reply", e);
+    log.error({ err: e }, "[ai] phone allowlist check failed — blocking reply");
     return;
   }
 
@@ -300,11 +299,10 @@ async function flushDebounce(
       await run();
     }
   } catch (err) {
-    console.error("[ai-attend] flushDebounce failed", {
-      conversationId,
-      generationId,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      { conversationId, generationId, err: err instanceof Error ? err.message : String(err) },
+      "[ai-attend] flushDebounce failed",
+    );
   }
 }
 
@@ -354,7 +352,7 @@ export function kickAiAfterInboxAssign(args: {
           channel: "meta",
         });
       } catch (e) {
-        console.error("[ai-attend] kickAiAfterInboxAssign failed", e);
+        log.error({ err: e }, "[ai-attend] kickAiAfterInboxAssign failed");
       }
     };
     if (ctx) {

@@ -8,6 +8,9 @@
  */
 
 import { generateWithTools } from "@/services/ai/provider";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.claim-check");
 
 /** Tempo máximo da checagem: passou disso, a resposta segue (não trava o atendimento). */
 export const CLAIM_CHECK_TIMEOUT_MS = 8000;
@@ -323,11 +326,17 @@ export async function checkClaimsWithModel(args: {
     const flagged = parseClaimCheck(res.text, args.reply);
     const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources));
     if (unsupported.length < flagged.length) {
-      console.info("[ai-v2] checagem por modelo: marcação descartada, está nas fontes:", flagged.filter((c) => !unsupported.includes(c)));
+      log.info(
+        { descartadas: flagged.length - unsupported.length },
+        "[ai-v2] checagem por modelo: marcação descartada, está nas fontes",
+      );
     }
     return { unsupported, inputTokens: res.inputTokens, outputTokens: res.outputTokens, ok: true };
   } catch (err) {
-    console.warn("[ai-v2] checagem por modelo falhou:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2] checagem por modelo falhou",
+    );
     return { unsupported: [], inputTokens: 0, outputTokens: 0, ok: false };
   } finally {
     if (timer) clearTimeout(timer);
