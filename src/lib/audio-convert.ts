@@ -672,55 +672,6 @@ export async function prepareWhatsAppAudio(
 }
 
 /**
- * Convert any audio buffer to WAV 16kHz mono — formato canônico
- * exigido pelo Whisper (OpenAI) e a maioria dos modelos de ASR.
- *
- * Sem essa conversão, mandar `.ogg`/`.opus` direto pra Hugging Face
- * Inference API funciona ÀS VEZES (depende do servidor decodificar
- * Opus), mas WAV 16kHz mono é o "lingua franca" garantido — Whisper
- * espera exatamente isso internamente, então economiza um decode
- * server-side e melhora a estabilidade.
- */
-export async function convertToWav16k(
-  inputBuffer: Buffer,
-  inputExt = "webm",
-): Promise<Buffer | null> {
-  await mkdir(TMP_DIR, { recursive: true });
-
-  const ts = Date.now();
-  const rand = Math.random().toString(36).slice(2, 8);
-  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
-  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.wav`);
-
-  try {
-    await writeFile(inputPath, inputBuffer);
-    const bin = getFFmpeg();
-    const args = [
-      "-i", inputPath,
-      "-vn",
-      "-acodec", "pcm_s16le",
-      "-ar", "16000",
-      "-ac", "1",
-      "-y",
-      outputPath,
-    ];
-    const { ok, stderr } = await runFFmpeg(bin, args);
-    if (!ok) {
-      console.warn(`[ffmpeg] Conversao WAV16k falhou: ${stderr.slice(-300)}`);
-      return null;
-    }
-    if (!existsSync(outputPath)) return null;
-    return await readFile(outputPath);
-  } catch (err) {
-    console.error("[audio-convert] WAV16k conversion error:", err instanceof Error ? err.message : err);
-    return null;
-  } finally {
-    await unlink(inputPath).catch(() => {});
-    await unlink(outputPath).catch(() => {});
-  }
-}
-
-/**
  * WhatsApp PTT (voice messages) REQUIRE audio/ogg with Opus codec.
  * Only audio/ogg should skip conversion for voice messages.
  */

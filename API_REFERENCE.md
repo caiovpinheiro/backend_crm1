@@ -886,7 +886,7 @@ Response do POST:
 | GET | `/api/storage/[...path]` | sessão | Lê arquivo do storage (Meta-cached, signed URLs). |
 | GET | `/api/media/proxy` | sessão | `?url=` — proxy autenticado para mídia Meta (com refresh de URL expirada). |
 | GET | `/api/media/audio-mp3` | sessão | `?url=&name=` — converte mídia áudio (ogg/opus do WhatsApp) para MP3 e retorna stream. |
-| POST | `/api/media/transcribe` | sessão | **multipart**: `file` (áudio) ou `{ messageId }`. Transcreve áudio via provider IA. |
+| POST | `/api/transcribe` | sessão | `{ url }` — transcreve o áudio (Groq Whisper). Retorna `{ transcript }`. |
 
 ---
 
@@ -1155,7 +1155,6 @@ GET     /api/me/data-export
 GET     /api/me/data-export/[id]
 GET     /api/media/audio-mp3
 GET     /api/media/proxy
-POST    /api/media/transcribe
 POST    /api/messages/[id]/reactions
 GET     /api/meta/whatsapp/call-permission-templates
 GET     /api/meta/whatsapp/message-templates
@@ -1255,6 +1254,7 @@ POST    /api/templates
 GET     /api/templates/[id]
 PUT     /api/templates/[id]
 DELETE  /api/templates/[id]
+POST    /api/transcribe
 POST    /api/uploads/automation-media
 GET     /api/uploads/[...path]
 GET     /api/users

@@ -172,7 +172,7 @@ Ação de encerramento é explícita; além dela, existe um classificador de men
 | Auditoria de config | `AIAgentConfigAudit` | `prisma/schema.prisma` |
 | Chave OpenAI por agente | `getAgentApiKey` | `src/services/ai/agent-key.ts` |
 | Custo | `estimateCost`, `getModelPricing` | `src/lib/ai-agents/pricing.ts` |
-| Transcrição de áudio | `POST /api/media/transcribe` | `src/app/api/media/transcribe/route.ts` |
+| Transcrição de áudio | `transcribeWithGroq` | `src/lib/groq-transcribe.ts` |
 | Permissões | `requirePermission` | `src/lib/authz/index.ts` |
 | Bridge de automação | `continueFromStep`, `AutomationContext` | `src/services/automation-executor.ts`, `src/services/automation-context.ts` |
 
