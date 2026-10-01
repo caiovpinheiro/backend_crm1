@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { createAutomation, getAutomations } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations");
 
 // Bug 27/abr/26: usavamos `auth()` direto. createAutomation chama
 // `getOrgIdOrThrow()` SINCRONO em src/services/automations.ts (linha 227)
@@ -41,7 +44,7 @@ export async function GET(request: Request) {
       const result = await getAutomations({ active, search, page, perPage, triggerType });
       return NextResponse.json(result);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar automações." }, { status: 500 });
     }
   });
@@ -134,7 +137,7 @@ export async function POST(request: Request) {
         throw err;
       }
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro ao criar automação." }, { status: 500 });
     }
   });

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { deleteAutomation, getAutomationById, updateAutomation } from "@/services/automations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]");
 
 // Bug 27/abr/26: usavamos `auth()` direto. updateAutomation chama
 // `getOrgIdOrThrow()` SINCRONO em src/services/automations.ts (linha 326)
@@ -31,7 +34,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
       return NextResponse.json(automation);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao buscar automação." }, { status: 500 });
     }
   });
@@ -143,7 +146,7 @@ export async function PUT(request: Request, context: RouteContext) {
         throw err;
       }
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
         return NextResponse.json({ message: "Automação não encontrada." }, { status: 404 });
       }
@@ -173,7 +176,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       await deleteAutomation(id);
       return NextResponse.json({ ok: true });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "DELETE falhou");
       if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
         return NextResponse.json({ message: "Automação não encontrada." }, { status: 404 });
       }

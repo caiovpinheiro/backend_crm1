@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/[id]/stats");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -73,7 +76,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
       return NextResponse.json({ trigger, steps, recentErrors });
     } catch (e) {
-      console.error("Error fetching automation stats:", e);
+      log.error({ err: e }, "Error fetching automation stats");
       return NextResponse.json({ message: "Erro ao buscar estatísticas." }, { status: 500 });
     }
   });

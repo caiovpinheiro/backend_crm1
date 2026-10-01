@@ -30,6 +30,9 @@ import {
   type CopilotCurrentAutomation,
   type CopilotMessage,
 } from "@/services/ai/automation-copilot";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/automations/ai-assistant");
 
 // 27/abr/26: envolvido em withOrgContext por consistencia com os
 // outros endpoints de /api/automations. O copilot pode chamar tools
@@ -121,7 +124,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json(result);
     } catch (e) {
-      console.error("[ai-assistant]", e);
+      log.error({ err: e }, "[ai-assistant] falhou");
       const msg = e instanceof Error ? e.message : "Erro desconhecido.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }
