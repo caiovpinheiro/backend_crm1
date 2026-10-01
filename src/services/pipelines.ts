@@ -472,12 +472,16 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
             data: payload,
             include: { stages: { orderBy: { position: "asc" } } },
           });
-          const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(tx, id);
+          const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(
+            tx,
+            id,
+            updated.organizationId,
+          );
           return Object.assign(updated, { duplicatesRemoved });
         },
         { timeout: 120_000 },
       );
-      await invalidatePipelineBoard(id);
+      await invalidatePipelineBoard(id, pipeline.organizationId);
       return pipeline;
     } catch (err) {
       const message =
