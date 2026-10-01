@@ -48,6 +48,9 @@ import {
   type RetryResult,
 } from "./pending-shared";
 import { cancelStalePendingOrphans } from "./pending-inbound";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("distribution.pending-drain");
 
 /**
  * Conversas com `DistributionPending` PENDING — candidatas mesmo já
@@ -219,17 +222,14 @@ export async function processPendingDistributionQueue(opts: {
         );
       }
     } catch (e) {
-      console.warn("[distribution] cancelStalePendingOrphans failed", e);
+      log.warn({ err: e }, "[distribution] cancelStalePendingOrphans failed");
     }
 
     let views: Awaited<ReturnType<typeof getDistributionResponsibles>> = [];
     try {
       views = await getDistributionResponsibles();
     } catch (e) {
-      console.warn(
-        "[distribution] processPending eligibility precheck failed",
-        e,
-      );
+      log.warn({ err: e }, "[distribution] processPending eligibility precheck failed");
     }
     const eligible = views.filter((r) => r.eligible);
 
@@ -433,13 +433,9 @@ export async function processPendingDistributionQueue(opts: {
             break;
           }
         } catch (e) {
-          console.error(
+          log.error(
+            { conversationId: it.id, trigger: opts.trigger, err: e },
             "[distribution] processPendingDistributionQueue item failed",
-            {
-              conversationId: it.id,
-              trigger: opts.trigger,
-              err: e,
-            },
           );
         }
       }
@@ -685,13 +681,9 @@ export async function enqueueProcessPendingOrRun(opts: {
     scope: "distribution.drain",
     kind: "queue_unavailable",
   });
-  console.warn(
+  log.warn(
+    { orgId, trigger: opts.trigger, userId: opts.userId ?? null },
     "[distribution] drain queue unavailable — skip sync fallback",
-    JSON.stringify({
-      orgId,
-      trigger: opts.trigger,
-      userId: opts.userId ?? null,
-    }),
   );
   return {
     resolved: 0,
@@ -767,10 +759,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
         },
         () => enqueueProcessPendingOrRun({ trigger, userId }),
       ).catch((e) => {
-        console.error(
-          "[distribution] scheduleProcessPendingDistributionQueue failed",
-          e,
-        );
+        log.error({ err: e }, "[distribution] scheduleProcessPendingDistributionQueue failed");
       });
     }, delayMs);
 
