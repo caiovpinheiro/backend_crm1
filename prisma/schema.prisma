@@ -557,6 +557,12 @@ model User {
   /// existentes foram backfillados na migration (não são forçados).
   emailVerifiedAt DateTime?
 
+  /// Versão da sessão (SV-1). O JWT carrega o valor do login; quando o banco
+  /// já incrementou (troca de senha, "sair de todos os dispositivos", erase,
+  /// remoção da org) o token antigo é rejeitado com 401. Default 0: usuários
+  /// e tokens existentes seguem válidos no deploy.
+  sessionVersion Int @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

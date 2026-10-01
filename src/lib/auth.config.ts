@@ -63,6 +63,11 @@ export default {
         token.isSuperAdmin = Boolean(
           (user as { isSuperAdmin?: boolean }).isSuperAdmin,
         );
+        // SV-1 (mesma regra de `session-version.ts`, inline para o Edge
+        // não puxar o módulo): inteiro >= 0, senão 0.
+        const sv = (user as { sessionVersion?: unknown }).sessionVersion;
+        token.sessionVersion =
+          typeof sv === "number" && Number.isFinite(sv) && sv >= 0 ? Math.floor(sv) : 0;
       }
       return token;
     },
@@ -77,6 +82,8 @@ export default {
         (session.user as { isSuperAdmin?: boolean }).isSuperAdmin = Boolean(
           token.isSuperAdmin,
         );
+        (session.user as { sessionVersion?: number }).sessionVersion =
+          typeof token.sessionVersion === "number" ? token.sessionVersion : 0;
       }
       return session;
     },

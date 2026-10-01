@@ -61,6 +61,11 @@ vi.mock("./auth.config", () => ({ default: { callbacks: {} } }));
 
 import "./auth";
 import { clearJwtRefreshCacheForTests, JWT_REFRESH_TTL_MS } from "./auth/jwt-refresh-cache";
+import {
+  clearSessionVersionCacheForTests,
+  getCachedSessionVersion,
+  invalidateSessionVersionCache,
+} from "./auth/session-version";
 
 type Authorize = (
   credentials: Record<string, unknown>,
@@ -157,6 +162,7 @@ describe("jwt — SS-2 cache do refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearJwtRefreshCacheForTests();
+    clearSessionVersionCacheForTests();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-30T12:00:00Z"));
     mocks.findUnique.mockResolvedValue(DB_USER);
@@ -237,5 +243,86 @@ describe("jwt — SS-2 cache do refresh", () => {
     });
     expect(t).toMatchObject({ id: "u9", role: "ADMIN", organizationSlug: "s" });
     expect(mocks.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("jwt — SV-1 versão da sessão", () => {
+  const DB_USER = {
+    role: "MEMBER",
+    avatarUrl: null,
+    organizationId: "org1",
+    isSuperAdmin: false,
+    isErased: false,
+    sessionVersion: 0,
+    organization: { status: "ACTIVE", slug: "acme" },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearJwtRefreshCacheForTests();
+    clearSessionVersionCacheForTests();
+    mocks.findUnique.mockResolvedValue(DB_USER);
+  });
+
+  it("login grava a claim sessionVersion no token (ausente vale 0)", async () => {
+    const jwt = getJwt();
+    const t1 = await jwt({ token: {}, user: { id: "u9", sessionVersion: 3 } });
+    expect(t1).toMatchObject({ id: "u9", sessionVersion: 3 });
+    const t2 = await jwt({ token: {}, user: { id: "u8" } });
+    expect(t2).toMatchObject({ id: "u8", sessionVersion: 0 });
+  });
+
+  it("refresh prima o cache de versão e a mesma consulta serve às duas checagens", async () => {
+    mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 2 });
+    const jwt = getJwt();
+    const t = await jwt({ token: { id: "u1", sessionVersion: 2 } });
+    expect(t).toMatchObject({ id: "u1", sessionVersion: 2 });
+    expect(getCachedSessionVersion("u1")).toBe(2);
+    expect(mocks.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it("banco incrementou (troca de senha / revoke-all): token cai (null)", async () => {
+    mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 1 });
+    const jwt = getJwt();
+    // Token antigo sem a claim (vale 0) e token com claim defasada.
+    expect(await jwt({ token: { id: "u1" } })).toBeNull();
+    expect(await jwt({ token: { id: "u1", sessionVersion: 0 } })).toBeNull();
+    // Sessão nova, emitida depois do incremento, passa.
+    expect(await jwt({ token: { id: "u1", sessionVersion: 1 } })).toMatchObject({ id: "u1" });
+  });
+
+  it("token sem a claim continua válido enquanto o banco está em 0 (deploy sem logout)", async () => {
+    const jwt = getJwt();
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toMatchObject({
+      id: "u1",
+      role: "MEMBER",
+    });
+  });
+
+  it("cache de versão invalidado no processo: próxima chamada reconsulta e derruba", async () => {
+    const jwt = getJwt();
+    expect(await jwt({ token: { id: "u1" } })).toMatchObject({ id: "u1" });
+    // Simula revokeUserSessions neste processo: incrementa e zera os caches.
+    mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 1 });
+    invalidateSessionVersionCache("u1");
+    clearJwtRefreshCacheForTests();
+    expect(await jwt({ token: { id: "u1" } })).toBeNull();
+    expect(mocks.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it("usuário não encontrado (hard delete): token vazio, e o estado fica em cache", async () => {
+    mocks.findUnique.mockResolvedValue(null);
+    const jwt = getJwt();
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
+    expect(mocks.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it("erro no banco: cache frio não derruba (fail-open, igual ao refresh)", async () => {
+    mocks.findUnique.mockRejectedValue(new Error("db down"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const jwt = getJwt();
+    expect(await jwt({ token: { id: "u1", sessionVersion: 4 } })).toMatchObject({ id: "u1" });
+    err.mockRestore();
   });
 });

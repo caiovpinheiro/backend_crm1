@@ -13,6 +13,8 @@ declare module "next-auth" {
     organizationSlug?: string | null;
     /// Flag que libera acesso ao painel /admin e bypassa a RLS por organizacao.
     isSuperAdmin?: boolean;
+    /// SV-1: `users.sessionVersion` no momento do login (vai para o JWT).
+    sessionVersion?: number;
   }
   interface Session {
     user: {
@@ -33,6 +35,9 @@ declare module "next-auth" {
       // É opcional porque usuários sem foto ficam com `null`, e nullable
       // porque pode voltar vazio do banco.
       image?: string | null;
+      /// SV-1: claim do token. `requireAuth` compara com o banco (cache 60 s)
+      /// e responde 401 quando a sessão foi revogada. Ausente = 0.
+      sessionVersion?: number;
     };
   }
 }
@@ -44,6 +49,9 @@ declare module "next-auth/jwt" {
     organizationId?: string | null;
     organizationSlug?: string | null;
     isSuperAdmin?: boolean;
+    /// SV-1: versão da sessão no login. Nunca é atualizada no refresh —
+    /// a comparação com o banco é o que invalida o token.
+    sessionVersion?: number;
   }
 }
 

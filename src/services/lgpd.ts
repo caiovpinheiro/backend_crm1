@@ -50,7 +50,10 @@ import { DataRequestStatus, DataRequestType } from "@prisma/client";
 import crypto from "node:crypto";
 
 import { prismaBase } from "@/lib/prisma-base";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  SESSION_VERSION_BUMP,
+  notifySessionsRevoked,
+} from "@/lib/auth/session-revocation";
 import { logAudit } from "@/lib/audit/log";
 import { getLogger } from "@/lib/logger";
 
@@ -437,6 +440,8 @@ async function processErase(userId: string, _organizationId: string): Promise<vo
         mfaEnabledAt: null,
         isErased: true,
         erasedAt: new Date(),
+        // SV-1: sessões abertas caem junto com o login.
+        ...SESSION_VERSION_BUMP,
       },
     }),
     prismaBase.userMfaBackupCode.deleteMany({ where: { userId } }),
@@ -456,7 +461,11 @@ async function processErase(userId: string, _organizationId: string): Promise<vo
     });
   }
 
-  sseBus.revokeUser({ userId, organizationId: _organizationId });
+  notifySessionsRevoked({
+    userId,
+    organizationId: _organizationId,
+    reason: "user_erased",
+  });
 }
 
 export async function getDataRequest(id: string, userId: string) {

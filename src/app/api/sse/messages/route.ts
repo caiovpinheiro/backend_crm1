@@ -18,6 +18,11 @@ import { getLogger } from "@/lib/logger";
 import { runWithContext } from "@/lib/request-context";
 import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
 import { encodeSseFrame, sseBus } from "@/lib/sse-bus";
+import {
+  SSE_EVICTED_EVENT,
+  SSE_HEARTBEAT_MS,
+  acquireSseConnection,
+} from "@/lib/sse-connection-limit";
 import { watchSseMembership } from "@/lib/sse-membership-watch";
 
 export const dynamic = "force-dynamic";
@@ -37,8 +42,13 @@ const SSE_AUTHZ_CTX_TTL_MS = 45_000;
  * Atendimento: filtro por organizationId da sessão (card por visibilidade).
  * Team-chat privado: audiência = membership (userId), sem bypass de super-admin.
  */
-function sseError(request: Request, body: string, status: number): Response {
-  const headers = new Headers();
+function sseError(
+  request: Request,
+  body: string,
+  status: number,
+  extraHeaders?: Record<string, string>,
+): Response {
+  const headers = new Headers(extraHeaders);
   applyBrowserApiCors(request, { headers });
   return new Response(body, { status, headers });
 }
@@ -66,6 +76,28 @@ export async function GET(request: Request) {
   if (!organizationId && !isSuperAdmin) {
     return sseError(request, "Sem organização vinculada à sessão", 403);
   }
+
+  // SSE-2: teto por org (429) e por usuário (a mais antiga do usuário sai
+  // para esta entrar — `evictStream` é preenchido quando o stream existe).
+  let evictedEarly = false;
+  let evictStream: (() => void) | null = null;
+  const acquired = await acquireSseConnection({
+    userId,
+    organizationId,
+    onEvict: () => {
+      if (evictStream) evictStream();
+      else evictedEarly = true;
+    },
+  });
+  if (!acquired.ok) {
+    return sseError(
+      request,
+      "Limite de conexões SSE da organização atingido. Tente novamente em instantes.",
+      429,
+      { "Retry-After": String(acquired.retryAfterSec) },
+    );
+  }
+  const slot = acquired.slot;
 
   let cardGate: InboxSseCardGate = allowAllInboxSseCards;
   if (sessionUser.id && sessionUser.role && organizationId && !isSuperAdmin) {
@@ -130,6 +162,7 @@ export async function GET(request: Request) {
     unsubscribe?.();
     unsubscribe = null;
     closed = true;
+    void slot.release();
   }
 
   const stream = new ReadableStream({
@@ -143,6 +176,32 @@ export async function GET(request: Request) {
         }
       };
 
+      // Teto por usuário: outra conexão deste usuário entrou e esta é a
+      // mais antiga. Avisa o motivo e pede ao EventSource nativo que espere
+      // antes de reconectar (evita rodízio entre abas); cliente custom lê o
+      // evento. Depois fecha.
+      const evictNow = () => {
+        if (closed) return;
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `retry: ${SSE_HEARTBEAT_MS * 2}\nevent: ${SSE_EVICTED_EVENT}\ndata: ${JSON.stringify({
+                reason: "user_limit",
+                retryAfterMs: SSE_HEARTBEAT_MS * 2,
+              })}\n\n`,
+            ),
+          );
+        } catch {
+          /* já fechado */
+        }
+        closeStream();
+      };
+      evictStream = evictNow;
+      if (evictedEarly) {
+        evictNow();
+        return;
+      }
+
       controller.enqueue(encoder.encode(": connected\n\n"));
 
       heartbeat = setInterval(() => {
@@ -151,8 +210,10 @@ export async function GET(request: Request) {
           controller.enqueue(encoder.encode(": heartbeat\n\n"));
         } catch {
           closeStream();
+          return;
         }
-      }, 25_000);
+        void slot.heartbeat();
+      }, SSE_HEARTBEAT_MS);
 
       // Uma consulta por processo para todas as conexões (antes: uma por
       // conexão por minuto). Perdeu o acesso → sseBus.revokeUser fecha.

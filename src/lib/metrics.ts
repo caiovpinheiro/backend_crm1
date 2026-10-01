@@ -81,6 +81,16 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Teto de conexões SSE (`sse-connection-limit.ts`). `org_limit` = nova
+  // conexão recusada com 429; `user_limit_evicted` = conexão mais antiga do
+  // usuário encerrada para a nova entrar. Conexões abertas: `crm_sse_subscribers`.
+  const sseConnectionsRejected = new Counter({
+    name: "crm_sse_connections_rejected_total",
+    help: "Conexões SSE recusadas (teto por org) ou encerradas pelo teto por usuário, por motivo.",
+    labelNames: ["reason"] as const,
+    registers: [registry],
+  });
+
   const bullmqJobs = new Counter({
     name: "crm_bullmq_jobs_total",
     help: "Jobs BullMQ por status terminal.",
@@ -216,6 +226,7 @@ function buildMetrics(registry: Registry): AppMetrics {
       subscribers: sseSubscribers,
       messages: sseMessages,
       inboundWithoutCard: sseInboundWithoutCard,
+      connectionsRejected: sseConnectionsRejected,
     },
     bullmq: { jobs: bullmqJobs, duration: bullmqDuration, queueDepth: bullmqQueueDepth },
     meta: { calls: metaApi, duration: metaApiDuration },
@@ -243,6 +254,7 @@ export type AppMetrics = {
     subscribers: Gauge<"organization" | "channel">;
     messages: Counter<"event" | "organization">;
     inboundWithoutCard: Counter<"reason">;
+    connectionsRejected: Counter<"reason">;
   };
   bullmq: {
     jobs: Counter<"queue" | "status">;
