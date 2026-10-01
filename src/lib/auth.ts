@@ -29,6 +29,11 @@ import {
   sessionVersionMatches,
   setCachedSessionVersion,
 } from "./auth/session-version";
+import { resolveKnownSessionVersion } from "./auth/session-version-check";
+import {
+  renewSessionVersion,
+  sessionRenewalProofFrom,
+} from "./auth/session-renewal";
 import { getClientIp, withRateLimit } from "./rate-limit";
 
 /** Código em `signIn(..., { redirect: false })` → `result.code` quando o Prisma falha (ex.: BD parada). */
@@ -331,7 +336,7 @@ const nextAuth = NextAuth({
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session: updateData }) {
       if (user) {
         token.id = user.id;
         token.role = (user as { role?: AppUserRole | null }).role ?? undefined;
@@ -414,14 +419,40 @@ const nextAuth = NextAuth({
           token.isSuperAdmin = snapshot.isSuperAdmin;
           token.picture = snapshot.picture;
         }
+        // SV-2: o próprio usuário revogou as sessões (troca de senha /
+        // "sair dos outros dispositivos") e esta é a que fez o pedido: o
+        // `update()` traz a prova de uso único que a rota devolveu. Só
+        // aqui a claim sobe — e só para a versão ATUAL do banco, vindo da
+        // imediatamente anterior (`session-renewal.ts`). Sem prova, ou com
+        // prova recusada, nada muda e a checagem abaixo decide: um token
+        // revogado não se renova chamando `update()`.
+        if (trigger === "update") {
+          const proof = sessionRenewalProofFrom(updateData);
+          if (proof) {
+            const renewed = await renewSessionVersion({
+              userId,
+              organizationId: (token.organizationId as string | null | undefined) ?? null,
+              tokenVersion: sessionVersionFromClaim(token.sessionVersion),
+              proof,
+            });
+            if (renewed !== null) token.sessionVersion = renewed;
+          }
+        }
         // SV-1: token emitido antes do último `revokeUserSessions` (troca
         // de senha, "sair de todos os dispositivos", erase). Só o cache
         // deste processo — primado logo acima; frio apenas quando o banco
         // falhou (fail-open, como o refresh). `null` limpa o cookie.
+        // Claim à frente do cache (sessão renovada em outra réplica): relê
+        // o banco em vez de derrubar uma sessão válida.
+        const tokenVersion = sessionVersionFromClaim(token.sessionVersion);
         if (
           !sessionVersionMatches(
-            sessionVersionFromClaim(token.sessionVersion),
-            getCachedSessionVersion(userId),
+            tokenVersion,
+            await resolveKnownSessionVersion(
+              userId,
+              tokenVersion,
+              getCachedSessionVersion(userId),
+            ),
           )
         ) {
           return null;

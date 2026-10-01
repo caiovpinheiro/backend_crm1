@@ -13,6 +13,13 @@
  *  - signature    (assinatura anexada às mensagens — vazio = usa name)
  *  - closingMessage (sobrescreve a mensagem de encerramento da organização)
  *  - currentPassword + newPassword (rotação de senha protegida)
+ *
+ * Troca de senha e sessões (SV-1/SV-2): a senha nova incrementa
+ * `users.sessionVersion` no mesmo UPDATE — todas as sessões do usuário
+ * caem. A resposta traz `sessionRenewal` (prova de uso único, 60 s) para a
+ * sessão que fez o pedido continuar: o cliente chama
+ * `update({ sessionRenewal: token })` do `useSession` e recebe o cookie na
+ * versão nova. Sem esse passo, esta sessão cai como as outras.
  */
 
 import { NextResponse } from "next/server";
@@ -22,10 +29,12 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 
 import { auth } from "@/lib/auth";
+import { issueSessionRenewal } from "@/lib/auth/session-renewal";
 import {
   SESSION_VERSION_BUMP,
   notifySessionsRevoked,
 } from "@/lib/auth/session-revocation";
+import { sessionVersionFromClaim } from "@/lib/auth/session-version";
 import { CHAT_THEME_KEYS } from "@/lib/chat-theme";
 import { prisma } from "@/lib/prisma";
 
@@ -188,16 +197,39 @@ export async function PUT(request: Request) {
       );
     }
     data.hashedPassword = await bcrypt.hash(body.newPassword, 10);
-    // SV-1: senha nova derruba todas as sessões (inclusive esta) — o
-    // cliente volta ao login. Mesmo UPDATE da senha: sem janela entre os dois.
+    // SV-1: senha nova derruba todas as sessões. Mesmo UPDATE da senha:
+    // sem janela entre os dois. SV-2: esta sessão recebe a prova para se
+    // renovar (`respond` abaixo); as demais caem.
     Object.assign(data, SESSION_VERSION_BUMP);
   }
-  const revokeSessions = () => {
-    if (!data.hashedPassword) return;
+  const passwordChanged = Boolean(data.hashedPassword);
+
+  /**
+   * Pós-commit: notifica a revogação e monta a resposta. `sessionVersion`
+   * vem do UPDATE só para emitir a prova — não vai no corpo.
+   */
+  const respond = async (
+    updated: Record<string, unknown> & { sessionVersion: number },
+    extra: Record<string, unknown> = {},
+  ) => {
+    const { sessionVersion: newVersion, ...profile } = updated;
+    if (!passwordChanged) return NextResponse.json({ ...profile, ...extra });
     notifySessionsRevoked({
       userId: session.user.id,
       organizationId: session.user.organizationId ?? null,
       reason: "password_change",
+    });
+    const sessionRenewal = await issueSessionRenewal({
+      userId: session.user.id,
+      newVersion,
+      tokenVersion: sessionVersionFromClaim(
+        (session.user as { sessionVersion?: unknown }).sessionVersion,
+      ),
+    });
+    return NextResponse.json({
+      ...profile,
+      ...extra,
+      ...(sessionRenewal ? { sessionRenewal } : {}),
     });
   };
 
@@ -205,10 +237,9 @@ export async function PUT(request: Request) {
     const updated = await prisma.user.update({
       where: { id: session.user.id },
       data,
-      select: PROFILE_SELECT,
+      select: { ...PROFILE_SELECT, sessionVersion: true },
     });
-    revokeSessions();
-    return NextResponse.json(updated);
+    return await respond(updated);
   } catch (e) {
     if (!isMissingUserChatThemeColumn(e)) throw e;
     const { chatTheme: _drop, ...dataWithoutTheme } = data;
@@ -225,12 +256,8 @@ export async function PUT(request: Request) {
     const updated = await prisma.user.update({
       where: { id: session.user.id },
       data: dataWithoutTheme,
-      select: PROFILE_SELECT_CORE,
+      select: { ...PROFILE_SELECT_CORE, sessionVersion: true },
     });
-    revokeSessions();
-    return NextResponse.json({
-      ...updated,
-      chatTheme: DEFAULT_CHAT_THEME_DB,
-    });
+    return await respond(updated, { chatTheme: DEFAULT_CHAT_THEME_DB });
   }
 }
