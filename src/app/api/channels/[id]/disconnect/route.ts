@@ -4,6 +4,9 @@ import { auth } from "@/lib/auth";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { enqueueBaileysControl } from "@/lib/queue";
 import { getChannelById, markChannelDisconnected } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/[id]/disconnect");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -36,7 +39,7 @@ export async function POST(_request: Request, context: RouteContext) {
       message: "Canal desconectado.",
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     const msg = e instanceof Error ? e.message : "Erro ao desconectar canal.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }

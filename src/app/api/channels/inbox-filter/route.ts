@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getChannelsForInboxFilter } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/inbox-filter");
 
 /**
  * GET /api/channels/inbox-filter
@@ -30,7 +33,7 @@ export async function GET() {
         channels: channels.filter((c) => allowedSet.has(c.id)),
       });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       const msg = e instanceof Error ? e.message : "Erro ao listar canais.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }

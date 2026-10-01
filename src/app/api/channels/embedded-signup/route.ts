@@ -6,6 +6,9 @@ import {
   MetaProvisionError,
   provisionMetaCloudChannel,
 } from "@/services/channels-meta-provision";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels/embedded-signup");
 
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
@@ -75,12 +78,15 @@ export async function POST(request: Request) {
           typeof tokenData.error === "object" && tokenData.error !== null
             ? (tokenData.error as Record<string, unknown>)
             : {};
-        console.error("Embedded Signup token exchange error:", {
-          status: tokenRes.status,
-          code: metaErr.code ?? null,
-          type: metaErr.type ?? null,
-          subcode: metaErr.error_subcode ?? null,
-        });
+        log.error(
+          {
+            status: tokenRes.status,
+            code: metaErr.code ?? null,
+            type: metaErr.type ?? null,
+            subcode: metaErr.error_subcode ?? null,
+          },
+          "Embedded Signup token exchange error",
+        );
         return NextResponse.json({ message: errMsg }, { status: 400 });
       }
 
@@ -120,7 +126,7 @@ export async function POST(request: Request) {
       if (e instanceof MetaProvisionError) {
         return NextResponse.json({ message: e.message }, { status: e.status });
       }
-      console.error("Embedded Signup error:", e);
+      log.error({ err: e }, "Embedded Signup error");
       const msg =
         e instanceof Error ? e.message : "Erro no Embedded Signup.";
       return NextResponse.json({ message: msg }, { status: 500 });

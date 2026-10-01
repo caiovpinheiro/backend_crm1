@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createChannel, getChannels } from "@/services/channels";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/channels");
 
 const CHANNEL_TYPES = new Set<string>([
   "WHATSAPP",
@@ -36,7 +39,7 @@ export async function GET() {
       const channels = await getChannels();
       return NextResponse.json({ channels });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       const msg = e instanceof Error ? e.message : "Erro ao listar canais.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }
@@ -84,7 +87,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json({ channel }, { status: 201 });
     } catch (e: unknown) {
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       const msg = e instanceof Error ? e.message : "Erro ao criar canal.";
       return NextResponse.json({ message: msg }, { status: 500 });
     }
