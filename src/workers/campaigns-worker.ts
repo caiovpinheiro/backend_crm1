@@ -59,6 +59,9 @@ import {
   type CampaignTemplatePayload,
 } from "@/services/campaign-template-variables";
 import { randomUUID } from "node:crypto";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("worker.campaigns");
 
 const BATCH_SIZE = 500;
 // Fatia de contatos que o dispatch processa antes de se re-enfileirar. Ceder o
@@ -506,7 +509,7 @@ async function isWithinMetaWindow(
 
 async function handleDispatch(payload: CampaignDispatchPayload) {
   const { campaignId, cursor } = payload;
-  console.info(`[campaign-dispatch] Processing campaign ${campaignId}${cursor ? ` (fatia após ${cursor})` : " (primeira fatia)"}`);
+  log.info({ campaignId, cursor: cursor ?? null }, "[campaign-dispatch] Processing campaign");
 
   const campaign = await prismaBase.campaign.findUnique({
     where: { id: campaignId },
@@ -514,13 +517,16 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
   });
 
   if (!campaign) {
-    console.error(`[campaign-dispatch] Campaign ${campaignId} not found`);
+    log.error({ campaignId }, "[campaign-dispatch] Campaign not found");
     return;
   }
   const organizationId = campaign.organizationId;
 
   if (!["PROCESSING", "SCHEDULED"].includes(campaign.status)) {
-    console.warn(`[campaign-dispatch] Campaign ${campaignId} status is ${campaign.status}, skipping`);
+    log.warn(
+      { campaignId, status: campaign.status },
+      "[campaign-dispatch] Campaign status não processável, skipping",
+    );
     return;
   }
 
@@ -552,7 +558,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
     });
 
     if (contacts.length === 0 && !cursor) {
-      console.warn(`[campaign-dispatch] No contacts for campaign ${campaignId}`);
+      log.warn({ campaignId }, "[campaign-dispatch] No contacts for campaign");
       await prisma.campaign.update({
         where: { id: campaignId },
         data: { status: "COMPLETED", totalRecipients: 0, completedAt: new Date() },
@@ -635,7 +641,10 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       // intercala as orgs e evita o head-of-line blocking.
       const nextCursor = contacts[contacts.length - 1].id;
       await enqueueCampaignDispatch({ campaignId, cursor: nextCursor });
-      console.info(`[campaign-dispatch] Campaign ${campaignId}: fatia de ${enqueued} recipients ${roundRobin ? "criados" : "enfileirada"}, próxima fatia após ${nextCursor}`);
+      log.info(
+        { campaignId, enqueued, modo: roundRobin ? "criados" : "enfileirada", nextCursor },
+        "[campaign-dispatch] fatia de recipients processada",
+      );
       return;
     }
 
@@ -646,13 +655,14 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       data: { status: "SENDING" },
     });
 
-    console.info(
+    log.info(
+      { campaignId, enqueued, roundRobin },
       roundRobin
-        ? `[campaign-dispatch] ${enqueued} recipients criados (fatia final) for campaign ${campaignId} — rodízio reabastece do banco`
-        : `[campaign-dispatch] Enqueued ${enqueued} send jobs (fatia final) for campaign ${campaignId}`,
+        ? "[campaign-dispatch] recipients criados (fatia final) — rodízio reabastece do banco"
+        : "[campaign-dispatch] Enqueued send jobs (fatia final)",
     );
   } catch (err) {
-    console.error(`[campaign-dispatch] Error dispatching campaign ${campaignId}:`, err);
+    log.error({ campaignId, err }, "[campaign-dispatch] Error dispatching campaign");
     await prisma.campaign.update({
       where: { id: campaignId },
       data: { status: "FAILED", completedAt: new Date() },
@@ -705,7 +715,10 @@ async function processRecipient(
   if (!campaign) return "skipped_inactive";
 
   if (campaign.status === "PAUSED" || campaign.status === "CANCELLED") {
-    console.info(`[campaign-send] Campaign ${campaignId} is ${campaign.status}, skipping recipient ${recipientId}`);
+    log.info(
+      { campaignId, status: campaign.status, recipientId },
+      "[campaign-send] Campaign não está ativa, skipping recipient",
+    );
     return "skipped_inactive";
   }
 
@@ -724,8 +737,9 @@ async function processRecipient(
     recipient.status === "READ" ||
     Boolean(recipient.metaMessageId)
   ) {
-    console.info(
-      `[campaign-send] Recipient ${recipientId} já enviado (${recipient.status}), skipping`,
+    log.info(
+      { recipientId, status: recipient.status },
+      "[campaign-send] Recipient já enviado, skipping",
     );
     return "skipped_duplicate";
   }
@@ -792,7 +806,7 @@ async function processRecipient(
       err instanceof CampaignChannelUnresolved
         ? err.message
         : formatMetaSendError(err);
-    console.error(`[campaign-send] Error for recipient ${recipientId}:`, errorMsg);
+    log.error({ recipientId, err: errorMsg }, "[campaign-send] Error for recipient");
     const metaCode = extractMetaRetryCode(errorMsg);
     const shouldRetry =
       !(err instanceof CampaignChannelUnresolved) &&
@@ -817,8 +831,9 @@ async function processRecipient(
         scope: "campaign.meta.retryable",
         kind: String(metaCode),
       });
-      console.warn(
-        `[campaign-send][ALERTA] Retryable Meta error code=${metaCode} campaign=${campaignId} recipient=${recipientId}`,
+      log.warn(
+        { code: metaCode, campaign: campaignId, recipient: recipientId },
+        "[campaign-send][ALERTA] Retryable Meta error",
       );
       throw new CampaignSendRetryable(errorMsg);
     }
@@ -922,8 +937,9 @@ async function sendViaMetaCloudApi(
         `Campanha template "${campaign.templateName}" exige header ${prepared.templatePayload.headerMediaType.toUpperCase()}, mas o payload ficou inválido (${headerDiag}).`,
       );
     }
-    console.log(
-      `[campaign-send] template=${campaign.templateName} header=${headerDiag} contact=${contactId}`,
+    log.info(
+      { template: campaign.templateName, header: headerDiag, contact: contactId },
+      "[campaign-send] template preparado",
     );
     try {
       const result = await client.sendTemplate(
@@ -989,9 +1005,9 @@ async function sendViaMetaCloudApi(
       flowToken,
     });
   } catch (err) {
-    console.error(
-      `[campaign-send] Falha ao gravar Message no chat (envio Meta ok) recipient=${recipientId}:`,
-      err instanceof Error ? err.message : err,
+    log.error(
+      { recipient: recipientId, err: err instanceof Error ? err.message : err },
+      "[campaign-send] Falha ao gravar Message no chat (envio Meta ok)",
     );
   }
 }
@@ -1032,8 +1048,9 @@ async function persistCampaignOutboundMessage(input: {
     ensured.status === "skipped_no_channel" ||
     ensured.status === "skipped_no_phone"
   ) {
-    console.warn(
-      `[campaign-send] Sem conversa para contact=${input.contactId} status=${ensured.status}`,
+    log.warn(
+      { contact: input.contactId, status: ensured.status },
+      "[campaign-send] Sem conversa para o contato",
     );
     return null;
   }
@@ -1358,9 +1375,9 @@ function startRoundRobinSender(opts: {
           await sleep(300);
         }
       } catch (err) {
-        console.warn(
-          "[campaign-rr] refill falhou (retry em 1s):",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[campaign-rr] refill falhou (retry em 1s)",
         );
         await sleep(1_000);
       }
@@ -1431,9 +1448,9 @@ function startRoundRobinSender(opts: {
         } else {
           // Erro inesperado (DB, bug): o recipient pode ter ficado SENDING —
           // o sweepStuck devolve a PENDING em até CAMPAIGN_RR_STALE_SENDING_MS.
-          console.error(
-            `[campaign-rr] erro inesperado recipient=${item.recipientId}:`,
-            err instanceof Error ? err.message : err,
+          log.error(
+            { recipient: item.recipientId, err: err instanceof Error ? err.message : err },
+            "[campaign-rr] erro inesperado",
           );
         }
       }
@@ -1444,14 +1461,29 @@ function startRoundRobinSender(opts: {
   for (let i = 0; i < sendConcurrency; i++) void runner();
 
   const statsTimer = setInterval(() => {
-    console.info(
-      `[campaign-rr] claimed=${stats.claimed} sent=${stats.sent} failed=${stats.failed} retried=${stats.retried} buffer=${localQueue.length} attemptsPendentes=${attemptsByRecipient.size}`,
+    log.info(
+      {
+        claimed: stats.claimed,
+        sent: stats.sent,
+        failed: stats.failed,
+        retried: stats.retried,
+        buffer: localQueue.length,
+        attemptsPendentes: attemptsByRecipient.size,
+      },
+      "[campaign-rr] stats",
     );
   }, 60_000);
   statsTimer.unref?.();
 
-  console.info(
-    `[campaign-rr] rodízio ativo (concurrency=${sendConcurrency}, orgCredit=${orgCredit}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, buffer=${localBufferMax})`,
+  log.info(
+    {
+      concurrency: sendConcurrency,
+      orgCredit,
+      rateLimitMax,
+      rateLimitDurationMs: rateLimitDuration,
+      buffer: localBufferMax,
+    },
+    "[campaign-rr] rodízio ativo",
   );
 }
 
@@ -1491,7 +1523,7 @@ export function startCampaignLoops() {
         select: { organizationId: true },
       });
       if (!camp) {
-        console.warn(`[campaign-dispatch] Campaign ${job.data.campaignId} não encontrada`);
+        log.warn({ campaignId: job.data.campaignId }, "[campaign-dispatch] Campaign não encontrada");
         return;
       }
       await withSystemContext(camp.organizationId, () => handleDispatch(job.data));
@@ -1516,8 +1548,9 @@ export function startCampaignLoops() {
         const counts = await q.getJobCounts("waiting", "delayed");
         const backlog = counts.waiting + counts.delayed;
         if (backlog > 0) {
-          console.warn(
-            `[campaign-rr] fila campaign-send tem ${backlog} jobs de backlog sem consumidor (rodízio ativo). Os recipients correspondentes serão enviados via banco; considere obliterar a fila.`,
+          log.warn(
+            { backlog },
+            "[campaign-rr] fila campaign-send tem jobs de backlog sem consumidor (rodízio ativo). Os recipients correspondentes serão enviados via banco; considere obliterar a fila.",
           );
         }
         await q.close();
@@ -1533,7 +1566,7 @@ export function startCampaignLoops() {
         // job (2k destinatários = 2k reads só pra resolver tenant).
         const orgId = await resolveCampaignOrgId(job.data.campaignId);
         if (!orgId) {
-          console.warn(`[campaign-send] Campaign ${job.data.campaignId} não encontrada`);
+          log.warn({ campaignId: job.data.campaignId }, "[campaign-send] Campaign não encontrada");
           return;
         }
         await withSystemContext(orgId, () => handleSend(job.data, job));
@@ -1546,12 +1579,12 @@ export function startCampaignLoops() {
     );
 
     sendWorker.on("failed", (job, err) => {
-      console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
+      log.error({ jobId: job?.id, err: err.message }, "[campaign-send] Job failed");
     });
   }
 
   dispatchWorker.on("failed", (job, err) => {
-    console.error(`[campaign-dispatch] Job ${job?.id} failed:`, err.message);
+    log.error({ jobId: job?.id, err: err.message }, "[campaign-dispatch] Job failed");
   });
 
   // Recupera campanhas que já bateram 100% mas ficaram em SENDING (check
@@ -1593,8 +1626,9 @@ export function startCampaignLoops() {
             select: { contactId: true },
           });
           await enqueueCampaignDispatch({ campaignId: c.id, cursor: last?.contactId });
-          console.warn(
-            `[campaigns-worker] campanha ${c.id} travada em PROCESSING — re-enfileirando dispatch a partir de ${last?.contactId ?? "início"}`,
+          log.warn(
+            { campaignId: c.id, fromContactId: last?.contactId ?? "início" },
+            "[campaigns-worker] campanha travada em PROCESSING — re-enfileirando dispatch",
           );
         }
 
@@ -1628,16 +1662,14 @@ export function startCampaignLoops() {
               },
             });
             if (recovered.count > 0) {
-              console.warn(
-                `[campaigns-worker] ${recovered.count} recipients SENDING travados → PENDING`,
-              );
+              log.warn({ count: recovered.count }, "[campaigns-worker] recipients SENDING travados → PENDING");
             }
           }
         }
       } catch (err) {
-        console.warn(
-          "[campaigns-worker] sweep de conclusão falhou:",
-          err instanceof Error ? err.message : err,
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[campaigns-worker] sweep de conclusão falhou",
         );
       }
     })();
@@ -1646,10 +1678,18 @@ export function startCampaignLoops() {
   const sweepTimer = setInterval(sweepStuck, 30_000);
   sweepTimer.unref?.();
 
-  console.info(
+  log.info(
+    {
+      roundRobin,
+      sendConcurrency,
+      rateLimitMax,
+      rateLimitDurationMs: rateLimitDuration,
+      ...(roundRobin ? { orgCredit: getCampaignOrgCredit() } : {}),
+      sendRateMax: getCampaignSendRateMax(),
+    },
     roundRobin
-      ? `[campaigns-worker] Dispatch + rodízio started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, orgCredit=${getCampaignOrgCredit()}, sendRateMax=${getCampaignSendRateMax()})`
-      : `[campaigns-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
+      ? "[campaigns-worker] Dispatch + rodízio started"
+      : "[campaigns-worker] Dispatch and send workers started",
   );
 
   return { dispatchWorker, sendWorker };
