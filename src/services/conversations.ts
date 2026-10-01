@@ -58,11 +58,23 @@ import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/servic
 const TAB_COUNTS_CACHE_TTL_SEC = 90;
 
 /**
+ * Stale-while-revalidate: passados os 90 s, a requisição recebe o número
+ * vencido na hora e a consulta roda em segundo plano (uma por chave), em
+ * vez de segurar a carga do inbox. Teto de staleness = 90 + 90 = 180 s;
+ * além disso (ou depois de uma invalidação por mudança de aba, que troca a
+ * versão da chave) a requisição recalcula antes de responder, como antes.
+ */
+const TAB_COUNTS_STALE_SEC = 90;
+
+/**
  * Abas históricas (todos/resolvidos/finalizados) varrem todas as conversas
  * da org, inclusive fechadas (~620 ms). Cache próprio (`:hist`), fora da
  * invalidação por mudança de aba: podem ficar até 10 min desatualizadas.
  */
 const TAB_COUNTS_HIST_CACHE_TTL_SEC = 600;
+
+/** SWR da histórica: vencida, ainda é servida por mais 5 min (teto 15 min). */
+const TAB_COUNTS_HIST_STALE_SEC = 300;
 
 /**
  * 1ª página de Encerradas: em vez de DISTINCT ON em todo o histórico
@@ -2028,7 +2040,7 @@ async function peekCachedTabTotal(
     collapseByContact: collapse,
   });
   if (!fp) return null;
-  const cached = await cache.get<Record<InboxTab, number>>(
+  const cached = await cache.peekSwr<Record<InboxTab, number>>(
     await inboxTabCountsKey(orgId, fp),
   );
   if (!cached) return null;
@@ -2070,9 +2082,9 @@ export async function getTabCounts(
     );
   }
 
-  return cache.wrap(
+  return cache.wrapSwr(
     await inboxTabCountsKey(orgId, scopeFp),
-    TAB_COUNTS_CACHE_TTL_SEC,
+    { ttlSec: TAB_COUNTS_CACHE_TTL_SEC, staleSec: TAB_COUNTS_STALE_SEC },
     () => computeTabCounts(
       visibilityWhere,
       todosMemberCategoryTabs,
@@ -2410,8 +2422,8 @@ async function computeActiveTabCountsFallback(
 
 /**
  * As duas consultas rodam em paralelo. A histórica (~620 ms) tem cache
- * próprio em `histCacheKey` (TTL 10 min): quando só a ativa expira, roda
- * apenas a consulta das abertas (~95 ms). Cada parte cai no COUNT
+ * próprio em `histCacheKey` (TTL 10 min, SWR): quando só a ativa expira,
+ * roda apenas a consulta das abertas (~95 ms). Cada parte cai no COUNT
  * sequencial sozinha se o where dela não traduzir para SQL.
  */
 async function computeTabCounts(
@@ -2455,7 +2467,14 @@ async function computeTabCounts(
 
   const [hist, active] = await Promise.all([
     histCacheKey
-      ? cache.wrap(histCacheKey, TAB_COUNTS_HIST_CACHE_TTL_SEC, computeHist)
+      ? cache.wrapSwr(
+          histCacheKey,
+          {
+            ttlSec: TAB_COUNTS_HIST_CACHE_TTL_SEC,
+            staleSec: TAB_COUNTS_HIST_STALE_SEC,
+          },
+          computeHist,
+        )
       : computeHist(),
     computeActive(),
   ]);
