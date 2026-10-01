@@ -4,7 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import {
   DEFAULT_INBOX_ALERT_CONFIG,
+  INBOX_TAB_AUDIENCE_KEY,
   inboxAlertConfigSchema,
+  inboxTabAudienceSchema,
   inboxAlertDepartmentKey,
   inboxAlertUserKey,
   invalidateOrgInboxAlertConfigs,
@@ -24,6 +26,9 @@ export const dynamic = "force-dynamic";
  *          users: [{ id, name, email, departmentIds, config|null }] }`
  * PUT `{ scope: "department"|"user", id, config|null }` — `null` volta a
  * herdar (apaga a chave).
+ * PUT `{ scope: "org", tabAudience: "owner"|"department"|"all"|null }` —
+ * público do aviso na aba para a org; `null` volta à coluna "Aba" por tipo.
+ * GET devolve também `tabAudience`.
  */
 
 function isAdmin(user: { role?: string | null; isSuperAdmin?: boolean }) {
@@ -67,6 +72,7 @@ export async function GET() {
 
     return NextResponse.json({
       defaults: DEFAULT_INBOX_ALERT_CONFIG,
+      tabAudience: configs.tabAudience,
       departments: departments.map((d) => ({
         ...d,
         config: configs.departments.get(d.id) ?? null,
@@ -86,6 +92,11 @@ const putSchema = z.object({
   config: inboxAlertConfigSchema.nullable(),
 });
 
+const putOrgSchema = z.object({
+  scope: z.literal("org"),
+  tabAudience: inboxTabAudienceSchema.nullable(),
+});
+
 export async function PUT(req: Request) {
   return withOrgContext(async (session) => {
     if (!isAdmin(session.user)) {
@@ -95,7 +106,16 @@ export async function PUT(req: Request) {
     if (!organizationId) {
       return NextResponse.json({ message: "Sem organização." }, { status: 400 });
     }
-    const parsed = putSchema.safeParse(await req.json().catch(() => null));
+    const body: unknown = await req.json().catch(() => null);
+    const orgParsed = putOrgSchema.safeParse(body);
+    if (orgParsed.success) {
+      const { tabAudience } = orgParsed.data;
+      if (tabAudience) await setOrgSetting(INBOX_TAB_AUDIENCE_KEY, tabAudience);
+      else await deleteOrgSetting(INBOX_TAB_AUDIENCE_KEY);
+      await invalidateOrgInboxAlertConfigs(organizationId);
+      return NextResponse.json({ ok: true, tabAudience });
+    }
+    const parsed = putSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ message: "Dados inválidos." }, { status: 400 });
     }

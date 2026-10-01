@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import {
   DEFAULT_INBOX_ALERT_CONFIG,
-  getEffectiveInboxAlertConfig,
+  getEffectiveInboxAlerts,
 } from "@/lib/inbox-alert-config";
 import { prisma } from "@/lib/prisma";
 
@@ -21,6 +21,7 @@ export async function GET() {
       return NextResponse.json({
         config: DEFAULT_INBOX_ALERT_CONFIG,
         departmentIds: [],
+        tabAudience: null,
       });
     }
     const rows = await prisma.departmentMember.findMany({
@@ -28,11 +29,11 @@ export async function GET() {
       select: { departmentId: true },
     });
     const departmentIds = rows.map((r) => r.departmentId);
-    const config = await getEffectiveInboxAlertConfig({
+    const { config, tabAudience } = await getEffectiveInboxAlerts({
       organizationId,
       userId: session.user.id,
       memberDepartmentIds: departmentIds,
     });
-    return NextResponse.json({ config, departmentIds });
+    return NextResponse.json({ config, departmentIds, tabAudience });
   });
 }
