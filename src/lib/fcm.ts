@@ -11,6 +11,9 @@ import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import type { PushPayload } from "@/lib/web-push";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("fcm");
 
 export const FCM_ENDPOINT_PREFIX = "fcm:";
 
@@ -118,7 +121,7 @@ async function getAccessToken(): Promise<string | null> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    console.error("[fcm] oauth token failed:", res.status, text.slice(0, 300));
+    log.error({ resStatus: res.status, text: text.slice(0, 300) }, "[fcm] oauth token failed");
     return null;
   }
   const json = (await res.json()) as {
@@ -196,6 +199,6 @@ export async function sendFcmToToken(
     res.status === 404 ||
     /UNREGISTERED|NOT_FOUND|INVALID_ARGUMENT/i.test(text);
   if (unregistered) return "unregistered";
-  console.error("[fcm] send failed:", res.status, text.slice(0, 400));
+  log.error({ resStatus: res.status, text: text.slice(0, 400) }, "[fcm] send failed");
   return "error";
 }

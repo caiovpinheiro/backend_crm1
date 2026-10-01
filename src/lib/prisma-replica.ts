@@ -66,6 +66,9 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
 import { applyOrgScope, prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("prisma-replica");
 
 const REPLICA_URL = process.env.DATABASE_URL_REPLICA?.trim() || "";
 
@@ -98,7 +101,7 @@ function createReplicaBase(): PrismaClient | null {
     } as any);
   } catch (err) {
     // Sem replica = degrada graciosamente pro primary.
-    console.warn("[prisma-replica] falha ao criar pool:", err);
+    log.warn({ err }, "[prisma-replica] falha ao criar pool");
     return null;
   }
 }

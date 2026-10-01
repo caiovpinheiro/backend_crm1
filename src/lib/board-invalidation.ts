@@ -35,6 +35,9 @@ import { Prisma } from "@prisma/client";
 
 import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("board-invalidation");
 
 export const PIPELINES_CACHE_TTL_MS = 60_000;
 /** Teto do Map por processo — evicção do mais antigo inserido. */
@@ -181,9 +184,9 @@ function logScopeFailure(err: unknown): void {
   const now = Date.now();
   if (now - lastScopeFailureLogAt < 60_000) return;
   lastScopeFailureLogAt = now;
-  console.error(
-    "[board-invalidation] contato → pipelines falhou; board da org purgado e new_message sem escopo:",
-    err instanceof Error ? err.message : err,
+  log.error(
+    { err: err instanceof Error ? err.message : err },
+    "[board-invalidation] contato → pipelines falhou; board da org purgado e new_message sem escopo",
   );
 }
 

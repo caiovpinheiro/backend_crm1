@@ -3,6 +3,9 @@ import type { AgentOnlineStatus } from "@prisma/client";
 import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
+import { getLogger } from "@/lib/logger";
+
+const logger = getLogger("agent-presence");
 
 /**
  * Registra uma transição de presença no histórico `agent_presence_logs`.
@@ -90,9 +93,9 @@ export async function recordPresenceTransition(params: {
   } catch (err) {
     // Migration ainda não aplicada em produção: registrar warning e seguir.
     // Não queremos que falha aqui bloqueie ping/status PUT.
-    console.warn(
-      "[recordPresenceTransition] falhou (provável migration pendente):",
-      err instanceof Error ? err.message : err,
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[recordPresenceTransition] falhou (provável migration pendente)",
     );
   }
 }
@@ -156,9 +159,9 @@ export async function computeActiveTimeByUser(params: {
       result.set(log.userId, agg);
     }
   } catch (err) {
-    console.warn(
-      "[computeActiveTimeByUser] falhou (provável migration pendente):",
-      err instanceof Error ? err.message : err,
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[computeActiveTimeByUser] falhou (provável migration pendente)",
     );
   }
 

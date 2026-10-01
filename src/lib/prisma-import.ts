@@ -3,6 +3,9 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
 import { applyOrgScope } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("prisma-import");
 
 /**
  * Pool/cliente Prisma DEDICADO para cargas em massa (import ETL, backfills).
@@ -55,7 +58,7 @@ function createImportPool(): Pool {
   });
 
   pool.on("error", (err) => {
-    console.warn("[prisma-import] pool error (continuando):", err.message);
+    log.warn({ err: err.message }, "[prisma-import] pool error (continuando)");
   });
 
   return pool;
