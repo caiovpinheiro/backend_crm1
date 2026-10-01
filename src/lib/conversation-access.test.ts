@@ -6,7 +6,9 @@
  * `where` avaliado de verdade, e confere o veredito de 4 usuários × 7
  * conversas. A tabela `ESPERADO` foi gerada com a implementação anterior
  * (uma consulta por checagem, em série) e não muda com a deduplicação: se
- * uma checagem sumir ou afrouxar, algum `false` vira `true` aqui.
+ * uma checagem sumir ou afrouxar, algum `false` vira `true` aqui. Cada
+ * cenário roda nos dois modos da função nova (insumos sob demanda e
+ * adiantados com `prefetch`, o modo do `GET /messages`).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -327,7 +329,7 @@ function encode(row: Record<ConvKey, boolean>): string {
   return CONV_KEYS.map((k) => `${k}:${row[k] ? "sim" : "NÃO"}`).join(" ");
 }
 
-async function verdicts(seed: SeedOptions): Promise<Verdicts> {
+async function verdicts(seed: SeedOptions, prefetch = false): Promise<Verdicts> {
   const db = seedInbox(seed);
   probe.setDbHandler((model, operation, args) => db.run(model, operation, args));
   const out = {} as Verdicts;
@@ -340,6 +342,7 @@ async function verdicts(seed: SeedOptions): Promise<Verdicts> {
           userHasConversationAccess(
             { id: u.id, role: u.role as AppUserRole, organizationId: ORG, isSuperAdmin: false },
             CONV_IDS[convKey],
+            { prefetch },
           ),
         ),
       );
@@ -374,6 +377,12 @@ describe("userHasConversationAccess — tabela de vereditos", () => {
         appendFileSync(process.env.P10_GOLDEN, `  ${JSON.stringify(name)}: ${JSON.stringify(encoded, null, 4)},\n`);
         return;
       }
+      expect(encoded).toEqual(ESPERADO[name]);
+    });
+
+    it(`${name} — com os insumos adiantados (prefetch)`, async () => {
+      const got = await verdicts(seed, true);
+      const encoded = Object.fromEntries(USER_KEYS.map((k) => [k, encode(got[k])]));
       expect(encoded).toEqual(ESPERADO[name]);
     });
   }
