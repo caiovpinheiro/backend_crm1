@@ -1,4 +1,4 @@
-import { sseBus } from "@/lib/sse-bus";
+import { publishEntityViewers } from "@/lib/realtime-events";
 
 /**
  * Presença efêmera "quem está vendo" (estilo Kommo). Registra, EM MEMÓRIA,
@@ -53,7 +53,7 @@ function publicList(room: Map<string, EntityViewer> | undefined): EntityViewer[]
 function broadcast(key: string): void {
   const meta = keyMeta.get(key);
   if (!meta) return;
-  sseBus.publish("entity_viewers", {
+  publishEntityViewers({
     organizationId: meta.orgId,
     entityType: meta.entityType,
     entityId: meta.entityId,

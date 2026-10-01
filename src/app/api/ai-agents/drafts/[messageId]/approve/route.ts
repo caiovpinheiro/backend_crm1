@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageUpdated } from "@/lib/realtime-events";
 
 const APPROVE_SEND_TIMEOUT_MS = 25_000;
 
@@ -135,7 +135,7 @@ export async function POST(
           },
         })
         .catch(() => null);
-      sseBus.publish("message_updated", {
+      publishMessageUpdated({
         organizationId: draft.conversation.organizationId,
         conversationId: draft.conversation.id,
         messageId,

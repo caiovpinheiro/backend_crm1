@@ -2,7 +2,7 @@ import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 
 /** Auto-resposta quando a ligação de entrada não tem consultor humano responsável. */
 export const INBOUND_CALL_NO_AGENT_MESSAGE =
@@ -108,7 +108,7 @@ export async function rejectInboundCallWithoutAgent(params: {
     .catch(() => {});
 
   if (!sendResult.failed && params.organizationId) {
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: params.organizationId,
       conversationId: params.conversationId,
       contactId: params.contactId,

@@ -9,7 +9,11 @@
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishSupportMessage,
+  publishSupportTicketNew,
+  publishSupportTicketUpdated,
+} from "@/lib/realtime-events";
 import { getSupportDepartment, tryAssignTicket } from "./distribution";
 
 export type SupportViewer = {
@@ -57,7 +61,11 @@ function publishTicketEvent(
   ticket: { id: string; organizationId?: string; requesterId: string; assignedToId: string | null; status: string; number: number },
   organizationId: string,
 ) {
-  sseBus.publish(event, {
+  const publish =
+    event === "support_ticket_new"
+      ? publishSupportTicketNew
+      : publishSupportTicketUpdated;
+  publish({
     organizationId,
     ticketId: ticket.id,
     requesterId: ticket.requesterId,
@@ -222,7 +230,7 @@ export async function sendMessage(
     select: { requesterId: true, assignedToId: true, number: true, status: true },
   });
 
-  sseBus.publish("support_message", {
+  publishSupportMessage({
     organizationId: orgId,
     ticketId,
     requesterId: updated.requesterId,

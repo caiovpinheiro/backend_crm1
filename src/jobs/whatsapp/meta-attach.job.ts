@@ -19,7 +19,7 @@ import { getDecryptedChannelConfig } from "@/lib/channels/config";
 import { formatMetaSendError, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import type { MetaAttachKind, MetaAttachPayload } from "@/lib/queue";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageStatus } from "@/lib/realtime-events";
 import {
   mimeFromFilename,
   parseStoragePath,
@@ -58,7 +58,7 @@ function publishStatus(
   error?: string | null,
 ) {
   try {
-    sseBus.publish("message_status", {
+    publishMessageStatus({
       organizationId,
       conversationId,
       messageId,

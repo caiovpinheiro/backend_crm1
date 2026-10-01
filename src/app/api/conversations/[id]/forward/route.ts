@@ -7,7 +7,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { getConversationLite } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -217,7 +217,7 @@ export async function POST(request: Request, context: RouteContext) {
       }).catch(() => {});
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: targetConv.organizationId,
           conversationId: targetConversationId,
           contactId: targetConv.contactId,

@@ -31,7 +31,10 @@ import {
   recordBlockedEffect,
 } from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationAssignment,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 
 async function aiSenderName(agentUserId: string): Promise<string> {
@@ -435,7 +438,7 @@ export async function sendAgentMessage(args: {
         },
       })
       .catch(() => null);
-    sseBus.publish("new_message", {
+    publishNewMessage({
       organizationId: getOrgIdOrNull(),
       conversationId: args.conversationId,
       contactId: args.contactId,
@@ -513,7 +516,7 @@ export async function sendAgentMessage(args: {
           },
         })
         .catch(() => null);
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: getOrgIdOrNull(),
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -559,7 +562,7 @@ async function saveDraft(
       sendStatus: "draft",
     }),
   });
-  sseBus.publish("new_message", {
+  publishNewMessage({
     organizationId: getOrgIdOrNull(),
     conversationId,
     direction: "out",
@@ -939,7 +942,7 @@ export async function executeAgentHandoff(
     }).catch(() => null);
   }
 
-  sseBus.publish(newAssignee ? "conversation_assigned" : "conversation_unassigned", {
+  publishConversationAssignment({
     organizationId: getOrgIdOrNull(),
     conversationId: args.conversationId,
     contactId: args.contactId,

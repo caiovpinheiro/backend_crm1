@@ -52,7 +52,12 @@ export type WebhookScope = {
   organizationId: string;
   organizationSlug: string;
 };
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishContactUpdated,
+  publishConversationUpdated,
+  publishMessageStatus,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
@@ -352,7 +357,7 @@ async function applyContactPhoneChange(params: {
   }
 
   try {
-    sseBus.publish("contact_updated", {
+    publishContactUpdated({
       organizationId: getOrgIdOrNull(),
       contactId,
       reason: "phone_changed",
@@ -2058,7 +2063,7 @@ async function processStatusUpdate(
         // invalidate inbox em todos os operadores.
         if (!isCampaignMsg) {
           try {
-            sseBus.publish("message_status", {
+            publishMessageStatus({
               organizationId: orgId,
               conversationId: msg.conversationId,
               messageId: bubbleId,
@@ -3205,7 +3210,7 @@ export async function processMetaWebhookPayload(
           if (echoOut) {
             if (msgCreated) {
               try {
-                sseBus.publish("new_message", {
+                publishNewMessage({
                   organizationId: conversation.organizationId,
                   conversationId: conversation.id,
                   contactId: contact.id,
@@ -3241,7 +3246,7 @@ export async function processMetaWebhookPayload(
                   consentPayload,
                 );
                 if (granted) {
-                  sseBus.publish("conversation_updated", {
+                  publishConversationUpdated({
                     organizationId: getOrgIdOrNull(),
                     conversationId: conversation.id,
                     contactId: contact.id,
@@ -3253,7 +3258,7 @@ export async function processMetaWebhookPayload(
                     consentPayload,
                   );
                   if (denied) {
-                    sseBus.publish("conversation_updated", {
+                    publishConversationUpdated({
                       organizationId: getOrgIdOrNull(),
                       conversationId: conversation.id,
                       contactId: contact.id,
@@ -3388,7 +3393,7 @@ export async function processMetaWebhookPayload(
                 consentPayload,
               );
               if (granted) {
-                sseBus.publish("conversation_updated", {
+                publishConversationUpdated({
                   organizationId: getOrgIdOrNull(),
                   conversationId: conversation.id,
                   contactId: contact.id,
@@ -3403,7 +3408,7 @@ export async function processMetaWebhookPayload(
                   consentPayload,
                 );
                 if (denied) {
-                  sseBus.publish("conversation_updated", {
+                  publishConversationUpdated({
                     organizationId: getOrgIdOrNull(),
                     conversationId: conversation.id,
                     contactId: contact.id,
@@ -3449,7 +3454,7 @@ export async function processMetaWebhookPayload(
             );
 
             try {
-              sseBus.publish("new_message", {
+              publishNewMessage({
                 // Org da própria conversa, não do contexto: o guard
                 // fail-closed do sse-bus descarta o evento sem org, e o
                 // inbound roda no worker-meta-webhook.

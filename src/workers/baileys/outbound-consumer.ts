@@ -12,7 +12,7 @@ import {
 } from "@/lib/queue";
 import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
-import { sseBus } from "@/lib/sse-bus";
+import { publishMessageStatus } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
@@ -197,7 +197,7 @@ export function startOutboundConsumer(
             where: { id: messageId },
             data: { externalId: sent.key!.id!, sendStatus: "sent" },
           });
-          sseBus.publish("message_status", {
+          publishMessageStatus({
             organizationId: meta.organizationId,
             conversationId: meta.conversationId,
             messageId,
@@ -244,7 +244,7 @@ async function markFailed(messageId: string, error: string) {
         where: { id: messageId },
         data: { sendStatus: "failed", sendError: error },
       });
-      sseBus.publish("message_status", {
+      publishMessageStatus({
         organizationId: msg.organizationId,
         conversationId: msg.conversationId,
         messageId,

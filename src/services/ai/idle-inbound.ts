@@ -19,7 +19,7 @@ import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import { releaseOtherAutomationContexts } from "@/services/automation-context";
 import { logEvent } from "@/services/activity-log";
-import { sseBus } from "@/lib/sse-bus";
+import { publishConversationUpdated } from "@/lib/realtime-events";
 
 const log = getLogger("idle-inbound");
 
@@ -182,7 +182,7 @@ export async function maybeResolveIdleReopenTicket(args: {
   });
   try {
     if (conv.organizationId) {
-      sseBus.publish("conversation_updated", {
+      publishConversationUpdated({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: args.contactId,

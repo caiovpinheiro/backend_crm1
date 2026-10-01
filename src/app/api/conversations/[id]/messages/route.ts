@@ -29,7 +29,7 @@ import {
   platformFromConversationChannel,
   sendMessengerOrInstagramText,
 } from "@/lib/send-meta-messaging";
-import { sseBus } from "@/lib/sse-bus";
+import { publishNewMessage } from "@/lib/realtime-events";
 import { logEvent } from "@/services/activity-log";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
@@ -1205,7 +1205,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -1324,7 +1324,7 @@ export async function POST(request: Request, context: RouteContext) {
       void stopAutomationsAfterHumanReply(conv.contactId);
 
       try {
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -1475,7 +1475,7 @@ export async function POST(request: Request, context: RouteContext) {
     // 'esperando' para 'respondidas' (ou similar). Sem isso, a UI so
     // atualizava no proximo polling (15-20s) — usuario percebia delay.
     try {
-      sseBus.publish("new_message", {
+      publishNewMessage({
         organizationId: conv.organizationId,
         conversationId: conv.id,
         contactId: conv.contactId,

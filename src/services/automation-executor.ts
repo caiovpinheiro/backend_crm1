@@ -52,7 +52,11 @@ import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-c
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { safeFetch } from "@/lib/safe-fetch";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationTimelineUpdated,
+  publishConversationUpdated,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import {
   assertStageEntryFields,
   assignDealOwner,
@@ -711,13 +715,13 @@ async function finishConversationsForContact(
 
     try {
       if (rowOrg) {
-        sseBus.publish("conversation_updated", {
+        publishConversationUpdated({
           organizationId: rowOrg,
           conversationId: c.id,
           contactId: rt.contactId,
           status: "RESOLVED",
         });
-        sseBus.publish("conversation_timeline_updated", {
+        publishConversationTimelineUpdated({
           organizationId: rowOrg,
           conversationId: c.id,
           type: "CONVERSATION_CLOSED",
@@ -3054,7 +3058,7 @@ async function executeStep(
             .catch(() => {});
         }
 
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId,
@@ -3351,7 +3355,7 @@ async function executeStep(
           },
         }).catch(() => {});
 
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId: tplConversationId,
           contactId: rt.contactId,
@@ -3557,7 +3561,7 @@ async function executeStep(
             ...(mediaChannelId ? { channelId: mediaChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId: mediaConversationId,
           contactId: rt.contactId,
@@ -3681,7 +3685,7 @@ async function executeStep(
             ...(interactiveChannelId ? { channelId: interactiveChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -3847,7 +3851,7 @@ async function executeStep(
             ...(listChannelId ? { channelId: listChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -3982,7 +3986,7 @@ async function executeStep(
             ...(flowChannelId ? { channelId: flowChannelId } : {}),
           }),
         });
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
@@ -4394,7 +4398,7 @@ async function executeStep(
           const saved = await prisma.message.create({
             data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId, ...(questionChannelId ? { channelId: questionChannelId } : {}) }),
           });
-          sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
+          publishNewMessage({ organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
 
           if (resolveFailureGotoStepId(cfg)) {
             await awaitMetaDeliveryVerdict(saved.id, "question");
@@ -4685,7 +4689,7 @@ async function executeStep(
         try {
           const rowOrg = c.organizationId ?? orgId;
           if (rowOrg) {
-            sseBus.publish("conversation_timeline_updated", {
+            publishConversationTimelineUpdated({
               organizationId: rowOrg,
               conversationId: c.id,
               type: "CONVERSATION_TABULATED",

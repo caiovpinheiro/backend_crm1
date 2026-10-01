@@ -15,7 +15,10 @@ import QRCode from "qrcode";
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishChannelUpdated,
+  publishMessageStatus,
+} from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 import { usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
@@ -223,7 +226,7 @@ export class BaileysSession {
         // O front usa `externalId ?? id` como id da bolha; publicar só o
         // UUID interno faz o update otimista do tick (incl. read azul)
         // nunca casar. Envia bubbleId + internalId, igual ao path Meta.
-        sseBus.publish("message_status", {
+        publishMessageStatus({
           organizationId: orgId,
           conversationId: msg.conversationId,
           messageId: msg.externalId ?? msg.id,
@@ -252,7 +255,7 @@ export class BaileysSession {
       });
     });
     try {
-      sseBus.publish("channel_updated", {
+      publishChannelUpdated({
         organizationId: orgId,
         channelId: this.channelId,
         status: status ?? (typeof data.status === "string" ? data.status : undefined),

@@ -43,7 +43,10 @@ import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-tem
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import {
+  publishConversationAssignment,
+  publishNewMessage,
+} from "@/lib/realtime-events";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import {
@@ -670,7 +673,7 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
             },
           })
           .catch(() => null);
-        sseBus.publish("new_message", {
+        publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
@@ -1415,18 +1418,13 @@ function transferToHumanTool(ctx: RunContext, policy: ToolPolicy) {
             createdById: ctx.agentUserId,
           }).catch(() => null);
         }
-        sseBus.publish(
-          result.distribution?.selectedUserId
-            ? "conversation_assigned"
-            : "conversation_unassigned",
-          {
-            organizationId: getOrgIdOrNull(),
-            conversationId: ctx.conversationId,
-            contactId: ctx.contactId,
-            assignedToId: result.distribution?.selectedUserId ?? null,
-            reason,
-          },
-        );
+        publishConversationAssignment({
+          organizationId: getOrgIdOrNull(),
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          assignedToId: result.distribution?.selectedUserId ?? null,
+          reason,
+        });
         if (ctx.dealId) {
           createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
             action: "transferred_to_human",
@@ -1648,7 +1646,7 @@ function transferToAiAgentTool(ctx: RunContext) {
         );
         await invalidateBoardsForPipelines(cluster.pipelineIds);
 
-        sseBus.publish("conversation_assigned", {
+        publishConversationAssignment({
           organizationId: getOrgIdOrNull(),
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
