@@ -6,6 +6,9 @@ import { createActivity, getActivities, isValidActivityType } from "@/services/a
 import { departmentTasksWhere, getTaskVisibility } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities");
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -72,7 +75,7 @@ export async function GET(request: Request) {
     return NextResponse.json(result);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar atividades." }, { status: 500 });
   }
 }
@@ -209,7 +212,7 @@ export async function POST(request: Request) {
     }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2003") {
       return NextResponse.json({ message: "Referência inválida." }, { status: 400 });
     }

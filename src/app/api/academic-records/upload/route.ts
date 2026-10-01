@@ -14,6 +14,9 @@ import {
   importKindFromName,
 } from "@/lib/import-file-guard";
 import { readTableFromBuffer } from "@/lib/import-helpers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/academic-records/upload");
 
 /** Upload só valida + enfileira; o etl-worker faz o replace da base. */
 export const maxDuration = 60;
@@ -150,7 +153,7 @@ export async function POST(request: Request) {
     if (e instanceof ImportFileError) {
       return NextResponse.json({ message: e.message }, { status: e.status });
     }
-    console.error("[academic-records] upload error:", e);
+    log.error({ err: e }, "[academic-records] upload error");
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro interno ao importar." },
       { status: 500 },

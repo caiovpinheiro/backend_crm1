@@ -4,6 +4,9 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/companies/export");
 
 const MAX_ROWS = 100_000;
 
@@ -87,7 +90,7 @@ export async function GET(request: Request) {
       });
     });
   } catch (e) {
-    console.error("[companies/export]", e);
+    log.error({ err: e }, "[companies/export] falhou");
     return NextResponse.json(
       { message: "Erro ao exportar empresas." },
       { status: 500 },

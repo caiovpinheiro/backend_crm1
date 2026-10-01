@@ -4,6 +4,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getDealsOverview } from "@/services/dashboard-v2";
 import type { AnalyticsPeriod } from "@/services/analytics";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/analytics/deals-overview");
 
 function parsePeriod(searchParams: URLSearchParams): AnalyticsPeriod {
   const fromS = searchParams.get("from");
@@ -49,7 +52,7 @@ export async function GET(request: Request) {
       const data = await getDealsOverview(period, pipelineId, ownerId);
       return NextResponse.json(data);
     } catch (e) {
-      console.error("[analytics/deals-overview]", e);
+      log.error({ err: e }, "[analytics/deals-overview] falhou");
       return NextResponse.json(
         { message: "Erro ao carregar visão de negócios." },
         { status: 500 },

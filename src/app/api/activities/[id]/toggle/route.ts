@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getActivityById, toggleActivityComplete } from "@/services/activities";
 import { canAccessActivity } from "@/services/task-visibility";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/[id]/toggle");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -55,7 +58,7 @@ export async function POST(_request: Request, context: RouteContext) {
       throw err;
     }
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
     }

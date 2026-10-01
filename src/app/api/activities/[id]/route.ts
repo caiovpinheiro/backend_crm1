@@ -5,6 +5,9 @@ import { deleteActivity, getActivityById, isValidActivityType, updateActivity } 
 import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -45,7 +48,7 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json(activity);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar atividade." }, { status: 500 });
   }
 }
@@ -323,7 +326,7 @@ export async function PUT(request: Request, context: RouteContext) {
     }
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "PUT falhou");
     if (typeof e === "object" && e !== null && "code" in e) {
       const code = (e as { code: string }).code;
       if (code === "P2025") {
@@ -382,7 +385,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     return NextResponse.json({ ok: true });
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
     }

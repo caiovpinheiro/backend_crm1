@@ -7,6 +7,9 @@ import {
   type CompanySegment,
   type CompanySortField,
 } from "@/services/companies";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/companies");
 
 const SORT_FIELDS = new Set<CompanySortField>(["name", "createdAt", "updatedAt"]);
 
@@ -67,7 +70,7 @@ export async function GET(request: Request) {
     return NextResponse.json(result);
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar empresas." }, { status: 500 });
   }
 }
@@ -113,7 +116,7 @@ export async function POST(request: Request) {
     return NextResponse.json(company, { status: 201 });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar empresa." }, { status: 500 });
   }
 }

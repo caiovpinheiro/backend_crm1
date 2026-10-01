@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/agents/schedules");
 
 const COVERAGE_USER_SELECT = {
   id: true,
@@ -46,9 +49,9 @@ export async function GET() {
       })),
     );
   } catch (e) {
-    console.warn(
+    log.warn(
+      { err: e },
       "[agents/schedules] sem visibleInCoverage — fallback (aplique a migration 20260814220000).",
-      e,
     );
     const users = await prisma.user.findMany({
       where,

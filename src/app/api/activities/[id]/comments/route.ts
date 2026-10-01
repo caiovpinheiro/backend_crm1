@@ -13,6 +13,9 @@ import {
   canViewActivityCommentHistory,
   type TaskViewer,
 } from "@/services/task-visibility";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/activities/[id]/comments");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -73,7 +76,7 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ items });
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar comentários." }, { status: 500 });
   }
 }
@@ -135,7 +138,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
     });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar comentário." }, { status: 500 });
   }
 }

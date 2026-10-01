@@ -5,6 +5,9 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { createCustomField, getCustomFields } from "@/services/custom-fields";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/custom-fields");
 
 function slugifyFieldName(input: string): string {
   return input
@@ -61,7 +64,7 @@ export async function GET(request: Request) {
     const msg = e instanceof Error ? e.message : "Erro ao listar campos.";
     const stack = e instanceof Error ? e.stack : undefined;
     // Log detalhado no servidor para diagnóstico.
-    console.error("[GET /api/custom-fields] erro:", msg, stack);
+    log.error({ err: msg, stack }, "[GET /api/custom-fields] erro");
     // Expõe detalhe do erro na resposta (ambiente dev) para captura via Network tab.
     return NextResponse.json(
       { message: msg, detail: msg, stack: stack?.split("\n").slice(0, 5) },
