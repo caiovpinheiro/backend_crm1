@@ -80,6 +80,7 @@ vi.mock("@/services/conversations", async (importOriginal) => {
 import { GET as getMessages } from "@/app/api/conversations/[id]/messages/route";
 import { GET as getInbox } from "@/app/api/conversations/route";
 import { cache } from "@/lib/cache";
+import { resetCacheVersionsForTests } from "@/lib/cache/versions";
 import type { FakeDb } from "@/test-setup/fake-db";
 import {
   CONV,
@@ -133,10 +134,14 @@ const ANTES: Record<string, Counts> = {
   "inbox / operador, flag on": antes(2, 1, 7, 4),
   "inbox / gestor own, flag on": antes(2, 1, 9, 6),
   "inbox counts / operador, flag on": antes(2, 1, 7, 4),
+  // Medidos já com o cache por versão (PR #102) na base:
+  "messages / operador, conversa própria, versão do cache expirada": antes(12, 6, 3, 3),
+  "inbox / operador, flag on, versão do cache expirada": antes(2, 1, 9, 5),
 };
 
 async function clearCaches() {
   await cache.delPattern("*");
+  resetCacheVersionsForTests();
 }
 
 function setup(user: FixtureUserKey, seed: SeedOptions = {}) {
@@ -164,6 +169,15 @@ async function openConversation(id: string, query = "") {
 async function openWarm(id: string, query = "") {
   await openConversation(id, query);
   return openConversation(id, query);
+}
+
+/**
+ * As chaves de authz e de settings embutem um número de versão que cada
+ * processo relê do Redis no máximo a cada `CACHE_VERSION_MEMO_MS` (500 ms).
+ * Passado esse tempo, a primeira requisição paga os GETs de versão.
+ */
+async function letCacheVersionMemoExpire() {
+  await vi.advanceTimersByTimeAsync(2_100);
 }
 
 async function listInbox(query = "") {
@@ -329,6 +343,9 @@ beforeEach(async () => {
   probe.reset();
   await probe.run(clearCaches);
   probe.reset();
+  // O Redis falso foi zerado: a versão de cache lembrada pelo processo
+  // (authz/settings, 500 ms) não pode sobrar de um teste para o outro.
+  resetCacheVersionsForTests();
 });
 
 describe("GET /api/conversations/:id/messages — consultas por fase", () => {
@@ -486,6 +503,16 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const c = measure("messages / operador, conversa com extras", warm.entries);
       expect(c).toEqual({ consultas: 13, fases: 3, redis: 2, redisEmSerie: 1 });
     });
+
+    it("versão do cache fora da memória do processo: as consultas não mudam, o Redis ganha um GET de versão antes do valor", async () => {
+      setup("member");
+      await openConversation(CONV.mine);
+      await letCacheVersionMemoExpire();
+      const res = await openConversation(CONV.mine);
+      expect(res.status).toBe(200);
+      const c = measure("messages / operador, conversa própria, versão do cache expirada", res.entries);
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
+    });
   });
 });
 
@@ -540,6 +567,20 @@ describe("GET /api/conversations — pré-checks antes da listagem", () => {
     const c = measure("inbox counts / operador, flag on", warm.entries);
     semRedisEmSerie(c);
     expect(c).toEqual({ consultas: 2, fases: 1, redis: 5, redisEmSerie: 1 });
+  });
+
+  it("versão do cache fora da memória do processo: versão e valor em série (mecanismo do cache, não dos pré-checks)", async () => {
+    setup("member", {
+      rbacFlag: true,
+      scopeGrants: CHANNEL_BY_ROLE,
+      memberPermissions: QUEUE_PERMS,
+    });
+    await listInbox("?tab=entrada");
+    await letCacheVersionMemoExpire();
+    const res = await listInbox("?tab=entrada");
+    expect(res.status).toBe(200);
+    const c = measure("inbox / operador, flag on, versão do cache expirada", res.entries);
+    expect(c).toEqual({ consultas: 2, fases: 1, redis: 7, redisEmSerie: 2 });
   });
 
   it("os filtros que a listagem recebe não mudam com o memo", async () => {
