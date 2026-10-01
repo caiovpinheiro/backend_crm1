@@ -22,6 +22,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { cache } from "@/lib/cache";
+import { metaWebhookMessagingKey, wrapChannelLookup } from "@/lib/cache/keys";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -71,7 +72,7 @@ const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
  * mesma flag do webhook WhatsApp em `handler.ts`.
  */
 const META_WEBHOOK_ASYNC = process.env.META_WEBHOOK_ASYNC !== "0";
-/** Cache do mapeamento entry.id → org/canal (invalidado por `meta_wh:*`). */
+/** Cache do mapeamento entry.id → org/canal (invalidado pela versão `channel:<org>`). */
 const ENTRY_SCOPE_CACHE_TTL_SEC = 60;
 /** Cache do nome público por PSID/IGSID. */
 const PROFILE_CACHE_TTL_SEC = 600;
@@ -446,15 +447,15 @@ type MessagingScope = { organizationId: string; channelId: string };
  * Org/canal do POST para o job e a auditoria, sem token (cacheável).
  * Percorre as entries até uma resolver (entry.id, depois recipient.id —
  * mesma ordem de `processEntry`). Cache 60 s sob o prefixo `meta_wh:*`,
- * invalidado na edição de canal junto com o mapeamento do WhatsApp.
+ * invalidado na edição de canal da org junto com o mapeamento do WhatsApp.
  */
 async function resolveMessagingScope(
   entries: WebhookEntry[],
   platform: Platform,
 ): Promise<MessagingScope | null> {
   const lookup = (id: string) =>
-    cache.wrap<MessagingScope | null>(
-      `meta_wh:msg:${platform}:${id}`,
+    wrapChannelLookup<MessagingScope>(
+      metaWebhookMessagingKey(platform, id),
       ENTRY_SCOPE_CACHE_TTL_SEC,
       async () => {
         const hit = await findChannelByEntryId(id, platform);

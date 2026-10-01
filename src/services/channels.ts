@@ -16,7 +16,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logAudit } from "@/lib/audit/log";
 import { pickFields } from "@/lib/audit/redact";
 import { cache } from "@/lib/cache";
-import { channelKey } from "@/lib/cache/keys";
+import { channelKey, invalidateChannelLookups } from "@/lib/cache/keys";
 
 const CHANNEL_AUDIT_FIELDS = [
   "id",
@@ -252,10 +252,10 @@ export async function createChannel(data: CreateChannelData): Promise<Channel> {
       phoneNumber: data.phoneNumber?.trim() || null,
     }),
   });
-  // Limpa caches de lookup do webhook Meta (phoneNumberId→org, appSecrets):
-  // cobre o caso de um POST ter cacheado "não mapeado" pouco antes do
-  // onboarding do canal novo.
-  await cache.delPattern("meta_wh:*");
+  // Invalida os lookups de webhook da org (phoneNumberId→org, appSecrets)
+  // e os "não mapeado": cobre o caso de um POST ter cacheado "não mapeado"
+  // pouco antes do onboarding do canal novo.
+  await invalidateChannelLookups(created.organizationId);
   await logAudit({
     entity: "channel",
     action: "create",
@@ -331,15 +331,13 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
     where: { id },
     data: patch,
   });
-  // Invalida lookups cacheados de webhook-context (PR 5.1). Cobre
-  // todos os tipos de query (channelId, phoneNumber, metaPhoneNumberId,
-  // baileysSessionId) — pattern delete e barato porque keys sao
-  // poucas por canal.
+  // Invalida os lookups cacheados de webhook da org deste canal: todos os
+  // tipos de `wh_ctx` (channelId, phoneNumber, metaPhoneNumberId,
+  // baileysSessionId) e os do webhook Meta (phoneNumberId→org, appSecrets)
+  // — edição de config pode trocar phoneNumberId/appSecret. É a versão
+  // `channel:<org>`; as outras orgs não perdem o cache.
   await cache.del(channelKey(id));
-  await cache.delPattern("wh_ctx:*");
-  // Caches do webhook Meta (phoneNumberId→org e appSecrets por org) —
-  // edição de config pode trocar phoneNumberId/appSecret.
-  await cache.delPattern("meta_wh:*");
+  await invalidateChannelLookups(updated.organizationId);
   // Sinaliza eventos de connect/disconnect alem de update generico —
   // util pra investigar interrupcoes de canal sem ler diff.
   let action: "update" | "channel_connect" | "channel_disconnect" = "update";
@@ -369,8 +367,7 @@ export async function deleteChannel(id: string): Promise<Channel> {
   }
   const deleted = await prisma.channel.delete({ where: { id } });
   await cache.del(channelKey(id));
-  await cache.delPattern("wh_ctx:*");
-  await cache.delPattern("meta_wh:*");
+  await invalidateChannelLookups(deleted.organizationId);
   await logAudit({
     entity: "channel",
     action: "delete",

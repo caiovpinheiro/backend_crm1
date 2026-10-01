@@ -22,6 +22,11 @@ import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { cache } from "@/lib/cache";
+import {
+  metaWebhookPhoneKey,
+  metaWebhookSecretsKey,
+  wrapChannelLookup,
+} from "@/lib/cache/keys";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import {
   enrichWhatsappOrder,
@@ -2362,7 +2367,8 @@ export async function handleMetaWebhookGet(
 
 /** TTL do cache de lookups de canal do webhook (phoneNumberId→org e
  * appSecrets). 60s: janela curta de staleness; a invalidação explícita em
- * `services/channels.ts` (delPattern "meta_wh:*") cobre edições de canal. */
+ * `services/channels.ts` (`invalidateChannelLookups`, versão por org)
+ * cobre edições de canal. */
 const META_WH_CACHE_TTL_SEC = 60;
 
 async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
@@ -2386,7 +2392,7 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   // histórico (só secrets de env).
   try {
     const channelSecrets = await cache.wrap(
-      `meta_wh:secrets:${scope?.organizationId ?? "global"}`,
+      await metaWebhookSecretsKey(scope?.organizationId ?? null),
       META_WH_CACHE_TTL_SEC,
       () => loadChannelAppSecrets(scope),
     );
@@ -2467,9 +2473,9 @@ export async function handleMetaWebhookPost(
       // Cache-aside 60s do mapeamento phoneNumberId → org/canal: este
       // findFirst rodava 1× por POST (somado ao findMany de appSecrets,
       // eram 2 lookups de channel por webhook — stress sa221601).
-      // Invalidado na edição de canal (delPattern "meta_wh:*").
-      const channel = await cache.wrap(
-        `meta_wh:phone:${phoneNumberId}`,
+      // Invalidado na edição de canal (versão `channel:<org>`).
+      const channel = await wrapChannelLookup(
+        metaWebhookPhoneKey(phoneNumberId),
         META_WH_CACHE_TTL_SEC,
         async () => {
           const ch = await prismaBase.channel.findFirst({

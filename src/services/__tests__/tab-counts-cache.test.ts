@@ -1,10 +1,14 @@
 /**
  * Contadores do inbox com cache separado (banco falso, sem Redis).
  *
- * - Histórica (todos/resolvidos/finalizados): `<chave>:hist`, TTL 10 min.
- * - Ativa (entrada…ligar): `<chave>`, TTL 90 s.
+ * - Histórica (todos/resolvidos/finalizados): chave própria, TTL 10 min.
+ * - Ativa (entrada…ligar): chave com a versão da org, TTL 90 s.
  * - Expirar ou invalidar só a ativa não roda a consulta histórica.
  * - Números iguais aos de antes da separação.
+ * - Stale-while-revalidate: vencida, a chave devolve o número antigo na
+ *   hora e recalcula em segundo plano uma vez; depois do teto (ativa
+ *   180 s, histórica 15 min) ou de uma invalidação, recalcula antes de
+ *   responder.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -74,6 +78,11 @@ function activeCalls() {
 
 let activeRow: Row;
 
+/** Deixa a revalidação em segundo plano (SWR) terminar. */
+async function flushBackground() {
+  await vi.advanceTimersByTimeAsync(0);
+}
+
 function withOrg<T>(orgId: string, fn: () => Promise<T>): Promise<T> {
   return runWithContext(
     { organizationId: orgId } as Parameters<typeof runWithContext>[0],
@@ -139,9 +148,17 @@ describe("getTabCounts — cache histórico separado", () => {
     expect(histCalls()).toBe(1);
     expect(activeCalls()).toBe(1);
 
-    // Ativa expirou; histórica (10 min) continua.
+    // Ativa venceu; histórica (10 min) continua. A requisição recebe o
+    // número antigo na hora e só a consulta ativa roda, em segundo plano.
     activeRow = { ...ACTIVE_ROW, entrada: 11, abertas: 25 };
     await vi.advanceTimersByTimeAsync(31_000);
+    const stale = await withOrg("org-ttl", () => getTabCounts({}, null));
+    expect(stale.entrada).toBe(1);
+    await flushBackground();
+    expect(histCalls()).toBe(1);
+    expect(activeCalls()).toBe(2);
+
+    // Revalidado: a leitura seguinte já vem com os números novos.
     const counts = await withOrg("org-ttl", () => getTabCounts({}, null));
     expect(histCalls()).toBe(1);
     expect(activeCalls()).toBe(2);
@@ -149,11 +166,83 @@ describe("getTabCounts — cache histórico separado", () => {
     expect(counts.resolvidos).toBe(30);
     expect(counts.todos).toBe(25 + 30 + 20);
 
-    // Depois de 10 min a histórica também recalcula.
+    // Depois de 10 min a histórica também recalcula (ativa passou do teto
+    // de 180 s: recalcula antes de responder; a histórica, vencida dentro
+    // do teto dela, revalida em segundo plano).
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     await withOrg("org-ttl", () => getTabCounts({}, null));
+    await flushBackground();
     expect(histCalls()).toBe(2);
     expect(activeCalls()).toBe(3);
+  });
+
+  it("vencida: devolve o número antigo na hora e revalida uma vez só", async () => {
+    await withOrg("org-swr", () => getTabCounts({}, null));
+    activeRow = { ...ACTIVE_ROW, entrada: 50 };
+    await vi.advanceTimersByTimeAsync(91_000);
+
+    // A consulta em segundo plano demora: 5 leituras vencidas no meio.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.queryRaw.mockImplementation(async (...call: unknown[]) => {
+      const sql = sqlOf(call);
+      if (isHist(sql)) return [{ ...HIST_ROW }];
+      if (isActive(sql)) {
+        await gate;
+        return [{ ...activeRow }];
+      }
+      throw new Error(`query inesperada: ${sql.slice(0, 80)}`);
+    });
+
+    for (let i = 0; i < 5; i++) {
+      const counts = await withOrg("org-swr", () => getTabCounts({}, null));
+      expect(counts.entrada).toBe(1);
+      await flushBackground();
+    }
+    expect(activeCalls()).toBe(2);
+
+    release();
+    await flushBackground();
+    const fresh = await withOrg("org-swr", () => getTabCounts({}, null));
+    expect(fresh.entrada).toBe(50);
+    expect(activeCalls()).toBe(2);
+    expect(histCalls()).toBe(1);
+  });
+
+  it("passado o teto de 180 s a requisição espera o número novo", async () => {
+    await withOrg("org-teto", () => getTabCounts({}, null));
+    activeRow = { ...ACTIVE_ROW, entrada: 77 };
+    await vi.advanceTimersByTimeAsync(181_000);
+
+    const counts = await withOrg("org-teto", () => getTabCounts({}, null));
+    expect(counts.entrada).toBe(77);
+    expect(activeCalls()).toBe(2);
+  });
+
+  it("mudança de aba (invalidação) não serve o número antigo", async () => {
+    await withOrg("org-rw", () => getTabCounts({}, null));
+    activeRow = { ...ACTIVE_ROW, entrada: 9 };
+
+    await invalidateInboxTabCounts("org-rw");
+    const counts = await withOrg("org-rw", () => getTabCounts({}, null));
+    expect(counts.entrada).toBe(9);
+  });
+
+  it("consulta em segundo plano falhando mantém o número antigo", async () => {
+    await withOrg("org-err", () => getTabCounts({}, null));
+    await vi.advanceTimersByTimeAsync(91_000);
+    h.queryRaw.mockImplementation(async () => {
+      throw new Error("db fora");
+    });
+    h.conversationCount.mockRejectedValue(new Error("db fora"));
+
+    const counts = await withOrg("org-err", () => getTabCounts({}, null));
+    await flushBackground();
+    expect(counts.entrada).toBe(1);
+    const again = await withOrg("org-err", () => getTabCounts({}, null));
+    expect(again.entrada).toBe(1);
   });
 
   it("invalidação por mudança de aba apaga só a chave ativa", async () => {

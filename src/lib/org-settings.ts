@@ -23,17 +23,32 @@
 
 import { prisma } from "@/lib/prisma";
 import { cache } from "@/lib/cache";
+import {
+  bumpCacheVersion,
+  cacheVersionName,
+  getCacheVersion,
+} from "@/lib/cache/versions";
 import { getOrgIdOrThrow, getOrgIdOrNull } from "@/lib/request-context";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 const TTL_SEC = 60;
 
-function cacheKey(orgId: string, key: string): string {
-  return `org_setting:${orgId}:${key}`;
+// As chaves embutem a versão das settings da org
+// (`cache:v:org_settings:<org>`). Qualquer escrita troca a versão (um
+// INCR): cobre a chave gravada e todo prefixo cacheado que a contenha,
+// sem varrer o Redis por padrão.
+function settingsVersion(orgId: string): string {
+  return cacheVersionName("org_settings", orgId);
 }
 
-function cachePrefixKey(orgId: string, prefix: string): string {
-  return `org_settings_prefix:${orgId}:${prefix}`;
+async function cacheKey(orgId: string, key: string): Promise<string> {
+  const version = await getCacheVersion(settingsVersion(orgId));
+  return `org_setting:${orgId}:v${version}:${key}`;
+}
+
+async function cachePrefixKey(orgId: string, prefix: string): Promise<string> {
+  const version = await getCacheVersion(settingsVersion(orgId));
+  return `org_settings_prefix:${orgId}:v${version}:${prefix}`;
 }
 
 /**
@@ -44,7 +59,7 @@ function cachePrefixKey(orgId: string, prefix: string): string {
  */
 export async function getOrgSetting(key: string): Promise<string | null> {
   const orgId = getOrgIdOrThrow();
-  return cache.wrap(cacheKey(orgId, key), TTL_SEC, async () => {
+  return cache.wrap(await cacheKey(orgId, key), TTL_SEC, async () => {
     const row = await prisma.organizationSetting.findUnique({
       where: { organizationId_key: { organizationId: orgId, key } },
       select: { value: true },
@@ -62,7 +77,7 @@ export async function getOrgSettingFor(
   orgId: string,
   key: string,
 ): Promise<string | null> {
-  return cache.wrap(cacheKey(orgId, key), TTL_SEC, async () => {
+  return cache.wrap(await cacheKey(orgId, key), TTL_SEC, async () => {
     const row = await prisma.organizationSetting.findUnique({
       where: { organizationId_key: { organizationId: orgId, key } },
       select: { value: true },
@@ -81,7 +96,7 @@ export async function getOrgSettingsByPrefix(
 ): Promise<Map<string, string>> {
   const orgId = getOrgIdOrThrow();
   const raw = await cache.wrap(
-    cachePrefixKey(orgId, prefix),
+    await cachePrefixKey(orgId, prefix),
     TTL_SEC,
     async (): Promise<Record<string, string>> => {
       const rows = await prisma.organizationSetting.findMany({
@@ -101,9 +116,10 @@ export async function getOrgSettingsByPrefix(
 }
 
 /**
- * Grava (upsert) e invalida o cache imediatamente. Toda escrita
- * propaga em <100ms entre réplicas via Redis del; sem Redis o cache
- * in-memory é per-process e o TTL de 60s faz a propagação eventual.
+ * Grava (upsert) e invalida o cache imediatamente neste processo. Entre
+ * réplicas a versão nova aparece em até `CACHE_VERSION_MEMO_MS` (500 ms);
+ * sem Redis o cache in-memory é per-process e o TTL de 60s faz a
+ * propagação eventual.
  */
 export async function setOrgSetting(
   key: string,
@@ -116,10 +132,10 @@ export async function setOrgSetting(
     create: { organizationId: orgId, key, value },
   });
   // Invalida tanto a chave especifica quanto qualquer prefixo cacheado
-  // que possa cobri-la. Como nao sabemos os prefixos consumidos, varremos
-  // por padrao — o custo e baixo (poucas chaves de prefixo por org).
-  await cache.del(cacheKey(orgId, key));
-  await cache.delPattern(`org_settings_prefix:${orgId}:*`);
+  // que possa cobri-la. Como nao sabemos os prefixos consumidos, troca a
+  // versao das settings da org (as demais chaves recarregam sob demanda —
+  // uma linha por leitura).
+  await bumpCacheVersion(settingsVersion(orgId));
 }
 
 export async function deleteOrgSetting(key: string): Promise<void> {
@@ -127,8 +143,7 @@ export async function deleteOrgSetting(key: string): Promise<void> {
   await prisma.organizationSetting.deleteMany({
     where: { key },
   });
-  await cache.del(cacheKey(orgId, key));
-  await cache.delPattern(`org_settings_prefix:${orgId}:*`);
+  await bumpCacheVersion(settingsVersion(orgId));
 }
 
 /**
@@ -194,6 +209,5 @@ export async function setOrgSecretSetting(
 export async function invalidateOrgSettingsCache(orgId?: string): Promise<void> {
   const id = orgId ?? getOrgIdOrNull();
   if (!id) return;
-  await cache.delPattern(`org_setting:${id}:*`);
-  await cache.delPattern(`org_settings_prefix:${id}:*`);
+  await bumpCacheVersion(settingsVersion(id));
 }

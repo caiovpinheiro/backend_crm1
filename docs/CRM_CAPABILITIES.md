@@ -213,7 +213,7 @@
 | Recebimento Baileys | `src/workers/baileys/message-handler.ts` | - | Áudio, imagem, documento. |
 | Placeholder de mídia | `src/lib/ai-agents/media-placeholder.ts` | - | Mapeia `[Áudio]`, `[Imagem]` etc. |
 | Decisão determinística de mídia | `src/services/ai/audio-inbound.ts`, `src/services/ai/media-inbound.ts` | - | Áudio → handoff; imagem/documento → política `inboxPolicy.media`. |
-| Transcrição de áudio | `POST /api/media/transcribe` — `src/app/api/media/transcribe/route.ts` | - | Groq Whisper + fallback HF. |
+| Transcrição de áudio | `POST /api/transcribe` — `src/app/api/transcribe/route.ts`; no agente, `transcribeWithGroq` em `src/lib/groq-transcribe.ts` | - | Groq Whisper. |
 | Envio de botões/lista | `sendInteractiveButtonsToConversation`, `sendInteractiveListToConversation` em `src/services/outbound-messaging.ts` | Rotas internas | Limites Meta. |
 | Clique inbound | `parseInteractiveBlock` em `src/lib/meta-webhook/handler.ts` | - | Extrai `interactiveButtonId`. |
 | Anexos | `src/app/api/conversations/[id]/attachments/route.ts` | `POST /api/conversations/[id]/attachments` | Download/upload. |
@@ -221,7 +221,7 @@
 ### Serviço para usar na v2
 
 - Canal: `conversation.channel` / `channelId`.
-- Áudio: `POST /api/media/transcribe` quando config = `transcrever`.
+- Áudio: `transcribeWithGroq` (`src/lib/groq-transcribe.ts`) quando config = `transcrever`.
 - Imagem/documento: hoje só handoff/pedir texto; OCR/leitura de documento **não existe**.
 - Botões/lista: `sendInteractiveButtonsToConversation` / `sendInteractiveListToConversation` quando Meta + janela aberta.
 - Clique: `Message.interactiveButtonId` + tabela de opções pendentes.

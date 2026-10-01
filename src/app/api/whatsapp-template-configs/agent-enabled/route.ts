@@ -83,7 +83,7 @@ export async function GET(request: Request) {
         const client = resolved.client;
         try {
           const entries = await cache.wrap<GraphEntries>(
-            whatsappTemplateCatalogKey(orgId, client.wabaId),
+            await whatsappTemplateCatalogKey(orgId, client.wabaId),
             GRAPH_CATALOG_TTL_SEC,
             async () => {
               const map = await listMessageTemplatesByGraphId(client);
