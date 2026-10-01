@@ -6,6 +6,7 @@ import { fireTrigger } from "@/services/automation-triggers";
 import {
   assertStageEntryFields,
   createDealEventsMany,
+  invalidateBoardsForPipelines,
   StageFieldsRequiredError,
   type DealEventInput,
 } from "@/services/deals";
@@ -94,7 +95,7 @@ export async function processBulkMoveStage(
   // Valida que a stage de destino existe na org.
   const targetStage = await prisma.stage.findUnique({
     where: { id: targetStageId },
-    select: { id: true, name: true, isWon: true, isLost: true },
+    select: { id: true, name: true, isWon: true, isLost: true, pipelineId: true },
   });
   if (!targetStage) {
     await markOperationFailed(
@@ -104,6 +105,9 @@ export async function processBulkMoveStage(
     );
     return;
   }
+
+  // Boards a invalidar no fim: destino + origem de cada deal movido.
+  const touchedPipelineIds = new Set<string>();
 
   // Processa em chunks. Cada chunk:
   //   - lê estado atual (1 SELECT)
@@ -128,7 +132,7 @@ export async function processBulkMoveStage(
           stageId: true,
           status: true,
           contactId: true,
-          stage: { select: { name: true } },
+          stage: { select: { name: true, pipelineId: true } },
         },
       });
 
@@ -200,6 +204,8 @@ export async function processBulkMoveStage(
                 : { stageId: targetStageId, status: "WON", closedAt: new Date(), lostReason: null },
         });
         chunkSucceeded += toMove.length;
+        touchedPipelineIds.add(targetStage.pipelineId);
+        for (const deal of toMove) touchedPipelineIds.add(deal.stage.pipelineId);
 
         // Efeitos colaterais do chunk. Antes eram disparados por deal sem
         // await: 50 deals × (2 inserts + findMany de automações + avaliação
@@ -307,6 +313,13 @@ export async function processBulkMoveStage(
       },
       chunkErrors.length > 0 ? chunkErrors : undefined,
     );
+  }
+
+  // Mesmo purge do `moveDeal`: sem isso o board servia a variante em cache
+  // (cards na etapa antiga) até o TTL. Antes do "finished" — o FE refaz o
+  // GET do board quando a operação termina.
+  if (touchedPipelineIds.size > 0) {
+    await invalidateBoardsForPipelines([...touchedPipelineIds]);
   }
 
   await markOperationFinished(operationId, organizationId);
