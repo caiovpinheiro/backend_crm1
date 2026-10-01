@@ -2029,7 +2029,7 @@ async function peekCachedTabTotal(
   });
   if (!fp) return null;
   const cached = await cache.get<Record<InboxTab, number>>(
-    inboxTabCountsKey(orgId, fp),
+    await inboxTabCountsKey(orgId, fp),
   );
   if (!cached) return null;
   const n = cached[tab];
@@ -2071,7 +2071,7 @@ export async function getTabCounts(
   }
 
   return cache.wrap(
-    inboxTabCountsKey(orgId, scopeFp),
+    await inboxTabCountsKey(orgId, scopeFp),
     TAB_COUNTS_CACHE_TTL_SEC,
     () => computeTabCounts(
       visibilityWhere,

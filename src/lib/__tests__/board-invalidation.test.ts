@@ -1,7 +1,8 @@
 /**
  * `new_message` → invalidação do board, sem Redis (fallback em memória)
- * e com o banco falso. Só o pipeline onde o contato tem deal é apagado,
- * no máximo uma vez a cada 15 s por pipeline (leading + trailing).
+ * e com o banco falso. Só o pipeline onde o contato tem deal é invalidado
+ * (versão do pipeline trocada — o valor antigo deixa de ser lido), no
+ * máximo uma vez a cada 15 s por pipeline (leading + trailing).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,12 +33,12 @@ const TTL = 45;
 
 async function seedBoards(orgId: string, ...pipelineIds: string[]) {
   for (const p of pipelineIds) {
-    await cache.set(boardDataKey(orgId, p, "v"), { pipeline: p }, TTL);
+    await cache.set(await boardDataKey(orgId, p, "v"), { pipeline: p }, TTL);
   }
 }
 
 async function cached(orgId: string, pipelineId: string) {
-  return cache.get(boardDataKey(orgId, pipelineId, "v"));
+  return cache.get(await boardDataKey(orgId, pipelineId, "v"));
 }
 
 function newMessage(orgId: string, extra: Record<string, unknown> = {}) {
@@ -51,7 +52,7 @@ function newMessage(orgId: string, extra: Record<string, unknown> = {}) {
   });
 }
 
-/** Deixa a consulta do pipeline e o delPattern (memória) terminarem. */
+/** Deixa a consulta do pipeline e a troca de versão (memória) terminarem. */
 async function settle() {
   await vi.advanceTimersByTimeAsync(0);
 }
