@@ -21,6 +21,9 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { normalizePhoneDigits, phoneMatchesAllowlist } from "@/services/ai/phone-allowlist";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.reset");
 
 export const V2_RESET_COMMAND = "#reset";
 
@@ -164,6 +167,6 @@ export async function handleV2ResetCommand(input: {
     skipAutomations: true,
   }).catch(() => null);
 
-  console.info("[ai-v2] reset", JSON.stringify({ conversationId: input.conversationId, agentId: agent.agentConfigId }));
+  log.info({ conversationId: input.conversationId, agentId: agent.agentConfigId }, "[ai-v2] reset");
   return true;
 }

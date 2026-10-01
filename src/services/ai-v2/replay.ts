@@ -26,6 +26,9 @@ import { runWithV2Trace, takeV2Facts, takeV2TraceForLog } from "./trace";
 import { IMPORT_LIMITS, parseTranscript, transcriptToRows } from "./replay-import";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { understandMedia, understoodKindOf } from "./media-understanding";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.replay");
 
 export const REPLAY_LIMITS = { maxConversations: 100, maxPoints: 300, pointsPerConversation: 6, concurrency: 2 };
 // A execução renova "updatedAt" a cada HEARTBEAT_MS. Sem renovação por
@@ -158,10 +161,13 @@ export function parseVerdict(text: string): ReplayVerdict | null {
   if (start < 0 || end <= start) return null;
   try {
     const r = replayVerdictSchema.safeParse(JSON.parse(cleaned.slice(start, end + 1)));
-    if (!r.success) console.warn("[replay] veredito fora do formato:", r.error.message, cleaned.slice(0, 300));
+    if (!r.success) log.warn(
+      { err: r.error.message, textLength: cleaned.length },
+      "[replay] veredito fora do formato",
+    );
     return r.success ? r.data : null;
   } catch {
-    console.warn("[replay] veredito não é JSON:", cleaned.slice(0, 300));
+    log.warn({ textLength: cleaned.length }, "[replay] veredito não é JSON");
     return null;
   }
 }
@@ -666,7 +672,7 @@ async function transcribeAudios(
       apiKey: model.apiKey,
     });
     if (r.text) row.content = kind === "image" && text && !isMediaPlaceholderText(text) ? `${text}\n${r.text}` : r.text;
-    else console.warn("[ai-v2 replay] mídia não entendida:", r.error);
+    else log.warn({ detail: r.error }, "[ai-v2 replay] mídia não entendida");
   }
 }
 
@@ -802,7 +808,7 @@ export async function startReplay(args: {
       }),
     ),
   ).catch(async (err) => {
-    console.error("[ai-v2 replay] falhou:", err);
+    log.error({ err }, "[ai-v2 replay] falhou");
     await db.$executeRawUnsafe(
       `UPDATE "ai_simple_replay_runs" SET "status"='error', "error"=$2, "updatedAt"=now(), "finishedAt"=now() WHERE "id"=$1 AND "status"='running'`,
       runId, err instanceof Error ? err.message : String(err),

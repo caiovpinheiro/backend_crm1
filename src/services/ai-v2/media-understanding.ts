@@ -14,6 +14,9 @@ import { guessInputExt } from "@/lib/audio-convert";
 import { transcribeWithGroq } from "@/lib/groq-transcribe";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { generateWithTools, transcribeWithOpenAI } from "@/services/ai/provider";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.media-understanding");
 
 export type UnderstoodKind = "audio" | "image";
 
@@ -71,7 +74,10 @@ export async function getMediaTexts(organizationId: string, messageIds: string[]
     );
     for (const r of rows) out.set(r.messageId, r.text);
   } catch (err) {
-    console.warn("[ai-v2 mídia] leitura dos textos falhou:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2 mídia] leitura dos textos falhou",
+    );
   }
   return out;
 }
@@ -85,7 +91,10 @@ async function saveMediaText(organizationId: string, messageId: string, kind: Un
       messageId, organizationId, kind, text,
     );
   } catch (err) {
-    console.warn("[ai-v2 mídia] gravação do texto falhou:", err instanceof Error ? err.message : err);
+    log.warn(
+      { err: err instanceof Error ? err.message : err },
+      "[ai-v2 mídia] gravação do texto falhou",
+    );
   }
 }
 

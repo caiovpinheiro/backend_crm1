@@ -22,6 +22,9 @@ import { applyConfigChanges, getAtPath, touchesProtectedPath, type V2ConfigChang
 import { buildAgentRulesMarkdown, detectConfigGaps } from "./rules-export";
 import { loadExportNames } from "./rules-export-names";
 import { maskSensitive } from "./sensitive";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.config-review");
 
 export const REVIEW_LIMITS = { maxSuggestions: 20, turnSamples: 80, configChars: 60_000, fichaChars: 60_000, timeoutMs: 240_000 };
 
@@ -416,7 +419,7 @@ export async function startConfigReview(args: {
     actor: { type: "AI", label: "Revisão da configuração", ref: args.agentId },
   } as Parameters<typeof runWithContext>[0];
   void Promise.resolve(runWithContext(ctx, () => executeReview({ ...args, runId, chatKey }))).catch(async (err) => {
-    console.error("[ai-v2 revisão] falhou:", err);
+    log.error({ err }, "[ai-v2 revisão] falhou");
     await db.$executeRawUnsafe(
       `UPDATE "ai_v2_config_reviews" SET "status"='error', "error"=$2, "finishedAt"=now() WHERE "id"=$1`,
       runId, err instanceof Error ? err.message : String(err),

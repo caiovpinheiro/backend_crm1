@@ -55,6 +55,9 @@ import {
   type ListenStatus,
   type Pattern,
 } from "./listen-extract";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("ai-v2.listen");
 
 const db = prismaBase as unknown as {
   $queryRawUnsafe: <T = unknown>(q: string, ...v: unknown[]) => Promise<T>;
@@ -587,7 +590,7 @@ export async function sweepListenNow(organizationId: string, agentId: string, se
   if (row.status === "off") throw new Error("Esta escuta foi desligada.");
   if (!(await claimSweep(sessionId, 60_000))) throw new Error("Já está lendo, ou leu há menos de 1 minuto.");
   const runId = randomUUID();
-  void runSweep(row, runId).catch((err) => console.error("[ai-v2 escuta] varredura falhou:", err));
+  void runSweep(row, runId).catch((err) => log.error({ err }, "[ai-v2 escuta] varredura falhou"));
   return { runId };
 }
 
@@ -611,7 +614,7 @@ export async function sweepAllListenSessions(opts: { limit?: number; dryRun?: bo
       await runSweep(row, randomUUID());
       swept += 1;
     } catch (err) {
-      console.error("[ai-v2 escuta] varredura falhou:", row.id, err);
+      log.error({ rowId: row.id, err }, "[ai-v2 escuta] varredura falhou");
     }
   }
   return { due: rows.length, swept };
@@ -627,7 +630,10 @@ export function startListenSweeper(): void {
     if (ticking) return;
     ticking = true;
     void sweepAllListenSessions()
-      .catch((err) => console.error("[ai-v2 escuta] tick falhou:", err instanceof Error ? err.message : err))
+      .catch((err) => log.error(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2 escuta] tick falhou",
+      ))
       .finally(() => {
         ticking = false;
       });
