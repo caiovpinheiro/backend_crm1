@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   can: vi.fn(),
   requirePermission: vi.fn(),
   requirePermissionForUser: vi.fn(),
-  getEffectiveInboxAlertConfig: vi.fn(),
+  getEffectiveInboxAlerts: vi.fn(),
   resolveEmailAccess: vi.fn(),
   listEmailAccounts: vi.fn(),
   computeEffectivePermissions: vi.fn(),
@@ -59,7 +59,7 @@ vi.mock("@/lib/authz/resource-policy", () => ({
 
 vi.mock("@/lib/inbox-alert-config", () => ({
   DEFAULT_INBOX_ALERT_CONFIG: { mine: {}, queue: {}, others: {} },
-  getEffectiveInboxAlertConfig: mocks.getEffectiveInboxAlertConfig,
+  getEffectiveInboxAlerts: mocks.getEffectiveInboxAlerts,
 }));
 
 vi.mock("@/services/email-accounts", () => ({
@@ -145,7 +145,10 @@ function armHappyPath() {
   mocks.can.mockImplementation((_ctx: unknown, key: string) => key === "deal:view");
   mocks.requirePermission.mockResolvedValue(null);
   mocks.requirePermissionForUser.mockResolvedValue(null);
-  mocks.getEffectiveInboxAlertConfig.mockResolvedValue({ mine: { sound: true } });
+  mocks.getEffectiveInboxAlerts.mockResolvedValue({
+    config: { mine: { sound: true } },
+    tabAudience: "department",
+  });
   mocks.resolveEmailAccess.mockResolvedValue({
     userId: "user_1",
     canViewShared: false,
@@ -213,6 +216,7 @@ describe("buildMeBootstrap", () => {
     expect(out.alertConfig).toEqual({
       config: { mine: { sound: true } },
       departmentIds: ["dep_1"],
+      tabAudience: "department",
     });
     expect(out.agentStatus).toEqual({
       userId: "user_1",
@@ -312,6 +316,7 @@ describe("buildMeBootstrap", () => {
     expect(out.alertConfig).toEqual({
       config: { mine: {}, queue: {}, others: {} },
       departmentIds: [],
+      tabAudience: null,
     });
     expect(mocks.getActiveWidgetSlugs).not.toHaveBeenCalled();
     expect(mocks.orgFindUnique).not.toHaveBeenCalled();
