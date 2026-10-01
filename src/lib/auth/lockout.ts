@@ -1,4 +1,7 @@
 import { prismaBase } from "@/lib/prisma-base";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auth.lockout");
 
 /**
  * Lock-out exponencial pra brute-force protection (PR 4.1).
@@ -181,7 +184,7 @@ export async function recordLoginAttempt(
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] recordLoginAttempt failed", err);
+    log.error({ err }, "[auth/lockout] recordLoginAttempt failed");
   }
 }
 
@@ -200,7 +203,7 @@ export async function clearFailuresOnSuccess(email: string): Promise<void> {
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] clearFailuresOnSuccess failed", err);
+    log.error({ err }, "[auth/lockout] clearFailuresOnSuccess failed");
   }
 }
 
@@ -223,6 +226,6 @@ export async function clearLoginLockout(email: string): Promise<void> {
       },
     });
   } catch (err) {
-    console.error("[auth/lockout] clearLoginLockout failed", err);
+    log.error({ err }, "[auth/lockout] clearLoginLockout failed");
   }
 }

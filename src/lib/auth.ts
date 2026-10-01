@@ -35,6 +35,10 @@ import {
   sessionRenewalProofFrom,
 } from "./auth/session-renewal";
 import { getClientIp, withRateLimit } from "./rate-limit";
+import { maskEmail } from "@/lib/pii-mask";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("auth");
 
 /** Código em `signIn(..., { redirect: false })` → `result.code` quando o Prisma falha (ex.: BD parada). */
 class DatabaseUnavailable extends CredentialsSignin {
@@ -157,7 +161,7 @@ const nextAuth = NextAuth({
               candidates.find((u) => u.isSuperAdmin && !u.organizationId) ?? null;
           }
         } catch (err) {
-          console.error("[auth] authorize: database error", err);
+          log.error({ err }, "[auth] authorize: database error");
           await recordLoginAttempt({ email, outcome: "db_error" });
           throw new DatabaseUnavailable();
         }
@@ -236,7 +240,7 @@ const nextAuth = NextAuth({
               const decrypted = decryptSecret(user.mfaSecret);
               mfaOk = verifyTotp(decrypted, totpCode);
             } catch (err) {
-              console.error("[auth] decrypt mfaSecret failed", err);
+              log.error({ err }, "[auth] decrypt mfaSecret failed");
               mfaOk = false;
             }
           }
@@ -277,8 +281,9 @@ const nextAuth = NextAuth({
         // organizationId=null e o Prisma scope mostra uma mensagem
         // tecnica vazando pro cliente.
         if (!user.organizationId && !user.isSuperAdmin) {
-          console.warn(
-            `[auth] login barrado: user ${user.email} sem organizationId`,
+          log.warn(
+            { userId: user.id, email: maskEmail(user.email) },
+            "[auth] login barrado: user sem organizationId",
           );
           await recordLoginAttempt({
             email,
@@ -404,7 +409,7 @@ const nextAuth = NextAuth({
             }
             setJwtRefreshSnapshot(userId, snapshot);
           } catch (err) {
-            console.error("[auth] jwt role refresh failed", err);
+            log.error({ err }, "[auth] jwt role refresh failed");
           }
         }
         if (snapshot) {
