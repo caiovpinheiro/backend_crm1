@@ -24,6 +24,7 @@ import {
   createDealEvent,
   findOpenDealForContactInPipeline,
   isValidDealStatus,
+  wasReusedOpenDeal,
 } from "@/services/deals";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -531,21 +532,27 @@ export async function POST(request: Request) {
           contactId,
           ownerId: deal.ownerId === undefined ? undefined : deal.ownerId,
         });
-        dealCreated = true;
+        if (wasReusedOpenDeal(dealResult)) {
+          dealReused = true;
+        } else {
+          dealCreated = true;
+        }
 
-        createDealEvent(dealResult.id, authResult.user.id, "CREATED", {
-          stageId: deal.stageId,
-          via: "api/leads",
-          // Origem do lead (form, chatbot, anúncio, etc.) — vinda no
-          // payload como contact.source. Combinado ao actor INTEGRATION
-          // (nome do token), o feed responde "de onde veio cada lead".
-          source: contact.source ?? null,
-        }).catch(() => {});
-        fireTrigger("deal_created", {
-          dealId: dealResult.id,
-          contactId,
-          data: { stageId: deal.stageId, toStageId: deal.stageId },
-        }).catch(() => {});
+        if (!dealReused) {
+          createDealEvent(dealResult.id, authResult.user.id, "CREATED", {
+            stageId: deal.stageId,
+            via: "api/leads",
+            // Origem do lead (form, chatbot, anúncio, etc.) — vinda no
+            // payload como contact.source. Combinado ao actor INTEGRATION
+            // (nome do token), o feed responde "de onde veio cada lead".
+            source: contact.source ?? null,
+          }).catch(() => {});
+          fireTrigger("deal_created", {
+            dealId: dealResult.id,
+            contactId,
+            data: { stageId: deal.stageId, toStageId: deal.stageId },
+          }).catch(() => {});
+        }
       }
 
       // Campos personalizados valem para os dois casos: no negócio

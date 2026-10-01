@@ -94,8 +94,15 @@ export async function PUT(request: Request, context: RouteContext) {
     if (b.isDefault !== undefined && typeof b.isDefault !== "boolean") {
       return NextResponse.json({ message: "isDefault inválido." }, { status: 400 });
     }
+    if (b.allowDuplicateDeals !== undefined && typeof b.allowDuplicateDeals !== "boolean") {
+      return NextResponse.json({ message: "allowDuplicateDeals inválido." }, { status: 400 });
+    }
 
-    if (b.name === undefined && b.isDefault === undefined) {
+    if (
+      b.name === undefined &&
+      b.isDefault === undefined &&
+      b.allowDuplicateDeals === undefined
+    ) {
       return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
     }
 
@@ -103,6 +110,8 @@ export async function PUT(request: Request, context: RouteContext) {
       const pipeline = await updatePipeline(id, {
         name: typeof b.name === "string" ? b.name : undefined,
         isDefault: typeof b.isDefault === "boolean" ? b.isDefault : undefined,
+        allowDuplicateDeals:
+          typeof b.allowDuplicateDeals === "boolean" ? b.allowDuplicateDeals : undefined,
       });
       return NextResponse.json(pipeline);
     } catch (err: unknown) {

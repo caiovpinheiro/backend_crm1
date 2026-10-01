@@ -1517,6 +1517,10 @@ model Pipeline {
   lossReasonRequired   Boolean              @default(false)
   /// Se true, permite motivo livre (“Outro…”) neste funil.
   lossReasonAllowOther Boolean              @default(true)
+  /// Se true (padrão), o mesmo contato pode ter vários negócios OPEN neste funil.
+  /// Se false, fica um OPEN comercial por contato: a criação reaproveita o
+  /// card mais à frente e, ao desligar, os repetidos são unidos nele.
+  allowDuplicateDeals  Boolean              @default(true)
   stages               Stage[]
   distributionRules    DistributionRule[]
   /// Canais cujo inbound roteia para este funil (Channel.defaultPipelineId).

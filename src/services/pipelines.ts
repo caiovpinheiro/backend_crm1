@@ -1,6 +1,10 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import {
+  invalidatePipelineBoard,
+  unifyDuplicateOpenDealsInPipeline,
+} from "@/services/deal-duplicates";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { slugify } from "@/lib/utils";
 
@@ -354,6 +358,15 @@ const dealListInclude = {
   owner: { select: { id: true, name: true, email: true, avatarUrl: true } },
 } satisfies Prisma.DealInclude;
 
+export async function getAllowDuplicateDeals(id: string): Promise<boolean | null> {
+  const row = await prisma.pipeline.findFirst({
+    where: { id, archivedAt: null },
+    select: { allowDuplicateDeals: true },
+  });
+  if (!row) return null;
+  return row.allowDuplicateDeals;
+}
+
 export async function getPipelineMeta(id: string) {
   return prisma.pipeline.findFirst({
     where: { id, archivedAt: null },
@@ -419,6 +432,7 @@ export async function createPipeline(data: { name: string }) {
 export type UpdatePipelineInput = {
   name?: string;
   isDefault?: boolean;
+  allowDuplicateDeals?: boolean;
 };
 
 export async function updatePipeline(id: string, data: UpdatePipelineInput) {
@@ -434,9 +448,35 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
   if (data.isDefault !== undefined) {
     payload.isDefault = data.isDefault;
   }
+  if (data.allowDuplicateDeals !== undefined) {
+    payload.allowDuplicateDeals = data.allowDuplicateDeals;
+  }
 
   if (Object.keys(payload).length === 0) {
     throw new Error("EMPTY_UPDATE");
+  }
+
+  if (data.allowDuplicateDeals === false) {
+    const pipeline = await prisma.$transaction(
+      async (tx) => {
+        if (data.isDefault === true) {
+          await tx.pipeline.updateMany({
+            where: { id: { not: id } },
+            data: { isDefault: false },
+          });
+        }
+        const updated = await tx.pipeline.update({
+          where: { id },
+          data: payload,
+          include: { stages: { orderBy: { position: "asc" } } },
+        });
+        const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(tx, id);
+        return Object.assign(updated, { duplicatesRemoved });
+      },
+      { timeout: 120_000 },
+    );
+    await invalidatePipelineBoard(id);
+    return pipeline;
   }
 
   if (data.isDefault === true) {
