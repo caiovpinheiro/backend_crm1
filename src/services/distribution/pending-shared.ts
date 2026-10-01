@@ -28,6 +28,7 @@ import {
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
 import { debugInfo, debugWarn } from "@/lib/debug-log";
+import { getLogger } from "@/lib/logger";
 import { getOrgSettingBoolFresh } from "@/lib/org-settings";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
@@ -36,6 +37,8 @@ import {
   runWithContext,
 } from "@/lib/request-context";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
+
+const log = getLogger("distribution.pending-shared");
 
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
@@ -123,7 +126,7 @@ export async function isDistributionAutoOnInbound(): Promise<boolean> {
   try {
     return (await getOrgSettingBoolFresh(AUTO_ON_INBOUND_KEY, true)) !== false;
   } catch (e) {
-    console.error("[distribution] leitura de distribution.autoOnInbound falhou", e);
+    log.error({ err: e }, "[distribution] leitura de distribution.autoOnInbound falhou");
     return true;
   }
 }
