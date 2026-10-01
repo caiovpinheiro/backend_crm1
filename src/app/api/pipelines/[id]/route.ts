@@ -125,6 +125,12 @@ export async function PUT(request: Request, context: RouteContext) {
         if (err.message === "EMPTY_UPDATE") {
           return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
         }
+        if (err.message.startsWith("DUPLICATE_DEALS:")) {
+          return NextResponse.json(
+            { message: err.message.slice("DUPLICATE_DEALS:".length) },
+            { status: 500 },
+          );
+        }
       }
       throw err;
     }
