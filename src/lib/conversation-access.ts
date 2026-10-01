@@ -9,7 +9,11 @@ import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createRequestMemo, type RequestMemo } from "@/lib/request-memo";
-import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
+import {
+  getDepartmentScopeForConversations,
+  getVisibilityFilter,
+  withInboxQueueVisibility,
+} from "@/lib/visibility";
 
 type SessionUser = {
   id: string;
@@ -58,12 +62,13 @@ export type ConversationAccessOptions = {
    */
   memo?: RequestMemo;
   /**
-   * Dispara já, junto com a leitura da conversa, os insumos da regra de
-   * visibilidade e de canal (departamento, settings, flag, grants, papéis),
-   * em vez de esperar descobrir que o usuário não é o responsável. Custa no
-   * máximo uma consulta a mais quando ele é; economiza uma fase quando não
-   * é. Para rotas quentes que em seguida precisam da política de canal de
-   * qualquer jeito (`GET /messages`).
+   * Dispara já, junto com a leitura da conversa, os insumos que custam uma
+   * ida ao Postgres — escopo de departamento e política de canal (flag,
+   * grants, papéis) — em vez de esperar descobrir que o usuário não é o
+   * responsável. Custa no máximo uma consulta a mais quando ele é;
+   * economiza uma fase quando não é. Para rotas quentes que em seguida
+   * precisam da política de canal de qualquer jeito (`GET /messages`).
+   * Os settings de visibilidade (só Redis) continuam sob demanda.
    */
   prefetch?: boolean;
 };
@@ -158,8 +163,9 @@ async function resolveConversationAccess<T extends ConversationAccessRow>(
   };
 
   const authzEarly = early(startAuthz);
-  const visibilityEarly = opts.prefetch ? early(startVisibility) : null;
   const channelsEarly = opts.prefetch ? early(startChannels) : null;
+  // Só aquece o memo: `getVisibilityFilter` pega o departamento de lá.
+  if (opts.prefetch) early(() => getDepartmentScopeForConversations(user, memo));
 
   const conv = await loadRow();
   if (!conv) return null;
@@ -182,7 +188,7 @@ async function resolveConversationAccess<T extends ConversationAccessRow>(
   if (conv.assignedToId === user.id) return passesFunnel();
 
   const [visibility, allowedChannelIds] = await Promise.all([
-    visibilityEarly ?? startVisibility(),
+    startVisibility(),
     // Escopo de canais por usuário (mesma regra do GET /conversations).
     channelsEarly ?? startChannels(),
   ]);
