@@ -11,7 +11,6 @@ import { Prisma } from "@prisma/client";
 import { invalidateBoardData } from "@/lib/cache/keys";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { getOrgIdOrThrow } from "@/lib/request-context";
 
 const log = getLogger("deal-duplicates");
 
@@ -118,8 +117,9 @@ async function runPairsSql(
 export async function unifyDuplicateOpenDealsInPipeline(
   tx: UnifyClient,
   pipelineId: string,
+  organizationId: string,
 ): Promise<number> {
-  const orgId = getOrgIdOrThrow();
+  const orgId = organizationId;
   const run = (statement: string) => runPairsSql(tx, orgId, pipelineId, statement);
 
   const counted = await tx.$queryRaw<Array<{ removed: number | bigint }>>`
@@ -404,9 +404,12 @@ export async function unifyDuplicateOpenDealsInPipeline(
   return removed;
 }
 
-export async function invalidatePipelineBoard(pipelineId: string): Promise<void> {
+export async function invalidatePipelineBoard(
+  pipelineId: string,
+  organizationId: string,
+): Promise<void> {
   try {
-    await invalidateBoardData(getOrgIdOrThrow(), pipelineId);
+    await invalidateBoardData(organizationId, pipelineId);
   } catch {
     /* fora de contexto — o TTL do board cobre */
   }
