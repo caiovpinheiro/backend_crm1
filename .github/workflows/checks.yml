@@ -65,8 +65,6 @@ jobs:
       # entra no `include` do tsconfig e gera erros falsos; o typecheck roda
       # sempre sobre a árvore limpa.
       - name: Typecheck (baseline)
-        # catraca de tsc em ajuste — tornar bloqueante depois
-        continue-on-error: true
         run: |
           set -o pipefail
           rm -rf .next
