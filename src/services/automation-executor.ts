@@ -3288,7 +3288,21 @@ async function executeStep(
             ? enrichTpl.flowToken.trim()
             : null;
 
-        const headerMediaUrlCfg = readString(cfg, "headerMediaUrl")?.trim() || null;
+        const headerMediaUrlRaw = readString(cfg, "headerMediaUrl")?.trim() || null;
+        // Mesma origem da campanha: token `{{dealCustomFields.x}}` vira a URL
+        // deste contato. URL fixa e upload interno seguem sem interpolar.
+        let headerMediaUrlCfg = headerMediaUrlRaw;
+        if (headerMediaUrlCfg?.includes("{{")) {
+          const resolved = (
+            await interpolateMessageVariables(headerMediaUrlCfg, rt, tplFlowVars)
+          ).trim();
+          if (!resolved || /\{\{/.test(resolved)) {
+            throw new TemplateHeaderMediaError(
+              `send_whatsapp_template: a URL da mídia do cabeçalho ficou vazia ao resolver ${headerMediaUrlRaw}. O campo do CRM precisa ter a URL HTTPS da mídia deste contato.`,
+            );
+          }
+          headerMediaUrlCfg = resolved;
+        }
         const headerMediaTypeCfg = readString(cfg, "headerMediaType")?.trim().toLowerCase();
         const finalTplComponents = await injectTemplateHeaderMediaComponent(tplMetaClient, {
           templateName,
