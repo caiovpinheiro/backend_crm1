@@ -82,6 +82,8 @@ vi.mock("../pending-shared", () => ({
   explainEmptyDrain: async () => ({ skipReason: null, skipMessage: null }),
   getDrainState: () => h.drainState,
   getWaitingQueueWhere: vi.fn(async () => ({ assignedToId: null })),
+  isDistributionAutoOnInbound: async () => true,
+  listRequestedPendingConversationIds: async () => [],
   hasRemainingCapacityInScope: () => true,
   liveFreeCapacityForUser: () => 1,
   logCooldownSkip: vi.fn(),
