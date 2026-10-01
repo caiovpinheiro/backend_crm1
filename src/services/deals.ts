@@ -2002,18 +2002,32 @@ type BoardStageWithDeals = Prisma.StageGetPayload<{
  */
 const LAST_INTERACTION_STAGE_SCAN_CAP = 2_500;
 
+function stagesAllowedByFilter<T extends { id: string }>(
+  stages: T[],
+  filters?: AdvancedDealFilters,
+): T[] {
+  const ids = filters?.stageIds;
+  if (!ids?.length) return stages;
+  const allow = new Set(ids);
+  return stages.filter((stage) => allow.has(stage.id));
+}
+
 async function loadBoardStagesByLastInteraction(
   pipelineId: string,
   dealWhere: Prisma.DealWhereInput,
   perStage: number,
   offsetByStage: Record<string, number>,
   direction: BoardSortDirection,
+  advancedFilters?: AdvancedDealFilters,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
-  const stagesRaw = await prisma.stage.findMany({
-    where: { pipelineId },
-    orderBy: { position: "asc" },
-  });
+  const stagesRaw = stagesAllowedByFilter(
+    await prisma.stage.findMany({
+      where: { pipelineId },
+      orderBy: { position: "asc" },
+    }),
+    advancedFilters,
+  );
   if (stagesRaw.length === 0) return [];
 
   // 1) Candidatos por etapa (mesmos filtros do board), os mais recentes
@@ -2023,7 +2037,7 @@ async function loadBoardStagesByLastInteraction(
       const extra = offsetByStage[stage.id] ?? 0;
       const limit = perStage + extra;
       return prisma.deal.findMany({
-        where: { ...dealWhere, stageId: stage.id },
+        where: { AND: [dealWhere, { stageId: stage.id }] },
         select: { id: true, contactId: true, position: true },
         orderBy: { updatedAt: "desc" },
         take: Math.max(limit, LAST_INTERACTION_STAGE_SCAN_CAP),
@@ -2295,21 +2309,25 @@ async function computeBoardData(
       perStage,
       offsetByStage,
       sortDirection,
+      advancedFilters,
     );
   } else {
     // 1) Etapas leves + 2) cards por coluna em paralelo (LIMIT por stage).
     // Nested `include.deals.take` gerava um plano único pesado em funis
     // grandes (ex.: ~40k OPEN); N queries indexadas `stageId+status+position`
     // com LIMIT rodam juntas e costumam ser bem mais baratas.
-    const stagesRaw = await prisma.stage.findMany({
-      where: { pipelineId },
-      orderBy: { position: "asc" },
-    });
+    const stagesRaw = stagesAllowedByFilter(
+      await prisma.stage.findMany({
+        where: { pipelineId },
+        orderBy: { position: "asc" },
+      }),
+      advancedFilters,
+    );
     const dealsByStage = await Promise.all(
       stagesRaw.map((stage) => {
         const extra = offsetByStage[stage.id] ?? 0;
         return prisma.deal.findMany({
-          where: { ...dealWhere, stageId: stage.id },
+          where: { AND: [dealWhere, { stageId: stage.id }] },
           orderBy: dealOrderBy,
           take: perStage + extra,
           include: BOARD_DEAL_INCLUDE,

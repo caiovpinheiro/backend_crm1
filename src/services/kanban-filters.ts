@@ -9,7 +9,7 @@
  * sem migration nova a cada operador.
  */
 
-import type { DealStatus, Prisma } from "@prisma/client";
+import { Prisma, type DealStatus } from "@prisma/client";
 
 import {
   metaSessionWindowWhere,
@@ -573,14 +573,95 @@ function isDateRangeValue(v: unknown): v is DateRangeValue {
 }
 
 /**
- * Custom fields são armazenados como STRING no DB (`value` em
- * `ContactCustomFieldValue`/`DealCustomFieldValue`).
+ * Custom fields são STRING no banco. Data entra como `DD/MM/AAAA` (painel)
+ * ou `AAAA-MM-DD` (importação / input date). Comparar o texto cru mistura
+ * os dois formatos: `30/09/2026` não casa com `2026-09-30`.
+ * Operadores de data passam por `idsMatchingCustomDate`, que normaliza os
+ * dois para `AAAA-MM-DD` antes do intervalo.
  *
- * Para datas convertemos pra ISO/`YYYY-MM-DD` e comparamos lexicograficamente.
- * Funciona porque ISO-8601 é monotonicamente comparável como string.
- * Para `gt`/`lt` em campos numéricos, idem (somente faz sentido se o
- * usuário cadastrou números com padding consistente — limitação documentada).
+ * `gt`/`lt` em campo numérico continua comparação de texto (só é estável
+ * com padding consistente).
  */
+
+/** `DD/MM/AAAA` ou `AAAA-MM-DD` (com ou sem hora) → `AAAA-MM-DD`, ou null. */
+function canonicalCustomDate(raw: string): string | null {
+  const s = raw.trim();
+  const br = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s);
+  const iso = br
+    ? `${br[3]}-${br[2]}-${br[1]}`
+    : /^(\d{4})-(\d{2})-(\d{2})/.exec(s)?.[0] ?? null;
+  if (!iso) return null;
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() !== m - 1 ||
+    dt.getUTCDate() !== d
+  ) {
+    return null;
+  }
+  return iso;
+}
+
+type CustomDateCmp = { gte?: string; lte?: string; gt?: string; lt?: string };
+
+/** Intervalo inclusivo em `AAAA-MM-DD` para operador de data. null = não é data. */
+function dateCompareFromFilter(filter: CustomFieldFilter): CustomDateCmp | null {
+  const op = filter.operator ?? "eq";
+  if (op === "between" && isDateRangeValue(filter.value)) {
+    const from = filter.value.from ? canonicalCustomDate(filter.value.from) : null;
+    const to = filter.value.to ? canonicalCustomDate(filter.value.to) : null;
+    if (!from && !to) return null;
+    const cmp: CustomDateCmp = {};
+    if (from) cmp.gte = from;
+    if (to) cmp.lte = to;
+    return cmp;
+  }
+  if (op !== "eq" && op !== "before" && op !== "after" && op !== "gt" && op !== "lt") {
+    return null;
+  }
+  const valueStr = typeof filter.value === "string" ? filter.value.trim() : "";
+  const day = valueStr ? canonicalCustomDate(valueStr) : null;
+  if (!day) return null;
+  if (op === "eq") return { gte: day, lte: day };
+  if (op === "before" || op === "lt") return { lt: day };
+  return { gt: day };
+}
+
+/**
+ * IDs cujo valor de data (BR ou ISO) cai no intervalo.
+ * `$queryRaw` não passa pelo escopo do Prisma — o `organizationId` vai no SQL.
+ */
+async function idsMatchingCustomDate(
+  table: "deal_custom_field_values" | "contact_custom_field_values",
+  idColumn: "dealId" | "contactId",
+  customFieldId: string,
+  cmp: CustomDateCmp,
+): Promise<string[]> {
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return [];
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM (
+      SELECT ${Prisma.raw(`"${idColumn}"`)} AS id,
+        CASE
+          WHEN value ~ '^[0-9]{2}/[0-9]{2}/[0-9]{4}'
+            THEN substring(value from 7 for 4) || '-' || substring(value from 4 for 2) || '-' || substring(value from 1 for 2)
+          WHEN value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+            THEN substring(value from 1 for 10)
+          ELSE NULL
+        END AS canon
+      FROM ${Prisma.raw(table)}
+      WHERE "organizationId" = ${orgId}
+        AND "customFieldId" = ${customFieldId}
+    ) dates
+    WHERE canon IS NOT NULL
+      AND (${cmp.gte ? Prisma.sql`canon >= ${cmp.gte}` : Prisma.sql`TRUE`})
+      AND (${cmp.lte ? Prisma.sql`canon <= ${cmp.lte}` : Prisma.sql`TRUE`})
+      AND (${cmp.gt ? Prisma.sql`canon > ${cmp.gt}` : Prisma.sql`TRUE`})
+      AND (${cmp.lt ? Prisma.sql`canon < ${cmp.lt}` : Prisma.sql`TRUE`})
+  `;
+  return rows.map((row) => row.id);
+}
 function buildContactCustomFieldClause(
   customFieldId: string,
   filter: CustomFieldFilter,
@@ -930,13 +1011,24 @@ export async function buildDealWhereFromFilters(
     if (names.length > 0) {
       const defs = await prisma.customField.findMany({
         where: { entity: "deal", name: { in: names } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, type: true },
       });
-      const byName = new Map(defs.map((d) => [d.name, d.id]));
+      const byName = new Map(defs.map((d) => [d.name, d]));
       for (const f of filters.dealCustomFields) {
-        const id = byName.get(f.name.trim());
-        if (!id) continue;
-        const clause = buildDealCustomFieldClause(id, f);
+        const def = byName.get(f.name.trim());
+        if (!def) continue;
+        const dateCmp = def.type === "DATE" ? dateCompareFromFilter(f) : null;
+        if (dateCmp) {
+          const ids = await idsMatchingCustomDate(
+            "deal_custom_field_values",
+            "dealId",
+            def.id,
+            dateCmp,
+          );
+          conditions.push({ id: { in: ids } });
+          continue;
+        }
+        const clause = buildDealCustomFieldClause(def.id, f);
         if (clause) conditions.push(clause);
       }
     }
@@ -948,13 +1040,24 @@ export async function buildDealWhereFromFilters(
     if (names.length > 0) {
       const defs = await prisma.customField.findMany({
         where: { entity: "contact", name: { in: names } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, type: true },
       });
-      const byName = new Map(defs.map((d) => [d.name, d.id]));
+      const byName = new Map(defs.map((d) => [d.name, d]));
       for (const f of filters.contactCustomFields) {
-        const id = byName.get(f.name.trim());
-        if (!id) continue;
-        const clause = buildContactCustomFieldClause(id, f);
+        const def = byName.get(f.name.trim());
+        if (!def) continue;
+        const dateCmp = def.type === "DATE" ? dateCompareFromFilter(f) : null;
+        if (dateCmp) {
+          const ids = await idsMatchingCustomDate(
+            "contact_custom_field_values",
+            "contactId",
+            def.id,
+            dateCmp,
+          );
+          conditions.push({ contactId: { in: ids } });
+          continue;
+        }
+        const clause = buildContactCustomFieldClause(def.id, f);
         if (clause) conditions.push({ contact: { is: clause } });
       }
     }
