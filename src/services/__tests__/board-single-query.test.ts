@@ -13,7 +13,9 @@
  *   2) `lastInteraction` em SQL == fallback em memória;
  *   3) o SQL gerado é parametrizado (valores em `values`, nunca no texto);
  *   4) a passagem única em `messages` reproduz `last_msg`/`last_in`/`awaiting`;
- *   5) o fallback limita a concorrência a 4.
+ *   5) o fallback limita a concorrência a 4;
+ *   6) com filtro de etapa, só as etapas escolhidas viram coluna (nos dois
+ *      caminhos) e o `stageId` da etapa não sobrescreve o do filtro.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
@@ -65,6 +67,7 @@ vi.mock("@/services/kanban-filters", () => ({
 }));
 
 import { runWithContext } from "@/lib/request-context";
+import { buildDealWhereFromFilters } from "@/services/kanban-filters";
 import {
   __boardInternal,
   buildLastInteractionRankedSql,
@@ -906,6 +909,71 @@ describe("board completo (getBoardData) com passagem única em messages", () => 
       expect(d).toHaveProperty("hasOverdueActivity");
       expect(d.tags).toEqual([]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6) Filtro de etapa: etapa filtrada fica sozinha
+// ---------------------------------------------------------------------------
+
+describe("board: filtro de etapa (stageIds)", () => {
+  const stageWhere = { stageId: { in: ["s2"] } };
+  const S2_BY_POSITION = ["d07", "d08", "d09", "d10"];
+
+  it("getBoardData devolve só a coluna filtrada (consulta ranqueada)", async () => {
+    vi.mocked(buildDealWhereFromFilters).mockResolvedValueOnce([stageWhere]);
+    currentWhere = stageWhere;
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "ALL", { stageIds: ["s2"] }, { perStage: 10 }),
+    );
+    expect(board.map((s) => s.id)).toEqual(["s2"]);
+    expect(board[0]?.deals.map((d) => d.id)).toEqual(S2_BY_POSITION);
+    expect(board[0]?.totalCount).toBe(4);
+
+    // A janela recebe só a etapa escolhida; nada de findMany por etapa.
+    const ranking = h.queryRaw.mock.calls
+      .map((c) => parseRawCall(c))
+      .find((c) => c.text.includes('PARTITION BY d."stageId"'));
+    expect(ranking?.values[1]).toEqual(["s2"]);
+    expect(findManyCalls()).toBe(1);
+  });
+
+  it("getBoardData com lastInteraction devolve só a coluna filtrada", async () => {
+    vi.mocked(buildDealWhereFromFilters).mockResolvedValueOnce([stageWhere]);
+    currentWhere = stageWhere;
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "ALL", { stageIds: ["s2"] }, {
+        perStage: 10,
+        sortField: "lastInteraction",
+        sortDirection: "desc",
+      }),
+    );
+    expect(board.map((s) => s.id)).toEqual(["s2"]);
+    expect(board[0]?.deals.map((d) => d.id).sort()).toEqual(S2_BY_POSITION);
+
+    const ranking = h.queryRaw.mock.calls
+      .map((c) => parseRawCall(c))
+      .find((c) => c.text.includes("WITH candidates AS"));
+    expect(ranking?.values[1]).toEqual(["s2"]);
+  });
+
+  it("fallback por etapa: o stageId da etapa não sobrescreve o do filtro", async () => {
+    // Where de uma condição só (status ALL, sem visibilidade): com spread, o
+    // `stageId` de cada etapa apagava o filtro e toda coluna vinha cheia.
+    const res = await withOrg(() =>
+      __boardInternal.loadBoardStagesPerStage(
+        stagesRaw(),
+        stageWhere,
+        [{ position: "asc" }],
+        10,
+        {},
+      ),
+    );
+    expect(res.map((s) => [s.id, s.deals.map((d) => d.id)])).toEqual([
+      ["s1", []],
+      ["s2", S2_BY_POSITION],
+      ["s3", []],
+    ]);
   });
 });
 

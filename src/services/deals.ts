@@ -2382,6 +2382,16 @@ export function buildRankedBoardDealsSql(args: {
  */
 const LAST_INTERACTION_STAGE_SCAN_CAP = 2_500;
 
+function stagesAllowedByFilter<T extends { id: string }>(
+  stages: T[],
+  filters?: AdvancedDealFilters,
+): T[] {
+  const ids = filters?.stageIds;
+  if (!ids?.length) return stages;
+  const allow = new Set(ids);
+  return stages.filter((stage) => allow.has(stage.id));
+}
+
 /**
  * `lastInteraction` em UMA consulta: candidatos por etapa (janela por
  * `updatedAt` até `scanCap`), `MAX(conversations.updatedAt)` só desses
@@ -2542,7 +2552,9 @@ async function loadBoardStagesPerStage(
     (stage) => {
       const extra = offsetByStage[stage.id] ?? 0;
       return prisma.deal.findMany({
-        where: { ...dealWhere, stageId: stage.id },
+        // AND explícito: o `stageId` da etapa não sobrescreve o `stageId`
+        // que o filtro de etapa (ou a visibilidade de funil) pôs no where.
+        where: { AND: [dealWhere, { stageId: stage.id }] },
         orderBy: dealOrderBy,
         take: perStage + extra,
         include: BOARD_DEAL_INCLUDE,
@@ -2579,12 +2591,17 @@ async function loadBoardStagesByLastInteraction(
    * o cliente pagina pelo `offsetByStage` antigo.
    */
   lastAtOut?: Map<string, Date | null>,
+  /** Filtro de etapa: só as etapas escolhidas viram coluna (`stagesAllowedByFilter`). */
+  advancedFilters?: AdvancedDealFilters,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
-  const stagesRaw = await prisma.stage.findMany({
-    where: { pipelineId },
-    orderBy: { position: "asc" },
-  });
+  const stagesRaw = stagesAllowedByFilter(
+    await prisma.stage.findMany({
+      where: { pipelineId },
+      orderBy: { position: "asc" },
+    }),
+    advancedFilters,
+  );
   if (stagesRaw.length === 0) return [];
   const limitByStage = boardLimitByStage(stagesRaw, perStage, offsetByStage);
   const maxPerStage = Math.max(...limitByStage.values());
@@ -2638,7 +2655,7 @@ async function loadLastInteractionIdsPerStage(
     (stage) => {
       const limit = limitByStage.get(stage.id) ?? 0;
       return prisma.deal.findMany({
-        where: { ...dealWhere, stageId: stage.id },
+        where: { AND: [dealWhere, { stageId: stage.id }] },
         select: { id: true, contactId: true, position: true },
         orderBy: { updatedAt: "desc" },
         take: Math.max(limit, LAST_INTERACTION_STAGE_SCAN_CAP),
@@ -2916,6 +2933,7 @@ async function computeBoardData(
       offsetByStage,
       sortDirection,
       lastAtByDealId,
+      advancedFilters,
     );
   } else {
     // 1) Etapas leves; 2) cards de TODAS as colunas numa consulta só
@@ -2927,10 +2945,15 @@ async function computeBoardData(
     // Se o where tiver algo que o tradutor não cobre (filtros avançados
     // por tag/contato/conversa), volta ao caminho por etapa com no máximo
     // 4 consultas em voo.
-    const stagesRaw = await prisma.stage.findMany({
-      where: { pipelineId },
-      orderBy: { position: "asc" },
-    });
+    //
+    // Com filtro de etapa, só as etapas escolhidas viram coluna.
+    const stagesRaw = stagesAllowedByFilter(
+      await prisma.stage.findMany({
+        where: { pipelineId },
+        orderBy: { position: "asc" },
+      }),
+      advancedFilters,
+    );
     const whereSql = translateDealWhereToSql(dealWhere);
     stages = whereSql
       ? await loadBoardStagesRanked(
