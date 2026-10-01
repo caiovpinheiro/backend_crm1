@@ -72,17 +72,23 @@ export async function findClosedOnlyContactIdsByLastDirection(
     JOIN LATERAL (
       SELECT v."lastMessageDirection" AS d
       FROM conversations v
-      WHERE v."contactId" = c.id
-      ORDER BY v."updatedAt" DESC
+      WHERE v."organizationId" = ${orgId} AND v."contactId" = c.id
+      ORDER BY v."updatedAt" DESC, v.id DESC
       LIMIT 1
     ) last ON true
     WHERE c."organizationId" = ${orgId}
       AND last.d = ${dir}
-      AND EXISTS (SELECT 1 FROM deals x WHERE x."contactId" = c.id)
+      AND EXISTS (
+        SELECT 1 FROM deals x
+        WHERE x."organizationId" = ${orgId} AND x."contactId" = c.id
+      )
       AND NOT EXISTS (
         SELECT 1 FROM conversations a
-        WHERE a."contactId" = c.id AND a.status <> 'RESOLVED'
+        WHERE a."organizationId" = ${orgId}
+          AND a."contactId" = c.id
+          AND a.status <> 'RESOLVED'
       )
+    ORDER BY c.id
     LIMIT ${CLOSED_ONLY_DIRECTION_CAP}
   `;
   return rows.map((r) => r.id);
