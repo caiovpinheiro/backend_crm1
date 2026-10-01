@@ -925,9 +925,10 @@ Response do POST:
 
 | Método | Path | Auth | Descrição |
 |--------|------|------|-----------|
-| GET | `/api/health` | público | `{ status: "ok", uptime, db: true/false, redis: true/false }`. |
-| HEAD | `/api/health` | público | Idem, headers apenas. |
-| GET | `/health` | público | Igual a `/api/health` (atalho). |
+| GET | `/api/health` | público | `{ status: "ok" \| "degraded" }`, 200 ou 503. Com `X-Health-Token`/`Authorization: Bearer` igual a `HEALTH_TOKEN`, ou sessão de super-admin: acrescenta `db`, `redis` (`ok`, `latencyMs`/`error`), `uptimeSec`, `timestamp`. Sem CORS. |
+| HEAD | `/api/health` | público | Só o status HTTP (200/503). |
+| GET | `/health` | público | Página HTML com o estado agregado; cartões de Postgres/Redis/uptime só com `HEALTH_TOKEN` ou super-admin. |
+| GET | `/api/internal/cors-origin` | interno | Loopback do middleware (CORS de subdomínio de organização). Sem a chave interna responde 404. |
 | GET | `/api/config/public` | público | Feature flags públicos + branding (logo, cores). Não exige auth. |
 | GET | `/api/cron/sync-meta-pricing` | `?secret=` ou header CRON | Job diário: sincroniza pricing Meta para todas as orgs. |
 | GET | `/api/metrics` | bearer admin | Prometheus metrics. |
