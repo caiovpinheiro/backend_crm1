@@ -7,6 +7,9 @@ import {
   setVisibilityForRole,
   type VisibilityMode,
 } from "@/lib/visibility";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/visibility");
 
 // Bug 27/abr/26: usavamos `auth()` direto. Os helpers de visibility leem/
 // escrevem em `OrganizationSetting` via Prisma, e a extension multi-tenant
@@ -19,7 +22,7 @@ export async function GET() {
       const settings = await getVisibilitySettings();
       return NextResponse.json(settings);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar configuracoes." },
         { status: 500 }
@@ -89,7 +92,7 @@ export async function PUT(request: Request) {
       const settings = await getVisibilitySettings();
       return NextResponse.json(settings);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       return NextResponse.json(
         { message: "Erro ao salvar configuracoes." },
         { status: 500 }

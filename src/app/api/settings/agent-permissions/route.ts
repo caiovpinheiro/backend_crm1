@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/agent-permissions");
 
 // GET /api/settings/agent-permissions
 // Returns all human users in the org with their AgentPermission (if any).
@@ -57,7 +60,7 @@ export async function GET() {
 
       return NextResponse.json(result);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar agentes." }, { status: 500 });
     }
   });

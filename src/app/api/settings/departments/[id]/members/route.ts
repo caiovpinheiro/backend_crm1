@@ -8,6 +8,9 @@ import {
   removeDepartmentMember,
   setDepartmentMembers,
 } from "@/services/department-members";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/departments/[id]/members");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -56,7 +59,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       return NextResponse.json(members);
     } catch (e) {
-      console.error("[PUT /settings/departments/[id]/members]", e);
+      log.error({ err: e }, "[PUT /settings/departments/[id]/members]");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao salvar membros." },
         { status: 400 },
@@ -85,7 +88,7 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return NextResponse.json(members, { status: 201 });
     } catch (e) {
-      console.error("[POST /settings/departments/[id]/members]", e);
+      log.error({ err: e }, "[POST /settings/departments/[id]/members]");
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro ao adicionar membro." },
         { status: 400 },

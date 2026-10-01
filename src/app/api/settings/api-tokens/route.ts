@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { requirePermission } from "@/lib/authz";
 import { generateToken, listTokens } from "@/services/api-tokens";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/api-tokens");
 
 type TokenSessionUser = {
   id: string;
@@ -51,7 +54,7 @@ export async function GET() {
     const tokens = await listTokens(user.id, user.organizationId);
     return NextResponse.json(tokens);
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar tokens." }, { status: 500 });
   }
 }
@@ -106,7 +109,7 @@ export async function POST(request: Request) {
       { status: 201 }
     );
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar token." }, { status: 500 });
   }
 }

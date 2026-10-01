@@ -4,6 +4,9 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { createNode, getTree } from "@/services/tabulations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/tabulations");
 
 /**
  * GET /api/settings/tabulations?departmentId=xxx
@@ -90,7 +93,7 @@ export async function POST(request: Request) {
       if (code === "PARENT_INVALID") {
         return NextResponse.json({ message: "Pai invalido.", code }, { status: 400 });
       }
-      console.error("[tabulations][POST]", e);
+      log.error({ err: e }, "[tabulations][POST] falhou");
       return NextResponse.json(
         { message: "Erro ao criar tabulacao." },
         { status: 500 },

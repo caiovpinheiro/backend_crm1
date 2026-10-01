@@ -6,6 +6,9 @@ import {
   listLossReasons,
   reorderLossReasons,
 } from "@/services/loss-reasons";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/loss-reasons");
 
 export async function GET() {
   return withOrgContext(async () => {
@@ -13,7 +16,7 @@ export async function GET() {
       const reasons = await listLossReasons();
       return NextResponse.json(reasons);
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json({ message: "Erro ao listar motivos." }, { status: 500 });
     }
   });
@@ -41,7 +44,7 @@ export async function POST(request: Request) {
       if (e instanceof Error && e.message === "INVALID_LABEL") {
         return NextResponse.json({ message: "Label é obrigatório." }, { status: 400 });
       }
-      console.error(e);
+      log.error({ err: e }, "POST falhou");
       return NextResponse.json({ message: "Erro ao criar motivo." }, { status: 500 });
     }
   });

@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { requirePermission } from "@/lib/authz";
 import { revokeToken } from "@/services/api-tokens";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/api-tokens/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -30,7 +33,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
     await revokeToken(id, user.id, user.organizationId);
     return NextResponse.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    log.error({ err: e }, "DELETE falhou");
     return NextResponse.json({ message: "Erro ao revogar token." }, { status: 500 });
   }
 }

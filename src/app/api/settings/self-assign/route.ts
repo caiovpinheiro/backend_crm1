@@ -7,6 +7,9 @@ import {
   getSelfAssignSettings,
   setSelfAssignForRole,
 } from "@/lib/self-assign";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/settings/self-assign");
 
 // Bug 27/abr/26: usavamos `auth()` direto. getSelfAssignSettings/setSelf
 // AssignForRole leem/escrevem OrganizationSetting via Prisma extension
@@ -32,7 +35,7 @@ export async function GET() {
         },
       });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "GET falhou");
       return NextResponse.json(
         { message: "Erro ao carregar configurações." },
         { status: 500 }
@@ -92,7 +95,7 @@ export async function PUT(request: Request) {
       const settings = await getSelfAssignSettings();
       return NextResponse.json({ settings });
     } catch (e) {
-      console.error(e);
+      log.error({ err: e }, "PUT falhou");
       return NextResponse.json(
         { message: "Erro ao salvar configurações." },
         { status: 500 }
