@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * Exercita o trecho REAL do `docker-entrypoint.sh` que decide se o
@@ -17,12 +18,13 @@ const entrypoint = readFileSync(
   "utf8",
 ).replace(/\r\n/g, "\n");
 
-function extractBlock(): string {
-  const m = entrypoint.match(
-    /# >>> skip-prisma-migrate\n([\s\S]*?)# <<< skip-prisma-migrate/,
-  );
-  if (!m) throw new Error("marcadores skip-prisma-migrate não encontrados");
-  return m[1];
+function extractBlock(name = "skip-prisma-migrate"): string {
+  const start = `# >>> ${name}\n`;
+  const end = `# <<< ${name}`;
+  const from = entrypoint.indexOf(start);
+  const to = entrypoint.indexOf(end);
+  if (from < 0 || to < from) throw new Error(`marcadores ${name} não encontrados`);
+  return entrypoint.slice(from + start.length, to);
 }
 
 const hasSh = spawnSync("sh", ["-c", "exit 0"]).status === 0;
@@ -65,5 +67,60 @@ describe("docker-entrypoint: SKIP_PRISMA_MIGRATE", () => {
     ["on", "skip"],
   ] as const)("SKIP_PRISMA_MIGRATE=%j → %s", (value, expected) => {
     expect(decide(value)).toBe(expected);
+  });
+});
+
+describe("docker-entrypoint: GIT_SHA da imagem", () => {
+  const dir = mkdtempSync(join(tmpdir(), "entrypoint-sha-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const IMAGE_SHA = "0123456789abcdef0123456789abcdef01234567";
+  let seq = 0;
+
+  function boot(fileContent: string | null, envSha: string | undefined) {
+    const file = join(dir, `BUILD_SHA_${seq++}`).replace(/\\/g, "/");
+    if (fileContent !== null) writeFileSync(file, fileContent);
+    const env: NodeJS.ProcessEnv = { ...process.env, BUILD_SHA_FILE: file };
+    delete env.GIT_SHA;
+    if (envSha !== undefined) env.GIT_SHA = envSha;
+    const script = extractBlock("build-sha") + "\nprintf 'FINAL=%s' \"$GIT_SHA\"\n";
+    const r = spawnSync("sh", ["-c", script], { env, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    return { out: r.stdout, final: r.stdout.match(/FINAL=(.*)$/)?.[1] ?? "" };
+  }
+
+  it.skipIf(!hasSh)("usa o SHA gravado na imagem e loga no boot", () => {
+    const r = boot(`${IMAGE_SHA}\n`, undefined);
+    expect(r.final).toBe(IMAGE_SHA);
+    expect(r.out).toContain(`[entrypoint] build: GIT_SHA=${IMAGE_SHA}`);
+    expect(r.out).not.toContain("aviso");
+  });
+
+  it.skipIf(!hasSh)("GIT_SHA fixo do painel perde para o da imagem, com aviso", () => {
+    const r = boot(IMAGE_SHA, "valor-fixo-do-painel");
+    expect(r.final).toBe(IMAGE_SHA);
+    expect(r.out).toContain("difere do da imagem");
+  });
+
+  it.skipIf(!hasSh)("imagem sem o build arg (unknown) ou sem o arquivo: mantém o ambiente", () => {
+    expect(boot("unknown", "do-ambiente").final).toBe("do-ambiente");
+    expect(boot(null, "do-ambiente").final).toBe("do-ambiente");
+    const r = boot(null, undefined);
+    expect(r.final).toBe("");
+    expect(r.out).toContain("[entrypoint] build: GIT_SHA=unknown");
+  });
+
+  it("Dockerfile grava o build arg em ENV, arquivo e label; o workflow passa o commit", () => {
+    const dockerfile = readFileSync(resolve(process.cwd(), "Dockerfile"), "utf8");
+    expect(dockerfile).toContain("ARG GIT_SHA=unknown");
+    expect(dockerfile).toContain("ENV GIT_SHA=${GIT_SHA}");
+    expect(dockerfile).toContain("> /app/BUILD_SHA");
+    expect(dockerfile).toContain("org.opencontainers.image.revision");
+
+    const workflow = readFileSync(
+      resolve(process.cwd(), ".github/workflows/build-and-deploy.yml"),
+      "utf8",
+    );
+    expect(workflow).toMatch(/build-args: \|\s+GIT_SHA=\$\{\{ github\.sha \}\}/);
   });
 });

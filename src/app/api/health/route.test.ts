@@ -96,6 +96,21 @@ describe("GET /api/health", () => {
     expect(typeof body.timestamp).toBe("string");
   });
 
+  it("commit da imagem (GIT_SHA) só no detalhe protegido", async () => {
+    process.env.GIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+    const anon = await (await GET(req())).text();
+    expect(JSON.parse(anon)).toEqual({ status: "ok" });
+    expect(anon).not.toMatch(/gitSha|0123456789abcdef/);
+
+    const detail = await (await GET(req({ "x-health-token": "token-do-monitor" }))).json();
+    expect(detail.gitSha).toBe("0123456789abcdef0123456789abcdef01234567");
+
+    delete process.env.GIT_SHA;
+    const semSha = await (await GET(req({ "x-health-token": "token-do-monitor" }))).json();
+    expect(semSha.gitSha).toBeNull();
+  });
+
   it("detalhe com sessão de super-admin", async () => {
     mocks.auth.mockResolvedValue({ user: { id: "u1", isSuperAdmin: true } });
     const body = await (
