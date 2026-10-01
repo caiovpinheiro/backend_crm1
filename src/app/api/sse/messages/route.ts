@@ -7,7 +7,7 @@ import {
   type AuthzContext,
 } from "@/lib/authz";
 import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
-import { applyBrowserApiCors } from "@/lib/browser-api-cors";
+import { applyBrowserApiCors } from "@/lib/browser-api-cors-node";
 import {
   allowAllInboxSseCards,
   buildInboxSseCardGate,
@@ -42,14 +42,14 @@ const SSE_AUTHZ_CTX_TTL_MS = 45_000;
  * Atendimento: filtro por organizationId da sessão (card por visibilidade).
  * Team-chat privado: audiência = membership (userId), sem bypass de super-admin.
  */
-function sseError(
+async function sseError(
   request: Request,
   body: string,
   status: number,
   extraHeaders?: Record<string, string>,
-): Response {
+): Promise<Response> {
   const headers = new Headers(extraHeaders);
-  applyBrowserApiCors(request, { headers });
+  await applyBrowserApiCors(request, { headers });
   return new Response(body, { status, headers });
 }
 
@@ -285,7 +285,7 @@ export async function GET(request: Request) {
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
-  applyBrowserApiCors(request, { headers });
+  await applyBrowserApiCors(request, { headers });
 
   return new Response(stream, { headers });
 }

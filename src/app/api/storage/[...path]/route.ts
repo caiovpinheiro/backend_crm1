@@ -15,7 +15,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { applyBrowserApiCors } from "@/lib/browser-api-cors";
+import { applyBrowserApiCors } from "@/lib/browser-api-cors-node";
 import {
   isStorageReuseBucket,
   mimeFromFilename,
@@ -52,9 +52,20 @@ function contentDisposition(bucket: string, fileName: string, mimeType: string):
   return `${kind}; filename="${safeName}"`;
 }
 
-function withStorageCors(request: Request, res: Response): Response {
-  applyBrowserApiCors(request, res);
-  return res;
+async function withStorageCors(request: Request, res: Response): Promise<Response> {
+  try {
+    await applyBrowserApiCors(request, res);
+    return res;
+  } catch {
+    // `Response` vinda de `fetch` (fallback upstream) tem headers imutáveis.
+    const copy = new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: new Headers(res.headers),
+    });
+    await applyBrowserApiCors(request, copy);
+    return copy;
+  }
 }
 
 /** Worker sem cookie: mesmo segredo dos crons. Não aceita `?secret=` (vaza em log). */

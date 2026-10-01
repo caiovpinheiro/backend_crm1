@@ -12,6 +12,7 @@ import {
   setScopeGrantsForOrg,
   type CrmActionKey,
 } from "@/lib/authz/scope-grants";
+import { invalidateCorsTenantOrigin } from "@/lib/cache/keys";
 import { generateUrlToken, hashSecret } from "@/lib/auth/token-hash";
 import { sendInviteEmail, sendWelcomeEmail } from "@/lib/mail/send";
 import { prismaBase } from "@/lib/prisma-base";
@@ -381,6 +382,10 @@ export async function acceptInvite(input: {
     });
     return user;
   });
+
+  // Primeiro usuário verificado de uma org criada pelo painel: o subdomínio
+  // passa a ser origem confiável no CORS (descarta o negativo em cache).
+  await invalidateCorsTenantOrigin(organization.slug);
 
   if (pendingCrm && invite.role !== UserRole.ADMIN) {
     const current = await getScopeGrants(organization.id);

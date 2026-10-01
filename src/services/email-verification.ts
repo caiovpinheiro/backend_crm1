@@ -1,4 +1,5 @@
 import { generateNumericCode, hashSecret } from "@/lib/auth/token-hash";
+import { invalidateCorsTenantOrigin } from "@/lib/cache/keys";
 import { sendVerifyEmail } from "@/lib/mail/send";
 import { prismaBase } from "@/lib/prisma-base";
 
@@ -85,7 +86,12 @@ export async function confirmEmailVerification(input: {
         ? { organization: { slug: input.organizationSlug } }
         : {}),
     },
-    select: { id: true, email: true, emailVerifiedAt: true },
+    select: {
+      id: true,
+      email: true,
+      emailVerifiedAt: true,
+      organization: { select: { slug: true } },
+    },
   });
   if (!user) throw new Error("Código inválido.");
   if (user.emailVerifiedAt) {
@@ -114,6 +120,10 @@ export async function confirmEmailVerification(input: {
       data: { emailVerifiedAt: new Date() },
     });
   });
+
+  // O subdomínio da org só vira origem confiável no CORS com admin
+  // verificado — descarta o "não confiável" que possa estar em cache.
+  await invalidateCorsTenantOrigin(user.organization?.slug);
 
   return { userId: user.id, email: user.email };
 }

@@ -44,7 +44,7 @@ vi.mock("@/lib/authz/funnel-visibility", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/browser-api-cors", () => ({ applyBrowserApiCors: () => undefined }));
+vi.mock("@/lib/browser-api-cors-node", () => ({ applyBrowserApiCors: async () => undefined }));
 
 vi.mock("@/lib/inbox-sse-card-visibility", () => ({
   allowAllInboxSseCards: () => true,
