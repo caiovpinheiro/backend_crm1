@@ -14,6 +14,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { sweepFinishedAiConversations } from "@/services/ai/sweep-finished-ai-conversations";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/sweep-finished-ai");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -57,7 +60,7 @@ export async function GET(request: Request) {
     const result = await sweepFinishedAiConversations(parseOpts(request, false));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/sweep-finished-ai]", e);
+    log.error({ err: e }, "[cron/sweep-finished-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na varredura." },
       { status: 500 },
@@ -72,7 +75,7 @@ export async function POST(request: Request) {
     const result = await sweepFinishedAiConversations(parseOpts(request, true));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/sweep-finished-ai]", e);
+    log.error({ err: e }, "[cron/sweep-finished-ai] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na varredura." },
       { status: 500 },

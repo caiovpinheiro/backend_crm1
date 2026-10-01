@@ -12,6 +12,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { sweepAllListenSessions } from "@/services/ai-v2/listen";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/ai-v2-listen-sweep");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,7 +32,7 @@ async function handle(request: Request, apply: boolean) {
     const limit = Number.isFinite(raw) && raw > 0 ? Math.min(raw, 100) : 20;
     return NextResponse.json({ ok: true, apply, ...(await sweepAllListenSessions({ limit, dryRun: !apply })) });
   } catch (e) {
-    console.error("[cron/ai-v2-listen-sweep]", e);
+    log.error({ err: e }, "[cron/ai-v2-listen-sweep] falhou");
     return NextResponse.json({ ok: false, message: e instanceof Error ? e.message : "Erro na varredura." }, { status: 500 });
   }
 }

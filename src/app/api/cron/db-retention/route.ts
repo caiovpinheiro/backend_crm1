@@ -19,6 +19,9 @@ import { NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { runDbRetention } from "@/services/db-retention";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/db-retention");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -45,7 +48,7 @@ async function handle(request: Request, apply: boolean) {
     const result = await runDbRetention({ apply, only: parseOnly(request) });
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/db-retention]", e);
+    log.error({ err: e }, "[cron/db-retention] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na retenção." },
       { status: 500 },

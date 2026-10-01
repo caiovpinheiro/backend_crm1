@@ -21,6 +21,9 @@ import { requireCronSecret } from "@/lib/auth/cron-secret";
 
 import { isTurnManagerEnabled } from "@/services/ai/turn-manager";
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/ai-turns-sweep");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -51,7 +54,7 @@ async function handle(request: Request, apply: boolean) {
       ...result,
     });
   } catch (e) {
-    console.error("[cron/ai-turns-sweep]", e);
+    log.error({ err: e }, "[cron/ai-turns-sweep] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro na varredura." },
       { status: 500 },

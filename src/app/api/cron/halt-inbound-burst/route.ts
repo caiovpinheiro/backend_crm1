@@ -17,6 +17,9 @@ import {
   DEFAULT_BURST_PHONE_NUMBER_ID,
   haltInboundBurst,
 } from "@/services/ai/halt-inbound-burst";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("api/cron/halt-inbound-burst");
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -47,7 +50,7 @@ export async function GET(request: Request) {
     const result = await haltInboundBurst(parseOpts(request, false));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/halt-inbound-burst]", e);
+    log.error({ err: e }, "[cron/halt-inbound-burst] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no halt." },
       { status: 500 },
@@ -62,7 +65,7 @@ export async function POST(request: Request) {
     const result = await haltInboundBurst(parseOpts(request, true));
     return NextResponse.json({ ok: true, ...result });
   } catch (e) {
-    console.error("[cron/halt-inbound-burst]", e);
+    log.error({ err: e }, "[cron/halt-inbound-burst] falhou");
     return NextResponse.json(
       { ok: false, message: e instanceof Error ? e.message : "Erro no halt." },
       { status: 500 },
