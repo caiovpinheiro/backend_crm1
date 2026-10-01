@@ -121,6 +121,9 @@ export async function readTableFromBuffer(
   const isSpreadsheet = kind !== "csv";
 
   if (isSpreadsheet) {
+    // `xlsx` vem do tarball oficial do SheetJS (cdn.sheetjs.com): o registry
+    // npm parou em 0.18.5, com dois advisories sem correção; >= 0.20.2 resolve.
+    // exceljs não serve aqui: não lê .xls/.ods nem produz o texto formatado (`w`).
     const XLSX = await import("xlsx");
     const buf = buffer;
     // `sheetRows`: cabeçalho + maxRows + 1 sentinela — o SheetJS para de
