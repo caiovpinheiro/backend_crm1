@@ -2803,6 +2803,18 @@ async function executeStep(
               : customField.type === "DATE"
                 ? normalizeDateFieldValue(String(value))
                 : String(value);
+          if (stored.trim() === "") {
+            const prev = await prisma.dealCustomFieldValue.findUnique({
+              where: {
+                dealId_customFieldId: {
+                  dealId: targetDealId,
+                  customFieldId: customField.id,
+                },
+              },
+              select: { value: true },
+            });
+            if (prev?.value?.trim()) return {};
+          }
           await prisma.dealCustomFieldValue.upsert({
             where: {
               dealId_customFieldId: {
@@ -2844,6 +2856,18 @@ async function executeStep(
               : customField.type === "DATE"
                 ? normalizeDateFieldValue(String(value))
                 : String(value);
+          if (stored.trim() === "") {
+            const prev = await prisma.contactCustomFieldValue.findUnique({
+              where: {
+                contactId_customFieldId: {
+                  contactId: targetContactId,
+                  customFieldId: customField.id,
+                },
+              },
+              select: { value: true },
+            });
+            if (prev?.value?.trim()) return {};
+          }
           await prisma.contactCustomFieldValue.upsert({
             where: {
               contactId_customFieldId: {
