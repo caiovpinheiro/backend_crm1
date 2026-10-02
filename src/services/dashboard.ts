@@ -33,6 +33,7 @@
 import { Prisma, type DealStatus } from "@prisma/client";
 
 import { analyticsClient } from "@/lib/analytics";
+import { allInBatches } from "@/lib/all-in-batches";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
   buildDealWhereFromFilters,
@@ -40,6 +41,9 @@ import {
 } from "@/services/kanban-filters";
 
 const prisma = analyticsClient();
+
+/** Máximo de consultas simultâneas do dashboard (pool de 20 compartilhado com o inbox). */
+const DASHBOARD_QUERY_BATCH = 4;
 
 /** Sentinela usada no filtro de origem para "Sem origem". */
 export const SOURCE_NONE = "__none__";
@@ -454,8 +458,8 @@ export async function getDashboard(
     enteredRows,
     exitedRows,
     stalledAgg,
-  ] = await Promise.all([
-    prisma.stage.findMany({
+  ] = await allInBatches([
+    () => prisma.stage.findMany({
       where: {
         AND: [
           f.pipelineId
@@ -477,78 +481,78 @@ export async function getDashboard(
         : [{ pipeline: { createdAt: "asc" } }, { position: "asc" }],
       select: { id: true, name: true, color: true, rottingDays: true },
     }),
-    prisma.deal.aggregate({
+    () => prisma.deal.aggregate({
       where: and(structural, openCond),
       _sum: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    () => prisma.deal.aggregate({
       where: and(structural, wonCond),
       _sum: { value: true },
       _avg: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    () => prisma.deal.aggregate({
       where: and(structural, lostCond),
       _sum: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    () => prisma.deal.aggregate({
       where: and(structural, prevWonCond),
       _sum: { value: true },
       _avg: { value: true },
       _count: true,
     }),
-    prisma.deal.aggregate({
+    () => prisma.deal.aggregate({
       where: and(structural, prevLostCond),
       _count: true,
     }),
-    prisma.deal.count({
+    () => prisma.deal.count({
       where: and(structural, { ...openCond, ownerId: null }),
     }),
-    prisma.deal.findMany({
+    () => prisma.deal.findMany({
       where: and(structural, wonCond),
       select: { createdAt: true, closedAt: true },
     }),
-    prisma.contact.count({ where: buildContactWhere(f) }),
-    prisma.deal.groupBy({
+    () => prisma.contact.count({ where: buildContactWhere(f) }),
+    () => prisma.deal.groupBy({
       by: ["stageId"],
       where: and(structural, openCond),
       _count: { _all: true },
       _sum: { value: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["stageId"],
       where: and(structural, wonCond),
       _count: { _all: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["stageId"],
       where: and(structural, lostCond),
       _count: { _all: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["ownerId"],
       where: and(structural, openCond),
       _count: { _all: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["ownerId"],
       where: and(structural, wonCond),
       _count: { _all: true },
       _sum: { value: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["ownerId"],
       where: and(structural, lostCond),
       _count: { _all: true },
     }),
-    prisma.deal.groupBy({
+    () => prisma.deal.groupBy({
       by: ["ownerId"],
       where: and(structural, createdCond),
       _count: { _all: true },
     }),
-    prisma.deal.findMany({
+    () => prisma.deal.findMany({
       where: and(structural, { OR: [createdCond, wonCond, lostCond] }),
       select: {
         status: true,
@@ -561,7 +565,7 @@ export async function getDashboard(
       },
     }),
     // Funil histórico: JOIN no escopo do pipeline (sem IN com N ids).
-    prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
+    () => prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
       SELECT stage_id AS "stageId", COUNT(*)::bigint AS c FROM (
         SELECT (e.meta->'to'->>'id') AS stage_id
         FROM deal_events e
@@ -584,7 +588,7 @@ export async function getDashboard(
       WHERE stage_id IS NOT NULL
       GROUP BY stage_id
     `),
-    prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
+    () => prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
       SELECT (e.meta->'from'->>'id') AS "stageId", COUNT(*)::bigint AS c
       FROM deal_events e
       INNER JOIN deals d ON d.id = e."dealId"
@@ -597,7 +601,7 @@ export async function getDashboard(
       GROUP BY 1
     `),
     // Leads parados: agrega no SQL (evita trazer dezenas de milhares de rows).
-    prisma.$queryRaw<{ stageId: string; c: bigint; v: unknown }[]>(Prisma.sql`
+    () => prisma.$queryRaw<{ stageId: string; c: bigint; v: unknown }[]>(Prisma.sql`
       SELECT d."stageId" AS "stageId",
              COUNT(*)::bigint AS c,
              COALESCE(SUM(d.value), 0) AS v
@@ -609,7 +613,7 @@ export async function getDashboard(
         AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
       GROUP BY d."stageId"
     `),
-  ]);
+  ], DASHBOARD_QUERY_BATCH);
 
   // ── Summary ──────────────────────────────────────────────────────
   const wonCount = openAggCount(wonAgg);

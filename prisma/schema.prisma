@@ -2644,6 +2644,8 @@ model DealEvent {
 
   @@index([organizationId])
   @@index([dealId, createdAt])
+  /// Dashboard: contagens por tipo (STAGE_CHANGED/CREATED) numa janela de data.
+  @@index([organizationId, type, createdAt], map: "deal_events_org_type_created_at_idx")
   @@index([userId])
   @@map("deal_events")
 }
@@ -3514,6 +3516,10 @@ model AutomationLog {
   // 2026-09-06/11: (automationId) prefixo de (automationId,executedAt) e
   // (automationId,stepId); (dealId) e (metaWebhookEventId) 0 scans / ~27 MB
   // em prod (~850 MB de tabela). Não recriar no schema.
+  // 2026-10-02: a FK de metaWebhookEventId (ON DELETE SET NULL) precisa de índice
+  // para a retenção de meta_webhook_events: sem ele cada DELETE varre a tabela
+  // inteira. É PARCIAL (WHERE "metaWebhookEventId" IS NOT NULL), que o Prisma
+  // não expressa — vive só na migration 20261002120000_retention_dashboard_indexes.
   @@index([organizationId])
   @@index([contactId])
   @@index([executedAt])
@@ -3554,6 +3560,8 @@ model MetaWebhookEvent {
   /// Recovery de backlog do worker-meta-webhook: eventos não processados
   /// (processed=false) em ordem de chegada.
   @@index([processed, receivedAt])
+  /// Retenção cross-org (DELETE ... WHERE "receivedAt" < X em lotes).
+  @@index([receivedAt], map: "meta_webhook_events_received_at_idx")
   @@index([channelId], map: "meta_webhook_events_channelId_idx")
   @@map("meta_webhook_events")
 }
