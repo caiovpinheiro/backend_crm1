@@ -32,7 +32,7 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 ## Nunca
 
 - Inventar model `Lead` (é Deal) ou `Group` (stub; filial = `OrgUnit`).
-- Recriar deal no inbound se o contato já tem WON/LOST (`src/services/auto-deals.ts`).
+- Recriar deal no inbound se o contato já tem WON/LOST, ou se o mesmo telefone (com ou sem o 9) já tem deal em outro contato (`findExistingContactOnPhone` em `src/services/auto-deals.ts`). A busca é pelo deal, sem teto de contatos.
 - Encerrar conversa ao mover etapa (`moveDeal`).
 - Encerrar conversa (`RESOLVED`) sem devolver deal do funil Atendimento à origem acadêmica — inbox, lote, automação e IA passam por `restoreDealToAcademicOrigin`.
 - Processar webhook Meta / send Graph / parse XLSX no `route.ts`.
