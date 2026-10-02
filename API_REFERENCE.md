@@ -405,7 +405,26 @@ telefone (preferido) ou email — chamar duas vezes não duplica contato.
     "customFields": [
       { "name": "curso_interesse", "value": "Engenharia de Dados" },
       { "fieldId": "ckxxx...", "value": "Plus" }   // pode usar fieldId direto
-    ]
+    ],
+    // Informação rastreada — todos opcionais. Ausente, null ou "" não apaga.
+    // Com options.fillEmptyContactFieldsOnly, valor já salvo no contato permanece.
+    "adUtmSource": "facebook",     // utm_source
+    "adUtmMedium": "cpc",          // utm_medium
+    "adUtmCampaign": "black",      // utm_campaign
+    "adUtmContent": "v1",          // utm_content
+    "adUtmTerm": "lead",           // utm_term
+    "utmId": "99",                 // utm_id
+    "utmReferrer": "https://lp",   // utm_referrer
+    "referrer": "https://lp",
+    "gclid": "G.1",
+    "fbclid": "F.2",
+    "googleClientId": "GA1.1",     // gclientid
+    "ttadId": "tt1",               // ttad_id
+    "ttadName": "criativo",        // ttad_name
+    "adCtwaClid": "Af...",         // ctwa_clid
+    "adHeadline": "Terapia",       // ad_headline
+    "adResolvedId": "12025...",    // ad_id
+    "adSourceId": "12025..."       // ad_source_id
   },
 
   // Bloco deal (opcional). Quando presente, cria deal sempre — mesmo se o
