@@ -89,6 +89,11 @@ export interface ResponsibleEligibilityInput {
 export interface EligibilityContext {
   /** Tipo/segmento solicitado pela distribuição (para `TYPE_INCOMPATIBLE`). */
   distributionType?: string | null;
+  /**
+   * Sorteio de lead sem departamento. Quem tem tipo preenchido fica de fora.
+   * A tela de Distribuição não liga isso: lá a lista é da equipe, sem lead.
+   */
+  strictUntypedPool?: boolean;
   /** Momento de referência (testes/simulação). Default: agora. */
   now?: Date;
 }
@@ -265,10 +270,15 @@ export function evaluateResponsibleEligibility(
 
   const requested = ctx.distributionType?.trim();
   const ownType = input.type?.trim();
-  // Tipo preenchido (ex.: "Acolhimento") só entra no sorteio desse tipo
-  // ou quando o lead já está no departamento dela. Lead sem departamento
-  // é org-wide: não pode cair em quem é de um segmento específico.
-  if (ownType && input.inDepartment !== true && (!requested || ownType !== requested)) {
+  if (requested && ownType && ownType !== requested) {
+    reasons.push("TYPE_INCOMPATIBLE");
+  } else if (
+    ctx.strictUntypedPool &&
+    ownType &&
+    !requested &&
+    input.inDepartment !== true
+  ) {
+    // Lead sem departamento: não sorteia quem é de um segmento (Acolhimento).
     reasons.push("TYPE_INCOMPATIBLE");
   }
 

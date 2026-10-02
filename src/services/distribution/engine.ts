@@ -994,6 +994,7 @@ export async function executeDistribution(
       distributionType: input.distributionType ?? null,
       now: input.now,
       departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
+      strictUntypedPool: deptScope.mode === "org-wide",
     });
   }
   let evaluated = toSummary(responsibles);
@@ -1008,6 +1009,7 @@ export async function executeDistribution(
     const orgWide = await getDistributionResponsibles({
       distributionType: input.distributionType ?? null,
       now: input.now,
+      strictUntypedPool: true,
     });
     const orgEligible = orgWide.filter((r) => r.eligible);
     if (orgEligible.length > 0) {
