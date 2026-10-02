@@ -32,6 +32,7 @@
 
 import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { defaultDealTitleForContact } from "@/lib/display-name";
+import { phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -82,6 +83,49 @@ type EnsureOpenDealResult =
       status: "skipped";
       reason: "no_pipeline" | "contact_has_closed_deal";
     };
+
+/**
+ * O telefone já tem deal em outro contato (com/sem o 9, ou o mesmo
+ * número duas vezes). Aberto → reusa. Só fechado → não cria outro.
+ */
+async function findDealOnSamePhone(
+  contactId: string,
+  reopenLostContacts: boolean,
+): Promise<EnsureOpenDealResult | null> {
+  const self = await prisma.contact.findUnique({
+    where: { id: contactId },
+    select: { phone: true },
+  });
+  const variants = phoneMatchVariants(self?.phone);
+  if (variants.length === 0) return null;
+
+  const siblings = await prisma.contact.findMany({
+    where: { phone: { in: variants }, NOT: { id: contactId } },
+    select: { id: true },
+    take: 20,
+  });
+  if (siblings.length === 0) return null;
+
+  const siblingIds = siblings.map((row) => row.id);
+  const openSibling = await prisma.deal.findFirst({
+    where: { contactId: { in: siblingIds }, status: "OPEN" },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  if (openSibling) {
+    return { status: "existing", dealId: openSibling.id };
+  }
+  if (!reopenLostContacts) {
+    const closedSibling = await prisma.deal.findFirst({
+      where: { contactId: { in: siblingIds } },
+      select: { id: true },
+    });
+    if (closedSibling) {
+      return { status: "skipped", reason: "contact_has_closed_deal" };
+    }
+  }
+  return null;
+}
 
 /**
  * Decide se um inbound passivo merece um deal automático e, em caso
@@ -138,6 +182,17 @@ export async function ensureOpenDealForContact(
     if (existingOpen) {
       return { status: "existing", dealId: existingOpen.id };
     }
+  }
+
+  // Rede de segurança: o inbound pode ter resolvido o contato vazio
+  // (BSUID) enquanto o telefone já tem deal no contato ao lado.
+  const siblingDeal = await findDealOnSamePhone(contactId, reopenLostContacts);
+  if (siblingDeal) {
+    log.warn(
+      { contactId, result: siblingDeal.status },
+      "telefone já tem deal em outro contato — não criando card novo",
+    );
+    return siblingDeal;
   }
 
   // Roteamento por canal: se o inbound veio de um canal com `defaultPipelineId`
