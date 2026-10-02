@@ -432,7 +432,51 @@ export async function getDeals(params: GetDealsParams = {}) {
     items.map((d) => d.contact).filter((c): c is NonNullable<typeof c> => c !== null),
   );
 
-  return { items, total, page, perPage };
+  const itemsWithInteraction = await attachLastInteractionAt(items);
+
+  return { items: itemsWithInteraction, total, page, perPage };
+}
+
+/**
+ * Última interação do negócio na lista: o mais recente entre a última
+ * alteração do próprio deal (movimentação de etapa, edição) e a última
+ * atividade da conversa do contato (mensagem enviada ou recebida —
+ * `MAX(conversations.updatedAt)`, o mesmo sinal do sort `lastInteraction`
+ * do board). Sem conversa, fica o `updatedAt` do deal.
+ */
+async function attachLastInteractionAt<
+  T extends { contactId: string | null; updatedAt: Date },
+>(items: T[]): Promise<Array<T & { lastInteractionAt: string }>> {
+  const contactIds = [
+    ...new Set(
+      items.map((d) => d.contactId).filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const lastByContact = new Map<string, number>();
+  if (contactIds.length > 0) {
+    const orgId = getOrgIdOrThrow();
+    const grouped = await prisma.$queryRaw<
+      { contactId: string; last_at: Date | null }[]
+    >`
+      SELECT "contactId", MAX("updatedAt") AS last_at
+      FROM conversations
+      WHERE "organizationId" = ${orgId}
+        AND "contactId" = ANY(${contactIds})
+      GROUP BY "contactId"
+    `;
+    for (const row of grouped) {
+      if (!row.contactId || !row.last_at) continue;
+      const at = new Date(row.last_at).getTime();
+      if (Number.isFinite(at)) lastByContact.set(row.contactId, at);
+    }
+  }
+
+  return items.map((deal) => {
+    const dealAt = deal.updatedAt.getTime();
+    const convAt = deal.contactId ? lastByContact.get(deal.contactId) : undefined;
+    const last = convAt != null && convAt > dealAt ? convAt : dealAt;
+    return { ...deal, lastInteractionAt: new Date(last).toISOString() };
+  });
 }
 
 type NestedTag = { tag: { id: string; name: string; color: string | null } };
