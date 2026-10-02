@@ -15,7 +15,8 @@
  *  - `PRE_LUNCH`            → pré-almoço / almoço (`lunchStart - N` até `lunchEnd`).
  *  - `PRE_END`              → pré-fim de expediente (`endTime - N` até `endTime`).
  *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`filaAtual >= queueLimit`; 0 = não recebe).
- *  - `TYPE_INCOMPATIBLE`    → tipo/segmento do responsável != tipo solicitado.
+ *  - `TYPE_INCOMPATIBLE`    → tipo do responsável não é o solicitado, ou o
+ *    lead não tem tipo/departamento e o responsável é de um segmento.
  *
  * Compatibilidade: a lógica de presença/expediente espelha o legado
  * `isAgentAvailable` (sem registro de AgentStatus = disponível; sem
@@ -264,7 +265,10 @@ export function evaluateResponsibleEligibility(
 
   const requested = ctx.distributionType?.trim();
   const ownType = input.type?.trim();
-  if (requested && ownType && ownType !== requested) {
+  // Tipo preenchido (ex.: "Acolhimento") só entra no sorteio desse tipo
+  // ou quando o lead já está no departamento dela. Lead sem departamento
+  // é org-wide: não pode cair em quem é de um segmento específico.
+  if (ownType && input.inDepartment !== true && (!requested || ownType !== requested)) {
     reasons.push("TYPE_INCOMPATIBLE");
   }
 
