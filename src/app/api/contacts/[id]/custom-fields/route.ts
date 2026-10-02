@@ -5,6 +5,7 @@ import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
   getContactCustomFieldValues,
   upsertContactCustomFieldValues,
+  withoutBlankOverwrites,
 } from "@/services/custom-fields";
 import { prisma } from "@/lib/prisma";
 import { logEvent } from "@/services/activity-log";
@@ -64,11 +65,15 @@ export async function PUT(request: Request, ctx: Ctx) {
         ]),
       );
 
-      await upsertContactCustomFieldValues(id, cleaned);
+      const writable = withoutBlankOverwrites(
+        cleaned,
+        [...prevByField.entries()].map(([fieldId, value]) => ({ fieldId, value })),
+      );
+      await upsertContactCustomFieldValues(id, writable);
       const updated = await getContactCustomFieldValues(id);
 
       // Emite 1 evento por campo que realmente mudou.
-      const fieldIds = cleaned.map((c) => c.fieldId);
+      const fieldIds = writable.map((c) => c.fieldId);
       const fields =
         fieldIds.length > 0
           ? await prisma.customField.findMany({
@@ -81,7 +86,7 @@ export async function PUT(request: Request, ctx: Ctx) {
         where: { id },
         select: { name: true, phone: true, email: true },
       });
-      for (const c of cleaned) {
+      for (const c of writable) {
         const before = prevByField.get(c.fieldId) ?? "";
         if (before === c.value) continue;
         void logEvent({

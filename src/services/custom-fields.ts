@@ -414,7 +414,17 @@ export async function upsertContactCustomFieldValues(
   contactId: string,
   values: { fieldId: string; value: string }[]
 ) {
-  const ops = values.map((v) =>
+  if (values.length === 0) return [];
+  const existing = await prisma.contactCustomFieldValue.findMany({
+    where: { contactId, customFieldId: { in: values.map((v) => v.fieldId) } },
+    select: { customFieldId: true, value: true },
+  });
+  const writable = withoutBlankOverwrites(
+    values,
+    existing.map((row) => ({ fieldId: row.customFieldId, value: row.value })),
+  );
+  if (writable.length === 0) return [];
+  const ops = writable.map((v) =>
     prisma.contactCustomFieldValue.upsert({
       where: {
         contactId_customFieldId: {
@@ -503,11 +513,33 @@ async function getDealCustomFieldValuesRaw(dealId: string) {
   });
 }
 
+/** Vazio não apaga valor já gravado (formulário/flow salvando o campo em branco). */
+export function withoutBlankOverwrites(
+  incoming: { fieldId: string; value: string }[],
+  previous: { fieldId: string; value: string | null }[],
+): { fieldId: string; value: string }[] {
+  const prev = new Map(previous.map((p) => [p.fieldId, p.value ?? ""]));
+  return incoming.filter((item) => {
+    if (item.value.trim() !== "") return true;
+    return (prev.get(item.fieldId) ?? "").trim() === "";
+  });
+}
+
 export async function upsertDealCustomFieldValues(
   dealId: string,
   values: { fieldId: string; value: string }[]
 ) {
-  const ops = values.map((v) =>
+  if (values.length === 0) return [];
+  const existing = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId, customFieldId: { in: values.map((v) => v.fieldId) } },
+    select: { customFieldId: true, value: true },
+  });
+  const writable = withoutBlankOverwrites(
+    values,
+    existing.map((row) => ({ fieldId: row.customFieldId, value: row.value })),
+  );
+  if (writable.length === 0) return [];
+  const ops = writable.map((v) =>
     prisma.dealCustomFieldValue.upsert({
       where: {
         dealId_customFieldId: {

@@ -11,6 +11,7 @@ import { prisma } from "@/lib/prisma";
 import {
   getDealCustomFieldValues,
   upsertDealCustomFieldValues,
+  withoutBlankOverwrites,
 } from "@/services/custom-fields";
 import { createDealEvent, getDealById } from "@/services/deals";
 
@@ -87,21 +88,25 @@ export async function PUT(request: Request, ctx: Ctx) {
         );
       }
       const oldValues = await getDealCustomFieldValues(dealId);
-      await upsertDealCustomFieldValues(dealId, cleaned);
+      const oldMap = new Map(
+        (oldValues as { fieldId: string; value: string }[]).map((v) => [v.fieldId, v.value]),
+      );
+      const writable = withoutBlankOverwrites(
+        cleaned,
+        [...oldMap.entries()].map(([fieldId, value]) => ({ fieldId, value })),
+      );
+      await upsertDealCustomFieldValues(dealId, writable);
       const updated = await getDealCustomFieldValues(dealId);
 
       const uid = authResult.user.id;
-      const fieldIds = cleaned.map((c) => c.fieldId);
+      const fieldIds = writable.map((c) => c.fieldId);
       const fieldDefs = await prisma.customField.findMany({
         where: { id: { in: fieldIds } },
         select: { id: true, label: true },
       });
       const labelMap = new Map(fieldDefs.map((f) => [f.id, f.label]));
-      const oldMap = new Map(
-        (oldValues as { fieldId: string; value: string }[]).map((v) => [v.fieldId, v.value]),
-      );
 
-      for (const item of cleaned) {
+      for (const item of writable) {
         const prev = oldMap.get(item.fieldId) ?? "";
         if (prev !== item.value) {
           createDealEvent(dealId, uid, "CUSTOM_FIELD_UPDATED", {
