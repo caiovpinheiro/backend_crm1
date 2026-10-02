@@ -133,7 +133,7 @@ export async function GET(request: Request) {
 
   const productInclude = {
     courseConfig: {
-      select: { level: true, mode: true, semester: true },
+      select: { level: true, mode: true, semester: true, grau: true },
     },
     metaLinks: {
       select: {
@@ -179,7 +179,7 @@ export async function GET(request: Request) {
           take: listTake,
           include: {
             courseConfig: {
-              select: { level: true, mode: true, semester: true },
+              select: { level: true, mode: true, semester: true, grau: true },
             },
           },
         }),
