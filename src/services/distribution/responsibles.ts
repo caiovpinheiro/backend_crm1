@@ -178,6 +178,8 @@ export interface GetResponsiblesOptions {
    * vêm preenchidos.
    */
   departmentIds?: string[] | null;
+  /** Lead sem departamento: quem tem tipo não entra no sorteio. */
+  strictUntypedPool?: boolean;
 }
 
 export async function getDistributionResponsibles(
@@ -297,6 +299,7 @@ export async function getDistributionResponsibles(
 
   const eligibilityCtx: EligibilityContext = {
     distributionType: opts.distributionType ?? null,
+    strictUntypedPool: opts.strictUntypedPool === true,
     now: opts.now,
   };
 
