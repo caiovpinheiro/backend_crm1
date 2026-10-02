@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { CONTACT_TRACKED_INFO_KEYS } from "@/lib/contact-tracking-fields";
 import { getLogger } from "@/lib/logger";
 import { parseContactPhoneInput } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
@@ -169,25 +170,11 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       return undefined;
     };
-    const trackingKeys = [
-      "adUtmSource",
-      "adUtmMedium",
-      "adUtmCampaign",
-      "adUtmContent",
-      "adUtmTerm",
-      "utmId",
-      "utmReferrer",
-      "referrer",
-      "gclid",
-      "fbclid",
-      "googleClientId",
-      "ttadId",
-      "ttadName",
-    ] as const;
-    for (const key of trackingKeys) {
-      if (b[key] !== undefined) {
-        data[key] = optionalTrim(b[key]);
-      }
+    for (const key of CONTACT_TRACKED_INFO_KEYS) {
+      if (b[key] === undefined) continue;
+      const parsed = optionalTrim(b[key]);
+      // null e string em branco não apagam. Só valor preenchido substitui.
+      if (typeof parsed === "string") data[key] = parsed;
     }
 
     const payload = Object.fromEntries(

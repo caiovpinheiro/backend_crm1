@@ -353,7 +353,7 @@ existe (e os dados já vêm em `items[0]`, sem precisar de segundo GET).
 > **Valores válidos de `lifecycleStage` (sempre MAIÚSCULOS):**
 > `SUBSCRIBER`, `LEAD`, `MQL`, `SQL`, `OPPORTUNITY`, `CUSTOMER`, `EVANGELIST`, `OTHER`.
 | GET | `/api/contacts/[id]` | — | Detalhe do contato. |
-| PUT | `/api/contacts/[id]` | mesmos campos opcionais | Atualiza. |
+| PUT | `/api/contacts/[id]` | mesmos campos opcionais + informação rastreada | Atualiza. UTM/click IDs e Meta (`adCtwaClid`, `adHeadline`, `adResolvedId`, `adSourceId`) são opcionais; ausente, null ou `""` não apagam. |
 | DELETE | `/api/contacts/[id]` | — | Remove (soft-delete + dissocia conversas/deals). |
 | POST | `/api/contacts/import` | **multipart**: `file` (CSV) + `mappings?` | Importação em lote. Retorna `{ created, updated, errors }`. |
 | POST | `/api/contacts/merge` | `{ primaryId, mergeIds: string[] }` | Funde contatos no `primaryId`. |
