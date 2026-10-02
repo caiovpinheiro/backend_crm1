@@ -23,6 +23,11 @@
  *  - Contato com deal OPEN          → retorna existente, sem disparar
  *  - Contato com último deal LOST   → NÃO faz nada (skipped)
  *  - Contato com último deal WON    → NÃO faz nada (skipped)
+ *  - O mesmo telefone em OUTRO contato (E.164, com ou sem o 9, ou
+ *    legado que normaliza para a mesma linha) já tem deal aberto
+ *    → reusa esse card. Só tem deal fechado → não cria outro.
+ *    A busca é pelo deal, sem teto de linhas: um `findMany` curto
+ *    deixava o contato que já atendia de fora e abria card novo.
  *
  * Opt-in `reopenLostContacts: true` mantém o comportamento v2 para
  * fluxos onde o caller PRECISA garantir um destino pros dados — ex.:
@@ -84,9 +89,105 @@ type EnsureOpenDealResult =
       reason: "no_pipeline" | "contact_has_closed_deal";
     };
 
+type PhoneDealHit = {
+  contactId: string;
+  dealId: string | null;
+  open: boolean;
+};
+
 /**
- * O telefone já tem deal em outro contato (com/sem o 9, ou o mesmo
- * número duas vezes). Aberto → reusa. Só fechado → não cria outro.
+ * Contato que já é esta linha de telefone.
+ *
+ * Se algum contato da linha tem deal, devolve esse (aberto mais
+ * recentemente atualizado; senão qualquer deal). A consulta filtra o
+ * deal pelo telefone — não corta em N contatos. Sem deal, devolve o
+ * contato mais antigo (para o inbound reusar a pessoa em vez de criar
+ * outra). `excludeContactId` liga o modo "irmão": aí sem deal devolve
+ * null, porque o caller já está no contato.
+ */
+export async function findExistingContactOnPhone(
+  phone: string | null | undefined,
+  excludeContactId?: string,
+): Promise<PhoneDealHit | null> {
+  const variants = phoneMatchVariants(phone);
+  if (variants.length === 0) return null;
+
+  const asHit = (
+    row: { id: string; contactId: string | null } | null,
+    open: boolean,
+  ): PhoneDealHit | null => {
+    if (!row?.contactId) return null;
+    return { contactId: row.contactId, dealId: row.id, open };
+  };
+
+  const exactContact = {
+    phone: { in: variants },
+    ...(excludeContactId ? { id: { not: excludeContactId } } : {}),
+  };
+
+  const openExact = await prisma.deal.findFirst({
+    where: { status: "OPEN", contact: exactContact },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, contactId: true },
+  });
+  const openExactHit = asHit(openExact, true);
+  if (openExactHit) return openExactHit;
+
+  const anyExact = await prisma.deal.findFirst({
+    where: { contact: exactContact },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, contactId: true },
+  });
+  const anyExactHit = asHit(anyExact, false);
+  if (anyExactHit) return anyExactHit;
+
+  const digits = (phone ?? "").replace(/\D/g, "");
+  const last8 = digits.slice(-8);
+  if (last8.length === 8) {
+    const legacy = await prisma.contact.findMany({
+      where: {
+        phone: { endsWith: last8, notIn: variants },
+        ...(excludeContactId ? { id: { not: excludeContactId } } : {}),
+      },
+      select: { id: true, phone: true },
+    });
+    const variantSet = new Set(variants);
+    const ids = legacy
+      .filter((row) => phoneMatchVariants(row.phone).some((v) => variantSet.has(v)))
+      .map((row) => row.id);
+    if (ids.length > 0) {
+      const openLegacy = await prisma.deal.findFirst({
+        where: { status: "OPEN", contactId: { in: ids } },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, contactId: true },
+      });
+      const openLegacyHit = asHit(openLegacy, true);
+      if (openLegacyHit) return openLegacyHit;
+      const anyLegacy = await prisma.deal.findFirst({
+        where: { contactId: { in: ids } },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, contactId: true },
+      });
+      const anyLegacyHit = asHit(anyLegacy, false);
+      if (anyLegacyHit) return anyLegacyHit;
+    }
+  }
+
+  if (excludeContactId) return null;
+
+  const oldest = await prisma.contact.findFirst({
+    where: { phone: { in: variants } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  if (!oldest) return null;
+  return { contactId: oldest.id, dealId: null, open: false };
+}
+
+/**
+ * O telefone já tem deal em outro contato (com/sem o 9, o mesmo número
+ * duas vezes, ou gravado fora do E.164). Aberto → reusa. Só fechado →
+ * não cria outro.
  */
 async function findDealOnSamePhone(
   contactId: string,
@@ -96,33 +197,11 @@ async function findDealOnSamePhone(
     where: { id: contactId },
     select: { phone: true },
   });
-  const variants = phoneMatchVariants(self?.phone);
-  if (variants.length === 0) return null;
-
-  const siblings = await prisma.contact.findMany({
-    where: { phone: { in: variants }, NOT: { id: contactId } },
-    select: { id: true },
-    take: 20,
-  });
-  if (siblings.length === 0) return null;
-
-  const siblingIds = siblings.map((row) => row.id);
-  const openSibling = await prisma.deal.findFirst({
-    where: { contactId: { in: siblingIds }, status: "OPEN" },
-    orderBy: { updatedAt: "desc" },
-    select: { id: true },
-  });
-  if (openSibling) {
-    return { status: "existing", dealId: openSibling.id };
-  }
+  const held = await findExistingContactOnPhone(self?.phone, contactId);
+  if (!held?.dealId) return null;
+  if (held.open) return { status: "existing", dealId: held.dealId };
   if (!reopenLostContacts) {
-    const closedSibling = await prisma.deal.findFirst({
-      where: { contactId: { in: siblingIds } },
-      select: { id: true },
-    });
-    if (closedSibling) {
-      return { status: "skipped", reason: "contact_has_closed_deal" };
-    }
+    return { status: "skipped", reason: "contact_has_closed_deal" };
   }
   return null;
 }

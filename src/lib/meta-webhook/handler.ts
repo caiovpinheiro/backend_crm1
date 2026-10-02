@@ -69,7 +69,7 @@ import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingM
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
-import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import { maskPhone } from "@/lib/pii-mask";
@@ -730,15 +730,15 @@ async function resolveWebhookContact(
 
   let byPh: ContactRow | null = null;
   if (phone) {
-    // Match por variantes E.164 (cobre com/sem 9º dígito BR). Já é
-    // org-scoped pela extensão do Prisma dentro de withSystemContext.
-    const variants = phoneMatchVariants(phone);
-    const phoneRows = await prisma.contact.findMany({
-      where: variants.length > 0 ? { phone: { in: variants } } : { phone },
-      select: contactResolveSelect,
-      take: 20,
-    });
-    byPh = await pickContactWithExistingDeal(phoneRows);
+    // O deal é que decide o contato. Um findMany com teto deixava de
+    // fora quem já atendia e o inbound abria outro card.
+    const held = await findExistingContactOnPhone(phone);
+    if (held) {
+      byPh = await prisma.contact.findUnique({
+        where: { id: held.contactId },
+        select: contactResolveSelect,
+      });
+    }
   }
 
   let contactRow: ContactRow | null = null;
