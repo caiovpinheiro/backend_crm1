@@ -21,6 +21,27 @@ export const CONTACT_TRACKING_KEYS = [
 
 export type ContactTrackingKey = (typeof CONTACT_TRACKING_KEYS)[number];
 
+/**
+ * Bloco Meta/CTWA do painel "Informação rastreada"
+ * (ctwa_clid, ad_headline, ad_id, ad_source_id).
+ */
+export const CONTACT_AD_PANEL_KEYS = [
+  "adCtwaClid",
+  "adHeadline",
+  "adResolvedId",
+  "adSourceId",
+] as const;
+
+export type ContactAdPanelKey = (typeof CONTACT_AD_PANEL_KEYS)[number];
+
+/** UTM/click IDs + Meta/CTWA — o que o painel "Informação rastreada" mostra. */
+export const CONTACT_TRACKED_INFO_KEYS = [
+  ...CONTACT_TRACKING_KEYS,
+  ...CONTACT_AD_PANEL_KEYS,
+] as const;
+
+export type ContactTrackedInfoKey = (typeof CONTACT_TRACKED_INFO_KEYS)[number];
+
 /** Cabeçalhos CSV (import) → chave Prisma. */
 export const TRACKING_IMPORT_ALIASES: Record<string, ContactTrackingKey> = {
   utm_source: "adUtmSource",

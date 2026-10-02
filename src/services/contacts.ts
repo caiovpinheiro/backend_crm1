@@ -7,6 +7,7 @@ import { allocateOrgNumber, prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { CONTACT_TRACKED_INFO_KEYS } from "@/lib/contact-tracking-fields";
 import { getLogger } from "@/lib/logger";
 import { maskPhone } from "@/lib/pii-mask";
 import { logEvent } from "@/services/activity-log";
@@ -619,6 +620,12 @@ export type CreateContactInput = {
   googleClientId?: string | null;
   ttadId?: string | null;
   ttadName?: string | null;
+  /** Meta/CTWA do painel Informação rastreada. Null limpa; undefined ignora. */
+  adCtwaClid?: string | null;
+  adHeadline?: string | null;
+  /** ad_id do painel. */
+  adResolvedId?: string | null;
+  adSourceId?: string | null;
 };
 
 export type UpdateContactInput = Partial<CreateContactInput>;
@@ -1285,6 +1292,10 @@ export async function createContact(data: CreateContactInput) {
               : {}),
             ...(data.ttadId !== undefined ? { ttadId: data.ttadId } : {}),
             ...(data.ttadName !== undefined ? { ttadName: data.ttadName } : {}),
+            ...(data.adCtwaClid !== undefined ? { adCtwaClid: data.adCtwaClid } : {}),
+            ...(data.adHeadline !== undefined ? { adHeadline: data.adHeadline } : {}),
+            ...(data.adResolvedId !== undefined ? { adResolvedId: data.adResolvedId } : {}),
+            ...(data.adSourceId !== undefined ? { adSourceId: data.adSourceId } : {}),
           }),
           include: {
             company: { select: { id: true, number: true, name: true, domain: true } },
@@ -1390,22 +1401,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     updateData.externalId = data.externalId;
   }
 
-  const trackingKeys = [
-    "adUtmSource",
-    "adUtmMedium",
-    "adUtmCampaign",
-    "adUtmContent",
-    "adUtmTerm",
-    "utmId",
-    "utmReferrer",
-    "referrer",
-    "gclid",
-    "fbclid",
-    "googleClientId",
-    "ttadId",
-    "ttadName",
-  ] as const;
-  for (const key of trackingKeys) {
+  for (const key of CONTACT_TRACKED_INFO_KEYS) {
     if (data[key] !== undefined) {
       (updateData as Record<string, unknown>)[key] = data[key];
     }

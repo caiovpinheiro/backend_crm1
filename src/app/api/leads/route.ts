@@ -6,6 +6,10 @@ import {
   requirePermissionForUser,
   requireStageScope,
 } from "@/lib/authz/resource-policy";
+import {
+  CONTACT_TRACKED_INFO_KEYS,
+  type ContactTrackedInfoKey,
+} from "@/lib/contact-tracking-fields";
 import { parseContactPhoneInput, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -160,7 +164,18 @@ type ContactPayload = {
   companyId?: string | null;
   assignedToId?: string | null;
   customFields?: CustomFieldInput[];
-};
+} & Partial<Record<ContactTrackedInfoKey, string>>;
+
+/**
+ * Campo de informação rastreada. Ausente, null ou string em branco não entra
+ * no payload — não apaga o que o contato já tem. Valor preenchido grava.
+ */
+function parseTrackedInfoValue(value: unknown): string | undefined | "invalid" {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return "invalid";
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 /**
  * Modificadores de idempotência do lead.
@@ -283,6 +298,12 @@ function parseContactPayload(input: unknown): ContactPayload | { error: string }
     if (!Array.isArray(b.customFields)) return { error: "contact.customFields deve ser array." };
     out.customFields = b.customFields as CustomFieldInput[];
   }
+  for (const key of CONTACT_TRACKED_INFO_KEYS) {
+    if (b[key] === undefined) continue;
+    const parsed = parseTrackedInfoValue(b[key]);
+    if (parsed === "invalid") return { error: `contact.${key} inválido.` };
+    if (parsed !== undefined) out[key] = parsed;
+  }
   return out;
 }
 
@@ -338,7 +359,10 @@ function parseDealPayload(input: unknown): DealPayload | { error: string } | nul
  *
  * Faz "lead-or-create" em uma única chamada:
  *   1. Lookup do contato (id → phone → email). Se existir, **reusa**; senão **cria**.
- *   2. Atualiza campos básicos do contato quando o payload trouxer valores novos.
+ *   2. Atualiza campos básicos e informação rastreada quando o payload trouxer
+ *      valor preenchido. String vazia não apaga. Com
+ *      `options.fillEmptyContactFieldsOnly`, rastreio já preenchido no contato
+ *      também não é sobrescrito.
  *   3. Upsert dos `contactCustomFields` (resolve por `fieldId` ou `name`).
  *   4. (opcional) Cria deal no `stageId` informado, encadeia `customFields` do deal
  *      e dispara o trigger `deal_created`.
@@ -423,7 +447,7 @@ export async function POST(request: Request) {
       if (existing) {
         contactId = existing.id;
         contactCreated = false;
-        const updates = {
+        const updates: Parameters<typeof updateContact>[1] = {
           name: contact.name,
           email: contact.email,
           phone: contact.phone,
@@ -434,6 +458,10 @@ export async function POST(request: Request) {
           companyId: contact.companyId,
           assignedToId: contact.assignedToId,
         };
+        for (const key of CONTACT_TRACKED_INFO_KEYS) {
+          const value = contact[key];
+          if (value !== undefined) updates[key] = value;
+        }
 
         if (options.fillEmptyContactFieldsOnly) {
           const current = await prisma.contact.findUnique({
@@ -447,6 +475,23 @@ export async function POST(request: Request) {
               source: true,
               companyId: true,
               assignedToId: true,
+              adUtmSource: true,
+              adUtmMedium: true,
+              adUtmCampaign: true,
+              adUtmContent: true,
+              adUtmTerm: true,
+              utmId: true,
+              utmReferrer: true,
+              referrer: true,
+              gclid: true,
+              fbclid: true,
+              googleClientId: true,
+              ttadId: true,
+              ttadName: true,
+              adCtwaClid: true,
+              adHeadline: true,
+              adResolvedId: true,
+              adSourceId: true,
             },
           });
           if (current) {
@@ -461,6 +506,9 @@ export async function POST(request: Request) {
             if (!isBlank(current.source)) updates.source = undefined;
             if (!isBlank(current.companyId)) updates.companyId = undefined;
             if (!isBlank(current.assignedToId)) updates.assignedToId = undefined;
+            for (const key of CONTACT_TRACKED_INFO_KEYS) {
+              if (!isBlank(current[key])) updates[key] = undefined;
+            }
           }
         }
 
@@ -475,6 +523,11 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
+        const tracked: Partial<Record<ContactTrackedInfoKey, string>> = {};
+        for (const key of CONTACT_TRACKED_INFO_KEYS) {
+          const value = contact[key];
+          if (value !== undefined) tracked[key] = value;
+        }
         const created = await createContact({
           name: contact.name,
           email: contact.email ?? undefined,
@@ -485,6 +538,7 @@ export async function POST(request: Request) {
           source: contact.source ?? undefined,
           companyId: contact.companyId ?? undefined,
           assignedToId: contact.assignedToId ?? undefined,
+          ...tracked,
         });
         contactId = created.id;
         contactCreated = true;
