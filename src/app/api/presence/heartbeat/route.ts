@@ -68,12 +68,12 @@ export async function POST(req: Request) {
     const userId = session.user.id;
 
     if (body.action === "leave") {
-      const viewers = removeViewer({ orgId, entityType, entityId, userId });
+      const viewers = await removeViewer({ orgId, entityType, entityId, userId });
       return NextResponse.json({ viewers });
     }
 
     const { name, avatarUrl } = await getUserInfo(userId);
-    const viewers = touchViewer({ orgId, entityType, entityId, userId, name, avatarUrl });
+    const viewers = await touchViewer({ orgId, entityType, entityId, userId, name, avatarUrl });
     return NextResponse.json({ viewers });
   });
 }

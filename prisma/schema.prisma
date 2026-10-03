@@ -3514,6 +3514,10 @@ model AutomationLog {
   // 2026-09-06/11: (automationId) prefixo de (automationId,executedAt) e
   // (automationId,stepId); (dealId) e (metaWebhookEventId) 0 scans / ~27 MB
   // em prod (~850 MB de tabela). Não recriar no schema.
+  // (metaWebhookEventId) voltou como índice PARCIAL só no SQL
+  // (`automation_logs_metaWebhookEventId_nn_idx`, migration
+  // 20261003120000): a FK ON DELETE SET NULL precisa dele para a retenção
+  // de meta_webhook_events não varrer esta tabela por linha apagada.
   @@index([organizationId])
   @@index([contactId])
   @@index([executedAt])
@@ -3555,6 +3559,9 @@ model MetaWebhookEvent {
   /// (processed=false) em ordem de chegada.
   @@index([processed, receivedAt])
   @@index([channelId], map: "meta_webhook_events_channelId_idx")
+  /// Corte por data da retenção (`services/db-retention.ts`). Btree, não
+  /// BRIN — ver migration 20261003120000.
+  @@index([receivedAt])
   @@map("meta_webhook_events")
 }
 

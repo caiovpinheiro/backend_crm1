@@ -150,23 +150,39 @@ describe("board", () => {
     expect(scans()).toEqual([]);
   });
 
-  it("a versão é lida uma vez por janela, não a cada leitura do board", async () => {
+  it("board lê a versão no Redis a cada leitura (sem memo — E5 / N-BE-9)", async () => {
     await seedBoard("org-a", "pipe-1");
     h.redis.calls.length = 0;
 
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 3; i++) {
       expect(await board("org-a", "pipe-1")).toBeDefined();
     }
-    // 20 GETs do valor; nenhuma ida ao Redis pelas versões.
-    expect(fakeRedisCalls(h.redis, "GET")).toHaveLength(20);
-    expect(versionReads()).toEqual([]);
+    // Por leitura: as 2 versões + o valor.
+    expect(versionReads()).toHaveLength(6);
+    expect(fakeRedisCalls(h.redis, "GET")).toHaveLength(9);
+  });
 
-    await vi.advanceTimersByTimeAsync(500);
-    await board("org-a", "pipe-1");
-    expect(versionReads().sort()).toEqual([
-      "GET cache:v:board:org-a",
-      "GET cache:v:board:org-a:pipe-1",
-    ]);
+  it("bump feito por outra réplica vale na leitura seguinte do board", async () => {
+    await seedBoard("org-a", "pipe-1");
+    expect(await board("org-a", "pipe-1")).toBeDefined();
+
+    // INCR de outra réplica, direto no Redis, sem passar por este processo.
+    const key = "cache:v:board:org-a:pipe-1";
+    const hit = h.redis.store.get(key);
+    if (!hit) throw new Error("versão do pipeline não existe no Redis falso");
+    hit.value = String(Number(hit.value) + 1);
+
+    // Mesmo instante (antes eram até 500 ms servindo a versão velha).
+    expect(await board("org-a", "pipe-1")).toBeUndefined();
+  });
+
+  it("outras famílias continuam com memo de 500 ms da versão", async () => {
+    await cache.set(await inboxTabCountsKey("org-a", FP), { entrada: 1 }, 90);
+    h.redis.calls.length = 0;
+    for (let i = 0; i < 5; i++) {
+      await cache.get(await inboxTabCountsKey("org-a", FP));
+    }
+    expect(versionReads()).toEqual([]);
   });
 
   it("valor gravado depois da invalidação é lido normalmente", async () => {

@@ -17,6 +17,16 @@
  *   DB_RETENTION_AUTOMATION_LOGS_DAYS   (120)
  *   DB_RETENTION_DISTRIBUTION_LOGS_DAYS (120)
  *
+ * meta_webhook_events depende de dois índices (migration
+ * 20261003120000_meta_webhook_retention_indexes — criar com CONCURRENTLY
+ * em produção ANTES de ligar o cron, comandos no cabeçalho dela):
+ *   - `meta_webhook_events_receivedAt_idx` — sem ele o count e cada lote
+ *     varrem a tabela inteira;
+ *   - `automation_logs_metaWebhookEventId_nn_idx` — a FK ON DELETE SET NULL
+ *     roda um UPDATE em automation_logs por linha apagada; sem índice é um
+ *     seq scan por linha e o 1º lote estoura o statement_timeout.
+ * Agendar o cron continua dependendo de aprovação (item 1.10).
+ *
  * `VACUUM FULL` (recuperar disco de bloat pré-existente, ex.: distribution_logs)
  * NÃO é feito aqui — trava a tabela. Rodar manual numa janela de manutenção.
  */
