@@ -54,7 +54,10 @@ RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/prisma ./prisma
+# Só o que o `migrate deploy` do entrypoint usa: schema + migrations. Seeds e
+# SQL avulso (prisma/scripts, prisma/manual) ficam fora da imagem.
+COPY --from=builder /app/prisma/schema.prisma ./prisma/schema.prisma
+COPY --from=builder /app/prisma/migrations ./prisma/migrations
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
@@ -65,10 +68,12 @@ COPY --from=builder /app/node_modules/pdfjs-dist ./node_modules/pdfjs-dist
 # Workers compilados (campaign-worker.js, …, baileys/index.js).
 # Executados com `node dist/workers/<name>.js` conforme APP_MODE.
 COPY --from=builder /app/dist/workers ./dist/workers
-# Scripts de manutencao/seed rodados manualmente no console do container
-# (ex.: `node scripts/seed-consultores-eduit.mjs`). Nao entram no runtime
-# normal; usam o @prisma/client e bcryptjs ja presentes no runner.
-COPY --from=builder /app/scripts ./scripts
+# Da pasta scripts/ só entra o que roda na imagem: o HEALTHCHECK e os
+# wrappers `ops-*.mjs` (chamam a API local com o CRON_SECRET do container,
+# sem credencial própria). Seeds, backfills, diagnósticos e scripts
+# destrutivos não vão para produção — rode-os de um checkout com DATABASE_URL.
+# O .dockerignore já tira o resto do contexto de build.
+COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs ./scripts/
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
