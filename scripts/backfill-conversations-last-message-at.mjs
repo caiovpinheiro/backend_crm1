@@ -1,7 +1,7 @@
 /**
  * Backfill de `conversations."lastMessageAt"` (D1 = N-BE-1 da auditoria).
  *
- * A coluna nasce NULL na migration `20261003120000_conversations_last_message_at`
+ * A coluna nasce NULL na migration `20261003150000_conversations_last_message_at`
  * e o código passa a gravá-la em toda mensagem de chat nova. Este script
  * preenche o histórico: MAX("createdAt") das mensagens de chat da conversa,
  * com o MESMO recorte da prévia do card (`src/lib/conversation-last-message.ts`):
