@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { markNowRelative } from "@/lib/cache/now-relative";
 import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 /** Canais WhatsApp Cloud (Meta) — mesma lista do filtro de sessão a expirar. */
@@ -25,7 +26,12 @@ export function metaSessionWindowWhere(
   state: "open" | "closed",
   now = new Date(),
 ): Prisma.ConversationWhereInput {
-  const cutoff = new Date(now.getTime() - WHATSAPP_SESSION_WINDOW_MS);
+  // Relativo ao agora: a chave dos contadores do Inbox usa o rótulo, não o
+  // instante (ver `inboxTabCountsFingerprint`).
+  const cutoff = markNowRelative(
+    new Date(now.getTime() - WHATSAPP_SESSION_WINDOW_MS),
+    "meta_session_window",
+  );
   const meta = metaWhatsappConversationWhere();
   if (state === "open") {
     return { AND: [meta, { lastInboundAt: { gt: cutoff } }] };
