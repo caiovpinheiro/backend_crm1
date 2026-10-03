@@ -202,6 +202,37 @@ describe("docker-entrypoint: migrations no boot", () => {
   );
 });
 
+describe("docker-entrypoint: servidor Next (parada graciosa e keep-alive)", () => {
+  function nextEnv(env: Record<string, string>) {
+    const base: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of ["NEXT_MANUAL_SIG_HANDLE", "KEEP_ALIVE_TIMEOUT", "API_GRACEFUL_SHUTDOWN"]) {
+      delete base[k];
+    }
+    const script =
+      extractBlock("next-server-env") +
+      '\nprintf "SIG=%s KA=%s" "${NEXT_MANUAL_SIG_HANDLE:-}" "${KEEP_ALIVE_TIMEOUT:-}"\n';
+    const r = spawnSync("sh", ["-c", script], { env: { ...base, ...env }, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    return r.stdout.match(/SIG=(\S*) KA=(\S*)$/)?.slice(1) ?? [];
+  }
+
+  it.skipIf(!hasSh).each(["api", "api-public"])(
+    "%s: handler próprio de SIGTERM e keep-alive acima do proxy",
+    (mode) => {
+      expect(nextEnv({ APP_MODE: mode })).toEqual(["true", "95000"]);
+    },
+  );
+
+  it.skipIf(!hasSh)("valores do painel vencem; API_GRACEFUL_SHUTDOWN=0 devolve o sinal ao Next", () => {
+    expect(nextEnv({ APP_MODE: "api", KEEP_ALIVE_TIMEOUT: "125000" })).toEqual(["true", "125000"]);
+    expect(nextEnv({ APP_MODE: "api", API_GRACEFUL_SHUTDOWN: "0" })).toEqual(["", "95000"]);
+  });
+
+  it.skipIf(!hasSh)("workers não recebem nada", () => {
+    expect(nextEnv({ APP_MODE: "worker-etl" })).toEqual(["", ""]);
+  });
+});
+
 describe("docker-entrypoint: GIT_SHA da imagem", () => {
   const dir = mkdtempSync(join(tmpdir(), "entrypoint-sha-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));

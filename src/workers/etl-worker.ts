@@ -21,6 +21,10 @@ import {
   markOperationFailed,
   truncateErrorMessage,
 } from "@/jobs/leads/_update-progress";
+import {
+  LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+  installGracefulShutdown,
+} from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.etl");
 
@@ -171,18 +175,18 @@ export function startEtlWorker() {
 
   log.info({ concurrency, queue: IMPORT_ETL_QUEUE_NAME }, "etl-worker started");
 
-  const shutdown = async (signal: string) => {
-    log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
-    try {
-      await worker.close();
-    } catch (err) {
-      log.error({ err: truncateErrorMessage(err) }, "Erro ao fechar worker");
-    }
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  // `close()` espera o import ativo (planilha grande leva minutos): teto
+  // longo, stop_grace ≥ 120 s. Passou do teto, o job ativo vira stalled e
+  // o BullMQ o reentrega (mesmo efeito do SIGKILL de antes).
+  installGracefulShutdown({
+    name: "etl-worker",
+    log,
+    timeoutMs: LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+    steps: [
+      { name: "bullmq", run: () => worker.close() },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 
   return worker;
 }

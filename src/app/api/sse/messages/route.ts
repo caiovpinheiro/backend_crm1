@@ -1,3 +1,8 @@
+import {
+  isApiDraining,
+  registerSseStream,
+  sseShutdownRetryAfterSec,
+} from "@/lib/api-shutdown";
 import type { AppUserRole } from "@/lib/auth-types";
 import { auth } from "@/lib/auth";
 import {
@@ -16,6 +21,7 @@ import {
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
 import { getLogger } from "@/lib/logger";
+import { metrics } from "@/lib/metrics";
 import { runWithContext } from "@/lib/request-context";
 import { SSE_ACCESS_REVOKED } from "@/lib/sse-audience";
 import { encodeSseFrame, sseBus } from "@/lib/sse-bus";
@@ -38,6 +44,11 @@ const log = getLogger("sse");
  */
 const SSE_AUTHZ_CTX_TTL_MS = 45_000;
 
+/** Gate fail-closed: usado enquanto o gate real não pôde ser montado. */
+const denyAllInboxSseCards: InboxSseCardGate = () => false;
+/** Nova tentativa de montar o gate após falha: base + jitter de até 1×. */
+const SSE_CARD_GATE_RETRY_MS = 15_000;
+
 /**
  * Stream SSE de eventos do CRM.
  * Atendimento: filtro por organizationId da sessão (card por visibilidade).
@@ -55,6 +66,15 @@ async function sseError(
 }
 
 export async function GET(request: Request) {
+  // Réplica em parada graciosa: não aceita stream novo (o cliente volta
+  // depois do Retry-After, já na réplica nova).
+  if (isApiDraining()) {
+    metrics.sse.connectionsRejected.inc({ reason: "draining" });
+    return sseError(request, "Servidor reiniciando. Tente novamente em instantes.", 503, {
+      "Retry-After": String(sseShutdownRetryAfterSec()),
+    });
+  }
+
   const session = await auth();
   if (!session?.user) {
     return sseError(request, "Não autorizado", 401);
@@ -101,20 +121,33 @@ export async function GET(request: Request) {
   const slot = acquired.slot;
 
   let cardGate: InboxSseCardGate = allowAllInboxSseCards;
-  if (sessionUser.id && sessionUser.role && organizationId && !isSuperAdmin) {
+  const gateRole = sessionUser.role;
+  const buildCardGate =
+    gateRole && organizationId && !isSuperAdmin
+      ? async (): Promise<InboxSseCardGate> =>
+          runWithContext({ organizationId, userId, isSuperAdmin: false }, () =>
+            buildInboxSseCardGate({
+              id: userId,
+              role: gateRole,
+              organizationId,
+              isSuperAdmin: false,
+            }),
+          )
+      : null;
+  // V-INF-2: falha ao montar o gate (pool cheio na reconexão em massa pós-
+  // deploy) NÃO libera tudo: nega todo card até remontar. Sem card o evento
+  // sai como `cardOmitted: "hidden"` (sem conteúdo em `new_message`).
+  let cardGateFailed = false;
+  if (buildCardGate) {
     try {
-      cardGate = await runWithContext(
-        { organizationId, userId: sessionUser.id, isSuperAdmin: false },
-        () =>
-          buildInboxSseCardGate({
-            id: sessionUser.id!,
-            role: sessionUser.role!,
-            organizationId,
-            isSuperAdmin: false,
-          }),
-      );
+      cardGate = await buildCardGate();
     } catch (e) {
-      log.error({ err: e }, "[sse] falha ao montar o gate de card do inbox");
+      log.error(
+        { err: e },
+        "[sse] falha ao montar o gate de card do inbox — negando cards até remontar",
+      );
+      cardGate = denyAllInboxSseCards;
+      cardGateFailed = true;
     }
   }
 
@@ -123,7 +156,31 @@ export async function GET(request: Request) {
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let unwatchMembership: (() => void) | null = null;
   let closed = false;
+  let unregisterShutdown: (() => void) | null = null;
+  let cardGateRetry: ReturnType<typeof setTimeout> | null = null;
   const convBlockCache = new Map<string, { at: number; blocked: boolean }>();
+
+  // Remonta o gate de card depois de uma falha (até conseguir ou a conexão
+  // fechar). Até lá o `denyAllInboxSseCards` segue valendo.
+  const scheduleCardGateRetry = () => {
+    if (closed || !buildCardGate) return;
+    const delay = SSE_CARD_GATE_RETRY_MS + Math.floor(Math.random() * SSE_CARD_GATE_RETRY_MS);
+    cardGateRetry = setTimeout(() => {
+      cardGateRetry = null;
+      if (closed) return;
+      buildCardGate()
+        .then((gate) => {
+          if (closed) return;
+          cardGate = gate;
+          log.info({ userId, organizationId }, "[sse] gate de card do inbox remontado");
+        })
+        .catch((err) => {
+          log.warn({ err, userId, organizationId }, "[sse] gate de card ainda falhando — nova tentativa");
+          scheduleCardGateRetry();
+        });
+    }, delay);
+    cardGateRetry.unref?.();
+  };
 
   // RT-2: uma carga de ctx por conexão dentro do TTL (singleflight entre
   // eventos concorrentes da mesma conexão). Reset na revogação.
@@ -155,21 +212,25 @@ export async function GET(request: Request) {
     return pending;
   };
 
-  function teardown() {
+  function teardown(): Promise<void> {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
     unwatchMembership?.();
     unwatchMembership = null;
     unsubscribe?.();
     unsubscribe = null;
+    unregisterShutdown?.();
+    unregisterShutdown = null;
+    if (cardGateRetry) clearTimeout(cardGateRetry);
+    cardGateRetry = null;
     closed = true;
-    void slot.release();
+    return slot.release();
   }
 
   const stream = new ReadableStream({
     start(controller) {
       const closeStream = () => {
-        teardown();
+        void teardown();
         try {
           controller.close();
         } catch {
@@ -202,6 +263,37 @@ export async function GET(request: Request) {
         evictNow();
         return;
       }
+
+      // Parada graciosa (SIGTERM): `retry:` com jitter para espalhar a
+      // reconexão, libera a vaga no Redis e fecha. Ver lib/api-shutdown.ts.
+      const shutdownNow = (retryMs: number): Promise<void> | undefined => {
+        if (closed) return undefined;
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `retry: ${retryMs}\nevent: ${SSE_EVICTED_EVENT}\ndata: ${JSON.stringify({
+                reason: "server_shutdown",
+                retryAfterMs: retryMs,
+              })}\n\n`,
+            ),
+          );
+        } catch {
+          /* já fechado */
+        }
+        const released = teardown();
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+        return released;
+      };
+      if (isApiDraining()) {
+        void shutdownNow(sseShutdownRetryAfterSec() * 1000);
+        return;
+      }
+      unregisterShutdown = registerSseStream(shutdownNow);
+      if (cardGateFailed) scheduleCardGateRetry();
 
       controller.enqueue(encoder.encode(": connected\n\n"));
 
@@ -286,7 +378,7 @@ export async function GET(request: Request) {
       request.signal.addEventListener("abort", closeStream, { once: true });
     },
     cancel() {
-      teardown();
+      void teardown();
     },
   });
 

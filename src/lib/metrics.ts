@@ -83,7 +83,8 @@ function buildMetrics(registry: Registry): AppMetrics {
 
   // Teto de conexões SSE (`sse-connection-limit.ts`). `org_limit` = nova
   // conexão recusada com 429; `user_limit_evicted` = conexão mais antiga do
-  // usuário encerrada para a nova entrar. Conexões abertas: `crm_sse_subscribers`.
+  // usuário encerrada para a nova entrar; `draining` = recusada com 503 durante
+  // a parada graciosa (`api-shutdown.ts`). Conexões abertas: `crm_sse_subscribers`.
   const sseConnectionsRejected = new Counter({
     name: "crm_sse_connections_rejected_total",
     help: "Conexões SSE recusadas (teto por org) ou encerradas pelo teto por usuário, por motivo.",

@@ -295,6 +295,25 @@ case "$APP_MODE" in
     echo "[entrypoint] worker sem HTTP — EasyPanel: desligar Tempo de inatividade zero (senão SIGTERM em ~2–4s)."
     ;;
 esac
+
+# Servidor Next (api / api-public). Bloco exercitado por docker-entrypoint.test.ts.
+# - NEXT_MANUAL_SIG_HANDLE: o handler de SIGTERM do Next fecha o listener e
+#   espera as requisições sem teto — um stream SSE prende o processo até o
+#   SIGKILL. Com a variável, quem trata o sinal é src/lib/api-shutdown.ts
+#   (instalado em instrumentation.ts): health 503, SSE com retry e jitter,
+#   requisições em curso até 25 s. API_GRACEFUL_SHUTDOWN=0 volta ao do Next.
+# - KEEP_ALIVE_TIMEOUT (lido pelo server.js do Next): keep-alive do Node maior
+#   que o idle do proxy até o backend (Traefik: 90 s), senão o Node fecha a
+#   conexão ociosa no meio de um POST reaproveitado → 502 esporádico.
+# >>> next-server-env
+if [ "$APP_MODE" = "api" ] || [ "$APP_MODE" = "api-public" ]; then
+  if [ "${API_GRACEFUL_SHUTDOWN:-1}" != "0" ]; then
+    export NEXT_MANUAL_SIG_HANDLE="${NEXT_MANUAL_SIG_HANDLE:-true}"
+  fi
+  export KEEP_ALIVE_TIMEOUT="${KEEP_ALIVE_TIMEOUT:-95000}"
+  echo "[entrypoint] http: KEEP_ALIVE_TIMEOUT=${KEEP_ALIVE_TIMEOUT} NEXT_MANUAL_SIG_HANDLE=${NEXT_MANUAL_SIG_HANDLE:-}"
+fi
+# <<< next-server-env
 case "$APP_MODE" in
   api)
     echo "[entrypoint] starting Next.js standalone server..."
