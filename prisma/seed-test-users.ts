@@ -13,21 +13,63 @@
  *
  * Pré-requisitos: `npm run db:seed` (cria org EduIT + admin + presets).
  *
- * Credenciais criadas (senha única pra facilitar o teste):
- *   gestor@eduit.com.br     / Teste@123   → preset Gestor (MANAGER)
- *   operador@eduit.com.br   / Teste@123   → preset Operador (MEMBER)
- *   operador2@eduit.com.br  / Teste@123   → preset Operador (MEMBER) + Grupo
+ * Usuários criados (senha ALEATÓRIA por usuário, gerada a cada execução e
+ * impressa uma única vez no fim — não existe senha padrão):
+ *   gestor@eduit.com.br     → preset Gestor (MANAGER)
+ *   operador@eduit.com.br   → preset Operador (MEMBER)
+ *   operador2@eduit.com.br  → preset Operador (MEMBER) + Grupo
+ *
+ * Só roda fora de produção: recusa NODE_ENV=production e banco cujo host não
+ * seja local (localhost / 127.x / ::1). Para um banco de teste remoto,
+ * SEED_TEST_USERS_ALLOW_REMOTE_DB=1 libera só a checagem de host.
  *
  * Idempotente: usuários por email (upsert), grupo por nome, produtos por SKU.
  */
 
+import { randomBytes } from "node:crypto";
+
 import { PrismaClient, type UserRole } from "@prisma/client";
 import { hash } from "bcryptjs";
+
+/** Host do DATABASE_URL é desta máquina? URL ilegível conta como remoto. */
+function isLocalDatabaseHost(url: string | undefined): boolean {
+  if (!url) return false;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    /^127(\.\d{1,3}){3}$/.test(host)
+  );
+}
+
+function assertNonProductionTarget(): void {
+  if (process.env.NODE_ENV === "production") {
+    console.error("✗ seed-test-users recusado: NODE_ENV=production.");
+    process.exit(1);
+  }
+  if (
+    !isLocalDatabaseHost(process.env.DATABASE_URL) &&
+    process.env.SEED_TEST_USERS_ALLOW_REMOTE_DB !== "1"
+  ) {
+    console.error(
+      "✗ seed-test-users recusado: o host do DATABASE_URL não é local.\n" +
+        "  Para um banco de TESTE remoto, rode com SEED_TEST_USERS_ALLOW_REMOTE_DB=1.",
+    );
+    process.exit(1);
+  }
+}
+
+assertNonProductionTarget();
 
 const prisma = new PrismaClient();
 
 const EDUIT_ORG_ID = "org_eduit";
-const DEFAULT_PASSWORD = "Teste@123";
 const SEED_PREFIX = "sh-seed-";
 
 type TestUser = {
@@ -104,11 +146,14 @@ async function main() {
     );
   }
 
-  const hashedPassword = await hash(DEFAULT_PASSWORD, 12);
-
   // ─── 1. Usuários de teste (upsert por email) ────────────────────────────
+  // Senha aleatória por usuário a cada execução; impressa só no fim.
   const userIdByEmail = new Map<string, string>();
+  const issuedPasswords = new Map<string, string>();
   for (const u of TEST_USERS) {
+    const password = randomBytes(18).toString("base64url");
+    issuedPasswords.set(u.email, password);
+    const hashedPassword = await hash(password, 12);
     const existingUser = await prisma.user.findFirst({
       where: { email: u.email, organizationId: EDUIT_ORG_ID },
       select: { id: true },
@@ -248,15 +293,11 @@ async function main() {
   console.log(`  ✔ ${linkedProducts} vínculos produto↔deal criados`);
 
   console.log("\n✅ Seed de usuários de teste concluído!\n");
-  console.log("   Credenciais (senha: " + DEFAULT_PASSWORD + ")");
-  console.log("   ┌─────────────────────────────┬──────────┬─────────────────────────┐");
-  console.log("   │ email                       │ perfil   │ observação              │");
-  console.log("   ├─────────────────────────────┼──────────┼─────────────────────────┤");
-  console.log("   │ adm@eduit.com.br            │ ADMIN    │ super-admin (já existia)│");
-  console.log("   │ gestor@eduit.com.br         │ MANAGER  │ gestão completa         │");
-  console.log("   │ operador@eduit.com.br       │ MEMBER   │ operador padrão         │");
-  console.log("   │ operador2@eduit.com.br      │ MEMBER   │ + Grupo (escopo SELF)   │");
-  console.log("   └─────────────────────────────┴──────────┴─────────────────────────┘");
+  console.log("   Credenciais geradas agora (exibidas só nesta execução):");
+  for (const u of TEST_USERS) {
+    console.log(`   ${u.email.padEnd(28)} ${u.role.padEnd(8)} ${issuedPasswords.get(u.email)}`);
+  }
+  console.log("   (adm@eduit.com.br — super-admin já existente, senha não alterada)");
 }
 
 main()

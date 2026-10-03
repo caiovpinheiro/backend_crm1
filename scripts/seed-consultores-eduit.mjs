@@ -14,46 +14,50 @@
  * Fonte dos e-mails: GET /api/crm/attendants do DataCrazy (22/07/2026).
  * Removidos a pedido: Debora Mani, Jessica Castro, Gustavo.
  *
- * Uso (dentro do container do backend, que tem DATABASE_URL + prisma):
+ * Senhas: cada usuario criado (ou resetado com RESET_PASSWORDS=1) recebe uma
+ * senha aleatoria propria (crypto.randomBytes), impressa UMA vez no fim da
+ * execucao para o operador entregar. Nao ha senha padrao nem hash fixo. O
+ * schema nao tem campo de "trocar senha no primeiro acesso": oriente cada
+ * consultor a trocar a senha depois de entrar.
+ *
+ * Uso (de um checkout do backend com `npm ci` e DATABASE_URL do banco alvo;
+ * a imagem de producao nao leva mais a pasta scripts/):
  *   node scripts/seed-consultores-eduit.mjs            # aplica
  *   DRY_RUN=1 node scripts/seed-consultores-eduit.mjs  # so mostra o plano
  *   ORG_ID=xxx node scripts/seed-consultores-eduit.mjs # forca a org
- *   CONSULTOR_TEMP_PASSWORD=... node ...                # troca a senha padrao
  */
+import { randomBytes } from "node:crypto";
+
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-// O runner (Next standalone) EMPACOTA o bcryptjs no bundle do app e nao o
-// deixa como pacote resolvivel em node_modules -> um script avulso quebra com
-// ERR_MODULE_NOT_FOUND. Para nao depender disso, tentamos importar o bcryptjs
-// e, se falhar, usamos um hash bcrypt pre-computado da senha padrao (cost 12,
-// compativel com o bcryptjs.compare do login).
-const PRECOMPUTED_HASH =
-  "$2b$12$RTKZ8cGWvEhQYRc41/cO9OZ4tc.J6gi8FoinZIRKqZxwdvW3PJzt2"; // "Eduit@!20"
-
+// bcryptjs e obrigatorio: sem ele o script para (nao existe hash de reserva).
+// Rode de um checkout do backend com node_modules instalado.
+let bcryptHash = null;
 async function makeHash(pw) {
-  try {
-    const { hash } = await import("bcryptjs");
-    return await hash(pw, 12);
-  } catch {
-    if (pw !== "Eduit@!20") {
+  if (!bcryptHash) {
+    try {
+      ({ hash: bcryptHash } = await import("bcryptjs"));
+    } catch {
       console.error(
-        "❌ bcryptjs indisponivel e a senha != padrao — nao consigo gerar o hash.\n" +
-          "   Rode com a senha padrao ou disponibilize o bcryptjs.",
+        "❌ bcryptjs indisponivel — rode o script de um checkout do backend com `npm ci`.",
       );
       process.exit(1);
     }
-    console.warn("  ⚠ bcryptjs nao resolvido no runner — usando hash pre-computado da senha padrao.");
-    return PRECOMPUTED_HASH;
   }
+  return bcryptHash(pw, 12);
 }
 
-const TEMP_PASSWORD = process.env.CONSULTOR_TEMP_PASSWORD ?? "Eduit@!20";
+// Senha aleatoria por usuario: 18 bytes -> 24 caracteres base64url.
+function generatePassword() {
+  return randomBytes(18).toString("base64url");
+}
+
 const DRY_RUN = process.env.DRY_RUN === "1";
 // Por seguranca em prod: NAO reseta a senha de quem ja existe (pode ja ter
-// trocado). Senha so e definida ao CRIAR um usuario novo. Para forcar o reset
-// de todos para a senha temporaria, rode com RESET_PASSWORDS=1.
+// trocado). Senha so e definida ao CRIAR um usuario novo. Para gerar senha
+// nova (aleatoria, uma por usuario) para todos, rode com RESET_PASSWORDS=1.
 const RESET_PASSWORDS = process.env.RESET_PASSWORDS === "1";
 // Volume/limite de fila por consultor (igual DataCrazy: ~25 por consultor).
 // queueLimit no motor = teto de deals OPEN simultaneos como owner (0 = sem
@@ -168,7 +172,8 @@ async function main() {
     select: { id: true, name: true },
   });
   console.log(`Org alvo: ${org?.name ?? "?"} (${orgId})`);
-  console.log(`Senha temporaria: ${TEMP_PASSWORD}${DRY_RUN ? "  [DRY_RUN]" : ""}\n`);
+  if (DRY_RUN) console.log("[DRY_RUN]");
+  console.log("");
 
   const deptMap = await ensureDepartments(orgId);
   const memberRoleId = await memberPresetRoleId(orgId);
@@ -179,7 +184,8 @@ async function main() {
     );
   }
 
-  const hashed = await makeHash(TEMP_PASSWORD);
+  // Senhas geradas nesta execucao, impressas so no fim.
+  const issued = [];
   let created = 0;
   let updated = 0;
 
@@ -200,6 +206,9 @@ async function main() {
     }
 
     let user;
+    // Senha nova (aleatoria, so deste usuario) ao criar ou com RESET_PASSWORDS=1.
+    const password = !existing || RESET_PASSWORDS ? generatePassword() : null;
+    const hashed = password ? await makeHash(password) : null;
     if (existing) {
       user = await prisma.user.update({
         where: { email },
@@ -209,7 +218,7 @@ async function main() {
           name: c.name,
           type: "HUMAN",
           organizationId: orgId,
-          ...(RESET_PASSWORDS ? { hashedPassword: hashed } : {}),
+          ...(hashed ? { hashedPassword: hashed } : {}),
         },
         select: { id: true, role: true },
       });
@@ -232,6 +241,7 @@ async function main() {
       created++;
       console.log(`  [user] criado ${c.name} <${email}> (${user.id})`);
     }
+    if (password) issued.push({ email, password });
 
     // Role assignment (preset MEMBER) — idempotente.
     if (memberRoleId) {
@@ -296,6 +306,14 @@ async function main() {
     `\nResumo: ${created} criados, ${updated} atualizados, ${CONSULTORES.length} consultores no total.` +
       (DRY_RUN ? "  (DRY_RUN — nada gravado)" : ""),
   );
+
+  if (issued.length) {
+    console.log(
+      "\nSenhas geradas nesta execucao (exibidas so agora; entregue cada uma ao" +
+        " consultor por canal privado e peca a troca no primeiro acesso):",
+    );
+    for (const i of issued) console.log(`  ${i.email}\t${i.password}`);
+  }
 }
 
 main()
