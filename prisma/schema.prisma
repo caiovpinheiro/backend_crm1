@@ -3049,6 +3049,19 @@ model Conversation {
   unreadCount            Int                @default(0)
   lastReadAt             DateTime?
   lastInboundAt          DateTime?
+  /// Horário da última mensagem de CHAT (entrada ou saída) — o mesmo recorte
+  /// da prévia do card (`isListChatMessage` em
+  /// `src/lib/conversation-last-message.ts`): nota interna, rascunho da IA,
+  /// ligação e evento de sistema não contam. Gravado junto do insert da
+  /// mensagem; ler/atribuir/encerrar NÃO mexe. NULL = sem mensagem de chat
+  /// ou ainda não preenchido pelo backfill
+  /// (`scripts/backfill-conversations-last-message-at.mjs`).
+  ///
+  /// Chave da lista do inbox: `COALESCE("lastMessageAt", "updatedAt")`, id
+  /// (ver `conversation-list-cursor.ts`). Os índices dessa expressão vivem só
+  /// na migration `20261003120000_conversations_last_message_at` — o Prisma
+  /// não descreve índice de expressão.
+  lastMessageAt          DateTime?
   /// Primeira inbound deste conversationId (semântica A / ticket). NULL até o primeiro inbound.
   firstInboundAt         DateTime? @db.Timestamp
   lastMessageDirection   String?
