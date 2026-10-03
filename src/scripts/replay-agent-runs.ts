@@ -8,10 +8,14 @@
  * Local:
  *   npx tsx src/scripts/replay-agent-runs.ts --org teste-dev --start Joseph
  *
- * EasyPanel (/app, depois do deploy):
- *   node dist/workers/replay-agent-runs.js --org teste-dev --start Joseph
- *   node dist/workers/replay-agent-runs.js --lote 2 --out /tmp/replay-lote2.json
- *   node dist/workers/replay-agent-runs.js --lote 2 --limit 35 --out /tmp/replay-lote2.json
+ *   npx tsx src/scripts/replay-agent-runs.ts --lote 2 --out /tmp/replay-lote2.json
+ *
+ * Os fixtures NÃO vão no bundle do worker nem na imagem. No container, passe
+ * o arquivo (copiado para fora da imagem, ex. /tmp) por --fixtures ou
+ * REPLAY_FIXTURES:
+ *   node dist/workers/replay-agent-runs.js --fixtures /tmp/lote2.json --org teste-dev --start Joseph
+ *   node dist/workers/replay-agent-runs.js --fixtures /tmp/lote2.json --limit 35 --out /tmp/replay-lote2.json
+ * Sem --fixtures, --lote 1|2|all lê src/scripts/fixtures/ (só num checkout).
  *   # --real-handoff: conversa sandbox com id real, tools de efeito rodam de
  *   #   verdade (executeOrchestratedHandoff + assign) e os eventos gravados
  *   #   entram no TurnRecord. A conversa é apagada no fim (--keep-sandbox mantém).
@@ -23,11 +27,9 @@
  * prismaBase: script fora de RequestContext até achar a org; o loop usa
  * runWithContext + runAgent (prisma scoped).
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import bundledLote1 from "./fixtures/joseph-replay-cases.json";
-import bundledLote2 from "./fixtures/joseph-replay-lote2.json";
 import { evaluateMessageRules } from "@/lib/ai-agents/message-rules";
 import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prismaBase } from "@/lib/prisma-base";
@@ -195,23 +197,35 @@ function formatTranscript(cases: FixtureCase[], records: TurnRecord[]): string {
   return lines.join("\n");
 }
 
+// Fixtures do repositório por lote. Lidos do disco em tempo de execução (o
+// esbuild não empacota caminho dinâmico): na imagem eles não existem.
+const REPO_FIXTURES: Record<string, string[]> = {
+  "1": ["src/scripts/fixtures/joseph-replay-cases.json"],
+  "2": ["src/scripts/fixtures/joseph-replay-lote2.json"],
+  lote2: ["src/scripts/fixtures/joseph-replay-lote2.json"],
+  all: [
+    "src/scripts/fixtures/joseph-replay-cases.json",
+    "src/scripts/fixtures/joseph-replay-lote2.json",
+  ],
+};
+
 function loadFixtures(path: string | null, lote: string): FixtureCase[] {
-  const bundled =
-    lote === "2" || lote === "lote2"
-      ? (bundledLote2 as FixtureFile)
-      : lote === "all"
-        ? {
-            cases: [
-              ...(bundledLote1 as FixtureFile).cases,
-              ...(bundledLote2 as FixtureFile).cases,
-            ],
-          }
-        : (bundledLote1 as FixtureFile);
-  const raw = path
-    ? (JSON.parse(readFileSync(path, "utf8")) as FixtureFile)
-    : bundled;
-  if (!Array.isArray(raw.cases)) throw new Error("fixture sem cases[]");
-  return raw.cases.filter((c) => c.id && Array.isArray(c.turns) && c.turns.length);
+  const files = path
+    ? [path]
+    : (REPO_FIXTURES[lote] ?? REPO_FIXTURES["1"]!).map((f) => resolve(f));
+  const cases: FixtureCase[] = [];
+  for (const file of files) {
+    if (!existsSync(file)) {
+      throw new Error(
+        `fixture não encontrado: ${file}. Fora de um checkout, passe o arquivo ` +
+          "com --fixtures <caminho> ou REPLAY_FIXTURES.",
+      );
+    }
+    const raw = JSON.parse(readFileSync(file, "utf8")) as FixtureFile;
+    if (!Array.isArray(raw.cases)) throw new Error(`fixture sem cases[]: ${file}`);
+    cases.push(...raw.cases);
+  }
+  return cases.filter((c) => c.id && Array.isArray(c.turns) && c.turns.length);
 }
 
 function findAgent(agents: AgentRow[], needle: string): AgentRow | null {
@@ -537,7 +551,7 @@ async function main() {
     process.exit(1);
   }
 
-  const fixturesArg = arg("--fixtures");
+  const fixturesArg = arg("--fixtures", process.env.REPLAY_FIXTURES ?? "");
   const fixturePath = fixturesArg ? resolve(fixturesArg) : null;
   const lote = arg("--lote", "1");
   const orgSlug = arg("--org", process.env.ORG_SLUG ?? "teste-dev");
