@@ -41,12 +41,17 @@ export async function findContactIdsByPhoneDigits(
   // o plano em produção varria os 42k contatos da org aplicando
   // regexp_replace por linha, 95ms por chamada. Ver migration
   // 20260826191000_phone_digits_pattern_idx.
+  //
+  // `'\\D'` (e não `'\D'`): em template literal o `\D` é cozido para `D`, o
+  // texto enviado deixa de ser a expressão do índice (o planner só usa índice
+  // de expressão com texto idêntico) e o regexp_replace passa a remover a
+  // letra D — telefone com máscara deixava de casar.
   const suffix = digits.length > 11 ? digits.slice(-11) : digits;
   const revPrefix = [...suffix].reverse().join("") + "%";
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT id FROM contacts
     WHERE "organizationId" = ${orgId}
-      AND reverse(regexp_replace(COALESCE(phone, ''), '\D', '', 'g'))
+      AND reverse(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'))
           LIKE ${revPrefix}
     LIMIT 500
   `;
