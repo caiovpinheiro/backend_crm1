@@ -81,3 +81,65 @@ de boot da API mostra a decisão:
 `[sse-bus] sweepers desligados na API — rodam no worker-whatsapp e no worker-automation`.
 Rollback sem deploy: `API_RUN_SWEEPERS=1` e `AUTOMATION_WORKER_MODE=inline` no
 serviço `api`.
+
+## 3. Parada graciosa (SIGTERM)
+
+### API (`api`, `api-public`)
+
+No SIGTERM (`src/lib/api-shutdown.ts`, instalado em `src/instrumentation.ts`):
+
+1. `/api/health` passa a 503 (`{"status":"draining"}`) e o SSE recusa conexão
+   nova com 503 + `Retry-After` (métrica `crm_sse_connections_rejected_total{reason="draining"}`).
+2. Streams SSE abertos recebem `retry:` aleatório entre 2 e 15 s e o evento
+   `sse_connection_evicted` (`reason: "server_shutdown"`), liberam a vaga no
+   Redis e são fechados.
+3. Pré-parada de `API_SHUTDOWN_PRESTOP_MS` (5 s) servindo normalmente, para o
+   proxy tirar a réplica.
+4. O listener HTTP fecha e as requisições em curso terminam.
+5. `$disconnect` do Prisma e saída 0. Teto `API_SHUTDOWN_TIMEOUT_MS` (25 s):
+   passou, as conexões restantes caem e o processo sai 1.
+
+O entrypoint exporta `NEXT_MANUAL_SIG_HANDLE=true` (o handler do Next esperava
+os streams SSE sem teto, até o SIGKILL) e `KEEP_ALIVE_TIMEOUT=95000` (o
+keep-alive do Node precisa ser maior que o idle do proxy até o backend:
+Traefik 90 s; o Caddy do compose da DO usa 2 min — lá defina `125000`).
+`API_GRACEFUL_SHUTDOWN=0` volta ao comportamento do Next.
+
+Gate de card do SSE (V-INF-2): se a montagem do filtro de visibilidade falhar
+(pool cheio na reconexão em massa), a conexão nega todos os cards
+(`cardOmitted: "hidden"`) e tenta remontar a cada 15–30 s — antes liberava todos.
+
+### Workers
+
+Todos usam `installGracefulShutdown` (`src/workers/graceful-shutdown.ts`):
+passos isolados (falha de um não pula os outros), `worker.close()` do BullMQ
+(espera o job ativo), sweepers parados, `$disconnect` do Prisma, teto e saída.
+
+| Serviço | Teto | Passos |
+|---------|------|--------|
+| `worker-whatsapp`, `worker-campaigns` | 25 s | (já existiam) |
+| `worker-meta-webhook` | 25 s | sweepers de IA → flush de status → `close()` → flush final → Prisma |
+| `worker-distribution` | 25 s | `close()` das duas filas → Prisma |
+| `worker-baileys` | 25 s | sweepers de IA → `close()` das filas → sessões → Prisma |
+| `worker-etl`, `worker-leads` | 110 s | `close()` → Prisma |
+| `worker-automation` | 110 s | sweepers (timeout e admission control) → `close()` → Prisma |
+
+`WORKER_SHUTDOWN_TIMEOUT_MS` sobrescreve o teto de qualquer worker (use ≈
+stop_grace − 10 s).
+
+### `stop_grace_period` recomendado
+
+O padrão do Docker é 10 s — menor que qualquer teto acima, então o SIGKILL
+chega antes. Configure por serviço:
+
+| Serviço | stop_grace_period |
+|---------|-------------------|
+| `api`, `api-public` | 35 s |
+| `worker-whatsapp`, `worker-campaigns`, `worker-meta-webhook`, `worker-distribution`, `worker-baileys` | 35 s |
+| `worker-etl`, `worker-leads`, `worker-automation` | 120 s |
+
+Workers: ordem stop-first (sem "Tempo de inatividade zero", como o entrypoint
+já avisa). No Easypanel, use o campo do painel se existir; um
+`docker service update --stop-grace-period` feito à mão é desfeito no próximo
+redeploy do Easypanel (mesmo problema do `--env-add`). O compose de
+`deploy/digitalocean` já traz esses valores.

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
-import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
-import { startListenSweeper } from "@/services/ai-v2/listen";
+import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
+import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
+import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 import { BaileysManager } from "./baileys-manager";
 import { startOutboundConsumer } from "./outbound-consumer";
 import { startControlConsumer } from "./control-consumer";
@@ -26,21 +27,27 @@ async function startup() {
   log.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
 }
 
-async function shutdown() {
-  log.info("[baileys-worker] Encerrando...");
-  await manager.shutdownAll();
-  await outboundWorker.close();
-  await controlWorker.close();
-  await prisma.$disconnect();
-  log.info("[baileys-worker] Encerrado");
-}
-
-process.on("SIGINT", () => {
-  void shutdown().then(() => process.exit(0));
-});
-
-process.on("SIGTERM", () => {
-  void shutdown().then(() => process.exit(0));
+// SIGTERM com teto de 25 s (antes: sem teto, e um passo que lançasse
+// impedia os seguintes). Filas fecham antes das sessões: o envio em curso
+// termina com o socket ainda aberto.
+installGracefulShutdown({
+  name: "worker-baileys",
+  log,
+  steps: [
+    {
+      name: "sweepers",
+      run: () => {
+        stopAiTurnSweeper();
+        stopListenSweeper();
+      },
+    },
+    {
+      name: "bullmq",
+      run: () => Promise.all([outboundWorker.close(), controlWorker.close()]),
+    },
+    { name: "sessoes", run: () => manager.shutdownAll() },
+    { name: "prisma", run: () => prisma.$disconnect() },
+  ],
 });
 
 void startup().catch((err) => {

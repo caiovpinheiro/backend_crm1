@@ -19,6 +19,46 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // Parada graciosa (B6): SIGTERM → health 503, SSE fechado com retry e
+  // jitter, requisições em curso terminam (teto 25 s), depois sai. Só no
+  // servidor de produção da API; `next dev` mantém o Ctrl+C do Next.
+  // O entrypoint exporta NEXT_MANUAL_SIG_HANDLE=true (o Next não registra o
+  // handler dele, que esperava os streams SSE até o SIGKILL).
+  // API_GRACEFUL_SHUTDOWN=0 desliga. Módulo sem pg/ioredis/prisma/logger.
+  const appMode = (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
+  if (
+    process.env.NODE_ENV === "production" &&
+    (appMode === "api" || appMode === "api-public") &&
+    process.env.API_GRACEFUL_SHUTDOWN !== "0"
+  ) {
+    try {
+      const { installApiGracefulShutdown, apiShutdownTimingsFromEnv } = await import(
+        "@/lib/api-shutdown"
+      );
+      const timings = apiShutdownTimingsFromEnv();
+      const emit = (level: string, msg: string, extra?: Record<string, unknown>) => {
+        // eslint-disable-next-line no-console -- instrumentation também é empacotado para o runtime Edge; o logger (pino + AsyncLocalStorage) não pode entrar aqui
+        console.log(JSON.stringify({ level, time: Date.now(), appMode, msg, ...extra }));
+      };
+      installApiGracefulShutdown({
+        ...timings,
+        log: {
+          info: (msg, extra) => emit("info", msg, extra),
+          warn: (msg, extra) => emit("warn", msg, extra),
+          error: (msg, extra) => emit("error", msg, extra),
+        },
+      });
+      emit("info", "[api-shutdown] handler de SIGTERM instalado", {
+        ...timings,
+        nextManualSigHandle: Boolean(process.env.NEXT_MANUAL_SIG_HANDLE),
+        keepAliveTimeoutMs: Number(process.env.KEEP_ALIVE_TIMEOUT) || null,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console -- instrumentation também é empacotado para o runtime Edge; o logger (pino + AsyncLocalStorage) não pode entrar aqui
+      console.warn("[instrumentation] parada graciosa não instalada:", err);
+    }
+  }
+
   if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
     try {
       const { startOtel } = await import("@/lib/otel-sdk");

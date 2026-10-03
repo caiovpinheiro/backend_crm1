@@ -13,8 +13,9 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
-import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
-import { startListenSweeper } from "@/services/ai-v2/listen";
+import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
+import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
+import { installGracefulShutdown, type ShutdownStep } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.meta-webhook");
 
@@ -109,18 +110,31 @@ export function startMetaWebhookWorker() {
   return worker;
 }
 
-async function shutdown(worker: Worker): Promise<void> {
-  log.info("Encerrando worker-meta-webhook...");
-  // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
-  // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
-  await flushStatusWrites().catch(() => {});
-  await worker.close().catch(() => {});
-  await prismaBase.$disconnect().catch(() => {});
-  process.exit(0);
+/** Passos do SIGTERM (teto de 25 s em `installGracefulShutdown`). */
+function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[] {
+  return [
+    {
+      name: "sweepers",
+      run: () => {
+        stopAiTurnSweeper();
+        stopListenSweeper();
+      },
+    },
+    // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
+    // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
+    { name: "status-flush", run: () => flushStatusWrites() },
+    { name: "bullmq", run: () => worker.close() },
+    // Jobs que terminaram durante o close() podem ter bufferizado mais status.
+    { name: "status-flush-final", run: () => flushStatusWrites() },
+    { name: "prisma", run: () => prismaBase.$disconnect() },
+  ];
 }
 
 if (require.main === module) {
   const worker = startMetaWebhookWorker();
-  process.on("SIGINT", () => void shutdown(worker));
-  process.on("SIGTERM", () => void shutdown(worker));
+  installGracefulShutdown({
+    name: "worker-meta-webhook",
+    log,
+    steps: metaWebhookShutdownSteps(worker),
+  });
 }

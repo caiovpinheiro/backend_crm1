@@ -87,6 +87,7 @@ vi.mock("@/lib/sse-connection-limit", () => ({
 }));
 
 import { GET } from "@/app/api/sse/messages/route";
+import { __resetApiShutdownStateForTest, createApiShutdown } from "@/lib/api-shutdown";
 
 const ORG = "org1";
 const USER = "u1";
@@ -294,5 +295,76 @@ describe("GET /api/sse/messages — filtro, memo de authz e frame", () => {
     expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
     expect(await next()).toBeNull();
     await reader.cancel().catch(() => undefined);
+  });
+});
+
+describe("GET /api/sse/messages — parada graciosa e gate fail-closed", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.listeners.length = 0;
+    __resetApiShutdownStateForTest();
+    mocks.auth.mockResolvedValue({
+      user: { id: USER, role: "MEMBER", organizationId: ORG, isSuperAdmin: false },
+    });
+    mocks.buildInboxSseCardGate.mockResolvedValue(() => true);
+    mocks.stripHiddenInboxSseCard.mockImplementation((data: unknown) => data);
+    mocks.loadAuthzContext.mockResolvedValue(adminCtx());
+    mocks.subscribe.mockImplementation((_ctx: unknown, fn: Listener) => {
+      mocks.listeners.push(fn);
+      return mocks.unsubscribe;
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    __resetApiShutdownStateForTest();
+  });
+
+  it("V-INF-2: gate que falha nega todo card e é remontado depois", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    mocks.buildInboxSseCardGate
+      .mockRejectedValueOnce(new Error("pool esgotado"))
+      .mockResolvedValueOnce(() => true);
+    const { reader, next, emit } = await open();
+
+    emit("new_message", envelope({ conversationId: "c1", card: {} }, "new_message"));
+    expect(await next()).toContain("event: new_message");
+    const failClosedGate = mocks.stripHiddenInboxSseCard.mock.calls[0][1] as (c: object) => boolean;
+    expect(failClosedGate({ assignedToId: USER })).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mocks.buildInboxSseCardGate).toHaveBeenCalledTimes(2);
+
+    // Os 30 s avançados também dispararam um heartbeat (25 s).
+    expect(await next()).toBe(": heartbeat\n\n");
+    emit("new_message", envelope({ conversationId: "c2", card: {} }, "new_message"));
+    expect(await next()).toContain('"conversationId":"c2"');
+    const remounted = mocks.stripHiddenInboxSseCard.mock.calls[1][1] as (c: object) => boolean;
+    expect(remounted({})).toBe(true);
+    await reader.cancel().catch(() => undefined);
+  });
+
+  it("SIGTERM: stream aberto recebe retry com jitter e fecha; conexão nova leva 503", async () => {
+    const { next } = await open();
+    const exit = vi.fn();
+    await createApiShutdown({
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      preStopMs: 0,
+      getServers: () => [],
+      exit,
+      random: () => 0,
+    })("SIGTERM");
+
+    const frame = await next();
+    expect(frame).toMatch(/^retry: 2000\nevent: sse_connection_evicted\n/);
+    expect(frame).toContain('"reason":"server_shutdown"');
+    expect(await next()).toBeNull();
+    expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+
+    const res = await GET(new Request("https://api.test/api/sse/messages"));
+    expect(res.status).toBe(503);
+    expect(Number(res.headers.get("Retry-After"))).toBeGreaterThanOrEqual(2);
+    expect(mocks.auth).toHaveBeenCalledTimes(1); // recusada antes da sessão
   });
 });

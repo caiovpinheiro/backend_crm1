@@ -24,7 +24,10 @@ export type GracefulShutdownOptions = {
   name: string;
   log: Logger;
   steps: ShutdownStep[];
-  /** Teto total antes de forçar a saída. Default 25 s (EasyPanel/Docker: 30 s). */
+  /**
+   * Teto total antes de forçar a saída. Default 25 s (stop_grace ≥ 35 s).
+   * `WORKER_SHUTDOWN_TIMEOUT_MS` no ambiente vence este valor.
+   */
   timeoutMs?: number;
   /** Injetáveis para teste. */
   exit?: (code: number) => void;
@@ -32,6 +35,25 @@ export type GracefulShutdownOptions = {
 };
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 25_000;
+/**
+ * Teto dos workers com job longo (worker-etl, worker-leads, worker-automation):
+ * `worker.close()` espera o job ativo terminar. Exige stop_grace_period ≥ 120 s
+ * no serviço — com o grace menor, o SIGKILL chega antes e o teto não importa.
+ */
+export const LONG_JOB_SHUTDOWN_TIMEOUT_MS = 110_000;
+
+/**
+ * Teto efetivo: `WORKER_SHUTDOWN_TIMEOUT_MS` (ms, > 0) vence o default do
+ * worker — use para alinhar com o stop_grace_period do serviço (teto ≈ grace − 10 s).
+ */
+export function resolveShutdownTimeoutMs(
+  defaultMs: number,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.WORKER_SHUTDOWN_TIMEOUT_MS?.trim();
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultMs;
+}
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -61,7 +83,7 @@ export function flushRootLogger(): Promise<void> {
 export function createGracefulShutdown(
   opts: GracefulShutdownOptions,
 ): (signal: string) => Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  const timeoutMs = resolveShutdownTimeoutMs(opts.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
   const exit = opts.exit ?? ((code: number) => process.exit(code));
   const flushLogger = opts.flushLogger ?? flushRootLogger;
   let running: Promise<void> | null = null;

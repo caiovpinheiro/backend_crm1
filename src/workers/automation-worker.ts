@@ -19,7 +19,11 @@ import {
 } from "@/lib/automation-fairness";
 import { withSystemContext } from "@/lib/webhook-context";
 import { runAutomationInline } from "@/services/automation-executor";
-import { startTimeoutSweeper } from "@/services/automation-context";
+import { startTimeoutSweeper, stopTimeoutSweeper } from "@/services/automation-context";
+import {
+  LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+  installGracefulShutdown,
+} from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.automations");
 
@@ -186,21 +190,24 @@ export function startAutomationWorker() {
     "automation-worker started",
   );
 
-  const shutdown = async (signal: string) => {
-    log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
-    try {
-      await worker.close();
-    } catch (err) {
-      log.error(
-        { err: err instanceof Error ? err.message : String(err) },
-        "Erro ao fechar worker",
-      );
-    }
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  // Sweepers param primeiro; `close()` espera o job ativo (automação pode
+  // levar dezenas de segundos) — teto longo, stop_grace ≥ 120 s.
+  installGracefulShutdown({
+    name: "automation-worker",
+    log,
+    timeoutMs: LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+    steps: [
+      {
+        name: "sweepers",
+        run: () => {
+          clearInterval(sweepTimer);
+          stopTimeoutSweeper();
+        },
+      },
+      { name: "bullmq", run: () => worker.close() },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 
   return worker;
 }

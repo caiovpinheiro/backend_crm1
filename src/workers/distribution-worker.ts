@@ -23,6 +23,8 @@ import { processDistributionExecuteJob } from "@/jobs/distribution/execute.job";
 import { processDistributionRedistributeJob } from "@/jobs/distribution/redistribute.job";
 import { processDistributionStuckInboundJob } from "@/jobs/distribution/stuck-inbound.job";
 import { truncateErrorMessage } from "@/jobs/leads/_update-progress";
+import { prismaBase } from "@/lib/prisma-base";
+import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.distribution");
 
@@ -169,18 +171,17 @@ export async function startDistributionWorker() {
     "distribution-worker started",
   );
 
-  const shutdown = async (signal: string) => {
-    log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
-    try {
-      await Promise.all([drainWorker.close(), executeWorker.close()]);
-    } catch (err) {
-      log.error({ err: truncateErrorMessage(err) }, "Erro ao fechar worker");
-    }
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  installGracefulShutdown({
+    name: "distribution-worker",
+    log,
+    steps: [
+      {
+        name: "bullmq",
+        run: () => Promise.all([drainWorker.close(), executeWorker.close()]),
+      },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 
   return { drainWorker, executeWorker };
 }
