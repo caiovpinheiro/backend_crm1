@@ -70,6 +70,138 @@ describe("docker-entrypoint: SKIP_PRISMA_MIGRATE", () => {
   });
 });
 
+describe("docker-entrypoint: migrations no boot", () => {
+  const dir = mkdtempSync(join(tmpdir(), "entrypoint-mig-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  // CLI falsa do Prisma: registra cada chamada e devolve saída/código pedidos.
+  const fakeCli = join(dir, "fake-prisma.sh").replace(/\\/g, "/");
+  writeFileSync(
+    fakeCli,
+    [
+      'echo "$*" >> "$FAKE_CALLS"',
+      'if [ -n "$FAKE_OUTPUT" ]; then printf "%s\\n" "$FAKE_OUTPUT"; fi',
+      'exit "${FAKE_RC:-0}"',
+      "",
+    ].join("\n"),
+  );
+
+  const P3018 = [
+    "Error: P3018",
+    "",
+    "A migration failed to apply. New migrations cannot be applied before the error is recovered from.",
+    "",
+    "Migration name: 20261002120000_exemplo_quebrado",
+    "",
+    "Database error code: 42P07",
+  ].join("\n");
+  const P3009 = [
+    "Error: P3009",
+    "",
+    "migrate found failed migrations in the target database, new migrations will not be applied.",
+    "The `20260716220000_tickets_unicos` migration started at 2026-10-02 12:00:00 UTC failed",
+  ].join("\n");
+
+  let seq = 0;
+  function boot(env: Record<string, string | undefined>) {
+    const calls = join(dir, `calls_${seq++}`).replace(/\\/g, "/");
+    writeFileSync(calls, "");
+    const base: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of [
+      "SKIP_PRISMA_MIGRATE",
+      "RUN_MIGRATIONS_ON_BOOT",
+      "FAKE_RC",
+      "FAKE_OUTPUT",
+    ]) {
+      delete base[k];
+    }
+    const fullEnv: NodeJS.ProcessEnv = {
+      ...base,
+      APP_MODE: "api",
+      DATABASE_URL: "postgresql://fake/db",
+      PRISMA_CLI: `sh ${fakeCli}`,
+      FAKE_CALLS: calls,
+      TMPDIR: dir.replace(/\\/g, "/"),
+      ...env,
+    };
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete fullEnv[k];
+    const script =
+      "set -e\n" +
+      extractBlock() +
+      extractBlock("boot-migrations") +
+      "\nif boot_migrations; then echo RESULT=ok; else echo RESULT=fail; fi\n";
+    const r = spawnSync("sh", ["-c", script], { env: fullEnv, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const invoked = readFileSync(calls, "utf8").split("\n").filter(Boolean);
+    return {
+      out: r.stdout,
+      ok: r.stdout.includes("RESULT=ok"),
+      invoked,
+    };
+  }
+
+  it("o fallback de reexecução em massa saiu do entrypoint", () => {
+    // Só o comentário que explica a remoção pode citar o comando.
+    expect(entrypoint).not.toMatch(/^\s*db execute|db execute --schema/m);
+    expect(entrypoint).not.toContain("prisma/migrations/*/migration.sql");
+    expect(entrypoint).toContain("if ! boot_migrations; then\n  exit 1\nfi");
+  });
+
+  it.skipIf(!hasSh)("sucesso: uma única chamada de migrate deploy e o boot segue", () => {
+    const r = boot({});
+    expect(r.ok).toBe(true);
+    expect(r.invoked).toEqual(["migrate deploy --schema=prisma/schema.prisma"]);
+  });
+
+  it.skipIf(!hasSh)("falha (P3018): aborta, nomeia a migration e não reexecuta nada", () => {
+    const r = boot({ FAKE_RC: "1", FAKE_OUTPUT: P3018 });
+    expect(r.ok).toBe(false);
+    expect(r.invoked).toEqual(["migrate deploy --schema=prisma/schema.prisma"]);
+    expect(r.out).toContain("Error: P3018");
+    expect(r.out).toContain("prisma migrate deploy falhou (exit 1)");
+    expect(r.out).toContain("migration com falha: 20261002120000_exemplo_quebrado");
+    expect(r.out).toContain("migrate resolve --rolled-back <nome>");
+  });
+
+  it.skipIf(!hasSh)("falha (P3009, migration marcada como falha): nomeia e aborta", () => {
+    const r = boot({ FAKE_RC: "1", FAKE_OUTPUT: P3009 });
+    expect(r.ok).toBe(false);
+    expect(r.invoked).toHaveLength(1);
+    expect(r.out).toContain("migration com falha: 20260716220000_tickets_unicos");
+  });
+
+  it.skipIf(!hasSh)("falha sem nome (ex.: lock/conexão): aborta com aviso genérico", () => {
+    const r = boot({ FAKE_RC: "1", FAKE_OUTPUT: "Error: P1002" });
+    expect(r.ok).toBe(false);
+    expect(r.invoked).toHaveLength(1);
+    expect(r.out).toContain("migration não identificada");
+  });
+
+  it.skipIf(!hasSh).each([
+    [{ APP_MODE: "worker-automation" }, "somente API roda migrate"],
+    [{ APP_MODE: "api-public" }, "somente API roda migrate"],
+    [{ SKIP_PRISMA_MIGRATE: "1" }, "pulando migrate deploy"],
+    [{ RUN_MIGRATIONS_ON_BOOT: "0" }, "NÃO rodam no boot"],
+    [{ RUN_MIGRATIONS_ON_BOOT: "false" }, "NÃO rodam no boot"],
+    [{ RUN_MIGRATIONS_ON_BOOT: "off" }, "NÃO rodam no boot"],
+    [{ DATABASE_URL: "" }, "DATABASE_URL vazio"],
+  ] as const)("não migra com %j", (env, msg) => {
+    const r = boot(env);
+    expect(r.ok).toBe(true);
+    expect(r.invoked).toEqual([]);
+    expect(r.out).toContain(msg);
+  });
+
+  it.skipIf(!hasSh).each([undefined, "", "1", "true", "on", "qualquer"])(
+    "RUN_MIGRATIONS_ON_BOOT=%j mantém o migrate na API",
+    (value) => {
+      const r = boot({ RUN_MIGRATIONS_ON_BOOT: value });
+      expect(r.ok).toBe(true);
+      expect(r.invoked).toHaveLength(1);
+    },
+  );
+});
+
 describe("docker-entrypoint: GIT_SHA da imagem", () => {
   const dir = mkdtempSync(join(tmpdir(), "entrypoint-sha-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
