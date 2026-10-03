@@ -2083,8 +2083,8 @@ function inboxTabCountsScopeFp(args: {
   collapseByContact: boolean;
 }): string | null {
   try {
-    // `Date` do escopo (ex.: corte da aba Automação) entra arredondado —
-    // ver `inboxTabCountsFingerprint`.
+    // Corte relativo ao agora (aba Automação, janela 24 h) entra pelo rótulo,
+    // não pelo instante — chave estável; ver `inboxTabCountsFingerprint`.
     return inboxTabCountsFingerprint({
       k: 12,
       v: args.visibilityWhere ?? null,
