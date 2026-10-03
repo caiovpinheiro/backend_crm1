@@ -14,8 +14,9 @@ name: Build & Deploy
 #   main           -> PRODUÇÃO na DigitalOcean (157.245.121.18).
 #                     Tags publicadas: `latest` E `digitalocean`.
 #                     Webhooks disparados: EASYPANEL_WEBHOOK_DO_*
-#   digitalocean   -> mesmo ambiente da DO (branch mantida por compatibilidade).
-#                     Tag `digitalocean`, webhooks EASYPANEL_WEBHOOK_DO_*
+#   digitalocean   -> NÃO é mais gatilho (parada desde 26/08). O push numa
+#                     branch roda o workflow DAQUELA branch: apague a branch
+#                     remota ou proteja o nome para desarmar de vez.
 #   qualquer outra -> ambiente dev. Tag `dev`, webhooks EASYPANEL_WEBHOOK_DEV_*
 #
 # Os secrets EASYPANEL_WEBHOOK_PROD* apontam para o EasyPanel do servidor
@@ -70,7 +71,7 @@ name: Build & Deploy
 
 on:
   push:
-    branches: [main, DEV_BRANCH, digitalocean]
+    branches: [main, DEV_BRANCH]
   workflow_dispatch:
 
 # Cancela runs anteriores da mesma branch quando um push novo chega.
