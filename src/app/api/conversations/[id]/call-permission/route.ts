@@ -4,6 +4,10 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import {
+  lastMessageAtData,
+  touchConversationLastMessageAt,
+} from "@/lib/conversation-last-message";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -106,7 +110,7 @@ async function dispatchCallPermissionTemplate(args: {
     const msg =
       e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.";
     try {
-      await prisma.message.create({
+      const failedRow = await prisma.message.create({
         data: withOrgFromCtx({
           conversationId: args.conv.id,
           content: args.content,
@@ -116,6 +120,10 @@ async function dispatchCallPermissionTemplate(args: {
           sendStatus: "failed",
           sendError: msg.slice(0, 500),
         }),
+      });
+      await touchConversationLastMessageAt({
+        conversationId: args.conv.id,
+        at: failedRow.createdAt,
       });
       publishNewMessage({
         organizationId: args.conv.organizationId,
@@ -159,6 +167,7 @@ async function dispatchCallPermissionTemplate(args: {
         whatsappCallConsentStatus: "REQUESTED",
         whatsappCallConsentUpdatedAt: now,
         updatedAt: now,
+        ...lastMessageAtData(savedMsg),
       },
     });
     try {
@@ -176,6 +185,14 @@ async function dispatchCallPermissionTemplate(args: {
         "[call-permission] não resetou type/expiresAt (migration pendente?)",
       );
     }
+  }
+
+  if (keepGranted) {
+    // Sem o update do consentimento acima: grava só a ordem da lista.
+    await touchConversationLastMessageAt({
+      conversationId: args.conv.id,
+      at: savedMsg.createdAt,
+    }).catch((err) => log.warn({ err }, "[call-permission] lastMessageAt"));
   }
 
   publishNewMessage({

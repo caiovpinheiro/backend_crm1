@@ -110,6 +110,8 @@ import {
 } from "@/services/outbound-messaging";
 
 const ORG = "org-a";
+/** `createdAt` da mensagem gravada — vira `conversations.lastMessageAt` no mesmo update. */
+const MESSAGE_CREATED_AT = new Date("2026-09-30T10:00:00Z");
 const ACTOR = { id: "user-1", name: "Ana", email: "ana@x.com", role: "MEMBER", organizationId: ORG };
 
 const CHANNEL = {
@@ -169,7 +171,7 @@ beforeEach(() => {
   h.isBaileysChannel.mockReturnValue(false);
   h.messageCreate.mockImplementation(async (args: { data: Record<string, unknown> }) => ({
     id: "msg-1",
-    createdAt: new Date("2026-09-30T10:00:00Z"),
+    createdAt: MESSAGE_CREATED_AT,
     ...args.data,
   }));
   h.sendWhatsAppText.mockResolvedValue({ externalId: "wamid.1", failed: false, error: null });
@@ -216,7 +218,7 @@ describe("sendTextToConversation — caminho feliz", () => {
     );
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false, lastMessageAt: MESSAGE_CREATED_AT },
     });
     expect(h.ssePublish).toHaveBeenCalledWith("new_message", {
       organizationId: ORG,
@@ -320,7 +322,7 @@ describe("sendTextToConversation — erro do provedor", () => {
     });
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: true },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: true, lastMessageAt: MESSAGE_CREATED_AT },
     });
     const logged = h.logEvent.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(logged).not.toContain("MESSAGE_SENT");
@@ -420,7 +422,7 @@ describe("sendTemplateToConversation", () => {
     });
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false, lastMessageAt: MESSAGE_CREATED_AT },
     });
     expect(h.ssePublish).toHaveBeenCalledWith(
       "new_message",

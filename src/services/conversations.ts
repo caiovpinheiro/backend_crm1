@@ -23,6 +23,7 @@ import {
   inboxClosedCardGroupKey,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
+import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import {
   activeInboxQueueGuardWhere,
@@ -36,11 +37,13 @@ import {
   getRequestContext,
 } from "@/lib/request-context";
 import {
+  DEFAULT_LIST_SORT_BY,
   InvalidListCursorError,
   encodeListCursor,
   listKeysetSql,
   listKeysetWhere,
   listSortColumnSql,
+  listSortValueOf,
   parseListCursor,
   type ListCursor,
   type ListSortBy,
@@ -200,7 +203,8 @@ export type GetConversationsParams = {
   sources?: string[];
   /** true = só conversas cujo contato não tem origem. */
   withoutSource?: boolean;
-  sortBy?: "updatedAt" | "createdAt" | "unreadCount";
+  /** Padrão `lastMessageAt` (última mensagem de chat; ver `conversation-list-cursor.ts`). */
+  sortBy?: ListSortBy;
   sortOrder?: "asc" | "desc";
   /**
    * Escopo de canais por usuário (IDs de `Channel`). `null/undefined` → sem
@@ -234,6 +238,12 @@ const listSelect = {
   lastMessageDirection: true,
   closedAt: true,
   followUpAt: true,
+  /**
+   * Coluna crua (chave do cursor). No item da resposta o campo é
+   * sobrescrito pelo horário da prévia (`paintListRows`) — mesmo valor
+   * depois do backfill, e nunca NULL quando existe mensagem de chat.
+   */
+  lastMessageAt: true,
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
@@ -386,15 +396,8 @@ async function lastMessagePreviewsBatch(
       WHERE "conversationId" = ANY(${conversationIds})
         AND "organizationId" = ${orgId}
         -- Mesma regra do board: preview = chat real, não nota/sistema.
-        AND "isPrivate" = false
-        AND "messageType" NOT IN (
-          'note',
-          'ai_draft',
-          'whatsapp_call',
-          'whatsapp_call_recording'
-        )
-        AND "messageType" NOT LIKE 'event%'
-        AND direction IN ('in', 'out')
+        -- É também o recorte de "conversations"."lastMessageAt".
+        AND ${chatMessageSqlFilter()}
     )
     -- Desempate no mesmo segundo: o WhatsApp manda timestamp em segundos
     -- e 3 mensagens seguidas empatavam (o card mostrava qualquer uma).
@@ -1290,6 +1293,70 @@ async function findCollapsedConversationPage(
  * exige saber quais grupos já tiveram representante numa página anterior:
  * uma consulta por lote procura irmãs dos candidatos antes do cursor.
  */
+const scanRowSelect = {
+  id: true,
+  contactId: true,
+  channel: true,
+  channelId: true,
+  lastMessageAt: true,
+  updatedAt: true,
+  createdAt: true,
+  unreadCount: true,
+} satisfies Prisma.ConversationSelect;
+
+type ScanRow = Prisma.ConversationGetPayload<{ select: typeof scanRowSelect }>;
+
+/**
+ * Próximo lote do caminho Prisma, na ordem da lista, depois de `after`.
+ *
+ * A chave padrão é `COALESCE(lastMessageAt, updatedAt)`, que o `orderBy`
+ * do Prisma não expressa: lê dois fluxos já ordenados — conversas COM
+ * `lastMessageAt` (ordem pela coluna) e SEM (ordem por `updatedAt`) — e
+ * intercala. Os `take` primeiros da intercalação são exatos: cada um deles
+ * está entre os `take` primeiros do próprio fluxo.
+ */
+async function fetchListScanBatch(
+  args: ListPageArgs,
+  after: ListCursor | null,
+  take: number,
+): Promise<ScanRow[]> {
+  const keyset = (where: Prisma.ConversationWhereInput): Prisma.ConversationWhereInput =>
+    after
+      ? { AND: [where, listKeysetWhere(args.sortBy, after, args.sortOrder)] }
+      : where;
+  if (args.sortBy !== "lastMessageAt") {
+    return prisma.conversation.findMany({
+      where: keyset(args.where),
+      orderBy: [{ [args.sortBy]: args.sortOrder }, { id: args.sortOrder }],
+      select: scanRowSelect,
+      take,
+    });
+  }
+  const [withCol, withoutCol] = await Promise.all([
+    prisma.conversation.findMany({
+      where: keyset({ AND: [args.where, { lastMessageAt: { not: null } }] }),
+      orderBy: [{ lastMessageAt: args.sortOrder }, { id: args.sortOrder }],
+      select: scanRowSelect,
+      take,
+    }),
+    prisma.conversation.findMany({
+      where: keyset({ AND: [args.where, { lastMessageAt: null }] }),
+      orderBy: [{ updatedAt: args.sortOrder }, { id: args.sortOrder }],
+      select: scanRowSelect,
+      take,
+    }),
+  ]);
+  const dir = args.sortOrder === "asc" ? 1 : -1;
+  const key = (r: ScanRow) => (r.lastMessageAt ?? r.updatedAt).getTime();
+  return [...withCol, ...withoutCol]
+    .sort((a, b) => {
+      const d = key(a) - key(b);
+      if (d !== 0) return d * dir;
+      return (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) * dir;
+    })
+    .slice(0, take);
+}
+
 async function scanCollapsedRepIdsJs(
   args: ListPageArgs,
 ): Promise<CollapsedConversationPage> {
@@ -1302,29 +1369,10 @@ async function scanCollapsedRepIdsJs(
   let scanned = 0;
   let exhausted = false;
   let after: ListCursor | null = cursor;
-  const orderBy: Prisma.ConversationOrderByWithRelationInput[] = [
-    { [args.sortBy]: args.sortOrder },
-    { id: args.sortOrder },
-  ];
 
   while (repIds.length < needReps && scanned < HARD_CAP) {
     const take = Math.min(BATCH, HARD_CAP - scanned);
-    const batch = await prisma.conversation.findMany({
-      where: after
-        ? { AND: [args.where, listKeysetWhere(args.sortBy, after, args.sortOrder)] }
-        : args.where,
-      orderBy,
-      select: {
-        id: true,
-        contactId: true,
-        channel: true,
-        channelId: true,
-        updatedAt: true,
-        createdAt: true,
-        unreadCount: true,
-      },
-      take,
-    });
+    const batch = await fetchListScanBatch(args, after, take);
     if (batch.length === 0) {
       exhausted = true;
       break;
@@ -1332,7 +1380,7 @@ async function scanCollapsedRepIdsJs(
     scanned += batch.length;
     if (batch.length < take) exhausted = true;
     const tail = batch[batch.length - 1]!;
-    after = { sortVal: tail[args.sortBy], id: tail.id };
+    after = { sortVal: listSortValueOf(args.sortBy, tail), id: tail.id };
 
     if (args.collapse && cursor) {
       const contactIds = [
@@ -1381,8 +1429,13 @@ async function scanCollapsedRepIdsJs(
 
 type ConversationListPage = {
   items: ConversationListItem[];
-  total: number;
-  page: number;
+  /**
+   * Total real do filtro, ou `null` quando não se sabe sem um COUNT (modo
+   * cursor fora da última página e sem badge em cache). Nunca estimado.
+   */
+  total: number | null;
+  /** Nº da página só no modo legado (`page` sem `cursor`); com cursor, `null`. */
+  page: number | null;
   perPage: number;
   hasMore: boolean;
   nextCursor: string | null;
@@ -1505,7 +1558,7 @@ export async function getConversations(
 
   const where = await buildConversationListWhere(params);
 
-  const sortBy = params.sortBy ?? "updatedAt";
+  const sortBy = params.sortBy ?? DEFAULT_LIST_SORT_BY;
   const sortOrder = params.sortOrder ?? "desc";
   const cursor = parseListCursor(params.cursor, sortBy);
   if (params.cursor && !cursor) throw new InvalidListCursorError();
@@ -1536,25 +1589,26 @@ export async function getConversations(
         }),
     lastMessagePreviewsBatch(pageIds),
   ]);
-  const total = knownTotal ?? cachedTotal ?? skip + perPage + 1;
+  // `total` só quando é o número real do filtro: varredura esgotada ou o
+  // badge em cache. Nunca o antigo `skip + perPage + 1` (em modo cursor era
+  // sempre perPage+1 e o cliente não tinha como distinguir).
+  const total = knownTotal ?? cachedTotal ?? null;
   const byIdRow = new Map(hydrated.map((r) => [r.id, r]));
   const rows = pageIds
     .map((id) => byIdRow.get(id))
     .filter((r): r is (typeof hydrated)[number] => r !== undefined);
 
   const items = await paintListRows(rows, previewMap);
-  const last = items[items.length - 1];
-  const sortVal =
-    !last
-      ? null
-      : sortBy === "createdAt"
-        ? last.createdAt
-        : sortBy === "unreadCount"
-          ? last.unreadCount
-          : last.updatedAt;
-  const nextCursor = hasMore && last ? encodeListCursor(sortBy, sortVal, last.id) : null;
+  // Chave do cursor pela linha CRUA (coluna `lastMessageAt`), não pelo item
+  // pintado — no item `lastMessageAt` é o horário da prévia.
+  const lastRow = rows[rows.length - 1];
+  const nextCursor =
+    hasMore && lastRow
+      ? encodeListCursor(sortBy, listSortValueOf(sortBy, lastRow), lastRow.id)
+      : null;
 
-  return { items, total, page, perPage, hasMore, nextCursor };
+  // Com cursor a página não tem número (keyset): `page: null`.
+  return { items, total, page: cursor ? null : page, perPage, hasMore, nextCursor };
 }
 
 /** Lista só categorias (exclui "todos") — contagens por aba e grants. */

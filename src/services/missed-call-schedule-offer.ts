@@ -1,4 +1,5 @@
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
@@ -113,7 +114,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
   }
 
   const content = buildOutboundTemplateMessageContent(name, "generic");
-  await prisma.message.create({
+  const saved = await prisma.message.create({
     data: withOrgFromCtx({
       conversationId: params.conversationId,
       content,
@@ -133,6 +134,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
       data: {
         lastMessageDirection: "out",
         updatedAt: new Date(),
+        ...lastMessageAtData(saved),
       },
     })
     .catch(() => {});

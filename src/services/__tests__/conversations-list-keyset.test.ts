@@ -82,6 +82,9 @@ vi.mock("@/services/deals", () => ({
   clearContactOwnershipOnClose: vi.fn().mockResolvedValue(undefined),
 }));
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import type { Prisma } from "@prisma/client";
 
 import { decodeOpaqueCursor } from "@/lib/pagination/opaque-cursor";
@@ -90,14 +93,24 @@ import {
   InvalidListCursorError,
   encodeListCursor,
   listKeysetWhere,
+  listSortColumnSql,
   parseListCursor,
 } from "@/services/conversation-list-cursor";
 import { getConversations } from "@/services/conversations";
 import { FakeDb, INBOX_SCHEMA } from "@/test-setup/fake-db";
 
 const ORG = "org-a";
+/** Chave padrão da lista no SQL (alias `c`). */
+const KEY_SQL = `COALESCE(c."lastMessageAt", c."updatedAt")`;
 const T0 = Date.UTC(2026, 8, 1, 12, 0, 0);
 const at = (sec: number) => new Date(T0 + sec * 1000);
+
+/** Cursor no formato da versão anterior (v1), como o frontend guarda hoje. */
+function v1Cursor(k: string, when: Date, id: string): string {
+  return Buffer.from(JSON.stringify({ v: 1, k, s: when.getTime(), i: id })).toString(
+    "base64url",
+  );
+}
 
 function withOrg<T>(fn: () => Promise<T>): Promise<T> {
   return runWithContext(
@@ -141,7 +154,7 @@ describe("cursor da lista", () => {
     expect(raw).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(raw).not.toContain("cmconv123");
     expect(decodeOpaqueCursor(raw)).toEqual({
-      v: 1,
+      v: 2,
       k: "updatedAt",
       s: when.getTime(),
       i: "cmconv123",
@@ -166,13 +179,45 @@ describe("cursor da lista", () => {
   it("recusa cursor de outra ordenação, de outra versão e lixo", () => {
     const raw = encodeListCursor("updatedAt", at(1), "c1")!;
     expect(parseListCursor(raw, "createdAt")).toBeNull();
+    // v2 de `updatedAt` não serve para a chave padrão (só o v1 da transição)
+    expect(parseListCursor(raw, "lastMessageAt")).toBeNull();
     expect(parseListCursor("nao-e-cursor", "updatedAt")).toBeNull();
     expect(parseListCursor("", "updatedAt")).toBeNull();
     expect(parseListCursor(undefined, "updatedAt")).toBeNull();
-    const v2 = Buffer.from(JSON.stringify({ v: 2, k: "updatedAt", s: 1, i: "x" })).toString(
+    const v3 = Buffer.from(JSON.stringify({ v: 3, k: "updatedAt", s: 1, i: "x" })).toString(
       "base64url",
     );
-    expect(parseListCursor(v2, "updatedAt")).toBeNull();
+    expect(parseListCursor(v3, "updatedAt")).toBeNull();
+  });
+
+  it("chave padrão: cursor v2 de `lastMessageAt`", () => {
+    const when = at(42);
+    const raw = encodeListCursor("lastMessageAt", when, "c9")!;
+    expect(decodeOpaqueCursor(raw)).toEqual({
+      v: 2,
+      k: "lastMessageAt",
+      s: when.getTime(),
+      i: "c9",
+    });
+    expect(parseListCursor(raw, "lastMessageAt")).toEqual({ sortVal: when, id: "c9" });
+    expect(parseListCursor(raw, "updatedAt")).toBeNull();
+  });
+
+  it("aceita o v1 por uma versão — inclusive o de `updatedAt` na chave padrão (cursor que o frontend tinha no deploy)", () => {
+    expect(parseListCursor(v1Cursor("updatedAt", at(7), "a"), "updatedAt")).toEqual({
+      sortVal: at(7),
+      id: "a",
+    });
+    expect(parseListCursor(v1Cursor("updatedAt", at(7), "a"), "lastMessageAt")).toEqual({
+      sortVal: at(7),
+      id: "a",
+    });
+    expect(parseListCursor(v1Cursor("createdAt", at(7), "a"), "lastMessageAt")).toBeNull();
+    // o texto puro anterior ao v1 também
+    expect(parseListCursor(`${at(8).getTime()}_b`, "lastMessageAt")).toEqual({
+      sortVal: at(8),
+      id: "b",
+    });
   });
 
   it("getConversations com cursor ilegível lança InvalidListCursorError (a rota responde 400)", async () => {
@@ -189,14 +234,34 @@ describe("cursor da lista", () => {
 
 describe("SQL da página (keyset)", () => {
   const cursorAt = at(100);
-  const cursor = () => encodeListCursor("updatedAt", cursorAt, "conv-050")!;
+  const cursor = () => encodeListCursor("lastMessageAt", cursorAt, "conv-050")!;
+
+  it("a chave padrão é a mesma expressão dos índices da migration (senão o índice não é usado)", () => {
+    const expr = listSortColumnSql("lastMessageAt").strings.join("?");
+    expect(expr).toBe(KEY_SQL);
+    const migration = readFileSync(
+      resolve(
+        process.cwd(),
+        "prisma/migrations/20261003150000_conversations_last_message_at/migration.sql",
+      ),
+      "utf8",
+    );
+    const sql = migration
+      .split(/\r?\n/)
+      .filter((l) => !l.trimStart().startsWith("--"))
+      .join("\n");
+    const indexExpr = KEY_SQL.replaceAll("c.", "");
+    expect(sql).toContain(`("organizationId", (${indexExpr}) DESC, "id" DESC)`);
+    expect(sql.match(/CREATE INDEX IF NOT EXISTS/g)).toHaveLength(2);
+    expect(sql).toMatch(/WHERE "status" = 'OPEN'/);
+  });
 
   it("fila quente com cursor: comparação de linha (chave, id), sem OFFSET, LIMIT perPage+1", async () => {
     await withOrg(() => getConversations({ tab: "entrada", perPage: 50, cursor: cursor() }));
     const [call] = listPageCalls();
     expect(call).toBeDefined();
-    expect(call!.text).toMatch(/\(c\."updatedAt", c\.id\) < \(\?, \?\)/);
-    expect(call!.text).toMatch(/ORDER BY c\."updatedAt" DESC, c\.id DESC/);
+    expect(call!.text).toContain(`(${KEY_SQL}, c.id) < (?, ?)`);
+    expect(call!.text).toContain(`ORDER BY ${KEY_SQL} DESC, c.id DESC`);
     expect(call!.text).not.toMatch(/OFFSET/i);
     expect(call!.text).not.toMatch(/DISTINCT ON/i);
     // Valores do cursor e do LIMIT viajam como parâmetros, nunca no texto.
@@ -211,8 +276,27 @@ describe("SQL da página (keyset)", () => {
       getConversations({ tab: "entrada", sortOrder: "asc", cursor: cursor() }),
     );
     const [call] = listPageCalls();
-    expect(call!.text).toMatch(/\(c\."updatedAt", c\.id\) > \(\?, \?\)/);
-    expect(call!.text).toMatch(/ORDER BY c\."updatedAt" ASC, c\.id ASC/);
+    expect(call!.text).toContain(`(${KEY_SQL}, c.id) > (?, ?)`);
+    expect(call!.text).toContain(`ORDER BY ${KEY_SQL} ASC, c.id ASC`);
+  });
+
+  it("`sortBy=updatedAt` explícito continua ordenando pela coluna (picker de encaminhar)", async () => {
+    const raw = encodeListCursor("updatedAt", cursorAt, "conv-050")!;
+    await withOrg(() => getConversations({ tab: "entrada", sortBy: "updatedAt", cursor: raw }));
+    const [call] = listPageCalls();
+    expect(call!.text).toMatch(/\(c\."updatedAt", c\.id\) < \(\?, \?\)/);
+    expect(call!.text).toMatch(/ORDER BY c\."updatedAt" DESC, c\.id DESC/);
+    expect(call!.text).not.toContain("lastMessageAt");
+  });
+
+  it("cursor v1 de `updatedAt` (frontend no deploy) vira limite na chave nova — sem 400", async () => {
+    await withOrg(() =>
+      getConversations({ tab: "entrada", cursor: v1Cursor("updatedAt", cursorAt, "conv-050") }),
+    );
+    const [call] = listPageCalls();
+    expect(call!.text).toContain(`(${KEY_SQL}, c.id) < (?, ?)`);
+    expect(call!.values).toContainEqual(cursorAt);
+    expect(call!.values).toContain("conv-050");
   });
 
   it("Encerradas com cursor: representante por NOT EXISTS — sem OFFSET e sem DISTINCT ON no escopo inteiro", async () => {
@@ -223,9 +307,9 @@ describe("SQL da página (keyset)", () => {
     expect(call!.text).not.toMatch(/DISTINCT ON/i);
     expect(call!.text).toMatch(/NOT EXISTS/);
     // o cursor limita a leitura DENTRO do select de conversas…
-    expect(call!.text).toMatch(/\(c\."updatedAt", c\.id\) < \(\?, \?\)/);
+    expect(call!.text).toContain(`(${KEY_SQL}, c.id) < (?, ?)`);
     // …e a irmã "melhor" do mesmo contato+canal é a mais nova.
-    expect(call!.text).toMatch(/\(c\."updatedAt", c\.id\) > \(o\.sort_val, o\.id\)/);
+    expect(call!.text).toContain(`(${KEY_SQL}, c.id) > (o.sort_val, o.id)`);
     expect(call!.text).toMatch(/c\."contactId" = o\.contact_id/);
   });
 
@@ -298,7 +382,7 @@ describe("SQL da página (keyset)", () => {
     const first = await count({ tab: "entrada" });
     expect(first.page.hasMore).toBe(true);
     expect(first.page.nextCursor).toBeTruthy();
-    expect(parseListCursor(first.page.nextCursor, "updatedAt")).toEqual({
+    expect(parseListCursor(first.page.nextCursor, "lastMessageAt")).toEqual({
       sortVal: at(2),
       id: "b",
     });
@@ -307,6 +391,17 @@ describe("SQL da página (keyset)", () => {
     expect(second.listPages).toBe(1);
     expect(second.raw).toBe(first.raw);
     expect(second.findMany).toBe(first.findMany);
+
+    // A chave nova custa exatamente as consultas da ordem antiga (`updatedAt`).
+    const oldKey = await count({ tab: "entrada", sortBy: "updatedAt" });
+    expect(oldKey.raw).toBe(first.raw);
+    expect(oldKey.findMany).toBe(first.findMany);
+
+    // total/page em modo cursor: nunca perPage+1 nem `page: 1` inventado.
+    expect(first.page.total).toBeNull();
+    expect(first.page.page).toBe(1);
+    expect(second.page.total).toBeNull();
+    expect(second.page.page).toBeNull();
 
     const firstClosed = await count({ tab: "finalizados" });
     const secondClosed = await count({
@@ -335,6 +430,7 @@ type ConvRow = {
   assignedToId: string | null;
   unreadCount: number;
   lastInboundAt: Date | null;
+  lastMessageAt: Date | null;
   updatedAt: Date;
   createdAt: Date;
 };
@@ -352,6 +448,7 @@ function conv(id: string, sec: number, extra: Partial<ConvRow> = {}): ConvRow {
     assignedToId: "user-1",
     unreadCount: 0,
     lastInboundAt: null,
+    lastMessageAt: null,
     updatedAt: at(sec),
     createdAt: at(sec),
     ...extra,
@@ -545,7 +642,123 @@ describe("paginação por cursor — comportamento", () => {
   });
 });
 
+describe("chave padrão (última mensagem) — comportamento", () => {
+  /** Conversa com mensagem de chat em `msgSec` e `updatedAt` em `updSec`. */
+  const withMsg = (id: string, msgSec: number, updSec = msgSec, extra: Partial<ConvRow> = {}) =>
+    conv(id, updSec, { lastMessageAt: at(msgSec), ...extra });
+
+  it("empate na última mensagem: o id desempata; `updatedAt` não entra na ordem", async () => {
+    useFakeDb([
+      withMsg("m-9", 50, 1),
+      withMsg("m-e", 40, 900), // lida/atribuída depois: updatedAt alto
+      withMsg("m-d", 40, 2),
+      withMsg("m-c", 40, 800),
+      withMsg("m-b", 40, 3),
+      withMsg("m-0", 10, 999),
+    ]);
+    const pages = await readAll({ perPage: 2 });
+    expect(pages).toEqual([["m-9", "m-e"], ["m-d", "m-c"], ["m-b", "m-0"]]);
+  });
+
+  it("conversa que recebe mensagem sobe; entre páginas não duplica nem pula as paradas", async () => {
+    const { db } = useFakeDb([
+      withMsg("c6", 60),
+      withMsg("c5", 50),
+      withMsg("c4", 40),
+      withMsg("c3", 30),
+      withMsg("c2", 20),
+      withMsg("c1", 10),
+    ]);
+    const newMessage = (id: string, sec: number) => {
+      const row = db.table("conversation").find((r) => r.id === id)!;
+      row.lastMessageAt = at(sec);
+      row.updatedAt = at(sec);
+    };
+    const pages = await readAll({ perPage: 2 }, (pageIndex) => {
+      if (pageIndex === 0) newMessage("c2", 100);
+    });
+    const flat = pages.flat();
+    expect(new Set(flat).size).toBe(flat.length);
+    expect(pages).toEqual([["c6", "c5"], ["c4", "c3"], ["c1"]]);
+
+    const top = await withOrg(() => getConversations({ perPage: 2 }));
+    expect(top.items.map((it) => it.id)).toEqual(["c2", "c6"]);
+  });
+
+  it("ler ou atribuir (só `updatedAt`/responsável mudam) NÃO muda a ordem", async () => {
+    const { db } = useFakeDb([
+      withMsg("a", 50),
+      withMsg("b", 40),
+      withMsg("c", 30),
+      withMsg("d", 20),
+    ]);
+    const before = (await readAll({ perPage: 2 })).flat();
+    expect(before).toEqual(["a", "b", "c", "d"]);
+    // POST /read e atribuição: unreadCount, responsável e @updatedAt
+    for (const id of ["d", "c"]) {
+      const row = db.table("conversation").find((r) => r.id === id)!;
+      row.updatedAt = at(10_000);
+      row.unreadCount = 0;
+      row.assignedToId = "user-1";
+    }
+    const after = (await readAll({ perPage: 2 })).flat();
+    expect(after).toEqual(before);
+  });
+
+  it("coluna NULL (antes do backfill / sem mensagem de chat) cai no `updatedAt`, intercalada pela chave", async () => {
+    useFakeDb([
+      withMsg("a", 50),
+      conv("b-null", 45),
+      withMsg("c", 40, 99), // updatedAt alto não puxa para cima
+      conv("d-null", 30),
+      withMsg("e", 30), // empate com d-null na chave → id desempata
+      conv("f-null", 5),
+    ]);
+    const pages = await readAll({ perPage: 2 });
+    expect(pages).toEqual([["a", "b-null"], ["c", "e"], ["d-null", "f-null"]]);
+  });
+
+  it("cursor v1 de `updatedAt` (frontend no deploy) continua a paginação na chave nova", async () => {
+    useFakeDb([withMsg("a", 50), conv("b-null", 45), withMsg("c", 40), conv("d-null", 30)]);
+    const page = await withOrg(() =>
+      getConversations({ perPage: 2, cursor: v1Cursor("updatedAt", at(45), "b-null") }),
+    );
+    expect(page.items.map((it) => it.id)).toEqual(["c", "d-null"]);
+    expect(page.page).toBeNull();
+  });
+
+  it("Encerradas: representante do contato+canal é o de mensagem mais nova", async () => {
+    useFakeDb([
+      closed("x-old", 10, "ct-x", { lastMessageAt: at(90) }),
+      closed("x-new", 95, "ct-x", { lastMessageAt: at(20) }), // encerrado depois, mensagem antiga
+      closed("y", 50, "ct-y", { lastMessageAt: at(50) }),
+    ]);
+    const pages = await readAll({ tab: "finalizados", perPage: 1 });
+    expect(pages).toEqual([["x-old"], ["y"]]);
+  });
+});
+
 describe("listKeysetWhere", () => {
+  it("chave padrão: o complemento (NOT) também é exato com NULL", () => {
+    const db = new FakeDb(INBOX_SCHEMA);
+    const rows = [
+      conv("a", 10, { lastMessageAt: at(10) }),
+      conv("b", 20),
+      conv("c", 99, { lastMessageAt: at(20) }),
+      conv("d", 30),
+    ];
+    db.insert("conversation", ...rows);
+    const cursor = { sortVal: at(20), id: "c" };
+    const after = db.run("conversation", "findMany", {
+      where: listKeysetWhere("lastMessageAt", cursor, "desc"),
+    }) as ConvRow[];
+    const upTo = db.run("conversation", "findMany", {
+      where: { NOT: listKeysetWhere("lastMessageAt", cursor, "desc") },
+    }) as ConvRow[];
+    expect(after.map((r) => r.id).sort()).toEqual(["a", "b"]);
+    expect(upTo.map((r) => r.id).sort()).toEqual(["c", "d"]);
+  });
+
   it("o complemento (NOT) é exatamente 'até o cursor, inclusive'", () => {
     const db = new FakeDb(INBOX_SCHEMA);
     const rows = [conv("a", 10), conv("b", 20), conv("c", 20), conv("d", 30)];
