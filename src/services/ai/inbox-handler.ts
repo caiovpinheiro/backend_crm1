@@ -88,6 +88,7 @@ import {
   type InboxPolicy,
 } from "@/lib/ai-agents/steering";
 import { cache } from "@/lib/cache";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -1756,6 +1757,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             lastMessageDirection: "out",
             hasAgentReply: true,
             updatedAt: new Date(),
+            ...lastMessageAtData(saved),
           },
         })
         .catch(() => null);
