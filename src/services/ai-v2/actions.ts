@@ -4,6 +4,7 @@
  */
 
 import { toWhatsAppText } from "./reply-format";
+import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -702,6 +703,11 @@ async function executeSendWhatsappTemplate(action: V2Action, ctx: V2ActionContex
         ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
       }),
     });
+    // Sem update da conversa neste caminho: grava só a ordem da lista.
+    await touchConversationLastMessageAt({
+      conversationId: ctx.conversationId,
+      at: saved.createdAt,
+    }).catch(() => {});
     const { publishNewMessage } = await import("@/lib/realtime-events");
     publishNewMessage({
       organizationId: conv.organizationId,

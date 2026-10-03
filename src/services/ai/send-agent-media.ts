@@ -7,6 +7,7 @@ import { WHATSAPP_VIDEO_MAX_BYTES } from "@/lib/audio-convert";
 import { enqueueMetaAttach, type MetaAttachPayload } from "@/lib/queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { isBaileysChannel, sendWhatsAppMedia } from "@/lib/send-whatsapp";
@@ -131,6 +132,11 @@ export async function sendAgentFollowUpMedia(args: {
         sendStatus: "pending",
       }),
     });
+    // Este envio não atualiza a conversa: grava só a ordem da lista.
+    await touchConversationLastMessageAt({
+      conversationId: conv.id,
+      at: msgRow.createdAt,
+    }).catch(() => {});
 
     try {
       publishNewMessage({

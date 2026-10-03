@@ -24,6 +24,10 @@
  * buscará o binário e chamará o endpoint de media do canal.
  */
 
+import {
+  lastMessageAtData,
+  touchConversationLastMessageAt,
+} from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // prismaBase para check de concorrencia cross-org (antes de entrar no
@@ -238,6 +242,11 @@ async function sendViaText(
         data: { sendStatus: "failed", sendError: result.error ?? "send failed" },
       })
       .catch(() => {});
+    // A bolha falhada fica no chat (e na prévia do card): mesma ordem.
+    await touchConversationLastMessageAt({
+      conversationId: conv.id,
+      at: saved.createdAt,
+    }).catch(() => {});
     throw new Error(result.error ?? "Envio WhatsApp falhou");
   }
 
@@ -248,6 +257,7 @@ async function sendViaText(
         lastMessageDirection: "out",
         hasAgentReply: true,
         hasError: false,
+        ...lastMessageAtData(saved),
       },
     })
     .catch(() => {});
@@ -361,6 +371,7 @@ async function sendViaMetaTemplate(
         lastMessageDirection: "out",
         hasAgentReply: true,
         hasError: false,
+        ...lastMessageAtData(saved),
       },
     })
     .catch(() => {});

@@ -50,6 +50,10 @@ import {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-context";
+import {
+  lastMessageAtData,
+  touchConversationLastMessageAt,
+} from "@/lib/conversation-last-message";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { safeFetch } from "@/lib/safe-fetch";
@@ -247,6 +251,22 @@ async function pauseAwaitingReply(
   return { skipRemaining: true };
 }
 
+/**
+ * Ordem da lista do inbox (`conversations.lastMessageAt`) para os envios da
+ * automação que não atualizam a conversa depois de gravar a mensagem
+ * (mídia, botões, lista, flow, pergunta, falha). Onde já existe update da
+ * conversa o campo vai nele (`lastMessageAtData`). Falha aqui não derruba o
+ * passo.
+ */
+async function touchAutomationLastMessageAt(
+  conversationId: string,
+  at: Date,
+): Promise<void> {
+  await touchConversationLastMessageAt({ conversationId, at }).catch((err) =>
+    log.warn("Falha ao gravar lastMessageAt (não-fatal):", err),
+  );
+}
+
 /** Persiste tentativa falha no inbox + marca conversa com erro. */
 async function persistFailedAutomationOutbound(opts: {
   conversationId: string | undefined | null;
@@ -261,7 +281,7 @@ async function persistFailedAutomationOutbound(opts: {
 }): Promise<void> {
   if (!opts.conversationId) return;
   const sendError = formatMetaSendError(opts.error).slice(0, 500);
-  await prisma.message
+  const failedRow = await prisma.message
     .create({
       data: withOrgFromCtx({
         conversationId: opts.conversationId,
@@ -277,7 +297,13 @@ async function persistFailedAutomationOutbound(opts: {
         ...(opts.channelId ? { channelId: opts.channelId } : {}),
       }),
     })
-    .catch((e) => log.warn("Falha ao persistir mensagem de erro:", e));
+    .catch((e) => {
+      log.warn("Falha ao persistir mensagem de erro:", e);
+      return null;
+    });
+  if (failedRow) {
+    await touchAutomationLastMessageAt(opts.conversationId, failedRow.createdAt);
+  }
 
   const { markConversationHasError } = await import(
     "@/services/conversation-error-flag"
@@ -3144,6 +3170,7 @@ export async function executeStep(
                   hasHumanReply: true,
                 }
               : await botOutboundReplyMark()),
+            ...lastMessageAtData(saved),
           },
         }).catch(() => {});
 
@@ -3470,6 +3497,7 @@ export async function executeStep(
           data: {
             updatedAt: new Date(),
             ...(await botOutboundReplyMark()),
+            ...lastMessageAtData(saved),
           },
         }).catch(() => {});
 
@@ -3679,6 +3707,7 @@ export async function executeStep(
             ...(mediaChannelId ? { channelId: mediaChannelId } : {}),
           }),
         });
+        await touchAutomationLastMessageAt(mediaConversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId: mediaConversationId,
@@ -3803,6 +3832,7 @@ export async function executeStep(
             ...(interactiveChannelId ? { channelId: interactiveChannelId } : {}),
           }),
         });
+        await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
@@ -3969,6 +3999,7 @@ export async function executeStep(
             ...(listChannelId ? { channelId: listChannelId } : {}),
           }),
         });
+        await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
@@ -4104,6 +4135,7 @@ export async function executeStep(
             ...(flowChannelId ? { channelId: flowChannelId } : {}),
           }),
         });
+        await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
           conversationId,
@@ -4516,6 +4548,7 @@ export async function executeStep(
           const saved = await prisma.message.create({
             data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId, ...(questionChannelId ? { channelId: questionChannelId } : {}) }),
           });
+          await touchAutomationLastMessageAt(conv.id, saved.createdAt);
           publishNewMessage({ organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
 
           if (resolveFailureGotoStepId(cfg)) {
