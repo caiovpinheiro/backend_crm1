@@ -23,6 +23,7 @@ import {
   inboxClosedCardGroupKey,
   noCountableReplyWhere,
 } from "@/lib/conversation-reply-marking";
+import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import {
   activeInboxQueueGuardWhere,
@@ -386,15 +387,8 @@ async function lastMessagePreviewsBatch(
       WHERE "conversationId" = ANY(${conversationIds})
         AND "organizationId" = ${orgId}
         -- Mesma regra do board: preview = chat real, não nota/sistema.
-        AND "isPrivate" = false
-        AND "messageType" NOT IN (
-          'note',
-          'ai_draft',
-          'whatsapp_call',
-          'whatsapp_call_recording'
-        )
-        AND "messageType" NOT LIKE 'event%'
-        AND direction IN ('in', 'out')
+        -- É também o recorte de "conversations"."lastMessageAt".
+        AND ${chatMessageSqlFilter()}
     )
     -- Desempate no mesmo segundo: o WhatsApp manda timestamp em segundos
     -- e 3 mensagens seguidas empatavam (o card mostrava qualquer uma).
