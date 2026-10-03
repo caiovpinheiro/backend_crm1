@@ -17,7 +17,9 @@
  */
 import { createHash } from "node:crypto";
 
+import { scheduleCoalescedPurge } from "./coalesce";
 import { cache } from "./index";
+import { nowRelativeLabel } from "./now-relative";
 import {
   bumpCacheVersion,
   cacheVersionName,
@@ -288,16 +290,26 @@ export async function invalidateWhatsappTemplateCatalog(
 export const INBOX_TAB_COUNTS_FP_LENGTH = 20;
 
 /**
- * Janela em que um `Date` do escopo conta como o mesmo valor no hash.
- * O `visibilityWhere` de MEMBER com a aba Automação embute
- * `automationQueueDelayAgo()` (agora − 15 s); hasheado cru, a chave mudava
- * a cada milissegundo e o cache dos contadores nunca acertava. A query
- * continua usando o instante exato — só a chave é arredondada (a mesma
- * tolerância de 15 s da fila).
+ * Janela em que um `Date` ABSOLUTO do escopo conta como o mesmo valor no
+ * hash — rede de segurança para um corte relativo ao agora que ainda não foi
+ * marcado (ver abaixo).
  */
 export const INBOX_TAB_COUNTS_FP_DATE_BUCKET_MS = 15_000;
 
-/** Hash do escopo das badges, com `Date` arredondado para baixo na janela. */
+/**
+ * Hash do escopo das badges.
+ *
+ * Cortes relativos ao agora (`markNowRelative`: fila Automação = agora − 15 s,
+ * janela de 24 h da Meta) entram pelo RÓTULO, não pelo instante: a chave fica
+ * estável enquanto o escopo não muda. Antes eles entravam arredondados para
+ * 15 s e a chave (ativa e histórica) girava a cada 15 s para quem vê a fila
+ * Automação — a consulta histórica (~620 ms) rodava de novo a cada virada e
+ * o SWR nunca acertava (C2 / 1.3 da auditoria). O instante exato continua na
+ * consulta; o que depende do tempo fica no VALOR calculado, cuja validade é
+ * o TTL/SWR (badges aceitam stale; mudança de aba purga pela versão).
+ *
+ * Demais `Date` (absolutos) entram arredondados para baixo na janela.
+ */
 export function inboxTabCountsFingerprint(scope: unknown): string {
   const json = JSON.stringify(
     scope,
@@ -305,6 +317,8 @@ export function inboxTabCountsFingerprint(scope: unknown): string {
       // `value` já passou por `Date#toJSON`; o original está em `this[key]`.
       const raw = this[key];
       if (raw instanceof Date) {
+        const rel = nowRelativeLabel(raw);
+        if (rel) return { $rel: rel };
         const t = raw.getTime();
         return Number.isFinite(t)
           ? {
@@ -407,37 +421,18 @@ export function shouldInvalidateInboxTabCounts(
 
 /**
  * Coalescência leading + trailing (~15s) para assign/resolve/transfer.
- * Não usar no path de `new_message`.
+ * Não usar no path de `new_message`. A janela vale entre réplicas (claim no
+ * Redis — ver `coalesce.ts`); sem Redis, por processo.
  */
 const TAB_COUNTS_INVALIDATION_WINDOW_MS = 15_000;
 
-const tabCountsInvalidationWindows = new Map<
-  string,
-  { timer: ReturnType<typeof setTimeout>; again: boolean }
->();
-
 export function scheduleTabCountsInvalidation(orgId: string | null | undefined): void {
   if (!orgId) return;
-
-  const open = tabCountsInvalidationWindows.get(orgId);
-  if (open) {
-    open.again = true;
-    return;
-  }
-
-  void invalidateInboxTabCounts(orgId);
-
-  const slot = {
-    again: false,
-    timer: setTimeout(() => {
-      tabCountsInvalidationWindows.delete(orgId);
-      if (slot.again) scheduleTabCountsInvalidation(orgId);
-    }, TAB_COUNTS_INVALIDATION_WINDOW_MS),
-  };
-  if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
-    slot.timer.unref();
-  }
-  tabCountsInvalidationWindows.set(orgId, slot);
+  scheduleCoalescedPurge(
+    `inbox_tab_counts:${orgId}`,
+    TAB_COUNTS_INVALIDATION_WINDOW_MS,
+    () => invalidateInboxTabCounts(orgId),
+  );
 }
 
 // ── Pipelines / Stages (config raramente muda) ──────────────────
@@ -542,17 +537,11 @@ export async function invalidateOrgBoards(orgId: string): Promise<void> {
  * da janela viram uma única purga no fim dela. Com 3s o board das orgs
  * grandes era recalculado quase sem parar; 15s é o atraso máximo aceito
  * para a prévia do card.
+ *
+ * A janela vale entre réplicas (claim `SET NX PX` no Redis + marca de sujo
+ * para o trailing — ver `coalesce.ts`); sem Redis, por processo.
  */
 export const BOARD_INVALIDATION_WINDOW_MS = 15_000;
-
-type BoardInvalidationWindow = {
-  timer: ReturnType<typeof setTimeout>;
-  /** Houve mensagem durante a janela → purga de novo ao fechá-la. */
-  again: boolean;
-};
-
-/** Chave `org` (todos os pipelines) ou `org:pipeline`. */
-const boardInvalidationWindows = new Map<string, BoardInvalidationWindow>();
 
 /**
  * Agenda a invalidação do board com coalescência (leading + trailing).
@@ -565,34 +554,16 @@ export function scheduleBoardInvalidation(
   pipelineId?: string | null,
 ): void {
   if (!orgId) return;
-
+  // Janela `org` (todos os pipelines) ou `org:pipeline`.
   const windowKey = pipelineId ? `${orgId}:${pipelineId}` : orgId;
-  const open = boardInvalidationWindows.get(windowKey);
-  if (open) {
-    open.again = true;
-    return;
-  }
-
-  if (pipelineId) {
-    void invalidateBoardData(orgId, pipelineId).catch(() => {
-      /* cache é best-effort — o TTL cobre a falha */
-    });
-  } else {
-    void invalidateOrgBoards(orgId);
-  }
-
-  const slot: BoardInvalidationWindow = {
-    again: false,
-    timer: setTimeout(() => {
-      boardInvalidationWindows.delete(windowKey);
-      if (slot.again) scheduleBoardInvalidation(orgId, pipelineId);
-    }, BOARD_INVALIDATION_WINDOW_MS),
-  };
-  // Não segura o event loop no shutdown.
-  if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
-    slot.timer.unref();
-  }
-  boardInvalidationWindows.set(windowKey, slot);
+  scheduleCoalescedPurge(
+    `board:${windowKey}`,
+    BOARD_INVALIDATION_WINDOW_MS,
+    () =>
+      pipelineId
+        ? invalidateBoardData(orgId, pipelineId)
+        : invalidateOrgBoards(orgId),
+  );
 }
 
 // ── Origem de tenant confiável no CORS ──────────────────────────
