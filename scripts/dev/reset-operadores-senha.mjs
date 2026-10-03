@@ -1,16 +1,18 @@
 /**
  * Redefine a senha de TODOS os operadores (users HUMAN, nao-erased) de uma org.
- * Senha gerada = Nome + Sobrenome + digitos aleatorios (facil de digitar).
+ * Senha gerada = aleatoria forte por usuario (crypto.randomBytes), mostrada
+ * uma unica vez no terminal com --apply. Nenhum arquivo e gravado.
  * Hash: bcrypt cost 10 (mesmo do login em src/lib/auth.ts).
  *
  * Uso:
- *   node reset-operadores-senha.mjs <orgId>            # DRY-RUN (so mostra)
+ *   node reset-operadores-senha.mjs <orgId>            # DRY-RUN (lista quem seria resetado)
  *   node reset-operadores-senha.mjs <orgId> --apply    # aplica no banco
  *
  * Requer .env.local com DATABASE_URL (mesmo padrao dos outros scripts).
  */
+import { randomBytes } from "crypto";
 import { createRequire } from "module";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -45,26 +47,10 @@ if (!orgId) {
   process.exit(1);
 }
 
-// Remove acentos, espacos e caracteres nao alfanumericos.
-function clean(str) {
-  return (str || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z]/g, "");
-}
-
-function cap(str) {
-  if (!str) return "";
-  return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
-}
-
-// Ex.: "Marcelo Silva Souza" -> "MarceloSilva8427"
-function genPassword(name) {
-  const parts = clean(name).length ? name.trim().split(/\s+/) : ["Operador"];
-  const first = cap(clean(parts[0])) || "Operador";
-  const last = parts.length > 1 ? cap(clean(parts[parts.length - 1])) : "";
-  const digits = String(Math.floor(1000 + Math.random() * 9000)); // 4 digitos
-  return `${first}${last}${digits}`;
+// Senha aleatoria forte (crypto): 18 bytes -> 24 caracteres base64url.
+// Nada derivado do nome do usuario.
+function genPassword() {
+  return randomBytes(18).toString("base64url");
 }
 
 async function main() {
@@ -94,33 +80,30 @@ async function main() {
     return;
   }
 
+  if (!APPLY) {
+    // DRY-RUN nao gera senha: so lista quem seria resetado.
+    console.log("Operadores que teriam a senha redefinida:\n");
+    console.table(operadores.map((u) => ({ Nome: u.name, Email: u.email, Role: u.role })));
+    console.log("\n>> DRY-RUN: rode novamente com --apply para gravar no banco.");
+    return;
+  }
+
   const results = [];
   for (const u of operadores) {
-    const senha = genPassword(u.name);
-    if (APPLY) {
-      const hashedPassword = await bcrypt.hash(senha, 10);
-      await prisma.user.update({
-        where: { id: u.id },
-        data: { hashedPassword },
-      });
-    }
+    const senha = genPassword();
+    const hashedPassword = await bcrypt.hash(senha, 10);
+    await prisma.user.update({
+      where: { id: u.id },
+      data: { hashedPassword },
+    });
     results.push({ nome: u.name, email: u.email, role: u.role, senha });
   }
 
-  console.log("Lista de operadores e novas senhas:\n");
+  // Exibidas UMA vez, so no terminal (nenhum arquivo e gravado). Entregue
+  // cada senha por canal privado e peca a troca no primeiro acesso.
+  console.log("Lista de operadores e novas senhas (exibidas so agora):\n");
   console.table(results.map((r) => ({ Nome: r.nome, Email: r.email, Role: r.role, Senha: r.senha })));
-
-  // Salva um arquivo local para entrega segura.
-  const outPath = resolve(__dirname, `senhas-operadores-${org.slug || org.id}.txt`);
-  const lines = results.map((r) => `${r.nome}\t${r.email}\t${r.role}\t${r.senha}`);
-  writeFileSync(outPath, `Org: ${org.name} (${org.id})\nGerado: ${new Date().toISOString()}\n\nNome\tEmail\tRole\tSenha\n${lines.join("\n")}\n`, "utf-8");
-  console.log(`\nArquivo salvo: ${outPath}`);
-
-  if (!APPLY) {
-    console.log("\n>> DRY-RUN: rode novamente com --apply para gravar no banco.");
-  } else {
-    console.log(`\n✅ ${results.length} senha(s) atualizada(s).`);
-  }
+  console.log(`\n✅ ${results.length} senha(s) atualizada(s).`);
 }
 
 main()
