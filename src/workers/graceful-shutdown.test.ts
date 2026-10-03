@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Logger } from "@/lib/logger";
 
-import { createGracefulShutdown, installGracefulShutdown } from "./graceful-shutdown";
+import {
+  LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+  createGracefulShutdown,
+  installGracefulShutdown,
+  resolveShutdownTimeoutMs,
+} from "./graceful-shutdown";
 
 function fakeLog(): Logger {
   const noop = vi.fn();
@@ -146,5 +151,19 @@ describe("installGracefulShutdown", () => {
     expect([...handlers.keys()].sort()).toEqual(["SIGINT", "SIGTERM"]);
     handlers.get("SIGTERM")!();
     await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+  });
+});
+
+describe("resolveShutdownTimeoutMs", () => {
+  it("usa o default do worker sem a variável", () => {
+    expect(resolveShutdownTimeoutMs(25_000, {})).toBe(25_000);
+    expect(resolveShutdownTimeoutMs(LONG_JOB_SHUTDOWN_TIMEOUT_MS, {})).toBe(110_000);
+  });
+
+  it("WORKER_SHUTDOWN_TIMEOUT_MS vence o default; inválido ou ≤ 0 é ignorado", () => {
+    expect(resolveShutdownTimeoutMs(25_000, { WORKER_SHUTDOWN_TIMEOUT_MS: "50000" })).toBe(50_000);
+    expect(resolveShutdownTimeoutMs(25_000, { WORKER_SHUTDOWN_TIMEOUT_MS: "0" })).toBe(25_000);
+    expect(resolveShutdownTimeoutMs(25_000, { WORKER_SHUTDOWN_TIMEOUT_MS: "x" })).toBe(25_000);
+    expect(resolveShutdownTimeoutMs(25_000, { WORKER_SHUTDOWN_TIMEOUT_MS: " " })).toBe(25_000);
   });
 });

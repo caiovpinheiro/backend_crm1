@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
+import { registerApiShutdownHook } from "@/lib/api-shutdown";
 import { registerDbPool } from "@/lib/db-pool-metrics";
 import { warnPublicDoManagedHosts } from "@/lib/warn-public-do-managed-hosts";
 import { getLogger } from "@/lib/logger";
@@ -292,3 +293,7 @@ export const prismaBase =
   globalForPrisma.prismaBase ?? createPrismaClient();
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prismaBase = prismaBase;
+
+// Parada graciosa da API (lib/api-shutdown.ts): fecha o pool depois que o
+// listener HTTP terminou as requisições em curso. Nos workers nunca roda.
+registerApiShutdownHook({ name: "prisma", run: () => prismaBase.$disconnect() });

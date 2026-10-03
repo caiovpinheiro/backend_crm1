@@ -39,7 +39,7 @@ Histórico de decisões técnicas: `docs/history/backend-decisions.md` (arquivad
 - Renomear permission (deprecar + chave nova).
 - `ENABLE RLS` não está em prod — não remova a extension Prisma “porque tem RLS”.
 - `Channel.pipelineId` / `search_text` — ADRs, **não implementados**.
-- Migrate no worker. Só `APP_MODE=api` migra no boot.
+- Migrate no worker. Só `APP_MODE=api` migra no boot (e só com `RUN_MIGRATIONS_ON_BOOT` ligado). Falha de migration aborta o boot — não reintroduzir reexecução de `migration.sql` no entrypoint (`docs/deploy-seguro.md`).
 
 ## Handler
 

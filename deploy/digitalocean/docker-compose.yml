@@ -6,6 +6,9 @@ x-backend: &backend
   image: ${BACKEND_IMAGE:-ghcr.io/caiovpinheiro/backend_crm1:latest}
   env_file: [.env]
   restart: unless-stopped
+  # Teto de parada graciosa: 25 s (api e workers) + margem. etl, leads e
+  # automation sobrescrevem com 120 s (docs/deploy-seguro.md).
+  stop_grace_period: 35s
   volumes:
     - storage:/app/storage
     # CA do Postgres/Valkey gerenciados. A DigitalOcean assina os
@@ -65,6 +68,8 @@ services:
     mem_limit: 1536m
     environment:
       APP_MODE: api
+      # Caddy reaproveita conexão ociosa por até 2 min: keep-alive do Node acima.
+      KEEP_ALIVE_TIMEOUT: "125000"
     healthcheck:
       test:
         - CMD
@@ -84,6 +89,8 @@ services:
     mem_limit: 768m
     environment:
       APP_MODE: api-public
+      # Caddy reaproveita conexão ociosa por até 2 min: keep-alive do Node acima.
+      KEEP_ALIVE_TIMEOUT: "125000"
     depends_on:
       api:
         condition: service_healthy
@@ -135,6 +142,7 @@ services:
 
   worker-automation:
     <<: *backend
+    stop_grace_period: 120s
     # Throttled 55% do tempo com 0.3 CPU sob carga total. Automação aciona
     # envio WhatsApp — sem CPU, trava o disparo.
     cpus: 0.6
@@ -147,6 +155,7 @@ services:
 
   worker-leads:
     <<: *backend
+    stop_grace_period: 120s
     cpus: 0.3
     mem_limit: 768m
     environment:
@@ -169,6 +178,7 @@ services:
 
   worker-etl:
     <<: *backend
+    stop_grace_period: 120s
     # Parsing de XLSX/CSV grandes pica em memória; pool de import max=4.
     cpus: 0.75
     mem_limit: 1g

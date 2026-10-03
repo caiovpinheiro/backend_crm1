@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { resolveAutomationExecution } from "@/lib/background-mode";
 import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -115,7 +116,8 @@ export async function GET() {
           ? "SET"
           : "MISSING",
         AUTOMATION_WORKER_MODE:
-          process.env.AUTOMATION_WORKER_MODE ?? "(não definido — inline)",
+          process.env.AUTOMATION_WORKER_MODE ||
+          `(não definido — ${resolveAutomationExecution().mode})`,
         REDIS_URL: process.env.REDIS_URL ? "SET" : "MISSING",
       };
 

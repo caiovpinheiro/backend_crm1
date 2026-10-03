@@ -3,8 +3,8 @@ name: Checks
 # Lint + testes + catraca de tipos em QUALQUER branch e em PR.
 #
 # Deliberadamente SEM job de build ou deploy: o `build-and-deploy.yml` roda
-# só em main/DEV_BRANCH/digitalocean (ou dispatch manual) e, em qualquer
-# branch que não seja main/digitalocean, ele publica a tag `dev` e dispara
+# só em main/DEV_BRANCH (ou dispatch manual) e, em qualquer
+# branch que não seja main, ele publica a tag `dev` e dispara
 # o redeploy do EasyPanel de DEV. Uma branch de auditoria não pode subir
 # nada — daí este workflow separado.
 
