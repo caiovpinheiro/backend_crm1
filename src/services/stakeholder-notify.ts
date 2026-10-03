@@ -136,7 +136,7 @@ async function deliver(
       messageType: "text",
       senderName: "Notificação",
     }),
-    select: { id: true },
+    select: { id: true, createdAt: true },
   });
 
   const result = await sendWhatsAppText({
@@ -155,7 +155,11 @@ async function deliver(
   await prisma.conversation
     .update({
       where: { id: ch.conversationId },
-      data: { lastMessageDirection: "out", updatedAt: new Date() },
+      data: {
+        lastMessageDirection: "out",
+        updatedAt: new Date(),
+        lastMessageAt: msg.createdAt,
+      },
     })
     .catch(() => {});
 }

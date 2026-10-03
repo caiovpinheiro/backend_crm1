@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
   WHATSAPP_VIDEO_MAX_BYTES,
@@ -636,6 +637,7 @@ export async function POST(request: Request, context: RouteContext) {
               lastMessageDirection: "out",
               hasAgentReply: true,
               hasHumanReply: true,
+              ...lastMessageAtData(msgRow),
               ...(metaSendError ? { hasError: true } : { hasError: false }),
             },
           });
@@ -725,6 +727,7 @@ export async function POST(request: Request, context: RouteContext) {
               hasAgentReply: true,
               hasHumanReply: true,
               hasError: false,
+              ...lastMessageAtData(msgRow),
             },
           });
         } catch { /* columns may not exist yet */ }
@@ -839,6 +842,7 @@ export async function POST(request: Request, context: RouteContext) {
             hasAgentReply: true,
             hasHumanReply: true,
             hasError: false,
+            ...lastMessageAtData(localMsg),
           },
         });
       } catch { /* columns may not exist yet */ }

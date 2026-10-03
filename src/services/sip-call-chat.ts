@@ -10,6 +10,7 @@
  */
 import type { CallDirection } from "@prisma/client";
 
+import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
@@ -113,6 +114,13 @@ export async function logSipCallInConversation(
     log.warn({ err, callId: input.callId }, "[sip-call-chat] falha ao gravar sip_call no chat");
     return conversationId;
   }
+
+  // Ordem da lista: a ligação entra na prévia do card (`sip_call` é chat).
+  // `createdAt` pode ser retroativo (evento atrasado) → escrita que nunca
+  // anda para trás, em vez de pôr o valor no update abaixo.
+  await touchConversationLastMessageAt({ conversationId, at: eventNow }).catch((err) =>
+    log.warn({ err, callId: input.callId }, "[sip-call-chat] lastMessageAt"),
+  );
 
   const isRecent = Date.now() - eventNow.getTime() < RECENT_MS;
   const notify = input.notifyInbox ?? isRecent;

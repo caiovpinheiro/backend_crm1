@@ -16,6 +16,7 @@ import {
   requireConversationAccess,
   requireConversationAccessAndLoad,
 } from "@/lib/conversation-access";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -1209,6 +1210,7 @@ export async function POST(request: Request, context: RouteContext) {
             lastMessageDirection: "out",
             hasAgentReply: true,
             hasHumanReply: true,
+            ...lastMessageAtData(savedMsg),
             ...(sendRes.failed ? { hasError: true } : { hasError: false }),
           },
         });
@@ -1353,6 +1355,7 @@ export async function POST(request: Request, context: RouteContext) {
             hasAgentReply: true,
             hasHumanReply: true,
             hasError: false,
+            ...lastMessageAtData(saved),
           },
         });
       } catch { /* columns may not exist yet */ }
@@ -1466,6 +1469,7 @@ export async function POST(request: Request, context: RouteContext) {
           lastMessageDirection: "out",
           hasAgentReply: true,
           hasHumanReply: true,
+          ...lastMessageAtData(saved),
           ...(sendFailed ? { hasError: true } : { hasError: false }),
         },
       });
