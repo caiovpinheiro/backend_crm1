@@ -53,3 +53,31 @@ Não há automação — é decisão do operador:
 4. Reiniciar o serviço `api`.
 
 Para subir sem migrar, sob responsabilidade do operador: `RUN_MIGRATIONS_ON_BOOT=0`.
+
+## 2. Sweepers e automação fora da API
+
+Padrão de produção (`NODE_ENV=production`, que o `server.js` do Next sempre
+define): a API **não** sobe sweeper e **não** executa automação inline.
+
+| Variável | Vazio (padrão) | Valores |
+|----------|----------------|---------|
+| `API_RUN_SWEEPERS` | desligado em produção; ligado em dev local | `1` liga na API (só sem os workers); `0` desliga sempre |
+| `AUTOMATION_WORKER_MODE` | `external` na `api`/`api-public` em produção; `inline` nos workers e em dev | `external` enfileira em `automation-jobs`; `inline` executa no processo |
+
+O que cada modo sobe (sem nenhuma das duas variáveis):
+
+| Processo | Antes | Depois |
+|----------|-------|--------|
+| `api` (produção) | timeout de automação + presença, atividade, agendadas, envio travado, inatividade da IA, expiração de sessão WhatsApp, push de alerta, projetores da outbox (tabulação e `CONVERSATION_CLOSED`); automação inline | nenhum sweeper; automação enfileirada |
+| `api` com `AUTOMATION_WORKER_MODE=external` | nenhum sweeper; automação enfileirada | igual |
+| `api` em dev local (`next dev`) | todos + inline | igual |
+| `api-public` | nenhum sweeper; automação inline | nenhum sweeper; automação enfileirada |
+| `worker-whatsapp` | presença … projetores da outbox (todos menos o timeout) | igual |
+| `worker-automation` | timeout de automação + varredura do admission control; consome `automation-jobs` | igual |
+| demais workers | nenhum sweeper; automação inline quando disparada neles | igual |
+
+Pré-requisito em produção: `worker-whatsapp` e `worker-automation` no ar. O log
+de boot da API mostra a decisão:
+`[sse-bus] sweepers desligados na API — rodam no worker-whatsapp e no worker-automation`.
+Rollback sem deploy: `API_RUN_SWEEPERS=1` e `AUTOMATION_WORKER_MODE=inline` no
+serviço `api`.

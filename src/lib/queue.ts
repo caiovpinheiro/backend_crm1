@@ -1,6 +1,7 @@
 import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
+import { resolveAutomationExecution } from "@/lib/background-mode";
 import { debugInfo } from "@/lib/debug-log";
 import { getLogger } from "@/lib/logger";
 
@@ -458,11 +459,12 @@ export function getAutomationQueue(): Queue<AutomationJobPayload> | null {
   return getQueue();
 }
 
-function readAutomationWorkerMode(): string {
-  return (process.env.AUTOMATION_WORKER_MODE ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/^["']|["']$/g, "");
+/**
+ * `external` (enfileira) ou `inline` (executa aqui). Sem a variável, a API
+ * em produção enfileira — ver `resolveAutomationExecution` (B5).
+ */
+function readAutomationWorkerMode(): "external" | "inline" {
+  return resolveAutomationExecution().mode;
 }
 
 function readAppMode(): string {
