@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { resolveAutomationExecution } from "@/lib/background-mode";
 import { prisma } from "@/lib/prisma";
 import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
 
@@ -58,7 +59,7 @@ export async function GET() {
         META_WHATSAPP_BUSINESS_ACCOUNT_ID: process.env.META_WHATSAPP_BUSINESS_ACCOUNT_ID || "NOT SET ⚠️",
         META_APP_SECRET: process.env.META_APP_SECRET ? "set" : "NOT SET",
         META_WEBHOOK_VERIFY_TOKEN: process.env.META_WEBHOOK_VERIFY_TOKEN ? "set" : "NOT SET",
-        AUTOMATION_WORKER_MODE: process.env.AUTOMATION_WORKER_MODE || "(not set → inline execution)",
+        AUTOMATION_WORKER_MODE: process.env.AUTOMATION_WORKER_MODE || `(not set → ${resolveAutomationExecution().mode})`,
         REDIS_URL: process.env.REDIS_URL ? "set" : "NOT SET (inline execution will be used)",
         NODE_ENV: process.env.NODE_ENV ?? "unknown",
         metaWhatsAppConfigured: metaWhatsApp.configured,
