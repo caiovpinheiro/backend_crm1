@@ -11,7 +11,11 @@ import { canSeeInboxTab } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { createRequestMemo } from "@/lib/request-memo";
 import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
-import { InvalidListCursorError } from "@/services/conversation-list-cursor";
+import {
+  InvalidListCursorError,
+  LIST_SORT_BY_VALUES,
+  type ListSortBy,
+} from "@/services/conversation-list-cursor";
 import {
   buildInboxFilterConditions,
   findSessionExpiringConversationIds,
@@ -34,7 +38,7 @@ function parseIntParam(v: string | null, fallback: number) {
 }
 
 const statuses = new Set(["OPEN", "RESOLVED", "PENDING", "SNOOZED"]);
-const validSortBy = new Set(["updatedAt", "createdAt", "unreadCount"]);
+const validSortBy: ReadonlySet<string> = new Set(LIST_SORT_BY_VALUES);
 
 // Bug 24/abr/26: usavamos authenticateApiRequest direto + enterRequestContext,
 // mas enterWith() perde o store quando o caller resume apos `await` (Next.js
@@ -264,7 +268,7 @@ export async function GET(request: Request) {
 
       const sortByRaw = searchParams.get("sortBy") ?? undefined;
       const sortBy = sortByRaw && validSortBy.has(sortByRaw)
-        ? (sortByRaw as "updatedAt" | "createdAt" | "unreadCount")
+        ? (sortByRaw as ListSortBy)
         : undefined;
       const sortOrderRaw = searchParams.get("sortOrder") ?? undefined;
       const sortOrder = sortOrderRaw === "asc" ? "asc" : sortOrderRaw === "desc" ? "desc" : undefined;
