@@ -7,7 +7,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { createMessageDedup } from "@/lib/message-dedup";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
-import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import {
   activeConversationOnAccountWhere,
@@ -74,10 +74,13 @@ async function resolveContact(
 ): Promise<CrmContact> {
   const phone = jidToPhone(jid);
 
-  const existing = await prisma.contact.findFirst({
-    where: { phone },
-    select: { id: true, name: true, phone: true, avatarUrl: true, organizationId: true },
-  });
+  const held = await findExistingContactOnPhone(phone);
+  const existing = held
+    ? await prisma.contact.findUnique({
+        where: { id: held.contactId },
+        select: { id: true, name: true, phone: true, avatarUrl: true, organizationId: true },
+      })
+    : null;
 
   if (existing) {
     const resolvedName = pushName && existing.name.startsWith("Lead +") ? pushName : existing.name;

@@ -69,7 +69,7 @@ import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingM
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
-import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import { maskPhone } from "@/lib/pii-mask";
@@ -391,6 +391,54 @@ type ContactRow = {
   whatsappUsername: string | null;
 };
 
+const contactResolveSelect = {
+  id: true,
+  name: true,
+  phone: true,
+  whatsappBsuid: true,
+  whatsappUsername: true,
+} as const;
+
+/**
+ * O mesmo telefone pode estar em mais de um contato. A mensagem tem que
+ * cair no que já tem deal — um findFirst no mais antigo (ou no BSUID)
+ * abre outro card e divide o atendimento.
+ * Preferência: deal OPEN mais recente, depois qualquer deal, depois o
+ * primeiro da lista.
+ */
+async function pickContactWithExistingDeal(
+  rows: ContactRow[],
+): Promise<ContactRow | null> {
+  const unique: ContactRow[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    unique.push(row);
+  }
+  if (unique.length === 0) return null;
+  if (unique.length === 1) return unique[0];
+
+  const ids = unique.map((row) => row.id);
+  const open = await prisma.deal.findFirst({
+    where: { contactId: { in: ids }, status: "OPEN" },
+    orderBy: { updatedAt: "desc" },
+    select: { contactId: true },
+  });
+  if (open) {
+    return unique.find((row) => row.id === open.contactId) ?? unique[0];
+  }
+  const anyDeal = await prisma.deal.findFirst({
+    where: { contactId: { in: ids } },
+    orderBy: { updatedAt: "desc" },
+    select: { contactId: true },
+  });
+  if (anyDeal) {
+    return unique.find((row) => row.id === anyDeal.contactId) ?? unique[0];
+  }
+  return unique[0];
+}
+
 /**
  * Resolve contato a partir do webhook Meta, com BSUID (user_id / from_user_id) e/ou telefone (wa_id / from).
  * Ref: https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids
@@ -682,14 +730,15 @@ async function resolveWebhookContact(
 
   let byPh: ContactRow | null = null;
   if (phone) {
-    // Match por variantes E.164 (cobre com/sem 9º dígito BR). Já é
-    // org-scoped pela extensão do Prisma dentro de withSystemContext.
-    const variants = phoneMatchVariants(phone);
-    byPh = await prisma.contact.findFirst({
-      where: variants.length > 0 ? { phone: { in: variants } } : { phone },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
-      orderBy: { createdAt: "asc" },
-    });
+    // O deal é que decide o contato. Um findMany com teto deixava de
+    // fora quem já atendia e o inbound abria outro card.
+    const held = await findExistingContactOnPhone(phone);
+    if (held) {
+      byPh = await prisma.contact.findUnique({
+        where: { id: held.contactId },
+        select: contactResolveSelect,
+      });
+    }
   }
 
   let contactRow: ContactRow | null = null;
@@ -698,20 +747,17 @@ async function resolveWebhookContact(
     if (byBs.id === byPh.id) {
       contactRow = byBs;
     } else {
-      const sameLine =
-        !!byBs.phone &&
-        !!byPh.phone &&
-        phoneMatchVariants(byBs.phone).some((v) =>
-          phoneMatchVariants(byPh.phone).includes(v),
-        );
-      if (sameLine) {
-        log.warn(
-          `mesmo celular com e sem o 9 — usando o contato mais antigo ${byPh.id} (bsuid estava em ${byBs.id})`,
-        );
-        contactRow = byPh;
-      } else {
-        log.warn(`BSUID e telefone em contatos diferentes — priorizando BSUID (${bsuid})`);
-        contactRow = byBs;
+      contactRow = (await pickContactWithExistingDeal([byBs, byPh])) ?? byPh;
+      log.warn(
+        `BSUID e telefone em contatos diferentes — usando o contato que já tem deal (${contactRow.id})`,
+      );
+      // Tira o BSUID do contato que ficou de fora. O bloco abaixo grava
+      // no escolhido, e o próximo inbound acha os dois no mesmo lugar.
+      if (byBs.id !== contactRow.id && byBs.whatsappBsuid) {
+        await prisma.contact
+          .update({ where: { id: byBs.id }, data: { whatsappBsuid: null } })
+          .catch(() => {});
+        byBs = { ...byBs, whatsappBsuid: null };
       }
     }
   } else if (byBs) {
@@ -735,9 +781,10 @@ async function resolveWebhookContact(
         where: { phone: { endsWith: last8 } },
         select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
       });
-      const byFuzzy = candidates.find((c) =>
+      const fuzzyMatches = candidates.filter((c) =>
         phoneMatchVariants(c.phone).some((v) => variantSet.has(v)),
       );
+      const byFuzzy = await pickContactWithExistingDeal(fuzzyMatches);
       if (byFuzzy) contactRow = byFuzzy;
     }
   }
