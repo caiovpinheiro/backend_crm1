@@ -242,7 +242,7 @@ describe("SQL da página (keyset)", () => {
     const migration = readFileSync(
       resolve(
         process.cwd(),
-        "prisma/migrations/20261003120000_conversations_last_message_at/migration.sql",
+        "prisma/migrations/20261003150000_conversations_last_message_at/migration.sql",
       ),
       "utf8",
     );

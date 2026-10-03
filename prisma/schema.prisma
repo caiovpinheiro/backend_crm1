@@ -3059,7 +3059,7 @@ model Conversation {
   ///
   /// Chave da lista do inbox: `COALESCE("lastMessageAt", "updatedAt")`, id
   /// (ver `conversation-list-cursor.ts`). Os índices dessa expressão vivem só
-  /// na migration `20261003120000_conversations_last_message_at` — o Prisma
+  /// na migration `20261003150000_conversations_last_message_at` — o Prisma
   /// não descreve índice de expressão.
   lastMessageAt          DateTime?
   /// Primeira inbound deste conversationId (semântica A / ticket). NULL até o primeiro inbound.
