@@ -159,6 +159,20 @@ fi
 # condition se também tentarem aplicar migrations — basta um serviço aplicar.
 # Por isso o branch abaixo é restrito a APP_MODE=api.
 #
+# RUN_MIGRATIONS_ON_BOOT (default ligado): desligue (0/false/no/off) quando a
+# API tiver mais de uma réplica ou quando o operador aplicar as migrations à
+# mão / por job antes do deploy. Com ela desligada nenhum processo migra no
+# boot. O `migrate deploy` do Prisma já serializa execuções concorrentes com
+# lock consultivo (pg_advisory_lock(72707369), timeout de 10 s → erro P1002),
+# então duas réplicas não aplicam a mesma migration — mas a que perde o lock
+# não sobe (exit 1) e fica reiniciando até a outra terminar.
+#
+# Falha do `migrate deploy` = boot abortado (exit 1), com o nome da migration
+# no log. Não há reexecução automática: o fallback antigo rodava TODAS as
+# migrations de novo com `db execute`, ignorando erros (UPDATE de tabela
+# inteira, recriação de índice). Recuperação de migration marcada como falha
+# (P3009/P3018) é manual — ver mensagem abaixo e docs/deploy-seguro.md.
+#
 # SKIP_PRISMA_MIGRATE: só pula quando o VALOR é afirmativo (1/true/yes/on).
 # Antes o teste era `[ -n ... ]` (variável existe?), então SKIP_PRISMA_MIGRATE=0
 # ou =false também pulava — em produção isso já deixou migration sem aplicar.
@@ -172,45 +186,78 @@ should_skip_prisma_migrate() {
   esac
 }
 # <<< skip-prisma-migrate
-if [ "$APP_MODE" = "api" ]; then
+# >>> boot-migrations
+# RUN_MIGRATIONS_ON_BOOT: só DESLIGA com valor negativo explícito. Ausente,
+# vazio ou qualquer outro valor → liga (comportamento histórico da API).
+should_run_migrations_on_boot() {
+  case "${RUN_MIGRATIONS_ON_BOOT:-1}" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+PRISMA_CLI="${PRISMA_CLI:-node /opt/prisma-cli/node_modules/prisma/build/index.js}"
+
+# Uma única execução do `migrate deploy`, com a saída ao vivo no log. Falhou →
+# imprime a(s) migration(s) citadas pelo Prisma e o caminho de recuperação, e
+# devolve 1. Nunca reaplica SQL por fora do Prisma.
+run_boot_migrate_deploy() {
+  _mig_log="${TMPDIR:-/tmp}/prisma-migrate-deploy.$$.log"
+  _mig_rc_file="${_mig_log}.rc"
+  echo "[entrypoint] prisma migrate deploy..."
+  # O `|| _mig_rc=$?` isenta a falha do `set -e` dentro do pipeline.
+  { _mig_rc=0; $PRISMA_CLI migrate deploy --schema=prisma/schema.prisma 2>&1 || _mig_rc=$?; echo "$_mig_rc" > "$_mig_rc_file"; } | tee "$_mig_log"
+  _mig_rc="$(cat "$_mig_rc_file" 2>/dev/null || echo 1)"
+  if [ "$_mig_rc" = "0" ]; then
+    rm -f "$_mig_log" "$_mig_rc_file"
+    return 0
+  fi
+  # P3018 → "Migration name: <nome>"; P3009 → "The `<nome>` migration started at … failed".
+  _mig_failed="$(sed -n -E \
+      -e 's/.*Migration name: ([0-9A-Za-z_]+).*/\1/p' \
+      -e 's/.*The `([0-9A-Za-z_]+)` migration started at.*/\1/p' \
+      "$_mig_log" 2>/dev/null | sort -u | tr '\n' ' ')"
+  rm -f "$_mig_log" "$_mig_rc_file"
+  echo "[entrypoint] !! ERRO FATAL: prisma migrate deploy falhou (exit ${_mig_rc}) — abortando boot."
+  if [ -n "$_mig_failed" ]; then
+    echo "[entrypoint] !! migration com falha: ${_mig_failed}"
+  else
+    echo "[entrypoint] !! migration não identificada na saída acima (P1001 banco fora, P1002 lock"
+    echo "[entrypoint] !! ocupado por outra réplica, timeout de conexão...). Nada foi reaplicado."
+  fi
+  echo "[entrypoint] !! Nada é reexecutado automaticamente. Recuperação (manual, no diretório do backend):"
+  echo "[entrypoint] !!   1. veja o erro acima e o estado da migration: ... migrate status --schema=prisma/schema.prisma"
+  echo "[entrypoint] !!   2. corrija o banco (SQL que faltou, ou desfaça o parcial) e marque o desfecho:"
+  echo "[entrypoint] !!      ... migrate resolve --applied <nome>      (o SQL já está no banco)"
+  echo "[entrypoint] !!      ... migrate resolve --rolled-back <nome>  (desfeito; o próximo deploy reaplica)"
+  echo "[entrypoint] !!   3. reinicie o serviço. (\"...\" = node /opt/prisma-cli/node_modules/prisma/build/index.js)"
+  echo "[entrypoint] !! Subir sem migrar, sob sua responsabilidade: RUN_MIGRATIONS_ON_BOOT=0."
+  return 1
+}
+
+# Decide e executa. 0 = seguir o boot (migrou ou pulou); 1 = abortar.
+boot_migrations() {
+  if [ "$APP_MODE" != "api" ]; then
+    echo "[entrypoint] APP_MODE=${APP_MODE} — pulando migrations (somente API roda migrate)."
+    return 0
+  fi
   if should_skip_prisma_migrate; then
     echo "[entrypoint] SKIP_PRISMA_MIGRATE=${SKIP_PRISMA_MIGRATE} — pulando migrate deploy."
-  elif [ -z "${DATABASE_URL}" ]; then
-    echo "[entrypoint] DATABASE_URL vazio — pulando migrate deploy."
-  else
-    echo "[entrypoint] prisma migrate deploy..."
-    if ! node /opt/prisma-cli/node_modules/prisma/build/index.js \
-          migrate deploy --schema=prisma/schema.prisma; then
-      echo "[entrypoint] migrate deploy falhou — tentando aplicar migrations
-              manualmente via 'db execute' nos arquivos .sql..."
-      # Fallback defensivo: aplica cada migration.sql na ordem. Idempotente
-      # porque os scripts usam IF NOT EXISTS / DO blocks.
-      for f in prisma/migrations/*/migration.sql; do
-        echo "[entrypoint]   aplicando $f"
-        node /opt/prisma-cli/node_modules/prisma/build/index.js \
-          db execute --schema=prisma/schema.prisma --file "$f" || \
-          echo "[entrypoint]   (warning) falha aplicando $f, prosseguindo"
-      done
-
-      # Gate final: reexecuta migrate deploy como verificação. Se AINDA
-      # falhar, o schema está fora de sincronia com o Prisma Client e subir
-      # o app resultaria em 500 silencioso em runtime (P2022 "column does
-      # not exist") — foi a causa do incidente de 23/07 (modelos internos).
-      # Abortar aqui torna o problema VISÍVEL no deploy, em vez de vazar
-      # pro usuário. Para casos excepcionais, use SKIP_PRISMA_MIGRATE.
-      echo "[entrypoint] revalidando migrations (gate de boot)..."
-      if ! node /opt/prisma-cli/node_modules/prisma/build/index.js \
-            migrate deploy --schema=prisma/schema.prisma; then
-        echo "[entrypoint] !! ERRO FATAL: migrations não aplicadas — abortando boot."
-        echo "[entrypoint] !! O schema do banco está atrás do código. Aplique as"
-        echo "[entrypoint] !! migrations pendentes e reinicie (ou SKIP_PRISMA_MIGRATE=1"
-        echo "[entrypoint] !! para forçar boot sob sua responsabilidade)."
-        exit 1
-      fi
-    fi
+    return 0
   fi
-else
-  echo "[entrypoint] APP_MODE=${APP_MODE} — pulando migrations (somente API roda migrate)."
+  if ! should_run_migrations_on_boot; then
+    echo "[entrypoint] RUN_MIGRATIONS_ON_BOOT=${RUN_MIGRATIONS_ON_BOOT} — migrations NÃO rodam no boot (aplicação manual ou job)."
+    return 0
+  fi
+  if [ -z "${DATABASE_URL}" ]; then
+    echo "[entrypoint] DATABASE_URL vazio — pulando migrate deploy."
+    return 0
+  fi
+  run_boot_migrate_deploy
+}
+# <<< boot-migrations
+if ! boot_migrations; then
+  exit 1
 fi
 
 # Roteamento APP_MODE → processo a iniciar.
