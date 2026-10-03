@@ -544,12 +544,12 @@
       var STAGES = Object.keys(META);
 
       /* ── Modo embedded ───────────────────────────────────────────────
-         Ativado por `?embedded=1`. Neste modo o cockpit NÃO usa o
-         `accessSecret` do config.js: ele é single-tenant (a org vem da env
-         COCKPIT_ORGANIZATION_ID no backend) e usá-lo aqui mostraria os dados
-         de uma organização fixa para qualquer usuário do CRM. Em vez disso
-         recebemos por postMessage um Bearer curto, emitido pelo CRM para a
-         organização da sessão. */
+         Ativado por `?embedded=1`. Neste modo o cockpit NÃO usa o proxy
+         `/proxy/prod/backend/agent-cockpit` (que injeta o segredo
+         single-tenant do lado do servidor — a org vem da env
+         COCKPIT_ORGANIZATION_ID no backend). Em vez disso recebemos por
+         postMessage um Bearer curto, emitido pelo CRM para a organização da
+         sessão. O segredo nunca chega ao navegador em nenhum dos modos. */
       var embedded = (function () {
         try {
           return new URLSearchParams(location.search).get("embedded") === "1";
@@ -557,17 +557,6 @@
           return /[?&]embedded=1(&|$)/.test(location.search);
         }
       })();
-
-      // Defesa em profundidade: embedado, o segredo single-tenant é apagado do
-      // objeto de config logo na carga, para que nenhum caminho de código
-      // consiga usá-lo por engano numa evolução futura.
-      if (embedded && window.COCKPIT_CONFIG) {
-        try {
-          delete window.COCKPIT_CONFIG.accessSecret;
-        } catch (e) {
-          window.COCKPIT_CONFIG.accessSecret = "";
-        }
-      }
 
       var host = {
         origin: null,
@@ -969,7 +958,7 @@
 
       function fetchCockpit() {
         if (embedded) {
-          // Sem accessSecret aqui — ver comentário do bloco "Modo embedded".
+          // Bearer do CRM direto na API — ver comentário do bloco "Modo embedded".
           if (!host.token || !host.apiBase) {
             return Promise.reject(new Error("Aguardando contexto do CRM."));
           }
@@ -978,14 +967,11 @@
             cache: "no-store",
           });
         }
-        var secret = cfg().accessSecret;
-        var base = apiBase();
-        if (!base || !secret) {
-          return Promise.reject(new Error("Hub não configurado (COCKPIT_* no EasyPanel)."));
-        }
-        return fetch(base + "/api/public/agent-cockpit", {
-          headers: { "X-Cockpit-Access": secret },
+        // Standalone: mesma origem. O nginx do cockpit exige o login (basic
+        // auth) e põe o X-Cockpit-Access na chamada ao backend.
+        return fetch("/proxy/prod/backend/agent-cockpit", {
           cache: "no-store",
+          credentials: "same-origin",
         });
       }
 
@@ -995,10 +981,19 @@
           .then(function (r) {
             if (r.status === 401) {
               var err401 = new Error(
-                embedded ? "Sessão do cockpit expirada." : "Segredo cockpit inválido."
+                embedded
+                  ? "Sessão do cockpit expirada."
+                  : "Acesso negado (login do cockpit ou COCKPIT_ACCESS_SECRET diferente do backend)."
               );
               err401.status = 401;
               throw err401;
+            }
+            if (!embedded && r.status === 503) {
+              var err503 = new Error(
+                "Cockpit sem login configurado (COCKPIT_BASIC_AUTH_USER / COCKPIT_BASIC_AUTH_PASSWORD)."
+              );
+              err503.status = 503;
+              throw err503;
             }
             if (!r.ok) {
               var err = new Error("Erro " + r.status);
