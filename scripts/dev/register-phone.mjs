@@ -19,6 +19,14 @@ function decrypt(v) {
   return Buffer.concat([d.update(ct), d.final()]).toString('utf8');
 }
 
+// PIN da verificação em duas etapas do número: obrigatório, vem do ambiente
+// e nunca é impresso.
+const PIN = (process.env.WHATSAPP_REGISTER_PIN ?? "").trim();
+if (!/^\d{6}$/.test(PIN)) {
+  console.error("Defina WHATSAPP_REGISTER_PIN com o PIN de 6 dígitos da verificação em duas etapas.");
+  process.exit(1);
+}
+
 const [ch] = await db.channel.findMany({
   where: { provider: 'META_CLOUD_API' },
   select: { config: true }
@@ -40,7 +48,7 @@ const res = await fetch(
     },
     body: JSON.stringify({
       messaging_product: 'whatsapp',
-      pin: '123456',
+      pin: PIN,
     }),
   }
 );
@@ -51,12 +59,13 @@ console.log('Resposta:', JSON.stringify(data, null, 2));
 
 if (data.success) {
   console.log('\n✅ Número registrado com sucesso!');
-  console.log('PIN definido: 123456 (guarde este número)');
+  console.log("PIN de duas etapas definido (valor de WHATSAPP_REGISTER_PIN, não exibido).");
 
   // Verificar novo status
   await new Promise(r => setTimeout(r, 2000));
   const r2 = await fetch(
-    `https://graph.facebook.com/v20.0/${phoneNumberId}?fields=id,status,platform_type,throughput&access_token=${token}`
+    `https://graph.facebook.com/v20.0/${phoneNumberId}?fields=id,status,platform_type,throughput`,
+    { headers: { Authorization: `Bearer ${token}` } },
   );
   const status = await r2.json();
   console.log('\nNovo status:', JSON.stringify(status, null, 2));
