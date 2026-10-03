@@ -24,6 +24,7 @@ import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import type { TemplateVariableInput } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enqueueMetaOutbound } from "@/lib/queue";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
@@ -369,6 +370,7 @@ export async function sendTextToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
+        ...lastMessageAtData(saved),
         hasError: sendResult.failed,
       },
     });
@@ -604,6 +606,7 @@ export async function sendInteractiveButtonsToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
+        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
@@ -912,6 +915,7 @@ export async function sendInteractiveListToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
+        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
@@ -1132,6 +1136,7 @@ export async function sendFlowToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
+        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
@@ -1400,6 +1405,7 @@ export async function sendTemplateToConversation(
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
+        ...lastMessageAtData(saved),
         hasError: false,
       },
     });

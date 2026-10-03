@@ -1,4 +1,5 @@
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
@@ -105,6 +106,7 @@ export async function rejectInboundCallWithoutAgent(params: {
       data: {
         lastMessageDirection: "out",
         updatedAt: new Date(),
+        ...lastMessageAtData(saved),
         ...(sendResult.failed ? { hasError: true } : {}),
       },
     })

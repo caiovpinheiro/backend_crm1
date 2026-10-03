@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getConversationSession } from "@/lib/channel-session";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
@@ -209,6 +210,7 @@ export async function POST(request: Request, context: RouteContext) {
             lastMessageDirection: "out",
             hasAgentReply: true,
             hasHumanReply: true,
+            ...lastMessageAtData(saved),
             ...(sendErrorMsg ? { hasError: true } : { hasError: false }),
           },
         });

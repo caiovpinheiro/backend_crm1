@@ -29,6 +29,10 @@ import {
 } from "@/lib/cache/keys";
 import { touchInbound, warnTouchInboundFailed } from "@/lib/conversation-inbound";
 import {
+  isListChatMessage,
+  touchConversationLastMessageAt,
+} from "@/lib/conversation-last-message";
+import {
   enrichWhatsappOrder,
   formatWhatsappOrderText,
   parseWhatsappOrder,
@@ -3256,6 +3260,16 @@ export async function processMetaWebhookPayload(
 
           if (echoOut) {
             if (msgCreated) {
+              // Eco do app do celular: único ponto deste ramo que grava a
+              // conversa (o `continue` abaixo pula o update do inbound).
+              if (isListChatMessage(msgCreated)) {
+                await touchConversationLastMessageAt({
+                  conversationId: conversation.id,
+                  at: msgCreated.createdAt,
+                }).catch((err) =>
+                  log.warn("Falha ao gravar lastMessageAt do eco (não-fatal):", err),
+                );
+              }
               try {
                 publishNewMessage({
                   organizationId: conversation.organizationId,
