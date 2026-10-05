@@ -22,6 +22,7 @@
 import type { AIAgentAutonomy, Prisma } from "@prisma/client";
 
 import { getOrgSettingBool } from "@/lib/org-settings";
+import { getOrganizationSummary } from "@/services/organization-summary";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { runWithActor } from "@/lib/request-context";
@@ -596,10 +597,7 @@ NÃO avise o contato que vai transferir. Chame a tool e pare. Não escreva "vou 
         });
 
     const [org, peerRows] = await Promise.all([
-      prisma.organization.findUnique({
-        where: { id: agent.organizationId },
-        select: { name: true },
-      }),
+      getOrganizationSummary(agent.organizationId),
       classifierRun || typeof prisma.aIAgentConfig.findMany !== "function"
         ? Promise.resolve(
             [] as Array<{
