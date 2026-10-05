@@ -33,6 +33,8 @@ const h = vi.hoisted(() => {
     /** Ids travados por "outra réplica" (SKIP LOCKED devolve vazio). */
     lockedElsewhere: new Set<string>(),
     failCreateOnce: false,
+    /** `where` de cada checagem de idempotência em activity_events. */
+    idemWheres: [] as Record<string, unknown>[],
   };
 
   const pending = (r: OutboxRow) => !r.processedAt && !r.deadLetterAt;
@@ -62,11 +64,22 @@ const h = vi.hoisted(() => {
       activityEvent: {
         findFirst: async ({ where }: { where: Record<string, unknown> }) => {
           if (!("idempotencyKey" in where)) return null;
-          const found = state.events.find(
-            (e) =>
+          state.idemWheres.push(where);
+          // Respeita a janela de `occurredAt` como o banco: se ela deixar o
+          // evento de fora, a idempotência quebra e o teste acusa.
+          const win = where.occurredAt as { gte?: Date; lte?: Date } | undefined;
+          const found = state.events.find((e) => {
+            const at = e.occurredAt as Date | undefined;
+            const inWindow =
+              !win ||
+              !at ||
+              ((!win.gte || at >= win.gte) && (!win.lte || at <= win.lte));
+            return (
               e.organizationId === where.organizationId &&
-              e.idempotencyKey === where.idempotencyKey,
-          );
+              e.idempotencyKey === where.idempotencyKey &&
+              inWindow
+            );
+          });
           return found ? { id: "evt" } : null;
         },
         create: async ({ data }: { data: EventRow }) => {
@@ -194,6 +207,7 @@ beforeEach(() => {
   h.state.sql = [];
   h.state.lockedElsewhere = new Set();
   h.state.failCreateOnce = false;
+  h.state.idemWheres = [];
   h.inc.mockClear();
   vi.mocked(runLogEvent).mockClear();
   resetConversationClosedProjectorForTests();
@@ -244,6 +258,19 @@ describe("projectConversationClosedOutboxBatch", () => {
     expect(await projectConversationClosedOutboxBatch()).toBe(0);
     expect(h.state.events).toHaveLength(1);
     expect(h.state.outbox[0].processedAt).toBeInstanceOf(Date);
+  });
+
+  it("a checagem de idempotência limita `occurredAt` (poda de partição de activity_events)", async () => {
+    h.state.outbox = [closedRow()];
+    await projectConversationClosedOutboxBatch();
+
+    expect(h.state.idemWheres).toHaveLength(1);
+    const win = h.state.idemWheres[0]!.occurredAt as { gte: Date; lte: Date };
+    // De 1 dia antes da linha da outbox até 1 dia depois de agora: o evento
+    // (occurredAt = createdAt da outbox) cai sempre dentro.
+    expect(win.gte.getTime()).toBe(CLOSED_AT.getTime() - 86_400_000);
+    expect(win.lte.getTime()).toBeGreaterThan(Date.now());
+    expect(win.lte.getTime()).toBeLessThanOrEqual(Date.now() + 86_400_000);
   });
 
   it("linha travada por outra réplica (SKIP LOCKED) é pulada sem gravar", async () => {
