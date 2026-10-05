@@ -10,17 +10,30 @@ import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal
 import { getDealPanelFieldsForDeal } from "@/services/contacts";
 import { logEvent } from "@/services/activity-log";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("api/deals/[id]");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+/**
+ * Detalhe do negócio (painel do Kanban/Flow).
+ *
+ * B5: antes eram ~8 fases em série (permissão → negócio → etapa → funil →
+ * authz → visibilidade → campos do painel em 2 idas). Agora authz e
+ * visibilidade saem junto com a leitura do negócio, e escopo de etapa/funil
+ * + campos do painel saem juntos depois dela. Toda checagem continua; os
+ * campos do painel só são devolvidos depois que todas passam.
+ * `Server-Timing`: auth, deal, checks, total.
+ */
 export async function GET(request: Request, context: RouteContext) {
+  const timing = new ServerTiming();
   try {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
+    timing.add("auth", timing.totalMs());
 
-    return await runWithApiUserContext(authResult.user, async () => {
+    const res = await runWithApiUserContext(authResult.user, async () => {
     const denied = await requirePermissionForUser(authResult.user, "deal:view");
     if (denied) return denied;
     const { id } = await context.params;
@@ -28,34 +41,47 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
-    // `contact.conversations[0]` é a conversa que o painel abre: sem ticket
-    // ativo, a que tem a última mensagem do contato (a da prévia do card).
-    const deal = await getDealById(id, { conversationWithLastMessageFirst: true });
-    if (!deal) {
-      return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
-    }
-    const stageDenied = await requireStageScope(authResult.user, "view", deal.stage.id);
-    if (stageDenied) return stageDenied;
-    const pipelineId = deal.stage.pipeline?.id ?? "";
-    const pipelineDenied = await requirePipelineScope(
-      authResult.user,
-      "view",
-      pipelineId,
-    );
-    if (pipelineDenied && pipelineId) return pipelineDenied;
-    const authz = await loadAuthzContext({
+    const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+    // Independem do negócio: em voo junto com a leitura dele.
+    const authzPromise = loadAuthzContext({
       userId: authResult.user.id,
       organizationId: authResult.user.organizationId,
       isSuperAdmin: authResult.user.isSuperAdmin,
     });
+    const visibilityPromise = getVisibilityFilter(user);
+    authzPromise.catch(() => undefined);
+    visibilityPromise.catch(() => undefined);
+
+    // `contact.conversations[0]` é a conversa que o painel abre: sem ticket
+    // ativo, a que tem a última mensagem do contato (a da prévia do card).
+    const deal = await timing.time("deal", () =>
+      getDealById(id, { conversationWithLastMessageFirst: true }),
+    );
+    if (!deal) {
+      return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
+    }
+    const pipelineId = deal.stage.pipeline?.id ?? "";
+    // A URL pode ser o número público (?deal=1389). Os valores estão no id
+    // interno; buscar com o número devolve todos os campos vazios.
+    const panelFieldsPromise = getDealPanelFieldsForDeal(deal.id).catch(() => []);
+    const [stageDenied, pipelineDenied, authz, visibility] = await timing.time(
+      "checks",
+      () =>
+        Promise.all([
+          requireStageScope(authResult.user, "view", deal.stage.id),
+          requirePipelineScope(authResult.user, "view", pipelineId),
+          authzPromise,
+          visibilityPromise,
+        ]),
+    );
+    if (stageDenied) return stageDenied;
+    if (pipelineDenied && pipelineId) return pipelineDenied;
     if (deal.stage.pipeline?.stages) {
       deal.stage.pipeline.stages = deal.stage.pipeline.stages.filter((s) =>
         canViewStage(authz, s.id),
       );
     }
 
-    const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-    const visibility = await getVisibilityFilter(user);
     // Deal sem dono acompanha o eixo "sem responsável": quem enxerga o pool no
     // board precisa conseguir abrir o card, senão o clique devolve 403.
     const ownsOrCanClaim =
@@ -71,9 +97,7 @@ export async function GET(request: Request, context: RouteContext) {
     // e disparava o warning de "unique key" no React.
     type NestedTag = { tag: { id: string; name: string; color: string | null } };
     const flattenTags = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
-    // A URL pode ser o número público (?deal=1389). Os valores estão no id
-    // interno; buscar com o número devolve todos os campos vazios.
-    const dealPanelFields = await getDealPanelFieldsForDeal(deal.id).catch(() => []);
+    const dealPanelFields = await panelFieldsPromise;
 
     const responseDeal = {
       ...deal,
@@ -91,6 +115,9 @@ export async function GET(request: Request, context: RouteContext) {
 
     return NextResponse.json(responseDeal);
     });
+    res.headers.set("Server-Timing", timing.header());
+    log.debug({ status: res.status, timing: timing.toJSON() }, "[deal GET] tempos");
+    return res;
   } catch (e) {
     log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao buscar negócio." }, { status: 500 });

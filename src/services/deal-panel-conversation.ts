@@ -23,7 +23,16 @@ const log = getLogger("deal-panel-conversation");
 /** Não são mensagens de chat — mesmo recorte da prévia do card do board. */
 const NON_CHAT_MESSAGE_TYPES = ["note", "ai_draft", "whatsapp_call", "whatsapp_call_recording"];
 
-type PanelConversation = { id: string; status: ConversationStatus };
+type PanelConversation = {
+  id: string;
+  status: ConversationStatus;
+  /**
+   * `conversations.lastMessageAt` — horário da última mensagem de CHAT, com
+   * o MESMO recorte deste arquivo (`lib/conversation-last-message.ts`).
+   * Ausente/null: conversa sem chat ou ainda não preenchida pelo backfill.
+   */
+  lastMessageAt?: Date | string | null;
+};
 
 /**
  * Ativos na frente (ordem do banco entre eles). Entre os encerrados: o da
@@ -47,31 +56,45 @@ export function orderConversationsForDealPanel<T extends PanelConversation>(
 }
 
 /**
- * Sem ticket ativo e com mais de um ticket: uma consulta agrupada (até 20
- * ids, índice `messages(conversationId, createdAt)`) para saber qual tem a
- * última mensagem de chat. Fora desse caso devolve a própria lista, sem
- * consulta. Falha na consulta mantém a ordem recebida.
+ * Sem ticket ativo e com mais de um ticket: qual tem a última mensagem de
+ * chat. Fora desse caso devolve a própria lista, sem consulta.
+ *
+ * B5: o horário vem de `conversations.lastMessageAt`, que já chega com a
+ * linha da conversa. Antes era SEMPRE um `groupBy` em `messages` sobre os
+ * até 20 tickets do contato — `MAX(createdAt)` com filtro de tipo/direção
+ * não usa o índice para parar cedo e lê o histórico inteiro desses tickets
+ * (contato antigo = milhares de linhas; p95 do `GET /api/deals/:id`). O
+ * `groupBy` agora roda só para os tickets com a coluna vazia (sem chat ou
+ * fora do backfill). Falha na consulta mantém a ordem recebida.
  */
 export async function preferConversationWithLastMessage<T extends PanelConversation>(
   conversations: T[],
 ): Promise<T[]> {
   if (conversations.length < 2) return conversations;
   if (conversations.some((c) => c.status !== "RESOLVED")) return conversations;
+  const lastMessageAt = new Map<string, Date>();
+  const unknown: string[] = [];
+  for (const c of conversations) {
+    const at = c.lastMessageAt ? new Date(c.lastMessageAt) : null;
+    if (at && !Number.isNaN(at.getTime())) lastMessageAt.set(c.id, at);
+    else unknown.push(c.id);
+  }
   try {
-    const rows = await prisma.message.groupBy({
-      by: ["conversationId"],
-      where: {
-        conversationId: { in: conversations.map((c) => c.id) },
-        isPrivate: false,
-        direction: { in: ["in", "out"] },
-        messageType: { notIn: NON_CHAT_MESSAGE_TYPES },
-        NOT: { messageType: { startsWith: "event" } },
-      },
-      _max: { createdAt: true },
-    });
-    const lastMessageAt = new Map<string, Date>();
-    for (const row of rows) {
-      if (row._max.createdAt) lastMessageAt.set(row.conversationId, row._max.createdAt);
+    if (unknown.length > 0) {
+      const rows = await prisma.message.groupBy({
+        by: ["conversationId"],
+        where: {
+          conversationId: { in: unknown },
+          isPrivate: false,
+          direction: { in: ["in", "out"] },
+          messageType: { notIn: NON_CHAT_MESSAGE_TYPES },
+          NOT: { messageType: { startsWith: "event" } },
+        },
+        _max: { createdAt: true },
+      });
+      for (const row of rows) {
+        if (row._max.createdAt) lastMessageAt.set(row.conversationId, row._max.createdAt);
+      }
     }
     if (lastMessageAt.size === 0) return conversations;
     return orderConversationsForDealPanel(conversations, lastMessageAt);
