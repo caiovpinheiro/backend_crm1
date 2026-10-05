@@ -109,7 +109,16 @@ else
 end`;
 
 async function encode(value: unknown): Promise<string | null> {
-  const json = JSON.stringify(value);
+  return encodeText(JSON.stringify(value));
+}
+
+/**
+ * Texto (JSON já serializado) → valor do Redis: o próprio texto, ou gzip em
+ * base64 acima de `GZ_MIN_BYTES`. `null` = gzipado passa do teto (fica só
+ * no fallback em memória). `set(key, obj)` grava exatamente o mesmo que
+ * `setText(key, JSON.stringify(obj))`.
+ */
+async function encodeText(json: string): Promise<string | null> {
   const jsonBytes = Buffer.byteLength(json, "utf8");
   if (jsonBytes < GZ_MIN_BYTES) return json;
   const gz = await gzipAsync(Buffer.from(json, "utf8"), { level: 6 });
@@ -120,13 +129,17 @@ async function encode(value: unknown): Promise<string | null> {
 }
 
 async function decode<T>(raw: string): Promise<T> {
+  return JSON.parse(await decodeText(raw)) as T;
+}
+
+/** Valor do Redis → texto, sem `JSON.parse` (gunzip no threadpool). */
+async function decodeText(raw: string): Promise<string> {
   if (raw.startsWith(GZ_PREFIX)) {
-    const json = (
+    return (
       await gunzipAsync(Buffer.from(raw.slice(GZ_PREFIX.length), "base64"))
     ).toString("utf8");
-    return JSON.parse(json) as T;
   }
-  return JSON.parse(raw) as T;
+  return raw;
 }
 
 // ── Fallback in-memory ─────────────────────────────────────────────
@@ -185,12 +198,23 @@ export interface CacheOptions<T = unknown> {
 
 type Accept<T> = CacheOptions<T>["accept"];
 
+/** Como o loader compartilhado lê e grava a chave (objeto ou texto). */
+type ValueStore<T> = {
+  get: (key: CacheKey) => Promise<T | undefined>;
+  set: (key: CacheKey, value: T, ttlSec: number) => Promise<void>;
+};
+
+function objectStore<T>(): ValueStore<T> {
+  return { get: (key) => get<T>(key), set: (key, value, ttl) => set(key, value, ttl) };
+}
+
 /** `get` que trata valor recusado por `accept` como miss. */
 async function getAccepted<T>(
   key: CacheKey,
   accept: Accept<T>,
+  store: ValueStore<T> = objectStore<T>(),
 ): Promise<T | undefined> {
-  const value = await get<T>(key);
+  const value = await store.get(key);
   if (value === undefined || !accept) return value;
   try {
     return (await accept(value)) ? value : undefined;
@@ -364,17 +388,124 @@ export async function wrap<T>(
   return loadShared(key, ttlSec, loader, options.accept);
 }
 
+// ── Texto (JSON já serializado) ────────────────────────────────────
+//
+// Para respostas grandes que a rota devolve como estão (board do Kanban):
+// o acerto devolve o texto sem `JSON.parse` + `JSON.stringify` de novo, e
+// o erro serializa uma vez só (o mesmo texto vai para o Redis e para a
+// resposta). Mesmo formato no Redis que `set`/`get` (texto ou `gz1:`), mas
+// use chaves próprias: o fallback em memória guarda o texto, não o objeto.
+
+/** Lê o texto de uma chave gravada por `setText`/`wrapText`. */
+export async function getText(key: CacheKey): Promise<string | undefined> {
+  const fullKey = KEY_PREFIX + key;
+  const fromMemory = (): string | undefined => {
+    const v = memoryGet<unknown>(fullKey);
+    return typeof v === "string" ? v : undefined;
+  };
+  const client = getClient();
+  if (!client) return fromMemory();
+  try {
+    const raw = await client.get(fullKey);
+    noteSuccess();
+    const label = { key: safeLabel(key.split(":")[0]) };
+    if (!raw) {
+      const local = fromMemory();
+      (local !== undefined ? metrics.cacheHits : metrics.cacheMisses)?.inc(label);
+      return local;
+    }
+    try {
+      const text = await decodeText(raw);
+      metrics.cacheHits?.inc(label);
+      return text;
+    } catch (decodeErr) {
+      log.warn({ err: decodeErr, key }, "[cache] decode falhou — tratando como miss");
+      metrics.cacheMisses?.inc(label);
+      return undefined;
+    }
+  } catch (err) {
+    noteFailure(err, key, "get");
+    return fromMemory();
+  }
+}
+
+/** Grava texto com TTL (gzip acima de 8 KB; acima do teto, só em memória). */
+export async function setText(
+  key: CacheKey,
+  text: string,
+  ttlSec: number = DEFAULT_TTL_SEC,
+): Promise<void> {
+  const fullKey = KEY_PREFIX + key;
+  const client = getClient();
+  if (!client) {
+    memorySet(fullKey, text, ttlSec);
+    return;
+  }
+  const payload = await encodeText(text);
+  if (payload === null) {
+    log.warn(
+      { key, maxBytes: MAX_REDIS_VALUE_BYTES },
+      "[cache] set pulou Redis — payload acima do limite",
+    );
+    memorySet(fullKey, text, ttlSec);
+    return;
+  }
+  try {
+    await client.set(fullKey, payload, "EX", ttlSec);
+    noteSuccess();
+    memoryDel(fullKey);
+  } catch (err) {
+    noteFailure(err, key, "set");
+    memorySet(fullKey, text, ttlSec);
+  }
+}
+
+/** De onde veio o texto de `wrapText`. */
+export type TextCacheSource =
+  /** Do cache. */
+  | "hit"
+  /** Este chamador rodou o loader. */
+  | "miss"
+  /** Esperou o loader de outra requisição (singleflight/lock). */
+  | "shared";
+
+/**
+ * `wrap` para texto: mesmo singleflight + lock entre réplicas, sem
+ * `JSON.parse`/`JSON.stringify` no caminho.
+ */
+export async function wrapText(
+  key: CacheKey,
+  ttlSec: number,
+  loader: () => Promise<string>,
+): Promise<{ text: string; source: TextCacheSource }> {
+  const cached = await getText(key);
+  if (cached !== undefined) return { text: cached, source: "hit" };
+  let ran = false;
+  const text = await loadShared<string>(
+    key,
+    ttlSec,
+    async () => {
+      ran = true;
+      return loader();
+    },
+    undefined,
+    { get: getText, set: setText },
+  );
+  return { text, source: ran ? "miss" : "shared" };
+}
+
 /** Miss: um loader por chave neste processo (singleflight) + lock Redis. */
 function loadShared<T>(
   key: CacheKey,
   ttlSec: number,
   loader: () => Promise<T>,
   accept: Accept<T>,
+  store: ValueStore<T> = objectStore<T>(),
 ): Promise<T> {
   const existing = inflight.get(key);
   if (existing) return existing as Promise<T>;
 
-  const pending = loadAndStore(key, ttlSec, loader, accept).finally(() => {
+  const pending = loadAndStore(key, ttlSec, loader, accept, store).finally(() => {
     inflight.delete(key);
   });
   inflight.set(key, pending);
@@ -386,6 +517,7 @@ async function loadAndStore<T>(
   ttlSec: number,
   loader: () => Promise<T>,
   accept: Accept<T>,
+  store: ValueStore<T>,
 ): Promise<T> {
   const lockKey = LOCK_PREFIX + key;
   const client = getClient();
@@ -413,7 +545,7 @@ async function loadAndStore<T>(
       for (let i = 0; i < STAMPEDE_MAX_RETRIES; i++) {
         await new Promise((r) => setTimeout(r, STAMPEDE_RETRY_DELAY_MS));
         if (circuitIsOpen()) break;
-        const retry = await getAccepted<T>(key, accept);
+        const retry = await getAccepted<T>(key, accept, store);
         if (retry !== undefined) return retry;
         try {
           const again = await client.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
@@ -428,7 +560,7 @@ async function loadAndStore<T>(
         }
       }
       if (!acquired) {
-        const late = await getAccepted<T>(key, accept);
+        const late = await getAccepted<T>(key, accept, store);
         if (late !== undefined) return late;
         // Degrada em vez de estourar 500: chama o loader direto (sem
         // lock). Pior caso = alguns loaders concorrentes pontuais, que é
@@ -436,14 +568,14 @@ async function loadAndStore<T>(
         // como fallback, inaceitável como resposta de erro ao usuário.
         log.warn({ key }, "[cache] stampede timeout — degradando para loader direto");
         const value = await loader();
-        await set(key, value, ttlSec);
+        await store.set(key, value, ttlSec);
         return value;
       }
     }
 
     try {
       const value = await loader();
-      await set(key, value, ttlSec);
+      await store.set(key, value, ttlSec);
       return value;
     } finally {
       if (acquired) {
@@ -455,7 +587,7 @@ async function loadAndStore<T>(
   }
 
   const value = await loader();
-  await set(key, value, ttlSec);
+  await store.set(key, value, ttlSec);
   return value;
 }
 
@@ -630,6 +762,9 @@ function matchesGlob(input: string, pattern: string): boolean {
 export const cache = {
   get,
   set,
+  getText,
+  setText,
+  wrapText,
   del,
   delPattern,
   wrap,

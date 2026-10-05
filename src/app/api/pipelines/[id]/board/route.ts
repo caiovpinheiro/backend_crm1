@@ -1,22 +1,29 @@
 import { NextResponse } from "next/server";
 
+import type { AppSession } from "@/lib/auth-helpers";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { funnelDealWhere, andDealWhere } from "@/lib/authz/funnel-visibility";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
+import { ServerTiming } from "@/lib/server-timing";
 import { getVisibilityFilter } from "@/lib/visibility";
+import { boardStageScope } from "@/services/board-cache-variant";
 import {
-  getBoardData,
+  getBoardJson,
   isValidDealStatus,
+  type BoardLimitOptions,
   type BoardSortDirection,
   type BoardSortField,
 } from "@/services/deals";
-import { parseAdvancedDealFilters } from "@/services/kanban-filters";
+import { parseAdvancedDealFilters, type AdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta, resolvePipelineByPublicRef } from "@/services/pipelines";
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/pipelines/[id]/board");
+
+/** Acima disto o tempo do board vai para o log em `info` (sem ligar debug). */
+const SLOW_BOARD_LOG_MS = 1_000;
 
 /**
  * Aceita `sort` e `direction` vindos do client (GET via query string ou
@@ -31,6 +38,13 @@ function parseBoardSortField(raw: unknown): BoardSortField | undefined {
 
 function parseBoardSortDirection(raw: unknown): BoardSortDirection | undefined {
   return raw === "asc" || raw === "desc" ? raw : undefined;
+}
+
+function parseStatus(raw: unknown): "OPEN" | "WON" | "LOST" | "ALL" | undefined {
+  if (raw === "ALL") return "ALL";
+  return typeof raw === "string" && isValidDealStatus(raw)
+    ? (raw as "OPEN" | "WON" | "LOST")
+    : undefined;
 }
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -69,6 +83,104 @@ async function getBoardStagesOnly(pipelineId: string) {
   }));
 }
 
+/** O que GET (query string) e POST (corpo) pedem — o resto é o mesmo caminho. */
+type BoardRequest = {
+  view?: "stages";
+  status?: "OPEN" | "WON" | "LOST" | "ALL";
+  filters?: AdvancedDealFilters;
+  limit: BoardLimitOptions;
+};
+
+/**
+ * Caminho único do board (GET e POST): autorização, cache canônico e
+ * resposta já serializada, com `Server-Timing` por fase.
+ *
+ * Toda checagem continua aqui: escopo do funil (`requirePipelineScope`),
+ * visibilidade do usuário (`getVisibilityFilter` + funil/etapas do papel
+ * no `where`) e filtro de etapas visíveis (`canViewStage`) — este agora
+ * roda antes de guardar no cache, e o recorte de etapas entra na chave.
+ */
+async function loadBoard(
+  session: AppSession,
+  rawRef: string,
+  readRequest: () => Promise<BoardRequest>,
+  timing: ServerTiming,
+  method: "GET" | "POST",
+): Promise<NextResponse> {
+  const resolved = await timing.time("pre", () => resolvePipelineByPublicRef(rawRef));
+  const pipelineId = resolved?.id ?? rawRef;
+  const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+
+  const pre0 = performance.now();
+  const authz = await loadAuthzContext({
+    userId: session.user.id,
+    organizationId: session.user.organizationId,
+    isSuperAdmin: session.user.isSuperAdmin,
+  });
+  // Corpo/query antes da visibilidade: `view=stages` não precisa dela.
+  const req = await readRequest();
+  // Meta + scope + visibilidade em paralelo.
+  const [meta, scopeDenied, visibility] = await Promise.all([
+    resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
+    requirePipelineScope(session.user, "view", pipelineId),
+    req.view === "stages" ? Promise.resolve(null) : getVisibilityFilter(user),
+  ]);
+  timing.add("pre", performance.now() - pre0);
+
+  if (!meta) {
+    return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
+  }
+  if (scopeDenied) return scopeDenied;
+
+  if (req.view === "stages") {
+    const stages = (await getBoardStagesOnly(pipelineId)).filter((s) =>
+      canViewStage(authz, s.id),
+    );
+    return NextResponse.json(stages);
+  }
+
+  const { json, source } = await getBoardJson(
+    pipelineId,
+    andDealWhere(visibility!.dealWhere, funnelDealWhere(authz)),
+    req.status,
+    req.filters,
+    req.limit,
+    {
+      stageVisible: (stageId) => canViewStage(authz, stageId),
+      stageScope: boardStageScope(authz),
+      timing,
+    },
+  );
+
+  const fields = {
+    method,
+    pipelineId,
+    cache: source,
+    chars: json.length,
+    filtered: Boolean(req.filters && Object.keys(req.filters).length > 0),
+    timing: timing.toJSON(),
+  };
+  if (timing.totalMs() >= SLOW_BOARD_LOG_MS) log.info(fields, "[board] lento");
+  else log.debug(fields, "[board] tempos");
+
+  return new NextResponse(json, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Server-Timing": timing.header(),
+    },
+  });
+}
+
+function errorResponse(e: unknown, label: string): NextResponse {
+  log.error({ err: e }, label);
+  const message = e instanceof Error ? e.message : "Erro ao carregar quadro.";
+  return NextResponse.json(
+    { message: "Erro ao carregar quadro.", detail: message },
+    { status: 500 },
+  );
+}
+
 // Bug 24/abr/26: usavamos `auth()` direto. As chamadas getPipelineMeta /
 // getVisibilityFilter / getBoardData rodam queries Prisma e dependem da
 // extension multi-tenant pra resolver organizationId no where. Sem o
@@ -77,78 +189,36 @@ async function getBoardStagesOnly(pipelineId: string) {
 // "Erro ao carregar quadro." em /pipeline. withOrgContext envolve o
 // handler em runWithContext.
 export async function GET(request: Request, context: RouteContext) {
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    // `auth` = JWT + versão da sessão + rate limit (antes do handler).
+    timing.add("auth", timing.totalMs());
     try {
       const { id: rawRef } = await context.params;
       if (!rawRef) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
-
-      const resolved = await resolvePipelineByPublicRef(rawRef);
-      const pipelineId = resolved?.id ?? rawRef;
-
-      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const url = new URL(request.url);
-      const view = url.searchParams.get("view");
-      const authz = await loadAuthzContext({
-        userId: session.user.id,
-        organizationId: session.user.organizationId,
-        isSuperAdmin: session.user.isSuperAdmin,
-      });
-
-      // Meta + scope + (visibility só se for board completo) em paralelo —
-      // antes eram awaits em série somando round-trips.
-      const [meta, scopeDenied, visibility] = await Promise.all([
-        resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
-        requirePipelineScope(session.user, "view", pipelineId),
-        view === "stages"
-          ? Promise.resolve(null)
-          : getVisibilityFilter(user),
-      ]);
-
-      if (!meta) {
-        return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
-      }
-      if (scopeDenied) return scopeDenied;
-
-      if (view === "stages") {
-        const stages = (await getBoardStagesOnly(pipelineId)).filter((s) =>
-          canViewStage(authz, s.id),
-        );
-        return NextResponse.json(stages);
-      }
-
-      const statusParam = url.searchParams.get("status");
-      const statusFilter = statusParam === "ALL"
-        ? "ALL" as const
-        : (statusParam && isValidDealStatus(statusParam) ? statusParam : undefined);
-
       const perStageRaw = url.searchParams.get("perStage");
-      const perStage = perStageRaw ? Math.max(1, parseInt(perStageRaw, 10) || 0) : undefined;
-
-      const sortField = parseBoardSortField(url.searchParams.get("sort"));
-      const sortDirection = parseBoardSortDirection(url.searchParams.get("direction"));
-
-      const board = await getBoardData(
-        pipelineId,
-        andDealWhere(visibility!.dealWhere, funnelDealWhere(authz)),
-        statusFilter,
-        undefined,
-        {
-          perStage,
-          sortField,
-          sortDirection,
-        },
+      return await loadBoard(
+        session,
+        rawRef,
+        async () => ({
+          view: url.searchParams.get("view") === "stages" ? "stages" : undefined,
+          status: parseStatus(url.searchParams.get("status")),
+          limit: {
+            perStage: perStageRaw
+              ? Math.max(1, parseInt(perStageRaw, 10) || 0)
+              : undefined,
+            sortField: parseBoardSortField(url.searchParams.get("sort")),
+            sortDirection: parseBoardSortDirection(url.searchParams.get("direction")),
+          },
+        }),
+        timing,
+        "GET",
       );
-      return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
-      log.error({ err: e }, "[board GET] erro ao carregar quadro");
-      const message =
-        e instanceof Error ? e.message : "Erro ao carregar quadro.";
-      return NextResponse.json(
-        { message: "Erro ao carregar quadro.", detail: message },
-        { status: 500 },
-      );
+      return errorResponse(e, "[board GET] erro ao carregar quadro");
     }
   });
 }
@@ -156,85 +226,61 @@ export async function GET(request: Request, context: RouteContext) {
 /**
  * Variante POST do board que aceita filtros avançados via body.
  *
- * Mantemos o GET intocado para compatibilidade — o frontend usa esta rota
- * quando há filtros que não cabem em query string (custom fields, ranges
- * de data, múltiplas tags, etc.).
+ * Mesmo caminho e mesmo cache do GET: sem filtro, um POST cai na mesma
+ * chave do GET equivalente. O frontend usa esta rota quando há filtros que
+ * não cabem em query string (custom fields, ranges de data, múltiplas
+ * tags, etc.).
  */
 export async function POST(request: Request, context: RouteContext) {
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     try {
       const { id: rawRef } = await context.params;
       if (!rawRef) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
-
-      const resolved = await resolvePipelineByPublicRef(rawRef);
-      const pipelineId = resolved?.id ?? rawRef;
-
-      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-      const authz = await loadAuthzContext({
-        userId: session.user.id,
-        organizationId: session.user.organizationId,
-        isSuperAdmin: session.user.isSuperAdmin,
-      });
-
-      const [meta, scopeDenied, visibility] = await Promise.all([
-        resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
-        requirePipelineScope(session.user, "view", pipelineId),
-        getVisibilityFilter(user),
-      ]);
-
-      if (!meta) {
-        return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
-      }
-      if (scopeDenied) return scopeDenied;
-
-      let bodyJson: unknown = null;
-      try {
-        bodyJson = await request.json();
-      } catch {
-        bodyJson = null;
-      }
-
-      const body = (bodyJson ?? {}) as { status?: string; filters?: unknown };
-      const statusParam = body.status;
-      const statusFilter =
-        statusParam === "ALL"
-          ? ("ALL" as const)
-          : statusParam && isValidDealStatus(statusParam)
-            ? (statusParam as "OPEN" | "WON" | "LOST")
-            : undefined;
-
-      const filters = parseAdvancedDealFilters(body.filters);
-      const limitOptions = {
-        perStage:
-          typeof (body as { perStage?: unknown }).perStage === "number"
-            ? Math.max(1, Math.floor((body as { perStage: number }).perStage))
-            : undefined,
-        offsetByStage:
-          (body as { offsetByStage?: Record<string, number> }).offsetByStage &&
-          typeof (body as { offsetByStage?: Record<string, number> }).offsetByStage === "object"
-            ? ((body as { offsetByStage: Record<string, number> }).offsetByStage)
-            : undefined,
-        sortField: parseBoardSortField((body as { sort?: unknown }).sort),
-        sortDirection: parseBoardSortDirection((body as { direction?: unknown }).direction),
-      };
-      const board = await getBoardData(
-        pipelineId,
-        andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
-        statusFilter,
-        filters,
-        limitOptions,
+      return await loadBoard(
+        session,
+        rawRef,
+        async () => {
+          let bodyJson: unknown = null;
+          try {
+            bodyJson = await request.json();
+          } catch {
+            bodyJson = null;
+          }
+          const body = (bodyJson ?? {}) as {
+            status?: unknown;
+            filters?: unknown;
+            perStage?: unknown;
+            offsetByStage?: unknown;
+            sort?: unknown;
+            direction?: unknown;
+          };
+          const offsetByStage =
+            body.offsetByStage && typeof body.offsetByStage === "object"
+              ? (body.offsetByStage as Record<string, number>)
+              : undefined;
+          return {
+            status: parseStatus(body.status),
+            filters: parseAdvancedDealFilters(body.filters),
+            limit: {
+              perStage:
+                typeof body.perStage === "number"
+                  ? Math.max(1, Math.floor(body.perStage))
+                  : undefined,
+              offsetByStage,
+              sortField: parseBoardSortField(body.sort),
+              sortDirection: parseBoardSortDirection(body.direction),
+            },
+          };
+        },
+        timing,
+        "POST",
       );
-      return NextResponse.json(board.filter((s) => canViewStage(authz, s.id)));
     } catch (e) {
-      log.error({ err: e }, "[board POST] erro ao carregar quadro com filtros");
-      const message =
-        e instanceof Error ? e.message : "Erro ao carregar quadro.";
-      return NextResponse.json(
-        { message: "Erro ao carregar quadro.", detail: message },
-        { status: 500 },
-      );
+      return errorResponse(e, "[board POST] erro ao carregar quadro com filtros");
     }
   });
 }

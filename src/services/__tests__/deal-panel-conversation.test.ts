@@ -180,6 +180,29 @@ describe("preferConversationWithLastMessage", () => {
     expect(h.groupBy).not.toHaveBeenCalled();
   });
 
+  it("com `lastMessageAt` em todos os tickets: ordena pela coluna, sem consultar mensagens", async () => {
+    const out = await preferConversationWithLastMessage([
+      { ...conv("t_velho", "RESOLVED"), lastMessageAt: day("01-01") },
+      { ...conv("t_antigo", "RESOLVED"), lastMessageAt: day("06-01") },
+      { ...conv("t_recente", "RESOLVED"), lastMessageAt: day("07-18") },
+    ]);
+    expect(ids(out)).toEqual(["t_recente", "t_antigo", "t_velho"]);
+    expect(h.groupBy).not.toHaveBeenCalled();
+  });
+
+  it("coluna vazia em parte dos tickets: groupBy só desses, e a ordem junta os dois", async () => {
+    seedMessages([{ id: "m1", conversationId: "t_sem_coluna", at: day("08-10") }]);
+    const out = await preferConversationWithLastMessage([
+      { ...conv("t_com_coluna", "RESOLVED"), lastMessageAt: day("07-01") },
+      { ...conv("t_sem_coluna", "RESOLVED"), lastMessageAt: null },
+    ]);
+    expect(ids(out)).toEqual(["t_sem_coluna", "t_com_coluna"]);
+    expect(h.groupBy).toHaveBeenCalledTimes(1);
+    const where = (h.groupBy.mock.calls[0]![0] as { where: { conversationId: { in: string[] } } })
+      .where;
+    expect(where.conversationId.in).toEqual(["t_sem_coluna"]);
+  });
+
   it("falha na consulta mantém a ordem original (não derruba o detalhe do negócio)", async () => {
     h.groupBy.mockRejectedValueOnce(new Error("boom"));
     const list = [conv("a", "RESOLVED"), conv("b", "RESOLVED")];
