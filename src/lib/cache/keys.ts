@@ -447,6 +447,16 @@ export async function invalidatePipelines(orgId: string): Promise<void> {
   await cache.del(pipelinesKey(orgId));
 }
 
+// ── Origens dos contatos (opções de filtro do Kanban) ───────────
+//
+// `source` e `ad_utm_source` distintos da org. Valor em envelope SWR
+// (`cache.wrapSwr`) — sem invalidação por escrita, ver
+// `services/contact-source-options.ts`.
+
+export function contactSourceOptionsKey(orgId: string): string {
+  return `contact_sources:${orgId}`;
+}
+
 // ── Stage Metrics (headers do Kanban) ───────────────────────────
 //
 // computeStageMetrics agrega os deals abertos do pipeline a cada carga do

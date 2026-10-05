@@ -1261,6 +1261,10 @@ model Contact {
   @@index([organizationId, createdAt])
   @@index([organizationId, assignedToId, lifecycleStage])
   @@index([organizationId, lifecycleStage, createdAt])
+  /// Opções de filtro do Kanban: valores distintos por org sem ler todos os
+  /// contatos (`services/contact-source-options.ts`, migration 20261005210000).
+  @@index([organizationId, source])
+  @@index([organizationId, adUtmSource])
   @@map("contacts")
 }
 
