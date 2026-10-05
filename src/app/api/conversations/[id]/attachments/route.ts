@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
-import { requireConversationAccess } from "@/lib/conversation-access";
+import { requireConversationAccessAndLoad } from "@/lib/conversation-access";
 import { lastMessageAtData } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
@@ -34,11 +34,30 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
 import { logEvent } from "@/services/activity-log";
 
 const log = getLogger("api/conversations/[id]/attachments");
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+/** Mesmos campos de `getConversationLite` (`services/conversations.ts`). */
+const CONVERSATION_LITE_SELECT = {
+  id: true, externalId: true, contactId: true, status: true,
+  channel: true, channelId: true, waJid: true, organizationId: true,
+  number: true,
+  createdAt: true,
+  lastInboundAt: true,
+  assignedToId: true,
+  assignedTo: { select: { id: true, name: true, type: true } },
+  pinnedNoteId: true,
+  channelRef: {
+    select: {
+      id: true, provider: true, config: true, name: true,
+      phoneNumber: true, type: true, status: true,
+    },
+  },
+} as const;
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
 // SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (nunca ao
@@ -367,19 +386,33 @@ async function parseAttachmentRequest(
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
 // (direto ou via service), avaliado ANTES da Prisma extension popular
 // o ctx. Migrado para withOrgContext.
+//
+// Contrato de tempo (B4): a resposta 201 sai assim que o arquivo está no
+// storage e a mensagem existe como `pending`. Upload à Graph e envio Meta
+// rodam no worker (fila `meta-attach`, jobId `meta-attach-<messageId>`);
+// Baileys vai pela fila `baileys-outbound`. Só `waitUntilSent: true` (pedido
+// explícito do cliente: sequência de modelo/produto, para a Graph receber
+// na ordem) espera o worker, com teto de 15 s. `Server-Timing` mostra as
+// fases (auth, access, body, channel, store, db, queue, wait).
 export async function POST(request: Request, context: RouteContext) {
-  return withOrgContext(async (session) => {
+  const timing = new ServerTiming();
+  const res = await withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     try {
       const { id } = await context.params;
-      const denied = await requireConversationAccess(session, id);
-      if (denied) return denied;
+      // Acesso + conversa numa leitura só (antes: checagem de acesso e
+      // `getConversationLite` liam a mesma linha, 3× com número na URL).
+      const access = await timing.time("access", () =>
+        requireConversationAccessAndLoad(session, id, (where) =>
+          prisma.conversation.findFirst({ where, select: CONVERSATION_LITE_SELECT }),
+        ),
+      );
+      if (access.response) return access.response;
+      let conv = access.conversation;
 
-      let conv = await getConversationLite(id);
-      if (!conv) {
-        return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
-      }
-
-      const parsed = await parseAttachmentRequest(request, conv.organizationId);
+      const parsed = await timing.time("body", () =>
+        parseAttachmentRequest(request, conv.organizationId),
+      );
       if (!parsed.ok) return parsed.response;
       const source = parsed.source;
       const caption = source.caption;
@@ -387,6 +420,7 @@ export async function POST(request: Request, context: RouteContext) {
       const asNote = source.asNote === true;
 
       // Nota interna não reabre ticket nem passa pelo canal.
+      const channel0 = performance.now();
       let reopenedConversationId: string | null = null;
       if (!asNote && conv.status === "RESOLVED" && conv.contactId) {
         const reopened = await reopenResolvedAsNewTicket(conv.id);
@@ -444,6 +478,7 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
+      timing.add("channel", performance.now() - channel0);
       const senderName = session.user.name ?? session.user.email ?? "Agente";
 
       let fileName: string;
@@ -464,6 +499,7 @@ export async function POST(request: Request, context: RouteContext) {
 
         fileName = raw.name || "file";
 
+        const store0 = performance.now();
         let buffer: Buffer;
         try {
           buffer = await blobToBuffer(raw);
@@ -499,6 +535,7 @@ export async function POST(request: Request, context: RouteContext) {
           buffer,
         });
         publicUrl = saved.url;
+        timing.add("store", performance.now() - store0);
       }
 
       const mediaTypeResolved = resolveMediaType(mimeBase);
@@ -706,6 +743,7 @@ export async function POST(request: Request, context: RouteContext) {
         const displayContent =
           mediaTypeResolved === "audio" ? caption || "" : caption || `📎 ${fileName}`;
 
+        const db0 = performance.now();
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conv.id,
@@ -719,6 +757,8 @@ export async function POST(request: Request, context: RouteContext) {
           }),
         });
 
+        // Antes do enqueue (não em paralelo): o worker pode marcar
+        // `hasError: true` ao falhar, e este update não pode sobrescrever.
         try {
           await prisma.conversation.update({
             where: { id: conv.id },
@@ -731,6 +771,7 @@ export async function POST(request: Request, context: RouteContext) {
             },
           });
         } catch { /* columns may not exist yet */ }
+        timing.add("db", performance.now() - db0);
 
         const deferChat =
           source.mode === "reuse" && source.deferChatUntilSent === true;
@@ -764,7 +805,7 @@ export async function POST(request: Request, context: RouteContext) {
           caption,
           kind: mediaTypeResolved,
         };
-        const job = await enqueueMetaAttach(jobPayload);
+        const job = await timing.time("queue", () => enqueueMetaAttach(jobPayload));
         let sendStatus = "pending";
         let storedType = pendingType;
         let delivery: "voice" | "audio" | "document" | null = null;
@@ -784,7 +825,7 @@ export async function POST(request: Request, context: RouteContext) {
           sendStatus = "failed";
           queuedMetaError = errMsg;
         } else if (source.waitUntilSent) {
-          const waited = await waitForMessageSendStatus(msgRow.id);
+          const waited = await timing.time("wait", () => waitForMessageSendStatus(msgRow.id));
           if (waited === "sent") sendStatus = "sent";
           if (waited === "failed") sendStatus = "failed";
         }
@@ -888,4 +929,9 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ message: msg }, { status: 500 });
     }
   });
+  if (res instanceof Response) {
+    res.headers.set("Server-Timing", timing.header());
+    log.debug({ status: res.status, timing: timing.toJSON() }, "[attachments] tempos");
+  }
+  return res;
 }
