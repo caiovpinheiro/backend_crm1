@@ -24,8 +24,10 @@ import {
 } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
-import { cache } from "@/lib/cache";
+import { cache, type TextCacheSource } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
+import type { ServerTiming } from "@/lib/server-timing";
+import { canonicalBoardVariant } from "@/services/board-cache-variant";
 import {
   boardColumnKeysetWhere,
   boardColumnOrderBy,
@@ -2312,6 +2314,90 @@ function translateStageFilter(value: unknown): Prisma.Sql | null {
 }
 
 /**
+ * Relação `tags` (`tags_on_deals`): `some`/`none` com `{}` ou só `tagId`
+ * (`valor`, `{ in }`, `{ equals }`) — o que os filtros de tag produzem
+ * (`kanban-filters.ts`: qualquer / todas / nenhuma / sem tag). `every` e
+ * outras chaves → fallback.
+ */
+function translateTagsFilter(value: unknown): Prisma.Sql | null {
+  if (!isPlainObject(value)) return null;
+  const parts: Prisma.Sql[] = [];
+  for (const [op, inner] of Object.entries(value)) {
+    if (inner === undefined) continue;
+    if ((op !== "some" && op !== "none") || !isPlainObject(inner)) return null;
+    const conds: Prisma.Sql[] = [];
+    for (const [k, v] of Object.entries(inner)) {
+      if (v === undefined) continue;
+      if (k !== "tagId") return null;
+      const cond = translateScalarFilter(Prisma.raw(`tg."tagId"`), v, null);
+      if (!cond) return null;
+      conds.push(cond);
+    }
+    const exists = Prisma.sql`EXISTS (SELECT 1 FROM tags_on_deals tg WHERE tg."dealId" = d.id AND ${sqlAndAll(conds)})`;
+    parts.push(op === "some" ? exists : Prisma.sql`NOT ${exists}`);
+  }
+  return parts.length > 0 ? sqlAndAll(parts) : null;
+}
+
+/** Colunas texto de `contacts` usadas pelos filtros do board. */
+const BOARD_CONTACT_TEXT_COLUMNS: Readonly<Record<string, string>> = {
+  source: "source",
+  adUtmSource: "ad_utm_source",
+  phone: "phone",
+  email: "email",
+};
+
+/** Where de `contacts` (alias `ct`) só com colunas da lista e AND/OR. */
+function translateContactWhere(where: unknown): Prisma.Sql | null {
+  if (!isPlainObject(where)) return null;
+  const parts: Prisma.Sql[] = [];
+  for (const [key, value] of Object.entries(where)) {
+    if (value === undefined) continue;
+    let frag: Prisma.Sql | null;
+    if (key === "AND" || key === "OR") {
+      const list = Array.isArray(value) ? value : [value];
+      const subs: Prisma.Sql[] = [];
+      for (const w of list) {
+        const sub = translateContactWhere(w);
+        if (!sub) return null;
+        subs.push(sub);
+      }
+      frag = key === "AND" ? sqlAndAll(subs) : sqlOrAll(subs);
+    } else if (hasOwn(BOARD_CONTACT_TEXT_COLUMNS, key)) {
+      frag = translateScalarFilter(
+        Prisma.raw(`ct."${BOARD_CONTACT_TEXT_COLUMNS[key] as string}"`),
+        value,
+        null,
+      );
+    } else {
+      frag = null;
+    }
+    if (!frag) return null;
+    parts.push(frag);
+  }
+  return sqlAndAll(parts);
+}
+
+/**
+ * Relação `contact` (to-one): `{ is: {...} }` ou o objeto direto — "o
+ * negócio TEM contato e o contato casa". É o que origem, UTM e "tem
+ * telefone/e-mail" produzem. `is: null`, `isNot` e busca por texto
+ * (`contains`) → fallback.
+ */
+function translateContactFilter(value: unknown): Prisma.Sql | null {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined);
+  let inner: unknown = value;
+  if (keys.includes("is") || keys.includes("isNot")) {
+    if (keys.length !== 1 || keys[0] !== "is") return null;
+    inner = value.is;
+  }
+  const cond = translateContactWhere(inner);
+  if (!cond) return null;
+  return Prisma.sql`EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = d."contactId" AND ct."organizationId" = d."organizationId" AND ${cond})`;
+}
+
+/**
  * Traduz o where do board para um fragmento SQL (alias `d` = `deals`).
  * Retorna `null` quando encontra algo fora do subconjunto suportado — o
  * caller usa o caminho Prisma por etapa. `{}`/`undefined` → `TRUE`.
@@ -2352,6 +2438,10 @@ export function translateDealWhereToSql(
       );
     } else if (key === "stage") {
       frag = translateStageFilter(value);
+    } else if (key === "tags") {
+      frag = translateTagsFilter(value);
+    } else if (key === "contact") {
+      frag = translateContactFilter(value);
     } else {
       frag = null;
     }
@@ -2359,6 +2449,79 @@ export function translateDealWhereToSql(
     parts.push(frag);
   }
   return sqlAndAll(parts);
+}
+
+/**
+ * Teto de ids pré-resolvidos quando o where tem filtro que o tradutor não
+ * cobre (conversa, janela 24 h, campo personalizado, busca). Acima disso o
+ * board volta ao caminho por etapa.
+ */
+const BOARD_PRERESOLVE_CAP = 20_000;
+
+/** Ids pré-resolvidos: fragmento SQL para a janela + total por etapa. */
+type PreResolvedBoardWhere = {
+  sql: Prisma.Sql;
+  countsByStage: Map<string, number>;
+};
+
+/**
+ * Where não traduzível: UMA consulta Prisma (`select id, stageId`; as
+ * relações viram subconsultas no mesmo SELECT) resolve os negócios que
+ * casam nas etapas do board, e a janela por etapa roda sobre
+ * `d.id = ANY(ids)`. Antes, um `findMany` com include POR ETAPA (4 em voo),
+ * cada um com ~6 SELECTs no motor do Prisma. Semântica idêntica: quem
+ * avalia o where é o Prisma. Os totais por etapa saem da mesma lista — o
+ * `groupBy` com o mesmo filtro caro não roda. `null` = passou do teto.
+ */
+async function preResolveBoardWhere(
+  dealWhere: Prisma.DealWhereInput,
+  stageIds: readonly string[],
+  cap: number = BOARD_PRERESOLVE_CAP,
+): Promise<PreResolvedBoardWhere | null> {
+  if (stageIds.length === 0) return { sql: SQL_FALSE, countsByStage: new Map() };
+  const rows = await prisma.deal.findMany({
+    where: { AND: [dealWhere, { stageId: { in: [...stageIds] } }] },
+    select: { id: true, stageId: true },
+    take: cap + 1,
+  });
+  if (rows.length > cap) return null;
+  const countsByStage = new Map<string, number>();
+  for (const r of rows) countsByStage.set(r.stageId, (countsByStage.get(r.stageId) ?? 0) + 1);
+  return {
+    sql: rows.length === 0 ? SQL_FALSE : Prisma.sql`d.id = ANY(${rows.map((r) => r.id)})`,
+    countsByStage,
+  };
+}
+
+/**
+ * Where do board em SQL para as etapas dadas. `direct` = traduzido direto
+ * (só nesse caso o cursor de `lastInteraction` vale). `sql: null` = nem
+ * traduz nem cabe no teto → caminho por etapa.
+ */
+type BoardWhereResolver = (
+  stageIds: readonly string[],
+) => Promise<{ sql: Prisma.Sql | null; direct: boolean }>;
+
+/** Resolvedor com memória: a pré-resolução roda no máximo uma vez por carga. */
+function createBoardWhereResolver(dealWhere: Prisma.DealWhereInput): {
+  resolve: BoardWhereResolver;
+  /** Resultado da pré-resolução (`undefined` = não rodou; `null` = teto). */
+  preResolved: () => PreResolvedBoardWhere | null | undefined;
+  directSql: Prisma.Sql | null;
+} {
+  const directSql = translateDealWhereToSql(dealWhere);
+  let pre: Promise<PreResolvedBoardWhere | null> | undefined;
+  let settled: PreResolvedBoardWhere | null | undefined;
+  return {
+    directSql,
+    preResolved: () => settled,
+    resolve: async (stageIds) => {
+      if (directSql) return { sql: directSql, direct: true };
+      pre ??= preResolveBoardWhere(dealWhere, stageIds).then((r) => (settled = r));
+      const r = await pre;
+      return { sql: r?.sql ?? null, direct: false };
+    },
+  };
 }
 
 type BoardRankedRow = {
@@ -2637,6 +2800,8 @@ async function loadBoardStagesByLastInteraction(
   lastAtOut?: Map<string, Date | null>,
   /** Filtro de etapa: só as etapas escolhidas viram coluna (`stagesAllowedByFilter`). */
   advancedFilters?: AdvancedDealFilters,
+  /** Resolvedor do where compartilhado com `computeBoardData` (totais). */
+  whereResolver: BoardWhereResolver = createBoardWhereResolver(dealWhere).resolve,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
   const stagesRaw = stagesAllowedByFilter(
@@ -2650,7 +2815,11 @@ async function loadBoardStagesByLastInteraction(
   const limitByStage = boardLimitByStage(stagesRaw, perStage, offsetByStage);
   const maxPerStage = Math.max(...limitByStage.values());
 
-  const whereSql = translateDealWhereToSql(dealWhere);
+  // Where traduzido direto, ou ids pré-resolvidos. Só o traduzido direto
+  // devolve `last_at` para o cursor: o "Carregar mais" por cursor
+  // (`getBoardColumnPages`) só aceita where traduzível — com ids
+  // pré-resolvidos o cliente segue pelo `offsetByStage`, como antes.
+  const { sql: whereSql, direct } = await whereResolver(stagesRaw.map((s) => s.id));
   if (whereSql) {
     const rows = await prisma.$queryRaw<BoardRankedRow[]>(
       buildLastInteractionRankedSql({
@@ -2662,7 +2831,7 @@ async function loadBoardStagesByLastInteraction(
         maxPerStage,
       }),
     );
-    if (lastAtOut) {
+    if (lastAtOut && direct) {
       for (const row of rows) {
         if (row.last_at === undefined) continue;
         lastAtOut.set(row.id, row.last_at === null ? null : new Date(row.last_at));
@@ -2859,11 +3028,12 @@ export async function getBoardData(
     typeof visibilityWhere === "string"
       ? { ownerId: visibilityWhere }
       : visibilityWhere ?? null;
-  const variant = JSON.stringify({
-    v: normalizedWhere ?? null,
-    s: statusFilter ?? null,
-    f: advancedFilters ?? null,
-    l: limitOptions ?? null,
+  const variant = canonicalBoardVariant({
+    pipelineId,
+    visibilityWhere: normalizedWhere,
+    statusFilter,
+    advancedFilters,
+    limitOptions,
   });
   return cache.wrap(
     await boardDataKey(orgId, pipelineId, variant),
@@ -2877,6 +3047,73 @@ export async function getBoardData(
         limitOptions,
       ),
   );
+}
+
+/**
+ * Board já serializado (JSON), para a rota devolver como está — B3 / P-4.
+ *
+ * - Acerto: o texto sai do Redis (gunzip no threadpool) direto para a
+ *   resposta. Antes: gunzip + `JSON.parse` do board inteiro + filtro de
+ *   etapas + `JSON.stringify` de novo na rota.
+ * - Erro: `computeBoardData`, filtro de etapas do papel e UM
+ *   `JSON.stringify`; o mesmo texto vai para o Redis e para a resposta.
+ *   Antes eram dois (o `set` do cache e o `NextResponse.json`).
+ *
+ * A variante é canônica (`board-cache-variant.ts`) e inclui `stageScope`,
+ * porque o filtro `canViewStage` agora roda antes de guardar. Chave
+ * própria (`…:json`): o fallback em memória guarda texto, não objeto.
+ */
+export async function getBoardJson(
+  pipelineId: string,
+  visibilityWhere: Prisma.DealWhereInput | null | undefined,
+  statusFilter: DealStatus | "ALL" | undefined,
+  advancedFilters: AdvancedDealFilters | undefined,
+  limitOptions: BoardLimitOptions | undefined,
+  opts: {
+    /** Etapas que o papel do usuário vê (`canViewStage`). */
+    stageVisible?: (stageId: string) => boolean;
+    /** Texto estável do recorte acima (`boardStageScope`) — entra na chave. */
+    stageScope?: string;
+    timing?: ServerTiming;
+  } = {},
+): Promise<{ json: string; source: TextCacheSource }> {
+  const orgId = getOrgIdOrThrow();
+  const timing = opts.timing;
+  const t0 = performance.now();
+  const variant = canonicalBoardVariant({
+    pipelineId,
+    visibilityWhere: visibilityWhere ?? null,
+    statusFilter,
+    advancedFilters,
+    limitOptions,
+    stageScope: opts.stageScope ?? null,
+  });
+  const key = `${await boardDataKey(orgId, pipelineId, variant)}:json`;
+  let loaderMs = 0;
+  const { text, source } = await cache.wrapText(key, BOARD_CACHE_TTL_SEC, async () => {
+    const l0 = performance.now();
+    try {
+      const board = await computeBoardData(
+        pipelineId,
+        visibilityWhere ?? null,
+        statusFilter,
+        advancedFilters,
+        limitOptions,
+        timing,
+      );
+      const visible = opts.stageVisible
+        ? board.filter((s) => opts.stageVisible!(s.id))
+        : board;
+      return timing
+        ? timing.timeSync("ser", () => JSON.stringify(visible))
+        : JSON.stringify(visible);
+    } finally {
+      loaderMs = performance.now() - l0;
+    }
+  });
+  // `cache` = chave (versões no Redis) + GET + lock + gzip/SET, sem o loader.
+  timing?.add("cache", performance.now() - t0 - loaderMs, source);
+  return { json: text, source };
 }
 
 /**
@@ -2921,13 +3158,15 @@ async function computeBoardData(
   statusFilter?: DealStatus | "ALL",
   advancedFilters?: AdvancedDealFilters,
   limitOptions?: BoardLimitOptions,
+  /** Tempos por fase (`Server-Timing` da rota). */
+  timing?: ServerTiming,
 ) {
   const now = new Date();
+  const phase = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
+    timing ? timing.time(name, fn) : fn();
 
-  const dealWhere = await buildBoardDealWhere(
-    visibilityWhere,
-    statusFilter,
-    advancedFilters,
+  const dealWhere = await phase("filters", () =>
+    buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters),
   );
 
   const perStage = Math.min(
@@ -2957,12 +3196,29 @@ async function computeBoardData(
   // ⚡ COUNT por etapa em paralelo com o SELECT de cards. Antes o groupBy
   // esperava `stages` só pra montar `stageId IN (...)` — agora escopa por
   // `stage.pipelineId` (mesmo resultado) e sobe junto com a query pesada.
-  const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
+  //
+  // Where não traduzível (filtro de conversa, campo personalizado, busca):
+  // os totais saem dos ids pré-resolvidos, sem um 2º SELECT com o mesmo
+  // filtro caro. O `groupBy` só roda nesse caso se a pré-resolução passar
+  // do teto.
+  const whereResolver = createBoardWhereResolver(dealWhere);
+  type TotalsRow = { stageId: string; _count: { _all: number } };
+  const groupByTotals = (): Promise<TotalsRow[]> =>
     prisma.deal.groupBy({
       by: ["stageId"],
       where: { ...dealWhere, stage: { pipelineId } },
       _count: { _all: true },
     });
+  const totalsPromise: Promise<TotalsRow[]> | null = whereResolver.directSql
+    ? groupByTotals()
+    : null;
+  totalsPromise?.catch(() => undefined);
+  const resolveTotals = async (): Promise<TotalsRow[]> => {
+    if (totalsPromise) return totalsPromise;
+    const pre = whereResolver.preResolved();
+    if (!pre) return groupByTotals();
+    return [...pre.countsByStage].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
+  };
 
   let stages: BoardStageWithDeals[];
 
@@ -2970,14 +3226,17 @@ async function computeBoardData(
     // Caminho dedicado: ordena por `MAX(Conversation.updatedAt)` do
     // contato. Já aplica `offsetByStage` internamente (não cai no
     // branch de "Carregar mais" abaixo).
-    stages = await loadBoardStagesByLastInteraction(
-      pipelineId,
-      dealWhere,
-      perStage,
-      offsetByStage,
-      sortDirection,
-      lastAtByDealId,
-      advancedFilters,
+    stages = await phase("cards", () =>
+      loadBoardStagesByLastInteraction(
+        pipelineId,
+        dealWhere,
+        perStage,
+        offsetByStage,
+        sortDirection,
+        lastAtByDealId,
+        advancedFilters,
+        whereResolver.resolve,
+      ),
     );
   } else {
     // 1) Etapas leves; 2) cards de TODAS as colunas numa consulta só
@@ -2986,35 +3245,41 @@ async function computeBoardData(
     // `Promise.all` — N etapas + totais + métricas + enriquecimentos
     // chegavam a ~18 das 20 conexões do pool numa carga só.
     //
-    // Se o where tiver algo que o tradutor não cobre (filtros avançados
-    // por tag/contato/conversa), volta ao caminho por etapa com no máximo
-    // 4 consultas em voo.
+    // Tags e contato (origem, UTM, telefone/e-mail) viram EXISTS no SQL.
+    // O resto que o tradutor não cobre (conversa, janela 24 h, campos
+    // personalizados, busca) é resolvido em ids numa consulta só
+    // (`preResolveBoardWhereSql`); o caminho por etapa (4 consultas em voo)
+    // fica só para mais de 20 mil negócios casando.
     //
     // Com filtro de etapa, só as etapas escolhidas viram coluna.
     const stagesRaw = stagesAllowedByFilter(
-      await prisma.stage.findMany({
-        where: { pipelineId },
-        orderBy: { position: "asc" },
-      }),
+      await phase("stages", () =>
+        prisma.stage.findMany({
+          where: { pipelineId },
+          orderBy: { position: "asc" },
+        }),
+      ),
       advancedFilters,
     );
-    const whereSql = translateDealWhereToSql(dealWhere);
-    stages = whereSql
-      ? await loadBoardStagesRanked(
-          stagesRaw,
-          whereSql,
-          sortField,
-          sortDirection,
-          perStage,
-          offsetByStage,
-        )
-      : await loadBoardStagesPerStage(
-          stagesRaw,
-          dealWhere,
-          dealOrderBy,
-          perStage,
-          offsetByStage,
-        );
+    stages = await phase("cards", async () => {
+      const { sql: whereSql } = await whereResolver.resolve(stagesRaw.map((s) => s.id));
+      return whereSql
+        ? loadBoardStagesRanked(
+            stagesRaw,
+            whereSql,
+            sortField,
+            sortDirection,
+            perStage,
+            offsetByStage,
+          )
+        : loadBoardStagesPerStage(
+            stagesRaw,
+            dealWhere,
+            dealOrderBy,
+            perStage,
+            offsetByStage,
+          );
+    });
   }
 
   // ⚡ [jul/26] Antes estas etapas eram AWAITADAS em série (totais →
@@ -3023,11 +3288,10 @@ async function computeBoardData(
   // si, então rodam em paralelo — `loadBoardCardEnrichment` dispara as
   // consultas dos cards no mesmo tick; `metricsPromise`/`totalsPromise` já
   // voam desde antes do findMany de stages.
-  const [totalsGroups, metrics, enrichCard] = await Promise.all([
-    totalsPromise,
-    metricsPromise,
-    loadBoardCardEnrichment(stages, now),
-  ]);
+  const [totalsGroups, metrics, enrichCard] = await phase("enrich", () =>
+    Promise.all([resolveTotals(), metricsPromise, loadBoardCardEnrichment(stages, now)]),
+  );
+  const buildStart = performance.now();
 
   const totalsByStage = new Map<string, number>();
   for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
@@ -3040,7 +3304,7 @@ async function computeBoardData(
   // filtros avançados). Qualquer filtro ativo escondia a coluna inteira
   // mesmo havendo leads no banco — bug reportado: "existem leads em
   // leads de entrada, mas a fase do funil não aparece".
-  return stages
+  const built = stages
     .map((stage) => {
       const metric = metricsMap.get(stage.id);
       const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
@@ -3068,6 +3332,8 @@ async function computeBoardData(
         deals: stage.deals.map((deal) => enrichCard(stage, deal)),
       };
     });
+  timing?.add("build", performance.now() - buildStart);
+  return built;
 }
 
 /**
@@ -3743,6 +4009,8 @@ export async function getBoardColumnPages(
  */
 export const __boardInternal = {
   mapWithConcurrency,
+  preResolveBoardWhere,
+  BOARD_PRERESOLVE_CAP,
   loadBoardStagesRanked,
   loadBoardStagesPerStage,
   loadBoardStagesByLastInteraction,

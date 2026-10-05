@@ -293,6 +293,9 @@ function evalScalar(actual: unknown, filter: unknown): boolean {
       case "lte":
         if (!((actual as Date).getTime() <= (v as Date).getTime())) return false;
         break;
+      case "contains":
+        if (typeof actual !== "string" || !actual.includes(v as string)) return false;
+        break;
       default:
         throw new Error(`operador não emulado: ${op}`);
     }
@@ -709,15 +712,52 @@ describe("board: lastInteraction em uma consulta == fallback por etapa", () => {
     });
   }
 
-  it("where não traduzível cai no fallback (findMany por etapa, concorrência limitada)", async () => {
-    const where: Prisma.DealWhereInput = { AND: [{ status: "OPEN" }, { tags: { none: {} } }] };
+  it("where não traduzível: ids pré-resolvidos numa consulta + janela SQL == fallback por etapa", async () => {
+    const where: Prisma.DealWhereInput = {
+      AND: [{ status: "OPEN" }, { title: { contains: "Deal d0" } }],
+    };
     currentWhere = where as AnyWhere;
     expect(translateDealWhereToSql(where)).toBeNull();
-    const res = await withOrg(() =>
-      __boardInternal.loadBoardStagesByLastInteraction(PIPELINE, where, 2, {}, "desc"),
+    const limitByStage = new Map(STAGES.map((s) => [s.id, 2]));
+    const oldIds = await withOrg(() =>
+      __boardInternal.loadLastInteractionIdsPerStage(stagesRaw(), where, limitByStage, "desc"),
     );
-    expect(findManyCalls()).toBe(STAGES.length + 1);
+    const oldResult = await withOrg(() => __boardInternal.hydrateBoardStages(stagesRaw(), oldIds));
+
+    h.dealFindMany.mockClear();
+    h.queryRaw.mockClear();
+    const lastAt = new Map<string, Date | null>();
+    const res = await withOrg(() =>
+      __boardInternal.loadBoardStagesByLastInteraction(PIPELINE, where, 2, {}, "desc", lastAt),
+    );
+    // 1 findMany (ids) + 1 janela + 1 hidratação — nada por etapa.
+    expect(findManyCalls()).toBe(2);
+    expect(rawCalls()).toBe(1);
+    const pre = h.dealFindMany.mock.calls[0]![0] as { where: unknown; select: unknown };
+    expect(pre.select).toEqual({ id: true, stageId: true });
+    expect(pre.where).toEqual({ AND: [where, { stageId: { in: ["s1", "s2", "s3"] } }] });
+    const ranked = parseRawCall(h.queryRaw.mock.calls[0]!);
+    expect(ranked.text).toContain("d.id = ANY(?)");
+    expect(JSON.parse(JSON.stringify(res))).toEqual(JSON.parse(JSON.stringify(oldResult)));
     expect(res.reduce((n, s) => n + s.deals.length, 0)).toBeGreaterThan(0);
+    // Sem `last_at` para cursor: a página por cursor só aceita where traduzível.
+    expect(lastAt.size).toBe(0);
+  });
+
+  it("pré-resolução acima do teto → null (caminho por etapa)", async () => {
+    const where: Prisma.DealWhereInput = { title: { contains: "Deal" } };
+    currentWhere = where as AnyWhere;
+    const capped = await withOrg(() =>
+      __boardInternal.preResolveBoardWhere(where, ["s1", "s2", "s3"], 2),
+    );
+    expect(capped).toBeNull();
+    expect((h.dealFindMany.mock.calls.at(-1)![0] as { take: number }).take).toBe(3);
+    const none = await withOrg(() =>
+      __boardInternal.preResolveBoardWhere({ title: { contains: "zzz" } }, ["s1"]),
+    );
+    expect(none?.sql.strings.join("?")).toBe("FALSE");
+    expect(none?.countsByStage.size).toBe(0);
+    expect(__boardInternal.BOARD_PRERESOLVE_CAP).toBe(20_000);
   });
 });
 
@@ -759,12 +799,71 @@ describe("board: SQL gerado", () => {
   it("where vazio → TRUE; relações, NOT e `not: valor` → null (fallback)", () => {
     expect((translateDealWhereToSql({}) as Prisma.Sql).strings.join("?")).toBe("TRUE");
     expect((translateDealWhereToSql(undefined) as Prisma.Sql).strings.join("?")).toBe("TRUE");
-    expect(translateDealWhereToSql({ tags: { some: { tagId: "t1" } } })).toBeNull();
-    expect(translateDealWhereToSql({ contact: { is: { phone: { not: null } } } })).toBeNull();
+    expect(translateDealWhereToSql({ tags: { every: { tagId: "t1" } } })).toBeNull();
+    expect(translateDealWhereToSql({ tags: { some: { tag: { name: "x" } } } })).toBeNull();
+    expect(
+      translateDealWhereToSql({ contact: { is: { name: { contains: "x", mode: "insensitive" } } } }),
+    ).toBeNull();
+    expect(
+      translateDealWhereToSql({ contact: { is: { conversations: { some: { status: "OPEN" } } } } }),
+    ).toBeNull();
+    expect(translateDealWhereToSql({ contact: { isNot: null } })).toBeNull();
     expect(translateDealWhereToSql({ ownerId: { not: "u1" } })).toBeNull();
     expect(translateDealWhereToSql({ NOT: { status: "OPEN" } })).toBeNull();
     expect(translateDealWhereToSql({ AND: [{ status: "OPEN" }, { title: { contains: "x" } }] })).toBeNull();
     expect(translateDealWhereToSql({ stage: { name: "x" } })).toBeNull();
+  });
+
+  it("tags (qualquer / nenhuma / sem tag) → EXISTS em tags_on_deals, ids como parâmetro", () => {
+    const sql = translateDealWhereToSql({
+      AND: [
+        { tags: { some: { tagId: { in: ["t1", "t2"] } } } },
+        { tags: { some: { tagId: "t3" } } },
+        { tags: { none: { tagId: { in: ["t9"] } } } },
+      ],
+    }) as Prisma.Sql;
+    expect(sql.strings.join("?")).toBe(
+      '(EXISTS (SELECT 1 FROM tags_on_deals tg WHERE tg."dealId" = d.id AND tg."tagId" = ANY(?))' +
+        ' AND EXISTS (SELECT 1 FROM tags_on_deals tg WHERE tg."dealId" = d.id AND tg."tagId" = ?)' +
+        ' AND NOT EXISTS (SELECT 1 FROM tags_on_deals tg WHERE tg."dealId" = d.id AND tg."tagId" = ANY(?)))',
+    );
+    expect(sql.values).toEqual([["t1", "t2"], "t3", ["t9"]]);
+    const noTags = translateDealWhereToSql({ tags: { none: {} } }) as Prisma.Sql;
+    expect(noTags.strings.join("?")).toBe(
+      'NOT EXISTS (SELECT 1 FROM tags_on_deals tg WHERE tg."dealId" = d.id AND TRUE)',
+    );
+  });
+
+  it("contato (origem, UTM, telefone/e-mail) → EXISTS em contacts da mesma org", () => {
+    const sql = translateDealWhereToSql({
+      AND: [
+        {
+          OR: [
+            { contact: { is: { source: { in: ["facebook"] } } } },
+            {
+              OR: [
+                { contactId: null },
+                { contact: { is: { source: null } } },
+                { contact: { is: { source: "" } } },
+              ],
+            },
+          ],
+        },
+        { contact: { is: { adUtmSource: { in: ["google"] } } } },
+        { contact: { is: { phone: { not: null } } } },
+        { contact: { is: { email: null } } },
+      ],
+    }) as Prisma.Sql;
+    const text = sql.strings.join("?");
+    const exists =
+      'EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = d."contactId" AND ct."organizationId" = d."organizationId" AND ';
+    expect(text).toContain(`${exists}ct."source" = ANY(?))`);
+    expect(text).toContain(`d."contactId" IS NULL OR ${exists}ct."source" IS NULL)`);
+    expect(text).toContain(`${exists}ct."source" = ?)`);
+    expect(text).toContain(`${exists}ct."ad_utm_source" = ANY(?))`);
+    expect(text).toContain(`${exists}ct."phone" IS NOT NULL)`);
+    expect(text).toContain(`${exists}ct."email" IS NULL)`);
+    expect(sql.values).toEqual([["facebook"], "", ["google"]]);
   });
 
   it("consulta ranqueada: ROW_NUMBER por etapa, org/etapas/limite como parâmetros", () => {
