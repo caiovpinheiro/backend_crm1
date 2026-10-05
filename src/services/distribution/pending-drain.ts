@@ -41,7 +41,7 @@ import {
   getDrainState,
   getWaitingQueueWhere,
   isDistributionAutoOnInbound,
-  listRequestedPendingConversationIds,
+  listRequestedPendingSources,
   hasRemainingCapacityInScope,
   liveFreeCapacityForUser,
   logCooldownSkip,
@@ -206,9 +206,13 @@ export async function processPendingDistributionQueue(opts: {
         userId: opts.userId ?? null,
       }),
     );
-    if (!widgetActive || !(await isDistributionEnabled())) {
+    if (!widgetActive) {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
+
+    // Motor desligado: não varre a Entrada. A fila pedida pela automação,
+    // pela IA ou pelo operador ainda drena — o passo já enfileirou.
+    const motorOn = await isDistributionEnabled();
 
     let cancelledOrphans = 0;
     try {
@@ -227,12 +231,13 @@ export async function processPendingDistributionQueue(opts: {
       log.warn({ err: e }, "[distribution] cancelStalePendingOrphans failed");
     }
 
-    // Toggle desligado: não varre a Entrada. Só drena quem o passo,
-    // a IA ou o operador colocou na fila.
-    const autoOnInbound = await isDistributionAutoOnInbound();
-    const requestedPendingIds = autoOnInbound
+    // Sem motor, ou com autoOnInbound desligado: não varre a Entrada.
+    // Só drena quem o passo, a IA ou o operador colocou na fila.
+    const requestedSources = await listRequestedPendingSources();
+    const sweepUnassigned = motorOn && (await isDistributionAutoOnInbound());
+    const requestedPendingIds = sweepUnassigned
       ? null
-      : await listRequestedPendingConversationIds();
+      : [...requestedSources.keys()];
     if (requestedPendingIds && requestedPendingIds.length === 0) {
       debugInfo(
         "[distribution] processPending skip — autoOnInbound=false sem pedido",
@@ -402,12 +407,14 @@ export async function processPendingDistributionQueue(opts: {
         }
 
         try {
+          const requested = requestedSources.get(it.id) ?? null;
+          if (!motorOn && !requested) continue;
           const result = await executeDistribution({
             dealId: null,
             contactId: it.contactId,
             conversationId: it.id,
             distributionType: null,
-            triggerSource: "SYSTEM",
+            triggerSource: requested ?? "SYSTEM",
             departmentId: it.departmentId,
             reassign: true,
             allowOrgWideFallback: false,

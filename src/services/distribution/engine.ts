@@ -571,6 +571,12 @@ async function writeLog(
  * contato/conversa), atualiza `lastExecutionAt` e grava `DistributionLog`.
  * Deve rodar dentro de `withOrgContext` / contexto org-scoped.
  */
+function distributionRequestedByOperator(
+  source: DistributionTriggerSource,
+): boolean {
+  return source === "AUTOMATION" || source === "AI_AGENT" || source === "MANUAL";
+}
+
 export async function executeDistribution(
   rawInput: ExecuteDistributionInput,
 ): Promise<DistributionResult> {
@@ -596,7 +602,14 @@ export async function executeDistribution(
     };
   }
 
-  if (!(await isDistributionEnabled())) {
+  // O interruptor desliga o sorteio automático (inbound e varredura da
+  // Entrada). O passo da automação, a ferramenta do agente de IA e a
+  // redistribuição manual continuam atribuindo — senão desligar o motor
+  // para parar o sistema também mata o "Executar distribuição".
+  if (
+    !distributionRequestedByOperator(rawInput.triggerSource) &&
+    !(await isDistributionEnabled())
+  ) {
     return {
       success: false,
       reason: "DISTRIBUTION_DISABLED",

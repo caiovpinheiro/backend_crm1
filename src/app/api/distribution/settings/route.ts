@@ -14,8 +14,10 @@
  *       - id: lead sem departamento vai SÓ para os membros desse departamento;
  *         se nenhum estiver elegível, espera na fila (fronteira estrita).
  *   - `enabled`:
- *       - true (default): motor atribui e drena a fila.
- *       - false: kill switch — inbound, automação, IA e drenagem não atribuem.
+ *       - true (default): motor atribui no inbound e drena a Entrada.
+ *       - false: o sistema não sorteia sozinho. O passo `execute_distribution`
+ *         (automação), a ferramenta do agente de IA e a redistribuição manual
+ *         continuam atribuindo, e a fila deles ainda drena.
  *   - `autoOnInbound`:
  *       - true (default): todo ticket OPEN sem responsável entra na fila de
  *         espera (legado acadêmico — não exige passo na automação).

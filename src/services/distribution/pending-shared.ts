@@ -131,12 +131,27 @@ export async function isDistributionAutoOnInbound(): Promise<boolean> {
   }
 }
 
+/** Quem pediu a distribuição. `SYSTEM` sozinho não conta. */
+export type RequestedDistributionSource = "AUTOMATION" | "AI_AGENT" | "MANUAL";
+
+export function requestedDistributionSource(
+  triggerSource: string | null | undefined,
+): RequestedDistributionSource | null {
+  const src = triggerSource ?? "";
+  if (src.includes("AI_AGENT")) return "AI_AGENT";
+  if (src.includes("AUTOMATION")) return "AUTOMATION";
+  if (src.includes("MANUAL")) return "MANUAL";
+  return null;
+}
+
 /**
  * Pendências pedidas de verdade (passo da automação, IA ou redistribuição
- * manual). `SYSTEM` sozinho é o inbound automático — com o toggle desligado
- * isso não autoriza distribuir.
+ * manual). `SYSTEM` sozinho é o inbound automático — isso não autoriza
+ * distribuir quando o motor automático está desligado.
  */
-export async function listRequestedPendingConversationIds(): Promise<string[]> {
+export async function listRequestedPendingSources(): Promise<
+  Map<string, RequestedDistributionSource>
+> {
   const rows = await prisma.distributionPending.findMany({
     where: {
       status: "PENDING",
@@ -147,11 +162,19 @@ export async function listRequestedPendingConversationIds(): Promise<string[]> {
         { triggerSource: { contains: "AI_AGENT" } },
       ],
     },
-    select: { conversationId: true },
+    select: { conversationId: true, triggerSource: true },
   });
-  return rows
-    .map((r) => r.conversationId)
-    .filter((id): id is string => Boolean(id));
+  const out = new Map<string, RequestedDistributionSource>();
+  for (const row of rows) {
+    if (!row.conversationId) continue;
+    const src = requestedDistributionSource(row.triggerSource);
+    if (src) out.set(row.conversationId, src);
+  }
+  return out;
+}
+
+export async function listRequestedPendingConversationIds(): Promise<string[]> {
+  return [...(await listRequestedPendingSources()).keys()];
 }
 
 /**
