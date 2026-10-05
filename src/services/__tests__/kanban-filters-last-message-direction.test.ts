@@ -78,8 +78,18 @@ describe("filtro de direção da última mensagem (Kanban) — coluna pronta", (
     queryRaw.mockResolvedValueOnce(READY);
     expect(await isContactLastMessageReady("org-1")).toBe(true);
     const text = sqlText(queryRaw.mock.calls[0]!);
-    expect(text).toMatch(/v\."lastMessageAt" IS NOT NULL/);
-    expect(text).toMatch(/c\.id = v\."contactId" AND c\."lastMessageAt" IS NULL/);
+    expect(text).toMatch(/INNER JOIN contacts c ON c\.id = v\."contactId"/);
+    expect(text).toMatch(/c\."lastMessageAt" IS NULL/);
+    // "Com mensagem": coluna da conversa OU mensagem de chat em `messages` —
+    // cobre a janela em que o backfill da conversa ainda não passou.
+    expect(text).toMatch(/v\."lastMessageAt" IS NOT NULL\s+OR EXISTS \(\s+SELECT 1 FROM messages m/);
+    // O recorte de mensagem de chat é o mesmo da prévia (fragmento aninhado).
+    const nested = (queryRaw.mock.calls[0] as unknown[])
+      .filter((a): a is Prisma.Sql => typeof a === "object" && a !== null && "strings" in a)
+      .map((a) => a.strings.join("?"))
+      .join(" ");
+    expect(nested).toContain(`m."messageType" NOT LIKE 'event%'`);
+    expect(nested).toContain(`m."direction" IN ('in', 'out')`);
     expect(queryRaw.mock.calls[0]).toContain("org-1");
 
     // Outra organização não herda o resultado.

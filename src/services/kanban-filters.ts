@@ -15,6 +15,7 @@ import {
   metaSessionWindowWhere,
   metaWhatsappConversationWhere,
 } from "@/lib/meta-session-window";
+import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
 
@@ -62,15 +63,22 @@ export async function findContactIdsByPhoneDigits(
  * A organização já tem `contacts.lastMessageAt` / `lastMessageDirection`
  * preenchidas (backfill `scripts/backfill-contacts-last-message.mjs`)?
  *
- * "Pronta" = nenhuma conversa com `lastMessageAt` cujo contato ainda esteja
- * com a coluna NULL. Depois disso o código mantém as colunas a cada mensagem
+ * "Pronta" = nenhuma conversa COM mensagem de chat cujo contato ainda esteja
+ * com a coluna NULL. "Com mensagem de chat" = `conversations.lastMessageAt`
+ * preenchido OU, enquanto o backfill da própria conversa não passou, uma
+ * mensagem do recorte em `messages` — sem isso, logo depois do deploy (as
+ * duas colunas ainda vazias no histórico) a organização pareceria pronta e o
+ * filtro só acharia quem escreveu depois do deploy.
+ *
+ * Depois de pronta o código mantém as colunas a cada mensagem
  * (`touchContactLastMessage`), então o estado não volta: guardamos `true`
  * pela vida do processo. Enquanto não está pronta, reconsulta no máximo uma
  * vez por minuto por organização — o filtro de direção fica no caminho antigo
  * (correto, só mais caro) e troca sozinho quando o backfill termina.
  *
  * A sonda para na primeira linha pendente; com tudo preenchido percorre as
- * conversas da organização uma vez por processo.
+ * conversas da organização uma vez por processo (e só olha `messages` das
+ * conversas cujo contato segue NULL, que são as sem mensagem de chat).
  */
 const CONTACT_LAST_MESSAGE_RECHECK_MS = 60_000;
 const contactLastMessageReady = new Map<string, true | number>();
@@ -87,11 +95,16 @@ export async function isContactLastMessageReady(orgId: string): Promise<boolean>
       SELECT EXISTS (
         SELECT 1
         FROM conversations v
+        INNER JOIN contacts c ON c.id = v."contactId"
         WHERE v."organizationId" = ${orgId}
-          AND v."lastMessageAt" IS NOT NULL
-          AND EXISTS (
-            SELECT 1 FROM contacts c
-            WHERE c.id = v."contactId" AND c."lastMessageAt" IS NULL
+          AND c."lastMessageAt" IS NULL
+          AND (
+            v."lastMessageAt" IS NOT NULL
+            OR EXISTS (
+              SELECT 1 FROM messages m
+              WHERE m."conversationId" = v.id
+                AND ${chatMessageSqlFilter("m")}
+            )
           )
       ) AS pending
     `;

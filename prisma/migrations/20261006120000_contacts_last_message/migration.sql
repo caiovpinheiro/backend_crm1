@@ -34,7 +34,9 @@
 -- Enquanto a coluna está NULL nada quebra: a ordem do board cai, por contato,
 -- em MAX(COALESCE(conversations."lastMessageAt", conversations."updatedAt"))
 -- e o filtro de direção segue no caminho antigo até a organização estar
--- preenchida (`isContactLastMessageReady` em `src/services/kanban-filters.ts`).
+-- preenchida (`isContactLastMessageReady` em `src/services/kanban-filters.ts`:
+-- nenhuma conversa com mensagem de chat cujo contato ainda esteja NULL). A
+-- troca é automática, por organização, em até 1 minuto depois do backfill.
 --
 -- Rollback (o código anterior não lê as colunas): as colunas podem ficar.
 
