@@ -32,6 +32,7 @@ function serializeNote<
     content: unknown;
     plainText: string;
     pinned: boolean;
+    favorite: boolean;
     archived: boolean;
     trashed: boolean;
     trashedAt: Date | null;
@@ -58,6 +59,7 @@ function serializeNote<
     content: normalizeDoc(note.content),
     plainText: note.plainText,
     pinned: note.pinned,
+    favorite: note.favorite,
     archived: note.archived,
     trashed: note.trashed,
     trashedAt: note.trashedAt?.toISOString() ?? null,
@@ -86,6 +88,7 @@ export async function listKeepNotes(opts: {
   folder: KeepFolder;
   q?: string;
   colors?: Array<KeepNoteColorId | "none">;
+  favorite?: boolean;
 }) {
   const q = opts.q?.trim();
   const colorClause =
@@ -106,6 +109,7 @@ export async function listKeepNotes(opts: {
     where: {
       userId: opts.userId,
       ...folder,
+      ...(opts.favorite ? { favorite: true } : {}),
       ...(and.length ? { AND: and } : {}),
     },
     include: includeAtt,
@@ -195,6 +199,7 @@ export async function updateKeepNote(opts: {
   title?: string;
   content?: unknown;
   pinned?: boolean;
+  favorite?: boolean;
   archived?: boolean;
   trashed?: boolean;
   color?: KeepNoteColorId | null;
@@ -232,6 +237,7 @@ export async function updateKeepNote(opts: {
       ...(opts.title !== undefined ? { title: opts.title.slice(0, 240) } : {}),
       ...(content ? { content: asJson(content), plainText } : {}),
       ...(opts.pinned !== undefined ? { pinned: opts.pinned } : {}),
+      ...(opts.favorite !== undefined ? { favorite: opts.favorite } : {}),
       ...(opts.archived !== undefined ? { archived: opts.archived, trashed: false, trashedAt: null } : {}),
       ...(trashed === true ? { trashed: true, archived: false, pinned: false, trashedAt: new Date() } : {}),
       ...(trashed === false ? { trashed: false, trashedAt: null } : {}),

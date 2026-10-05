@@ -6816,6 +6816,8 @@ model KeepNote {
   /// Texto plano derivado do JSON — busca e preview.
   plainText      String    @default("")
   pinned         Boolean   @default(false)
+  /// Favorito pessoal. O "/" da conversa lista estas notas quando a busca é "keeps".
+  favorite       Boolean   @default(false)
   archived       Boolean   @default(false)
   trashed        Boolean   @default(false)
   trashedAt      DateTime?
