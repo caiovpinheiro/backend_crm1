@@ -38,7 +38,6 @@ import { cache, type TextCacheSource } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import type { ServerTiming } from "@/lib/server-timing";
 import {
-  BOARD_DEFAULT_PER_STAGE,
   BOARD_MAX_PER_STAGE,
   canonicalBoardVariant,
   normalizeBoardOffsets,
