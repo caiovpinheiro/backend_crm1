@@ -15,6 +15,10 @@ import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
+import {
+  startDbRetentionSweeper,
+  stopDbRetentionSweeper,
+} from "@/services/db-retention-sweeper";
 import { installGracefulShutdown, type ShutdownStep } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.meta-webhook");
@@ -105,6 +109,9 @@ export function startMetaWebhookWorker() {
   startAiTurnSweeper();
   // Escutar a equipe: lê em lote as conversas das escutas ligadas.
   startListenSweeper();
+  // Retenção diária de meta_webhook_events (só processados, janela por env).
+  // Uma instância por dia ganha a trava no Redis. `DB_RETENTION_WORKER=0` desliga.
+  startDbRetentionSweeper();
 
   log.info({ concurrency }, "worker-meta-webhook iniciado");
   return worker;
@@ -118,6 +125,7 @@ function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[]
       run: () => {
         stopAiTurnSweeper();
         stopListenSweeper();
+        stopDbRetentionSweeper();
       },
     },
     // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
