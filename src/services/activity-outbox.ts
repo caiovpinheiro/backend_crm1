@@ -465,6 +465,8 @@ export async function projectTabulationOutboxBatch(
               ? { idempotencyKey: payload.idempotencyKey }
               : {}),
           },
+          // Só o id volta: ninguém usa a linha (era INSERT … RETURNING * de ~25 colunas).
+          select: { id: true },
         });
         await tx.activityOutbox.update({
           where: { id: row.id },
@@ -701,6 +703,8 @@ export async function projectConversationClosedOutboxBatch(
               ? { idempotencyKey: payload.idempotencyKey }
               : {}),
           },
+          // Só o id volta: ninguém usa a linha (era INSERT … RETURNING * de ~25 colunas).
+          select: { id: true },
         });
         await tx.activityOutbox.update({
           where: { id: row.id },
