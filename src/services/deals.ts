@@ -13,7 +13,12 @@ import {
 } from "@/services/ai/replay-sandbox";
 import { withOrg, withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
-import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
+import {
+  publishConversationTimelineUpdated,
+  publishDealMoved,
+  type DealMovedCard,
+  type DealMovedPayload,
+} from "@/lib/realtime-events";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
 import { preferConversationWithLastMessage } from "@/services/deal-panel-conversation";
@@ -1631,6 +1636,150 @@ export async function assertStageEntryFields(dealId: string, targetStageId: stri
   if (missing.length > 0) throw new StageFieldsRequiredError(target.name, missing);
 }
 
+type DealMoveSnapshot = {
+  fromStageId: string;
+  toStageId: string;
+  fromPipelineId: string;
+  toPipelineId: string;
+  position: number;
+};
+
+function isoInstant(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value) return value;
+  return new Date().toISOString();
+}
+
+function plainDealValue(value: unknown): number | string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "toNumber" in value) {
+    const n = (value as { toNumber: () => number }).toNumber();
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function optionalIso(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value) return value;
+  return null;
+}
+
+/** Card mínimo para o cliente do funil destino, a partir do deal já lido. */
+function toDealMovedCard(
+  deal: unknown,
+  position: number,
+  updatedAt: string,
+): DealMovedCard | undefined {
+  if (!deal || typeof deal !== "object") return undefined;
+  const row = deal as Record<string, unknown>;
+  if (typeof row.id !== "string") return undefined;
+  const title = typeof row.title === "string" ? row.title.trim() : "";
+  if (!title) return undefined;
+
+  const contactRaw = row.contact;
+  const contact =
+    contactRaw && typeof contactRaw === "object"
+      ? (contactRaw as Record<string, unknown>)
+      : null;
+  const ownerRaw = row.owner;
+  const owner =
+    ownerRaw && typeof ownerRaw === "object"
+      ? (ownerRaw as Record<string, unknown>)
+      : null;
+
+  const tags = Array.isArray(row.tags)
+    ? row.tags.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const tag = "tag" in item ? (item as { tag?: unknown }).tag : item;
+        if (!tag || typeof tag !== "object") return [];
+        const t = tag as { id?: unknown; name?: unknown; color?: unknown };
+        if (typeof t.id !== "string" || typeof t.name !== "string") return [];
+        return [{ id: t.id, name: t.name, color: typeof t.color === "string" ? t.color : "" }];
+      })
+    : undefined;
+
+  return {
+    id: row.id,
+    title,
+    value: plainDealValue(row.value),
+    status: typeof row.status === "string" ? row.status : undefined,
+    lostReason:
+      typeof row.lostReason === "string" || row.lostReason === null ? row.lostReason : undefined,
+    position,
+    expectedClose: optionalIso(row.expectedClose),
+    createdAt: optionalIso(row.createdAt) ?? undefined,
+    updatedAt,
+    contact:
+      contact && typeof contact.id === "string" && typeof contact.name === "string"
+        ? {
+            id: contact.id,
+            name: contact.name,
+            email: typeof contact.email === "string" || contact.email === null ? contact.email : null,
+            phone: typeof contact.phone === "string" || contact.phone === null ? contact.phone : null,
+            avatarUrl:
+              typeof contact.avatarUrl === "string" || contact.avatarUrl === null
+                ? contact.avatarUrl
+                : null,
+          }
+        : null,
+    owner:
+      owner && typeof owner.id === "string" && typeof owner.name === "string"
+        ? {
+            id: owner.id,
+            name: owner.name,
+            avatarUrl:
+              typeof owner.avatarUrl === "string" || owner.avatarUrl === null ? owner.avatarUrl : null,
+            type: typeof owner.type === "string" || owner.type === null ? owner.type : null,
+          }
+        : null,
+    ...(tags && tags.length > 0 ? { tags } : {}),
+  };
+}
+
+/**
+ * Depois do commit: invalida o cache do board e só então publica.
+ * Falha de Redis não desfaz o move nem falha o HTTP.
+ */
+function publishDealMovedAfterCacheBump(
+  orgId: string,
+  dealId: string,
+  snapshot: DealMoveSnapshot,
+  deal: unknown,
+): void {
+  const pipelines =
+    snapshot.fromPipelineId === snapshot.toPipelineId
+      ? [snapshot.toPipelineId]
+      : [snapshot.toPipelineId, snapshot.fromPipelineId];
+  const updatedAt = isoInstant(
+    deal && typeof deal === "object" ? (deal as { updatedAt?: unknown }).updatedAt : undefined,
+  );
+  const payload: DealMovedPayload = {
+    organizationId: orgId,
+    dealId,
+    fromPipelineId: snapshot.fromPipelineId,
+    toPipelineId: snapshot.toPipelineId,
+    fromStageId: snapshot.fromStageId,
+    toStageId: snapshot.toStageId,
+    position: snapshot.position,
+    updatedAt,
+  };
+  const card = toDealMovedCard(deal, snapshot.position, updatedAt);
+  const event = card ? { ...payload, card } : payload;
+  void (async () => {
+    try {
+      await Promise.all(pipelines.map((pipelineId) => invalidateBoardData(orgId, pipelineId)));
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err), orgId, dealId },
+        "[deals.moveDeal] invalidate do board falhou",
+      );
+    }
+    publishDealMoved(event);
+  })();
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
@@ -1669,17 +1818,16 @@ export async function moveDeal(
 
   let becameWon = false;
   let becameLost = false;
-  // Preserva o pipeline de ORIGEM para invalidação de cache pós-move.
-  let fromPipelineId: string | null = dealPeek.stage.pipelineId;
   // Timeout 20s: sob carga (webhooks + AI) o default 5s estourava em
   // `updateMany` de posição → P2028 → HTTP 500 em /deals/:id/move (~6s).
   // Hidratação (`listInclude`) fica FORA da TX pra liberar locks cedo.
   // Retry em P2034/deadlock: moves concorrentes ainda podem colidir; a
   // ordem de lock reduz, o retry absorve o residual.
   let lastMoveErr: unknown;
+  let moveSnapshot: DealMoveSnapshot | null = null;
   for (let attempt = 0; attempt < MOVE_DEAL_MAX_RETRIES; attempt++) {
     try {
-      await prisma.$transaction(
+      moveSnapshot = await prisma.$transaction(
         async (tx) => {
           // Trava o deal movido antes de ler estágios — evita TOCTOU com
           // outro move do mesmo card.
@@ -1709,7 +1857,6 @@ export async function moveDeal(
             select: { pipelineId: true },
           });
           if (!dealStage) throw new Error("STAGE_NOT_FOUND");
-          fromPipelineId = dealStage.pipelineId;
           // Cross-pipeline permitido: quando o funil muda, a reordenação de
           // posições continua funcionando (origem decrementa, destino incrementa
           // — ambos escopados por stageId, então não há colisão entre funis).
@@ -1736,6 +1883,7 @@ export async function moveDeal(
           // Lock order estável (advisory) nas colunas tocadas.
           await lockStagesForMove(tx, [oldStageId, targetStageId]);
 
+          let newPos: number;
           if (oldStageId === targetStageId) {
             // Indexação fracionária: grava o ponto médio entre os vizinhos
             // do índice alvo — 1 UPDATE na linha movida. Antes reescrevia
@@ -1744,7 +1892,7 @@ export async function moveDeal(
               where: { stageId: targetStageId, id: { not: dealId } },
             });
             const clamped = Math.min(position, siblings);
-            const newPos = await resolveInsertionPosition(
+            newPos = await resolveInsertionPosition(
               tx,
               targetStageId,
               clamped,
@@ -1754,33 +1902,41 @@ export async function moveDeal(
               where: { id: dealId },
               data: { position: newPos, ...statusPatch },
             });
-            return;
+          } else {
+            // Cross-stage: idem — ponto médio no destino, SEM shift em massa
+            // (`position+1` no destino e `position-1` na origem custavam ~900ms
+            // por move em estágios grandes; posições esparsas na origem
+            // preservam a ordem sem nenhum UPDATE adicional).
+            const targetSiblings = await tx.deal.count({
+              where: { stageId: targetStageId },
+            });
+            const clamped = Math.min(position, targetSiblings);
+            newPos = await resolveInsertionPosition(
+              tx,
+              targetStageId,
+              clamped,
+            );
+
+            await tx.deal.update({
+              where: { id: dealId },
+              data: { stageId: targetStageId, position: newPos, ...statusPatch },
+            });
           }
 
-          // Cross-stage: idem — ponto médio no destino, SEM shift em massa
-          // (`position+1` no destino e `position-1` na origem custavam ~900ms
-          // por move em estágios grandes; posições esparsas na origem
-          // preservam a ordem sem nenhum UPDATE adicional).
-          const targetSiblings = await tx.deal.count({
-            where: { stageId: targetStageId },
-          });
-          const clamped = Math.min(position, targetSiblings);
-          const newPos = await resolveInsertionPosition(
-            tx,
-            targetStageId,
-            clamped,
-          );
-
-          await tx.deal.update({
-            where: { id: dealId },
-            data: { stageId: targetStageId, position: newPos, ...statusPatch },
-          });
+          return {
+            fromStageId: oldStageId,
+            toStageId: targetStageId,
+            fromPipelineId: dealStage.pipelineId,
+            toPipelineId: targetStage.pipelineId,
+            position: newPos,
+          };
         },
         { timeout: 20_000, maxWait: 10_000 },
       );
       lastMoveErr = undefined;
       break;
     } catch (err) {
+      moveSnapshot = null;
       lastMoveErr = err;
       if (!isPrismaDeadlock(err) || attempt >= MOVE_DEAL_MAX_RETRIES - 1) {
         throw err;
@@ -1816,17 +1972,16 @@ export async function moveDeal(
     }),
   );
 
-  // Invalida o cache-aside do board pra que a ação manual do operador
-  // reflita de imediato (sem esperar o TTL), evitando "flicker" do card
-  // voltando à coluna de origem. Cobre origem e destino (cross-pipeline).
-  try {
-    const orgId = getOrgIdOrThrow();
-    void invalidateBoardData(orgId, targetPeek.pipelineId);
-    if (fromPipelineId && fromPipelineId !== targetPeek.pipelineId) {
-      void invalidateBoardData(orgId, fromPipelineId);
+  // COMMIT já aconteceu. Invalida o cache e só então publica `deal_moved`.
+  // Sem org (job fora de contexto) não publica — o barramento descartaria
+  // e o TTL cobre o board. Falha de Redis não volta o card.
+  if (moveSnapshot) {
+    try {
+      const orgId = getOrgIdOrThrow();
+      publishDealMovedAfterCacheBump(orgId, dealId, moveSnapshot, result);
+    } catch {
+      /* fora de contexto de org — TTL curto cobre a atualização */
     }
-  } catch {
-    /* fora de contexto de org (jobs) — TTL curto cobre a atualização */
   }
 
   return result;

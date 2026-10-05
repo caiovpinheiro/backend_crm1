@@ -315,9 +315,9 @@ export async function processBulkMoveStage(
     );
   }
 
-  // Mesmo purge do `moveDeal`: sem isso o board servia a variante em cache
-  // (cards na etapa antiga) até o TTL. Antes do "finished" — o FE refaz o
-  // GET do board quando a operação termina.
+  // Purga o cache-aside do board para o próximo GET (poll de 120 s ou F5)
+  // não devolver a etapa antiga. Não publica `deal_moved`: lote não é
+  // realtime visual e não manda um evento por card.
   if (touchedPipelineIds.size > 0) {
     await invalidateBoardsForPipelines([...touchedPipelineIds]);
   }

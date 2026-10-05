@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { Job } from "bullmq";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -103,5 +107,18 @@ describe("processBulkMoveStage — cache do board", () => {
     expect(mocks.dealUpdateMany).not.toHaveBeenCalled();
     expect(mocks.invalidateBoardsForPipelines).not.toHaveBeenCalled();
     expect(mocks.markOperationFinished).toHaveBeenCalledTimes(1);
+  });
+
+  it("não publica deal_moved — lote fica fora do realtime visual", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const job = readFileSync(join(here, "bulk-move-stage.job.ts"), "utf8");
+    const route = readFileSync(
+      join(here, "../../app/api/deals/bulk/route.ts"),
+      "utf8",
+    );
+    for (const source of [job, route]) {
+      expect(source).not.toMatch(/publishDealMoved\s*\(/);
+      expect(source).not.toMatch(/sseBus\s*\.\s*publish\s*\(/);
+    }
   });
 });

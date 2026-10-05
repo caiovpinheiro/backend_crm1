@@ -6,6 +6,7 @@ import {
   canViewStage,
   type AuthzContext,
 } from "@/lib/authz";
+import { projectDealMovedForViewer } from "@/lib/authz/deal-moved-visibility";
 import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors-node";
 import {
@@ -237,9 +238,19 @@ export async function GET(request: Request) {
             let data: unknown;
             try {
               if (closed) return;
+              // `deal_moved` é por lado (origem/destino). O gate genérico
+              // olha `pipelineId` singular e derrubaria o frame inteiro.
+              let visible = envelope.data;
+              if (event === "deal_moved") {
+                const ctx = isSuperAdmin ? null : await resolveAuthz();
+                const projected = projectDealMovedForViewer(visible, ctx);
+                if (!projected) return;
+                visible = projected;
+              }
+              if (closed) return;
               if (
                 await sseEventHiddenByFunnel(
-                  envelope.data,
+                  visible,
                   { organizationId, isSuperAdmin },
                   resolveAuthz,
                   convBlockCache,
@@ -248,7 +259,7 @@ export async function GET(request: Request) {
                 return;
               }
               if (closed) return;
-              data = stripHiddenInboxSseCard(envelope.data, cardGate, event);
+              data = stripHiddenInboxSseCard(visible, cardGate, event);
             } catch (err) {
               log.warn(
                 { err, event, userId, organizationId },

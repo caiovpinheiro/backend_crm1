@@ -203,6 +203,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function flushMovePublish() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("moveDeal", () => {
   it("muda a etapa sem encerrar nem tocar na conversa do contato", async () => {
     seedDeal("stage-a");
@@ -218,8 +223,22 @@ describe("moveDeal", () => {
     expect(h.tx.conversation.updateMany).not.toHaveBeenCalled();
     expect(h.prisma.conversation.update).not.toHaveBeenCalled();
     expect(h.prisma.conversation.updateMany).not.toHaveBeenCalled();
+    await flushMovePublish();
     const sseEvents = h.ssePublish.mock.calls.map((c) => c[0]);
     expect(sseEvents).not.toContain("conversation_updated");
+    expect(sseEvents).toEqual(["deal_moved"]);
+    expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
+      dealId: "deal-1",
+      organizationId: ORG,
+      fromPipelineId: "pipe-1",
+      toPipelineId: "pipe-1",
+      fromStageId: "stage-a",
+      toStageId: "stage-b",
+      position: 0,
+    });
+    expect(typeof (h.ssePublish.mock.calls[0]![1] as { updatedAt: string }).updatedAt).toBe(
+      "string",
+    );
   });
 
   it("mover para Ganho sincroniza status WON + closedAt, mas continua sem mexer na conversa", async () => {
@@ -262,6 +281,8 @@ describe("moveDeal", () => {
     expect(h.prisma.$transaction).not.toHaveBeenCalled();
     expect(h.tx.deal.update).not.toHaveBeenCalled();
     expect(h.invalidateBoardData).not.toHaveBeenCalled();
+    await flushMovePublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
   });
 
   it("deixa entrar na etapa com campo obrigatório quando ele está preenchido", async () => {
@@ -287,6 +308,11 @@ describe("moveDeal", () => {
 
     expect(h.invalidateBoardData).toHaveBeenCalledTimes(1);
     expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    await flushMovePublish();
+    expect(h.ssePublish).toHaveBeenCalledTimes(1);
+    const invalidateOrder = h.invalidateBoardData.mock.invocationCallOrder[0]!;
+    const publishOrder = h.ssePublish.mock.invocationCallOrder[0]!;
+    expect(invalidateOrder).toBeLessThan(publishOrder);
   });
 
   it("invalida o board de ORIGEM e de DESTINO no move entre funis, sempre na org do contexto", async () => {
@@ -300,6 +326,14 @@ describe("moveDeal", () => {
     for (const call of h.invalidateBoardData.mock.calls) {
       expect(call[0]).toBe(ORG);
     }
+    await flushMovePublish();
+    expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
+      organizationId: ORG,
+      fromPipelineId: "pipe-1",
+      toPipelineId: "pipe-2",
+      fromStageId: "stage-a",
+      toStageId: "stage-x",
+    });
   });
 
   it("exige motivo de perda quando o funil do destino obriga (LOST_REASON_REQUIRED)", async () => {
@@ -310,6 +344,8 @@ describe("moveDeal", () => {
       withOrg(ORG, () => moveDeal("deal-1", "stage-lost", 0)),
     ).rejects.toThrow("LOST_REASON_REQUIRED");
     expect(h.tx.deal.update).not.toHaveBeenCalled();
+    await flushMovePublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
 
     await withOrg(ORG, () => moveDeal("deal-1", "stage-lost", 0, { lostReason: "Sem interesse" }));
     const data = h.tx.deal.update.mock.calls[0]![0].data as Record<string, unknown>;
@@ -362,11 +398,43 @@ describe("moveDeal", () => {
     await vi.runAllTimersAsync();
     await p;
     expect(h.prisma.$transaction).toHaveBeenCalledTimes(2);
+    await flushMovePublish();
+    expect(h.ssePublish).toHaveBeenCalledTimes(1);
 
     h.prisma.$transaction.mockClear();
+    h.ssePublish.mockClear();
     h.tx.deal.update.mockRejectedValueOnce(new Error("boom"));
     await expect(withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0))).rejects.toThrow("boom");
     expect(h.prisma.$transaction).toHaveBeenCalledTimes(1);
+    await flushMovePublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
+  });
+
+  it("falha ao publicar deal_moved não desfaz o move", async () => {
+    seedDeal("stage-a");
+    h.ssePublish.mockImplementationOnce(() => {
+      throw new Error("redis fora");
+    });
+    await expect(withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0))).resolves.toBeTruthy();
+    await flushMovePublish();
+    expect(h.tx.deal.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidate do board que falha ainda publica deal_moved", async () => {
+    seedDeal("stage-a");
+    h.invalidateBoardData.mockRejectedValueOnce(new Error("redis fora"));
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0));
+    await flushMovePublish();
+    expect(h.ssePublish).toHaveBeenCalledTimes(1);
+    expect(h.ssePublish.mock.calls[0]![0]).toBe("deal_moved");
+  });
+
+  it("o evento sai com a organizationId do contexto, não de outra org", async () => {
+    seedDeal("stage-a");
+    await withOrg("org-z", () => moveDeal("deal-1", "stage-b", 0));
+    await flushMovePublish();
+    expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({ organizationId: "org-z" });
+    expect(h.invalidateBoardData).toHaveBeenCalledWith("org-z", "pipe-1");
   });
 });
 
