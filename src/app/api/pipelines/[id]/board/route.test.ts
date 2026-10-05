@@ -320,7 +320,9 @@ async function queryRaw(...call: unknown[]): Promise<unknown> {
     }
     const out: Row[] = [];
     for (const [stageId, list] of byStage) {
-      list.slice(0, max).forEach((d, i) => out.push({ id: d.id, stageId, rn: i + 1 }));
+      list
+        .slice(0, max)
+        .forEach((d, i) => out.push({ id: d.id, stageId, rn: i + 1, total: list.length }));
     }
     return out;
   }

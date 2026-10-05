@@ -71,6 +71,7 @@ import { buildDealWhereFromFilters } from "@/services/kanban-filters";
 import {
   __boardInternal,
   buildBoardCardPreviewSql,
+  buildBoardStageTotalsSql,
   buildLastInteractionRankedSql,
   buildRankedBoardDealsSql,
   getBoardData,
@@ -430,10 +431,11 @@ function rankRows(
 ) {
   const byStage = new Map<string, DealRow[]>();
   for (const d of rows) byStage.set(d.stageId, [...(byStage.get(d.stageId) ?? []), d]);
-  const out: { id: string; stageId: string; rn: number }[] = [];
+  // `total` = COUNT(*) OVER (PARTITION BY "stageId"): a etapa inteira, não o corte.
+  const out: { id: string; stageId: string; rn: number; total: number }[] = [];
   for (const [stageId, ds] of byStage) {
     ds.sort(cmp).forEach((d, i) => {
-      if (i + 1 <= maxPerStage) out.push({ id: d.id, stageId, rn: i + 1 });
+      if (i + 1 <= maxPerStage) out.push({ id: d.id, stageId, rn: i + 1, total: ds.length });
     });
   }
   // Embaralha de propósito: o código não pode depender da ordem física.
@@ -455,6 +457,9 @@ function emulateRaw(call: unknown[]): unknown[] {
     );
     const last = lastConvAtByContact();
     const mul = dir === "desc" ? -1 : 1;
+    // O total vem da janela dos CANDIDATOS (todos os que casam, antes do teto).
+    const totalByStage = new Map<string, number>();
+    for (const d of matched) totalByStage.set(d.stageId, (totalByStage.get(d.stageId) ?? 0) + 1);
     return rankRows(
       candidates,
       (a, b) => {
@@ -467,7 +472,7 @@ function emulateRaw(call: unknown[]): unknown[] {
         return a.id < b.id ? -1 : 1;
       },
       maxPerStage,
-    );
+    ).map((r) => ({ ...r, total: totalByStage.get(r.stageId) ?? 0 }));
   }
 
   if (text.includes('PARTITION BY d."stageId"')) {
@@ -928,6 +933,9 @@ describe("board: SQL gerado", () => {
     expect(text).toContain("WHERE r.rn <= ?");
     expect(text).not.toContain("org-x");
     expect(sql.values).toEqual(["org-x", ["s1", "s2"], "OPEN", 7]);
+    // Total da etapa na mesma janela (K3).
+    expect(text).toContain('COUNT(*) OVER (PARTITION BY d."stageId")::int AS total');
+    expect(text).toContain('SELECT r.id, r."stageId", r.rn, r.total');
     // Placeholders numerados na forma final do Postgres.
     expect(sql.text).toContain("$1");
     expect(sql.text).toContain("$4");
@@ -946,6 +954,9 @@ describe("board: SQL gerado", () => {
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).toContain("WHERE c.scan_rn <= ?");
     expect(text).toContain("ORDER BY s.last_at DESC NULLS LAST");
+    // Total da etapa contado nos candidatos, antes do teto de varredura (K3).
+    expect(text).toMatch(/AS scan_rn,\s+COUNT\(\*\) OVER \(PARTITION BY d\."stageId"\)::int AS total/);
+    expect(text).toContain('SELECT r.id, r."stageId", r.rn, r.last_at, r.total');
     // Coluna pronta do contato; `conversations` só para quem está NULL.
     expect(text).toContain('LEFT JOIN contacts ct');
     expect(text).toContain('COALESCE(ct."lastMessageAt", fb.last_at) AS last_at');
@@ -963,6 +974,82 @@ describe("board: SQL gerado", () => {
       maxPerStage: 1,
     });
     expect(asc.strings.join("?")).toContain("ORDER BY s.last_at ASC NULLS LAST");
+  });
+});
+
+describe("board: contagem por etapa sem consulta à parte (K3)", () => {
+  it("getBoardData: totais vêm da janela — etapa cheia, etapa cortada e etapa vazia", async () => {
+    currentWhere = { status: "OPEN" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, undefined, undefined, { perStage: 2 }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    const byId = new Map(board.map((s) => [s.id, s]));
+    // s1: 5 abertos (d05 é LOST), 2 carregados.
+    expect(byId.get("s1")).toMatchObject({ totalCount: 5, loadedCount: 2, hasMore: true });
+    expect(byId.get("s2")).toMatchObject({ totalCount: 4, loadedCount: 2, hasMore: true });
+    // s3: só d13 aberto.
+    expect(byId.get("s3")).toMatchObject({ totalCount: 1, loadedCount: 1, hasMore: false });
+  });
+
+  it("etapa sem nenhum negócio casando: total 0 (sem linha na janela), não o tamanho da página", async () => {
+    currentWhere = { status: "WON" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "WON", undefined, { perStage: 10 }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    expect(board.map((s) => [s.id, s.totalCount, s.hasMore])).toEqual([
+      ["s1", 0, false],
+      ["s2", 0, false],
+      ["s3", 2, false],
+    ]);
+  });
+
+  it("lastInteraction: total da etapa mesmo com a janela cortada", async () => {
+    currentWhere = { status: "OPEN" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, undefined, undefined, {
+        perStage: 1,
+        sortField: "lastInteraction",
+        sortDirection: "desc",
+      }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    expect(board.map((s) => [s.id, s.totalCount, s.loadedCount])).toEqual([
+      ["s1", 5, 1],
+      ["s2", 4, 1],
+      ["s3", 1, 1],
+    ]);
+  });
+
+  it("caminho por etapa (where que não traduz e passa do teto) continua contando com groupBy", async () => {
+    const where: Prisma.DealWhereInput = { title: { contains: "Deal" } };
+    vi.mocked(buildDealWhereFromFilters).mockResolvedValueOnce([where]);
+    currentWhere = where as AnyWhere;
+    const cap = __boardInternal.BOARD_PRERESOLVE_CAP;
+    // Força "acima do teto": a pré-resolução devolve cap + 1 linhas.
+    h.dealFindMany.mockImplementationOnce(async () =>
+      Array.from({ length: cap + 1 }, (_, i) => ({ id: `x${i}`, stageId: "s1" })),
+    );
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "ALL", { search: "Deal" }, { perStage: 2 }),
+    );
+    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
+    expect(board.find((s) => s.id === "s1")?.totalCount).toBe(6);
+  });
+
+  it("contagem do \"carregar mais\": SQL sem JOIN, etapas e organização como parâmetros", () => {
+    const sql = buildBoardStageTotalsSql({
+      orgId: "org-x",
+      stageIds: ["s1", "s2"],
+      whereSql: translateDealWhereToSql({ status: "OPEN" }) as Prisma.Sql,
+    });
+    const text = sql.strings.join("?");
+    expect(text).toContain('SELECT d."stageId", COUNT(*)::int AS total');
+    expect(text).toContain('d."stageId" = ANY(?)');
+    expect(text).toContain('GROUP BY d."stageId"');
+    expect(text).not.toMatch(/JOIN/);
+    expect(sql.values).toEqual(["org-x", ["s1", "s2"], "OPEN"]);
   });
 });
 
@@ -1026,11 +1113,12 @@ describe("board completo (getBoardData) com passagem única em messages", () => 
     const board = await withOrg(() =>
       getBoardData(PIPELINE, where, "ALL", undefined, { perStage: 10 }),
     );
-    // Consultas do miss: 1 stages + 1 ranking + 1 hidratação + 1 groupBy +
-    // 2 raws (produtos e prévia — conversas e mensagens numa só, K2).
+    // Consultas do miss: 1 stages + 1 ranking (com o total por etapa, K3) +
+    // 1 hidratação + 2 raws (produtos e prévia — conversas e mensagens numa
+    // só, K2). Nenhum groupBy.
     expect(h.stageFindMany).toHaveBeenCalledTimes(1);
     expect(findManyCalls()).toBe(1);
-    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
     expect(rawCalls()).toBe(3);
     const previewCalls = h.queryRaw.mock.calls.filter((c) =>
       parseRawCall(c).text.includes("FROM messages"),

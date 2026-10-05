@@ -231,6 +231,11 @@ function candidates(stageId: string, scanCap: number): DealRow[] {
     .slice(0, scanCap);
 }
 
+/** Negócios da etapa que casam com o where do cenário (total da coluna). */
+function stageTotal(stageId: string): number {
+  return deals().filter((d) => d.stageId === stageId && db.matches("deal", d, currentWhere)).length;
+}
+
 function emulateRaw(call: unknown[]): unknown[] {
   const { text, values } = parseRawCall(call);
 
@@ -268,15 +273,17 @@ function emulateRaw(call: unknown[]): unknown[] {
     const scanCap = values[values.length - 2] as number;
     const maxPerStage = values[values.length - 1] as number;
     const dir = /last_at DESC NULLS LAST/.test(text) ? "desc" : "asc";
-    return stageIds.flatMap((stageId) =>
-      candidates(stageId, scanCap)
+    return stageIds.flatMap((stageId) => {
+      // `total` = COUNT(*) OVER da etapa inteira (antes do teto de candidatos).
+      const total = stageTotal(stageId);
+      return candidates(stageId, scanCap)
         .sort(cmpLastInteraction(dir))
         .slice(0, maxPerStage)
         .map((d, i) => {
           const la = lastAtOf(d);
-          return { id: d.id, stageId, rn: i + 1, last_at: la === null ? null : new Date(la) };
-        }),
-    );
+          return { id: d.id, stageId, rn: i + 1, last_at: la === null ? null : new Date(la), total };
+        });
+    });
   }
 
   // Board em position/createdAt (janela por etapa).
@@ -299,8 +306,16 @@ function emulateRaw(call: unknown[]): unknown[] {
           return cmpId(a, b);
         })
         .slice(0, maxPerStage)
-        .map((d, i) => ({ id: d.id, stageId, rn: i + 1 })),
+        .map((d, i) => ({ id: d.id, stageId, rn: i + 1, total: stageTotal(stageId) })),
     );
+  }
+
+  // Contagem por etapa em SQL (página por cursor): values = [org, etapas, ...where].
+  if (text.includes("COUNT(*)::int AS total") && text.includes('GROUP BY d."stageId"')) {
+    const stageIds = values[1] as string[];
+    return stageIds
+      .map((stageId) => ({ stageId, total: stageTotal(stageId) }))
+      .filter((r) => r.total > 0);
   }
 
   if (text.includes("FROM deal_products")) return [];
@@ -613,7 +628,7 @@ describe("coluna por cursor — custo", () => {
     expect(wrap).not.toHaveBeenCalled();
   });
 
-  it("uma página custa menos consultas que recarregar o board com offsetByStage (que continua aceito)", async () => {
+  it("uma página traz só os cards novos; recarregar o board com offsetByStage (que continua aceito) traz tudo de novo", async () => {
     const board = await loadBoard(3);
     const cursor = board.find((s) => s.id === "s1")!.nextCursor!;
 
@@ -634,11 +649,14 @@ describe("coluna por cursor — custo", () => {
     // de conversa/mensagem; produtos sempre)
     expect(h.stageFindMany).toHaveBeenCalledTimes(1);
     expect(h.dealFindMany).toHaveBeenCalledTimes(1);
-    // contagem só das etapas pedidas (o board conta o funil inteiro)
-    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
-    expect(
-      (h.dealGroupBy.mock.calls[0]![0] as { where: { AND: unknown[] } }).where.AND[1],
-    ).toEqual({ stageId: { in: ["s1"] } });
+    // contagem só das etapas pedidas, em SQL sem JOIN (K3) — nada de groupBy
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    const totalsCall = h.queryRaw.mock.calls
+      .map((c) => parseRawCall(c))
+      .find((c) => c.text.includes('GROUP BY d."stageId"'));
+    expect(totalsCall).toBeDefined();
+    expect(totalsCall!.text).not.toMatch(/JOIN/);
+    expect(totalsCall!.values.slice(0, 2)).toEqual([ORG, ["s1"]]);
     expect(page!.totalCount).toBe(12);
 
     vi.clearAllMocks();
@@ -649,7 +667,13 @@ describe("coluna por cursor — custo", () => {
       }),
     );
     const legacyCalls = calls();
-    expect(cursorCalls).toBeLessThan(legacyCalls);
+    // Depois do K3 o board não tem mais a contagem à parte: os dois caminhos
+    // custam o mesmo número de consultas. A página por cursor continua mais
+    // barata no que importa — traz e hidrata só os 3 cards novos de UMA
+    // etapa, não as 2 colunas inteiras de novo.
+    expect(cursorCalls).toBeLessThanOrEqual(legacyCalls);
+    expect(page!.deals).toHaveLength(3);
+    expect(legacy.reduce((n, s) => n + s.deals.length, 0)).toBeGreaterThan(3);
 
     // mesmo resultado pelos dois caminhos
     const legacyS1 = legacy.find((s) => s.id === "s1")!;

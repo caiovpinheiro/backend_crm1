@@ -2768,6 +2768,12 @@ type BoardRankedRow = {
   id: string;
   stageId: string;
   rn: number;
+  /**
+   * Total de negócios da etapa que casam com o where (`COUNT(*) OVER
+   * (PARTITION BY "stageId")` da mesma janela) — K3: a contagem por etapa
+   * não é mais uma consulta à parte.
+   */
+  total?: number | bigint | null;
   /** Só no ranking por `lastInteraction` (chave do cursor da etapa). */
   last_at?: Date | string | null;
 };
@@ -2787,10 +2793,13 @@ function boardRankOrderBySql(
 
 /**
  * UMA consulta para todas as colunas: `ROW_NUMBER() OVER (PARTITION BY
- * "stageId" ORDER BY …) <= maxPerStage`. Devolve só (id, stageId, rn); a
+ * "stageId" ORDER BY …) <= maxPerStage`. Devolve (id, stageId, rn, total); a
  * hidratação (contato, dono, tags, atividades) é um `findMany` por `id IN`.
+ * `total` = `COUNT(*) OVER (PARTITION BY "stageId")`: o total da etapa sai da
+ * mesma passada (etapa sem negócio não devolve linha → total 0).
  *
- * Antes: N `findMany` (um por etapa, cada um com include) em `Promise.all`.
+ * Antes: N `findMany` (um por etapa, cada um com include) em `Promise.all`,
+ * e a contagem num `groupBy` do Prisma à parte (2–3 LEFT JOIN em `stages`).
  */
 export function buildRankedBoardDealsSql(args: {
   orgId: string;
@@ -2800,7 +2809,7 @@ export function buildRankedBoardDealsSql(args: {
   maxPerStage: number;
 }): Prisma.Sql {
   return Prisma.sql`
-    SELECT r.id, r."stageId", r.rn
+    SELECT r.id, r."stageId", r.rn, r.total
     FROM (
       SELECT
         d.id,
@@ -2808,7 +2817,8 @@ export function buildRankedBoardDealsSql(args: {
         ROW_NUMBER() OVER (
           PARTITION BY d."stageId"
           ORDER BY ${args.orderBy}
-        )::int AS rn
+        )::int AS rn,
+        COUNT(*) OVER (PARTITION BY d."stageId")::int AS total
       FROM deals d
       WHERE d."organizationId" = ${args.orgId}
         AND d."stageId" = ANY(${args.stageIds})
@@ -2893,14 +2903,15 @@ export function buildLastInteractionRankedSql(args: {
         ROW_NUMBER() OVER (
           PARTITION BY d."stageId"
           ORDER BY d."updatedAt" DESC, d.id DESC
-        )::int AS scan_rn
+        )::int AS scan_rn,
+        COUNT(*) OVER (PARTITION BY d."stageId")::int AS total
       FROM deals d
       WHERE d."organizationId" = ${args.orgId}
         AND d."stageId" = ANY(${args.stageIds})
         AND (${args.whereSql})
     ),
     scored AS (
-      SELECT c.id, c."stageId", c."position", ${li.lastAt} AS last_at
+      SELECT c.id, c."stageId", c."position", c.total, ${li.lastAt} AS last_at
       FROM candidates c
       ${li.joins}
       WHERE c.scan_rn <= ${args.scanCap}
@@ -2910,16 +2921,49 @@ export function buildLastInteractionRankedSql(args: {
         s.id,
         s."stageId",
         s.last_at,
+        s.total,
         ROW_NUMBER() OVER (
           PARTITION BY s."stageId"
           ORDER BY s.last_at ${dir} NULLS LAST, s."position" ASC, s.id ASC
         )::int AS rn
       FROM scored s
     )
-    SELECT r.id, r."stageId", r.rn, r.last_at
+    SELECT r.id, r."stageId", r.rn, r.last_at, r.total
     FROM ranked r
     WHERE r.rn <= ${args.maxPerStage}
     ORDER BY r."stageId", r.rn
+  `;
+}
+
+/** Totais por etapa lidos das linhas ranqueadas (`total` da janela). */
+function collectRankedTotals(
+  rows: readonly BoardRankedRow[],
+  totalsOut: Map<string, number> | undefined,
+): void {
+  if (!totalsOut) return;
+  for (const row of rows) {
+    if (row.total == null || totalsOut.has(row.stageId)) continue;
+    totalsOut.set(row.stageId, Number(row.total));
+  }
+}
+
+/**
+ * Contagem por etapa em SQL — para quem não passa pela janela ranqueada (o
+ * "Carregar mais" por cursor). Mesmo where traduzido do board, sem JOIN:
+ * `stageId = ANY(etapas)` já escopa o funil.
+ */
+export function buildBoardStageTotalsSql(args: {
+  orgId: string;
+  stageIds: string[];
+  whereSql: Prisma.Sql;
+}): Prisma.Sql {
+  return Prisma.sql`
+    SELECT d."stageId", COUNT(*)::int AS total
+    FROM deals d
+    WHERE d."organizationId" = ${args.orgId}
+      AND d."stageId" = ANY(${args.stageIds})
+      AND (${args.whereSql})
+    GROUP BY d."stageId"
   `;
 }
 
@@ -2982,6 +3026,19 @@ async function hydrateBoardStages(
   });
 }
 
+/**
+ * O único jeito de ainda cair no `findMany` por etapa: filtro que o tradutor
+ * SQL não cobre E mais de `BOARD_PRERESOLVE_CAP` negócios casando. Fica no
+ * log para sabermos se acontece em produção (era o caminho dos 3 formatos de
+ * `findMany` por etapa que somavam 67,5 M linhas na main).
+ */
+function logBoardPerStageFallback(pipelineId: string, sortField: BoardSortField | undefined): void {
+  log.info(
+    { pipelineId, sort: sortField ?? "position", cap: BOARD_PRERESOLVE_CAP },
+    "[board] caminho por etapa (filtro fora do tradutor e acima do teto de pré-resolução)",
+  );
+}
+
 /** Caminho novo do board (sort `position`/`createdAt`): 1 janela + 1 hidratação. */
 async function loadBoardStagesRanked(
   stagesRaw: readonly BoardStageRaw[],
@@ -2990,6 +3047,8 @@ async function loadBoardStagesRanked(
   sortDirection: BoardSortDirection,
   perStage: number,
   offsetByStage: Record<string, number>,
+  /** Saída opcional: total por etapa vindo da mesma janela (K3). */
+  totalsOut?: Map<string, number>,
 ): Promise<BoardStageWithDeals[]> {
   if (stagesRaw.length === 0) return [];
   const orgId = getOrgIdOrThrow();
@@ -3003,6 +3062,7 @@ async function loadBoardStagesRanked(
       maxPerStage: Math.max(...limitByStage.values()),
     }),
   );
+  collectRankedTotals(rows, totalsOut);
   return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
 }
 
@@ -3067,6 +3127,11 @@ async function loadBoardStagesByLastInteraction(
   advancedFilters?: AdvancedDealFilters,
   /** Resolvedor do where compartilhado com `computeBoardData` (totais). */
   whereResolver: BoardWhereResolver = createBoardWhereResolver(dealWhere).resolve,
+  /**
+   * Saída opcional: total por etapa vindo da janela (K3). Só é preenchido no
+   * caminho em SQL; no fallback por etapa fica vazio e quem chama conta.
+   */
+  totals?: { fromSql: boolean; byStage: Map<string, number> },
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
   const stagesRaw = stagesAllowedByFilter(
@@ -3096,6 +3161,10 @@ async function loadBoardStagesByLastInteraction(
         maxPerStage,
       }),
     );
+    if (totals) {
+      totals.fromSql = true;
+      collectRankedTotals(rows, totals.byStage);
+    }
     if (lastAtOut && direct) {
       for (const row of rows) {
         if (row.last_at === undefined) continue;
@@ -3105,6 +3174,7 @@ async function loadBoardStagesByLastInteraction(
     return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
   }
 
+  logBoardPerStageFallback(pipelineId, "lastInteraction");
   return hydrateBoardStages(
     stagesRaw,
     await loadLastInteractionIdsPerStage(
@@ -3466,14 +3536,14 @@ async function computeBoardData(
   // Promise.all lá embaixo. Não usar `await` aqui — a promise fica em voo.
   const metricsPromise = getStageMetrics(pipelineId);
 
-  // ⚡ COUNT por etapa em paralelo com o SELECT de cards. Antes o groupBy
-  // esperava `stages` só pra montar `stageId IN (...)` — agora escopa por
-  // `stage.pipelineId` (mesmo resultado) e sobe junto com a query pesada.
+  // Contagem por etapa (K3): sai da MESMA janela que ranqueia os cards
+  // (`COUNT(*) OVER (PARTITION BY "stageId")`), com o mesmo where — direto
+  // em SQL ou sobre os ids pré-resolvidos. Antes era um `groupBy` do Prisma à
+  // parte, com `stage.pipelineId` no where (2–3 LEFT JOIN repetidos em
+  // `stages`; ~61 mil chamadas de 30–77 ms em produção, 05/10).
   //
-  // Where não traduzível (filtro de conversa, campo personalizado, busca):
-  // os totais saem dos ids pré-resolvidos, sem um 2º SELECT com o mesmo
-  // filtro caro. O `groupBy` só roda nesse caso se a pré-resolução passar
-  // do teto.
+  // O `groupBy` só sobrevive no caminho por etapa (where que nem traduz nem
+  // cabe no teto da pré-resolução), onde não existe janela.
   const whereResolver = createBoardWhereResolver(dealWhere);
   type TotalsRow = { stageId: string; _count: { _all: number } };
   const groupByTotals = (): Promise<TotalsRow[]> =>
@@ -3482,15 +3552,10 @@ async function computeBoardData(
       where: { ...dealWhere, stage: { pipelineId } },
       _count: { _all: true },
     });
-  const totalsPromise: Promise<TotalsRow[]> | null = whereResolver.directSql
-    ? groupByTotals()
-    : null;
-  totalsPromise?.catch(() => undefined);
+  const sqlTotals = { fromSql: false, byStage: new Map<string, number>() };
   const resolveTotals = async (): Promise<TotalsRow[]> => {
-    if (totalsPromise) return totalsPromise;
-    const pre = whereResolver.preResolved();
-    if (!pre) return groupByTotals();
-    return [...pre.countsByStage].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
+    if (!sqlTotals.fromSql) return groupByTotals();
+    return [...sqlTotals.byStage].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
   };
 
   let stages: BoardStageWithDeals[];
@@ -3509,6 +3574,7 @@ async function computeBoardData(
         lastAtByDealId,
         advancedFilters,
         whereResolver.resolve,
+        sqlTotals,
       ),
     );
   } else {
@@ -3536,6 +3602,8 @@ async function computeBoardData(
     );
     stages = await phase("cards", async () => {
       const { sql: whereSql } = await whereResolver.resolve(stagesRaw.map((s) => s.id));
+      if (whereSql) sqlTotals.fromSql = true;
+      else logBoardPerStageFallback(pipelineId, sortField);
       return whereSql
         ? loadBoardStagesRanked(
             stagesRaw,
@@ -3544,6 +3612,7 @@ async function computeBoardData(
             sortDirection,
             perStage,
             offsetByStage,
+            sqlTotals.byStage,
           )
         : loadBoardStagesPerStage(
             stagesRaw,
@@ -3559,8 +3628,8 @@ async function computeBoardData(
   // produtos → última mensagem → métricas → avatares): a latência do board
   // virava a SOMA de ~5 round-trips ao Postgres. São independentes entre
   // si, então rodam em paralelo — `loadBoardCardEnrichment` dispara as
-  // consultas dos cards no mesmo tick; `metricsPromise`/`totalsPromise` já
-  // voam desde antes do findMany de stages.
+  // consultas dos cards no mesmo tick; `metricsPromise` já voa desde antes
+  // do findMany de stages. Os totais já vieram com os cards (K3).
   const [totalsGroups, metrics, enrichCard] = await phase("enrich", () =>
     Promise.all([resolveTotals(), metricsPromise, loadBoardCardEnrichment(stages, now)]),
   );
@@ -3580,7 +3649,9 @@ async function computeBoardData(
   const built = stages
     .map((stage) => {
       const metric = metricsMap.get(stage.id);
-      const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
+      // Janela em SQL: etapa sem linha = nenhum negócio casando (total 0).
+      const totalCount =
+        totalsByStage.get(stage.id) ?? (sqlTotals.fromSql ? 0 : stage.deals.length);
       // `extra` agora representa "quantos cards adicionais foram pedidos".
       // O total carregado é o tamanho real do array.
       const loadedCount = stage.deals.length;
@@ -4120,8 +4191,8 @@ export function buildLastInteractionColumnPageSql(args: {
 /**
  * Próximos cards de uma ou mais etapas, a partir do cursor de cada uma.
  *
- * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem (total
- * atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
+ * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem em SQL
+ * (total atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
  * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (2
  * consultas + avatar), feito UMA vez para todas as etapas do pedido. Não
  * passa pelo cache do board.
@@ -4183,8 +4254,10 @@ export async function getBoardColumnPages(
     statusFilter,
     advancedFilters,
   );
-  const whereSql =
-    sort === "lastInteraction" ? translateDealWhereToSql(dealWhere) : null;
+  // Where em SQL: obrigatório para a página de `lastInteraction`; nas outras
+  // ordenações serve só à contagem (abaixo).
+  const translatedWhere = translateDealWhereToSql(dealWhere);
+  const whereSql = sort === "lastInteraction" ? translatedWhere : null;
   if (sort === "lastInteraction" && !whereSql) {
     throw new BoardColumnPageError(
       "cursor_unsupported",
@@ -4199,17 +4272,31 @@ export async function getBoardColumnPages(
 
   // Total ATUAL de cada etapa pedida (o do board pode ter até 45 s de cache):
   // o cliente recalcula "faltam N" sem recarregar o board. Em voo junto com
-  // as páginas.
+  // as páginas. Where traduzível → uma contagem em SQL sem JOIN (K3); senão
+  // o `groupBy` do Prisma, que é quem sabe avaliar o filtro.
   const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
     stagesRaw.length === 0
       ? Promise.resolve([])
-      : prisma.deal.groupBy({
-          by: ["stageId"],
-          where: {
-            AND: [dealWhere, { stageId: { in: stagesRaw.map((s) => s.id) } }],
-          },
-          _count: { _all: true },
-        });
+      : translatedWhere
+        ? prisma
+            .$queryRaw<{ stageId: string; total: number | bigint }[]>(
+              buildBoardStageTotalsSql({
+                orgId: getOrgIdOrThrow(),
+                stageIds: stagesRaw.map((s) => s.id),
+                whereSql: translatedWhere,
+              }),
+            )
+            .then((rows) =>
+              rows.map((r) => ({ stageId: r.stageId, _count: { _all: Number(r.total) } })),
+            )
+        : prisma.deal.groupBy({
+            by: ["stageId"],
+            where: {
+              AND: [dealWhere, { stageId: { in: stagesRaw.map((s) => s.id) } }],
+            },
+            _count: { _all: true },
+          });
+  totalsPromise.catch(() => undefined);
 
   const hasMoreByStage = new Map<string, boolean>();
   const lastAtByDealId = new Map<string, Date | null>();
