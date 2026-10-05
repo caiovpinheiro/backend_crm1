@@ -53,6 +53,7 @@ import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
+import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("deals");
@@ -3774,6 +3775,88 @@ async function computeBoardData(
 }
 
 /**
+ * Não lidas, canal e prévia de mensagens dos contatos do board numa consulta
+ * (ver o comentário em `loadBoardCardEnrichment`). Só valores como
+ * parâmetro; o recorte de mensagem de chat é o de
+ * `lib/conversation-last-message.ts`.
+ */
+export function buildBoardCardPreviewSql(args: {
+  orgId: string;
+  contactIds: readonly string[];
+  awaitingCap: number;
+}): Prisma.Sql {
+  const lastOf = (direction: "in" | "out", limit: Prisma.Sql) => Prisma.sql`
+          (SELECT m.id, m."externalId", m.content, m."createdAt", m.direction,
+                  m."sendStatus", m."sendError"
+           FROM messages m
+           WHERE m."conversationId" = conv.id
+             AND m."organizationId" = ${args.orgId}
+             AND m.direction = ${direction}
+             AND m."isPrivate" = false
+             AND m."messageType" NOT IN (${Prisma.join([...NON_CHAT_MESSAGE_TYPES])})
+             AND m."messageType" NOT LIKE 'event%'
+           -- Desempate no mesmo segundo (timestamp do WhatsApp em s).
+           ORDER BY m."createdAt" DESC, m.id DESC
+           LIMIT ${limit})`;
+  const inLimit = Prisma.sql`CASE WHEN pc.unread > 0 THEN ${args.awaitingCap}::int ELSE 1 END`;
+  return Prisma.sql`
+    WITH conv AS (
+      SELECT c.id, c."contactId", c.channel, c."unreadCount", c."updatedAt"
+      FROM conversations c
+      WHERE c."contactId" = ANY(${[...args.contactIds]})
+        AND c."organizationId" = ${args.orgId}
+    ),
+    per_contact AS (
+      SELECT
+        "contactId",
+        COALESCE(SUM("unreadCount"), 0)::int AS unread,
+        (ARRAY_AGG(channel ORDER BY "updatedAt" DESC))[1] AS channel
+      FROM conv
+      GROUP BY "contactId"
+    ),
+    picked AS (
+      SELECT conv."contactId", lm.*
+      FROM conv
+      INNER JOIN per_contact pc ON pc."contactId" = conv."contactId"
+      CROSS JOIN LATERAL (
+        ${lastOf("in", inLimit)}
+        UNION ALL
+        ${lastOf("out", Prisma.sql`1`)}
+      ) lm
+    ),
+    ranked AS (
+      SELECT
+        p.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY p."contactId", p.direction
+          ORDER BY p."createdAt" DESC, p.id DESC
+        )::int AS rn
+      FROM picked p
+    )
+    SELECT
+      pc."contactId",
+      pc.channel,
+      pc.unread AS "unreadCount",
+      r.id AS "msgId",
+      r."externalId" AS "msgExternalId",
+      r.content AS "msgContent",
+      r."createdAt" AS "msgCreatedAt",
+      r.direction AS "msgDirection",
+      r."sendStatus" AS "msgSendStatus",
+      r."sendError" AS "msgSendError",
+      r.rn
+    FROM per_contact pc
+    LEFT JOIN ranked r
+      ON r."contactId" = pc."contactId"
+     AND r.rn <= CASE
+           WHEN r.direction = 'in' AND pc.unread > 0 THEN ${args.awaitingCap}::int
+           ELSE 1
+         END
+    ORDER BY pc."contactId", r.rn
+  `;
+}
+
+/**
  * Enriquecimento dos cards do board: produto, última mensagem (qualquer
  * lado e do cliente), não lidas, canal, prévia “N aguardando” e avatar.
  *
@@ -3782,7 +3865,7 @@ async function computeBoardData(
  * (`computeBoardData`) e pelo “Carregar mais” por cursor
  * (`getBoardColumnPages`) — o card tem o mesmo formato nos dois.
  *
- * As 3 consultas + avatar saem juntas (`Promise.all`); as promessas são
+ * As 2 consultas (produtos e prévia) + avatar saem juntas (`Promise.all`); as promessas são
  * criadas antes do primeiro `await`, então quem chama pode pôr esta função
  * num `Promise.all` com outras consultas sem serializar nada.
  */
@@ -3842,128 +3925,67 @@ async function loadBoardCardEnrichment(
         `
       : Promise.resolve([]);
 
-  // Última mensagem + não lidas + canal por contato.
+  // Não lidas + canal + prévia de mensagens por contato — UMA consulta (K2).
   // Obs.: o "responsável" do contato e do chat são derivados de
   // `Deal.owner` via regra de herança (ver `propagateOwnerToContactAndChat`),
   // então não precisamos carregá-los separadamente aqui.
   //
-  // Antes: findMany conversations + nested messages take 1 por conv — N+1
-  // em SQL gerado. Agora: 1 query em `conversations` (unread + canal) e
-  // 1 passagem em `messages` (abaixo). Semântica: unread = soma; channel =
-  // conv mais recente por updatedAt.
-  type BoardConvRow = {
-    contactId: string;
-    channel: string | null;
-    unreadCount: number;
-  };
-  /**
-   * Uma linha por (contato, direção, posição): `rn = 1` da direção `in` é
-   * a última do cliente; `rn = 1` de cada direção disputa a última mensagem
-   * do contato; `rn <= 5` de `in` alimenta o preview “N aguardando”.
-   */
-  type BoardMsgRow = {
-    contactId: string;
-    msgId: string;
-    msgExternalId: string | null;
-    msgContent: string | null;
-    msgCreatedAt: Date;
-    msgDirection: string;
-    msgSendStatus: string | null;
-    msgSendError: string | null;
-    rn: number;
-  };
-  const AWAITING_PREVIEW_CAP = 5;
-  const convsPromise: Promise<BoardConvRow[]> =
-    allContactIds.length > 0
-      ? prisma.$queryRaw<BoardConvRow[]>`
-          WITH contact_unread AS (
-            SELECT "contactId", SUM("unreadCount")::int AS unread
-            FROM conversations
-            WHERE "contactId" = ANY(${allContactIds})
-              AND "organizationId" = ${orgIdForBoard}
-            GROUP BY "contactId"
-          ),
-          latest_channel AS (
-            SELECT DISTINCT ON ("contactId")
-              "contactId", channel
-            FROM conversations
-            WHERE "contactId" = ANY(${allContactIds})
-              AND "organizationId" = ${orgIdForBoard}
-            ORDER BY "contactId", "updatedAt" DESC
-          )
-          SELECT
-            cu."contactId",
-            lc.channel,
-            COALESCE(cu.unread, 0) AS "unreadCount"
-          FROM contact_unread cu
-          LEFT JOIN latest_channel lc ON lc."contactId" = cu."contactId"
-        `
-      : Promise.resolve([]);
-
-  // UMA passagem em `messages` para última mensagem (qualquer lado), última
-  // do cliente e preview “aguardando”. Antes eram 3 varreduras por contato
-  // (`last_msg`, `last_in` e `awaiting`, cada uma com DISTINCT ON /
-  // ROW_NUMBER próprio). Janela por (contato, direção): `in` guarda até
-  // AWAITING_PREVIEW_CAP linhas, `out` só a mais recente.
+  // Antes eram duas: `contact_unread`/`latest_channel` em `conversations` e
+  // uma janela `ROW_NUMBER() OVER (PARTITION BY contato, direção)` sobre
+  // TODAS as mensagens de todos os contatos do board — o Postgres lia e
+  // ordenava o histórico inteiro para ficar com até 6 linhas por contato
+  // (produção, 05/10: 31.833 + 29.017 chamadas, 19,4 M linhas).
+  //
+  // Agora, por conversa do contato, um LATERAL busca pelo índice
+  // `messages("conversationId", "createdAt")` de trás para a frente e para
+  // em poucas linhas: as últimas do cliente (até AWAITING_PREVIEW_CAP quando
+  // o contato tem não lidas; 1 quando não tem) e a última nossa. A janela
+  // final ranqueia só essas linhas. Semântica: unread = soma; canal = conversa
+  // de `updatedAt` mais recente; `rn = 1` de cada direção disputa a última
+  // mensagem do contato; `rn <= cap` de `in` alimenta o "N aguardando".
   //
   // Preview do card = última msg real de chat (cliente/agente). Exclui nota
   // interna, rascunho IA e eventos de call — senão o kanban/Flow mostra
   // "Lead/Conversa distribuída…" no lugar do Oi. `NOT LIKE 'event%'` vale
   // para as duas direções: mensagens de evento nascem com `direction: "out"`
-  // (`conversation-events.ts`), então o preview “aguardando” (só `in`) não
-  // muda em relação à varredura antiga, que não tinha esse filtro.
-  const msgsPromise: Promise<BoardMsgRow[]> =
+  // (`conversation-events.ts`).
+  //
+  // Única diferença visível: contato SEM não lidas cuja última mensagem do
+  // cliente é só espaços em branco não mostra mais a anterior no "aguardando"
+  // (antes vinham sempre 5 do cliente; agora 1 quando não há não lidas).
+  /**
+   * Uma linha por (contato, direção, posição); contato com conversa mas sem
+   * mensagem de chat devolve uma linha só com `unreadCount`/`channel`.
+   */
+  type BoardPreviewRow = {
+    contactId: string;
+    channel: string | null;
+    unreadCount: number;
+    msgId: string | null;
+    msgExternalId: string | null;
+    msgContent: string | null;
+    msgCreatedAt: Date | null;
+    msgDirection: string | null;
+    msgSendStatus: string | null;
+    msgSendError: string | null;
+    rn: number | null;
+  };
+  type BoardMsgRow = BoardPreviewRow & { msgId: string; msgCreatedAt: Date; msgDirection: string };
+  const AWAITING_PREVIEW_CAP = 5;
+  const previewPromise: Promise<BoardPreviewRow[]> =
     allContactIds.length > 0
-      ? prisma.$queryRaw<BoardMsgRow[]>`
-          SELECT
-            r."contactId",
-            r."msgId",
-            r."msgExternalId",
-            r."msgContent",
-            r."msgCreatedAt",
-            r."msgDirection",
-            r."msgSendStatus",
-            r."msgSendError",
-            r.rn
-          FROM (
-            SELECT
-              c."contactId",
-              m.id AS "msgId",
-              m."externalId" AS "msgExternalId",
-              m.content AS "msgContent",
-              m."createdAt" AS "msgCreatedAt",
-              m.direction AS "msgDirection",
-              m."sendStatus" AS "msgSendStatus",
-              m."sendError" AS "msgSendError",
-              ROW_NUMBER() OVER (
-                PARTITION BY c."contactId", m.direction
-                -- Desempate no mesmo segundo (timestamp do WhatsApp em s).
-                ORDER BY m."createdAt" DESC, m.id DESC
-              )::int AS rn
-            FROM conversations c
-            INNER JOIN messages m ON m."conversationId" = c.id
-            WHERE c."contactId" = ANY(${allContactIds})
-              AND c."organizationId" = ${orgIdForBoard}
-              AND m."organizationId" = ${orgIdForBoard}
-              AND m."isPrivate" = false
-              AND m.direction IN ('in', 'out')
-              AND m."messageType" NOT IN (
-                'note',
-                'ai_draft',
-                'whatsapp_call',
-                'whatsapp_call_recording'
-              )
-              AND m."messageType" NOT LIKE 'event%'
-          ) r
-          WHERE r.rn <= CASE WHEN r."msgDirection" = 'in' THEN ${AWAITING_PREVIEW_CAP} ELSE 1 END
-          ORDER BY r."contactId", r.rn
-        `
+      ? prisma.$queryRaw<BoardPreviewRow[]>(
+          buildBoardCardPreviewSql({
+            orgId: orgIdForBoard,
+            contactIds: allContactIds,
+            awaitingCap: AWAITING_PREVIEW_CAP,
+          }),
+        )
       : Promise.resolve([]);
 
-  const [dealProducts, convs, msgRows] = await Promise.all([
+  const [dealProducts, previewRows] = await Promise.all([
     productsPromise,
-    convsPromise,
-    msgsPromise,
+    previewPromise,
     // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
     // homônimo quando o Contact não tem avatarUrl). Independe das demais;
     // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
@@ -3994,14 +4016,20 @@ async function loadBoardCardEnrichment(
   const lastInMap = new Map<string, { content: string; createdAt: Date }>();
   const unreadMap = new Map<string, number>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
-  for (const row of convs) {
+  const msgRows: BoardMsgRow[] = [];
+  for (const row of previewRows) {
     if (!row.contactId) continue;
-    unreadMap.set(row.contactId, row.unreadCount ?? 0);
-    if (row.channel) {
-      channelMap.set(row.contactId, {
-        channel: row.channel,
-        updatedAt: new Date(0),
-      });
+    if (!unreadMap.has(row.contactId)) {
+      unreadMap.set(row.contactId, row.unreadCount ?? 0);
+      if (row.channel) {
+        channelMap.set(row.contactId, {
+          channel: row.channel,
+          updatedAt: new Date(0),
+        });
+      }
+    }
+    if (row.msgId != null && row.msgCreatedAt != null && row.msgDirection != null) {
+      msgRows.push(row as BoardMsgRow);
     }
   }
 
@@ -4018,7 +4046,6 @@ async function loadBoardCardEnrichment(
   // igual ao `DISTINCT ON … ORDER BY createdAt DESC, id DESC` antigo.
   const newestByContact = new Map<string, BoardMsgRow>();
   for (const row of msgRows) {
-    if (!row.contactId || row.msgCreatedAt == null) continue;
     const isIn = row.msgDirection === "in";
     if (row.rn === 1) {
       const current = newestByContact.get(row.contactId);
@@ -4260,7 +4287,7 @@ export function buildLastInteractionColumnPageSql(args: {
  *
  * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem (total
  * atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
- * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (3
+ * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (2
  * consultas + avatar), feito UMA vez para todas as etapas do pedido. Não
  * passa pelo cache do board.
  *

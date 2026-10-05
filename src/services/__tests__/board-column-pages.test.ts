@@ -304,8 +304,7 @@ function emulateRaw(call: unknown[]): unknown[] {
   }
 
   if (text.includes("FROM deal_products")) return [];
-  if (text.includes("contact_unread")) return [];
-  if (text.includes('PARTITION BY c."contactId", m.direction')) return [];
+  if (text.includes("per_contact AS")) return [];
   throw new Error(`SQL cru não emulado: ${text.slice(0, 120)}`);
 }
 
