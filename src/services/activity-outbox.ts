@@ -22,6 +22,7 @@ import {
   userIdForFk,
   type LogEventInput,
 } from "@/services/activity-log";
+import { occurredAtWindow } from "@/lib/activity-events-window";
 import { getLogger } from "@/lib/logger";
 import { scheduleBackgroundTimeout } from "@/lib/background-timers";
 
@@ -91,6 +92,7 @@ export async function insertActivityOutbox(
 type OutboxRow = {
   id: string;
   organizationId: string;
+  createdAt: Date;
   payload: Prisma.JsonValue;
   attempts: number;
   maxAttempts: number;
@@ -100,7 +102,7 @@ export async function pollAndProjectActivityOutbox(
   batchSize = 100,
 ): Promise<{ processed: number; dead: number; failed: number }> {
   const rows = await prismaBase.$queryRaw<OutboxRow[]>`
-    SELECT id, "organizationId", payload, attempts, "maxAttempts"
+    SELECT id, "organizationId", "createdAt", payload, attempts, "maxAttempts"
     FROM "activity_outbox"
     WHERE "processedAt" IS NULL
       AND "deadLetterAt" IS NULL
@@ -125,6 +127,10 @@ export async function pollAndProjectActivityOutbox(
             where: {
               organizationId: row.organizationId,
               idempotencyKey: payload.idempotencyKey,
+              // Poda de partição: o evento desta linha nasce com
+              // `occurredAt` = `createdAt` da outbox ou a hora da projeção
+              // — nunca antes da linha existir.
+              occurredAt: occurredAtWindow(row.createdAt),
             },
             select: { id: true },
           });
@@ -406,6 +412,10 @@ export async function projectTabulationOutboxBatch(
             where: {
               organizationId: row.organizationId,
               idempotencyKey: payload.idempotencyKey,
+              // Poda de partição: o evento desta linha nasce com
+              // `occurredAt` = `createdAt` da outbox ou a hora da projeção
+              // — nunca antes da linha existir.
+              occurredAt: occurredAtWindow(row.createdAt),
             },
             select: { id: true },
           });
@@ -652,6 +662,10 @@ export async function projectConversationClosedOutboxBatch(
             where: {
               organizationId: row.organizationId,
               idempotencyKey: payload.idempotencyKey,
+              // Poda de partição: o evento desta linha nasce com
+              // `occurredAt` = `createdAt` da outbox ou a hora da projeção
+              // — nunca antes da linha existir.
+              occurredAt: occurredAtWindow(row.createdAt),
             },
             select: { id: true },
           });
