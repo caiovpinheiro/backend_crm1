@@ -34,6 +34,7 @@ export async function GET(request: Request) {
     folderRaw === "archive" || folderRaw === "trash" ? folderRaw : "notes";
   const q = url.searchParams.get("q") ?? undefined;
   const colors = parseKeepColorFilter(url.searchParams.getAll("color"));
+  const favorite = url.searchParams.get("favorite") === "1";
 
   try {
     const { rows, usedColors, hasUncolored } = await listKeepNotes({
@@ -41,6 +42,7 @@ export async function GET(request: Request) {
       folder,
       q,
       colors,
+      favorite,
     });
     const orgId = r.session.user.organizationId!;
     return NextResponse.json({

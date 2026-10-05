@@ -1,0 +1,1 @@
+ALTER TABLE "keep_notes" ADD COLUMN IF NOT EXISTS "favorite" BOOLEAN NOT NULL DEFAULT false;

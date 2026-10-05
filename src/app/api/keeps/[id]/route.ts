@@ -69,6 +69,7 @@ export async function PATCH(
       title: typeof body.title === "string" ? body.title : undefined,
       content: body.content,
       pinned: typeof body.pinned === "boolean" ? body.pinned : undefined,
+      favorite: typeof body.favorite === "boolean" ? body.favorite : undefined,
       archived: typeof body.archived === "boolean" ? body.archived : undefined,
       trashed: typeof body.trashed === "boolean" ? body.trashed : undefined,
       color: colorPatch,
