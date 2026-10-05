@@ -19,7 +19,7 @@
  * Se o deal/conversa passa no bloco, redistribui — inclusive quando já tem
  * dono humano. `DONO_PRESERVADO` fica só para corrida (CAS perdeu). Sem
  * elegível: NO_ELIGIBLE_PARTICIPANT — o alvo fica marcado (routeMode="leads")
- * fora do smart, sem fila e sem fallback.
+ * e entra em `distribution_leads_pending` até alguém ACTIVE ter peso > 0.
  */
 
 import { Prisma } from "@prisma/client";
@@ -39,6 +39,7 @@ import {
   claimDealAssignmentTx,
 } from "../claim";
 import { isLeadsDistributionEnabled } from "./enabled";
+import { enqueueLeadsPending } from "./pending";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("distribution.leads.engine");
@@ -375,7 +376,7 @@ export async function executeLeadsDistribution(
         pipelineId: string | null;
         fromOwnerId: string | null;
       }
-    | { kind: "NO_ELIGIBLE_PARTICIPANT" }
+    | { kind: "NO_ELIGIBLE_PARTICIPANT"; pending: "created" | "updated" }
     | { kind: "DONO_PRESERVADO"; ownerId: string | null; ownerName: string | null };
 
   try {
@@ -387,6 +388,14 @@ export async function executeLeadsDistribution(
 
       const slot = await selectNextSlotTx(tx, orgId);
       if (!slot) {
+        const pending = await enqueueLeadsPending(tx, {
+          organizationId: orgId,
+          targetKey: target.targetKey,
+          contactId: target.contactId,
+          dealId: target.dealId,
+          conversationId: target.conversationId,
+          triggerSource: input.triggerSource,
+        });
         const result: LeadsDistributionResult = {
           success: false,
           reason: "NO_ELIGIBLE_PARTICIPANT",
@@ -394,7 +403,7 @@ export async function executeLeadsDistribution(
           selectedUserName: null,
         };
         await recordExecution(orgId, execId, result, null, tx);
-        return { kind: "NO_ELIGIBLE_PARTICIPANT" };
+        return { kind: "NO_ELIGIBLE_PARTICIPANT", pending };
       }
 
       // Claim do alvo: o modo leads sempre redistribui (inclusive dono
@@ -541,7 +550,30 @@ export async function executeLeadsDistribution(
   }
 
   if (txOutcome.kind === "NO_ELIGIBLE_PARTICIPANT") {
-    // routeMode permanece: o alvo fica fora do smart até ação explícita.
+    // routeMode permanece: o alvo fica fora do smart. A fila
+    // (distribution_leads_pending) redistribui quando alguém ficar elegível.
+    if (txOutcome.pending === "created") {
+      logEvent({
+        type: "LEAD_DISTRIBUTION_FAILED",
+        entityType: target.dealId
+          ? "DEAL"
+          : target.conversationId
+            ? "CONVERSATION"
+            : "CONTACT",
+        entityId: target.dealId ?? target.conversationId ?? target.contactId!,
+        dealId: target.dealId,
+        contactId: target.contactId,
+        conversationId: target.conversationId,
+        field: "owner",
+        meta: {
+          reason: "NO_ELIGIBLE_PARTICIPANT",
+          mode: "leads",
+          triggerSource: input.triggerSource,
+          queued: true,
+        },
+        actor: { type: "AUTOMATION", label: "Distribuição por Leads" },
+      }).catch((e) => log.error({ err: e }, "[leads] logEvent fila falhou"));
+    }
     return {
       success: false,
       reason: "NO_ELIGIBLE_PARTICIPANT",

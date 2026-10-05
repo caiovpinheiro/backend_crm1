@@ -10,9 +10,12 @@
  * entram na urna os slots com `slotIndex < weight`. Peso 0 = não recebe.
  */
 
+import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { parseDay } from "@/services/painel-period";
+
+const log = getLogger("distribution.leads.participants");
 
 export const LEADS_SLOT_COUNT = 5;
 export const LEADS_NOTE_MAX = 500;
@@ -218,7 +221,17 @@ export async function upsertLeadsParticipant(args: {
   });
 
   const all = await getLeadsParticipants();
-  return all.find((p) => p.userId === args.userId) ?? null;
+  const saved = all.find((p) => p.userId === args.userId) ?? null;
+  // Peso > 0 e ACTIVE: havia lead parado na fila (ninguém podia receber).
+  if (saved && saved.status === "ACTIVE" && saved.weight > 0) {
+    try {
+      const { drainLeadsPending } = await import("./pending");
+      await drainLeadsPending();
+    } catch (e) {
+      log.warn({ err: e }, "[leads] drenagem da fila falhou");
+    }
+  }
+  return saved;
 }
 
 /** Inclui vários operadores no rodízio numa tacada (mesmo upsert unitário). */

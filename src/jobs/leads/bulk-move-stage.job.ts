@@ -316,7 +316,8 @@ export async function processBulkMoveStage(
   }
 
   // Purga o cache-aside do board para o próximo GET (poll de 120 s ou F5)
-  // não devolver a etapa antiga. Não publica `deal_moved`: lote não é
+  // não devolver a etapa antiga. Antes do "finished" — o FE refaz o GET
+  // quando a operação termina. Não publica `deal_moved`: lote não é
   // realtime visual e não manda um evento por card.
   if (touchedPipelineIds.size > 0) {
     await invalidateBoardsForPipelines([...touchedPipelineIds]);

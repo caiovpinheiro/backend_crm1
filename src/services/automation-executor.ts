@@ -2391,7 +2391,8 @@ async function executeStep(
 
       // ── Modo "leads" (escolha EXPLÍCITA no bloco; ausência = smart) ──
       // Rodízio próprio: participantes com status administrativo + peso 0–5.
-      // Sem fila de espera, sem olhar presença/expediente/departamento.
+      // Sem olhar presença/expediente/departamento. Sem elegível, o lead
+      // espera em distribution_leads_pending.
       // Idempotência: outcome gravado em DistributionLeadsExecution por
       // (contexto, step, occurrence) — retry antes do avanço durável do
       // fluxo reencontra o resultado; a occurrence avança após a execução.
@@ -2462,14 +2463,18 @@ async function executeStep(
           // ASSIGNED (ou corrida rara DONO_PRESERVADO) → saída SIM.
           return {};
         }
-        // NO_ELIGIBLE_PARTICIPANT / módulo off → saída NÃO. Sem fila de
-        // espera e sem fallback para o smart: o alvo fica marcado
-        // (routeMode="leads") fora da distribuição automática atual.
+        // NO_ELIGIBLE_PARTICIPANT → saída NÃO. O motor já enfileirou o
+        // lead (distribution_leads_pending) para atribuir quando algum
+        // consultor ACTIVE tiver peso > 0. Sem fallback para o smart.
         const elseStepId = readString(cfg, "elseStepId");
+        const note =
+          leadsResult.reason === "NO_ELIGIBLE_PARTICIPANT"
+            ? "Sem consultor no rodízio — lead na fila de espera"
+            : undefined;
         if (elseStepId) {
-          return { skipRemaining: true, gotoStepId: elseStepId };
+          return { skipRemaining: true, gotoStepId: elseStepId, note };
         }
-        return { skipRemaining: true };
+        return { skipRemaining: true, note };
       }
 
       // Campo de departamento vazio no nó = herda o departamento da conversa
@@ -4998,6 +5003,35 @@ const RETRY_PAUSE_STEP_TYPES = new Set([
   "wait_for_reply",
 ]);
 
+/**
+ * Retry de `execute_distribution` no modo leads: a execução anterior já
+ * gravou o outcome. ASSIGNED segue a saída Distribuído; sem consultor,
+ * segue a saída Sem agente — nunca o nextStepId só porque o log foi SUCCESS.
+ */
+async function leadsRetryBranch(
+  automationId: string,
+  contactId: string | null | undefined,
+  stepId: string,
+  elseStepId: string,
+): Promise<StepResult | null> {
+  if (!contactId) return null;
+  const ctx = await getActiveContext(automationId, contactId);
+  if (!ctx) return null;
+  const last = await prisma.distributionLeadsExecution.findFirst({
+    where: { automationContextId: ctx.id, stepId },
+    orderBy: { occurrence: "desc" },
+    select: { result: true },
+  });
+  const reason =
+    last?.result && typeof last.result === "object"
+      ? (last.result as { reason?: string }).reason
+      : undefined;
+  if (!reason) return null;
+  if (reason === "ASSIGNED" || reason === "DONO_PRESERVADO") return {};
+  if (elseStepId) return { skipRemaining: true, gotoStepId: elseStepId };
+  return { skipRemaining: true };
+}
+
 /** Só roteiam — reexecutar no retry (sem efeito colateral). */
 const RETRY_REROUTE_STEP_TYPES = new Set([
   "condition",
@@ -5271,7 +5305,17 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
           }
         }
         log.info(`[${traceId}] Retry: pulando "${step.type}" ${step.id} (já SUCCESS)`);
-        result = {};
+        // execute_distribution é um IF. result={} segue o nextStepId
+        // (saída Distribuído). Se a tentativa anterior não atribuiu,
+        // o retry tem que continuar na saída Sem agente.
+        if (step.type === "execute_distribution") {
+          const elseId =
+            typeof stepConfig.elseStepId === "string" ? stepConfig.elseStepId.trim() : "";
+          const branched = await leadsRetryBranch(automationId, rt.contactId, step.id, elseId);
+          result = branched ?? {};
+        } else {
+          result = {};
+        }
       } else {
       await humanizeBeforeStep(step.type, humanize, wamid, runMetaClient);
 
