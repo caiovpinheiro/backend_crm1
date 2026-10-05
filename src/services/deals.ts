@@ -37,7 +37,13 @@ import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallb
 import { cache, type TextCacheSource } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import type { ServerTiming } from "@/lib/server-timing";
-import { canonicalBoardVariant } from "@/services/board-cache-variant";
+import {
+  BOARD_DEFAULT_PER_STAGE,
+  BOARD_MAX_PER_STAGE,
+  canonicalBoardVariant,
+  normalizeBoardOffsets,
+  normalizeBoardPerStage,
+} from "@/services/board-cache-variant";
 import {
   boardColumnKeysetWhere,
   boardColumnOrderBy,
@@ -2397,9 +2403,12 @@ export async function reopenDeal(id: string) {
   return result;
 }
 
-/** Limite default de cards exibidos por coluna no board. */
-const DEFAULT_BOARD_COLUMN_LIMIT = 100;
-const MAX_BOARD_COLUMN_LIMIT = 500;
+/**
+ * Cards por coluna no board: padrão 50, teto 200 (K4; eram 100 e 500). O
+ * resto da coluna vem pelo "carregar mais" por cursor. Fonte única em
+ * `board-cache-variant.ts` (a chave do cache normaliza com os mesmos números).
+ */
+const MAX_BOARD_COLUMN_LIMIT = BOARD_MAX_PER_STAGE;
 /**
  * TTL do cache-aside do board. Curto o bastante pra manter o quadro
  * "fresco" (novos leads via webhook aparecem em ≤ este intervalo), longo
@@ -2424,7 +2433,7 @@ const BOARD_CACHE_TTL_SEC = 45;
  *   kebab do Kanban no frontend (`_v2-client.tsx`). Cobre TODOS os
  *   cards da coluna porque o orderBy roda antes do `take` do Prisma —
  *   ao contrário do sort client-side antigo, que só ordenava os deals
- *   já carregados (default 100 por coluna).
+ *   já carregados (default 50 por coluna).
  * - `lastInteraction`: ordena pela última MENSAGEM de chat do contato
  *   vinculado ao deal — `contacts.lastMessageAt`, coluna mantida no mesmo
  *   ponto que `conversations.lastMessageAt` (K1). Antes era
@@ -3435,7 +3444,10 @@ async function loadLastInteractionIdsPerStage(
 }
 
 export type BoardLimitOptions = {
-  /** Quantos cards retornar por coluna. */
+  /**
+   * Quantos cards retornar por coluna: padrão `BOARD_DEFAULT_PER_STAGE` (50),
+   * teto `BOARD_MAX_PER_STAGE` (200). As rotas aceitam `perStage` ou `limit`.
+   */
   perStage?: number;
   /** Offset por etapa: stageId -> quantos pular. Permite "Carregar mais". */
   offsetByStage?: Record<string, number>;
@@ -3677,11 +3689,8 @@ async function computeBoardData(
     buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters),
   );
 
-  const perStage = Math.min(
-    MAX_BOARD_COLUMN_LIMIT,
-    Math.max(1, limitOptions?.perStage ?? DEFAULT_BOARD_COLUMN_LIMIT),
-  );
-  const offsetByStage = limitOptions?.offsetByStage ?? {};
+  const perStage = normalizeBoardPerStage(limitOptions?.perStage);
+  const offsetByStage = normalizeBoardOffsets(limitOptions?.offsetByStage);
   const sortField = limitOptions?.sortField;
   const sortDirection: BoardSortDirection =
     limitOptions?.sortDirection === "desc" ? "desc" : "asc";

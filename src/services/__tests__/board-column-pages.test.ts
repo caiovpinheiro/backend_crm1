@@ -687,7 +687,7 @@ describe("coluna por cursor — custo", () => {
     expect(legacyS1.nextCursor).toBe(page!.nextCursor);
   });
 
-  it("limit é limitado a [1, 500]; padrão 20", async () => {
+  it("limit é limitado a [1, 200]; padrão 20", async () => {
     const cursor = encodeBoardColumnCursor({ sort: "position", direction: "asc", position: 0, id: "a" });
     const take = async (limit: number | undefined) => {
       h.dealFindMany.mockClear();
@@ -700,7 +700,7 @@ describe("coluna por cursor — custo", () => {
     };
     expect(await take(undefined)).toBe(21);
     expect(await take(0)).toBe(2);
-    expect(await take(10_000)).toBe(501);
+    expect(await take(10_000)).toBe(201);
     expect(await take(7.9)).toBe(8);
   });
 });
