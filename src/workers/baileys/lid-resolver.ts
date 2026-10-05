@@ -10,6 +10,7 @@
  * so they survive worker restarts.
  */
 
+import { carryContactLastMessage } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { maskPhone } from "@/lib/pii-mask";
@@ -156,6 +157,11 @@ export async function fixLidContacts(channelId: string): Promise<number> {
             where: { contactId: c.id },
             data: { contactId: existing.id },
           });
+          // A última mensagem (Kanban) acompanha as conversas.
+          await carryContactLastMessage({
+            fromContactId: c.id,
+            toContactId: existing.id,
+          }).catch(() => {});
           await prisma.deal.updateMany({
             where: { contactId: c.id },
             data: { contactId: existing.id },

@@ -165,6 +165,30 @@ export async function touchContactLastMessage(args: {
   }
 }
 
+/**
+ * Fusão de contatos: as conversas de `fromContactId` passam para
+ * `toContactId`, então a última mensagem dele também passa — se for mais
+ * nova que a do contato que fica (mesma guarda monotônica). Chamar ANTES de
+ * apagar o contato de origem.
+ */
+export async function carryContactLastMessage(args: {
+  fromContactId: string;
+  toContactId: string;
+  tx?: RawWriter;
+}): Promise<void> {
+  const db = args.tx ?? prisma;
+  await db.$executeRaw`
+    UPDATE contacts k
+    SET "lastMessageAt" = src."lastMessageAt",
+        "lastMessageDirection" = src."lastMessageDirection"
+    FROM contacts src
+    WHERE k.id = ${args.toContactId}
+      AND src.id = ${args.fromContactId}
+      AND src."lastMessageAt" IS NOT NULL
+      AND (k."lastMessageAt" IS NULL OR k."lastMessageAt" < src."lastMessageAt")
+  `;
+}
+
 /** Grava `lastMessageAt` só se a mensagem entra no recorte da lista. */
 export async function touchChatLastMessageAt(args: {
   conversationId: string;
