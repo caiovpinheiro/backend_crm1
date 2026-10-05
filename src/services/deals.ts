@@ -311,6 +311,13 @@ export type GetDealsParams = {
   contactId?: string;
   page?: number;
   perPage?: number;
+  /**
+   * `false` = não rodar o `COUNT(*)` da lista (K5). A resposta sempre traz
+   * `hasMore` (uma linha a mais que a página); `total` vem preenchido quando
+   * sai de graça (última página) e `null` quando exigiria contar. Ausente ou
+   * `true` = conta como sempre (contrato antigo: `total` numérico).
+   */
+  withTotal?: boolean;
   visibilityWhere?: Prisma.DealWhereInput;
   /**
    * Escopo de funis por usuário. `null/undefined` → sem restrição; array
@@ -482,33 +489,51 @@ export async function getDeals(params: GetDealsParams = {}) {
   const where: Prisma.DealWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
 
-  const totalPromise = prisma.deal.count({ where });
-  const itemsPromise =
-    params.sort === "lastInteraction"
-      ? (async () => {
-          const ids = await pageIdsByLastInteraction(
-            where,
-            params.direction === "asc" ? "asc" : "desc",
-            skip,
-            perPage,
-          );
-          if (ids.length === 0) return [];
-          const rows = await prisma.deal.findMany({
-            where: { id: { in: ids } },
-            include: listInclude,
-          });
-          const order = new Map(ids.map((id, index) => [id, index]));
-          rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-          return rows;
-        })()
-      : prisma.deal.findMany({
+  // Uma linha além da página diz se existe próxima (`hasMore`) sem contar.
+  //
+  // O `COUNT(*)` repete os JOINs do filtro (stages → pipelines) e custava
+  // quase o mesmo que a página (produção, 05/10: 95 ms a página + 81 ms a
+  // contagem, 8.490 pares). Quem não mostra "página X de Y" (buscas, diálogo
+  // de duplicados, integrações que só avançam enquanto há itens) pede
+  // `withTotal=0` e paga só a página. O padrão continua contando: a aba
+  // Lista do frontend atual calcula a última página por `total`.
+  const wantsTotal = params.withTotal !== false;
+  const sortByLastInteraction = params.sort === "lastInteraction";
+  const interactionDir = params.direction === "asc" ? "asc" : "desc";
+  const loadPage = async (include: typeof listInclude) => {
+    const counted = wantsTotal ? prisma.deal.count({ where }) : Promise.resolve(null);
+    if (!sortByLastInteraction) {
+      return Promise.all([
+        prisma.deal.findMany({
           where,
           skip,
-          take: perPage,
+          take: perPage + 1,
           orderBy: [{ updatedAt: "desc" }],
-          include: listInclude,
-        });
-  const [items, total] = await Promise.all([itemsPromise, totalPromise]);
+          include,
+        }),
+        counted,
+      ]);
+    }
+    const [ids, total] = await Promise.all([
+      pageIdsByLastInteraction(where, interactionDir, skip, perPage + 1),
+      counted,
+    ]);
+    if (ids.length === 0) return [[], total] as const;
+    const rows = await prisma.deal.findMany({
+      where: { id: { in: ids } },
+      include,
+    });
+    const order = new Map(ids.map((id, index) => [id, index]));
+    rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    return [rows, total] as const;
+  };
+  const [rows, counted] = await loadPage(listInclude);
+  const hasMore = rows.length > perPage;
+  const items = hasMore ? rows.slice(0, perPage) : rows;
+  // Sem contagem: na última página o total é exato sem consultar
+  // (`skip + itens`). Página vazia depois da primeira não diz o total.
+  const total: number | null =
+    counted ?? (!hasMore && (items.length > 0 || page === 1) ? skip + items.length : null);
 
   await enrichContactsWithUserAvatarFallback(
     items.map((d) => d.contact).filter((c): c is NonNullable<typeof c> => c !== null),
@@ -516,7 +541,7 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const itemsWithInteraction = await attachLastInteractionAt(items);
 
-  return { items: itemsWithInteraction, total, page, perPage };
+  return { items: itemsWithInteraction, total, page, perPage, hasMore };
 }
 
 /**
