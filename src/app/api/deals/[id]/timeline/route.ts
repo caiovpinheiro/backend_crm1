@@ -45,6 +45,8 @@ export async function GET(request: Request, ctx: Ctx) {
       type: string;
       meta: Record<string, unknown>;
       createdAt: Date;
+      newValue: string | null;
+      entityLabel: string | null;
       user: { id: string; name: string; avatarUrl: string | null } | null;
     };
 
@@ -81,6 +83,11 @@ export async function GET(request: Request, ctx: Ctx) {
       type: a.type,
       meta: (a.meta ?? {}) as Record<string, unknown>,
       createdAt: a.occurredAt,
+      // Nome de quem recebeu o lead (LEAD_DISTRIBUTED). Sem isso a
+      // timeline só tem o ator ("Distribuição por Leads") e cai no
+      // texto genérico "Distribuição Inteligente".
+      newValue: a.newValue,
+      entityLabel: a.entityLabel,
       user: a.actorUser
         ? {
             id: a.actorUser.id,
@@ -107,6 +114,8 @@ export async function GET(request: Request, ctx: Ctx) {
         type: e.type,
         meta: (e.meta ?? {}) as Record<string, unknown>,
         createdAt: e.createdAt,
+        newValue: null,
+        entityLabel: null,
         user: e.user
           ? {
               id: e.user.id,
@@ -128,6 +137,8 @@ export async function GET(request: Request, ctx: Ctx) {
           createdAt: existing.createdAt.toISOString?.() ?? String(existing.createdAt),
         },
         createdAt: existing.createdAt instanceof Date ? existing.createdAt : new Date(existing.createdAt),
+        newValue: null,
+        entityLabel: null,
         user: null,
       });
     }
@@ -154,6 +165,8 @@ export async function GET(request: Request, ctx: Ctx) {
                 name: contact.name ?? contact.phone,
               },
               createdAt: contact.createdAt,
+              newValue: null,
+              entityLabel: null,
               user: null,
             });
           }

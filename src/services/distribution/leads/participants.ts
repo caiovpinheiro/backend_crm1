@@ -218,7 +218,20 @@ export async function upsertLeadsParticipant(args: {
   });
 
   const all = await getLeadsParticipants();
-  return all.find((p) => p.userId === args.userId) ?? null;
+  const saved = all.find((p) => p.userId === args.userId) ?? null;
+  // Peso > 0 e ACTIVE: havia lead parado na fila (ninguém podia receber).
+  if (saved && saved.status === "ACTIVE" && saved.weight > 0) {
+    try {
+      const { drainLeadsPending } = await import("./pending");
+      await drainLeadsPending();
+    } catch (e) {
+      console.warn(
+        "[leads] drenagem da fila falhou",
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+  return saved;
 }
 
 /** Inclui vários operadores no rodízio numa tacada (mesmo upsert unitário). */

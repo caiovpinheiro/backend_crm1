@@ -5,7 +5,7 @@
  * INACTIVE fora, mudança de peso), proporção ~3:1 entre participantes,
  * idempotência por DistributionLeadsExecution (retry não consome slot nem
  * duplica histórico), redistribuição com dono humano vigente e
- * NO_ELIGIBLE_PARTICIPANT (sem fila, sem fallback; routeMode permanece).
+ * NO_ELIGIBLE_PARTICIPANT (entra na fila; routeMode permanece).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,6 +73,17 @@ let slots: Slot[];
 let conversations: Map<string, Conv>;
 let users: Map<string, { type: string; name: string }>;
 let assignments: Record<string, unknown>[];
+let pendingRows: {
+  id: string;
+  targetKey: string;
+  status: string;
+  attempts: number;
+  conversationId: string | null;
+  contactId: string | null;
+  dealId: string | null;
+  resolvedUserId: string | null;
+  createdAt: number;
+}[];
 let executions: Map<string, { result: unknown; assignmentId: string | null }>;
 let advisoryLocks: string[];
 let slotUpdates: string[];
@@ -83,6 +94,7 @@ function resetDb() {
   conversations = new Map();
   users = new Map();
   assignments = [];
+  pendingRows = [];
   executions = new Map();
   advisoryLocks = [];
   slotUpdates = [];
@@ -248,6 +260,79 @@ vi.mock("@/lib/prisma", () => {
         return { id: `a_${assignments.length}` };
       }),
     },
+    distributionLeadsPending: {
+      findFirst: vi.fn(
+        async ({
+          where,
+          orderBy,
+        }: {
+          where: { status?: string; targetKey?: string };
+          orderBy?: { createdAt?: "asc" | "desc" };
+        }) => {
+          let rows = pendingRows.filter((r) =>
+            where.status ? r.status === where.status : true,
+          );
+          if (where.targetKey) rows = rows.filter((r) => r.targetKey === where.targetKey);
+          if (orderBy?.createdAt === "asc") {
+            rows = [...rows].sort((a, b) => a.createdAt - b.createdAt);
+          }
+          return rows[0] ?? null;
+        },
+      ),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        const row = {
+          id: `pend_${pendingRows.length + 1}`,
+          targetKey: String(data.targetKey),
+          status: String(data.status ?? "PENDING"),
+          attempts: 1,
+          conversationId: (data.conversationId as string | null) ?? null,
+          contactId: (data.contactId as string | null) ?? null,
+          dealId: (data.dealId as string | null) ?? null,
+          resolvedUserId: null,
+          createdAt: Date.now(),
+        };
+        pendingRows.push(row);
+        return row;
+      }),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Record<string, unknown>;
+        }) => {
+          const row = pendingRows.find((r) => r.id === where.id);
+          if (!row) throw new Error("pending not found");
+          const attempts = data.attempts as { increment?: number } | number | undefined;
+          if (attempts && typeof attempts === "object" && attempts.increment) {
+            row.attempts += attempts.increment;
+          }
+          if (typeof data.status === "string") row.status = data.status;
+          if (typeof data.resolvedUserId === "string" || data.resolvedUserId === null) {
+            row.resolvedUserId = data.resolvedUserId as string | null;
+          }
+          return row;
+        },
+      ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: string };
+          data: { status?: string; resolvedUserId?: string | null };
+        }) => {
+          const row = pendingRows.find(
+            (r) => r.id === where.id && (!where.status || r.status === where.status),
+          );
+          if (!row) return { count: 0 };
+          if (typeof data.status === "string") row.status = data.status;
+          if (data.resolvedUserId !== undefined) row.resolvedUserId = data.resolvedUserId;
+          return { count: 1 };
+        },
+      ),
+    },
     distributionLeadsExecution: {
       upsert: vi.fn(
         async ({
@@ -280,6 +365,7 @@ vi.mock("@/lib/prisma", () => {
     conversation: conversationApi,
     contact: tx.contact,
     deal: tx.deal,
+    distributionLeadsPending: tx.distributionLeadsPending,
     distributionLeadsExecution: {
       findUnique: vi.fn(
         async ({
@@ -333,8 +419,36 @@ describe("executeLeadsDistribution — sorteio por peso", () => {
     expect(r.success).toBe(false);
     expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
     expect(assignments).toHaveLength(0);
-    // routeMode marcado e MANTIDO (sem fila, sem fallback para o smart).
+    // routeMode marcado (fora do smart) e o lead fica na fila do modo leads.
     expect(conversations.get("c1")?.routeMode).toBe("leads");
+    expect(pendingRows).toHaveLength(1);
+    expect(pendingRows[0]).toMatchObject({
+      status: "PENDING",
+      conversationId: "c1",
+      targetKey: "contact:ct1",
+    });
+  });
+
+  it("fila espera e atribui quando o consultor fica com peso maior que zero", async () => {
+    addParticipant("Julia", 0);
+    addConversation("c1", "ct1", null);
+
+    const waiting = await executeLeadsDistribution({
+      conversationId: "c1",
+      contactId: "ct1",
+      triggerSource: "AUTOMATION",
+    });
+    expect(waiting.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
+    expect(conversations.get("c1")?.assignedToId).toBeNull();
+
+    participants.find((p) => p.userId === "Julia")!.weight = 1;
+    const { drainLeadsPending } = await import("../leads/pending");
+    const assigned = await drainLeadsPending();
+
+    expect(assigned).toBe(1);
+    expect(conversations.get("c1")?.assignedToId).toBe("Julia");
+    expect(pendingRows[0]?.status).toBe("RESOLVED");
+    expect(pendingRows[0]?.resolvedUserId).toBe("Julia");
   });
 
   it("só um elegível: todos os leads vão para ele", async () => {

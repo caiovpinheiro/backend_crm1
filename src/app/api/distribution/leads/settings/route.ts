@@ -90,6 +90,19 @@ export async function PUT(req: Request) {
       );
     }
     await setOrgSettingBool(LEADS_DISTRIBUTION_ENABLED_KEY, body.enabled);
+    if (body.enabled) {
+      try {
+        const { drainLeadsPending } = await import(
+          "@/services/distribution/leads/pending"
+        );
+        await drainLeadsPending();
+      } catch (e) {
+        console.warn(
+          "[leads] drenagem ao ligar o modo falhou",
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
     return NextResponse.json(await readSettings());
   });
 }

@@ -95,6 +95,7 @@ model Organization {
   distributionLeadsSlots        DistributionLeadsSlot[]
   distributionLeadsAssignments  DistributionLeadsAssignment[]
   distributionLeadsExecutions   DistributionLeadsExecution[]
+  distributionLeadsPending      DistributionLeadsPending[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -4240,11 +4241,12 @@ model DistributionPending {
 }
 
 // ── Distribuição por Leads (modo `leads`) ─────────────────
-// Modo síncrono, SEM fila de espera: o bloco `execute_distribution` com
-// mode="leads" seleciona o próximo slot do rodízio e atribui na hora.
-// Configuração independente do smart (DistributionResponsible): status
-// administrativo próprio + peso 0..5. Não herda presença, pausa, expediente,
-// queueLimit, departamento ou tipo do modo smart.
+// O bloco `execute_distribution` com mode="leads" sorteia um slot do
+// rodízio e atribui na hora. Sem consultor elegível (ACTIVE com peso > 0),
+// o lead vai para `distribution_leads_pending` e sai quando alguém fica
+// elegível. Configuração independente do smart (DistributionResponsible):
+// status administrativo próprio + peso 0..5. Não herda presença, pausa,
+// expediente, queueLimit, departamento ou tipo do modo smart.
 
 model DistributionLeadsParticipant {
   id             String       @id @default(cuid())
@@ -4336,6 +4338,33 @@ model DistributionLeadsExecution {
   @@unique([automationContextId, stepId, occurrence])
   @@index([organizationId, createdAt])
   @@map("distribution_leads_executions")
+}
+
+/// Fila do modo leads. Entra quando o rodízio não tem consultor elegível
+/// (ninguém ACTIVE com peso > 0). Sai quando um participante fica elegível
+/// (`drainLeadsPending`). Não mistura com `distribution_pending` do smart.
+model DistributionLeadsPending {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// "contact:{id}" | "deal:{id}" | "conversation:{id}"
+  targetKey        String
+  contactId        String?
+  dealId           String?
+  conversationId   String?
+  triggerSource    String
+  /// PENDING | RESOLVED | CANCELLED
+  status           String       @default("PENDING")
+  attempts         Int          @default(1)
+  lastAttemptAt    DateTime     @default(now())
+  resolvedUserId   String?
+  resolvedAt       DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, targetKey, status])
+  @@map("distribution_leads_pending")
 }
 
 // ── Automation Context (Salesbot) ─────────────────
