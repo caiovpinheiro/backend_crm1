@@ -22,6 +22,7 @@ const h = vi.hoisted(() => {
     messageCount: vi.fn().mockResolvedValue(1),
     messageUpdateMany: vi.fn().mockResolvedValue({ count: 1 }),
     conversationUpdate: vi.fn().mockResolvedValue({}),
+    executeRaw: vi.fn().mockResolvedValue(1),
     conversationFindUnique: vi.fn(),
     templateConfigFindFirst: vi.fn().mockResolvedValue(null),
     getConversationLite: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: h.messageUpdateMany,
     },
     conversation: { update: h.conversationUpdate, findUnique: h.conversationFindUnique },
+    $executeRaw: h.executeRaw,
     whatsAppTemplateConfig: { findFirst: h.templateConfigFindFirst },
   },
 }));
@@ -218,8 +220,12 @@ describe("sendTextToConversation — caminho feliz", () => {
     );
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false, lastMessageAt: MESSAGE_CREATED_AT },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
     });
+    const raw = h.executeRaw.mock.calls.at(-1)!;
+    const rawText = Array.isArray(raw[0]) ? (raw[0] as string[]).join("?") : "";
+    expect(rawText).toContain('GREATEST("lastMessageAt"');
+    expect(raw).toContain(MESSAGE_CREATED_AT);
     expect(h.ssePublish).toHaveBeenCalledWith("new_message", {
       organizationId: ORG,
       conversationId: "conv-1",
@@ -322,7 +328,7 @@ describe("sendTextToConversation — erro do provedor", () => {
     });
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: true, lastMessageAt: MESSAGE_CREATED_AT },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: true },
     });
     const logged = h.logEvent.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(logged).not.toContain("MESSAGE_SENT");
@@ -422,7 +428,7 @@ describe("sendTemplateToConversation", () => {
     });
     expect(h.conversationUpdate).toHaveBeenCalledWith({
       where: { id: "conv-1" },
-      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false, lastMessageAt: MESSAGE_CREATED_AT },
+      data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
     });
     expect(h.ssePublish).toHaveBeenCalledWith(
       "new_message",

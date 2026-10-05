@@ -40,7 +40,7 @@ import {
 } from "@/lib/ai-agents/steering";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -674,10 +674,13 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
               lastMessageDirection: "out",
               hasAgentReply: true,
               updatedAt: new Date(),
-              ...lastMessageAtData(saved),
             },
           })
           .catch(() => null);
+        await touchChatLastMessageAt({
+          conversationId: ctx.conversationId,
+          message: saved,
+        }).catch(() => null);
         publishNewMessage({
           organizationId: conv.organizationId,
           conversationId: ctx.conversationId,

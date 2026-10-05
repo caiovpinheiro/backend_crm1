@@ -5754,6 +5754,9 @@ model ScheduledMessage {
 
 enum ScheduledMessageStatus {
   PENDING
+  /// Reservado por um worker antes de qualquer chamada externa. Só um
+  /// `updateMany` com `status = PENDING` consegue entrar aqui.
+  SENDING
   SENT
   CANCELLED
   FAILED

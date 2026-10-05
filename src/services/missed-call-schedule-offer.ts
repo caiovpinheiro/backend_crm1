@@ -1,5 +1,5 @@
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
@@ -134,10 +134,13 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
       data: {
         lastMessageDirection: "out",
         updatedAt: new Date(),
-        ...lastMessageAtData(saved),
       },
     })
     .catch(() => {});
+  await touchChatLastMessageAt({
+    conversationId: params.conversationId,
+    message: saved,
+  }).catch(() => {});
 
   fireTrigger("message_sent", {
     contactId: params.contactId,

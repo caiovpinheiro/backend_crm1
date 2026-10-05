@@ -8,12 +8,11 @@
  * pública com direção `in`/`out`; nota interna, rascunho da IA, ligação e
  * evento de sistema não contam. Mudou aqui → mude nos dois.
  *
- * Quem grava: o ponto que cria a mensagem, no MESMO `conversation.update`
- * que já toca a conversa logo depois (marcação de resposta, `hasError`…),
- * espalhando `lastMessageAtData(...)`. Só onde não existe update nenhum é
- * que se usa `touchConversationLastMessageAt` (uma escrita a mais).
- * Inbound passa por `touchInbound` (`lib/conversation-inbound.ts`), que já
- * grava as duas colunas na mesma instrução.
+ * Quem grava: `touchConversationLastMessageAt` (GREATEST na própria linha).
+ * Não atribuir `lastMessageAt: message.createdAt` num `conversation.update`:
+ * uma mensagem atrasada rebaixaria a conversa. Inbound passa por
+ * `touchInbound` (`lib/conversation-inbound.ts`), que já usa GREATEST na
+ * mesma instrução de `lastInboundAt`.
  *
  * Ler, atribuir, encerrar ou reabrir NÃO mexe na coluna — é isso que impede a
  * lista de reordenar quando alguém só abre a conversa.
@@ -50,20 +49,29 @@ export function isListChatMessage(m: ChatMessageShape): boolean {
 }
 
 /**
- * Campo a espalhar no `conversation.update` que já existe logo depois da
- * criação da mensagem. Vazio quando a mensagem não é de chat.
- *
- *   await prisma.conversation.update({
- *     where: { id },
- *     data: { ...HUMAN_OUTBOUND_REPLY_MARK, ...lastMessageAtData(saved) },
- *   });
+ * Horário que esta mensagem proporia para a lista. `null` quando ela não
+ * entra no recorte (nota, rascunho, ligação, evento). Não usar o retorno
+ * como atribuição de `conversation.update` — gravar só com
+ * `touchConversationLastMessageAt` / `touchChatLastMessageAt`.
  */
-export function lastMessageAtData(
+export function listChatMessageAt(
   m: ChatMessageShape & { createdAt?: Date | null },
   at?: Date,
-): { lastMessageAt: Date } | Record<string, never> {
-  if (!isListChatMessage(m)) return {};
-  return { lastMessageAt: at ?? m.createdAt ?? new Date() };
+): Date | null {
+  if (!isListChatMessage(m)) return null;
+  return at ?? m.createdAt ?? new Date();
+}
+
+/**
+ * Compatibilidade: não devolve mais `{ lastMessageAt }`. Espalhar isto num
+ * update não move a coluna. Quem cria mensagem de chat chama
+ * `touchChatLastMessageAt`.
+ */
+export function lastMessageAtData(
+  _m: ChatMessageShape & { createdAt?: Date | null },
+  _at?: Date,
+): Record<string, never> {
+  return {};
 }
 
 type RawWriter = { $executeRaw: typeof prisma.$executeRaw };
@@ -78,12 +86,30 @@ export async function touchConversationLastMessageAt(args: {
   tx?: RawWriter;
 }): Promise<void> {
   const db = args.tx ?? prisma;
+  // GREATEST ignora NULL no Postgres: coluna vazia recebe `at`; valor maior
+  // já gravado permanece. A comparação é na linha, então dois updates
+  // concorrentes ficam com o máximo.
   await db.$executeRaw`
     UPDATE conversations
-    SET "lastMessageAt" = ${args.at}
+    SET "lastMessageAt" = GREATEST("lastMessageAt", ${args.at})
     WHERE id = ${args.conversationId}
-      AND ("lastMessageAt" IS NULL OR "lastMessageAt" < ${args.at})
   `;
+}
+
+/** Grava `lastMessageAt` só se a mensagem entra no recorte da lista. */
+export async function touchChatLastMessageAt(args: {
+  conversationId: string;
+  message: ChatMessageShape & { createdAt?: Date | null };
+  at?: Date;
+  tx?: RawWriter;
+}): Promise<void> {
+  const at = listChatMessageAt(args.message, args.at);
+  if (!at) return;
+  await touchConversationLastMessageAt({
+    conversationId: args.conversationId,
+    at,
+    tx: args.tx,
+  });
 }
 
 /**

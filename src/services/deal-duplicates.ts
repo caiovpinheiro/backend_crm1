@@ -16,11 +16,86 @@ const log = getLogger("deal-duplicates");
 
 type UnifyClient = Pick<Prisma.TransactionClient, "$executeRaw" | "$queryRaw">;
 
+/**
+ * Chave lógica da duplicata (já existente, não inventada):
+ * organizationId + contactId + funil (`stage.pipelineId`) + OPEN + COMMERCIAL.
+ * Quem fica: maior `stage.position`, depois `updatedAt` mais recente,
+ * depois `createdAt` mais antigo.
+ *
+ * Locks, sempre nesta ordem (evita deadlock):
+ * 1. funil `organizationId:pipelineId:open-commercial`
+ *    — shared em toda criação OPEN comercial, exclusivo na unificação
+ * 2. contato `organizationId:pipelineId:contactId:open-commercial`
+ *    — exclusivo, só depois de reler `allowDuplicateDeals = false`
+ * A flag é lida dentro do shared. A unificação espera esses shared,
+ * então uma criação que entrou com o valor antigo ainda é limpa.
+ */
+export function openCommercialPipelineLockKey(organizationId: string, pipelineId: string): string {
+  return `${organizationId}:${pipelineId}:open-commercial`;
+}
+
+export function openCommercialContactLockKey(
+  organizationId: string,
+  pipelineId: string,
+  contactId: string,
+): string {
+  return `${organizationId}:${pipelineId}:${contactId}:open-commercial`;
+}
+
+/** A unificação segura o exclusivo por até 120s. A criação espera esse lock. */
+export const OPEN_COMMERCIAL_CREATE_TX_MS = 150_000;
+
+export async function lockOpenCommercialPipelineShared(
+  tx: Pick<UnifyClient, "$executeRaw">,
+  organizationId: string,
+  pipelineId: string,
+): Promise<void> {
+  const pipelineKey = openCommercialPipelineLockKey(organizationId, pipelineId);
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock_shared(hashtextextended(${pipelineKey}, 0))
+  `;
+}
+
+export async function lockOpenCommercialContactExclusive(
+  tx: Pick<UnifyClient, "$executeRaw">,
+  organizationId: string,
+  pipelineId: string,
+  contactId: string,
+): Promise<void> {
+  const contactKey = openCommercialContactLockKey(organizationId, pipelineId, contactId);
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtextextended(${contactKey}, 0))
+  `;
+}
+
+/** Shared do funil e, em seguida, exclusivo do contato. */
+export async function lockOpenCommercialDealCreate(
+  tx: Pick<UnifyClient, "$executeRaw">,
+  organizationId: string,
+  pipelineId: string,
+  contactId: string,
+): Promise<void> {
+  await lockOpenCommercialPipelineShared(tx, organizationId, pipelineId);
+  await lockOpenCommercialContactExclusive(tx, organizationId, pipelineId, contactId);
+}
+
+export async function lockOpenCommercialDealUnify(
+  tx: Pick<UnifyClient, "$executeRaw">,
+  organizationId: string,
+  pipelineId: string,
+): Promise<void> {
+  const pipelineKey = openCommercialPipelineLockKey(organizationId, pipelineId);
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtextextended(${pipelineKey}, 0))
+  `;
+}
+
 export async function pipelineForbidsDuplicateDeals(
   pipelineId: string,
+  db: Pick<typeof prisma, "pipeline"> = prisma,
 ): Promise<boolean> {
   try {
-    const row = await prisma.pipeline.findUnique({
+    const row = await db.pipeline.findUnique({
       where: { id: pipelineId },
       select: { allowDuplicateDeals: true },
     });
@@ -65,43 +140,19 @@ export function duplicateDealsErrorMessage(err: unknown): string | null {
   return text;
 }
 
-async function runPairsSql(
+type DuplicatePair = { loserId: string; keeperId: string };
+
+async function runFrozenPairsSql(
   tx: UnifyClient,
-  orgId: string,
-  pipelineId: string,
+  pairs: DuplicatePair[],
   statement: string,
 ) {
+  const loserIds = pairs.map((p) => p.loserId);
+  const keeperIds = pairs.map((p) => p.keeperId);
   await tx.$executeRaw`
-    WITH open_deals AS (
-      SELECT
-        d.id,
-        d."contactId",
-        d."updatedAt",
-        d."createdAt",
-        s.position AS stage_position
-      FROM deals d
-      JOIN stages s ON s.id = d."stageId"
-      WHERE d."organizationId" = ${orgId}
-        AND s."pipelineId" = ${pipelineId}
-        AND d.status = 'OPEN'::"DealStatus"
-        AND d."dealRole" = 'COMMERCIAL'::"DealRole"
-        AND d."contactId" IS NOT NULL
-    ),
-    ranked AS (
-      SELECT
-        id,
-        "contactId",
-        row_number() OVER (
-          PARTITION BY "contactId"
-          ORDER BY stage_position DESC, "updatedAt" DESC, "createdAt" ASC
-        ) AS rn
-      FROM open_deals
-    ),
-    _dup_pairs AS (
-      SELECT r.id AS loser_id, k.id AS keeper_id
-      FROM ranked r
-      JOIN ranked k ON k."contactId" = r."contactId" AND k.rn = 1
-      WHERE r.rn > 1
+    WITH _dup_pairs AS (
+      SELECT loser_id, keeper_id
+      FROM unnest(${loserIds}::text[], ${keeperIds}::text[]) AS t(loser_id, keeper_id)
     )
     ${Prisma.raw(statement)}
   `;
@@ -120,9 +171,21 @@ export async function unifyDuplicateOpenDealsInPipeline(
   organizationId: string,
 ): Promise<number> {
   const orgId = organizationId;
-  const run = (statement: string) => runPairsSql(tx, orgId, pipelineId, statement);
+  await lockOpenCommercialDealUnify(tx, orgId, pipelineId);
+  await tx.$executeRaw`
+    SELECT d.id
+    FROM deals d
+    JOIN stages s ON s.id = d."stageId"
+    WHERE d."organizationId" = ${orgId}
+      AND s."pipelineId" = ${pipelineId}
+      AND d.status = 'OPEN'::"DealStatus"
+      AND d."dealRole" = 'COMMERCIAL'::"DealRole"
+      AND d."contactId" IS NOT NULL
+    ORDER BY d.id
+    FOR UPDATE OF d
+  `;
 
-  const counted = await tx.$queryRaw<Array<{ removed: number | bigint }>>`
+  const rows = await tx.$queryRaw<Array<{ loser_id: string; keeper_id: string }>>`
     WITH open_deals AS (
       SELECT
         d.id,
@@ -147,17 +210,19 @@ export async function unifyDuplicateOpenDealsInPipeline(
           ORDER BY stage_position DESC, "updatedAt" DESC, "createdAt" ASC
         ) AS rn
       FROM open_deals
-    ),
-    _dup_pairs AS (
-      SELECT r.id AS loser_id, k.id AS keeper_id
-      FROM ranked r
-      JOIN ranked k ON k."contactId" = r."contactId" AND k.rn = 1
-      WHERE r.rn > 1
     )
-    SELECT count(*)::int AS removed FROM _dup_pairs
+    SELECT r.id AS loser_id, k.id AS keeper_id
+    FROM ranked r
+    JOIN ranked k ON k."contactId" = r."contactId" AND k.rn = 1
+    WHERE r.rn > 1
   `;
-  const removed = Number(counted[0]?.removed ?? 0);
-  if (!removed) return 0;
+  const pairs: DuplicatePair[] = rows.map((row) => ({
+    loserId: row.loser_id,
+    keeperId: row.keeper_id,
+  }));
+  if (pairs.length === 0) return 0;
+
+  const run = (statement: string) => runFrozenPairsSql(tx, pairs, statement);
 
   await run(`
     INSERT INTO tags_on_deals ("dealId", "tagId")
@@ -401,7 +466,7 @@ export async function unifyDuplicateOpenDealsInPipeline(
     WHERE id IN (SELECT loser_id FROM _dup_pairs)
   `);
 
-  return removed;
+  return pairs.length;
 }
 
 export async function invalidatePipelineBoard(

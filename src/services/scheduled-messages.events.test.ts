@@ -15,7 +15,7 @@ const db = vi.hoisted(() => ({
   })),
   findMany: vi.fn(async () => [] as Array<{ id: string; organizationId: string }>),
   updateMany: vi.fn(async () => ({ count: 0 })),
-  findUnique: vi.fn(async () => null as unknown),
+  findUnique: vi.fn(async (_args?: { where?: { id?: string } }) => null as unknown),
   update: vi.fn(async (args: { where: { id: string } }) => ({
     id: args.where.id,
     organizationId: "org_1",
@@ -29,6 +29,7 @@ const db = vi.hoisted(() => ({
 vi.mock("@prisma/client", () => ({
   ScheduledMessageStatus: {
     PENDING: "PENDING",
+    SENDING: "SENDING",
     CANCELLED: "CANCELLED",
     SENT: "SENT",
     FAILED: "FAILED",
@@ -149,9 +150,24 @@ describe("scheduled-messages → scheduled_message_updated", () => {
     expect(published()).toEqual([]);
   });
 
-  it("enviado e falhou → SENT / FAILED", async () => {
+  it("enviado e falhou → SENT / FAILED só a partir de SENDING", async () => {
+    db.updateMany.mockResolvedValue({ count: 1 });
+    db.findUnique.mockImplementation(async (args?: { where?: { id?: string } }) => ({
+      id: args?.where?.id ?? "sm",
+      organizationId: "org_1",
+      conversationId: "conv_1",
+      createdById: "user_a",
+      content: "oi",
+      fallbackTemplateName: null,
+    }));
     await markAsSent("sm_1", { sentMessageId: "msg_1" });
     await markAsFailed("sm_2", "sessão expirada");
+    expect(db.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "sm_1", status: "SENDING" },
+        data: expect.objectContaining({ status: "SENT", sentMessageId: "msg_1" }),
+      }),
+    );
     expect(published()).toEqual([
       {
         organizationId: "org_1",

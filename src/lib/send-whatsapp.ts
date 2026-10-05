@@ -4,7 +4,10 @@ import {
   formatMetaSendError,
 } from "@/lib/meta-whatsapp/client";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { enqueueBaileysOutbound } from "@/lib/queue";
+import {
+  BaileysOutboundAlreadyQueuedError,
+  enqueueBaileysOutbound,
+} from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
 import { logMessageFailed } from "@/services/activity-log";
 
@@ -21,6 +24,11 @@ type SendTextOpts = {
   messageId: string;
   replyContextWamid?: string | null;
   waJid?: string | null;
+  /**
+   * Só o worker de mensagem agendada preenche. Vira `jobId` do BullMQ
+   * para não haver dois jobs do mesmo agendamento.
+   */
+  baileysJobId?: string;
 };
 
 type SendTextResult = {
@@ -145,17 +153,30 @@ async function sendViaBaileys(opts: SendTextOpts): Promise<SendTextResult> {
   }
 
   try {
-    await enqueueBaileysOutbound({
-      channelId: opts.channelRef!.id,
-      to: targetJid,
-      content: opts.content,
-      messageType: "text",
-      conversationId: opts.conversationId,
-      messageId: opts.messageId,
-      replyTo: opts.replyContextWamid ?? undefined,
-    });
+    await enqueueBaileysOutbound(
+      {
+        channelId: opts.channelRef!.id,
+        to: targetJid,
+        content: opts.content,
+        messageType: "text",
+        conversationId: opts.conversationId,
+        messageId: opts.messageId,
+        replyTo: opts.replyContextWamid ?? undefined,
+      },
+      opts.baileysJobId ? { jobId: opts.baileysJobId } : undefined,
+    );
     return { externalId: null, failed: false, error: null };
   } catch (err) {
+    if (err instanceof BaileysOutboundAlreadyQueuedError) {
+      // O job que já está na fila faz o envio. Esta bolha não pode seguir
+      // pendente, e o agendamento não é falha: a outra tentativa entrega.
+      await markFailed(
+        opts,
+        "Envio já reservado por outra tentativa deste agendamento.",
+        "baileys",
+      );
+      return { externalId: null, failed: false, error: null };
+    }
     const error = formatMetaSendError(err);
     return markFailed(opts, error, "baileys");
   }

@@ -16,7 +16,7 @@ import {
   requireConversationAccess,
   requireConversationAccessAndLoad,
 } from "@/lib/conversation-access";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -1210,10 +1210,10 @@ export async function POST(request: Request, context: RouteContext) {
             lastMessageDirection: "out",
             hasAgentReply: true,
             hasHumanReply: true,
-            ...lastMessageAtData(savedMsg),
             ...(sendRes.failed ? { hasError: true } : { hasError: false }),
           },
         });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: savedMsg });
       } catch { /* colunas opcionais */ }
 
       scheduleCapacityReleasedAfterHumanSend(
@@ -1355,9 +1355,9 @@ export async function POST(request: Request, context: RouteContext) {
             hasAgentReply: true,
             hasHumanReply: true,
             hasError: false,
-            ...lastMessageAtData(saved),
           },
         });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
       } catch { /* columns may not exist yet */ }
 
       scheduleCapacityReleasedAfterHumanSend(
@@ -1469,10 +1469,10 @@ export async function POST(request: Request, context: RouteContext) {
           lastMessageDirection: "out",
           hasAgentReply: true,
           hasHumanReply: true,
-          ...lastMessageAtData(saved),
           ...(sendFailed ? { hasError: true } : { hasError: false }),
         },
       });
+      await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
     } catch { /* columns may not exist yet */ }
 
     scheduleCapacityReleasedAfterHumanSend(

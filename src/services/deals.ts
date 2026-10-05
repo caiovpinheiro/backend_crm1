@@ -20,7 +20,12 @@ import {
   type DealMovedPayload,
 } from "@/lib/realtime-events";
 import { getOrgSettingBool } from "@/lib/org-settings";
-import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
+import {
+  lockOpenCommercialContactExclusive,
+  lockOpenCommercialPipelineShared,
+  OPEN_COMMERCIAL_CREATE_TX_MS,
+  pipelineForbidsDuplicateDeals,
+} from "@/services/deal-duplicates";
 import { preferConversationWithLastMessage } from "@/services/deal-panel-conversation";
 import {
   logEvent,
@@ -747,8 +752,9 @@ function markReusedOpenDeal<T extends object>(deal: T): T {
 export async function findCanonicalOpenDealInPipeline(
   contactId: string,
   pipelineId: string,
+  db: Pick<typeof prisma, "deal"> = prisma,
 ) {
-  return prisma.deal.findFirst({
+  return db.deal.findFirst({
     where: {
       contactId,
       status: "OPEN",
@@ -764,8 +770,13 @@ export async function findCanonicalOpenDealInPipeline(
   });
 }
 
-async function reuseOpenDealWhenPipelineForbidsDuplicates(data: CreateDealInput) {
-  if (!data.contactId || data.id) return null;
+/** OPEN comercial com contato: entra no shared do funil, mesmo com duplicata permitida. */
+async function openCommercialCreateScope(data: CreateDealInput): Promise<{
+  organizationId: string;
+  pipelineId: string;
+  contactId: string;
+} | null> {
+  if (!data.contactId) return null;
   if (data.status && data.status !== "OPEN") return null;
   if (data.dealRole && data.dealRole !== "COMMERCIAL") return null;
 
@@ -774,26 +785,24 @@ async function reuseOpenDealWhenPipelineForbidsDuplicates(data: CreateDealInput)
     select: { pipelineId: true },
   });
   if (!stage) return null;
-  if (!(await pipelineForbidsDuplicateDeals(stage.pipelineId))) return null;
-
-  const existing = await findCanonicalOpenDealInPipeline(
-    data.contactId,
-    stage.pipelineId,
-  );
-  return existing ? markReusedOpenDeal(existing) : null;
+  return {
+    organizationId: getOrgIdOrThrow(),
+    pipelineId: stage.pipelineId,
+    contactId: data.contactId,
+  };
 }
 
-export async function createDeal(data: CreateDealInput) {
-  const reused = await reuseOpenDealWhenPipelineForbidsDuplicates(data);
-  if (reused) return reused;
-
+async function insertNewDeal(
+  db: Pick<typeof prisma, "contact" | "deal">,
+  data: CreateDealInput,
+) {
   // Título opcional. Prioridade:
   //  1. título informado
   //  2. "Negócio {Nome do Contato}" quando há contactId
   //  3. "Negócio - #<number>" (fallback numérico, resolvido no loop)
   let rawTitle = data.title?.trim() ?? "";
   if (!rawTitle && data.contactId) {
-    const contact = await prisma.contact.findFirst({
+    const contact = await db.contact.findFirst({
       where: { id: data.contactId },
       select: { name: true },
     });
@@ -806,7 +815,7 @@ export async function createDeal(data: CreateDealInput) {
   // aggregates num import de 5 mil linhas (stress sa221601).
   let position = data.position;
   if (position === undefined) {
-    const maxPos = await prisma.deal.aggregate({
+    const maxPos = await db.deal.aggregate({
       where: { stageId: data.stageId },
       _max: { position: true },
     });
@@ -821,7 +830,7 @@ export async function createDeal(data: CreateDealInput) {
   // P2002 residual de `number` (ver `allocateOrgNumber` em lib/prisma.ts).
   const number = await allocateOrgNumber("Deal", getOrgIdOrThrow());
   const title = rawTitle || `Negócio - #${number}`;
-  const created = await prisma.deal.create({
+  return db.deal.create({
     data: withOrgFromCtx({
       ...(data.id ? { id: data.id } : {}),
       number,
@@ -839,6 +848,44 @@ export async function createDeal(data: CreateDealInput) {
     }),
     include: listInclude,
   });
+}
+
+export async function createDeal(data: CreateDealInput) {
+  const scope = await openCommercialCreateScope(data);
+  if (scope) {
+    const deal = await prisma.$transaction(
+      async (tx) => {
+        await lockOpenCommercialPipelineShared(
+          tx,
+          scope.organizationId,
+          scope.pipelineId,
+        );
+        const forbids = await pipelineForbidsDuplicateDeals(scope.pipelineId, tx);
+        if (forbids) {
+          await lockOpenCommercialContactExclusive(
+            tx,
+            scope.organizationId,
+            scope.pipelineId,
+            scope.contactId,
+          );
+          const existing = await findCanonicalOpenDealInPipeline(
+            scope.contactId,
+            scope.pipelineId,
+            tx,
+          );
+          if (existing) return markReusedOpenDeal(existing);
+        }
+        return insertNewDeal(tx, data);
+      },
+      { timeout: OPEN_COMMERCIAL_CREATE_TX_MS },
+    );
+    if (!wasReusedOpenDeal(deal)) {
+      await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
+    }
+    return deal;
+  }
+
+  const created = await insertNewDeal(prisma, data);
   await invalidateBoardsForPipelines([created.stage?.pipelineId]);
   return created;
 }
