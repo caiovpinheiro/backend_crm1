@@ -814,6 +814,14 @@ export async function getInboxLeadPanelFieldsForDeals(
 export async function getDealPanelFieldsForDeal(
   dealId: string
 ): Promise<InboxLeadPanelFieldRow[]> {
+  // Valores do negócio em paralelo com as definições (antes: em série). Um
+  // negócio tem dezenas de valores, não milhares; o filtro pelos campos do
+  // painel é feito abaixo, em memória.
+  const valuesPromise = prisma.dealCustomFieldValue.findMany({
+    where: { dealId },
+    select: { customFieldId: true, value: true },
+  });
+  valuesPromise.catch(() => undefined);
   let fields: Awaited<ReturnType<typeof prisma.customField.findMany>>;
   try {
     fields = await prisma.customField.findMany({
@@ -852,11 +860,8 @@ export async function getDealPanelFieldsForDeal(
 
   if (fields.length === 0) return [];
 
-  const fieldIds = fields.map((f) => f.id);
-  const values = await prisma.dealCustomFieldValue.findMany({
-    where: { dealId, customFieldId: { in: fieldIds } },
-    select: { customFieldId: true, value: true },
-  });
+  const fieldIds = new Set(fields.map((f) => f.id));
+  const values = (await valuesPromise).filter((v) => fieldIds.has(v.customFieldId));
   const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
 
   return fields.map((f) => {

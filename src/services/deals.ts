@@ -599,6 +599,9 @@ const detailInclude = {
           id: true, number: true, externalId: true, channel: true,
           status: true, inboxName: true, closedAt: true,
           createdAt: true, updatedAt: true,
+          // Última mensagem de chat: ordena o painel sem varrer `messages`
+          // (`preferConversationWithLastMessage`).
+          lastMessageAt: true,
           departmentId: true,
           department: {
             select: { id: true, name: true, requireTabulationOnClose: true },
