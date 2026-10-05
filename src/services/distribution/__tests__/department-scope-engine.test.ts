@@ -208,7 +208,7 @@ describe("distribuição pelo departamento do lead", () => {
 
     const result = await executeDistribution({
       conversationId: CONV,
-      triggerSource: "SYSTEM",
+      triggerSource: "AUTOMATION",
       allowOrgWideFallback: true,
     });
 
@@ -250,7 +250,7 @@ describe("distribuição pelo departamento do lead", () => {
 
     const result = await executeDistribution({
       conversationId: CONV,
-      triggerSource: "SYSTEM",
+      triggerSource: "AUTOMATION",
     });
 
     expect(result.reason).toBe("NO_DEPARTMENT");

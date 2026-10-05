@@ -84,7 +84,8 @@ vi.mock("../pending-shared", () => ({
   getWaitingQueueWhere: vi.fn(async () => ({ assignedToId: null })),
   isDistributionAutoOnInbound: async () => true,
   listRequestedPendingConversationIds: async () => [],
-  listRequestedPendingSources: async () => new Map(),
+  listRequestedPendingSources: async () =>
+    new Map([["conv_ai", "AUTOMATION"]]),
   hasRemainingCapacityInScope: () => true,
   liveFreeCapacityForUser: () => 1,
   logCooldownSkip: vi.fn(),

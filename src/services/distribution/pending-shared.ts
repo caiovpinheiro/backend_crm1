@@ -178,13 +178,11 @@ export async function listRequestedPendingConversationIds(): Promise<string[]> {
 }
 
 /**
- * Filtro da fila de espera.
- * - autoOnInbound true: toda conversa OPEN sem responsável (com inbound).
- * - false: só quem já passou por execute_distribution / redistribuição
- *   manual / IA e ficou em DistributionPending.
+ * Fila de espera: só quem o bloco da automação, a ferramenta do agente
+ * de IA ou a redistribuição manual enfileirou. Conversa nova sem esse
+ * pedido não entra.
  */
 export async function getWaitingQueueWhere(): Promise<Prisma.ConversationWhereInput> {
-  if (await isDistributionAutoOnInbound()) return ABERTA_SEM_RESPONSAVEL;
   const ids = await listRequestedPendingConversationIds();
   if (ids.length === 0) return { id: { equals: "__no_distribution_pending__" } };
   return {
@@ -283,42 +281,7 @@ export async function getPendingDistributions(opts: {
   const { purgeUnansweredFromPendingQueue } = await import("./pending-inbound");
   await purgeUnansweredFromPendingQueue().catch(() => 0);
 
-  // Inclui também conversas OPEN sem dono enfileiradas MANUALMENTE mesmo
-  // sem lastInboundAt (redistribuição p/ depto com fila cheia).
-  const autoOnInbound = await isDistributionAutoOnInbound();
-  const manualPending = autoOnInbound
-    ? await prisma.distributionPending.findMany({
-        where: {
-          status: "PENDING",
-          triggerSource: "MANUAL",
-          conversationId: { not: null },
-        },
-        select: { conversationId: true },
-        take: 500,
-      })
-    : [];
-  const manualConvIds = manualPending
-    .map((p) => p.conversationId)
-    .filter((id): id is string => Boolean(id));
-
-  // Toggle desligado: a fila só lista quem o passo / IA / manual enfileirou.
-  // Senão a aba mostra a Entrada inteira e o retry distribui sem automação.
-  const baseWhere: Prisma.ConversationWhereInput = autoOnInbound
-    ? {
-        OR: [
-          ABERTA_SEM_RESPONSAVEL,
-          ...(manualConvIds.length > 0
-            ? [
-                {
-                  id: { in: manualConvIds },
-                  ...activeInboxQueueGuardWhere(),
-                  assignedToId: null,
-                },
-              ]
-            : []),
-        ],
-      }
-    : await getWaitingQueueWhere();
+  const baseWhere = await getWaitingQueueWhere();
 
   const where: Prisma.ConversationWhereInput = cursor
     ? {

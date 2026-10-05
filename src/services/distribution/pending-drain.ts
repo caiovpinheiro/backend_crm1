@@ -40,7 +40,6 @@ import {
   explainEmptyDrain,
   getDrainState,
   getWaitingQueueWhere,
-  isDistributionAutoOnInbound,
   listRequestedPendingSources,
   hasRemainingCapacityInScope,
   liveFreeCapacityForUser,
@@ -210,9 +209,12 @@ export async function processPendingDistributionQueue(opts: {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
-    // Motor desligado: não varre a Entrada. A fila pedida pela automação,
-    // pela IA ou pelo operador ainda drena — o passo já enfileirou.
+    // Motor desligado: nem a fila pedida anda. Ligado: só completa o que
+    // a automação, a IA ou o operador enfileirou. Não varre a Entrada.
     const motorOn = await isDistributionEnabled();
+    if (!motorOn) {
+      return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
+    }
 
     let cancelledOrphans = 0;
     try {
@@ -231,13 +233,8 @@ export async function processPendingDistributionQueue(opts: {
       log.warn({ err: e }, "[distribution] cancelStalePendingOrphans failed");
     }
 
-    // Sem motor, ou com autoOnInbound desligado: não varre a Entrada.
-    // Só drena quem o passo, a IA ou o operador colocou na fila.
     const requestedSources = await listRequestedPendingSources();
-    const sweepUnassigned = motorOn && (await isDistributionAutoOnInbound());
-    const requestedPendingIds = sweepUnassigned
-      ? null
-      : [...requestedSources.keys()];
+    const requestedPendingIds = [...requestedSources.keys()];
     if (requestedPendingIds && requestedPendingIds.length === 0) {
       debugInfo(
         "[distribution] processPending skip — autoOnInbound=false sem pedido",
@@ -407,14 +404,14 @@ export async function processPendingDistributionQueue(opts: {
         }
 
         try {
-          const requested = requestedSources.get(it.id) ?? null;
-          if (!motorOn && !requested) continue;
+          const requested = requestedSources.get(it.id);
+          if (!requested) continue;
           const result = await executeDistribution({
             dealId: null,
             contactId: it.contactId,
             conversationId: it.id,
             distributionType: null,
-            triggerSource: requested ?? "SYSTEM",
+            triggerSource: requested,
             departmentId: it.departmentId,
             reassign: true,
             allowOrgWideFallback: false,
