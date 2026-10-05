@@ -33,6 +33,7 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 import { getLogger } from "@/lib/logger";
+import { logEvent } from "@/services/activity-log";
 
 const log = getLogger("api/conversations/[id]/attachments");
 
@@ -97,6 +98,8 @@ type AttachmentSource =
       caption: string;
       requestedChannelId: string | null;
       waitUntilSent?: boolean;
+      /** Nota interna: grava na conversa e não envia ao cliente. */
+      asNote?: boolean;
     }
   | {
       mode: "reuse";
@@ -108,6 +111,7 @@ type AttachmentSource =
       waitUntilSent?: boolean;
       /** Produto: não avisa o chat até o worker Meta terminar. */
       deferChatUntilSent?: boolean;
+      asNote?: boolean;
     };
 
 function readChannelId(raw: unknown): string | null {
@@ -288,7 +292,7 @@ async function parseAttachmentRequest(
       resolved.fileName,
       parsedReuse.fileName,
     );
-    if (mimeBase.startsWith("video/") && !resolved.legacyRelative) {
+    if (rec.asNote !== true && mimeBase.startsWith("video/") && !resolved.legacyRelative) {
       const st = await statStoredFile(resolved.orgId, resolved.bucket, resolved.fileName);
       if (st && st.size > WHATSAPP_VIDEO_MAX_BYTES) {
         return {
@@ -323,6 +327,7 @@ async function parseAttachmentRequest(
         requestedChannelId: readChannelId(rec.channelId),
         waitUntilSent: rec.waitUntilSent === true,
         deferChatUntilSent: rec.deferChatUntilSent === true,
+        asNote: rec.asNote === true,
       },
     };
   }
@@ -353,6 +358,7 @@ async function parseAttachmentRequest(
       file: raw,
       caption: (form.get("caption") as string) ?? "",
       requestedChannelId: readChannelId(form.get("channelId")),
+      asNote: form.get("asNote") === "1" || form.get("asNote") === "true",
     },
   };
 }
@@ -372,10 +378,16 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
       }
 
-      // Regra "reabrir = novo id": anexo em conversa ENCERRADA reabre como
-      // NOVO ticket (mesmo comportamento do POST /messages).
+      const parsed = await parseAttachmentRequest(request, conv.organizationId);
+      if (!parsed.ok) return parsed.response;
+      const source = parsed.source;
+      const caption = source.caption;
+      const requestedChannelId = source.requestedChannelId;
+      const asNote = source.asNote === true;
+
+      // Nota interna não reabre ticket nem passa pelo canal.
       let reopenedConversationId: string | null = null;
-      if (conv.status === "RESOLVED" && conv.contactId) {
+      if (!asNote && conv.status === "RESOLVED" && conv.contactId) {
         const reopened = await reopenResolvedAsNewTicket(conv.id);
         if (reopened.id !== conv.id) {
           const fresh = await getConversationLite(reopened.id);
@@ -386,57 +398,48 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
-      if (sendDenied) return sendDenied;
+      let outboundChannelRef = conv.channelRef;
+      let outboundChannelId = conv.channelId;
+      let useBaileys = false;
+      if (!asNote) {
+        const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
+        if (sendDenied) return sendDenied;
 
-      const parsed = await parseAttachmentRequest(request, conv.organizationId);
-      if (!parsed.ok) return parsed.response;
-      const source = parsed.source;
-      const caption = source.caption;
-      const requestedChannelId = source.requestedChannelId;
+        const resolved = await resolveOutboundChannel({
+          conv: {
+            channelId: conv.channelId,
+            channelRef: conv.channelRef,
+            organizationId: conv.organizationId,
+          },
+          user: session.user as {
+            id: string;
+            role?: string | null;
+            organizationId: string | null;
+            isSuperAdmin?: boolean;
+          },
+          requestedChannelId,
+        });
+        if (!resolved.ok) return resolved.response;
+        outboundChannelRef = resolved.channelRef;
+        outboundChannelId = resolved.channelId;
+        useBaileys = isBaileysChannel(outboundChannelRef);
 
-      // Resolve o canal de envio (com override se válido). Vem ANTES dos
-      // metaClient/baileys para que `channelId` snapshotado em
-      // `message.channelId` já reflita o canal escolhido.
-      const resolved = await resolveOutboundChannel({
-        conv: {
-          channelId: conv.channelId,
-          channelRef: conv.channelRef,
-          organizationId: conv.organizationId,
-        },
-        user: session.user as {
-          id: string;
-          role?: string | null;
-          organizationId: string | null;
-          isSuperAdmin?: boolean;
-        },
-        requestedChannelId,
-      });
-      if (!resolved.ok) return resolved.response;
-      const outboundChannelRef = resolved.channelRef;
-      const outboundChannelId = resolved.channelId;
-      const useBaileys = isBaileysChannel(outboundChannelRef);
-
-      // Bloqueio duro de envio humano fora da janela de 24h em canal Meta
-      // Cloud API (mídia também é envio livre) — mesmo critério do POST
-      // /messages. Roda ANTES de qualquer message.create: anexo bloqueado
-      // não vira sendStatus=failed nem marca hasError na conversa. Esta
-      // rota é session-only (withOrgContext), então todo caller é humano.
-      if (outboundChannelRef?.provider === "META_CLOUD_API") {
-        const hasChannelOverride =
-          !!requestedChannelId && requestedChannelId !== conv.channelId;
-        const targetSession =
-          hasChannelOverride && conv.contactId
-            ? await getContactChannelSession(conv.contactId, outboundChannelRef.id)
-            : await getConversationSession(conv);
-        if (!targetSession.active) {
-          return NextResponse.json(
-            {
-              message: "Sessão de 24h encerrada neste canal. Envie um template.",
-              code: "SESSION_CLOSED",
-            },
-            { status: 409 },
-          );
+        if (outboundChannelRef?.provider === "META_CLOUD_API") {
+          const hasChannelOverride =
+            !!requestedChannelId && requestedChannelId !== conv.channelId;
+          const targetSession =
+            hasChannelOverride && conv.contactId
+              ? await getContactChannelSession(conv.contactId, outboundChannelRef.id)
+              : await getConversationSession(conv);
+          if (!targetSession.active) {
+            return NextResponse.json(
+              {
+                message: "Sessão de 24h encerrada neste canal. Envie um template.",
+                code: "SESSION_CLOSED",
+              },
+              { status: 409 },
+            );
+          }
         }
       }
 
@@ -502,6 +505,86 @@ export async function POST(request: Request, context: RouteContext) {
         mimeBase.startsWith("audio/webm") ||
         mimeBase.startsWith("audio/ogg") ||
         mimeBase === "audio/opus";
+
+      if (asNote) {
+        const noteType =
+          mediaTypeResolved === "audio" && looksLikeVoice ? "ptt" : mediaTypeResolved;
+        const trimmedCaption = caption.trim();
+        const displayContent =
+          mediaTypeResolved === "audio"
+            ? trimmedCaption
+            : mediaTypeResolved === "document"
+              ? trimmedCaption
+                ? `${trimmedCaption}\n📎 ${fileName}`
+                : `📎 ${fileName}`
+              : trimmedCaption || `📎 ${fileName}`;
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId: conv.id,
+            content: displayContent,
+            direction: "out",
+            messageType: noteType,
+            isPrivate: true,
+            senderName,
+            mediaUrl: publicUrl,
+          }),
+        });
+        const noteText = displayContent || `📎 ${fileName}`;
+        void (async () => {
+          const openDeal = conv.contactId
+            ? await prisma.deal
+                .findFirst({
+                  where: { contactId: conv.contactId, status: "OPEN" },
+                  select: { id: true },
+                  orderBy: { updatedAt: "desc" },
+                })
+                .catch(() => null)
+            : null;
+          if (conv.contactId || openDeal?.id) {
+            await prisma.note
+              .create({
+                data: withOrgFromCtx({
+                  content: noteText,
+                  contactId: conv.contactId ?? undefined,
+                  dealId: openDeal?.id ?? undefined,
+                  userId: session.user.id,
+                }),
+              })
+              .catch(() => null);
+          }
+          await logEvent({
+            type: "NOTE_ADDED",
+            entityType: "MESSAGE",
+            entityId: saved.id,
+            entityLabel: senderName,
+            conversationId: conv.id,
+            contactId: conv.contactId,
+            dealId: openDeal?.id ?? null,
+            meta: {
+              preview: noteText.slice(0, 200),
+              source: "inbox_composer",
+              isPrivate: true,
+              hasMedia: true,
+            },
+          }).catch(() => null);
+        })();
+        return NextResponse.json(
+          {
+            message: {
+              id: saved.id,
+              content: displayContent,
+              createdAt: saved.createdAt.toISOString(),
+              direction: "out",
+              messageType: noteType,
+              isPrivate: true,
+              senderName,
+              mediaUrl: publicUrl,
+            },
+            conversationId: conv.id,
+          },
+          { status: 201 },
+        );
+      }
 
       // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
 
