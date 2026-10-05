@@ -502,7 +502,7 @@ Códigos:
 
 | Método | Path | Query / Body | Descrição |
 |--------|------|--------------|-----------|
-| GET | `/api/deals` | `?pipelineId=&stageId=&status=OPEN\|WON\|LOST&ownerId=&contactId=&contactEmail=&contactPhone=&search=&page=&perPage=` | Lista negócios. |
+| GET | `/api/deals` | `?pipelineId=&stageId=&status=OPEN\|WON\|LOST&ownerId=&contactId=&contactEmail=&contactPhone=&search=&updatedSince=&page=&perPage=&withTotal=` | Lista negócios: `{ items, total, page, perPage, hasMore }`. `hasMore` diz se existe próxima página sem contar. `withTotal=0` pula o `COUNT(*)`: `total` vem exato na última página e `null` nas demais. Sem o parâmetro, `total` é sempre numérico. |
 
 #### Verificar se um contato já tem deal (sem dois round-trips)
 
@@ -551,8 +551,8 @@ existe (e `items[]` já traz os deals com `contact`, `stage`, `owner`).
 | GET | `/api/pipelines/[id]` | — | Detalhe + stages. |
 | PUT | `/api/pipelines/[id]` | `{ name? }` | Atualiza. |
 | DELETE | `/api/pipelines/[id]` | — | Remove (somente se vazio). |
-| GET | `/api/pipelines/[id]/board` | `?status=&perStage=` | View Kanban com deals agrupados por stage. |
-| POST | `/api/pipelines/[id]/board` | `{ action, payload }` | Operações no board (reorder, bulk move). |
+| GET | `/api/pipelines/[id]/board` | `?status=&perStage=&limit=&sort=&direction=` | View Kanban com deals agrupados por stage. `perStage` (ou `limit`) = cards por etapa: padrão 50, teto 200. Cada etapa traz `totalCount`, `loadedCount`, `hasMore` e `nextCursor`; o resto da coluna vem por `POST /board/columns`. |
+| POST | `/api/pipelines/[id]/board` | `{ status?, filters?, perStage?, limit?, offsetByStage?, sort?, direction? }` | Mesmo board do GET (mesmo cache), com filtros avançados no corpo. `perStage`/`limit`: padrão 50, teto 200. `offsetByStage` (modo antigo do "carregar mais") continua aceito. |
 | POST | `/api/pipelines/[id]/board/columns` | `{ status?, filters?, sort?, direction?, columns: [{ stageId, cursor, limit? }] }` | "Carregar mais" por cursor: devolve só os próximos cards de cada etapa pedida — `{ columns: [{ stageId, deals, totalCount, hasMore, nextCursor }] }`. `cursor` é o `nextCursor` que a etapa traz no board (ou na página anterior); `status`/`filters`/`sort` devem ser os do board. Não recarrega o board nem usa o cache dele. |
 | POST | `/api/pipelines/[id]/stages` | `{ name, color?, position?, isWon?, isLost? }` | Cria stage. |
 | PUT | `/api/pipelines/[id]/stages` | `{ stages: [{ id, position }] }` | Reordena stages. |

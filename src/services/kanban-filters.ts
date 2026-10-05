@@ -15,6 +15,7 @@ import {
   metaSessionWindowWhere,
   metaWhatsappConversationWhere,
 } from "@/lib/meta-session-window";
+import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
 
@@ -59,11 +60,81 @@ export async function findContactIdsByPhoneDigits(
 }
 
 /**
+ * A organização já tem `contacts.lastMessageAt` / `lastMessageDirection`
+ * preenchidas (backfill `scripts/backfill-contacts-last-message.mjs`)?
+ *
+ * "Pronta" = nenhuma conversa COM mensagem de chat cujo contato ainda esteja
+ * com a coluna NULL. "Com mensagem de chat" = `conversations.lastMessageAt`
+ * preenchido OU, enquanto o backfill da própria conversa não passou, uma
+ * mensagem do recorte em `messages` — sem isso, logo depois do deploy (as
+ * duas colunas ainda vazias no histórico) a organização pareceria pronta e o
+ * filtro só acharia quem escreveu depois do deploy.
+ *
+ * Depois de pronta o código mantém as colunas a cada mensagem
+ * (`touchContactLastMessage`), então o estado não volta: guardamos `true`
+ * pela vida do processo. Enquanto não está pronta, reconsulta no máximo uma
+ * vez por minuto por organização — o filtro de direção fica no caminho antigo
+ * (correto, só mais caro) e troca sozinho quando o backfill termina.
+ *
+ * A sonda para na primeira linha pendente; com tudo preenchido percorre as
+ * conversas da organização uma vez por processo (e só olha `messages` das
+ * conversas cujo contato segue NULL, que são as sem mensagem de chat).
+ */
+const CONTACT_LAST_MESSAGE_RECHECK_MS = 60_000;
+const contactLastMessageReady = new Map<string, true | number>();
+
+export async function isContactLastMessageReady(orgId: string): Promise<boolean> {
+  const known = contactLastMessageReady.get(orgId);
+  if (known === true) return true;
+  if (typeof known === "number" && Date.now() - known < CONTACT_LAST_MESSAGE_RECHECK_MS) {
+    return false;
+  }
+  let pending = true;
+  try {
+    const rows = await prisma.$queryRaw<{ pending: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM conversations v
+        INNER JOIN contacts c ON c.id = v."contactId"
+        WHERE v."organizationId" = ${orgId}
+          AND c."lastMessageAt" IS NULL
+          AND (
+            v."lastMessageAt" IS NOT NULL
+            OR EXISTS (
+              SELECT 1 FROM messages m
+              WHERE m."conversationId" = v.id
+                AND ${chatMessageSqlFilter("m")}
+            )
+          )
+      ) AS pending
+    `;
+    pending = rows[0]?.pending !== false;
+  } catch {
+    // Coluna ainda não existe (migration pendente) ou banco fora: caminho antigo.
+    pending = true;
+  }
+  contactLastMessageReady.set(orgId, pending ? Date.now() : true);
+  return !pending;
+}
+
+/** Só para testes: esquece o que já foi sondado. */
+export function resetContactLastMessageReadyForTests(): void {
+  contactLastMessageReady.clear();
+}
+
+/**
+ * CAMINHO ANTIGO do filtro de direção (organização ainda sem
+ * `contacts.lastMessageDirection` preenchida — ver
+ * `isContactLastMessageReady`).
+ *
  * Contatos SEM conversa ativa cuja conversa mais recente terminou com
  * mensagem na direção pedida ("in" = do cliente). Complementa o filtro
  * "Mensagem recebida/enviada" do Kanban, que para contatos com conversa
  * ativa é resolvido no próprio where. Só contatos com negócio entram.
  * Teto de 20 mil ids para o IN não estourar o limite de parâmetros.
+ *
+ * Custo em produção (05/10): 989 ms por chamada (LATERAL por contato da
+ * organização inteira) e até 20 mil ids devolvidos ao Node.
  */
 const CLOSED_ONLY_DIRECTION_CAP = 20000;
 export async function findClosedOnlyContactIdsByLastDirection(
@@ -1024,7 +1095,29 @@ export async function buildDealWhereFromFilters(
     if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
     const dir = filters.lastMessageDirection;
-    if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
+    const orgIdForDir = getRequestContext()?.organizationId;
+    if (
+      (dir === "in" || dir === "out") &&
+      !filters.conversationStatus &&
+      orgIdForDir &&
+      (await isContactLastMessageReady(orgIdForDir))
+    ) {
+      // Direção da ÚLTIMA mensagem de chat do contato, em coluna pronta
+      // (`contacts.lastMessageDirection`, gravada junto de
+      // `conversations.lastMessageAt`). Um predicado na PK do contato: o
+      // board traduz para EXISTS no SQL (`translateContactFilter`), sem
+      // pré-consulta nem lista de ids.
+      //
+      // Diferença para o caminho antigo (abaixo): vale a última mensagem de
+      // chat do contato em QUALQUER conversa. Antes: com conversa ativa, "tem
+      // uma ativa na direção pedida e nenhuma ativa na oposta" (contato com
+      // duas conversas ativas em direções opostas não casava com nenhum dos
+      // dois filtros; agora casa com a mais recente); só com encerradas, a
+      // conversa de `updatedAt` mais recente (que muda com atribuição e
+      // encerramento, não só com mensagem). Ligação (`whatsapp_call`) e
+      // evento não contam como mensagem.
+      conditions.push({ contact: { is: { lastMessageDirection: dir } } });
+    } else if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
       // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma
       // conversa" com a direção pedida: contato com conversa antiga em que o
       // cliente falou por último aparecia em "Mensagem recebida" mesmo com a

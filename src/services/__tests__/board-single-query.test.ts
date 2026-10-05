@@ -70,6 +70,8 @@ import { runWithContext } from "@/lib/request-context";
 import { buildDealWhereFromFilters } from "@/services/kanban-filters";
 import {
   __boardInternal,
+  buildBoardCardPreviewSql,
+  buildBoardStageTotalsSql,
   buildLastInteractionRankedSql,
   buildRankedBoardDealsSql,
   getBoardData,
@@ -194,15 +196,33 @@ type ConvRow = {
   channel: string;
   unreadCount: number;
   updatedAt: Date;
+  /** `conversations.lastMessageAt` (NULL = backfill pendente / sem chat). */
+  lastMessageAt: Date | null;
 };
 const CONVS: ConvRow[] = [
-  { id: "v1", contactId: "c1", channel: "whatsapp", unreadCount: 1, updatedAt: at(50) },
-  { id: "v2", contactId: "c1", channel: "instagram", unreadCount: 1, updatedAt: at(60) },
-  { id: "v3", contactId: "c2", channel: "whatsapp", unreadCount: 0, updatedAt: at(40) },
-  { id: "v4", contactId: "c3", channel: "whatsapp", unreadCount: 3, updatedAt: at(70) },
-  { id: "v5", contactId: "c5", channel: "whatsapp", unreadCount: 0, updatedAt: at(30) },
-  { id: "v6", contactId: "c6", channel: "whatsapp", unreadCount: 2, updatedAt: at(80) },
+  { id: "v1", contactId: "c1", channel: "whatsapp", unreadCount: 1, updatedAt: at(50), lastMessageAt: at(45) },
+  { id: "v2", contactId: "c1", channel: "instagram", unreadCount: 1, updatedAt: at(60), lastMessageAt: at(55) },
+  { id: "v3", contactId: "c2", channel: "whatsapp", unreadCount: 0, updatedAt: at(40), lastMessageAt: at(35) },
+  { id: "v4", contactId: "c3", channel: "whatsapp", unreadCount: 3, updatedAt: at(70), lastMessageAt: at(20) },
+  { id: "v5", contactId: "c5", channel: "whatsapp", unreadCount: 0, updatedAt: at(30), lastMessageAt: null },
+  { id: "v6", contactId: "c6", channel: "whatsapp", unreadCount: 2, updatedAt: at(80), lastMessageAt: at(75) },
 ];
+
+/**
+ * `contacts.lastMessageAt` (K1). c1/c3/c6 já preenchidos — valem a coluna,
+ * mesmo com `conversations.updatedAt` mais novo (c3: conversa mexida em 70,
+ * última mensagem em 20). c2/c5 ainda NULL → fallback
+ * `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`
+ * (c2 = 35, c5 = 30). c4 não tem conversa → sem última interação.
+ */
+const CONTACT_LAST_MESSAGE_AT: Record<string, Date | null> = {
+  c1: at(55),
+  c2: null,
+  c3: at(20),
+  c4: null,
+  c5: null,
+  c6: at(75),
+};
 
 type MsgRow = {
   id: string;
@@ -390,10 +410,16 @@ function parseRawCall(call: unknown[]): { text: string; values: unknown[] } {
 /** `where` Prisma corrente — o SQL cru emulado filtra a fixture por ele. */
 let currentWhere: AnyWhere = {};
 
+/** Última interação por contato: coluna do contato; NULL → fallback nas conversas. */
 function lastConvAtByContact(): Map<string, number> {
   const m = new Map<string, number>();
   for (const c of CONVS) {
-    m.set(c.contactId, Math.max(m.get(c.contactId) ?? -Infinity, c.updatedAt.getTime()));
+    if (CONTACT_LAST_MESSAGE_AT[c.contactId]) continue;
+    const convAt = (c.lastMessageAt ?? c.updatedAt).getTime();
+    m.set(c.contactId, Math.max(m.get(c.contactId) ?? -Infinity, convAt));
+  }
+  for (const [contactId, at] of Object.entries(CONTACT_LAST_MESSAGE_AT)) {
+    if (at) m.set(contactId, at.getTime());
   }
   return m;
 }
@@ -405,10 +431,11 @@ function rankRows(
 ) {
   const byStage = new Map<string, DealRow[]>();
   for (const d of rows) byStage.set(d.stageId, [...(byStage.get(d.stageId) ?? []), d]);
-  const out: { id: string; stageId: string; rn: number }[] = [];
+  // `total` = COUNT(*) OVER (PARTITION BY "stageId"): a etapa inteira, não o corte.
+  const out: { id: string; stageId: string; rn: number; total: number }[] = [];
   for (const [stageId, ds] of byStage) {
     ds.sort(cmp).forEach((d, i) => {
-      if (i + 1 <= maxPerStage) out.push({ id: d.id, stageId, rn: i + 1 });
+      if (i + 1 <= maxPerStage) out.push({ id: d.id, stageId, rn: i + 1, total: ds.length });
     });
   }
   // Embaralha de propósito: o código não pode depender da ordem física.
@@ -419,7 +446,7 @@ function emulateRaw(call: unknown[]): unknown[] {
   const { text, values } = parseRawCall(call);
 
   if (text.includes("WITH candidates AS")) {
-    // lastInteraction: values = [org, stageIds, ...where, org(lateral), scanCap, maxPerStage]
+    // lastInteraction: values = [org, stageIds, ...where, org(contato), org(lateral), scanCap, maxPerStage]
     const stageIds = values[1] as string[];
     const scanCap = values[values.length - 2] as number;
     const maxPerStage = values[values.length - 1] as number;
@@ -430,6 +457,9 @@ function emulateRaw(call: unknown[]): unknown[] {
     );
     const last = lastConvAtByContact();
     const mul = dir === "desc" ? -1 : 1;
+    // O total vem da janela dos CANDIDATOS (todos os que casam, antes do teto).
+    const totalByStage = new Map<string, number>();
+    for (const d of matched) totalByStage.set(d.stageId, (totalByStage.get(d.stageId) ?? 0) + 1);
     return rankRows(
       candidates,
       (a, b) => {
@@ -442,7 +472,7 @@ function emulateRaw(call: unknown[]): unknown[] {
         return a.id < b.id ? -1 : 1;
       },
       maxPerStage,
-    );
+    ).map((r) => ({ ...r, total: totalByStage.get(r.stageId) ?? 0 }));
   }
 
   if (text.includes('PARTITION BY d."stageId"')) {
@@ -458,8 +488,9 @@ function emulateRaw(call: unknown[]): unknown[] {
     return rankRows(matched, compareBy(orderBy), maxPerStage);
   }
 
-  if (text.includes('MAX("updatedAt") AS last_at')) {
-    const contactIds = values[1] as string[];
+  if (text.includes("FROM contacts ct") && text.includes("ct.id = ANY(")) {
+    // fallback em memória: values = [org(lateral), org, contactIds]
+    const contactIds = values.find((v) => Array.isArray(v)) as string[];
     const last = lastConvAtByContact();
     return contactIds
       .filter((c) => last.has(c))
@@ -468,61 +499,70 @@ function emulateRaw(call: unknown[]): unknown[] {
 
   if (text.includes("FROM deal_products")) return [];
 
-  if (text.includes("contact_unread")) {
-    const contactIds = values[0] as string[];
-    const out: { contactId: string; channel: string | null; unreadCount: number }[] = [];
-    for (const c of contactIds) {
-      const convs = CONVS.filter((v) => v.contactId === c);
-      if (convs.length === 0) continue;
-      const latest = [...convs].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
-      out.push({
-        contactId: c,
-        channel: latest?.channel ?? null,
-        unreadCount: convs.reduce((s, v) => s + v.unreadCount, 0),
-      });
-    }
-    return out;
-  }
-
-  if (text.includes('PARTITION BY c."contactId", m.direction')) {
+  if (text.includes("per_contact AS")) {
+    // Prévia do card numa consulta (K2): values[0] = contatos; último = teto
+    // do "aguardando". Por CONVERSA: últimas do cliente (teto quando o
+    // contato tem não lidas; 1 quando não tem) + a última nossa; depois a
+    // janela por (contato, direção) só sobre essas linhas.
     const contactIds = values[0] as string[];
     const cap = values[values.length - 1] as number;
-    const convByid = new Map(CONVS.map((v) => [v.id, v]));
-    const rows = MESSAGES.filter((m) => {
-      const conv = convByid.get(m.conversationId);
-      return (
-        conv &&
-        contactIds.includes(conv.contactId) &&
-        !m.isPrivate &&
-        (m.direction === "in" || m.direction === "out") &&
-        !CARD_EXCLUDED_TYPES.has(m.messageType) &&
-        !m.messageType.startsWith("event")
-      );
-    });
-    const groups = new Map<string, MsgRow[]>();
-    for (const m of rows) {
-      const key = `${convByid.get(m.conversationId)?.contactId}|${m.direction}`;
-      groups.set(key, [...(groups.get(key) ?? []), m]);
-    }
+    const eligible = (m: MsgRow) =>
+      !m.isPrivate && !CARD_EXCLUDED_TYPES.has(m.messageType) && !m.messageType.startsWith("event");
+    const newestFirst = (x: MsgRow, y: MsgRow) =>
+      y.createdAt.getTime() - x.createdAt.getTime() || (y.id < x.id ? -1 : 1);
     const out: unknown[] = [];
-    for (const [key, ms] of groups) {
-      const contactId = key.split("|")[0] as string;
-      ms.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (b.id < a.id ? -1 : 1));
-      ms.forEach((m, i) => {
-        const rn = i + 1;
-        if (rn > (m.direction === "in" ? cap : 1)) return;
+    for (const contactId of contactIds) {
+      const convs = CONVS.filter((v) => v.contactId === contactId);
+      if (convs.length === 0) continue;
+      const latest = [...convs].sort((x, y) => y.updatedAt.getTime() - x.updatedAt.getTime())[0];
+      const unread = convs.reduce((sum, v) => sum + v.unreadCount, 0);
+      const base = { contactId, channel: latest?.channel ?? null, unreadCount: unread };
+      const inLimit = unread > 0 ? cap : 1;
+      const picked: MsgRow[] = [];
+      for (const conv of convs) {
+        for (const [dir, limit] of [["in", inLimit], ["out", 1]] as const) {
+          picked.push(
+            ...MESSAGES.filter((m) => m.conversationId === conv.id && m.direction === dir && eligible(m))
+              .sort(newestFirst)
+              .slice(0, limit),
+          );
+        }
+      }
+      let emitted = 0;
+      for (const dir of ["in", "out"] as const) {
+        picked
+          .filter((m) => m.direction === dir)
+          .sort(newestFirst)
+          .forEach((m, i) => {
+            const rn = i + 1;
+            if (rn > (dir === "in" && unread > 0 ? cap : 1)) return;
+            emitted++;
+            out.push({
+              ...base,
+              msgId: m.id,
+              msgExternalId: m.externalId,
+              msgContent: m.content,
+              msgCreatedAt: m.createdAt,
+              msgDirection: m.direction,
+              msgSendStatus: m.sendStatus,
+              msgSendError: m.sendError,
+              rn,
+            });
+          });
+      }
+      if (emitted === 0) {
         out.push({
-          contactId,
-          msgId: m.id,
-          msgExternalId: m.externalId,
-          msgContent: m.content,
-          msgCreatedAt: m.createdAt,
-          msgDirection: m.direction,
-          msgSendStatus: m.sendStatus,
-          msgSendError: m.sendError,
-          rn,
+          ...base,
+          msgId: null,
+          msgExternalId: null,
+          msgContent: null,
+          msgCreatedAt: null,
+          msgDirection: null,
+          msgSendStatus: null,
+          msgSendError: null,
+          rn: null,
         });
-      });
+      }
     }
     return out;
   }
@@ -697,7 +737,7 @@ describe("board: lastInteraction em uma consulta == fallback por etapa", () => {
       );
       const oldResult = await withOrg(() => __boardInternal.hydrateBoardStages(stagesRaw(), oldIds));
       expect(findManyCalls()).toBe(STAGES.length + 1);
-      expect(rawCalls()).toBe(1); // GROUP BY de conversas
+      expect(rawCalls()).toBe(1); // última mensagem por contato
 
       h.dealFindMany.mockClear();
       h.queryRaw.mockClear();
@@ -866,6 +906,17 @@ describe("board: SQL gerado", () => {
     expect(sql.values).toEqual([["facebook"], "", ["google"]]);
   });
 
+  it("filtro de direção em coluna pronta: EXISTS no contato pela PK, sem lista de ids (K1)", () => {
+    const sql = translateDealWhereToSql({
+      AND: [{ status: "OPEN" }, { contact: { is: { lastMessageDirection: "in" } } }],
+    }) as Prisma.Sql;
+    expect(sql).not.toBeNull();
+    expect(sql.strings.join("?")).toContain(
+      'EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = d."contactId" AND ct."organizationId" = d."organizationId" AND ct."lastMessageDirection" = ?)',
+    );
+    expect(sql.values).toEqual(["OPEN", "in"]);
+  });
+
   it("consulta ranqueada: ROW_NUMBER por etapa, org/etapas/limite como parâmetros", () => {
     const sql = buildRankedBoardDealsSql({
       orgId: "org-x",
@@ -882,6 +933,9 @@ describe("board: SQL gerado", () => {
     expect(text).toContain("WHERE r.rn <= ?");
     expect(text).not.toContain("org-x");
     expect(sql.values).toEqual(["org-x", ["s1", "s2"], "OPEN", 7]);
+    // Total da etapa na mesma janela (K3).
+    expect(text).toContain('COUNT(*) OVER (PARTITION BY d."stageId")::int AS total');
+    expect(text).toContain('SELECT r.id, r."stageId", r.rn, r.total');
     // Placeholders numerados na forma final do Postgres.
     expect(sql.text).toContain("$1");
     expect(sql.text).toContain("$4");
@@ -899,9 +953,18 @@ describe("board: SQL gerado", () => {
     const text = sql.strings.join("?");
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).toContain("WHERE c.scan_rn <= ?");
-    expect(text).toContain("ORDER BY li.last_at DESC NULLS LAST");
+    expect(text).toContain("ORDER BY s.last_at DESC NULLS LAST");
+    // Total da etapa contado nos candidatos, antes do teto de varredura (K3).
+    expect(text).toMatch(/AS scan_rn,\s+COUNT\(\*\) OVER \(PARTITION BY d\."stageId"\)::int AS total/);
+    expect(text).toContain('SELECT r.id, r."stageId", r.rn, r.last_at, r.total');
+    // Coluna pronta do contato; `conversations` só para quem está NULL.
+    expect(text).toContain('LEFT JOIN contacts ct');
+    expect(text).toContain('COALESCE(ct."lastMessageAt", fb.last_at) AS last_at');
+    expect(text).toMatch(/FROM conversations cv\s+WHERE ct\.id IS NOT NULL\s+AND ct\."lastMessageAt" IS NULL/);
+    expect(text).toContain('MAX(COALESCE(cv."lastMessageAt", cv."updatedAt"))');
+    expect(text).not.toContain('MAX(cv."updatedAt")');
     expect(text).not.toContain("org-x");
-    expect(sql.values).toEqual(["org-x", ["s1"], "OPEN", "org-x", 2500, 100]);
+    expect(sql.values).toEqual(["org-x", ["s1"], "OPEN", "org-x", "org-x", 2500, 100]);
     const asc = buildLastInteractionRankedSql({
       orgId: "o",
       stageIds: ["s1"],
@@ -910,7 +973,129 @@ describe("board: SQL gerado", () => {
       scanCap: 1,
       maxPerStage: 1,
     });
-    expect(asc.strings.join("?")).toContain("ORDER BY li.last_at ASC NULLS LAST");
+    expect(asc.strings.join("?")).toContain("ORDER BY s.last_at ASC NULLS LAST");
+  });
+});
+
+describe("board: contagem por etapa sem consulta à parte (K3)", () => {
+  it("getBoardData: totais vêm da janela — etapa cheia, etapa cortada e etapa vazia", async () => {
+    currentWhere = { status: "OPEN" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, undefined, undefined, { perStage: 2 }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    const byId = new Map(board.map((s) => [s.id, s]));
+    // s1: 5 abertos (d05 é LOST), 2 carregados.
+    expect(byId.get("s1")).toMatchObject({ totalCount: 5, loadedCount: 2, hasMore: true });
+    expect(byId.get("s2")).toMatchObject({ totalCount: 4, loadedCount: 2, hasMore: true });
+    // s3: só d13 aberto.
+    expect(byId.get("s3")).toMatchObject({ totalCount: 1, loadedCount: 1, hasMore: false });
+  });
+
+  it("etapa sem nenhum negócio casando: total 0 (sem linha na janela), não o tamanho da página", async () => {
+    currentWhere = { status: "WON" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "WON", undefined, { perStage: 10 }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    expect(board.map((s) => [s.id, s.totalCount, s.hasMore])).toEqual([
+      ["s1", 0, false],
+      ["s2", 0, false],
+      ["s3", 2, false],
+    ]);
+  });
+
+  it("lastInteraction: total da etapa mesmo com a janela cortada", async () => {
+    currentWhere = { status: "OPEN" };
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, undefined, undefined, {
+        perStage: 1,
+        sortField: "lastInteraction",
+        sortDirection: "desc",
+      }),
+    );
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    expect(board.map((s) => [s.id, s.totalCount, s.loadedCount])).toEqual([
+      ["s1", 5, 1],
+      ["s2", 4, 1],
+      ["s3", 1, 1],
+    ]);
+  });
+
+  it("caminho por etapa (where que não traduz e passa do teto) continua contando com groupBy", async () => {
+    const where: Prisma.DealWhereInput = { title: { contains: "Deal" } };
+    vi.mocked(buildDealWhereFromFilters).mockResolvedValueOnce([where]);
+    currentWhere = where as AnyWhere;
+    const cap = __boardInternal.BOARD_PRERESOLVE_CAP;
+    // Força "acima do teto": a pré-resolução devolve cap + 1 linhas.
+    h.dealFindMany.mockImplementationOnce(async () =>
+      Array.from({ length: cap + 1 }, (_, i) => ({ id: `x${i}`, stageId: "s1" })),
+    );
+    const board = await withOrg(() =>
+      getBoardData(PIPELINE, null, "ALL", { search: "Deal" }, { perStage: 2 }),
+    );
+    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
+    expect(board.find((s) => s.id === "s1")?.totalCount).toBe(6);
+  });
+
+  it("contagem do \"carregar mais\": SQL sem JOIN, etapas e organização como parâmetros", () => {
+    const sql = buildBoardStageTotalsSql({
+      orgId: "org-x",
+      stageIds: ["s1", "s2"],
+      whereSql: translateDealWhereToSql({ status: "OPEN" }) as Prisma.Sql,
+    });
+    const text = sql.strings.join("?");
+    expect(text).toContain('SELECT d."stageId", COUNT(*)::int AS total');
+    expect(text).toContain('d."stageId" = ANY(?)');
+    expect(text).toContain('GROUP BY d."stageId"');
+    expect(text).not.toMatch(/JOIN/);
+    expect(sql.values).toEqual(["org-x", ["s1", "s2"], "OPEN"]);
+  });
+});
+
+describe("board: prévia do card numa consulta, sem varrer messages (K2)", () => {
+  const sql = buildBoardCardPreviewSql({ orgId: "org-x", contactIds: ["c1", "c2"], awaitingCap: 5 });
+  const text = sql.strings.join("?");
+
+  it("por conversa, LATERAL limitado pelo índice (conversationId, createdAt)", () => {
+    expect(text).toContain("CROSS JOIN LATERAL");
+    // Duas buscas por conversa (cliente e nossa), cada uma com LIMIT.
+    expect(text.match(/FROM messages m\s+WHERE m\."conversationId" = conv\.id/g)).toHaveLength(2);
+    expect(text.match(/ORDER BY m\."createdAt" DESC, m\.id DESC\s+LIMIT /g)).toHaveLength(2);
+    // Cliente: teto do "aguardando" só quando o contato tem não lidas.
+    expect(text).toMatch(/LIMIT CASE WHEN pc\.unread > 0 THEN \?::int ELSE 1 END\)/);
+    // Nossa: só a última.
+    expect(text).toMatch(/LIMIT 1\)/);
+    // A janela final ranqueia só as linhas já escolhidas.
+    expect(text).toMatch(/PARTITION BY p\."contactId", p\.direction/);
+    expect(text).toMatch(/FROM picked p/);
+  });
+
+  it("mesmo recorte de mensagem de chat da prévia (nota, rascunho, ligação e evento fora)", () => {
+    expect(text.match(/m\."isPrivate" = false/g)).toHaveLength(2);
+    expect(text.match(/m\."messageType" NOT LIKE 'event%'/g)).toHaveLength(2);
+    const types = ["note", "ai_draft", "whatsapp_call", "whatsapp_call_recording"];
+    expect(sql.values).toEqual([
+      ["c1", "c2"],
+      "org-x",
+      "org-x",
+      "in",
+      ...types,
+      5,
+      "org-x",
+      "out",
+      ...types,
+      5,
+    ]);
+  });
+
+  it("não lidas = soma; canal = conversa de updatedAt mais recente; tudo escopado à organização", () => {
+    expect(text).toContain('COALESCE(SUM("unreadCount"), 0)::int AS unread');
+    expect(text).toContain('(ARRAY_AGG(channel ORDER BY "updatedAt" DESC))[1] AS channel');
+    expect(text).toContain('c."organizationId" = ?');
+    expect(text.match(/m\."organizationId" = \?/g)).toHaveLength(2);
+    expect(text).not.toContain("org-x");
+    expect(text).not.toContain("c1");
   });
 });
 
@@ -928,23 +1113,25 @@ describe("board completo (getBoardData) com passagem única em messages", () => 
     const board = await withOrg(() =>
       getBoardData(PIPELINE, where, "ALL", undefined, { perStage: 10 }),
     );
-    // Consultas do miss: 1 stages + 1 ranking + 1 hidratação + 1 groupBy +
-    // 3 raws (produtos, conversas, mensagens).
+    // Consultas do miss: 1 stages + 1 ranking (com o total por etapa, K3) +
+    // 1 hidratação + 2 raws (produtos e prévia — conversas e mensagens numa
+    // só, K2). Nenhum groupBy.
     expect(h.stageFindMany).toHaveBeenCalledTimes(1);
     expect(findManyCalls()).toBe(1);
-    expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
-    expect(rawCalls()).toBe(4);
-    const msgCall = h.queryRaw.mock.calls.find((c) =>
-      parseRawCall(c).text.includes('PARTITION BY c."contactId", m.direction'),
+    expect(h.dealGroupBy).not.toHaveBeenCalled();
+    expect(rawCalls()).toBe(3);
+    const previewCalls = h.queryRaw.mock.calls.filter((c) =>
+      parseRawCall(c).text.includes("FROM messages"),
     );
-    expect(msgCall).toBeDefined();
-    // Uma única varredura em messages (não há mais last_msg/last_in/awaiting).
+    // Uma única consulta toca `messages`, e sem varrer o histórico: nada de
+    // JOIN de todas as mensagens dos contatos antes da janela.
+    expect(previewCalls).toHaveLength(1);
+    const previewText = parseRawCall(previewCalls[0]!).text;
+    expect(previewText).toContain("per_contact AS");
+    expect(previewText).not.toContain("JOIN messages m");
     expect(
-      h.queryRaw.mock.calls.filter((c) => parseRawCall(c).text.includes("FROM messages")).length,
+      h.queryRaw.mock.calls.filter((c) => parseRawCall(c).text.includes("contact_unread")).length,
     ).toBe(0);
-    expect(
-      h.queryRaw.mock.calls.filter((c) => parseRawCall(c).text.includes("JOIN messages m")).length,
-    ).toBe(1);
 
     const cards = new Map(board.flatMap((s) => s.deals.map((d) => [d.id, d] as const)));
 
