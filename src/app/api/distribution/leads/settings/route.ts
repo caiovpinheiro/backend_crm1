@@ -11,6 +11,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { getLogger } from "@/lib/logger";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { getOrgSettingBool, setOrgSettingBool } from "@/lib/org-settings";
 import { LEADS_DISTRIBUTION_ENABLED_KEY } from "@/services/distribution/leads/enabled";
@@ -18,6 +19,8 @@ import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
+
+const log = getLogger("distribution.leads.settings");
 
 async function readSettings() {
   const enabled = await getOrgSettingBool(LEADS_DISTRIBUTION_ENABLED_KEY, false);
@@ -97,10 +100,7 @@ export async function PUT(req: Request) {
         );
         await drainLeadsPending();
       } catch (e) {
-        console.warn(
-          "[leads] drenagem ao ligar o modo falhou",
-          e instanceof Error ? e.message : e,
-        );
+        log.warn({ err: e }, "[leads] drenagem ao ligar o modo falhou");
       }
     }
     return NextResponse.json(await readSettings());
