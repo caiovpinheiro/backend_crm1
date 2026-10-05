@@ -864,10 +864,15 @@ describe("coluna por cursor — lastInteraction", () => {
   });
 
   it("where que o SQL não traduz: board sai sem cursor (cliente usa offsetByStage) e a rota de página recusa", async () => {
-    const visibility: Prisma.DealWhereInput = { tags: { none: {} } } as Prisma.DealWhereInput;
-    // fake-db não conhece `tags`: a etapa cai no fallback, que filtra em memória
+    // Filtro de conversa: o tradutor não cobre (tags e origem do contato
+    // viram EXISTS). O board resolve os ids numa consulta e ranqueia em SQL,
+    // mas sem cursor — a rota de página só aceita where traduzível.
+    const visibility: Prisma.DealWhereInput = {
+      contact: { is: { conversations: { some: { status: "OPEN" } } } },
+    } as Prisma.DealWhereInput;
+    // fake-db não conhece `contact` aqui: o filtro é retirado em memória.
     h.dealFindMany.mockImplementation(async (args: Record<string, unknown>) => {
-      const where = JSON.parse(JSON.stringify(args.where ?? {}), (k, v) => (k === "tags" ? undefined : v));
+      const where = JSON.parse(JSON.stringify(args.where ?? {}), (k, v) => (k === "contact" ? undefined : v));
       const rows = db.run("deal", "findMany", { ...args, where }) as Record<string, unknown>[];
       return args.include
         ? rows.map((r) => ({ ...r, contact: null, owner: null, tags: [], activities: [] }))
