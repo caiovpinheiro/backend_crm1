@@ -1,9 +1,10 @@
 /**
  * "Escutar a equipe": com a escuta ligada, o agente lê em lote os
- * atendimentos das pessoas escolhidas (depois que a conversa encerra ou fica
- * 1 h parada) e monta propostas de conhecimento (material), abordagem
- * (regras) e tom de voz. Nada muda sozinho: cada proposta é aplicada no
- * rascunho ou recusada por quem configura; o atendimento só muda ao publicar.
+ * atendimentos das pessoas escolhidas e/ou da origem acadêmica do aluno
+ * (depois que a conversa encerra ou fica 1 h parada) e monta propostas de
+ * conhecimento (material), abordagem (regras) e tom de voz. Nada muda
+ * sozinho: cada proposta é aplicada no rascunho ou recusada por quem
+ * configura; o atendimento só muda ao publicar.
  *
  * Etapas de cada varredura: conversas das pessoas escutadas (eventos de
  * envio + nome na mensagem) → análise de cada conversa (modelo auxiliar,
@@ -156,6 +157,9 @@ export async function ensureListenSchema(): Promise<void> {
       "finishedAt" TIMESTAMPTZ
     )`);
   await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ai_v2_listen_runs_session_idx" ON "ai_v2_listen_runs" ("sessionId", "createdAt")`);
+  await db.$executeRawUnsafe(
+    `ALTER TABLE "ai_v2_listen_sessions" ADD COLUMN IF NOT EXISTS "originStageIds" JSONB NOT NULL DEFAULT '[]'::jsonb`,
+  );
   schemaReady = true;
 }
 
@@ -176,6 +180,9 @@ export type ListenSession = {
   status: ListenStatus;
   userIds: string[];
   people: Array<{ id: string; name: string }>;
+  /** Etapas acadêmicas de onde o aluno veio antes de entrar em atendimento. */
+  originStageIds: string[];
+  origins: Array<{ id: string; name: string; pipelineName: string }>;
   mode: ListenMode;
   startsAt: string;
   endsAt: string | null;
@@ -232,6 +239,14 @@ async function peopleNames(organizationId: string, ids: string[]): Promise<Array
   return ids.filter((id) => byId.has(id)).map((id) => ({ id, name: byId.get(id)! }));
 }
 
+/** Consultores da org: só entra quando a escuta não escolheu pessoas. */
+async function orgHumans(organizationId: string): Promise<Array<{ id: string; name: string }>> {
+  return db.$queryRawUnsafe<Array<{ id: string; name: string }>>(
+    `SELECT "id", "name" FROM "users" WHERE "organizationId"=$1 AND "type"='HUMAN' AND NOT "isErased"`,
+    organizationId,
+  );
+}
+
 async function costToday(sessionId: string): Promise<{ usd: number; samples: number }> {
   const since = startOfTodayBrazil();
   const [cost] = await db.$queryRawUnsafe<Array<{ usd: number | null }>>(
@@ -245,14 +260,33 @@ async function costToday(sessionId: string): Promise<{ usd: number; samples: num
   return { usd: Number(cost?.usd ?? 0), samples: Number(samples?.n ?? 0) };
 }
 
+async function originNames(ids: string[]): Promise<Array<{ id: string; name: string; pipelineName: string }>> {
+  if (ids.length === 0) return [];
+  const rows = await db.$queryRawUnsafe<Array<{ id: string; name: string; pipelineName: string }>>(
+    `SELECT s."id", s."name", p."name" AS "pipelineName"
+       FROM "stages" s JOIN "pipelines" p ON p."id" = s."pipelineId"
+      WHERE s."id" = ANY($1::text[])`,
+    ids,
+  );
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ids.filter((id) => byId.has(id)).map((id) => byId.get(id)!);
+}
+
 async function toSession(r: Record<string, any>): Promise<ListenSession> {
   const userIds = (r.userIds ?? []) as string[];
-  const [people, today] = await Promise.all([peopleNames(r.organizationId, userIds), costToday(r.id).catch(() => ({ usd: 0, samples: 0 }))]);
+  const originStageIds = (Array.isArray(r.originStageIds) ? r.originStageIds : []) as string[];
+  const [people, origins, today] = await Promise.all([
+    peopleNames(r.organizationId, userIds),
+    originNames(originStageIds),
+    costToday(r.id).catch(() => ({ usd: 0, samples: 0 })),
+  ]);
   return {
     id: r.id,
     status: effectiveListenStatus({ status: r.status, endsAt: r.endsAt }),
     userIds,
     people,
+    originStageIds,
+    origins,
     mode: r.mode,
     startsAt: iso(r.startsAt)!,
     endsAt: iso(r.endsAt),
@@ -329,10 +363,10 @@ export async function getListenState(organizationId: string, agentId: string): P
   return { session, runs: runs.map(toListenRun), proposals: proposals.map(toProposal) };
 }
 
-/** Pessoas válidas: humanas, ativas e da organização. */
+/** Pessoas válidas: humanas, ativas e da organização. Vazio = qualquer consultor. */
 async function validPeople(organizationId: string, userIds: string[]): Promise<string[]> {
   const ids = [...new Set(userIds.filter((x) => typeof x === "string" && x))];
-  if (ids.length === 0) throw new Error("Escolha pelo menos uma pessoa da equipe.");
+  if (ids.length === 0) return [];
   if (ids.length > LISTEN_LIMITS.maxPeople) throw new Error(`Escolha no máximo ${LISTEN_LIMITS.maxPeople} pessoas.`);
   const rows = await db.$queryRawUnsafe<Array<{ id: string }>>(
     `SELECT "id" FROM "users" WHERE "organizationId"=$1 AND "id" = ANY($2::text[]) AND "type"='HUMAN' AND NOT "isErased"`,
@@ -342,19 +376,40 @@ async function validPeople(organizationId: string, userIds: string[]): Promise<s
   return ids;
 }
 
+/** Etapas de origem: fora do funil Atendimento. Vazio = não filtra por origem. */
+async function validOrigins(organizationId: string, stageIds: string[]): Promise<string[]> {
+  const ids = [...new Set(stageIds.filter((x) => typeof x === "string" && x))];
+  if (ids.length === 0) return [];
+  if (ids.length > 10) throw new Error("Escolha no máximo 10 etapas de origem.");
+  const rows = await db.$queryRawUnsafe<Array<{ id: string }>>(
+    `SELECT s."id" FROM "stages" s
+       JOIN "pipelines" p ON p."id" = s."pipelineId"
+      WHERE s."organizationId"=$1 AND s."id" = ANY($2::text[])
+        AND p."name" NOT ILIKE '%atendimento%'`,
+    organizationId, ids,
+  );
+  if (rows.length !== ids.length) {
+    throw new Error("A origem é a etapa de onde o aluno veio, não uma etapa do funil Atendimento.");
+  }
+  return ids;
+}
+
 /** Conversas por dia de cada pessoa nos últimos 7 dias × custo por conversa. */
-export async function estimateListen(organizationId: string, agentId: string, userIds: string[]): Promise<{ conversationsPerDay: number; usdPerDay: number }> {
+export async function estimateListen(
+  organizationId: string,
+  agentId: string,
+  userIds: string[],
+  originStageIds: string[] = [],
+): Promise<{ conversationsPerDay: number; usdPerDay: number }> {
   const ids = await validPeople(organizationId, userIds);
+  const origins = await validOrigins(organizationId, originStageIds);
+  if (ids.length === 0 && origins.length === 0) return { conversationsPerDay: 0, usdPerDay: 0 };
   const agent = await getV2Agent(agentId, organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
   const config = (agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
   const since = new Date(Date.now() - 7 * 86_400_000);
-  const [row] = await db.$queryRawUnsafe<Array<{ n: bigint | number }>>(
-    `SELECT COUNT(DISTINCT "conversationId") AS "n" FROM "activity_events"
-      WHERE "organizationId"=$1 AND "type"='MESSAGE_SENT' AND "entityType"='MESSAGE' AND "actorUserId" = ANY($2::text[]) AND "occurredAt" >= $3`,
-    organizationId, ids, since,
-  );
-  const conversationsPerDay = Math.round((Number(row?.n ?? 0) / 7) * 10) / 10;
+  const conversations = await selectConversations(organizationId, ids, since, null, "estimate", 100000, origins);
+  const conversationsPerDay = Math.round((conversations.length / 7) * 10) / 10;
   const model = v2AuxModel(config.model);
   return { conversationsPerDay, usdPerDay: estimateListenCostMath(conversationsPerDay, (i, o) => estimateCost(model, i, o)) };
 }
@@ -369,6 +424,7 @@ export async function startListen(args: {
   endsAt?: string | null;
   maxUsdPerDay?: number;
   maxConversationsPerDay?: number;
+  originStageIds?: string[];
 }): Promise<{ sessionId: string }> {
   await ensureListenSchema();
   const agent = await getV2Agent(args.agentId, args.organizationId);
@@ -376,6 +432,10 @@ export async function startListen(args: {
   const apiKey = await getAgentApiKey(args.agentId).catch(() => null);
   if (!apiKey) throw new Error("NO_OPENAI_KEY");
   const ids = await validPeople(args.organizationId, args.userIds);
+  const origins = await validOrigins(args.organizationId, args.originStageIds ?? []);
+  if (ids.length === 0 && origins.length === 0) {
+    throw new Error("Escolha pessoas da equipe ou uma origem.");
+  }
   const endsAt = listenEndsAt(args.mode, { days: args.days, endsAt: args.endsAt });
   const current = await db.$queryRawUnsafe<Array<{ id: string; endsAt: Date | null; status: ListenStatus }>>(
     `SELECT "id", "endsAt", "status" FROM "ai_v2_listen_sessions" WHERE "organizationId"=$1 AND "agentId"=$2 AND "status" IN ('on','paused')`,
@@ -390,9 +450,9 @@ export async function startListen(args: {
     return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def;
   };
   await db.$executeRawUnsafe(
-    `INSERT INTO "ai_v2_listen_sessions" ("id","organizationId","agentId","status","userIds","mode","endsAt","maxUsdPerDay","maxConversationsPerDay","createdById","statusById")
-     VALUES ($1,$2,$3,'on',$4::jsonb,$5,$6,$7,$8,$9,$9)`,
-    sessionId, args.organizationId, args.agentId, JSON.stringify(ids), args.mode, endsAt,
+    `INSERT INTO "ai_v2_listen_sessions" ("id","organizationId","agentId","status","userIds","originStageIds","mode","endsAt","maxUsdPerDay","maxConversationsPerDay","createdById","statusById")
+     VALUES ($1,$2,$3,'on',$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,$10)`,
+    sessionId, args.organizationId, args.agentId, JSON.stringify(ids), JSON.stringify(origins), args.mode, endsAt,
     clamp(args.maxUsdPerDay, 0.1, 50, 1), Math.round(clamp(args.maxConversationsPerDay, 5, 500, 60)), args.userId,
   );
   return { sessionId };
@@ -443,16 +503,23 @@ type ConversationRow = { conversationId: string; lastAt: Date; number: number | 
  */
 export const SELECT_CONVERSATIONS_SQL = `
   WITH people AS (
-    SELECT "id", lower("name") AS "lname" FROM "users" WHERE "organizationId"=$1 AND "id" = ANY($2::text[])
+    SELECT "id", lower("name") AS "lname" FROM "users"
+     WHERE "organizationId"=$1 AND "type"='HUMAN' AND NOT "isErased"
+       AND (cardinality($2::text[]) = 0 OR "id" = ANY($2::text[]))
   ), hits AS (
     SELECT e."conversationId", e."occurredAt" AS "at" FROM "activity_events" e
      WHERE e."organizationId"=$1 AND e."type"='MESSAGE_SENT' AND e."entityType"='MESSAGE'
-       AND e."actorUserId" = ANY($2::text[]) AND e."occurredAt" >= $3 AND e."conversationId" IS NOT NULL
-       AND ($6::timestamptz IS NULL OR e."occurredAt" <= $6)
+       AND e."conversationId" IS NOT NULL
+       AND e."occurredAt" >= $3 AND ($6::timestamptz IS NULL OR e."occurredAt" <= $6)
+       AND (
+         (cardinality($2::text[]) > 0 AND e."actorUserId" = ANY($2::text[]))
+         OR (cardinality($2::text[]) = 0 AND e."actorUserId" IN (SELECT "id" FROM people))
+       )
     UNION ALL
     SELECT m."conversationId", m."createdAt" FROM "messages" m JOIN people p ON lower(m."senderName") = p."lname"
      WHERE m."organizationId"=$1 AND m."direction"='out' AND m."authorType"='human' AND m."createdAt" >= $3
        AND ($6::timestamptz IS NULL OR m."createdAt" <= $6)
+       AND (cardinality($2::text[]) = 0 OR p."id" = ANY($2::text[]))
   ), conv AS (
     SELECT "conversationId", max("at") AS "lastAt", count(*) AS "n" FROM hits GROUP BY 1
   )
@@ -464,11 +531,49 @@ export const SELECT_CONVERSATIONS_SQL = `
    WHERE conv."n" >= 2
      AND (c."closedAt" IS NOT NULL OR c."updatedAt" < now() - interval '60 minutes')
      AND (s."id" IS NULL OR conv."lastAt" > s."watermarkAt" + interval '1 hour')
+     AND (
+       cardinality($7::text[]) = 0
+       OR EXISTS (
+         SELECT 1
+           FROM "deals" d
+           JOIN "stages" st ON st."id" = d."stageId"
+           JOIN "pipelines" pl ON pl."id" = st."pipelineId"
+          WHERE d."organizationId" = $1
+            AND d."contactId" = c."contactId"
+            AND d."status" = 'OPEN'
+            AND d."id" = (
+              SELECT d2."id" FROM "deals" d2
+               WHERE d2."organizationId" = $1 AND d2."contactId" = c."contactId" AND d2."status" = 'OPEN'
+               ORDER BY d2."updatedAt" DESC
+               LIMIT 1
+            )
+            AND (
+              (d."stageId" = ANY($7::text[]) AND pl."name" NOT ILIKE '%atendimento%')
+              OR (
+                pl."name" ILIKE '%atendimento%'
+                AND (
+                  SELECT e.meta->'from'->>'id'
+                    FROM "deal_events" e
+                    LEFT JOIN "stages" fs ON fs."id" = e.meta->'from'->>'id'
+                    LEFT JOIN "pipelines" fp ON fp."id" = fs."pipelineId"
+                    LEFT JOIN "stages" ts ON ts."id" = e.meta->'to'->>'id'
+                    LEFT JOIN "pipelines" tp ON tp."id" = ts."pipelineId"
+                   WHERE e."dealId" = d."id"
+                     AND e."type" = 'STAGE_CHANGED'
+                     AND COALESCE(fp."name", e.meta->'from'->>'pipelineName', '') NOT ILIKE '%atendimento%'
+                     AND COALESCE(tp."name", e.meta->'to'->>'pipelineName', '') ILIKE '%atendimento%'
+                   ORDER BY e."createdAt" DESC
+                   LIMIT 1
+                ) = ANY($7::text[])
+              )
+            )
+       )
+     )
    ORDER BY conv."lastAt" ASC
    LIMIT $5`;
 
-async function selectConversations(organizationId: string, userIds: string[], since: Date, until: Date | null, sessionId: string, limit: number): Promise<ConversationRow[]> {
-  return db.$queryRawUnsafe<ConversationRow[]>(SELECT_CONVERSATIONS_SQL, organizationId, userIds, since, sessionId, limit, until);
+async function selectConversations(organizationId: string, userIds: string[], since: Date, until: Date | null, sessionId: string, limit: number, originStageIds: string[]): Promise<ConversationRow[]> {
+  return db.$queryRawUnsafe<ConversationRow[]>(SELECT_CONVERSATIONS_SQL, organizationId, userIds, since, sessionId, limit, until, originStageIds);
 }
 
 async function loadConversation(organizationId: string, conversationId: string, since: Date): Promise<ListenMessage[]> {
@@ -674,13 +779,14 @@ async function executeSweep(row: Record<string, any>, runId: string): Promise<vo
   const agentId: string = row.agentId;
   const sessionId: string = row.id;
   const userIds = (row.userIds ?? []) as string[];
+  const originStageIds = (Array.isArray(row.originStageIds) ? row.originStageIds : []) as string[];
   const agent = await getV2Agent(agentId, organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
   const config = (agent.draftConfig ?? agent.publishedConfig) as V2AgentConfig;
   const apiKey = await getAgentApiKey(agentId).catch(() => null);
   if (!apiKey) throw new Error("Sem a chave do modelo do agente (Publicação).");
   const model = v2AuxModel(config.model);
-  const people = await peopleNames(organizationId, userIds);
+  const people = userIds.length > 0 ? await peopleNames(organizationId, userIds) : await orgHumans(organizationId);
   const personNames = people.map((p) => p.name);
   const stats: ListenSessionStats = { ...((row.stats ?? {}) as ListenSessionStats) };
   let inTok = 0;
@@ -705,7 +811,7 @@ async function executeSweep(row: Record<string, any>, runId: string): Promise<vo
   const capHit = today.usd >= Number(row.maxUsdPerDay) || room === 0;
   const startsAt = new Date(row.startsAt);
   const until = row.endsAt ? new Date(row.endsAt) : null;
-  const conversations = capHit ? [] : await selectConversations(organizationId, userIds, startsAt, until, sessionId, room);
+  const conversations = capHit ? [] : await selectConversations(organizationId, userIds, startsAt, until, sessionId, room, originStageIds);
   stats.capHit = capHit;
   await progress(conversations.length, 0);
 
@@ -725,8 +831,11 @@ async function executeSweep(row: Record<string, any>, runId: string): Promise<vo
         sendersByMessage(organizationId, c.conversationId, messagesSince),
       ]);
       const attributed = attributeHumanMessages(messages, actors, userByName);
-      who = [...new Set(attributed.map((m) => m.userId).filter((u): u is string => !!u && referenceIds.has(u)))];
-      const tr = buildListenTranscript(attributed, referenceIds, [c.contactName ?? "", ...personNames].filter(Boolean));
+      const refs = userIds.length > 0
+        ? referenceIds
+        : new Set(attributed.map((m) => m.userId).filter((u): u is string => !!u));
+      who = [...new Set(attributed.map((m) => m.userId).filter((u): u is string => !!u && refs.has(u)))];
+      const tr = buildListenTranscript(attributed, refs, [c.contactName ?? "", ...personNames].filter(Boolean));
       count = attributed.length;
       if (tr.referenceCount < LISTEN_LIMITS.minReferenceMessages) skipped = "poucas mensagens da pessoa escutada";
       else {
