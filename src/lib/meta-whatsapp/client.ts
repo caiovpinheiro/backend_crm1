@@ -1203,9 +1203,21 @@ export class MetaWhatsAppClient {
 
   // ── Typing indicator + mark as read ────────────
 
-  async sendTypingIndicator(messageId: string): Promise<void> {
+  /**
+   * "Digitando…" no WhatsApp do cliente. A Graph acopla o indicador ao
+   * `status: "read"` da mensagem — não existe um sem o outro.
+   *
+   * `opts` (opcional): `POST /typing` manda `maxAttempts: 1` e um timeout
+   * curto — o indicador vale ~25 s, retentar com backoff não serve.
+   */
+  async sendTypingIndicator(
+    messageId: string,
+    opts: { maxAttempts?: number; timeoutMs?: number } = {},
+  ): Promise<void> {
     try {
       await this.graphFetch(`${this.phoneNumberId}/messages`, {
+        ...(opts.maxAttempts ? { maxAttempts: opts.maxAttempts } : {}),
+        ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
         method: "POST",
         body: JSON.stringify({
           messaging_product: "whatsapp",
