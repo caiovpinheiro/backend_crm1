@@ -12,21 +12,21 @@ import {
   PRODUCT_WHATSAPP_SEND_MODE_KEY,
 } from "@/lib/product-whatsapp-send-mode";
 import { getLogger } from "@/lib/logger";
+import {
+  foldProductSearch as foldSearch,
+  PRODUCT_NAME_FOLD_SQL,
+  PRODUCT_SEARCH_MIN_CHARS,
+  PRODUCT_SKU_FOLD_SQL,
+} from "@/lib/product-search";
 
 const log = getLogger("api/products");
 
-const ACCENT_FROM = "áàâãäåéèêëíìîïóòôõöúùûüýÿçñ";
-const ACCENT_TO = "aaaaaaeeeeiiiiooooouuuuyycn";
-
-function foldSearch(raw: string): string {
-  return raw
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toLowerCase()
-    .replace(/[%_\\]/g, "");
-}
-
-/** Busca sem acento. Graduação primeiro, depois pós; cada grupo em ordem alfabética. */
+/**
+ * Busca sem acento, numa ida só: ids da página + total pela janela
+ * (`count(*) OVER ()`, calculado antes do LIMIT). Graduação primeiro, depois
+ * pós; cada grupo em ordem alfabética. Só uma página vazia com OFFSET > 0
+ * precisa de um COUNT à parte para o total.
+ */
 async function searchProductIds(args: {
   search: string;
   activeOnly: boolean;
@@ -37,7 +37,7 @@ async function searchProductIds(args: {
   take: number;
 }): Promise<{ ids: string[]; total: number }> {
   const folded = foldSearch(args.search);
-  if (!folded) return { ids: [], total: 0 };
+  if (folded.length < PRODUCT_SEARCH_MIN_CHARS) return { ids: [], total: 0 };
   const orgId = getOrgIdOrThrow();
   const pattern = `%${folded}%`;
   const filters: Prisma.Sql[] = [Prisma.sql`p."organizationId" = ${orgId}`];
@@ -54,37 +54,42 @@ async function searchProductIds(args: {
     filters.push(Prisma.sql`p.kind::text = ${args.kindFilter}`);
   }
   if (args.catalogId) filters.push(Prisma.sql`p."catalogId" = ${args.catalogId}`);
+  const nameFold = Prisma.raw(PRODUCT_NAME_FOLD_SQL);
+  const skuFold = Prisma.raw(PRODUCT_SKU_FOLD_SQL);
+  // `p.sku IS NOT NULL` explícito: o índice de SKU é parcial. Sem SKU, o
+  // `coalesce(sku, '')` antigo nunca casava com termo não vazio — igual.
   filters.push(Prisma.sql`(
-    translate(lower(p.name), ${ACCENT_FROM}, ${ACCENT_TO}) LIKE ${pattern}
-    OR translate(lower(coalesce(p.sku, '')), ${ACCENT_FROM}, ${ACCENT_TO}) LIKE ${pattern}
+    ${nameFold} LIKE ${pattern}
+    OR (p.sku IS NOT NULL AND ${skuFold} LIKE ${pattern})
   )`);
   const where = Prisma.join(filters, " AND ");
-  const [idRows, countRows] = await Promise.all([
-    prisma.$queryRaw<{ id: string }[]>`
-      SELECT p.id
-      FROM products p
-      LEFT JOIN course_configs cc ON cc."productId" = p.id
-      WHERE ${where}
-      ORDER BY
-        CASE cc.level::text
-          WHEN 'GRADUATION' THEN 0
-          WHEN 'POSTGRADUATE' THEN 1
-          ELSE 2
-        END,
-        translate(lower(p.name), ${ACCENT_FROM}, ${ACCENT_TO})
-      LIMIT ${args.take}
-      OFFSET ${args.skip}
-    `,
-    prisma.$queryRaw<{ total: number }[]>`
-      SELECT count(*)::int AS total
-      FROM products p
-      WHERE ${where}
-    `,
-  ]);
-  return {
-    ids: idRows.map((r) => r.id),
-    total: Number(countRows[0]?.total ?? 0),
-  };
+  const rows = await prisma.$queryRaw<{ id: string; total: number }[]>`
+    SELECT p.id, count(*) OVER ()::int AS total
+    FROM products p
+    LEFT JOIN course_configs cc ON cc."productId" = p.id
+    WHERE ${where}
+    ORDER BY
+      CASE cc.level::text
+        WHEN 'GRADUATION' THEN 0
+        WHEN 'POSTGRADUATE' THEN 1
+        ELSE 2
+      END,
+      ${nameFold},
+      p.id
+    LIMIT ${args.take}
+    OFFSET ${args.skip}
+  `;
+  if (rows.length > 0) {
+    return { ids: rows.map((r) => r.id), total: Number(rows[0]!.total) };
+  }
+  if (args.skip === 0) return { ids: [], total: 0 };
+  // Página além do fim: a janela não devolve linha nenhuma para contar.
+  const countRows = await prisma.$queryRaw<{ total: number }[]>`
+    SELECT count(*)::int AS total
+    FROM products p
+    WHERE ${where}
+  `;
+  return { ids: [], total: Number(countRows[0]?.total ?? 0) };
 }
 
 export async function GET(request: Request) {
@@ -116,7 +121,8 @@ export async function GET(request: Request) {
     where.kind = kindFilter;
   }
   if (catalogId) where.catalogId = catalogId;
-  const searched = search
+  // Termo curto demais (1 letra) não filtra: devolve a lista normal.
+  const searched = foldSearch(search).length >= PRODUCT_SEARCH_MIN_CHARS
     ? await searchProductIds({
         search,
         activeOnly,
@@ -157,16 +163,20 @@ export async function GET(request: Request) {
       return [...rows].sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
     }
     try {
-      const [rows, total] = await Promise.all([
-        prisma.product.findMany({
-          where,
-          orderBy,
-          skip: listSkip,
-          take: listTake,
-          include: productInclude,
-        }),
-        searched ? Promise.resolve(searched.total) : prisma.product.count({ where }),
-      ]);
+      // Busca sem resultado: nada a carregar.
+      const [rows, total] =
+        searched && searched.ids.length === 0
+          ? [[], searched.total]
+          : await Promise.all([
+              prisma.product.findMany({
+                where,
+                orderBy,
+                skip: listSkip,
+                take: listTake,
+                include: productInclude,
+              }),
+              searched ? Promise.resolve(searched.total) : prisma.product.count({ where }),
+            ]);
       products = { rows: sortSearched(rows), total };
     } catch (inner) {
       const raw = inner instanceof Error ? inner.message : "";
