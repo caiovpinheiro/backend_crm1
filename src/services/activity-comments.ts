@@ -136,6 +136,8 @@ async function createCommentEvent(tx: ScopedTx, args: {
         ...(args.meta ?? {}),
       } as Prisma.InputJsonValue,
     }),
+    // Só o id volta: ninguém usa a linha (era INSERT … RETURNING * de ~25 colunas).
+    select: { id: true },
   });
 }
 
