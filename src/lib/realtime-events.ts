@@ -272,6 +272,57 @@ export type TeamChatPayload = {
   [field: string]: unknown;
 };
 
+// ── Funil ───────────────────────────────────────────────────────────────
+
+/**
+ * Card enxuto do board, só para o cliente que ainda não tem o negócio
+ * em cache (outro funil). Quem já tem o card reaproveita o objeto local
+ * — `lastMessage` e não-lidas não viajam aqui.
+ */
+export type DealMovedCard = {
+  id: string;
+  title: string;
+  value?: number | string;
+  status?: string;
+  lostReason?: string | null;
+  position?: number;
+  expectedClose?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  contact?: {
+    id: string;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    avatarUrl?: string | null;
+  } | null;
+  owner?: {
+    id: string;
+    name: string;
+    avatarUrl?: string | null;
+    type?: string | null;
+  } | null;
+  tags?: Array<{ id: string; name: string; color: string }>;
+};
+
+/**
+ * Negócio mudou de etapa (ou de ordem na mesma etapa) e o banco já
+ * commitou. `position` é a posição fracionária gravada, não o índice
+ * que o cliente pediu. `card` é opcional: sem ele, quem não tem o
+ * negócio em cache espera o polling.
+ */
+export type DealMovedPayload = {
+  organizationId: OrgId;
+  dealId: string;
+  fromPipelineId: string;
+  toPipelineId: string;
+  fromStageId: string;
+  toStageId: string;
+  position: number;
+  updatedAt: string;
+  card?: DealMovedCard;
+};
+
 // ── União discriminada ──────────────────────────────────────────────────
 
 export type RealtimeEventMap = {
@@ -300,6 +351,7 @@ export type RealtimeEventMap = {
   team_chat_typing: TeamChatPayload;
   team_chat_work_item_updated: TeamChatPayload;
   team_chat_forward_updated: TeamChatPayload;
+  deal_moved: DealMovedPayload;
 };
 
 export type RealtimeEventName = keyof RealtimeEventMap;
@@ -336,6 +388,7 @@ export const REALTIME_EVENT_NAMES = [
   "team_chat_typing",
   "team_chat_work_item_updated",
   "team_chat_forward_updated",
+  "deal_moved",
 ] as const satisfies readonly RealtimeEventName[];
 
 /** Único ponto que fala com o barramento. */
@@ -400,6 +453,20 @@ export function publishConversationUpdated(
   payload: ConversationUpdatedPayload,
 ): void {
   publish("conversation_updated", payload);
+}
+
+/**
+ * Board: um negócio já está na etapa/posição novas. Só o move individual
+ * (`moveDeal`). Lote (`POST /api/deals/bulk`, `bulkMoveStage` e qualquer
+ * outra movimentação em massa) não publica este evento — o quadro converge
+ * no polling. Best-effort: falha de Redis/SSE não desfaz o move.
+ */
+export function publishDealMoved(payload: DealMovedPayload): void {
+  try {
+    publish("deal_moved", payload);
+  } catch {
+    /* best-effort */
+  }
 }
 
 export function publishConversationTimelineUpdated(

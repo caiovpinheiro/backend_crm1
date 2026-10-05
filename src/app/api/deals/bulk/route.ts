@@ -394,6 +394,8 @@ export async function POST(request: Request) {
           throw err;
         }
 
+        // Lote síncrono: grava no banco e devolve `{ affected }`. Não publica
+        // `deal_moved` nem pede refetch do board — o Pipeline converge no poll.
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
             const pipelineChanged =

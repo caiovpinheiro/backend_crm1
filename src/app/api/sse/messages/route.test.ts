@@ -288,6 +288,74 @@ describe("GET /api/sse/messages — filtro, memo de authz e frame", () => {
     expect(changed).not.toContain("assignedToId");
   });
 
+  it("deal_moved: quem não vê o destino recebe o evento sem card; quem não vê nenhum lado não recebe", async () => {
+    mocks.loadAuthzContext.mockResolvedValue(restrictedCtx(["p_denied"]));
+    const { reader, next, emit } = await open();
+    openReader = reader;
+
+    emit(
+      "deal_moved",
+      envelope(
+        {
+          organizationId: ORG,
+          dealId: "d1",
+          fromPipelineId: "p_ok",
+          toPipelineId: "p_denied",
+          fromStageId: "s_from",
+          toStageId: "s_to",
+          position: 1,
+          updatedAt: "2026-10-05T12:00:00.000Z",
+          card: { id: "d1", title: "SEGREDO" },
+        },
+        "deal_moved",
+      ),
+    );
+    const originOnly = await next();
+    expect(originOnly).toContain('"dealId":"d1"');
+    expect(originOnly).toContain('"fromPipelineId":"p_ok"');
+    expect(originOnly).not.toContain("SEGREDO");
+    expect(originOnly).not.toContain('"card"');
+
+    emit(
+      "deal_moved",
+      envelope(
+        {
+          organizationId: ORG,
+          dealId: "d-hidden",
+          fromPipelineId: "p_denied",
+          toPipelineId: "p_denied",
+          fromStageId: "s_a",
+          toStageId: "s_b",
+          position: 0,
+          updatedAt: "2026-10-05T12:00:00.000Z",
+          card: { id: "d-hidden", title: "OUTRO" },
+        },
+        "deal_moved",
+      ),
+    );
+    await flush();
+    emit(
+      "deal_moved",
+      envelope(
+        {
+          organizationId: ORG,
+          dealId: "d2",
+          fromPipelineId: "p_ok",
+          toPipelineId: "p_ok",
+          fromStageId: "s1",
+          toStageId: "s2",
+          position: 0,
+          updatedAt: "2026-10-05T12:00:00.000Z",
+        },
+        "deal_moved",
+      ),
+    );
+    const both = await next();
+    expect(both).toContain('"dealId":"d2"');
+    expect(both).not.toContain("d-hidden");
+    expect(both).not.toContain("OUTRO");
+  });
+
   it("sse_access_revoked fecha a conexão", async () => {
     const { reader, next, emit } = await open();
     emit("sse_access_revoked", envelope({ userId: USER }, "sse_access_revoked"));
