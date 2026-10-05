@@ -56,6 +56,20 @@ function graphTransientMaxAttempts(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 3;
 }
 
+/**
+ * Pior duração de uma `graphFetch`: cada tentativa espera no máximo
+ * `GRAPH_TIMEOUT_MS` e, entre as que falham por erro transitório, o backoff
+ * linear pode chegar a 100% de `GRAPH_TRANSIENT_BACKOFF_MS * attempt`.
+ * A última tentativa não dorme.
+ */
+export function metaGraphFetchWorstCaseMs(
+  attempts = graphTransientMaxAttempts(),
+): number {
+  const n = Math.max(1, Math.floor(attempts));
+  const backoffSteps = ((n - 1) * n) / 2;
+  return n * GRAPH_TIMEOUT_MS + GRAPH_TRANSIENT_BACKOFF_MS * backoffSteps;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

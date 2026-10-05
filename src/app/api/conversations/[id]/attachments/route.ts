@@ -4,7 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { requireConversationAccessAndLoad } from "@/lib/conversation-access";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
   WHATSAPP_VIDEO_MAX_BYTES,
@@ -674,10 +674,10 @@ export async function POST(request: Request, context: RouteContext) {
               lastMessageDirection: "out",
               hasAgentReply: true,
               hasHumanReply: true,
-              ...lastMessageAtData(msgRow),
               ...(metaSendError ? { hasError: true } : { hasError: false }),
             },
           });
+          await touchChatLastMessageAt({ conversationId: conv.id, message: msgRow });
         } catch { /* columns may not exist yet */ }
 
         fireTrigger("message_sent", {
@@ -767,9 +767,9 @@ export async function POST(request: Request, context: RouteContext) {
               hasAgentReply: true,
               hasHumanReply: true,
               hasError: false,
-              ...lastMessageAtData(msgRow),
             },
           });
+          await touchChatLastMessageAt({ conversationId: conv.id, message: msgRow });
         } catch { /* columns may not exist yet */ }
         timing.add("db", performance.now() - db0);
 
@@ -883,9 +883,9 @@ export async function POST(request: Request, context: RouteContext) {
             hasAgentReply: true,
             hasHumanReply: true,
             hasError: false,
-            ...lastMessageAtData(localMsg),
           },
         });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: localMsg });
       } catch { /* columns may not exist yet */ }
 
       fireTrigger("message_sent", {

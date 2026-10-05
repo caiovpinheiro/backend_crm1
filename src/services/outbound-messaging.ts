@@ -24,7 +24,7 @@ import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import type { TemplateVariableInput } from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enqueueMetaOutbound } from "@/lib/queue";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
@@ -370,10 +370,10 @@ export async function sendTextToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: sendResult.failed,
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     // colunas opcionais em bases antigas
   }
@@ -606,10 +606,10 @@ export async function sendInteractiveButtonsToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     // colunas opcionais em bases antigas
   }
@@ -915,10 +915,10 @@ export async function sendInteractiveListToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     // colunas opcionais em bases antigas
   }
@@ -1136,10 +1136,10 @@ export async function sendFlowToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: Boolean(sendError),
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     // colunas opcionais em bases antigas
   }
@@ -1405,10 +1405,10 @@ export async function sendTemplateToConversation(
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: false,
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     // colunas opcionais em bases antigas
   }

@@ -49,10 +49,7 @@ import {
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, getRequestContext, runWithActor } from "@/lib/request-context";
-import {
-  lastMessageAtData,
-  touchConversationLastMessageAt,
-} from "@/lib/conversation-last-message";
+import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { safeFetch } from "@/lib/safe-fetch";
@@ -64,14 +61,12 @@ import {
 import {
   assertStageEntryFields,
   assignDealOwner,
+  createDeal,
   createDealEvent,
   markDealLost,
   markDealWon,
-  findCanonicalOpenDealInPipeline,
-  nextDealNumber,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
-import { pipelineForbidsDuplicateDeals } from "@/services/deal-duplicates";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
@@ -250,9 +245,8 @@ async function pauseAwaitingReply(
 /**
  * Ordem da lista do inbox (`conversations.lastMessageAt`) para os envios da
  * automação que não atualizam a conversa depois de gravar a mensagem
- * (mídia, botões, lista, flow, pergunta, falha). Onde já existe update da
- * conversa o campo vai nele (`lastMessageAtData`). Falha aqui não derruba o
- * passo.
+ * (mídia, botões, lista, flow, pergunta, falha) e também depois do update
+ * de marcação. A coluna só anda com GREATEST. Falha aqui não derruba o passo.
  */
 async function touchAutomationLastMessageAt(
   conversationId: string,
@@ -3092,9 +3086,9 @@ async function executeStep(
                   hasHumanReply: true,
                 }
               : await botOutboundReplyMark()),
-            ...lastMessageAtData(saved),
           },
         }).catch(() => {});
+        await touchAutomationLastMessageAt(conversationId, saved.createdAt);
 
         // Resposta "como responsável" libera vaga na fila (sai de Entrada
         // no volume do consultor) — igual ao POST manual do inbox.
@@ -3419,9 +3413,9 @@ async function executeStep(
           data: {
             updatedAt: new Date(),
             ...(await botOutboundReplyMark()),
-            ...lastMessageAtData(saved),
           },
         }).catch(() => {});
+        await touchAutomationLastMessageAt(tplConversationId, saved.createdAt);
 
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
@@ -4610,65 +4604,19 @@ async function executeStep(
         select: { name: true, pipelineId: true, pipeline: { select: { name: true } } },
       });
       if (!stage) throw new Error("create_deal: stageId inválido");
-      if (
-        rt.contactId &&
-        (await pipelineForbidsDuplicateDeals(stage.pipelineId))
-      ) {
-        const existing = await findCanonicalOpenDealInPipeline(
-          rt.contactId,
-          stage.pipelineId,
-        );
-        if (existing) {
-          rt.dealId = existing.id;
-          rt.deal = {
-            ...(existing as unknown as Deal & { contactId: string | null }),
-            stageName: existing.stage?.name ?? stage.name,
-            pipelineId: existing.stage?.pipeline?.id ?? stage.pipelineId,
-            pipelineName: existing.stage?.pipeline?.name ?? stage.pipeline?.name ?? "",
-          };
-          return {};
-        }
-      }
-      // `Deal.number` e mandatorio + unico por org. Aloca max+1 com retry
-      // em P2002 (corrida concorrente). Mesmo padrao de services/deals.ts.
-      let deal: Deal | null = null;
-      let lastErr: unknown;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const number = await nextDealNumber();
-        const title = rawTitle || `Negócio - #${number}`;
-        try {
-          deal = await prisma.deal.create({
-            data: withOrgFromCtx({
-              number,
-              title,
-              contactId: rt.contactId,
-              stageId,
-              status: "OPEN" as const,
-              ...(rawValue != null
-                ? { value: new Prisma.Decimal(String(rawValue)) }
-                : {}),
-            }),
-          });
-          break;
-        } catch (err) {
-          lastErr = err;
-          const isUnique =
-            typeof err === "object" &&
-            err !== null &&
-            "code" in err &&
-            (err as { code: string }).code === "P2002";
-          if (!isUnique) throw err;
-        }
-      }
-      if (!deal) {
-        throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
-      }
+      const deal = await createDeal({
+        contactId: rt.contactId,
+        stageId,
+        title: rawTitle || undefined,
+        status: "OPEN",
+        ...(rawValue != null ? { value: rawValue } : {}),
+      });
       rt.dealId = deal.id;
       rt.deal = {
-        ...(deal as Deal & { contactId: string | null }),
-        stageName: stage.name,
-        pipelineId: stage.pipelineId,
-        pipelineName: stage.pipeline?.name ?? "",
+        ...(deal as unknown as Deal & { contactId: string | null }),
+        stageName: deal.stage?.name ?? stage.name,
+        pipelineId: deal.stage?.pipeline?.id ?? stage.pipelineId,
+        pipelineName: deal.stage?.pipeline?.name ?? stage.pipeline?.name ?? "",
       };
       return {};
     }

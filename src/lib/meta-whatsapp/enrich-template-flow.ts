@@ -8,6 +8,9 @@ import { getLogger } from "@/lib/logger";
 
 const log = getLogger("meta-whatsapp.enrich-template-flow");
 
+/** Teto de páginas em `findTemplateByListing` (fallback do enriquecimento de Flow). */
+export const TEMPLATE_DEFINITION_LISTING_PAGE_CAP = 40;
+
 export { isFlowDefinitionButton };
 
 /**
@@ -167,7 +170,7 @@ async function findTemplateByListing(
 
   // `limit: 200` — valor comprovado seguro pra `message_templates` (usado em
   // outros pontos do backend). Alguns tokens rejeitam >200 com 400.
-  for (let page = 0; page < 40; page++) {
+  for (let page = 0; page < TEMPLATE_DEFINITION_LISTING_PAGE_CAP; page++) {
     let listRaw: unknown;
     try {
       listRaw = await client.listMessageTemplates({ limit: 200, after });
@@ -217,7 +220,10 @@ async function findTemplateByListing(
     row: null,
     reason: {
       kind: "not_found",
-      pagesScanned: Math.min(40, Math.ceil((totalRowsScanned || 1) / 200)),
+      pagesScanned: Math.min(
+        TEMPLATE_DEFINITION_LISTING_PAGE_CAP,
+        Math.ceil((totalRowsScanned || 1) / 200),
+      ),
       totalRowsScanned,
       sameNameDifferentLanguage: langHint,
     },

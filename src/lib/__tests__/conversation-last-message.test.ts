@@ -17,6 +17,8 @@ import {
   chatMessageSqlFilter,
   isListChatMessage,
   lastMessageAtData,
+  listChatMessageAt,
+  touchChatLastMessageAt,
   touchConversationLastMessageAt,
 } from "@/lib/conversation-last-message";
 
@@ -50,14 +52,13 @@ describe("recorte de mensagem de chat", () => {
     expect(isListChatMessage({ direction: "system", messageType: "text" })).toBe(false);
   });
 
-  it("lastMessageAtData: campo para o update existente, vazio fora do recorte", () => {
+  it("listChatMessageAt propõe o horário só no recorte; lastMessageAtData não atribui a coluna", () => {
     const createdAt = new Date("2026-10-03T10:00:00.000Z");
-    expect(lastMessageAtData({ direction: "out", messageType: "text", createdAt })).toEqual({
-      lastMessageAt: createdAt,
-    });
-    expect(
-      lastMessageAtData({ direction: "out", messageType: "note", isPrivate: true, createdAt }),
-    ).toEqual({});
+    expect(listChatMessageAt({ direction: "out", messageType: "text", createdAt })).toEqual(createdAt);
+    expect(listChatMessageAt({ direction: "out", messageType: "note", isPrivate: true, createdAt })).toBeNull();
+    expect(listChatMessageAt({ direction: "out", messageType: "ai_draft", createdAt })).toBeNull();
+    expect(listChatMessageAt({ direction: "out", messageType: "event:transfer", createdAt })).toBeNull();
+    expect(lastMessageAtData({ direction: "out", messageType: "text", createdAt })).toEqual({});
   });
 
   it("o predicado SQL (prévia do card) exclui exatamente os mesmos tipos", () => {
@@ -81,13 +82,45 @@ describe("escritas cruas", () => {
     expect(values).toContain("conv-1");
   });
 
-  it("touchConversationLastMessageAt só avança", async () => {
+  it("touchConversationLastMessageAt só avança (GREATEST na linha)", async () => {
     const at = new Date("2026-10-03T10:00:00.000Z");
     await touchConversationLastMessageAt({ conversationId: "conv-2", at });
     const { text, values } = sqlOf(h.executeRaw.mock.calls[0]!);
-    expect(text).toMatch(/SET "lastMessageAt" = \?/);
-    expect(text).toMatch(/"lastMessageAt" IS NULL OR "lastMessageAt" < \?/);
+    expect(text).toMatch(/SET "lastMessageAt" = GREATEST\("lastMessageAt", \?\)/);
+    expect(text).not.toMatch(/SET "lastMessageAt" = \?/);
     expect(text).not.toMatch(/updatedAt/);
-    expect(values).toEqual([at, "conv-2", at]);
+    expect(values).toEqual([at, "conv-2"]);
+  });
+
+  it("mensagem nova sobe, atrasada não desce, e dois horários concorrentes ficam no maior", () => {
+    const current = new Date("2026-10-05T15:00:00.000Z");
+    const late = new Date("2026-10-05T14:00:00.000Z");
+    const next = new Date("2026-10-05T16:00:00.000Z");
+    const apply = (row: Date | null, at: Date) =>
+      row == null || at.getTime() > row.getTime() ? at : row;
+    expect(apply(current, next)).toEqual(next);
+    expect(apply(current, late)).toEqual(current);
+    expect(apply(apply(current, late), next)).toEqual(next);
+    expect(apply(apply(current, next), late)).toEqual(next);
+  });
+
+  it("nota, ai_draft e evento não escrevem lastMessageAt", async () => {
+    const createdAt = new Date("2026-10-05T14:00:00.000Z");
+    for (const messageType of ["note", "ai_draft", "event", "whatsapp_call"] as const) {
+      await touchChatLastMessageAt({
+        conversationId: "conv-3",
+        message: { direction: "out", messageType, createdAt },
+      });
+    }
+    await touchChatLastMessageAt({
+      conversationId: "conv-3",
+      message: { direction: "out", messageType: "text", isPrivate: true, createdAt },
+    });
+    expect(h.executeRaw).not.toHaveBeenCalled();
+    await touchChatLastMessageAt({
+      conversationId: "conv-3",
+      message: { direction: "in", messageType: "text", createdAt },
+    });
+    expect(h.executeRaw).toHaveBeenCalledTimes(1);
   });
 });

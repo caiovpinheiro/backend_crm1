@@ -6,7 +6,7 @@
  */
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { HUMAN_OUTBOUND_REPLY_MARK } from "@/lib/conversation-reply-marking";
 import {
   formatMetaSendError,
@@ -415,10 +415,10 @@ export async function sendProductsToConversation(args: {
       where: { id: conv.id },
       data: {
         ...HUMAN_OUTBOUND_REPLY_MARK,
-        ...lastMessageAtData(saved),
         hasError: false,
       },
     });
+    await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
   } catch {
     /* colunas opcionais */
   }

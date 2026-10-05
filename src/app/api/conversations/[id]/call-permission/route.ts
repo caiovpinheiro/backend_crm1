@@ -5,7 +5,7 @@ import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import {
-  lastMessageAtData,
+  touchChatLastMessageAt,
   touchConversationLastMessageAt,
 } from "@/lib/conversation-last-message";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
@@ -167,8 +167,11 @@ async function dispatchCallPermissionTemplate(args: {
         whatsappCallConsentStatus: "REQUESTED",
         whatsappCallConsentUpdatedAt: now,
         updatedAt: now,
-        ...lastMessageAtData(savedMsg),
       },
+    });
+    await touchChatLastMessageAt({
+      conversationId: args.conv.id,
+      message: savedMsg,
     });
     try {
       await prisma.$executeRaw`

@@ -24,7 +24,7 @@ import {
   renderTemplate,
 } from "@/lib/ai-agents/piloting";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
@@ -441,10 +441,13 @@ export async function sendAgentMessage(args: {
         data: {
           updatedAt: new Date(),
           ...(await botOutboundReplyMark()),
-          ...lastMessageAtData(saved),
         },
       })
       .catch(() => null);
+    await touchChatLastMessageAt({
+      conversationId: args.conversationId,
+      message: saved,
+    }).catch(() => null);
     publishNewMessage({
       organizationId: getOrgIdOrNull(),
       conversationId: args.conversationId,
@@ -520,10 +523,13 @@ export async function sendAgentMessage(args: {
           data: {
             updatedAt: new Date(),
             ...(await botOutboundReplyMark()),
-            ...lastMessageAtData(saved),
           },
         })
         .catch(() => null);
+      await touchChatLastMessageAt({
+        conversationId: args.conversationId,
+        message: saved,
+      }).catch(() => null);
       publishNewMessage({
         organizationId: getOrgIdOrNull(),
         conversationId: args.conversationId,

@@ -158,10 +158,14 @@ async function deliver(
       data: {
         lastMessageDirection: "out",
         updatedAt: new Date(),
-        lastMessageAt: msg.createdAt,
       },
     })
     .catch(() => {});
+  const { touchChatLastMessageAt } = await import("@/lib/conversation-last-message");
+  await touchChatLastMessageAt({
+    conversationId: ch.conversationId,
+    message: { direction: "out", messageType: "text", createdAt: msg.createdAt },
+  }).catch(() => {});
 }
 
 /** Notifica stakeholders `notifyOnSend` que o processo avançou. */

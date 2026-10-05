@@ -373,14 +373,18 @@ export async function markAsSent(
   id: string,
   data: { sentMessageId?: string | null },
 ) {
-  const updated = await prisma.scheduledMessage.update({
-    where: { id },
+  const claimed = await prisma.scheduledMessage.updateMany({
+    where: { id, status: ScheduledMessageStatus.SENDING },
     data: {
       status: ScheduledMessageStatus.SENT,
       sentAt: new Date(),
       sentMessageId: data.sentMessageId ?? null,
     },
   });
+  if (claimed.count !== 1) return null;
+
+  const updated = await prisma.scheduledMessage.findUnique({ where: { id } });
+  if (!updated) return null;
 
   publishScheduledMessageUpdated({
     organizationId: updated.organizationId,
@@ -406,14 +410,18 @@ export async function markAsSent(
 }
 
 export async function markAsFailed(id: string, reason: string) {
-  const updated = await prisma.scheduledMessage.update({
-    where: { id },
+  const claimed = await prisma.scheduledMessage.updateMany({
+    where: { id, status: ScheduledMessageStatus.SENDING },
     data: {
       status: ScheduledMessageStatus.FAILED,
       failedAt: new Date(),
       failureReason: reason.slice(0, 500),
     },
   });
+  if (claimed.count !== 1) return null;
+
+  const updated = await prisma.scheduledMessage.findUnique({ where: { id } });
+  if (!updated) return null;
 
   // FAILED também sai da lista de pendentes — o banner precisa saber.
   publishScheduledMessageUpdated({

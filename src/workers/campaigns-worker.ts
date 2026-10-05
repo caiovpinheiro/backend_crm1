@@ -2,7 +2,7 @@ import { Queue, Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
 import { Prisma, type ChannelProvider } from "@prisma/client";
 
-import { lastMessageAtData } from "@/lib/conversation-last-message";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
@@ -1097,10 +1097,10 @@ async function persistCampaignOutboundMessage(input: {
       data: {
         updatedAt: new Date(),
         ...(await botOutboundReplyMark()),
-        ...lastMessageAtData(saved),
       },
     })
     .catch(() => {});
+  await touchChatLastMessageAt({ conversationId, message: saved }).catch(() => {});
   await maybeResolveUnansweredOutboundTicket(conversationId).catch(() => {});
 
   // NÃO publicar SSE `new_message` em blast de campanha.
