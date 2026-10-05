@@ -80,13 +80,13 @@ vi.mock("@/services/attendance-guards", () => ({
 
 const { executeDistribution } = await import("../engine");
 
-describe("kill switch não bloqueia o passo da automação", () => {
+describe("distribuição ligada só no bloco e na ferramenta", () => {
   beforeEach(() => {
-    isDistributionEnabled.mockResolvedValue(false);
+    isDistributionEnabled.mockResolvedValue(true);
     getDistributionResponsibles.mockClear();
   });
 
-  it("SYSTEM com o motor desligado não sorteia", async () => {
+  it("SYSTEM não sorteia mesmo com o motor ligado", async () => {
     const result = await executeDistribution({
       triggerSource: "SYSTEM",
       conversationId: "c1",
@@ -96,7 +96,17 @@ describe("kill switch não bloqueia o passo da automação", () => {
     expect(getDistributionResponsibles).not.toHaveBeenCalled();
   });
 
-  it("AUTOMATION com o motor desligado ainda avalia o departamento do passo", async () => {
+  it("AUTOMATION com o motor desligado não atribui", async () => {
+    isDistributionEnabled.mockResolvedValue(false);
+    const result = await executeDistribution({
+      triggerSource: "AUTOMATION",
+      departmentIds: ["dept_retencao"],
+    });
+    expect(result.reason).toBe("DISTRIBUTION_DISABLED");
+    expect(getDistributionResponsibles).not.toHaveBeenCalled();
+  });
+
+  it("AUTOMATION com o motor ligado avalia o departamento do passo", async () => {
     const result = await executeDistribution({
       triggerSource: "AUTOMATION",
       departmentIds: ["dept_retencao"],

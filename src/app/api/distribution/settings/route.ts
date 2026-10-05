@@ -14,15 +14,14 @@
  *       - id: lead sem departamento vai SÓ para os membros desse departamento;
  *         se nenhum estiver elegível, espera na fila (fronteira estrita).
  *   - `enabled`:
- *       - true (default): motor atribui no inbound e drena a Entrada.
- *       - false: o sistema não sorteia sozinho. O passo `execute_distribution`
- *         (automação), a ferramenta do agente de IA e a redistribuição manual
- *         continuam atribuindo, e a fila deles ainda drena.
+ *       - true: atribui só no bloco `execute_distribution` da automação,
+ *         na ferramenta `execute_distribution` do agente de IA (se estiver
+ *         em `enabledTools`) e na redistribuição manual. Não sorteia
+ *         conversa nova sozinho.
+ *       - false: ninguém é atribuído.
  *   - `autoOnInbound`:
- *       - true (default): todo ticket OPEN sem responsável entra na fila de
- *         espera (legado acadêmico — não exige passo na automação).
- *       - false: a fila só recebe quem passou por `execute_distribution`
- *         (automação, IA ou redistribuição manual).
+ *       - gravado ainda, mas não sorteia inbound. Conversa nova sem o
+ *         bloco ou a ferramenta não entra na fila.
  *
  * PUT aceita atualização PARCIAL (só grava as chaves presentes no corpo).
  * Gateado por `smart_distribution` + `distribution:execute`.
