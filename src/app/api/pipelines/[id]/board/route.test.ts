@@ -44,6 +44,8 @@ const h = vi.hoisted(() => {
       down: false,
     },
     pg: [] as string[],
+    /** Ids pedidos em cada `deal.findMany` com include (hidratação dos cards). */
+    includeIds: [] as string[][],
     trips: 0,
     /** Maior profundidade já concluída na requisição corrente. */
     doneDepth: 0,
@@ -394,6 +396,7 @@ vi.mock("@/lib/prisma", () => ({
           take: args.take,
           select: args.select,
         }) as Row[];
+        if (args.include) h.includeIds.push(rows.map((r) => r.id as string));
         return args.include ? rows.map(withInclude) : rows;
       },
       groupBy: async (args: { where?: Row }) => {
@@ -605,6 +608,86 @@ describe("rota do board: cache canônico e checagens", () => {
     expect(h.pg).toEqual([]);
     // Acerto devolve o mesmo texto guardado, sem reserializar.
     expect(await post.text()).toBe(getText);
+  });
+
+  // ── Tamanho da página (K4) ──────────────────────────────────────────────
+
+  type StageBody = {
+    id: string;
+    deals: { id: string }[];
+    totalCount: number;
+    loadedCount: number;
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+  const boardOf = async (res: Response) => JSON.parse(await res.text()) as StageBody[];
+  const getBoard = (query: string) =>
+    GET(new Request(`http://localhost/api/pipelines/${PIPELINE}/board${query}`), params());
+
+  it("sem perStage/limit: 50 cards por etapa, com total, hasMore e cursor para o resto", async () => {
+    const board = await boardOf(await getBoard(""));
+    expect(board).toHaveLength(STAGE_COUNT);
+    for (const stage of board) {
+      expect(stage.deals).toHaveLength(50);
+      expect(stage.loadedCount).toBe(50);
+      expect(stage.totalCount).toBe(PER_STAGE + 20);
+      expect(stage.hasMore).toBe(true);
+      expect(typeof stage.nextCursor).toBe("string");
+    }
+  });
+
+  it("`limit` vale como `perStage` (GET e POST) e cai na mesma chave de cache", async () => {
+    const viaLimit = await getBoard("?limit=30");
+    expect(cacheDesc(viaLimit)).toBe("miss");
+    const board = await boardOf(viaLimit);
+    expect(board.every((s) => s.deals.length === 30)).toBe(true);
+
+    const viaPerStage = await getBoard("?perStage=30");
+    expect(cacheDesc(viaPerStage)).toBe("hit");
+    const viaPostLimit = await POST(postReq({ limit: 30 }), params());
+    expect(cacheDesc(viaPostLimit)).toBe("hit");
+    // Os dois informados: `perStage` (nome histórico) vence.
+    const both = await boardOf(await getBoard("?perStage=10&limit=30"));
+    expect(both.every((s) => s.deals.length === 10)).toBe(true);
+  });
+
+  it("o frontend atual pede 200 e recebe 200; acima do teto vem o teto (200), nunca 500", async () => {
+    const at200 = await boardOf(await POST(postReq({ perStage: 200 }), params()));
+    expect(at200.every((s) => s.deals.length === 200 && s.hasMore === true)).toBe(true);
+
+    h.pg.length = 0;
+    const over = await POST(postReq({ perStage: 500 }), params());
+    // Mesmo resultado do pedido de 200 → mesma chave, nenhuma consulta.
+    expect(cacheDesc(over)).toBe("hit");
+    expect(h.pg).toEqual([]);
+    expect((await boardOf(over)).every((s) => s.deals.length === 200)).toBe(true);
+  });
+
+  it("valor inválido cai no padrão (50); zero/negativo vira 1", async () => {
+    expect((await boardOf(await getBoard("?perStage=abc"))).every((s) => s.deals.length === 50)).toBe(true);
+    expect((await boardOf(await getBoard("?limit=0"))).every((s) => s.deals.length === 1)).toBe(true);
+    expect(
+      (await boardOf(await POST(postReq({ perStage: "200" }), params()))).every((s) => s.deals.length === 50),
+    ).toBe(true);
+  });
+
+  it("offsetByStage antigo continua aceito: perStage + extra só na etapa pedida", async () => {
+    const board = await boardOf(
+      await POST(postReq({ perStage: 10, offsetByStage: { st0: 15, st1: -3, st2: 0 } }), params()),
+    );
+    const sizes = Object.fromEntries(board.map((s) => [s.id, s.deals.length]));
+    expect(sizes.st0).toBe(25);
+    expect(sizes.st1).toBe(10);
+    expect(sizes.st2).toBe(10);
+  });
+
+  it("hidrata só os cards devolvidos (ids da página, não a coluna inteira)", async () => {
+    h.includeIds.length = 0;
+    const board = await boardOf(await getBoard("?limit=20"));
+    const returned = board.flatMap((s) => s.deals.map((d) => d.id)).sort();
+    expect(returned).toHaveLength(STAGE_COUNT * 20);
+    expect(h.includeIds).toHaveLength(1);
+    expect([...h.includeIds[0]!].sort()).toEqual(returned);
   });
 
   it("mesmos filtros em outra ordem caem na mesma chave", async () => {

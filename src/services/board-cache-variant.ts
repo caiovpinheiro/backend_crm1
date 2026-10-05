@@ -9,7 +9,7 @@
  *   - filtro vazio × ausente (`filters: {}` do POST × `undefined` do GET;
  *     `tagIds: []`, `search: "  "`, `withoutOwner: false`);
  *   - padrões explícitos × implícitos (`status` ausente = OPEN,
- *     `perStage` ausente = 100, `sort` ausente = position, `direction` sem
+ *     `perStage` ausente = 50, `sort` ausente = position, `direction` sem
  *     efeito em position, `tagMode: "any"`);
  *   - `filters.pipelineId` igual ao funil do próprio board;
  *   - `offsetByStage` com zeros.
@@ -29,9 +29,43 @@ export type BoardVariantLimit = {
   sortDirection?: "asc" | "desc";
 };
 
-/** Mesmos limites de `computeBoardData` (`deals.ts`). */
-export const BOARD_DEFAULT_PER_STAGE = 100;
-export const BOARD_MAX_PER_STAGE = 500;
+/**
+ * Tamanho da página do board por etapa (K4) — fonte única; `deals.ts` usa
+ * estas constantes.
+ *
+ * Padrão 50 (era 100) e teto 200 (era 500): o resto da coluna vem pelo
+ * "carregar mais" por cursor (`POST /board/columns`). Quem pede mais que o
+ * teto recebe o teto, com `hasMore`/`nextCursor` para continuar — nenhum
+ * cliente quebra, só deixa de trazer 500 cards por coluna numa ida.
+ */
+export const BOARD_DEFAULT_PER_STAGE = 50;
+export const BOARD_MAX_PER_STAGE = 200;
+/**
+ * Teto do `offsetByStage` (modo antigo do "carregar mais", cumulativo): um
+ * valor absurdo do cliente não pode virar um `findMany` de milhões de ids.
+ */
+export const BOARD_MAX_STAGE_OFFSET = 2_000;
+
+/** `perStage` efetivo: inteiro em [1, teto]; ausente/inválido = padrão. */
+export function normalizeBoardPerStage(raw: number | null | undefined): number {
+  const n = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : BOARD_DEFAULT_PER_STAGE;
+  return Math.min(BOARD_MAX_PER_STAGE, Math.max(1, n));
+}
+
+/** `offsetByStage` efetivo: inteiros em [1, teto]; zero/negativo/inválido sai. */
+export function normalizeBoardOffsets(
+  raw: Record<string, number> | null | undefined,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const stageId of Object.keys(raw).sort()) {
+    const n = raw[stageId];
+    if (typeof n !== "number" || !Number.isFinite(n)) continue;
+    const v = Math.min(BOARD_MAX_STAGE_OFFSET, Math.floor(n));
+    if (v > 0) out[stageId] = v;
+  }
+  return out;
+}
 
 type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
@@ -149,21 +183,15 @@ export function canonicalBoardFilters(
 export function canonicalBoardLimit(limit: BoardVariantLimit | null | undefined): {
   [k: string]: Json;
 } {
-  const perStage = Math.min(
-    BOARD_MAX_PER_STAGE,
-    Math.max(1, limit?.perStage ?? BOARD_DEFAULT_PER_STAGE),
-  );
+  const perStage = normalizeBoardPerStage(limit?.perStage);
   const sortField = limit?.sortField ?? "position";
   const out: { [k: string]: Json } = { perStage, sortField };
   // `position` ignora a direção (`boardRankOrderBySql`).
   if (sortField !== "position") {
     out.sortDirection = limit?.sortDirection === "desc" ? "desc" : "asc";
   }
-  const offsets: { [k: string]: Json } = {};
-  for (const stageId of Object.keys(limit?.offsetByStage ?? {}).sort()) {
-    const n = limit!.offsetByStage![stageId];
-    if (typeof n === "number" && Number.isFinite(n) && n !== 0) offsets[stageId] = n;
-  }
+  // Mesma normalização que `computeBoardData` aplica antes de consultar.
+  const offsets: { [k: string]: Json } = normalizeBoardOffsets(limit?.offsetByStage);
   if (Object.keys(offsets).length > 0) out.offsetByStage = offsets;
   return out;
 }
