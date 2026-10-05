@@ -1243,6 +1243,17 @@ model Contact {
   emails                 Email[]
   calls                  Call[]
 
+  /// Última mensagem de CHAT do contato em qualquer conversa (mesmo recorte de
+  /// `conversations.lastMessageAt` — `isListChatMessage`) e a direção dela
+  /// ("in" = cliente, "out" = nós). Gravadas no mesmo ponto que
+  /// `conversations.lastMessageAt` (`touchContactLastMessage` em
+  /// `src/lib/conversation-last-message.ts`), só andam para a frente. É a
+  /// "última interação" do Kanban (ordem do board, cursor, filtro de direção)
+  /// sem LATERAL em `conversations`. NULL = contato sem mensagem de chat ou
+  /// ainda não preenchido (`scripts/backfill-contacts-last-message.mjs`).
+  lastMessageAt          DateTime?
+  lastMessageDirection   String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

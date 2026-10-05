@@ -1,3 +1,4 @@
+import { touchContactLastMessage } from "@/lib/conversation-last-message";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 
@@ -20,6 +21,10 @@ type InboundWriter = {
  * `lib/conversation-last-message.ts`) na mesma instrução, sem andar para
  * trás: webhook atrasado não rebaixa a conversa. Só é chamado para
  * mensagem de chat do cliente (o recorte da prévia do card).
+ *
+ * Em seguida grava a última mensagem do CONTATO (`contacts.lastMessageAt` /
+ * `lastMessageDirection = 'in'`, Kanban) — instrução própria, também sem
+ * andar para trás (`touchContactLastMessage`).
  */
 export async function touchInbound(args: {
   conversationId: string;
@@ -35,6 +40,12 @@ export async function touchInbound(args: {
       "lastMessageAt" = GREATEST("lastMessageAt", ${args.at})
     WHERE id = ${args.conversationId}
   `;
+  await touchContactLastMessage({
+    conversationId: args.conversationId,
+    at: args.at,
+    direction: "in",
+    tx: args.tx,
+  });
 }
 
 export function warnTouchInboundFailed(

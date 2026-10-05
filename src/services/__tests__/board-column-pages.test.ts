@@ -841,7 +841,11 @@ describe("coluna por cursor — lastInteraction", () => {
       /\(r\.last_at < \? OR \(r\.last_at = \? AND \(r\."position", r\.id\) > \(\?::double precision, \?\)\) OR r\.last_at IS NULL\)/,
     );
     expect(text).toMatch(/ORDER BY r\.last_at DESC NULLS LAST, r\."position" ASC, r\.id ASC\s+LIMIT \?/);
-    expect(withLast.values).toEqual([ORG, "s1", "OPEN", 2500, ORG, at(7), at(7), 2, "d-x", 11]);
+    // Última interação: coluna do contato; `conversations` só com a coluna NULL.
+    expect(text).toContain('COALESCE(ct."lastMessageAt", fb.last_at) AS last_at');
+    expect(text).toMatch(/WHERE ct\.id IS NOT NULL\s+AND ct\."lastMessageAt" IS NULL/);
+    expect(text).not.toContain('MAX(cv."updatedAt")');
+    expect(withLast.values).toEqual([ORG, "s1", "OPEN", 2500, ORG, ORG, at(7), at(7), 2, "d-x", 11]);
     expect(text).not.toContain("d-x");
 
     const asc = buildLastInteractionColumnPageSql({
@@ -860,7 +864,7 @@ describe("coluna por cursor — lastInteraction", () => {
     expect(nullCursor.strings.join("?")).toMatch(
       /WHERE \(r\.last_at IS NULL AND \(r\."position", r\.id\) > \(\?::double precision, \?\)\)/,
     );
-    expect(nullCursor.values).toEqual([ORG, "s1", "OPEN", 2500, ORG, 3, "d-y", 11]);
+    expect(nullCursor.values).toEqual([ORG, "s1", "OPEN", 2500, ORG, ORG, 3, "d-y", 11]);
   });
 
   it("where que o SQL não traduz: board sai sem cursor (cliente usa offsetByStage) e a rota de página recusa", async () => {
@@ -881,7 +885,7 @@ describe("coluna por cursor — lastInteraction", () => {
     h.dealGroupBy.mockImplementation(async () => [{ stageId: "s1", _count: { _all: 12 } }]);
     h.queryRaw.mockImplementation(async (...call: unknown[]) => {
       const { text } = parseRawCall(call);
-      if (text.includes('MAX("updatedAt") AS last_at')) return [];
+      if (text.includes("FROM contacts ct")) return [];
       return emulateRaw(call);
     });
     const board = await loadBoard(2, { sortField: "lastInteraction", sortDirection: "desc" }, visibility);
