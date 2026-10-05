@@ -5,7 +5,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const isDistributionEnabled = vi.fn(async () => false);
-const getDistributionResponsibles = vi.fn(async () => []);
+const getDistributionResponsibles = vi.fn(
+  async (..._args: unknown[]): Promise<unknown[]> => [],
+);
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
