@@ -4,6 +4,7 @@ import { userOrgFilter, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getLogger } from "@/lib/logger";
+import { getContactSourceOptions } from "@/services/contact-source-options";
 
 const log = getLogger("api/kanban/filter-options");
 
@@ -16,7 +17,7 @@ export async function GET() {
   return withOrgContext(async (session) => {
     try {
       const orgId = getOrgIdOrThrow();
-      const [pipelines, users, tags, customFields, sourceRows, utmSourceRows, lossReasonCatalog] = await Promise.all([
+      const [pipelines, users, tags, customFields, sourceOptions, lossReasonCatalog] = await Promise.all([
         prisma.pipeline.findMany({
           where: { archivedAt: null },
           orderBy: { name: "asc" },
@@ -57,20 +58,10 @@ export async function GET() {
           orderBy: { label: "asc" },
           select: { id: true, name: true, label: true, type: true, options: true, entity: true },
         }),
-        prisma.$queryRaw<{ source: string }[]>`
-          SELECT DISTINCT source FROM contacts
-          WHERE "organizationId" = ${orgId}
-            AND source IS NOT NULL
-            AND source <> ''
-          LIMIT 200
-        `,
-        prisma.$queryRaw<{ ad_utm_source: string }[]>`
-          SELECT DISTINCT ad_utm_source FROM contacts
-          WHERE "organizationId" = ${orgId}
-            AND ad_utm_source IS NOT NULL
-            AND ad_utm_source <> ''
-          LIMIT 200
-        `,
+        // Origens e UTM sources distintos: cache por org (5–10 min) e
+        // consulta pelo índice — eram 2 DISTINCT sobre todos os contatos
+        // da org a cada abertura do board.
+        getContactSourceOptions(orgId),
         prisma.lossReason.findMany({
           where: { isActive: true },
           orderBy: { position: "asc" },
@@ -91,14 +82,8 @@ export async function GET() {
         tags,
         dealCustomFields,
         contactCustomFields,
-        sources: sourceRows
-          .map((s) => s.source?.trim())
-          .filter((s): s is string => !!s)
-          .sort((a, b) => a.localeCompare(b, "pt-BR")),
-        utmSources: utmSourceRows
-          .map((s) => s.ad_utm_source?.trim())
-          .filter((s): s is string => !!s)
-          .sort((a, b) => a.localeCompare(b, "pt-BR")),
+        sources: sourceOptions.sources,
+        utmSources: sourceOptions.utmSources,
         lossReasons,
       });
     } catch (e) {
