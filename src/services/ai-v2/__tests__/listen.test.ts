@@ -35,7 +35,7 @@ describe("escutar a equipe — ligar", () => {
     query.mockResolvedValueOnce([{ id: "u1" }]); // só 1 das 2 é válida
     await expect(startListen({ ...base, userIds: ["u1", "u-outra-org"] })).rejects.toThrow(/não é da equipe/);
     await expect(startListen({ ...base, userIds: Array.from({ length: 11 }, (_, i) => `u${i}`) })).rejects.toThrow(/no máximo 10/);
-    await expect(startListen({ ...base, userIds: [] })).rejects.toThrow(/pelo menos uma/);
+    await expect(startListen({ ...base, userIds: [] })).rejects.toThrow(/pessoas da equipe ou uma origem/);
   });
 
   it("uma escuta ligada por agente; vencida é fechada e não bloqueia", async () => {
@@ -48,7 +48,8 @@ describe("escutar a equipe — ligar", () => {
     expect(exec.mock.calls.some((c) => String(c[0]).includes(`"status"='expired'`) && c[1] === "s0")).toBe(true);
     const insert = exec.mock.calls.find((c) => String(c[0]).includes(`INSERT INTO "ai_v2_listen_sessions"`));
     expect(insert?.[4]).toBe(JSON.stringify(["u1"]));
-    expect(insert?.[9]).toBe("u-admin");
+    expect(insert?.[5]).toBe(JSON.stringify([]));
+    expect(insert?.[10]).toBe("u-admin");
   });
 });
 
@@ -58,6 +59,8 @@ describe("escutar a equipe — captação", () => {
     expect(SELECT_CONVERSATIONS_SQL).toContain(`s."id" IS NULL OR conv."lastAt" > s."watermarkAt" + interval '1 hour'`);
     expect(SELECT_CONVERSATIONS_SQL).toContain(`$6::timestamptz IS NULL OR e."occurredAt" <= $6`);
     expect(SELECT_CONVERSATIONS_SQL).toContain(`"type"='MESSAGE_SENT'`);
+    expect(SELECT_CONVERSATIONS_SQL).toContain(`cardinality($7::text[]) = 0`);
+    expect(SELECT_CONVERSATIONS_SQL).toContain(`d."stageId" = ANY($7::text[])`);
   });
 });
 

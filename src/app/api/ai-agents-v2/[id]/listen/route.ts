@@ -12,7 +12,7 @@ type Params = { params: Promise<{ id: string }> };
 function fail(err: unknown, where: string) {
   const msg = err instanceof Error ? err.message : "Erro na escuta da equipe.";
   if (msg === "NO_OPENAI_KEY") return NextResponse.json({ code: msg, message: "Configure a chave do modelo do agente em Publicação." }, { status: 400 });
-  const status = /não encontrad/.test(msg) ? 404 : /Já existe|Já está lendo|já foi decidida|atualizada por uma leitura/.test(msg) ? 409 : /Escolha|no máximo|não é da equipe|futuro|desligada|terminou|Informe/.test(msg) ? 400 : 500;
+  const status = /não encontrad/.test(msg) ? 404 : /Já existe|Já está lendo|já foi decidida|atualizada por uma leitura/.test(msg) ? 409 : /Escolha|origem|no máximo|não é da equipe|futuro|desligada|terminou|Informe/.test(msg) ? 400 : 500;
   if (status === 500) log.error({ where, err }, "escuta da equipe falhou");
   return NextResponse.json({ message: msg }, { status });
 }
@@ -51,6 +51,7 @@ export async function POST(request: Request, { params }: Params) {
         agentId: id,
         userId: r.session.user.id,
         userIds: Array.isArray(body.userIds) ? body.userIds.filter((x): x is string => typeof x === "string") : [],
+        originStageIds: Array.isArray(body.originStageIds) ? body.originStageIds.filter((x): x is string => typeof x === "string") : [],
         mode,
         days: typeof body.days === "number" ? body.days : undefined,
         endsAt: typeof body.endsAt === "string" ? body.endsAt : null,
