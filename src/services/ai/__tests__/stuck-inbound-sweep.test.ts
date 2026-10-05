@@ -52,6 +52,7 @@ const h = vi.hoisted(() => {
     pendings: [] as Pending[],
     users: new Map<string, { type: "AI" | "HUMAN"; name: string; agentActive?: boolean }>(),
     orgs: new Map<string, { widget: boolean; enabled: boolean }>(),
+    departments: new Map<string, { id: string; name: string }>(),
     responsibles: [] as Responsible[],
     currentOrg: "org1",
     sql: [] as string[],
@@ -159,6 +160,16 @@ vi.mock("@/lib/prisma", async () => {
   client.user = {
     findUnique: async (args: { where: { id: string } }) =>
       h.users.get(args.where.id) ?? null,
+  };
+  client.department = {
+    findUnique: async (args: { where: { id: string } }) => {
+      const d = h.departments.get(args.where.id);
+      return d ? { ...d, distributionEnabled: true, distributionMode: "smart" } : null;
+    },
+    findMany: async (args: { where: { id?: { in: string[] } } }) =>
+      [...h.departments.values()]
+        .filter((d) => !args.where.id || args.where.id.in.includes(d.id))
+        .map((d) => ({ ...d, distributionMode: "smart" })),
   };
   client.distributionPending = {
     findFirst: async (args: { where: { status: string; dealId?: string; contactId?: string } }) =>
@@ -361,6 +372,7 @@ beforeEach(async () => {
   h.pendings.length = 0;
   h.users.clear();
   h.orgs.clear();
+  h.departments.clear();
   h.responsibles = [];
   h.sql.length = 0;
   h.currentOrg = "org1";
@@ -468,6 +480,20 @@ describe("varredura stuck-inbound — não regrava as mesmas conversas", () => {
     const r5 = await round();
     expect(r5.result.candidates).toBe(0);
     expect(r5.wrote.conversationWrites).toBe(0);
+  });
+
+  it("conversa já sem responsável e já no departamento: enfileira sem regravar a conversa", async () => {
+    h.departments.set("dep1", { id: "dep1", name: "Atendimento" });
+    const c = addConv({ id: "c1", departmentId: "dep1" });
+    const antes = c.updatedAt.getTime();
+
+    const r1 = await round();
+    expect(r1.result.queued).toBe(1);
+    expect(r1.result.items[0]!.department).toBe("Atendimento");
+    // Nem o handoff nem o motor regravam departamento/responsável iguais.
+    expect(r1.wrote.conversationWrites).toBe(0);
+    expect(c.updatedAt.getTime()).toBe(antes);
+    expect(h.pendings.filter((p) => p.status === "PENDING")).toHaveLength(1);
   });
 
   it("ligar o motor reabre a Entrada na rodada seguinte, sem esperar", async () => {
