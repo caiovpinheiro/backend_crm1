@@ -325,17 +325,16 @@ async function queryRaw(...call: unknown[]): Promise<unknown> {
     return out;
   }
   if (text.includes("FROM deal_products")) return [];
-  if (text.includes("contact_unread")) {
-    const ids = rawValues(call)[0] as string[];
-    return ids.map((contactId) => ({ contactId, channel: "whatsapp", unreadCount: 2 }));
-  }
-  if (text.includes('PARTITION BY c."contactId", m.direction')) {
+  if (text.includes("per_contact AS")) {
+    // Prévia do card numa consulta: não lidas/canal repetidos em cada linha.
     const ids = rawValues(call)[0] as string[];
     const rows: Row[] = [];
     for (const contactId of ids) {
       for (let rn = 1; rn <= 5; rn++) {
         rows.push({
           contactId,
+          channel: "whatsapp",
+          unreadCount: 2,
           msgId: `m-${contactId}-in-${rn}`,
           msgExternalId: `wamid.${contactId}.${rn}`,
           msgContent: `${TEXT} (${rn})`,
@@ -348,6 +347,8 @@ async function queryRaw(...call: unknown[]): Promise<unknown> {
       }
       rows.push({
         contactId,
+        channel: "whatsapp",
+        unreadCount: 2,
         msgId: `m-${contactId}-out`,
         msgExternalId: null,
         msgContent: "Claro! Te envio as informações agora.",
