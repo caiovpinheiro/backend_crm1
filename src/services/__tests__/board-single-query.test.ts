@@ -194,15 +194,33 @@ type ConvRow = {
   channel: string;
   unreadCount: number;
   updatedAt: Date;
+  /** `conversations.lastMessageAt` (NULL = backfill pendente / sem chat). */
+  lastMessageAt: Date | null;
 };
 const CONVS: ConvRow[] = [
-  { id: "v1", contactId: "c1", channel: "whatsapp", unreadCount: 1, updatedAt: at(50) },
-  { id: "v2", contactId: "c1", channel: "instagram", unreadCount: 1, updatedAt: at(60) },
-  { id: "v3", contactId: "c2", channel: "whatsapp", unreadCount: 0, updatedAt: at(40) },
-  { id: "v4", contactId: "c3", channel: "whatsapp", unreadCount: 3, updatedAt: at(70) },
-  { id: "v5", contactId: "c5", channel: "whatsapp", unreadCount: 0, updatedAt: at(30) },
-  { id: "v6", contactId: "c6", channel: "whatsapp", unreadCount: 2, updatedAt: at(80) },
+  { id: "v1", contactId: "c1", channel: "whatsapp", unreadCount: 1, updatedAt: at(50), lastMessageAt: at(45) },
+  { id: "v2", contactId: "c1", channel: "instagram", unreadCount: 1, updatedAt: at(60), lastMessageAt: at(55) },
+  { id: "v3", contactId: "c2", channel: "whatsapp", unreadCount: 0, updatedAt: at(40), lastMessageAt: at(35) },
+  { id: "v4", contactId: "c3", channel: "whatsapp", unreadCount: 3, updatedAt: at(70), lastMessageAt: at(20) },
+  { id: "v5", contactId: "c5", channel: "whatsapp", unreadCount: 0, updatedAt: at(30), lastMessageAt: null },
+  { id: "v6", contactId: "c6", channel: "whatsapp", unreadCount: 2, updatedAt: at(80), lastMessageAt: at(75) },
 ];
+
+/**
+ * `contacts.lastMessageAt` (K1). c1/c3/c6 já preenchidos — valem a coluna,
+ * mesmo com `conversations.updatedAt` mais novo (c3: conversa mexida em 70,
+ * última mensagem em 20). c2/c5 ainda NULL → fallback
+ * `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`
+ * (c2 = 35, c5 = 30). c4 não tem conversa → sem última interação.
+ */
+const CONTACT_LAST_MESSAGE_AT: Record<string, Date | null> = {
+  c1: at(55),
+  c2: null,
+  c3: at(20),
+  c4: null,
+  c5: null,
+  c6: at(75),
+};
 
 type MsgRow = {
   id: string;
@@ -390,10 +408,16 @@ function parseRawCall(call: unknown[]): { text: string; values: unknown[] } {
 /** `where` Prisma corrente — o SQL cru emulado filtra a fixture por ele. */
 let currentWhere: AnyWhere = {};
 
+/** Última interação por contato: coluna do contato; NULL → fallback nas conversas. */
 function lastConvAtByContact(): Map<string, number> {
   const m = new Map<string, number>();
   for (const c of CONVS) {
-    m.set(c.contactId, Math.max(m.get(c.contactId) ?? -Infinity, c.updatedAt.getTime()));
+    if (CONTACT_LAST_MESSAGE_AT[c.contactId]) continue;
+    const convAt = (c.lastMessageAt ?? c.updatedAt).getTime();
+    m.set(c.contactId, Math.max(m.get(c.contactId) ?? -Infinity, convAt));
+  }
+  for (const [contactId, at] of Object.entries(CONTACT_LAST_MESSAGE_AT)) {
+    if (at) m.set(contactId, at.getTime());
   }
   return m;
 }
@@ -419,7 +443,7 @@ function emulateRaw(call: unknown[]): unknown[] {
   const { text, values } = parseRawCall(call);
 
   if (text.includes("WITH candidates AS")) {
-    // lastInteraction: values = [org, stageIds, ...where, org(lateral), scanCap, maxPerStage]
+    // lastInteraction: values = [org, stageIds, ...where, org(contato), org(lateral), scanCap, maxPerStage]
     const stageIds = values[1] as string[];
     const scanCap = values[values.length - 2] as number;
     const maxPerStage = values[values.length - 1] as number;
@@ -458,8 +482,9 @@ function emulateRaw(call: unknown[]): unknown[] {
     return rankRows(matched, compareBy(orderBy), maxPerStage);
   }
 
-  if (text.includes('MAX("updatedAt") AS last_at')) {
-    const contactIds = values[1] as string[];
+  if (text.includes("FROM contacts ct") && text.includes("ct.id = ANY(")) {
+    // fallback em memória: values = [org(lateral), org, contactIds]
+    const contactIds = values.find((v) => Array.isArray(v)) as string[];
     const last = lastConvAtByContact();
     return contactIds
       .filter((c) => last.has(c))
@@ -697,7 +722,7 @@ describe("board: lastInteraction em uma consulta == fallback por etapa", () => {
       );
       const oldResult = await withOrg(() => __boardInternal.hydrateBoardStages(stagesRaw(), oldIds));
       expect(findManyCalls()).toBe(STAGES.length + 1);
-      expect(rawCalls()).toBe(1); // GROUP BY de conversas
+      expect(rawCalls()).toBe(1); // última mensagem por contato
 
       h.dealFindMany.mockClear();
       h.queryRaw.mockClear();
@@ -866,6 +891,17 @@ describe("board: SQL gerado", () => {
     expect(sql.values).toEqual([["facebook"], "", ["google"]]);
   });
 
+  it("filtro de direção em coluna pronta: EXISTS no contato pela PK, sem lista de ids (K1)", () => {
+    const sql = translateDealWhereToSql({
+      AND: [{ status: "OPEN" }, { contact: { is: { lastMessageDirection: "in" } } }],
+    }) as Prisma.Sql;
+    expect(sql).not.toBeNull();
+    expect(sql.strings.join("?")).toContain(
+      'EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = d."contactId" AND ct."organizationId" = d."organizationId" AND ct."lastMessageDirection" = ?)',
+    );
+    expect(sql.values).toEqual(["OPEN", "in"]);
+  });
+
   it("consulta ranqueada: ROW_NUMBER por etapa, org/etapas/limite como parâmetros", () => {
     const sql = buildRankedBoardDealsSql({
       orgId: "org-x",
@@ -899,9 +935,15 @@ describe("board: SQL gerado", () => {
     const text = sql.strings.join("?");
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).toContain("WHERE c.scan_rn <= ?");
-    expect(text).toContain("ORDER BY li.last_at DESC NULLS LAST");
+    expect(text).toContain("ORDER BY s.last_at DESC NULLS LAST");
+    // Coluna pronta do contato; `conversations` só para quem está NULL.
+    expect(text).toContain('LEFT JOIN contacts ct');
+    expect(text).toContain('COALESCE(ct."lastMessageAt", fb.last_at) AS last_at');
+    expect(text).toMatch(/FROM conversations cv\s+WHERE ct\.id IS NOT NULL\s+AND ct\."lastMessageAt" IS NULL/);
+    expect(text).toContain('MAX(COALESCE(cv."lastMessageAt", cv."updatedAt"))');
+    expect(text).not.toContain('MAX(cv."updatedAt")');
     expect(text).not.toContain("org-x");
-    expect(sql.values).toEqual(["org-x", ["s1"], "OPEN", "org-x", 2500, 100]);
+    expect(sql.values).toEqual(["org-x", ["s1"], "OPEN", "org-x", "org-x", 2500, 100]);
     const asc = buildLastInteractionRankedSql({
       orgId: "o",
       stageIds: ["s1"],
@@ -910,7 +952,7 @@ describe("board: SQL gerado", () => {
       scanCap: 1,
       maxPerStage: 1,
     });
-    expect(asc.strings.join("?")).toContain("ORDER BY li.last_at ASC NULLS LAST");
+    expect(asc.strings.join("?")).toContain("ORDER BY s.last_at ASC NULLS LAST");
   });
 });
 

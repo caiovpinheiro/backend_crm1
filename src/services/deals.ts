@@ -371,6 +371,9 @@ const listInclude = {
       phone: true,
       avatarUrl: true,
       source: true,
+      // Última mensagem de chat do contato — insumo de `lastInteractionAt`
+      // sem consultar `conversations` (K1).
+      lastMessageAt: true,
       tags: {
         select: { tag: { select: { id: true, name: true, color: true } } },
       },
@@ -510,37 +513,65 @@ export async function getDeals(params: GetDealsParams = {}) {
 }
 
 /**
- * Última interação do negócio na lista: a última atividade da conversa
- * do contato (`MAX(conversations.updatedAt)`, o mesmo sinal do sort
- * `lastInteraction` do board). Sem conversa, fica o `updatedAt` do deal.
- * Alterar o card não substitui a conversa — senão "mais antiga" só
- * reordena a hora do último toque.
+ * Última interação de contatos SEM `contacts.lastMessageAt` (ainda não
+ * preenchido pelo backfill, ou contato que nunca teve mensagem de chat):
+ * `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`.
+ * Contato sem conversa não volta. Só os ids pedidos; quem chama passa
+ * apenas os contatos com a coluna NULL.
+ */
+async function loadConversationLastAtFallback(
+  orgId: string,
+  contactIds: readonly string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (contactIds.length === 0) return out;
+  const grouped = await prisma.$queryRaw<
+    { contactId: string; last_at: Date | null }[]
+  >`
+    SELECT "contactId", MAX(COALESCE("lastMessageAt", "updatedAt")) AS last_at
+    FROM conversations
+    WHERE "organizationId" = ${orgId}
+      AND "contactId" = ANY(${[...contactIds]})
+    GROUP BY "contactId"
+  `;
+  for (const row of grouped) {
+    if (!row.contactId || !row.last_at) continue;
+    const at = new Date(row.last_at).getTime();
+    if (Number.isFinite(at)) out.set(row.contactId, at);
+  }
+  return out;
+}
+
+/**
+ * Última interação do negócio na lista: o mais recente entre a última
+ * alteração do próprio deal (movimentação de etapa, edição) e a última
+ * MENSAGEM de chat do contato (`contacts.lastMessageAt`, o mesmo sinal do
+ * sort `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ *
+ * O contato já vem no `include` da lista, então a página não consulta
+ * `conversations`. Antes: um `GROUP BY "contactId"` com
+ * `MAX(conversations.updatedAt)` por página — que ainda contava como
+ * "interação" qualquer gravação na conversa (atribuição, distribuição).
+ * Contato com a coluna NULL cai em `loadConversationLastAtFallback`.
  */
 async function attachLastInteractionAt<
-  T extends { contactId: string | null; updatedAt: Date },
+  T extends {
+    contactId: string | null;
+    updatedAt: Date;
+    contact?: { lastMessageAt?: Date | null } | null;
+  },
 >(items: T[]): Promise<Array<T & { lastInteractionAt: string }>> {
-  const contactIds = [
-    ...new Set(
-      items.map((d) => d.contactId).filter((id): id is string => Boolean(id)),
-    ),
-  ];
   const lastByContact = new Map<string, number>();
-  if (contactIds.length > 0) {
-    const orgId = getOrgIdOrThrow();
-    const grouped = await prisma.$queryRaw<
-      { contactId: string; last_at: Date | null }[]
-    >`
-      SELECT "contactId", MAX("updatedAt") AS last_at
-      FROM conversations
-      WHERE "organizationId" = ${orgId}
-        AND "contactId" = ANY(${contactIds})
-      GROUP BY "contactId"
-    `;
-    for (const row of grouped) {
-      if (!row.contactId || !row.last_at) continue;
-      const at = new Date(row.last_at).getTime();
-      if (Number.isFinite(at)) lastByContact.set(row.contactId, at);
-    }
+  const missing = new Set<string>();
+  for (const deal of items) {
+    if (!deal.contactId) continue;
+    const at = deal.contact?.lastMessageAt;
+    if (at) lastByContact.set(deal.contactId, new Date(at).getTime());
+    else missing.add(deal.contactId);
+  }
+  if (missing.size > 0) {
+    const fallback = await loadConversationLastAtFallback(getOrgIdOrThrow(), [...missing]);
+    for (const [contactId, at] of fallback) lastByContact.set(contactId, at);
   }
 
   return items.map((deal) => {
@@ -2393,14 +2424,15 @@ const BOARD_CACHE_TTL_SEC = 45;
  *   cards da coluna porque o orderBy roda antes do `take` do Prisma —
  *   ao contrário do sort client-side antigo, que só ordenava os deals
  *   já carregados (default 100 por coluna).
- * - `lastInteraction`: ordena pela última interação na conversa do
- *   contato vinculado ao deal (`MAX(Conversation.updatedAt)` do
- *   contato). Como o Deal não tem campo desnormalizado, esse sort
- *   percorre um caminho próprio (`loadBoardStagesByLastInteraction`):
- *   busca IDs leves de todos os deals que casam com o filtro,
- *   agrega o último `updatedAt` por contato via `groupBy`, ordena
- *   e pagina em memória, e só então faz o `findMany` completo dos
- *   IDs paginados. Deals sem contato/conversa ficam no fim
+ * - `lastInteraction`: ordena pela última MENSAGEM de chat do contato
+ *   vinculado ao deal — `contacts.lastMessageAt`, coluna mantida no mesmo
+ *   ponto que `conversations.lastMessageAt` (K1). Antes era
+ *   `MAX(conversations.updatedAt)` do contato, calculado por card a cada
+ *   carga e renovado por gravações que não são mensagem (atribuição,
+ *   varredura de distribuição). Contato com a coluna NULL (backfill
+ *   pendente ou sem mensagem de chat) cai, só ele, em
+ *   `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`
+ *   (`boardLastInteractionSql`). Deals sem contato/conversa ficam no fim
  *   (`nulls last`) em ambas as direções; `position` é tiebreaker.
  */
 export type BoardSortField = "position" | "createdAt" | "lastInteraction";
@@ -2715,6 +2747,8 @@ const BOARD_CONTACT_TEXT_COLUMNS: Readonly<Record<string, string>> = {
   adUtmSource: "ad_utm_source",
   phone: "phone",
   email: "email",
+  // Filtro "Mensagem recebida/enviada" em coluna pronta (K1).
+  lastMessageDirection: "lastMessageDirection",
 };
 
 /** Where de `contacts` (alias `ct`) só com colunas da lista e AND/OR. */
@@ -2970,13 +3004,38 @@ function stagesAllowedByFilter<T extends { id: string }>(
 }
 
 /**
+ * `last_at` (última interação) de cada candidato `c` do board, em SQL:
+ * `contacts.lastMessageAt` pela PK e, SÓ quando a coluna está NULL, o
+ * fallback em `conversations` — o `ct."lastMessageAt" IS NULL` dentro do
+ * LATERAL vira filtro de uma vez por linha, então contato já preenchido não
+ * toca em `conversations`. Devolve os JOINs e a expressão.
+ */
+function boardLastInteractionSql(orgId: string): { joins: Prisma.Sql; lastAt: Prisma.Sql } {
+  return {
+    joins: Prisma.sql`
+      LEFT JOIN contacts ct
+        ON ct.id = c."contactId" AND ct."organizationId" = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct.id IS NOT NULL
+          AND ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = c."contactId"
+      ) fb ON TRUE`,
+    lastAt: Prisma.sql`COALESCE(ct."lastMessageAt", fb.last_at)`,
+  };
+}
+
+/**
  * `lastInteraction` em UMA consulta: candidatos por etapa (janela por
- * `updatedAt` até `scanCap`), `MAX(conversations.updatedAt)` só desses
- * candidatos via `LEFT JOIN LATERAL` (índice `(organizationId, contactId,
- * updatedAt)`) e segunda janela por etapa na ordem final.
+ * `updatedAt` até `scanCap`), última mensagem do contato desses candidatos
+ * (`boardLastInteractionSql`: coluna pronta em `contacts`, fallback em
+ * `conversations` só para quem está NULL) e segunda janela por etapa na
+ * ordem final.
  *
- * Antes: N `findMany` com `take ≥ 2500` por etapa em `Promise.all` + GROUP BY
- * de conversas + ordenação em memória.
+ * Antes: `LEFT JOIN LATERAL (SELECT MAX(cv."updatedAt") …)` para todo
+ * candidato (78–382 ms × ~14.800 em produção, 05/10).
  */
 export function buildLastInteractionRankedSql(args: {
   orgId: string;
@@ -2987,6 +3046,7 @@ export function buildLastInteractionRankedSql(args: {
   maxPerStage: number;
 }): Prisma.Sql {
   const dir = args.direction === "desc" ? Prisma.raw("DESC") : Prisma.raw("ASC");
+  const li = boardLastInteractionSql(args.orgId);
   return Prisma.sql`
     WITH candidates AS (
       SELECT
@@ -3003,23 +3063,22 @@ export function buildLastInteractionRankedSql(args: {
         AND d."stageId" = ANY(${args.stageIds})
         AND (${args.whereSql})
     ),
+    scored AS (
+      SELECT c.id, c."stageId", c."position", ${li.lastAt} AS last_at
+      FROM candidates c
+      ${li.joins}
+      WHERE c.scan_rn <= ${args.scanCap}
+    ),
     ranked AS (
       SELECT
-        c.id,
-        c."stageId",
-        li.last_at,
+        s.id,
+        s."stageId",
+        s.last_at,
         ROW_NUMBER() OVER (
-          PARTITION BY c."stageId"
-          ORDER BY li.last_at ${dir} NULLS LAST, c."position" ASC, c.id ASC
+          PARTITION BY s."stageId"
+          ORDER BY s.last_at ${dir} NULLS LAST, s."position" ASC, s.id ASC
         )::int AS rn
-      FROM candidates c
-      LEFT JOIN LATERAL (
-        SELECT MAX(cv."updatedAt") AS last_at
-        FROM conversations cv
-        WHERE cv."organizationId" = ${args.orgId}
-          AND cv."contactId" = c."contactId"
-      ) li ON TRUE
-      WHERE c.scan_rn <= ${args.scanCap}
+      FROM scored s
     )
     SELECT r.id, r."stageId", r.rn, r.last_at
     FROM ranked r
@@ -3153,8 +3212,8 @@ async function loadBoardStagesPerStage(
  *   - Where traduzível → `buildLastInteractionRankedSql` (uma consulta) e
  *     hidratação dos ids paginados.
  *   - Fallback (where com relações/operadores não traduzidos): candidatos
- *     por etapa via findMany (concorrência limitada), UMA agregação
- *     `MAX(conversations.updatedAt)` por contato, ordena/pagina em memória.
+ *     por etapa via findMany (concorrência limitada), UMA consulta da última
+ *     mensagem por contato, ordena/pagina em memória.
  */
 async function loadBoardStagesByLastInteraction(
   pipelineId: string,
@@ -3246,8 +3305,9 @@ async function loadLastInteractionIdsPerStage(
     },
   );
 
-  // 2) UMA agregação para o board inteiro: última atividade de conversa por
-  //    contato.
+  // 2) UMA consulta para o board inteiro: última mensagem por contato
+  //    (`contacts.lastMessageAt`; fallback em `conversations` só para quem
+  //    está com a coluna NULL — mesma regra do caminho em SQL).
   const contactIds = [
     ...new Set(
       candidatesByStage
@@ -3261,11 +3321,18 @@ async function loadLastInteractionIdsPerStage(
     const grouped = await prisma.$queryRaw<
       { contactId: string; last_at: Date | null }[]
     >`
-      SELECT "contactId", MAX("updatedAt") AS last_at
-      FROM conversations
-      WHERE "organizationId" = ${orgId}
-        AND "contactId" = ANY(${contactIds})
-      GROUP BY "contactId"
+      SELECT ct.id AS "contactId", COALESCE(ct."lastMessageAt", fb.last_at) AS last_at
+      FROM contacts ct
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = ct.id
+      ) fb ON TRUE
+      WHERE ct."organizationId" = ${orgId}
+        AND ct.id = ANY(${contactIds})
+        AND COALESCE(ct."lastMessageAt", fb.last_at) IS NOT NULL
     `;
     for (const g of grouped) {
       if (g.contactId && g.last_at) {
@@ -3593,8 +3660,8 @@ async function computeBoardData(
   let stages: BoardStageWithDeals[];
 
   if (sortField === "lastInteraction") {
-    // Caminho dedicado: ordena por `MAX(Conversation.updatedAt)` do
-    // contato. Já aplica `offsetByStage` internamente (não cai no
+    // Caminho dedicado: ordena pela última mensagem do contato
+    // (`contacts.lastMessageAt`). Já aplica `offsetByStage` internamente (não cai no
     // branch de "Carregar mais" abaixo).
     stages = await phase("cards", () =>
       loadBoardStagesByLastInteraction(
@@ -4164,6 +4231,7 @@ export function buildLastInteractionColumnPageSql(args: {
       : desc
         ? Prisma.sql`(r.last_at < ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`
         : Prisma.sql`(r.last_at > ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`;
+  const li = boardLastInteractionSql(args.orgId);
   return Prisma.sql`
     WITH candidates AS (
       SELECT d.id, d."contactId", d."position"
@@ -4175,14 +4243,9 @@ export function buildLastInteractionColumnPageSql(args: {
       LIMIT ${args.scanCap}
     ),
     ranked AS (
-      SELECT c.id, c."position", li.last_at
+      SELECT c.id, c."position", ${li.lastAt} AS last_at
       FROM candidates c
-      LEFT JOIN LATERAL (
-        SELECT MAX(cv."updatedAt") AS last_at
-        FROM conversations cv
-        WHERE cv."organizationId" = ${args.orgId}
-          AND cv."contactId" = c."contactId"
-      ) li ON TRUE
+      ${li.joins}
     )
     SELECT r.id, r.last_at
     FROM ranked r
