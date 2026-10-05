@@ -71,8 +71,9 @@ export async function GET(request: Request, context: RouteContext) {
     // e disparava o warning de "unique key" no React.
     type NestedTag = { tag: { id: string; name: string; color: string | null } };
     const flattenTags = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
-    // Campos do negócio visíveis no painel Deal Detail (filtrados por showInDealPanel)
-    const dealPanelFields = await getDealPanelFieldsForDeal(id).catch(() => []);
+    // A URL pode ser o número público (?deal=1389). Os valores estão no id
+    // interno; buscar com o número devolve todos os campos vazios.
+    const dealPanelFields = await getDealPanelFieldsForDeal(deal.id).catch(() => []);
 
     const responseDeal = {
       ...deal,
