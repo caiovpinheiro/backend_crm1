@@ -57,6 +57,7 @@ import {
   type EffectivePermissionsPayload,
 } from "@/services/effective-permissions";
 import { getActiveWidgetSlugs } from "@/services/organization-widgets";
+import { getOrganizationSummary } from "@/services/organization-summary";
 import { listRooms } from "@/services/team-chat";
 import {
   computeAvailableKeys,
@@ -277,26 +278,16 @@ async function loadEffectivePermissions(
   return computeEffectivePermissions(row);
 }
 
-/** Espelha `ORG_SELECT` de `app/api/organization/route.ts`. */
-const ORG_SELECT = {
-  id: true,
-  name: true,
-  slug: true,
-  logoUrl: true,
-  primaryColor: true,
-  status: true,
-  onboardingCompletedAt: true,
-} as const;
-
+/**
+ * Mesmos campos do `ORG_SELECT` de `app/api/organization/route.ts` — o
+ * select mora em `services/organization-summary.ts`.
+ */
 async function loadOrganization(
   organizationId: string | null,
 ): Promise<BootstrapOrganization | null> {
   if (!organizationId) return null;
-  const org = await prisma.organization.findUnique({
-    where: { id: organizationId },
-    select: ORG_SELECT,
-  });
-  return org as BootstrapOrganization | null;
+  // Memória do processo por 30 s (invalidada quando a org é editada).
+  return getOrganizationSummary(organizationId);
 }
 
 async function loadAlertConfig(user: MeBootstrapUser): Promise<BootstrapAlertConfig> {

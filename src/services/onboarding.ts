@@ -9,7 +9,12 @@ import { normalizeOrganizationLogoUrl } from "@/lib/organization-logo-url";
 import { prismaBase } from "@/lib/prisma-base";
 import { nextUserNumber } from "@/lib/public-id";
 import { logAudit } from "@/lib/audit/log";
-import { nextPipelineNumber, TERMINAL_STAGES } from "@/services/pipelines";
+import { invalidateOrganizationSummary } from "@/services/organization-summary";
+import {
+  invalidatePipelinesMeta,
+  nextPipelineNumber,
+  TERMINAL_STAGES,
+} from "@/services/pipelines";
 import {
   PIPELINE_TEMPLATES,
   type PipelineTemplateId,
@@ -108,6 +113,7 @@ export async function updateOrganizationBasics(
       phone: input.phone?.trim() || null,
     },
   });
+  await invalidateOrganizationSummary(organizationId);
 }
 
 export async function createAdminFromInvite(
@@ -157,6 +163,7 @@ export async function updateBranding(
     where: { id: organizationId },
     data,
   });
+  await invalidateOrganizationSummary(organizationId);
 }
 
 /**
@@ -172,6 +179,7 @@ export async function setOrganizationLogo(
     where: { id: organizationId },
     data: { logoUrl },
   });
+  await invalidateOrganizationSummary(organizationId);
 }
 
 export async function applyPipelineTemplate(
@@ -265,6 +273,7 @@ export async function applyPipelineTemplate(
     return pipeline;
   });
 
+  await invalidatePipelinesMeta(organizationId);
   return { pipelineId: result.id };
 }
 
@@ -299,6 +308,7 @@ export async function completeOnboarding(organizationId: string): Promise<void> 
     where: { id: organizationId },
     data: { onboardingCompletedAt: new Date() },
   });
+  await invalidateOrganizationSummary(organizationId);
 }
 
 /**
