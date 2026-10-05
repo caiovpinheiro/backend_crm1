@@ -19,6 +19,7 @@ import {
   isListChatMessage,
   lastMessageAtData,
   listChatMessageAt,
+  carryContactLastMessage,
   touchChatLastMessageAt,
   touchContactLastMessage,
   touchConversationLastMessageAt,
@@ -189,5 +190,16 @@ describe("última mensagem do contato (Kanban)", () => {
     ).rejects.toThrow("x");
     expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
     expect(h.executeRaw).not.toHaveBeenCalled();
+  });
+});
+
+describe("fusão de contatos", () => {
+  it("a última mensagem acompanha as conversas, só se for mais nova que a do contato que fica", async () => {
+    await carryContactLastMessage({ fromContactId: "c-old", toContactId: "c-keep" });
+    const { text, values } = sqlOf(h.executeRaw.mock.calls[0]!);
+    expect(text).toMatch(/UPDATE contacts k/);
+    expect(text).toMatch(/src\."lastMessageAt" IS NOT NULL/);
+    expect(text).toMatch(/k\."lastMessageAt" IS NULL OR k\."lastMessageAt" < src\."lastMessageAt"/);
+    expect(values).toEqual(["c-keep", "c-old"]);
   });
 });
