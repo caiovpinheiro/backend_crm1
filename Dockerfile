@@ -68,12 +68,21 @@ COPY --from=builder /app/node_modules/pdfjs-dist ./node_modules/pdfjs-dist
 # Workers compilados (campaign-worker.js, …, baileys/index.js).
 # Executados com `node dist/workers/<name>.js` conforme APP_MODE.
 COPY --from=builder /app/dist/workers ./dist/workers
-# Da pasta scripts/ só entra o que roda na imagem: o HEALTHCHECK e os
+# Da pasta scripts/ só entra o que roda na imagem: o HEALTHCHECK, os
 # wrappers `ops-*.mjs` (chamam a API local com o CRON_SECRET do container,
-# sem credencial própria). Seeds, backfills, diagnósticos e scripts
+# sem credencial própria) e os backfills `backfill-*.mjs` (completam colunas
+# novas depois de uma migration; usam o DATABASE_URL do container:
+# `node scripts/backfill-<nome>.mjs`). Seeds, diagnósticos e scripts
 # destrutivos não vão para produção — rode-os de um checkout com DATABASE_URL.
 # O .dockerignore já tira o resto do contexto de build.
-COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs ./scripts/
+COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs /app/scripts/backfill-*.mjs ./scripts/
+# Os backfills fazem `import { Client } from "pg"`. O `pg` já vem no standalone
+# (está em `serverExternalPackages`, então o Next copia o pacote inteiro, com
+# `esm/index.mjs` e as dependências); este RUN só falha o build se isso deixar
+# de ser verdade (ex.: `pg` sair de `serverExternalPackages`). `pgpass` é carregado só
+# na conexão sem senha; importá-lo aqui cobre o `split2`.
+RUN cd /app/scripts \
+ && node --input-type=module -e 'import { Client } from "pg"; import "pgpass"; if (typeof Client !== "function") process.exit(1);'
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
