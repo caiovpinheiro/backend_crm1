@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { cachedReport } from "@/lib/report-cache";
 import { getSystemActivityAggregate } from "@/services/system-activity";
 
 import { parsePeriod } from "./_period";
@@ -38,11 +39,18 @@ export async function GET(request: Request) {
     }
 
     try {
-      const items = await getSystemActivityAggregate({
-        organizationId: orgId,
-        from: period.from,
-        to: period.to,
-      });
+      // Alimenta o card "Uso do sistema hoje": cache por org + período (ao minuto).
+      const items = await cachedReport(
+        "system_usage_logs",
+        orgId,
+        { from: period.from, to: period.to },
+        () =>
+          getSystemActivityAggregate({
+            organizationId: orgId,
+            from: period.from,
+            to: period.to,
+          }),
+      );
       return NextResponse.json({ items });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

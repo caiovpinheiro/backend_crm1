@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { REPORT_MAX_RANGE_MS } from "@/lib/report-cache";
+import { clampRangeFromEnd } from "@/services/painel-period";
 import { getSystemUsageAggregate } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
 
@@ -42,14 +44,20 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     }
-    const from = new Date(fromS);
+    const requestedFrom = new Date(fromS);
     const to = new Date(toS);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    if (Number.isNaN(requestedFrom.getTime()) || Number.isNaN(to.getTime())) {
       return NextResponse.json(
         { message: "from/to devem ser datas ISO válidas." },
         { status: 400 },
       );
     }
+    // Teto de 366 dias (igual a /api/logs/system-usage): mantém o fim e recua o início.
+    const { from } = clampRangeFromEnd(
+      { from: requestedFrom, to },
+      REPORT_MAX_RANGE_MS,
+    );
+    const rangeClamped = from.getTime() !== requestedFrom.getTime();
 
     try {
       const items = await getSystemUsageAggregate({
@@ -57,7 +65,8 @@ export async function GET(request: Request) {
         from,
         to,
       });
-      return NextResponse.json({ items });
+      // Aditivo: só aparece quando o período foi cortado.
+      return NextResponse.json(rangeClamped ? { items, rangeClamped: true } : { items });
     } catch (err) {
       // Migration pendente ou outro erro transiente — devolve vazio pra
       // não travar a tela de Analytics.
