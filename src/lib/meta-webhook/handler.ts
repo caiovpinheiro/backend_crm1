@@ -111,15 +111,11 @@ import {
   parseWhatsappFlowResponsePayload,
 } from "@/lib/meta-whatsapp/parse-flow-response";
 import { applyWhatsappFlowResponseToContact } from "@/services/whatsapp-flow-response";
-
-type ReferralInfo = {
-  sourceId: string | null;
-  sourceType: string | null;
-  ctwaClid: string | null;
-  headline: string | null;
-  body: string | null;
-  sourceUrl: string | null;
-};
+import {
+  buildMessageReferral,
+  parseReferral,
+  type ReferralInfo,
+} from "@/lib/meta-referral";
 
 // Token de verificação do webhook Meta. Sem fallback hardcoded — se não
 // estiver configurado em produção, o GET de verificação responde 503 e o
@@ -173,19 +169,6 @@ function obj(v: unknown): Record<string, unknown> {
 
 function arr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
-}
-
-function parseReferral(message: Record<string, unknown>): ReferralInfo | null {
-  const ref = obj(message.referral);
-  if (Object.keys(ref).length === 0) return null;
-  return {
-    sourceId: str(ref.source_id) || null,
-    sourceType: str(ref.source_type) || null,
-    ctwaClid: str(ref.ctwa_clid) || null,
-    headline: str(ref.headline) || null,
-    body: str(ref.body) || null,
-    sourceUrl: str(ref.source_url) || null,
-  };
 }
 
 function normalizePhone(raw: string): string {
@@ -3224,6 +3207,14 @@ export async function processMetaWebhookPayload(
           // callback deixaria o COMMIT em estado inválido. Aqui a tx faz
           // rollback e a duplicata volta como `null` — mesmo caminho do
           // `findFirst` abaixo.
+          const referralJson =
+            parsed.referral && !echoOut
+              ? await buildMessageReferral(
+                  conversation.organizationId,
+                  parsed.referral,
+                ).catch(() => null)
+              : null;
+
           const msgCreated = await createMessageDedup(() =>
             prisma.$transaction(async (tx) => {
               const existing = await tx.message.findFirst({
@@ -3247,6 +3238,7 @@ export async function processMetaWebhookPayload(
                 mediaUrl,
                 createdAt: parsed.timestamp,
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
+                ...(referralJson ? { referral: referralJson } : {}),
                 ...(replyLink
                   ? {
                       replyToId: replyLink.messageId,
@@ -3528,6 +3520,7 @@ export async function processMetaWebhookPayload(
                 messageType: inboundMsgType,
                 timestamp: parsed.timestamp,
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
+                ...(referralJson ? { referral: referralJson } : {}),
               });
             } catch (err) {
               log.warn("Falha ao publicar SSE (não-fatal):", err);

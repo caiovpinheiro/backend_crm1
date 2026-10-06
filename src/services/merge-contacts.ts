@@ -19,6 +19,7 @@
  *     contato meio-mesclado.
  */
 
+import { carryContactLastMessage } from "@/lib/conversation-last-message";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 
 export type MergeContactsResult = {
@@ -150,6 +151,8 @@ export async function mergeContacts(
         where: { contactId: removeId },
         data: { contactId: keepId },
       });
+      // A última mensagem (Kanban) acompanha as conversas.
+      await carryContactLastMessage({ fromContactId: removeId, toContactId: keepId, tx });
 
       const dealsRes = await tx.deal.updateMany({
         where: { contactId: removeId },

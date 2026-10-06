@@ -15,6 +15,7 @@ import {
   matchesAnyKeyword,
   type InboxPolicy,
 } from "@/lib/ai-agents/steering";
+import { releaseConversationForHandoff } from "@/services/ai/handoff-release";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 import { getLogger } from "@/lib/logger";
 
@@ -912,28 +913,14 @@ export async function executeAcademicDepartmentHandoff(args: {
     policy: args.policy,
   });
 
-  if (dept) {
-    await prisma.conversation.update({
-      where: { id: args.conversationId },
-      data: {
-        departmentId: dept.id,
-        assignedToId: null,
-        // Mantém aiGreetedAt: se zerar, o próximo inbound reassumido
-        // pela IA reenvia a openingMessage (bug Thabata).
-        updatedAt: new Date(),
-      },
-      select: { id: true },
-    });
-  } else {
-    await prisma.conversation.update({
-      where: { id: args.conversationId },
-      data: {
-        assignedToId: null,
-        updatedAt: new Date(),
-      },
-      select: { id: true },
-    });
-  }
+  // Solta a IA e fixa o departamento. Mantém aiGreetedAt: se zerar, o
+  // próximo inbound reassumido pela IA reenvia a openingMessage (bug
+  // Thabata). Só grava se responsável ou departamento mudam — a varredura
+  // de segurança repete o handoff e regravava `updatedAt` a cada minuto.
+  await releaseConversationForHandoff({
+    conversationId: args.conversationId,
+    departmentId: dept?.id ?? null,
+  });
 
   // AI_AGENT: se ninguém elegível (offline / fila cheia / fora do dept),
   // o motor enfileira em DistributionPending e a conversa fica sem

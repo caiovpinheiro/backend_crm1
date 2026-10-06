@@ -26,6 +26,9 @@ const log = getLogger("api/pipelines/[id]/board");
 const SLOW_BOARD_LOG_MS = 1_000;
 
 /**
+ * Tamanho da página: `perStage` ou `limit` por etapa (padrão 50, teto 200);
+ * o resto de cada coluna vem por `POST /board/columns` com o `nextCursor`.
+ *
  * Aceita `sort` e `direction` vindos do client (GET via query string ou
  * POST via body). Retorna `undefined` quando o valor é omitido/inválido
  * pra que o serviço caia no default `position asc` (comportamento atual).
@@ -45,6 +48,20 @@ function parseStatus(raw: unknown): "OPEN" | "WON" | "LOST" | "ALL" | undefined 
   return typeof raw === "string" && isValidDealStatus(raw)
     ? (raw as "OPEN" | "WON" | "LOST")
     : undefined;
+}
+
+/**
+ * Cards por etapa pedidos pelo cliente: `perStage` (nome histórico) ou
+ * `limit`. Só normaliza o tipo — padrão (50) e teto (200) são do serviço
+ * (`normalizeBoardPerStage`), que também é quem monta a chave do cache.
+ */
+function parsePerStage(...raws: unknown[]): number | undefined {
+  for (const raw of raws) {
+    const n =
+      typeof raw === "number" ? raw : typeof raw === "string" && raw !== "" ? Number(raw) : NaN;
+    if (Number.isFinite(n)) return Math.max(1, Math.floor(n));
+  }
+  return undefined;
 }
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -199,7 +216,6 @@ export async function GET(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
       const url = new URL(request.url);
-      const perStageRaw = url.searchParams.get("perStage");
       return await loadBoard(
         session,
         rawRef,
@@ -207,9 +223,10 @@ export async function GET(request: Request, context: RouteContext) {
           view: url.searchParams.get("view") === "stages" ? "stages" : undefined,
           status: parseStatus(url.searchParams.get("status")),
           limit: {
-            perStage: perStageRaw
-              ? Math.max(1, parseInt(perStageRaw, 10) || 0)
-              : undefined,
+            perStage: parsePerStage(
+              url.searchParams.get("perStage"),
+              url.searchParams.get("limit"),
+            ),
             sortField: parseBoardSortField(url.searchParams.get("sort")),
             sortDirection: parseBoardSortDirection(url.searchParams.get("direction")),
           },
@@ -254,6 +271,7 @@ export async function POST(request: Request, context: RouteContext) {
             status?: unknown;
             filters?: unknown;
             perStage?: unknown;
+            limit?: unknown;
             offsetByStage?: unknown;
             sort?: unknown;
             direction?: unknown;
@@ -266,10 +284,10 @@ export async function POST(request: Request, context: RouteContext) {
             status: parseStatus(body.status),
             filters: parseAdvancedDealFilters(body.filters),
             limit: {
-              perStage:
-                typeof body.perStage === "number"
-                  ? Math.max(1, Math.floor(body.perStage))
-                  : undefined,
+              perStage: parsePerStage(
+                typeof body.perStage === "number" ? body.perStage : undefined,
+                typeof body.limit === "number" ? body.limit : undefined,
+              ),
               offsetByStage,
               sortField: parseBoardSortField(body.sort),
               sortDirection: parseBoardSortDirection(body.direction),

@@ -965,7 +965,13 @@ export async function executeDistribution(
   if (explicitDeptIds.length > 0) {
     // Marca a conversa com o 1º departamento (contexto/inbox); o pool
     // de elegíveis usa TODOS os IDs selecionados.
-    if (input.conversationId) {
+    // Só grava se o departamento muda: o handoff já fixa o mesmo
+    // departamento antes de chamar o motor, e todo `update` renova
+    // `updatedAt` (ordem do Inbox/Kanban) mesmo sem mudança.
+    if (
+      input.conversationId &&
+      preAssignSnap?.departmentId !== explicitDeptIds[0]
+    ) {
       await prisma.conversation.update({
         where: { id: input.conversationId },
         data: { departmentId: explicitDeptIds[0]! },
