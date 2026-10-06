@@ -484,7 +484,7 @@ export async function getDeals(params: GetDealsParams = {}) {
   // `withTotal=0` e paga só a página. O padrão continua contando: a aba
   // Lista do frontend atual calcula a última página por `total`.
   const wantsTotal = params.withTotal !== false;
-  const loadPage = (include: Prisma.DealInclude) =>
+  const loadPage = (include: typeof listInclude) =>
     Promise.all([
       prisma.deal.findMany({
         where,
@@ -504,7 +504,11 @@ export async function getDeals(params: GetDealsParams = {}) {
       { err: error },
       "[deals] contacts.lastMessageAt ausente — lista segue sem a coluna. Aplique a migration 20261006120000_contacts_last_message.",
     );
-    loaded = await loadPage(listIncludeWithoutLastMessage);
+    loaded = await loadPage(
+      // Mesmo formato do include normal, só sem `contact.lastMessageAt`: o tipo da
+      // resposta continua o de `listInclude` para os chamadores não perderem as relações.
+      listIncludeWithoutLastMessage as typeof listInclude,
+    );
   }
   const [rows, counted] = loaded;
   const hasMore = rows.length > perPage;
