@@ -449,6 +449,17 @@ function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, "\\$&");
 }
 
+/**
+ * `col IN (subconsulta)`. Uma subconsulta entra sem parênteses extras (`IN
+ * ((SELECT …))` é ambíguo para o parser do Postgres: lista de um escalar x
+ * subconsulta); várias viram `IN ((A) UNION ALL (B))`, cada uma com o seu LIMIT.
+ */
+function inSubqueries(col: Prisma.Sql, subs: Prisma.Sql[]): Prisma.Sql {
+  if (subs.length === 1) return Prisma.sql`${col} IN (${subs[0]!})`;
+  const wrapped = subs.map((q) => Prisma.sql`(${q})`);
+  return Prisma.sql`${col} IN (${Prisma.join(wrapped, " UNION ALL ")})`;
+}
+
 export type DealSearchResolved = { ids: number; capped: boolean };
 
 export type DealSearch = {
@@ -538,12 +549,12 @@ export function createDealSearch(
     if (digits.length >= 3) {
       const suffix = digits.length > 11 ? digits.slice(-11) : digits;
       const revPrefix = [...suffix].reverse().join("") + "%";
-      contactSubs.push(Prisma.sql`(
+      contactSubs.push(Prisma.sql`
         SELECT c.id FROM contacts c
         WHERE c."organizationId" = ${orgId}
           AND reverse(regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g')) LIKE ${revPrefix}
         LIMIT ${DEAL_SEARCH_PHONE_CAP}
-      )`);
+      `);
     }
 
     if (numericTerm) {
@@ -551,69 +562,67 @@ export function createDealSearch(
       // perdido ("1234567890" para 01234567890); `%digits%` casa as duas formas.
       // Expressão idêntica à dos índices `*_cfv_value_digits_trgm_idx`.
       const digitsPattern = `%${digits.replace(/^0+/, "")}%`;
-      contactSubs.push(Prisma.sql`(
+      contactSubs.push(Prisma.sql`
         SELECT v."contactId" FROM contact_custom_field_values v
         WHERE v."organizationId" = ${orgId}
           AND regexp_replace(v.value, '\\D', '', 'g') LIKE ${digitsPattern}
         LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
-      )`);
-      dealSubs.push(Prisma.sql`(
+      `);
+      dealSubs.push(Prisma.sql`
         SELECT v."dealId" FROM deal_custom_field_values v
         WHERE v."organizationId" = ${orgId}
           AND regexp_replace(v.value, '\\D', '', 'g') LIKE ${digitsPattern}
         LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
-      )`);
+      `);
     } else {
       // Uma coluna por subconsulta: OR de name/email/phone na mesma cláusula faz
       // o planner desistir do GIN trgm. Nome por `contacts_name_trgm_idx`.
       contactSubs.push(
         short
-          ? Prisma.sql`(
+          ? Prisma.sql`
         SELECT c.id FROM contacts c
         WHERE c."organizationId" = ${orgId}
           AND (c.name ILIKE ${prefix} OR c.name ILIKE ${wordPrefix})
         LIMIT ${DEAL_SEARCH_CONTACT_CAP}
-      )`
-          : Prisma.sql`(
+      `
+          : Prisma.sql`
         SELECT c.id FROM contacts c
         WHERE c."organizationId" = ${orgId} AND c.name ILIKE ${contains}
         LIMIT ${DEAL_SEARCH_CONTACT_CAP}
-      )`,
+      `,
       );
       if (!short) {
-        contactSubs.push(Prisma.sql`(
+        contactSubs.push(Prisma.sql`
         SELECT c.id FROM contacts c
         WHERE c."organizationId" = ${orgId} AND c.email ILIKE ${contains}
         LIMIT ${DEAL_SEARCH_CONTACT_CAP}
-      )`);
+      `);
         // Telefone é só dígito e pontuação: termo com letra nunca casa.
         if (/^[\d\s+().-]+$/.test(search)) {
-          contactSubs.push(Prisma.sql`(
+          contactSubs.push(Prisma.sql`
         SELECT c.id FROM contacts c
         WHERE c."organizationId" = ${orgId} AND c.phone ILIKE ${contains}
         LIMIT ${DEAL_SEARCH_CONTACT_CAP}
-      )`);
+      `);
         }
-        contactSubs.push(Prisma.sql`(
+        contactSubs.push(Prisma.sql`
         SELECT v."contactId" FROM contact_custom_field_values v
         WHERE v."organizationId" = ${orgId} AND v.value ILIKE ${contains}
         LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
-      )`);
-        dealSubs.push(Prisma.sql`(
+      `);
+        dealSubs.push(Prisma.sql`
         SELECT v."dealId" FROM deal_custom_field_values v
         WHERE v."organizationId" = ${orgId} AND v.value ILIKE ${contains}
         LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
-      )`);
+      `);
       }
     }
 
     if (contactSubs.length > 0) {
-      or.push(
-        Prisma.sql`d."contactId" IN (${Prisma.join(contactSubs, " UNION ALL ")})`,
-      );
+      or.push(inSubqueries(Prisma.sql`d."contactId"`, contactSubs));
     }
     if (dealSubs.length > 0) {
-      or.push(Prisma.sql`d.id IN (${Prisma.join(dealSubs, " UNION ALL ")})`);
+      or.push(inSubqueries(Prisma.sql`d.id`, dealSubs));
     }
   }
   if (dealNumber !== null) or.push(Prisma.sql`d.number = ${dealNumber}`);
