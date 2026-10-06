@@ -17,6 +17,8 @@ import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
 import {
   DEFAULT_NO_REPLY_HOURS,
+  PAINEL_MAX_RANGE_MS,
+  clampRangeFromEnd,
   dayKeyFromDate,
   eachDayKey,
   mean,
@@ -175,7 +177,7 @@ const PLATFORM_COLORS: Record<string, string> = {
 };
 const MAX_CONNECTION_SERIES = 6;
 /** First-reply / close metrics: full selected range, but never more than 90d. */
-const REPLY_RANGE_MAX_MS = 90 * 24 * 60 * 60 * 1000;
+const REPLY_RANGE_MAX_MS = PAINEL_MAX_RANGE_MS;
 /** Subsequent waits: last 14d of the range, capped inbound rows. */
 const SUBSEQUENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const SUBSEQUENT_INBOUND_CAP = 1_500;
@@ -186,12 +188,6 @@ const CLOSED_ROWS_CAP = 4_000;
 /** Replica when healthy; primary if unset or tripped after a connect timeout. */
 function db() {
   return analyticsClient();
-}
-
-function clampRangeFromEnd(range: PainelRange, maxMs: number): PainelRange {
-  const span = range.to.getTime() - range.from.getTime();
-  if (span <= maxMs) return range;
-  return { from: new Date(range.to.getTime() - maxMs), to: range.to };
 }
 
 function openWhere(): Prisma.ConversationWhereInput {

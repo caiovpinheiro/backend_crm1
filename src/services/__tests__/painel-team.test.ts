@@ -35,14 +35,12 @@ describe("buildDeptHour", () => {
 });
 
 describe("buildRanking", () => {
-  it("conta carga distinta e calcula tempo médio por atendente", () => {
+  it("usa a carga distinta já contada no banco e calcula tempo médio por atendente", () => {
     const t = (min: number) => new Date(Date.UTC(2026, 9, 5, 12, min));
     const rows = buildRanking({
       load: [
-        { userId: "a", conversationId: "c1" },
-        { userId: "a", conversationId: "c1" },
-        { userId: "a", conversationId: "c2" },
-        { userId: "b", conversationId: "c3" },
+        { userId: "a", attended: BigInt(2) },
+        { userId: "b", attended: 1 },
       ],
       closed: [
         { userId: "a", createdAt: t(0), endedAt: t(10) },

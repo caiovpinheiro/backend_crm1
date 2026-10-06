@@ -57,32 +57,48 @@ export function parseDay(value: string | null, end: boolean): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * `Intl.DateTimeFormat` custa caro de construir (milhares de microssegundos) e
+ * `zonedParts` roda por dia de cada conversa no relógio comercial. Um formatter
+ * por fuso, criado uma vez por processo.
+ */
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zonedFormatter(timeZone: string): Intl.DateTimeFormat {
+  let fmt = zonedFormatters.get(timeZone);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hourCycle: "h23",
+    });
+    zonedFormatters.set(timeZone, fmt);
+  }
+  return fmt;
+}
+
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as const;
+
 /** Partes civis no fuso do Painel. */
 export function zonedParts(
   date: Date,
   timeZone = PAINEL_TZ,
 ): { year: number; month: number; day: number; hour: number; minute: number; weekday: number } {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    weekday: "short",
-    hourCycle: "h23",
-  });
-  const parts = fmt.formatToParts(date);
+  const parts = zonedFormatter(timeZone).formatToParts(date);
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "0";
-  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as const;
-  const weekdayRaw = get("weekday") as keyof typeof wd;
+  const weekdayRaw = get("weekday") as keyof typeof WEEKDAY_INDEX;
   return {
     year: Number(get("year")),
     month: Number(get("month")),
     day: Number(get("day")),
     hour: Number(get("hour")),
     minute: Number(get("minute")),
-    weekday: wd[weekdayRaw] ?? date.getDay(),
+    weekday: WEEKDAY_INDEX[weekdayRaw] ?? date.getDay(),
   };
 }
 
@@ -164,6 +180,20 @@ export function computePainelRange(
   }
 }
 
+/** Teto de período das consultas pesadas do Painel (90 dias). */
+export const PAINEL_MAX_RANGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Mantém o FIM do período e recua o início para no máximo `maxMs` de janela
+ * (o dado mais recente é o que o painel mostra). Devolve o próprio objeto
+ * quando já cabe.
+ */
+export function clampRangeFromEnd(range: PainelRange, maxMs: number): PainelRange {
+  const span = range.to.getTime() - range.from.getTime();
+  if (span <= maxMs) return range;
+  return { from: new Date(range.to.getTime() - maxMs), to: range.to };
+}
+
 /** Janela imediatamente anterior, mesmo comprimento. */
 export function previousPeriod(from: Date, to: Date): PainelRange {
   const span = to.getTime() - from.getTime();
@@ -217,34 +247,41 @@ export function parseBusinessHours(raw: unknown): BusinessHours {
   return { startMin, endMin, weekdays };
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** São Paulo é UTC-3 o ano todo (mesma premissa de `parseDay`). */
+const PAINEL_UTC_OFFSET_MS = 3 * 60 * 60 * 1000;
+
 /**
  * Milissegundos de relógio comercial entre dois instantes.
  * Noites e dias fora de `weekdays` não contam.
+ *
+ * Só o dia civil de `from` passa pelo formatter. Os dias seguintes andam em
+ * aritmética de calendário (UTC), sem criar `Date` nem formatter por dia: o
+ * cálculo roda uma vez por conversa encerrada (até 10 mil no ranking de TMA).
  */
 export function businessMsBetween(
   from: Date,
   to: Date,
   bh: BusinessHours = DEFAULT_BUSINESS_HOURS,
 ): number {
-  if (to.getTime() <= from.getTime()) return 0;
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+  if (toMs <= fromMs) return 0;
+  const first = zonedParts(from);
+  // Meia-noite civil de SP, em ms UTC, do dia de `from`.
+  let dayStart = Date.UTC(first.year, first.month - 1, first.day) + PAINEL_UTC_OFFSET_MS;
+  let weekday = first.weekday;
   let ms = 0;
-  const cursor = startOfZonedDay(from);
-  const endDay = startOfZonedDay(to);
-  let guard = 0;
-  while (cursor.getTime() <= endDay.getTime() && guard < 800) {
-    const parts = zonedParts(cursor);
-    if (bh.weekdays.includes(parts.weekday)) {
-      const dayKey = dayKeyFromDate(cursor);
-      const winStart = parseDay(dayKey, false)!;
-      winStart.setMinutes(winStart.getMinutes() + bh.startMin);
-      const winEnd = parseDay(dayKey, false)!;
-      winEnd.setMinutes(winEnd.getMinutes() + bh.endMin);
-      const a = from.getTime() > winStart.getTime() ? from : winStart;
-      const b = to.getTime() < winEnd.getTime() ? to : winEnd;
-      if (b.getTime() > a.getTime()) ms += b.getTime() - a.getTime();
+  for (let guard = 0; guard < 800 && dayStart <= toMs; guard++) {
+    if (bh.weekdays.includes(weekday)) {
+      const winStart = dayStart + bh.startMin * 60_000;
+      const winEnd = dayStart + bh.endMin * 60_000;
+      const a = fromMs > winStart ? fromMs : winStart;
+      const b = toMs < winEnd ? toMs : winEnd;
+      if (b > a) ms += b - a;
     }
-    cursor.setDate(cursor.getDate() + 1);
-    guard++;
+    dayStart += DAY_MS;
+    weekday = (weekday + 1) % 7;
   }
   return ms;
 }
