@@ -353,6 +353,16 @@ describe("fragmento SQL da busca (contrato)", () => {
     expect(SEARCH_SHORT_TERM_MAX).toBe(3);
   });
 
+  it("`IN (subconsulta)`: uma só sem parênteses extras; várias como `IN ((A) UNION ALL (B))`", async () => {
+    // `IN ((SELECT …))` é ambíguo para o parser do Postgres (lista de escalar x subconsulta).
+    const short = (await sqlOf("ana")).strings.join("?");
+    expect(short).toMatch(/d\."contactId" IN \(\s*SELECT c\.id FROM contacts c/);
+    expect(short).not.toMatch(/IN \(\s*\(/);
+    const long = (await sqlOf("mariana")).strings.join("?");
+    expect(long).toMatch(/d\."contactId" IN \(\s*\(\s*SELECT c\.id FROM contacts c[\s\S]*?\)\s+UNION ALL\s+\(/);
+    expect(long).toMatch(/d\.id IN \(\s*SELECT v\."dealId" FROM deal_custom_field_values v/);
+  });
+
   it("termo curto com dígitos: prefixo + sufixo do telefone por dígitos + número do negócio", async () => {
     const sql = await sqlOf("123");
     const text = sql.strings.join("?");
