@@ -38,6 +38,7 @@ import { cancelActiveContextsForContactIfAny } from "@/services/automation-conte
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { isWhatsappOrderSnapshot } from "@/lib/whatsapp-catalog-order";
+import { referralFromJson } from "@/lib/meta-referral";
 import {
   enrichEventMessageActors,
   resolveLifecycleEventActor,
@@ -164,6 +165,21 @@ export type InboxMessageDto = {
    *  compartilhado entre agentes). Alimenta a estrela preenchida no
    *  menu contextual e no bubble. */
   favoritedByMe?: boolean;
+  /** Referral do anúncio Meta desta mensagem. Ausente quando não houve anúncio. */
+  referral?: {
+    sourceId?: string;
+    sourceType?: string;
+    ctwaClid?: string;
+    headline?: string;
+    body?: string;
+    sourceUrl?: string;
+    mediaType?: string;
+    imageUrl?: string;
+    videoUrl?: string;
+    thumbnailUrl?: string;
+    storedImageUrl?: string;
+    storedThumbnailUrl?: string;
+  } | null;
   /** Pedido do catálogo WhatsApp. Ausente em mensagens que não são `order`. */
   catalogOrder?: {
     catalogId: string;
@@ -246,6 +262,7 @@ const MSG_SELECT = {
   mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
   sendStatus: true, sendError: true, channelId: true,
   catalogOrder: true,
+  referral: true,
 } satisfies Prisma.MessageSelect;
 
 type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
@@ -264,7 +281,7 @@ async function findMessagesSafe(args: {
   take: number;
 }): Promise<MsgRow[]> {
   const select: Prisma.MessageSelect = { ...MSG_SELECT };
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const rows = await prisma.message.findMany({ ...args, select });
       return rows.map((r) => ({
@@ -272,6 +289,7 @@ async function findMessagesSafe(args: {
         triggeredByName:
           "triggeredByName" in r ? (r.triggeredByName as string | null) : null,
         catalogOrder: "catalogOrder" in r ? r.catalogOrder : null,
+        referral: "referral" in r ? r.referral : null,
       })) as MsgRow[];
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -279,6 +297,10 @@ async function findMessagesSafe(args: {
       const missing =
         code === "P2022" || /does not exist|Unknown field/i.test(message);
       if (!missing) throw e;
+      if (/\breferral\b/i.test(message) && select.referral) {
+        delete select.referral;
+        continue;
+      }
       if (/catalogOrder|catalog_order/i.test(message) && select.catalogOrder) {
         delete select.catalogOrder;
         continue;
@@ -764,6 +786,7 @@ export async function GET(request: Request, context: RouteContext) {
       channelId: r.channelId ?? null,
       favoritedByMe: favoritedIds.has(r.id) || undefined,
       catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
+      referral: referralFromJson(r.referral),
     };
     });
 
@@ -804,6 +827,7 @@ export async function GET(request: Request, context: RouteContext) {
           status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
           channelId: r.channelId ?? null,
           catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
+          referral: referralFromJson(r.referral),
         }));
 
       const createdByConv = new Map<string, (typeof lifeEvents)[number]>();
