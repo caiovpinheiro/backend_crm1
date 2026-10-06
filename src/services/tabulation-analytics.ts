@@ -74,7 +74,15 @@ export type TabulationByUserItem = {
 };
 
 export type TabulationAnalyticsResult = {
+  /**
+   * Conversas tabuladas no período (cada uma conta uma vez, pela tabulação mais
+   * recente dela no período) + eventos sem conversa. Vale para os KPIs e para
+   * `byTabulation`/`byUser`/`distinct*`. NÃO é o tamanho do log paginado: use
+   * `eventsTotal` para paginar `items`.
+   */
   total: number;
+  /** Aditivo: todos os eventos que casam com os filtros (o log mostra todos). */
+  eventsTotal: number;
   page: number;
   perPage: number;
   /**
@@ -201,12 +209,37 @@ export async function getTabulationAnalytics(
   // Agregação no Postgres. A versão anterior puxava até 5000 eventos e
   // contava em memória: acima disso o "total" simplesmente parava de crescer,
   // sem aviso, e os filtros de meta rodavam DEPOIS do corte.
-  const conds: Prisma.Sql[] = [
-    Prisma.sql`"organizationId" = ${orgId}`,
-    Prisma.sql`"type" = 'CONVERSATION_TABULATED'`,
-    Prisma.sql`"occurredAt" >= ${filters.from}`,
-    Prisma.sql`"occurredAt" <= ${filters.to}`,
+  //
+  // REGRA DE CONTAGEM (totais e rankings): conversa retabulada no período conta
+  // UMA vez, pela tabulação mais recente dela no período (maior occurredAt; id
+  // desempata). Evento sem conversationId conta como está. O recorte do período
+  // vem primeiro; os filtros (atendente, departamento, tabulação) valem sobre a
+  // tabulação vigente: filtrar por uma tabulação antiga que a conversa já
+  // trocou não a conta. O log paginado (`items`) continua mostrando TODOS os
+  // eventos e `eventsTotal` conta todos eles.
+  const periodConds: Prisma.Sql[] = [
+    Prisma.sql`e."organizationId" = ${orgId}`,
+    Prisma.sql`e."type" = 'CONVERSATION_TABULATED'`,
+    Prisma.sql`e."occurredAt" >= ${filters.from}`,
+    Prisma.sql`e."occurredAt" <= ${filters.to}`,
   ];
+  const periodSql = Prisma.join(periodConds, " AND ");
+  const latestCte = Prisma.sql`
+    WITH latest AS (
+      (
+        SELECT DISTINCT ON (e."conversationId") e.id, e."actorUserId", e.meta
+        FROM "activity_events" e
+        WHERE ${periodSql} AND e."conversationId" IS NOT NULL
+        ORDER BY e."conversationId", e."occurredAt" DESC, e.id DESC
+      )
+      UNION ALL
+      (
+        SELECT e.id, e."actorUserId", e.meta
+        FROM "activity_events" e
+        WHERE ${periodSql} AND e."conversationId" IS NULL
+      )
+    )`;
+  const conds: Prisma.Sql[] = [];
   if (actorUserIds.length === 1) {
     conds.push(Prisma.sql`"actorUserId" = ${actorUserIds[0]}`);
   } else if (actorUserIds.length > 1) {
@@ -222,7 +255,7 @@ export async function getTabulationAnalytics(
   } else if (tabulationIds.length > 1) {
     conds.push(Prisma.sql`meta->>'tabulationId' IN (${Prisma.join(tabulationIds)})`);
   }
-  const whereSql = Prisma.join(conds, " AND ");
+  const whereSql = conds.length ? Prisma.join(conds, " AND ") : Prisma.sql`TRUE`;
 
   const metaAnd: Prisma.ActivityEventWhereInput[] = [];
   if (departmentIds.length === 1) {
@@ -248,44 +281,51 @@ export async function getTabulationAnalytics(
     });
   }
 
-  const [totals, tabRows, userRows, pageItems] = await Promise.all([
+  const eventsWhere: Prisma.ActivityEventWhereInput = {
+    organizationId: orgId,
+    type: "CONVERSATION_TABULATED",
+    occurredAt: { gte: filters.from, lte: filters.to },
+    ...(actorUserIds.length === 1
+      ? { actorUserId: actorUserIds[0] }
+      : actorUserIds.length > 1
+        ? { actorUserId: { in: actorUserIds } }
+        : {}),
+    ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
+  };
+
+  const [totals, tabRows, userRows, eventsCount, pageItems] = await Promise.all([
     analyticsClient().$queryRaw<
       { total: bigint; distinct_tabulations: bigint; distinct_users: bigint }[]
     >(Prisma.sql`
+      ${latestCte}
       SELECT COUNT(*)::bigint AS total,
              COUNT(DISTINCT meta->>'tabulationId')::bigint AS distinct_tabulations,
              COUNT(DISTINCT "actorUserId")::bigint AS distinct_users
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql}
     `),
     analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      ${latestCte}
       SELECT meta->>'tabulationId' AS id, COUNT(*)::bigint AS count
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql} AND meta->>'tabulationId' IS NOT NULL
       GROUP BY 1
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
     analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      ${latestCte}
       SELECT "actorUserId" AS id, COUNT(*)::bigint AS count
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql} AND "actorUserId" IS NOT NULL
       GROUP BY 1
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
+    // Todos os eventos que casam com os filtros (paginação do log).
+    analyticsClient().activityEvent.count({ where: eventsWhere }),
     analyticsClient().activityEvent.findMany({
-      where: {
-        organizationId: orgId,
-        type: "CONVERSATION_TABULATED",
-        occurredAt: { gte: filters.from, lte: filters.to },
-        ...(actorUserIds.length === 1
-          ? { actorUserId: actorUserIds[0] }
-          : actorUserIds.length > 1
-            ? { actorUserId: { in: actorUserIds } }
-            : {}),
-        ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
-      },
+      where: eventsWhere,
       orderBy: { occurredAt: "desc" },
       skip: (page - 1) * perPage,
       take: perPage,
@@ -303,6 +343,7 @@ export async function getTabulationAnalytics(
   ]);
 
   const total = Number(totals[0]?.total ?? 0);
+  const eventsTotal = eventsCount;
   const distinctTabulations = Number(totals[0]?.distinct_tabulations ?? 0);
   const distinctUsers = Number(totals[0]?.distinct_users ?? 0);
 
@@ -394,6 +435,7 @@ export async function getTabulationAnalytics(
 
   return {
     total,
+    eventsTotal,
     page,
     perPage,
     distinctTabulations,
