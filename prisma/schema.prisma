@@ -1272,6 +1272,10 @@ model Contact {
   @@index([organizationId, createdAt])
   @@index([organizationId, assignedToId, lifecycleStage])
   @@index([organizationId, lifecycleStage, createdAt])
+  /// Opções de filtro do Kanban: valores distintos por org sem ler todos os
+  /// contatos (`services/contact-source-options.ts`, migration 20261005210000).
+  @@index([organizationId, source])
+  @@index([organizationId, adUtmSource])
   @@map("contacts")
 }
 
@@ -3559,7 +3563,8 @@ model AutomationLog {
 // Guarda o JSON cru completo entregue pela Meta em cada POST,
 // junto com identificadores para busca rápida (waMessageId,
 // phoneNumberId). 1 evento Meta pode disparar N AutomationLogs.
-// Não há limpeza automática — retenção indefinida.
+// Limpeza: job diário do worker-meta-webhook apaga eventos já processados
+// com mais de DB_RETENTION_META_WEBHOOK_DAYS (30) — services/db-retention.ts.
 // ──────────────────────────────────────────────
 
 model MetaWebhookEvent {
@@ -3582,10 +3587,12 @@ model MetaWebhookEvent {
 
   automationLogs AutomationLog[]
 
-  @@index([organizationId, receivedAt(sort: Desc)])
-  /// Recovery de backlog do worker-meta-webhook: eventos não processados
-  /// (processed=false) em ordem de chegada.
-  @@index([processed, receivedAt])
+  // 2026-10-05 (migration 20261005220000): removidos (organizationId,
+  // receivedAt DESC) e (processed, receivedAt) — 0 leituras / 494 MB em prod.
+  // A tabela só é lida por id e apagada por receivedAt. Não recriar.
+  // O backlog do runbook (`WHERE processed = false ORDER BY "receivedAt"`)
+  // usa o PARCIAL "meta_webhook_events_unprocessed_idx" (só no SQL).
+  // (channelId) fica: sustenta a FK ON DELETE SET NULL ao excluir um canal.
   @@index([channelId], map: "meta_webhook_events_channelId_idx")
   /// Corte por data da retenção (`services/db-retention.ts`). Btree, não
   /// BRIN — ver migration 20261003120000.
@@ -4565,7 +4572,9 @@ model SystemActivitySession {
 
   @@index([organizationId, userId, endedAt])
   @@index([organizationId, startedAt])
-  @@index([organizationId, lastActivityAt])
+  // 2026-10-05: (organizationId, lastActivityAt) removido — 0 leituras e
+  // reescrito a cada heartbeat. O sweeper usa o parcial
+  // system_activity_sessions_open_activity_idx (só no SQL).
   @@map("system_activity_sessions")
 }
 

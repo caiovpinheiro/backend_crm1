@@ -48,6 +48,7 @@ import {
   extractLegacyBracketTemplateName,
 } from "@/lib/whatsapp-outbound-template-label";
 import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
+import { occurredAtWindow } from "@/lib/activity-events-window";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/conversations/[id]/messages");
@@ -717,6 +718,15 @@ export async function GET(request: Request, context: RouteContext) {
               where: {
                 conversationId: { in: [...historyTickets.map((t) => t.id), conv.id] },
                 type: { in: ["CONVERSATION_CREATED", "CONVERSATION_CLOSED"] },
+                // Poda de partição de activity_events: nenhum evento destes
+                // tickets é anterior à abertura do mais antigo deles.
+                occurredAt: occurredAtWindow(
+                  historyTickets.every((t) => t.createdAt)
+                    ? new Date(
+                        Math.min(...historyTickets.map((t) => t.createdAt!.getTime())),
+                      )
+                    : null,
+                ),
               },
               select: {
                 conversationId: true,

@@ -309,6 +309,8 @@ vi.mock("@/lib/prisma-base", () => ({
       })),
     },
     conversation: { findFirst: vi.fn(async () => ({ ...state.conversation })) },
+    // O nome da org vem de `services/organization-summary` (prismaBase).
+    organization: { findUnique: vi.fn(async () => ({ name: "Nova Org" })) },
   },
 }));
 

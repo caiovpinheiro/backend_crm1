@@ -2,10 +2,14 @@
  * GET  /api/cron/db-retention          dry-run (conta candidatos, não apaga)
  * POST /api/cron/db-retention?apply=1  apaga em lotes
  *
- * Retenção das tabelas-log sem TTL: meta_webhook_events (21d),
- * ai_agent_runs + automation_logs + distribution_logs (120d). Janelas via
- * env (ver src/services/db-retention.ts). `?only=meta_webhook_events,...`
- * restringe a alvos específicos.
+ * Retenção das tabelas-log sem TTL: meta_webhook_events (30d, só eventos
+ * já processados), ai_agent_runs + automation_logs + distribution_logs
+ * (120d). Janelas via env (ver src/services/db-retention.ts).
+ * `?only=meta_webhook_events,...` restringe a alvos específicos.
+ *
+ * meta_webhook_events também é limpa todo dia pelo worker-meta-webhook
+ * (`services/db-retention-sweeper.ts`); esta rota continua servindo para
+ * dry-run e para as outras tabelas.
  *
  * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *

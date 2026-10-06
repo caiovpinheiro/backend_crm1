@@ -243,6 +243,8 @@ export async function runLogEvent(
       },
       orgId,
     ),
+    // Só o id volta: ninguém usa a linha (era INSERT … RETURNING * de ~25 colunas).
+    select: { id: true },
   });
   await mirrorConversationChatEvent({
     type: input.type,
@@ -382,7 +384,7 @@ export async function logEventRaw(
 ): Promise<void> {
   if (shouldSkipActivityLog()) return;
   try {
-    await prisma.activityEvent.create({ data });
+    await prisma.activityEvent.create({ data, select: { id: true } });
   } catch (err) {
     log.warn(
       { type: data.type, err: err instanceof Error ? err.message : String(err) },

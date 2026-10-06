@@ -35,7 +35,12 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 vi.mock("@/lib/prisma-base", () => ({
-  prismaBase: { user: { findFirst: mocks.baseUserFindFirst } },
+  prismaBase: {
+    user: { findFirst: mocks.baseUserFindFirst },
+    // A org do bootstrap vem de `services/organization-summary` (memória
+    // do processo por 30 s), que lê pelo `prismaBase`.
+    organization: { findUnique: mocks.orgFindUnique },
+  },
 }));
 
 vi.mock("@/lib/auth-helpers", () => ({
@@ -99,6 +104,7 @@ import {
   computeBootstrapEtag,
   etagMatches,
 } from "@/services/me-bootstrap";
+import { resetLocalVersionedForTests } from "@/lib/cache/local-versioned";
 
 const USER = {
   id: "user_1",
@@ -202,6 +208,7 @@ function armHappyPath() {
 describe("buildMeBootstrap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetLocalVersionedForTests();
     vi.spyOn(console, "error").mockImplementation(() => {});
     armHappyPath();
   });
