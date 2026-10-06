@@ -11,6 +11,7 @@ import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
+import { localTs } from "@/lib/local-time-sql";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
@@ -615,7 +616,7 @@ export async function getPainelVolume(
         AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to}
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
-      SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+      SELECT ${localTs('conv."createdAt"')}::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
@@ -623,7 +624,7 @@ export async function getPainelVolume(
       GROUP BY 1
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
-      SELECT (conv."closedAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+      SELECT ${localTs('conv."closedAt"')}::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
@@ -761,8 +762,8 @@ export async function getPainelHeatmap(range: PainelRange): Promise<PainelHeatma
   const rows = await db().$queryRaw<
     { dow: number; h: number; c: bigint; deptId: string | null; deptName: string | null }[]
   >(Prisma.sql`
-    SELECT EXTRACT(DOW FROM conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
-           EXTRACT(HOUR FROM conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::int AS h,
+    SELECT EXTRACT(DOW FROM ${localTs('conv."createdAt"')})::int AS dow,
+           EXTRACT(HOUR FROM ${localTs('conv."createdAt"')})::int AS h,
            conv."departmentId" AS "deptId",
            d.name AS "deptName",
            COUNT(*)::bigint AS c
@@ -1077,7 +1078,7 @@ export async function getPainelByDepartment(
   const [daily, counts] = await Promise.all([
     db().$queryRaw<{ d: Date; deptId: string | null; deptName: string | null; c: bigint }[]>(
       Prisma.sql`
-        SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+        SELECT ${localTs('conv."createdAt"')}::date AS d,
                conv."departmentId" AS "deptId",
                d.name AS "deptName",
                COUNT(*)::bigint AS c
@@ -1225,7 +1226,7 @@ export async function getPainelConnections(range: PainelRange): Promise<PainelCo
       c: bigint;
     }[]
   >(Prisma.sql`
-    SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+    SELECT ${localTs('conv."createdAt"')}::date AS d,
            conv."channelId" AS "chId",
            ch.name AS "chName",
            ch."phoneNumber" AS phone,
