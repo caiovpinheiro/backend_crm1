@@ -16,10 +16,19 @@
  *
  * Ler, atribuir, encerrar ou reabrir NÃO mexe na coluna — é isso que impede a
  * lista de reordenar quando alguém só abre a conversa.
+ *
+ * `contacts.lastMessageAt` / `contacts.lastMessageDirection` (Kanban: ordem
+ * por última interação, cursor e filtro de direção) são gravadas AQUI, logo
+ * depois da conversa — `touchContactLastMessage`. Os dois escritores de
+ * `conversations.lastMessageAt` (este arquivo e `touchInbound`) passam por
+ * ela; não existe outro ponto.
  */
 import { Prisma } from "@prisma/client";
 
+import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+
+const log = getLogger("conversation-last-message");
 
 /** `messageType` que nunca é mensagem de chat (além de `event*`). */
 export const NON_CHAT_MESSAGE_TYPES = [
@@ -83,6 +92,12 @@ type RawWriter = { $executeRaw: typeof prisma.$executeRaw };
 export async function touchConversationLastMessageAt(args: {
   conversationId: string;
   at: Date;
+  /**
+   * Direção da mensagem (vai para `contacts.lastMessageDirection`). Padrão
+   * `"out"`: quem chama sem informar são envios nossos (automação, IA,
+   * template, eco do celular); mensagem do cliente entra por `touchInbound`.
+   */
+  direction?: ChatDirection;
   tx?: RawWriter;
 }): Promise<void> {
   const db = args.tx ?? prisma;
@@ -93,6 +108,83 @@ export async function touchConversationLastMessageAt(args: {
     UPDATE conversations
     SET "lastMessageAt" = GREATEST("lastMessageAt", ${args.at})
     WHERE id = ${args.conversationId}
+  `;
+  await touchContactLastMessage({
+    conversationId: args.conversationId,
+    at: args.at,
+    direction: args.direction ?? "out",
+    tx: args.tx,
+  });
+}
+
+export type ChatDirection = "in" | "out";
+
+/**
+ * Última mensagem de chat do CONTATO (`contacts.lastMessageAt` e
+ * `lastMessageDirection`), a partir da conversa que acabou de receber a
+ * mensagem. Guarda monotônica no WHERE: mensagem atrasada (webhook fora de
+ * ordem, backfill) não escreve nada — nem horário nem direção regridem. Em
+ * empate de horário vale a última gravação.
+ *
+ * Instrução separada da conversa, de propósito: numa só (CTE) ela travaria
+ * conversa → contato, a ordem inversa de quem atualiza o contato e depois as
+ * conversas dele (herança de responsável), e as duas poderiam se bloquear.
+ * Fora de transação cada instrução solta a trava ao terminar.
+ *
+ * SQL cru: não mexe em `contacts.updatedAt`. Falha aqui não derruba o envio
+ * (só registra) — exceto dentro de uma transação de quem chamou, onde o erro
+ * tem que subir (a transação já estaria abortada).
+ */
+export async function touchContactLastMessage(args: {
+  conversationId: string;
+  at: Date;
+  direction: ChatDirection;
+  tx?: RawWriter;
+}): Promise<void> {
+  const run = (db: RawWriter) => db.$executeRaw`
+    UPDATE contacts ct
+    SET "lastMessageAt" = ${args.at},
+        "lastMessageDirection" = ${args.direction}
+    FROM conversations cv
+    WHERE cv.id = ${args.conversationId}
+      AND ct.id = cv."contactId"
+      AND (ct."lastMessageAt" IS NULL OR ct."lastMessageAt" <= ${args.at})
+  `;
+  if (args.tx) {
+    await run(args.tx);
+    return;
+  }
+  try {
+    await run(prisma);
+  } catch (err) {
+    log.warn(
+      { err, conversationId: args.conversationId },
+      "Falha ao gravar a última mensagem do contato (não-fatal)",
+    );
+  }
+}
+
+/**
+ * Fusão de contatos: as conversas de `fromContactId` passam para
+ * `toContactId`, então a última mensagem dele também passa — se for mais
+ * nova que a do contato que fica (mesma guarda monotônica). Chamar ANTES de
+ * apagar o contato de origem.
+ */
+export async function carryContactLastMessage(args: {
+  fromContactId: string;
+  toContactId: string;
+  tx?: RawWriter;
+}): Promise<void> {
+  const db = args.tx ?? prisma;
+  await db.$executeRaw`
+    UPDATE contacts k
+    SET "lastMessageAt" = src."lastMessageAt",
+        "lastMessageDirection" = src."lastMessageDirection"
+    FROM contacts src
+    WHERE k.id = ${args.toContactId}
+      AND src.id = ${args.fromContactId}
+      AND src."lastMessageAt" IS NOT NULL
+      AND (k."lastMessageAt" IS NULL OR k."lastMessageAt" < src."lastMessageAt")
   `;
 }
 
@@ -108,6 +200,8 @@ export async function touchChatLastMessageAt(args: {
   await touchConversationLastMessageAt({
     conversationId: args.conversationId,
     at,
+    // `isListChatMessage` já garantiu "in" | "out".
+    direction: args.message.direction === "in" ? "in" : "out",
     tx: args.tx,
   });
 }

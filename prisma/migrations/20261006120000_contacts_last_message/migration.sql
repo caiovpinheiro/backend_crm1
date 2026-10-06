@@ -1,0 +1,44 @@
+-- Kanban: "última interação" e direção em coluna pronta (K1).
+--
+-- Produção (29/09 → 05/10): o board calculava, a cada carga,
+--   LEFT JOIN LATERAL (SELECT MAX(cv."updatedAt") FROM conversations cv WHERE cv."contactId" = …)
+-- por card candidato (78–382 ms × ~14.800), a lista de negócios fazia
+--   SELECT "contactId", MAX("updatedAt") FROM conversations … GROUP BY "contactId"
+-- (115 mil chamadas, 50,8 M linhas devolvidas ao Node) e o filtro "Mensagem
+-- recebida/enviada" varria todos os contatos da organização com um LATERAL
+-- por contato (989 ms × 3.825). Além do custo, "updatedAt" da conversa é
+-- renovado por gravações que não são mensagem (atribuição, varredura de
+-- distribuição), então nem era a última interação.
+--
+-- Agora o CONTATO guarda a última mensagem de chat (qualquer conversa) e a
+-- direção dela. As colunas são gravadas no mesmo ponto que
+-- conversations."lastMessageAt" (`src/lib/conversation-last-message.ts` e
+-- `src/lib/conversation-inbound.ts`) e só andam para a frente.
+--
+-- Expand-only: duas colunas nullable sem default (ADD COLUMN é só catálogo no
+-- PG 17, instantâneo, sem reescrever a tabela). Nenhum índice novo: o board
+-- chega ao contato pela PK. O código anterior ignora as colunas.
+--
+-- PRODUÇÃO — pode rodar à mão antes do deploy (os IF NOT EXISTS daqui viram
+-- no-op):
+--
+--   ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "lastMessageAt" TIMESTAMP(3);
+--   ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "lastMessageDirection" TEXT;
+--
+-- Depois do deploy (e DEPOIS do backfill de conversations."lastMessageAt",
+-- `scripts/backfill-conversations-last-message-at.mjs`), o backfill:
+--
+--   DATABASE_URL=... node scripts/backfill-contacts-last-message.mjs            # dry-run
+--   DATABASE_URL=... node scripts/backfill-contacts-last-message.mjs --apply
+--
+-- Enquanto a coluna está NULL nada quebra: a ordem do board cai, por contato,
+-- em MAX(COALESCE(conversations."lastMessageAt", conversations."updatedAt"))
+-- e o filtro de direção segue no caminho antigo até a organização estar
+-- preenchida (`isContactLastMessageReady` em `src/services/kanban-filters.ts`:
+-- nenhuma conversa com mensagem de chat cujo contato ainda esteja NULL). A
+-- troca é automática, por organização, em até 1 minuto depois do backfill.
+--
+-- Rollback (o código anterior não lê as colunas): as colunas podem ficar.
+
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "lastMessageAt" TIMESTAMP(3);
+ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "lastMessageDirection" TEXT;

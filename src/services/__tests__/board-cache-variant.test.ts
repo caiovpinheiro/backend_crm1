@@ -6,10 +6,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BOARD_DEFAULT_PER_STAGE,
+  BOARD_MAX_PER_STAGE,
+  BOARD_MAX_STAGE_OFFSET,
   boardStageScope,
   canonicalBoardFilters,
   canonicalBoardLimit,
   canonicalBoardVariant,
+  normalizeBoardOffsets,
+  normalizeBoardPerStage,
 } from "@/services/board-cache-variant";
 import type { AdvancedDealFilters } from "@/services/kanban-filters";
 
@@ -32,7 +37,7 @@ describe("canonicalBoardVariant — mesma chave", () => {
       variant({
         statusFilter: "OPEN",
         advancedFilters: {},
-        limitOptions: { perStage: 100, sortField: "position", sortDirection: "desc", offsetByStage: { s1: 0 } },
+        limitOptions: { perStage: 50, sortField: "position", sortDirection: "desc", offsetByStage: { s1: 0 } },
         visibilityWhere: {},
       }),
     ).toBe(variant());
@@ -67,13 +72,47 @@ describe("canonicalBoardVariant — mesma chave", () => {
     expect(canonicalBoardFilters({ tagIds: ["t1"], tagMode: "any" }, PIPE)).toEqual({ tagIds: ["t1"] });
   });
 
-  it("perStage é limitado como no board (0..500, padrão 100)", () => {
-    expect(canonicalBoardLimit({ perStage: 9_999 })).toEqual({ perStage: 500, sortField: "position" });
-    expect(canonicalBoardLimit(undefined)).toEqual({ perStage: 100, sortField: "position" });
+  it("perStage é limitado como no board (1..200, padrão 50 — K4)", () => {
+    expect(BOARD_DEFAULT_PER_STAGE).toBe(50);
+    expect(BOARD_MAX_PER_STAGE).toBe(200);
+    expect(canonicalBoardLimit({ perStage: 9_999 })).toEqual({ perStage: 200, sortField: "position" });
+    expect(canonicalBoardLimit({ perStage: 200 })).toEqual({ perStage: 200, sortField: "position" });
+    expect(canonicalBoardLimit(undefined)).toEqual({ perStage: 50, sortField: "position" });
+    expect(canonicalBoardLimit({ perStage: 0 })).toEqual({ perStage: 1, sortField: "position" });
+    expect(canonicalBoardLimit({ perStage: Number.NaN })).toEqual({ perStage: 50, sortField: "position" });
+    expect(canonicalBoardLimit({ perStage: 30.9 })).toEqual({ perStage: 30, sortField: "position" });
     expect(canonicalBoardLimit({ sortField: "createdAt" })).toEqual({
-      perStage: 100,
+      perStage: 50,
       sortField: "createdAt",
       sortDirection: "asc",
+    });
+    // Pedir o padrão explicitamente ou acima do teto não cria chave nova.
+    expect(variant({ limitOptions: { perStage: 50 } })).toBe(variant());
+    expect(variant({ limitOptions: { perStage: 500 } })).toBe(variant({ limitOptions: { perStage: 200 } }));
+  });
+
+  it("offsetByStage (modo antigo): inteiros positivos com teto; lixo não entra na chave nem na consulta", () => {
+    expect(
+      normalizeBoardOffsets({
+        b: 30,
+        a: 12.7,
+        zero: 0,
+        neg: -5,
+        nan: Number.NaN,
+        huge: 1e9,
+        text: "40" as unknown as number,
+      }),
+    ).toEqual({ a: 12, b: 30, huge: BOARD_MAX_STAGE_OFFSET });
+    expect(normalizeBoardOffsets(undefined)).toEqual({});
+    expect(normalizeBoardPerStage(undefined)).toBe(50);
+    expect(canonicalBoardLimit({ offsetByStage: { s1: -1, s2: 0 } })).toEqual({
+      perStage: 50,
+      sortField: "position",
+    });
+    expect(canonicalBoardLimit({ offsetByStage: { s1: 1e9 } })).toEqual({
+      perStage: 50,
+      sortField: "position",
+      offsetByStage: { s1: BOARD_MAX_STAGE_OFFSET },
     });
   });
 });

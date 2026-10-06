@@ -118,7 +118,11 @@ export async function logSipCallInConversation(
   // Ordem da lista: a ligação entra na prévia do card (`sip_call` é chat).
   // `createdAt` pode ser retroativo (evento atrasado) → escrita que nunca
   // anda para trás, em vez de pôr o valor no update abaixo.
-  await touchConversationLastMessageAt({ conversationId, at: eventNow }).catch((err) =>
+  await touchConversationLastMessageAt({
+    conversationId,
+    at: eventNow,
+    direction: callMessageDirection,
+  }).catch((err) =>
     log.warn({ err, callId: input.callId }, "[sip-call-chat] lastMessageAt"),
   );
 
