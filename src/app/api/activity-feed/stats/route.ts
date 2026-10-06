@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { localTs } from "@/lib/local-time-sql";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -111,7 +112,7 @@ async function handle(req: Request, session: OrgSession) {
       `,
         ),
         prisma.$queryRaw<{ hour: number; count: bigint }[]>(Prisma.sql`
-        SELECT EXTRACT(HOUR FROM ("occurredAt" AT TIME ZONE 'America/Sao_Paulo'))::int AS hour,
+        SELECT EXTRACT(HOUR FROM ${localTs('"occurredAt"')})::int AS hour,
                COUNT(*)::bigint AS count
         FROM "activity_events"
         WHERE "organizationId" = ${orgId}

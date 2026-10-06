@@ -12,10 +12,10 @@
 import { Prisma } from "@prisma/client";
 
 import { analyticsClient } from "@/lib/analytics";
+import { localTs } from "@/lib/local-time-sql";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { loadPainelHours } from "@/services/painel-hours";
 import {
-  PAINEL_TZ,
   mean,
   median,
   waitMs,
@@ -181,7 +181,7 @@ export async function getPainelDeptHour(
   const raw = await db().$queryRaw<DeptHourRaw[]>(Prisma.sql`
     SELECT conv."departmentId" AS "deptId",
            d.name AS "deptName",
-           EXTRACT(HOUR FROM conv."createdAt" AT TIME ZONE ${PAINEL_TZ})::int AS h,
+           EXTRACT(HOUR FROM ${localTs('conv."createdAt"')})::int AS h,
            COUNT(*)::bigint AS c
     FROM conversations conv
     LEFT JOIN departments d ON d.id = conv."departmentId"
