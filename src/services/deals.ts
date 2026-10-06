@@ -1780,68 +1780,98 @@ function publishDealMovedAfterCacheBump(
   })();
 }
 
+/** Select do `UPDATE` de etapa: a linha devolvida já é o estado gravado. */
+export const activeDealMovedSelect = {
+  id: true,
+  title: true,
+  value: true,
+  status: true,
+  lostReason: true,
+  position: true,
+  expectedClose: true,
+  createdAt: true,
+  updatedAt: true,
+  stageId: true,
+  contact: {
+    select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+  },
+  owner: { select: { id: true, name: true, avatarUrl: true, type: true } },
+  tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
+  stage: { select: { pipelineId: true, isWon: true, isLost: true } },
+} satisfies Prisma.DealSelect;
+
+/** Linha já gravada, o bastante para o mesmo `deal_moved` do move manual. */
+export type ActiveDealMovedRow = {
+  id: string;
+  title?: string | null;
+  value?: unknown;
+  status?: string | null;
+  lostReason?: string | null;
+  position?: unknown;
+  expectedClose?: Date | string | null;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
+  stageId: string;
+  contact?: {
+    id: string;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    avatarUrl?: string | null;
+  } | null;
+  owner?: {
+    id: string;
+    name: string;
+    avatarUrl?: string | null;
+    type?: string | null;
+  } | null;
+  tags?: Array<{ tag: { id: string; name: string; color: string | null } }>;
+  stage?: { pipelineId?: string | null; isWon?: boolean | null; isLost?: boolean | null } | null;
+};
+
 /**
- * Depois de um `UPDATE` de etapa já confirmado (automação `move_stage` ou
- * `update_field` de `stageId`). Reusa o mesmo `deal_moved` do move manual.
+ * Publica `deal_moved` com a linha que o `UPDATE` acabou de devolver.
+ * Não relê o deal: no worker essa segunda leitura pode voltar a etapa
+ * antiga (ou falhar fora do contexto) e o catch engole o evento — o
+ * banco fica certo e o quadro só anda no F5.
  *
  * Só deal que continua OPEN, fora de Ganho/Perdido. Lote não chama isto.
  * Falha de Redis não desfaz o update.
  */
-export function publishActiveDealMoved(dealId: string, fromStageId: string): void {
+export function publishActiveDealMoved(args: {
+  dealId: string;
+  fromStageId: string;
+  fromPipelineId: string;
+  deal: ActiveDealMovedRow;
+}): void {
   const orgId = getOrgIdOrNull();
-  if (!orgId || !dealId || !fromStageId) return;
-  void (async () => {
-    try {
-      const deal = await prisma.deal.findUnique({
-        where: { id: dealId },
-        select: {
-          id: true,
-          title: true,
-          value: true,
-          status: true,
-          lostReason: true,
-          position: true,
-          expectedClose: true,
-          createdAt: true,
-          updatedAt: true,
-          stageId: true,
-          contact: {
-            select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
-          },
-          owner: { select: { id: true, name: true, avatarUrl: true, type: true } },
-          tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
-          stage: { select: { id: true, pipelineId: true, isWon: true, isLost: true } },
-        },
-      });
-      if (!deal || deal.status !== "OPEN" || !deal.stage) return;
-      if (deal.stage.isWon || deal.stage.isLost) return;
-      if (deal.stageId === fromStageId) return;
-      const position = typeof deal.position === "number" ? deal.position : Number(deal.position);
-      if (!Number.isFinite(position)) return;
-      const fromStage = await prisma.stage.findUnique({
-        where: { id: fromStageId },
-        select: { pipelineId: true, isWon: true, isLost: true },
-      });
-      if (!fromStage || fromStage.isWon || fromStage.isLost || !fromStage.pipelineId) return;
-      publishDealMovedAfterCacheBump(
-        orgId,
-        dealId,
-        {
-          fromStageId,
-          toStageId: deal.stageId,
-          fromPipelineId: fromStage.pipelineId,
-          toPipelineId: deal.stage.pipelineId,
-          position,
-        },
-        deal,
-      );
-    } catch (err) {
-      log.warn(
-        { err: err instanceof Error ? err.message : String(err), dealId },
-        "[deals.publishActiveDealMoved] deal_moved não publicado",
-      );
-    }
-  })();
+  if (!orgId || !args.dealId || !args.fromStageId || !args.fromPipelineId) return;
+  const deal = args.deal;
+  if (deal.status !== "OPEN") return;
+  if (deal.stage?.isWon || deal.stage?.isLost) return;
+  const toPipelineId = deal.stage?.pipelineId;
+  if (!toPipelineId || !deal.stageId || deal.stageId === args.fromStageId) return;
+  const position = typeof deal.position === "number" ? deal.position : Number(deal.position);
+  if (!Number.isFinite(position)) return;
+  try {
+    publishDealMovedAfterCacheBump(
+      orgId,
+      args.dealId,
+      {
+        fromStageId: args.fromStageId,
+        toStageId: deal.stageId,
+        fromPipelineId: args.fromPipelineId,
+        toPipelineId,
+        position,
+      },
+      deal,
+    );
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), dealId: args.dealId },
+      "[deals.publishActiveDealMoved] deal_moved não publicado",
+    );
+  }
 }
 
 export async function moveDeal(

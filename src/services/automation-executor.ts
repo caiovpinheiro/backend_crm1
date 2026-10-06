@@ -60,6 +60,7 @@ import {
 import {
   assertStageEntryFields,
   assignDealOwner,
+  activeDealMovedSelect,
   createDealEvent,
   findCanonicalOpenDealInPipeline,
   markDealLost,
@@ -2076,7 +2077,7 @@ export async function executeStep(
       // — mesma regra do moveDeal manual no Kanban.
       const targetStage = await prisma.stage.findUnique({
         where: { id: stageId },
-        select: { isWon: true, isLost: true, name: true },
+        select: { isWon: true, isLost: true, name: true, pipelineId: true },
       });
       let moved = 0;
       for (const dealId of dealIds) {
@@ -2086,7 +2087,7 @@ export async function executeStep(
           status: true,
           stageId: true,
           contactId: true,
-          stage: { select: { name: true } },
+          stage: { select: { name: true, pipelineId: true, isWon: true, isLost: true } },
         },
       });
       const statusPatch = targetStage?.isWon
@@ -2101,7 +2102,11 @@ export async function executeStep(
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
       await assertStageEntryFields(dealId, stageId);
-      await prisma.deal.update({ where: { id: dealId }, data: { stageId, ...statusPatch } });
+      const updated = await prisma.deal.update({
+        where: { id: dealId },
+        data: { stageId, ...statusPatch },
+        select: activeDealMovedSelect,
+      });
       // Só sincroniza Deal.status. NÃO encerrar conversa: fila ≠ funil.
       // Loga STAGE_CHANGED na timeline do negócio (paridade com o move
       // manual/kanban/bulk). Antes o move por automação não registrava o
@@ -2136,8 +2141,24 @@ export async function executeStep(
           depth: (rt.depth ?? 0) + 1,
         });
         // Só o card que continua aberto. Ganho/Perdido não entra no realtime.
-        if (currentDeal.status === "OPEN" && !targetStage?.isWon && !targetStage?.isLost) {
-          publishActiveDealMoved(dealId, currentDeal.stageId);
+        // Um passo que move vários negócios de uma vez é mudança em massa:
+        // o banco atualiza, o quadro espera o polling.
+        const fromPipelineId = currentDeal.stage?.pipelineId;
+        if (
+          dealIds.length === 1 &&
+          currentDeal.status === "OPEN" &&
+          !currentDeal.stage?.isWon &&
+          !currentDeal.stage?.isLost &&
+          !targetStage?.isWon &&
+          !targetStage?.isLost &&
+          fromPipelineId
+        ) {
+          publishActiveDealMoved({
+            dealId,
+            fromStageId: currentDeal.stageId,
+            fromPipelineId,
+            deal: updated,
+          });
         }
       }
       }
@@ -2784,21 +2805,45 @@ export async function executeStep(
           const isStageMove = field === "stageId" && typeof value === "string";
           let prevStageId: string | null = null;
           let moveContactId: string | null = null;
+          let prevStatus: string | null = null;
+          let fromPipelineId: string | null = null;
+          let originTerminal = false;
           if (isStageMove) {
             const cur = await prisma.deal.findUnique({
               where: { id: targetDealId },
-              select: { stageId: true, contactId: true },
+              select: {
+                stageId: true,
+                contactId: true,
+                status: true,
+                stage: { select: { pipelineId: true, isWon: true, isLost: true } },
+              },
             });
             prevStageId = cur?.stageId ?? null;
             moveContactId = cur?.contactId ?? null;
+            prevStatus = cur?.status ?? null;
+            fromPipelineId = cur?.stage?.pipelineId ?? null;
+            originTerminal = Boolean(cur?.stage?.isWon || cur?.stage?.isLost);
           }
-          await prisma.deal.update({ where: { id: targetDealId }, data });
+          const updated = isStageMove
+            ? await prisma.deal.update({
+                where: { id: targetDealId },
+                data,
+                select: activeDealMovedSelect,
+              })
+            : await prisma.deal.update({ where: { id: targetDealId }, data });
           if (isStageMove && prevStageId && prevStageId !== value) {
             void notifyDealStageChanged(targetDealId, prevStageId, value as string, {
               contactId: rt.contactId ?? moveContactId ?? undefined,
               depth: (rt.depth ?? 0) + 1,
             });
-            publishActiveDealMoved(targetDealId, prevStageId);
+            if (prevStatus === "OPEN" && !originTerminal && fromPipelineId) {
+              publishActiveDealMoved({
+                dealId: targetDealId,
+                fromStageId: prevStageId,
+                fromPipelineId,
+                deal: updated,
+              });
+            }
           }
         } else {
           const customField = await prisma.customField.findFirst({
