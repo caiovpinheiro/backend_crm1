@@ -71,6 +71,8 @@ export type NewMessagePayload = {
   assignedToId?: string | null;
   /** Pedido de catálogo do WhatsApp (entrada Meta). */
   catalogOrder?: unknown;
+  /** Referral do anúncio Meta desta mensagem inbound. */
+  referral?: unknown;
   /** Escopo do board — ver cabeçalho. Só com a lista completa do contato. */
   pipelineIds?: string[];
   dealIds?: string[];
