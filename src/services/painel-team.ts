@@ -11,11 +11,15 @@
 
 import { Prisma } from "@prisma/client";
 
-import { analyticsClient } from "@/lib/analytics";
+import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { localTs } from "@/lib/local-time-sql";
+import { getLogger } from "@/lib/logger";
+import { cachedReport } from "@/lib/report-cache";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { loadPainelHours } from "@/services/painel-hours";
 import {
+  PAINEL_MAX_RANGE_MS,
+  clampRangeFromEnd,
   mean,
   median,
   waitMs,
@@ -23,6 +27,8 @@ import {
   type ClockMode,
   type PainelRange,
 } from "@/services/painel-period";
+
+const log = getLogger("painel-team");
 
 export type PainelBlock<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -90,6 +96,10 @@ export type PainelTeamResult = {
   deptHour: PainelBlock<PainelDeptHour>;
   ranking: PainelBlock<{ rows: PainelTeamRankRow[]; capped: boolean }>;
   transfers: PainelBlock<PainelTransfers>;
+  /** Aditivo: o período pedido passava de 90 dias e foi cortado pelo início. */
+  rangeClamped: boolean;
+  /** Aditivo: início efetivo (ISO) do período usado nas consultas. */
+  effectiveFrom: string;
 };
 
 export const NONE_DEPT_KEY = "__none__";
@@ -205,17 +215,16 @@ export type ClosedRaw = {
 };
 
 export function buildRanking(input: {
-  load: { userId: string; conversationId: string }[];
+  /** Conversas distintas por atendente (já agregadas no banco). */
+  load: { userId: string; attended: number | bigint }[];
   closed: ClosedRaw[];
   names: Map<string, string>;
   clock: ClockMode;
   hours: BusinessHours;
 }): PainelTeamRankRow[] {
-  const attended = new Map<string, Set<string>>();
+  const attended = new Map<string, number>();
   for (const r of input.load) {
-    const set = attended.get(r.userId) ?? new Set<string>();
-    set.add(r.conversationId);
-    attended.set(r.userId, set);
+    attended.set(r.userId, (attended.get(r.userId) ?? 0) + Number(r.attended));
   }
   const durations = new Map<string, number[]>();
   for (const c of input.closed) {
@@ -229,7 +238,7 @@ export function buildRanking(input: {
     return {
       id,
       name: input.names.get(id) ?? "Sem nome",
-      attended: attended.get(id)?.size ?? 0,
+      attended: attended.get(id) ?? 0,
       finished: vals.length,
       serviceMeanMs: mean(vals),
       serviceMedianMs: median(vals),
@@ -253,8 +262,11 @@ export async function getPainelTeamRanking(
   const orgId = getOrgIdOrThrow();
   const [load, closed, hours] = await Promise.all([
     // Carga: atribuição atual + distribuição (mesma regra da tabela de atendentes).
-    db().$queryRaw<{ userId: string; conversationId: string }[]>(Prisma.sql`
-      SELECT DISTINCT x."userId", x."conversationId" FROM (
+    // Conta no banco: COUNT(DISTINCT conversa) por atendente, em vez de trazer
+    // todos os pares (atendente, conversa) e deduplicar em JS. UNION ALL + DISTINCT
+    // no COUNT dá o mesmo número do UNION anterior.
+    db().$queryRaw<{ userId: string; attended: bigint }[]>(Prisma.sql`
+      SELECT x."userId", COUNT(DISTINCT x."conversationId")::bigint AS attended FROM (
         SELECT conv."assignedToId" AS "userId", conv.id AS "conversationId"
         FROM conversations conv
         INNER JOIN users u ON u.id = conv."assignedToId"
@@ -264,7 +276,7 @@ export async function getPainelTeamRanking(
           AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
           ${deptClause("conv", scope.departmentIds)}
           ${userClause('conv."assignedToId"', scope.userIds)}
-        UNION
+        UNION ALL
         SELECT l."selectedUserId", l."conversationId"
         FROM distribution_logs l
         INNER JOIN users u ON u.id = l."selectedUserId"
@@ -278,23 +290,28 @@ export async function getPainelTeamRanking(
           ${deptClause("conv", scope.departmentIds)}
           ${userClause('l."selectedUserId"', scope.userIds)}
       ) x
+      GROUP BY x."userId"
     `),
     // Tempo de atendimento: abertura → encerramento das conversas encerradas
-    // no período, creditado a quem estava responsável ao encerrar.
+    // no período, creditado a quem estava responsável ao encerrar. Filtra por
+    // "closedAt" (índice (organizationId, closedAt)): o COALESCE com "updatedAt"
+    // não usava índice e trazia de volta conversa antiga sem "closedAt" sempre
+    // que o "updatedAt" mudava. Conversa encerrada sempre grava "closedAt".
     db().$queryRaw<ClosedRaw[]>(Prisma.sql`
       SELECT conv."assignedToId" AS "userId",
              conv."createdAt" AS "createdAt",
-             COALESCE(conv."closedAt", conv."updatedAt") AS "endedAt"
+             conv."closedAt" AS "endedAt"
       FROM conversations conv
       INNER JOIN users u ON u.id = conv."assignedToId"
       WHERE conv."organizationId" = ${orgId}
         AND conv.status = 'RESOLVED'::"ConversationStatus"
         AND u.type = 'HUMAN'::"UserType"
-        AND COALESCE(conv."closedAt", conv."updatedAt") >= ${range.from}
-        AND COALESCE(conv."closedAt", conv."updatedAt") <= ${range.to}
+        AND conv."closedAt" IS NOT NULL
+        AND conv."closedAt" >= ${range.from}
+        AND conv."closedAt" <= ${range.to}
         ${deptClause("conv", scope.departmentIds)}
         ${userClause('conv."assignedToId"', scope.userIds)}
-      ORDER BY COALESCE(conv."closedAt", conv."updatedAt") DESC
+      ORDER BY conv."closedAt" DESC
       LIMIT ${CLOSED_ROWS_CAP}
     `),
     loadPainelHours(),
@@ -455,33 +472,78 @@ export async function getPainelTransfers(
 
 // ---------------------------------------------------------------------------
 
-async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
+const BLOCK_ERROR = "Falha ao carregar este bloco.";
+
+/** Uma tentativa na réplica; se ela caiu, desarma a réplica e repete no primário. */
+async function withReplicaRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
-    return { ok: true, data: await fn() };
+    return await fn();
   } catch (e) {
-    return {
-      ok: false,
-      error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
-    };
+    if (!isReplicaConnectionError(e)) throw e;
+    tripReplica();
+    return fn();
+  }
+}
+
+/**
+ * Bloco com cache (60 s fresco + 120 s vencido, ver `cachedReport`). O cache é
+ * por bloco e o loader lança em caso de erro: bloco que falhou nunca vai para o
+ * cache. Erro do banco não vai ao cliente: fica no log estruturado e o bloco
+ * volta com mensagem genérica.
+ */
+async function wrap<T>(
+  name: string,
+  orgId: string,
+  parts: Record<string, unknown>,
+  fn: () => Promise<T>,
+): Promise<PainelBlock<T>> {
+  try {
+    const data = await cachedReport(`painel_team:${name}`, orgId, parts, () =>
+      withReplicaRetry(fn),
+    );
+    return { ok: true, data };
+  } catch (e) {
+    log.error({ err: e, block: name }, "[painel/team] bloco falhou");
+    return { ok: false, error: BLOCK_ERROR };
   }
 }
 
 export async function getPainelTeam(
-  range: PainelRange,
+  requestedRange: PainelRange,
   clock: ClockMode,
   scope: PainelTeamScope,
   sections: PainelTeamSection[] = [...TEAM_SECTIONS],
 ): Promise<PainelTeamResult> {
+  const orgId = getOrgIdOrThrow();
+  // Teto de 90 dias, como o painel de atendimentos: mantém o fim e recua o início.
+  const range = clampRangeFromEnd(requestedRange, PAINEL_MAX_RANGE_MS);
   const want = new Set(sections);
   const omit = <T,>(): PainelBlock<T> => ({ ok: false, error: "omitido" });
+  // Chave por bloco: só entra o que o bloco usa (o relógio só muda o ranking).
+  const base = {
+    from: range.from,
+    to: range.to,
+    departmentIds: scope.departmentIds,
+    userIds: scope.userIds,
+  };
   const [deptHour, ranking, transfers] = await Promise.all([
-    want.has("deptHour") ? wrap(() => getPainelDeptHour(range, scope)) : omit<PainelDeptHour>(),
+    want.has("deptHour")
+      ? wrap("deptHour", orgId, base, () => getPainelDeptHour(range, scope))
+      : omit<PainelDeptHour>(),
     want.has("ranking")
-      ? wrap(() => getPainelTeamRanking(range, clock, scope))
+      ? wrap("ranking", orgId, { ...base, clock }, () =>
+          getPainelTeamRanking(range, clock, scope),
+        )
       : omit<{ rows: PainelTeamRankRow[]; capped: boolean }>(),
     want.has("transfers")
-      ? wrap(() => getPainelTransfers(range, scope))
+      ? wrap("transfers", orgId, base, () => getPainelTransfers(range, scope))
       : omit<PainelTransfers>(),
   ]);
-  return { deptHour, ranking, transfers };
+  return {
+    deptHour,
+    ranking,
+    transfers,
+    rangeClamped: range !== requestedRange,
+    effectiveFrom: range.from.toISOString(),
+  };
 }
