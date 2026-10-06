@@ -54,9 +54,10 @@ import {
   type BoardCursorSort,
 } from "@/services/board-column-cursor";
 import {
-  buildDealSearchOr,
   buildDealWhereFromFilters,
+  createDealSearch,
   type AdvancedDealFilters,
+  type DealSearch,
 } from "@/services/kanban-filters";
 import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { getLogger } from "@/lib/logger";
@@ -432,14 +433,6 @@ export async function getDeals(params: GetDealsParams = {}) {
     conditions.push({ ownerId: params.ownerId });
   }
 
-  const search = params.search?.trim();
-  if (search) {
-    // Mesma engine de busca livre do Kanban (título, contato, número do
-    // negócio e qualquer campo personalizado — inclusive CPF/RGM com máscara).
-    const or = await buildDealSearchOr(search);
-    if (or.length > 0) conditions.push({ OR: or });
-  }
-
   if (params.contactId) {
     conditions.push({ contactId: params.contactId });
   }
@@ -470,6 +463,29 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   if (params.updatedSince) {
     conditions.push({ updatedAt: { gte: params.updatedSince } });
+  }
+
+  // Busca livre: mesma engine do Kanban (título, contato, número do negócio e
+  // qualquer campo personalizado — inclusive CPF/RGM com máscara). Os ids saem
+  // de UMA consulta, estreitada pelo que as demais condições já dizem (status,
+  // funil, dono) e ordenada como a lista (mais recentes primeiro). O teto
+  // acompanha a página pedida; `searchCapped` avisa quando houve corte.
+  let searchCapped = false;
+  const searchTerm = params.search?.trim();
+  if (searchTerm) {
+    const dealSearch = createDealSearch(searchTerm);
+    if (dealSearch) {
+      conditions.push(
+        await dealSearch.prismaWhere({
+          narrowSql: narrowSqlOfConditions(conditions),
+          idsCap: Math.min(
+            LIST_SEARCH_IDS_CAP_MAX,
+            Math.max(LIST_SEARCH_IDS_CAP_MIN, skip + perPage + 1),
+          ),
+        }),
+      );
+      searchCapped = dealSearch.resolved()?.capped === true;
+    }
   }
 
   const where: Prisma.DealWhereInput =
@@ -520,8 +536,19 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const itemsWithInteraction = await attachLastInteractionAt(items);
 
-  return { items: itemsWithInteraction, total, page, perPage, hasMore };
+  return {
+    items: itemsWithInteraction,
+    total,
+    page,
+    perPage,
+    hasMore,
+    ...(searchCapped ? { searchCapped: true } : {}),
+  };
 }
+
+/** Ids da busca na lista: piso e teto (a página pedida empurra o teto até o máximo). */
+const LIST_SEARCH_IDS_CAP_MIN = 2_000;
+const LIST_SEARCH_IDS_CAP_MAX = 5_000;
 
 /**
  * Última interação de contatos SEM `contacts.lastMessageAt` (ainda não
@@ -2913,28 +2940,82 @@ async function preResolveBoardWhere(
  * (só nesse caso o cursor de `lastInteraction` vale). `sql: null` = nem
  * traduz nem cabe no teto → caminho por etapa.
  */
-type BoardWhereResolver = (
-  stageIds: readonly string[],
-) => Promise<{ sql: Prisma.Sql | null; direct: boolean }>;
+type BoardWhereResolver = (stageIds: readonly string[]) => Promise<{
+  sql: Prisma.Sql | null;
+  direct: boolean;
+  /**
+   * Where Prisma COMPLETO (busca incluída, com os ids resolvidos) para o
+   * caminho por etapa, quando `sql` é `null`. Sem busca, o próprio `dealWhere`.
+   */
+  where: Prisma.DealWhereInput;
+}>;
 
-/** Resolvedor com memória: a pré-resolução roda no máximo uma vez por carga. */
-function createBoardWhereResolver(dealWhere: Prisma.DealWhereInput): {
+/**
+ * Restrição em SQL (alias `d`) com o que dá para traduzir de uma lista de
+ * condições em AND — as que não traduzem ficam de fora. Serve só para estreitar
+ * a consulta de ids da busca: as condições continuam no where final, então
+ * estreitar nunca muda o resultado, só reduz candidatos.
+ */
+function narrowSqlOfConditions(
+  conditions: readonly Prisma.DealWhereInput[],
+): Prisma.Sql | null {
+  const parts: Prisma.Sql[] = [];
+  for (const c of conditions) {
+    const sql = translateDealWhereToSql(c);
+    if (sql) parts.push(sql);
+  }
+  return parts.length > 0 ? sqlAndAll(parts) : null;
+}
+
+/** Condições de primeiro nível de um where (o `AND` vira lista; senão, ele mesmo). */
+function andConditionsOf(where: Prisma.DealWhereInput): Prisma.DealWhereInput[] {
+  if (Array.isArray(where.AND)) return where.AND;
+  return where.AND ? [where.AND] : [where];
+}
+
+/**
+ * Resolvedor com memória: a pré-resolução roda no máximo uma vez por carga.
+ *
+ * Busca livre (`search`): quando o resto do where traduz para SQL, o predicado
+ * da busca (subconsultas, sem lista de ids) entra NA MESMA consulta da janela
+ * (`direct`) — cursor de `lastInteraction`, contagem por etapa e "carregar
+ * mais" valem como sem busca. Se o resto não traduz, os ids da busca saem de
+ * uma consulta só e o Prisma avalia o where inteiro (visibilidade incluída).
+ */
+function createBoardWhereResolver(
+  dealWhere: Prisma.DealWhereInput,
+  search: DealSearch | null = null,
+): {
   resolve: BoardWhereResolver;
   /** Resultado da pré-resolução (`undefined` = não rodou; `null` = teto). */
   preResolved: () => PreResolvedBoardWhere | null | undefined;
   directSql: Prisma.Sql | null;
+  /** Where Prisma completo da última resolução (antes dela, o `dealWhere`). */
+  fullWhere: () => Prisma.DealWhereInput;
 } {
-  const directSql = translateDealWhereToSql(dealWhere);
+  const baseSql = translateDealWhereToSql(dealWhere);
+  const directSql = baseSql && search ? sqlAndAll([baseSql, search.sql]) : baseSql;
   let pre: Promise<PreResolvedBoardWhere | null> | undefined;
   let settled: PreResolvedBoardWhere | null | undefined;
+  let fullWhere = dealWhere;
   return {
     directSql,
     preResolved: () => settled,
+    fullWhere: () => fullWhere,
     resolve: async (stageIds) => {
-      if (directSql) return { sql: directSql, direct: true };
-      pre ??= preResolveBoardWhere(dealWhere, stageIds).then((r) => (settled = r));
+      if (directSql) return { sql: directSql, direct: true, where: dealWhere };
+      if (search) {
+        const narrow = narrowSqlOfConditions([
+          ...andConditionsOf(dealWhere),
+          { stageId: { in: [...stageIds] } },
+        ]);
+        fullWhere = {
+          AND: [dealWhere, await search.prismaWhere({ narrowSql: narrow })],
+        };
+      }
+      pre ??= preResolveBoardWhere(fullWhere, stageIds).then((r) => (settled = r));
       const r = await pre;
-      return { sql: r?.sql ?? null, direct: false };
+      return { sql: r?.sql ?? null, direct: false, where: fullWhere };
     },
   };
 }
@@ -3214,6 +3295,10 @@ function logBoardPerStageFallback(pipelineId: string, sortField: BoardSortField 
   );
 }
 
+/** Envolve uma consulta para medi-la (ver `loadBoardStagesRanked`). */
+type MeasureQuery = <T>(fn: () => Promise<T>) => Promise<T>;
+const runQuery: MeasureQuery = (fn) => fn();
+
 /** Caminho novo do board (sort `position`/`createdAt`): 1 janela + 1 hidratação. */
 async function loadBoardStagesRanked(
   stagesRaw: readonly BoardStageRaw[],
@@ -3224,18 +3309,22 @@ async function loadBoardStagesRanked(
   offsetByStage: Record<string, number>,
   /** Saída opcional: total por etapa vindo da mesma janela (K3). */
   totalsOut?: Map<string, number>,
+  /** Mede a consulta da janela (`search.apply` do Server-Timing, só com busca). */
+  measure: MeasureQuery = runQuery,
 ): Promise<BoardStageWithDeals[]> {
   if (stagesRaw.length === 0) return [];
   const orgId = getOrgIdOrThrow();
   const limitByStage = boardLimitByStage(stagesRaw, perStage, offsetByStage);
-  const rows = await prisma.$queryRaw<BoardRankedRow[]>(
-    buildRankedBoardDealsSql({
-      orgId,
-      stageIds: stagesRaw.map((s) => s.id),
-      whereSql,
-      orderBy: boardRankOrderBySql(sortField, sortDirection),
-      maxPerStage: Math.max(...limitByStage.values()),
-    }),
+  const rows = await measure(() =>
+    prisma.$queryRaw<BoardRankedRow[]>(
+      buildRankedBoardDealsSql({
+        orgId,
+        stageIds: stagesRaw.map((s) => s.id),
+        whereSql,
+        orderBy: boardRankOrderBySql(sortField, sortDirection),
+        maxPerStage: Math.max(...limitByStage.values()),
+      }),
+    ),
   );
   collectRankedTotals(rows, totalsOut);
   return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
@@ -3307,6 +3396,8 @@ async function loadBoardStagesByLastInteraction(
    * caminho em SQL; no fallback por etapa fica vazio e quem chama conta.
    */
   totals?: { fromSql: boolean; byStage: Map<string, number> },
+  /** Mede a consulta da janela (`search.apply` do Server-Timing, só com busca). */
+  measure: MeasureQuery = runQuery,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
   const stagesRaw = stagesAllowedByFilter(
@@ -3324,17 +3415,23 @@ async function loadBoardStagesByLastInteraction(
   // devolve `last_at` para o cursor: o "Carregar mais" por cursor
   // (`getBoardColumnPages`) só aceita where traduzível — com ids
   // pré-resolvidos o cliente segue pelo `offsetByStage`, como antes.
-  const { sql: whereSql, direct } = await whereResolver(stagesRaw.map((s) => s.id));
+  const {
+    sql: whereSql,
+    direct,
+    where: fallbackWhere,
+  } = await whereResolver(stagesRaw.map((s) => s.id));
   if (whereSql) {
-    const rows = await prisma.$queryRaw<BoardRankedRow[]>(
-      buildLastInteractionRankedSql({
-        orgId,
-        stageIds: stagesRaw.map((s) => s.id),
-        whereSql,
-        direction,
-        scanCap: Math.max(maxPerStage, LAST_INTERACTION_STAGE_SCAN_CAP),
-        maxPerStage,
-      }),
+    const rows = await measure(() =>
+      prisma.$queryRaw<BoardRankedRow[]>(
+        buildLastInteractionRankedSql({
+          orgId,
+          stageIds: stagesRaw.map((s) => s.id),
+          whereSql,
+          direction,
+          scanCap: Math.max(maxPerStage, LAST_INTERACTION_STAGE_SCAN_CAP),
+          maxPerStage,
+        }),
+      ),
     );
     if (totals) {
       totals.fromSql = true;
@@ -3354,7 +3451,7 @@ async function loadBoardStagesByLastInteraction(
     stagesRaw,
     await loadLastInteractionIdsPerStage(
       stagesRaw,
-      dealWhere,
+      fallbackWhere,
       limitByStage,
       direction,
     ),
@@ -3647,7 +3744,12 @@ async function buildBoardDealWhere(
   visibilityWhere: Prisma.DealWhereInput | null | undefined,
   statusFilter: DealStatus | "ALL" | undefined,
   advancedFilters: AdvancedDealFilters | undefined,
-): Promise<Prisma.DealWhereInput> {
+  timing?: ServerTiming,
+): Promise<{
+  /** Where sem a busca livre (ela entra em SQL, ver `createBoardWhereResolver`). */
+  where: Prisma.DealWhereInput;
+  search: DealSearch | null;
+}> {
   const conditions: Prisma.DealWhereInput[] = [];
 
   if (statusFilter && statusFilter !== "ALL") {
@@ -3659,18 +3761,26 @@ async function buildBoardDealWhere(
     conditions.push(visibilityWhere);
   }
 
+  let search: DealSearch | null = null;
   if (advancedFilters && Object.keys(advancedFilters).length > 0) {
+    // A busca livre sai do where Prisma: vira predicado SQL dentro da consulta
+    // do board (sem pré-consultas nem lista de ids). Os demais filtros e a
+    // visibilidade seguem no where, sempre em AND com ela.
+    const { search: searchTerm, ...rest } = advancedFilters;
+    if (searchTerm?.trim()) search = createDealSearch(searchTerm, { timing });
     // pipelineId/statuses no advancedFilters não substituem visibilidade —
     // ficam como condições adicionais (AND).
-    const advConditions = await buildDealWhereFromFilters(advancedFilters);
+    const advConditions = await buildDealWhereFromFilters(rest);
     for (const c of advConditions) conditions.push(c);
   }
 
-  return conditions.length === 0
-    ? {}
-    : conditions.length === 1
-      ? (conditions[0] as Prisma.DealWhereInput)
-      : { AND: conditions };
+  const where: Prisma.DealWhereInput =
+    conditions.length === 0
+      ? {}
+      : conditions.length === 1
+        ? (conditions[0] as Prisma.DealWhereInput)
+        : { AND: conditions };
+  return { where, search };
 }
 
 async function computeBoardData(
@@ -3686,9 +3796,12 @@ async function computeBoardData(
   const phase = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timing ? timing.time(name, fn) : fn();
 
-  const dealWhere = await phase("filters", () =>
-    buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters),
+  const { where: dealWhere, search } = await phase("filters", () =>
+    buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters, timing),
   );
+  // Consulta final com a busca dentro: `search.apply` (Server-Timing).
+  const measureSearch: MeasureQuery = <T,>(fn: () => Promise<T>): Promise<T> =>
+    search && timing ? timing.time("search.apply", fn) : fn();
 
   const perStage = normalizeBoardPerStage(limitOptions?.perStage);
   const offsetByStage = normalizeBoardOffsets(limitOptions?.offsetByStage);
@@ -3719,12 +3832,13 @@ async function computeBoardData(
   //
   // O `groupBy` só sobrevive no caminho por etapa (where que nem traduz nem
   // cabe no teto da pré-resolução), onde não existe janela.
-  const whereResolver = createBoardWhereResolver(dealWhere);
+  const whereResolver = createBoardWhereResolver(dealWhere, search);
   type TotalsRow = { stageId: string; _count: { _all: number } };
   const groupByTotals = (): Promise<TotalsRow[]> =>
     prisma.deal.groupBy({
       by: ["stageId"],
-      where: { ...dealWhere, stage: { pipelineId } },
+      // `fullWhere`: com busca, já traz os ids resolvidos pelo caminho por etapa.
+      where: { ...whereResolver.fullWhere(), stage: { pipelineId } },
       _count: { _all: true },
     });
   const sqlTotals = { fromSql: false, byStage: new Map<string, number>() };
@@ -3750,6 +3864,7 @@ async function computeBoardData(
         advancedFilters,
         whereResolver.resolve,
         sqlTotals,
+        measureSearch,
       ),
     );
   } else {
@@ -3776,7 +3891,9 @@ async function computeBoardData(
       advancedFilters,
     );
     stages = await phase("cards", async () => {
-      const { sql: whereSql } = await whereResolver.resolve(stagesRaw.map((s) => s.id));
+      const { sql: whereSql, where: fallbackWhere } = await whereResolver.resolve(
+        stagesRaw.map((s) => s.id),
+      );
       if (whereSql) sqlTotals.fromSql = true;
       else logBoardPerStageFallback(pipelineId, sortField);
       return whereSql
@@ -3788,10 +3905,11 @@ async function computeBoardData(
             perStage,
             offsetByStage,
             sqlTotals.byStage,
+            measureSearch,
           )
         : loadBoardStagesPerStage(
             stagesRaw,
-            dealWhere,
+            fallbackWhere,
             dealOrderBy,
             perStage,
             offsetByStage,
@@ -4424,14 +4542,16 @@ export async function getBoardColumnPages(
     typeof visibilityWhere === "string"
       ? { ownerId: visibilityWhere }
       : visibilityWhere ?? null;
-  const dealWhere = await buildBoardDealWhere(
+  const { where: baseWhere, search } = await buildBoardDealWhere(
     normalizedWhere,
     statusFilter,
     advancedFilters,
   );
   // Where em SQL: obrigatório para a página de `lastInteraction`; nas outras
-  // ordenações serve só à contagem (abaixo).
-  const translatedWhere = translateDealWhereToSql(dealWhere);
+  // ordenações serve só à contagem (abaixo). A busca livre entra como predicado
+  // (subconsultas); só o caminho por Prisma (`position`/`createdAt`) pede os ids.
+  const baseSql = translateDealWhereToSql(baseWhere);
+  const translatedWhere = baseSql && search ? sqlAndAll([baseSql, search.sql]) : baseSql;
   const whereSql = sort === "lastInteraction" ? translatedWhere : null;
   if (sort === "lastInteraction" && !whereSql) {
     throw new BoardColumnPageError(
@@ -4444,6 +4564,25 @@ export async function getBoardColumnPages(
     where: { pipelineId, id: { in: [...requests.keys()] } },
     orderBy: { position: "asc" },
   });
+
+  // Where Prisma COMPLETO, só quando um caminho precisa dele (página por
+  // `position`/`createdAt` via findMany, ou `groupBy` de totais sem tradução).
+  // Com busca, os ids saem de UMA consulta estreitada pelas etapas pedidas.
+  const needsPrismaWhere = sort !== "lastInteraction" || !translatedWhere;
+  const dealWhere: Prisma.DealWhereInput =
+    search && needsPrismaWhere
+      ? {
+          AND: [
+            baseWhere,
+            await search.prismaWhere({
+              narrowSql: narrowSqlOfConditions([
+                ...andConditionsOf(baseWhere),
+                { stageId: { in: stagesRaw.map((s) => s.id) } },
+              ]),
+            }),
+          ],
+        }
+      : baseWhere;
 
   // Total ATUAL de cada etapa pedida (o do board pode ter até 45 s de cache):
   // o cliente recalcula "faltam N" sem recarregar o board. Em voo junto com

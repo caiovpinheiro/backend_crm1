@@ -63,6 +63,7 @@ vi.mock("@/services/ai/replay-sandbox", () => ({
 }));
 vi.mock("@/services/kanban-filters", () => ({
   buildDealSearchOr: vi.fn(async () => []),
+  createDealSearch: vi.fn(() => null),
   buildDealWhereFromFilters: vi.fn(async () => []),
 }));
 
@@ -1032,7 +1033,9 @@ describe("board: contagem por etapa sem consulta à parte (K3)", () => {
       Array.from({ length: cap + 1 }, (_, i) => ({ id: `x${i}`, stageId: "s1" })),
     );
     const board = await withOrg(() =>
-      getBoardData(PIPELINE, null, "ALL", { search: "Deal" }, { perStage: 2 }),
+      // Qualquer filtro avançado aciona o where simulado acima (a busca livre
+      // agora é tratada à parte, ver deal-search-sql.test.ts).
+      getBoardData(PIPELINE, null, "ALL", { withoutTags: true }, { perStage: 2 }),
     );
     expect(h.dealGroupBy).toHaveBeenCalledTimes(1);
     expect(board.find((s) => s.id === "s1")?.totalCount).toBe(6);
