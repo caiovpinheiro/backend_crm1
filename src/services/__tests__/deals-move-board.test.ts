@@ -123,6 +123,7 @@ import {
   getBoardData,
   moveDeal,
   nextDealNumber,
+  publishActiveDealMoved,
   resolveBoardDealIds,
   StageFieldsRequiredError,
 } from "@/services/deals";
@@ -579,5 +580,117 @@ describe("getBoardData — cache por org e where de visibilidade", () => {
     await expect(getBoardData("pipe-1")).rejects.toThrow(/organization context ausente/);
     expect(h.cacheWrap).not.toHaveBeenCalled();
     expect(h.prisma.deal.groupBy).not.toHaveBeenCalled();
+  });
+});
+
+const MOVED_AT = new Date("2026-10-06T12:00:01.000Z");
+
+function activeMovedDeal(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "deal-1",
+    title: "Lead",
+    value: 10,
+    status: "OPEN",
+    lostReason: null,
+    position: 3,
+    expectedClose: null,
+    createdAt: new Date("2026-10-06T12:00:00.000Z"),
+    updatedAt: MOVED_AT,
+    stageId: "stage-b",
+    contact: { id: "c1", name: "Ana", email: null, phone: null, avatarUrl: null },
+    owner: null,
+    tags: [],
+    stage: { id: "stage-b", pipelineId: "pipe-1", isWon: false, isLost: false },
+    ...overrides,
+  };
+}
+
+describe("publishActiveDealMoved — automação, deal que continua aberto", () => {
+  async function flushPublish() {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  it("stage A → stage B publica deal_moved com a org, a posição e o card", async () => {
+    h.prisma.deal.findUnique.mockResolvedValue(activeMovedDeal());
+    h.prisma.stage.findUnique.mockResolvedValue({
+      pipelineId: "pipe-1",
+      isWon: false,
+      isLost: false,
+    });
+
+    withOrg(ORG, () => {
+      publishActiveDealMoved("deal-1", "stage-a");
+      return Promise.resolve();
+    });
+    await flushPublish();
+
+    expect(h.ssePublish).toHaveBeenCalledTimes(1);
+    expect(h.ssePublish.mock.calls[0]![0]).toBe("deal_moved");
+    expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
+      dealId: "deal-1",
+      organizationId: ORG,
+      fromPipelineId: "pipe-1",
+      toPipelineId: "pipe-1",
+      fromStageId: "stage-a",
+      toStageId: "stage-b",
+      position: 3,
+      updatedAt: MOVED_AT.toISOString(),
+      card: { id: "deal-1", title: "Lead", status: "OPEN", position: 3 },
+    });
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    const invalidateOrder = h.invalidateBoardData.mock.invocationCallOrder[0]!;
+    const publishOrder = h.ssePublish.mock.invocationCallOrder[0]!;
+    expect(invalidateOrder).toBeLessThan(publishOrder);
+  });
+
+  it("não publica se a leitura depois do update falha", async () => {
+    h.prisma.deal.findUnique.mockRejectedValue(new Error("db fora"));
+    withOrg(ORG, () => {
+      publishActiveDealMoved("deal-1", "stage-a");
+      return Promise.resolve();
+    });
+    await flushPublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
+  });
+
+  it("WON e LOST ficam fora", async () => {
+    h.prisma.deal.findUnique.mockResolvedValue(
+      activeMovedDeal({
+        status: "WON",
+        stage: { id: "stage-won", pipelineId: "pipe-1", isWon: true, isLost: false },
+        stageId: "stage-won",
+      }),
+    );
+    withOrg(ORG, () => {
+      publishActiveDealMoved("deal-1", "stage-a");
+      return Promise.resolve();
+    });
+    await flushPublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
+
+    h.ssePublish.mockClear();
+    h.prisma.deal.findUnique.mockResolvedValue(
+      activeMovedDeal({
+        status: "LOST",
+        stage: { id: "stage-lost", pipelineId: "pipe-1", isWon: false, isLost: true },
+        stageId: "stage-lost",
+      }),
+    );
+    withOrg(ORG, () => {
+      publishActiveDealMoved("deal-1", "stage-a");
+      return Promise.resolve();
+    });
+    await flushPublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
+  });
+
+  it("não publica sem organizationId", async () => {
+    h.prisma.deal.findUnique.mockResolvedValue(activeMovedDeal());
+    publishActiveDealMoved("deal-1", "stage-a");
+    await flushPublish();
+    expect(h.ssePublish).not.toHaveBeenCalled();
+    expect(h.prisma.deal.findUnique).not.toHaveBeenCalled();
   });
 });

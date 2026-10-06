@@ -118,6 +118,7 @@ describe("processBulkMoveStage — cache do board", () => {
     );
     for (const source of [job, route]) {
       expect(source).not.toMatch(/publishDealMoved\s*\(/);
+      expect(source).not.toMatch(/publishActiveDealMoved\s*\(/);
       expect(source).not.toMatch(/sseBus\s*\.\s*publish\s*\(/);
     }
   });

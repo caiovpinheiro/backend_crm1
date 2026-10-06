@@ -1780,6 +1780,70 @@ function publishDealMovedAfterCacheBump(
   })();
 }
 
+/**
+ * Depois de um `UPDATE` de etapa já confirmado (automação `move_stage` ou
+ * `update_field` de `stageId`). Reusa o mesmo `deal_moved` do move manual.
+ *
+ * Só deal que continua OPEN, fora de Ganho/Perdido. Lote não chama isto.
+ * Falha de Redis não desfaz o update.
+ */
+export function publishActiveDealMoved(dealId: string, fromStageId: string): void {
+  const orgId = getOrgIdOrNull();
+  if (!orgId || !dealId || !fromStageId) return;
+  void (async () => {
+    try {
+      const deal = await prisma.deal.findUnique({
+        where: { id: dealId },
+        select: {
+          id: true,
+          title: true,
+          value: true,
+          status: true,
+          lostReason: true,
+          position: true,
+          expectedClose: true,
+          createdAt: true,
+          updatedAt: true,
+          stageId: true,
+          contact: {
+            select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+          },
+          owner: { select: { id: true, name: true, avatarUrl: true, type: true } },
+          tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
+          stage: { select: { id: true, pipelineId: true, isWon: true, isLost: true } },
+        },
+      });
+      if (!deal || deal.status !== "OPEN" || !deal.stage) return;
+      if (deal.stage.isWon || deal.stage.isLost) return;
+      if (deal.stageId === fromStageId) return;
+      const position = typeof deal.position === "number" ? deal.position : Number(deal.position);
+      if (!Number.isFinite(position)) return;
+      const fromStage = await prisma.stage.findUnique({
+        where: { id: fromStageId },
+        select: { pipelineId: true, isWon: true, isLost: true },
+      });
+      if (!fromStage || fromStage.isWon || fromStage.isLost || !fromStage.pipelineId) return;
+      publishDealMovedAfterCacheBump(
+        orgId,
+        dealId,
+        {
+          fromStageId,
+          toStageId: deal.stageId,
+          fromPipelineId: fromStage.pipelineId,
+          toPipelineId: deal.stage.pipelineId,
+          position,
+        },
+        deal,
+      );
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err), dealId },
+        "[deals.publishActiveDealMoved] deal_moved não publicado",
+      );
+    }
+  })();
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
