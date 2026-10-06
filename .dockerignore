@@ -8,10 +8,13 @@ node_modules
 Dockerfile*
 .dockerignore
 
-# scripts/: só o que o build e a imagem usam (build:workers, HEALTHCHECK e os
-# wrappers ops-*.mjs). Seeds, backfills, diagnósticos, scripts/dev e
-# scripts destrutivos não entram no contexto de build nem na imagem.
+# scripts/: só o que o build e a imagem usam (build:workers, HEALTHCHECK, os
+# wrappers ops-*.mjs e os backfills de dados `backfill-*.mjs`, que o dono
+# roda no container depois de uma migration). Seeds, diagnósticos,
+# scripts/dev e scripts destrutivos não entram no contexto de build nem na
+# imagem.
 scripts/*
 !scripts/build-workers.mjs
 !scripts/healthcheck.mjs
 !scripts/ops-*.mjs
+!scripts/backfill-*.mjs
