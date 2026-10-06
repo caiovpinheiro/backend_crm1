@@ -68,12 +68,34 @@ COPY --from=builder /app/node_modules/pdfjs-dist ./node_modules/pdfjs-dist
 # Workers compilados (campaign-worker.js, …, baileys/index.js).
 # Executados com `node dist/workers/<name>.js` conforme APP_MODE.
 COPY --from=builder /app/dist/workers ./dist/workers
-# Da pasta scripts/ só entra o que roda na imagem: o HEALTHCHECK e os
+# Da pasta scripts/ só entra o que roda na imagem: o HEALTHCHECK, os
 # wrappers `ops-*.mjs` (chamam a API local com o CRON_SECRET do container,
-# sem credencial própria). Seeds, backfills, diagnósticos e scripts
+# sem credencial própria) e os backfills `backfill-*.mjs` (completam colunas
+# novas depois de uma migration; usam o DATABASE_URL do container:
+# `node scripts/backfill-<nome>.mjs`). Seeds, diagnósticos e scripts
 # destrutivos não vão para produção — rode-os de um checkout com DATABASE_URL.
 # O .dockerignore já tira o resto do contexto de build.
-COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs ./scripts/
+COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs /app/scripts/backfill-*.mjs ./scripts/
+# `pg` inteiro para os backfills (`import { Client } from "pg"`). O standalone
+# só traz o que o servidor carrega por `require` (`pg/lib/*`); o `import`
+# resolve pelo `exports` do pacote para `pg/esm/index.mjs`, que o rastreio não
+# copia — sem isto o backfill morre em ERR_MODULE_NOT_FOUND. Copia o pacote e
+# as dependências de runtime (lockfile: pg 8.x; `pg-types` traz o seu
+# `postgres-array` aninhado). `pg-cloudflare` (opcional) só carrega no runtime
+# da Cloudflare; `pg-native` não é instalado. Mesmas versões do standalone: só
+# completa os arquivos que o rastreio deixou de fora.
+RUN --mount=type=bind,from=builder,source=/app/node_modules,target=/tmp/nm \
+    mkdir -p /app/node_modules \
+ && for p in pg pg-connection-string pg-pool pg-protocol pg-types pgpass \
+             pg-int8 postgres-array postgres-bytea postgres-date postgres-interval \
+             split2 xtend; do \
+      rm -rf "/app/node_modules/$p" && cp -a "/tmp/nm/$p" /app/node_modules/ || exit 1; \
+    done
+# Falha o build se um backfill não conseguir carregar o `pg` (ex.: o pg ganhou
+# dependência nova e a lista acima ficou velha). `pgpass` é carregado só na
+# conexão sem senha; importá-lo aqui puxa o `split2`.
+RUN cd /app/scripts \
+ && node --input-type=module -e 'import { Client } from "pg"; import "pgpass"; if (typeof Client !== "function") process.exit(1);'
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
