@@ -520,9 +520,11 @@ export async function getDeals(params: GetDealsParams = {}) {
       { err: error },
       "[deals] contacts.lastMessageAt ausente — lista segue sem a coluna. Aplique a migration 20261006120000_contacts_last_message.",
     );
-    // Sem `lastMessageAt` no contato: o tipo do resultado é o de `listInclude`
-    // (a coluna é opcional em `attachLastInteractionAt`).
-    loaded = await loadPage(listIncludeWithoutLastMessage as unknown as typeof listInclude);
+    loaded = await loadPage(
+      // Mesmo formato do include normal, só sem `contact.lastMessageAt`: o tipo da
+      // resposta continua o de `listInclude` para os chamadores não perderem as relações.
+      listIncludeWithoutLastMessage as typeof listInclude,
+    );
   }
   const [rows, counted] = loaded;
   const hasMore = rows.length > perPage;
