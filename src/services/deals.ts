@@ -413,6 +413,36 @@ const listInclude = {
   owner: { select: { id: true, name: true, email: true, avatarUrl: true, type: true } },
 } satisfies Prisma.DealInclude;
 
+/** Mesma lista sem `contacts.lastMessageAt` — banco ainda sem a migration. */
+const listIncludeWithoutLastMessage: Prisma.DealInclude = {
+  ...listInclude,
+  contact: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      avatarUrl: true,
+      source: true,
+      tags: {
+        select: { tag: { select: { id: true, name: true, color: true } } },
+      },
+    },
+  },
+};
+
+function missingLastMessageColumn(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  if (!/lastMessageAt/i.test(message)) return false;
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return error.code === "P2022" || error.code === "P2010";
+  }
+  return (
+    error instanceof Prisma.PrismaClientValidationError ||
+    /does not exist|Unknown field/i.test(message)
+  );
+}
+
 export async function getDeals(params: GetDealsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
   // Lista do Pipeline permite até 1000/página para seleção em massa.
@@ -526,7 +556,22 @@ export async function getDeals(params: GetDealsParams = {}) {
     rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     return [rows, total] as const;
   };
-  const [rows, counted] = await loadPage(listInclude);
+  let loaded: Awaited<ReturnType<typeof loadPage>>;
+  try {
+    loaded = await loadPage(listInclude);
+  } catch (error) {
+    if (!missingLastMessageColumn(error)) throw error;
+    log.warn(
+      { err: error },
+      "[deals] contacts.lastMessageAt ausente — lista segue sem a coluna. Aplique a migration 20261006120000_contacts_last_message.",
+    );
+    loaded = await loadPage(
+      // Mesmo formato do include normal, só sem `contact.lastMessageAt`: o tipo da
+      // resposta continua o de `listInclude` para os chamadores não perderem as relações.
+      listIncludeWithoutLastMessage as unknown as typeof listInclude,
+    );
+  }
+  const [rows, counted] = loaded;
   const hasMore = rows.length > perPage;
   const items = hasMore ? rows.slice(0, perPage) : rows;
   // Sem contagem: na última página o total é exato sem consultar
@@ -601,8 +646,16 @@ async function attachLastInteractionAt<
     else missing.add(deal.contactId);
   }
   if (missing.size > 0) {
-    const fallback = await loadConversationLastAtFallback(getOrgIdOrThrow(), [...missing]);
-    for (const [contactId, at] of fallback) lastByContact.set(contactId, at);
+    try {
+      const fallback = await loadConversationLastAtFallback(getOrgIdOrThrow(), [...missing]);
+      for (const [contactId, at] of fallback) lastByContact.set(contactId, at);
+    } catch (error) {
+      if (!missingLastMessageColumn(error)) throw error;
+      log.warn(
+        { err: error },
+        "[deals] conversations.lastMessageAt ausente — última interação fica no updatedAt do negócio.",
+      );
+    }
   }
 
   return items.map((deal) => {
