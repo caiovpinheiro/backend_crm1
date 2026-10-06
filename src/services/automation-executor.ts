@@ -65,6 +65,7 @@ import {
   createDealEvent,
   markDealLost,
   markDealWon,
+  publishActiveDealMoved,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
@@ -2050,7 +2051,7 @@ function buildStepOrigin(
   };
 }
 
-async function executeStep(
+export async function executeStep(
   stepType: string,
   rawConfig: Prisma.JsonValue | Record<string, unknown>,
   rt: RuntimeContext
@@ -2154,6 +2155,10 @@ async function executeStep(
           contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
           depth: (rt.depth ?? 0) + 1,
         });
+        // Só o card que continua aberto. Ganho/Perdido não entra no realtime.
+        if (currentDeal.status === "OPEN" && !targetStage?.isWon && !targetStage?.isLost) {
+          publishActiveDealMoved(dealId, currentDeal.stageId);
+        }
       }
       }
       return moved > 1 ? { note: `OK (${moved} negócios)` } : {};
@@ -2813,6 +2818,7 @@ async function executeStep(
               contactId: rt.contactId ?? moveContactId ?? undefined,
               depth: (rt.depth ?? 0) + 1,
             });
+            publishActiveDealMoved(targetDealId, prevStageId);
           }
         } else {
           const customField = await prisma.customField.findFirst({
