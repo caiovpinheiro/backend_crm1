@@ -644,32 +644,44 @@ describe("publishActiveDealMoved — automação, deal que continua aberto", () 
     await Promise.resolve();
   }
 
-  it("stage A → stage B publica deal_moved com a org, a posição e o card", async () => {
-    h.prisma.deal.findUnique.mockResolvedValue(activeMovedDeal());
-    h.prisma.stage.findUnique.mockResolvedValue({
-      pipelineId: "pipe-1",
-      isWon: false,
-      isLost: false,
-    });
-
+  function publishRow(deal = activeMovedDeal(), fromStageId = "stage-a", fromPipelineId = "pipe-1") {
     withOrg(ORG, () => {
-      publishActiveDealMoved("deal-1", "stage-a");
+      publishActiveDealMoved({
+        dealId: deal.id,
+        fromStageId,
+        fromPipelineId,
+        deal,
+      });
       return Promise.resolve();
     });
+  }
+
+  it("Qualificado → Novo publica deal_moved com a linha já gravada, sem nova leitura", async () => {
+    const deal = activeMovedDeal({
+      id: "deal-caio",
+      title: "Caio",
+      stageId: "stage-novo",
+      position: 4,
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+    });
+
+    publishRow(deal, "stage-qualificado", "pipe-1");
     await flushPublish();
 
+    expect(h.prisma.deal.findUnique).not.toHaveBeenCalled();
+    expect(h.prisma.stage.findUnique).not.toHaveBeenCalled();
     expect(h.ssePublish).toHaveBeenCalledTimes(1);
     expect(h.ssePublish.mock.calls[0]![0]).toBe("deal_moved");
     expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
-      dealId: "deal-1",
+      dealId: "deal-caio",
       organizationId: ORG,
       fromPipelineId: "pipe-1",
       toPipelineId: "pipe-1",
-      fromStageId: "stage-a",
-      toStageId: "stage-b",
-      position: 3,
+      fromStageId: "stage-qualificado",
+      toStageId: "stage-novo",
+      position: 4,
       updatedAt: MOVED_AT.toISOString(),
-      card: { id: "deal-1", title: "Lead", status: "OPEN", position: 3 },
+      card: { id: "deal-caio", title: "Caio", status: "OPEN", position: 4 },
     });
     expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
     const invalidateOrder = h.invalidateBoardData.mock.invocationCallOrder[0]!;
@@ -677,50 +689,37 @@ describe("publishActiveDealMoved — automação, deal que continua aberto", () 
     expect(invalidateOrder).toBeLessThan(publishOrder);
   });
 
-  it("não publica se a leitura depois do update falha", async () => {
-    h.prisma.deal.findUnique.mockRejectedValue(new Error("db fora"));
-    withOrg(ORG, () => {
-      publishActiveDealMoved("deal-1", "stage-a");
-      return Promise.resolve();
-    });
-    await flushPublish();
-    expect(h.ssePublish).not.toHaveBeenCalled();
-  });
-
   it("WON e LOST ficam fora", async () => {
-    h.prisma.deal.findUnique.mockResolvedValue(
+    publishRow(
       activeMovedDeal({
         status: "WON",
         stage: { id: "stage-won", pipelineId: "pipe-1", isWon: true, isLost: false },
         stageId: "stage-won",
       }),
     );
-    withOrg(ORG, () => {
-      publishActiveDealMoved("deal-1", "stage-a");
-      return Promise.resolve();
-    });
     await flushPublish();
     expect(h.ssePublish).not.toHaveBeenCalled();
 
     h.ssePublish.mockClear();
-    h.prisma.deal.findUnique.mockResolvedValue(
+    publishRow(
       activeMovedDeal({
         status: "LOST",
         stage: { id: "stage-lost", pipelineId: "pipe-1", isWon: false, isLost: true },
         stageId: "stage-lost",
       }),
     );
-    withOrg(ORG, () => {
-      publishActiveDealMoved("deal-1", "stage-a");
-      return Promise.resolve();
-    });
     await flushPublish();
     expect(h.ssePublish).not.toHaveBeenCalled();
   });
 
   it("não publica sem organizationId", async () => {
-    h.prisma.deal.findUnique.mockResolvedValue(activeMovedDeal());
-    publishActiveDealMoved("deal-1", "stage-a");
+    const deal = activeMovedDeal();
+    publishActiveDealMoved({
+      dealId: deal.id,
+      fromStageId: "stage-a",
+      fromPipelineId: "pipe-1",
+      deal,
+    });
     await flushPublish();
     expect(h.ssePublish).not.toHaveBeenCalled();
     expect(h.prisma.deal.findUnique).not.toHaveBeenCalled();

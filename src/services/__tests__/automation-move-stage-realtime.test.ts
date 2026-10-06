@@ -35,7 +35,25 @@ vi.mock("@/services/deals", () => ({
   createDealEvent: h.createDealEvent,
   markDealLost: vi.fn(),
   markDealWon: vi.fn(),
-  publishActiveDealMoved: h.publishActiveDealMoved,
+    activeDealMovedSelect: {
+      id: true,
+      title: true,
+      value: true,
+      status: true,
+      lostReason: true,
+      position: true,
+      expectedClose: true,
+      createdAt: true,
+      updatedAt: true,
+      stageId: true,
+      contact: {
+        select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+      },
+      owner: { select: { id: true, name: true, avatarUrl: true, type: true } },
+      tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
+      stage: { select: { pipelineId: true, isWon: true, isLost: true } },
+    },
+    publishActiveDealMoved: h.publishActiveDealMoved,
   findCanonicalOpenDealInPipeline: vi.fn(),
   nextDealNumber: vi.fn(),
   propagateOwnerToContactAndChat: vi.fn(),
@@ -82,7 +100,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.assertStageEntryFields.mockResolvedValue(undefined);
   h.createDealEvent.mockResolvedValue(undefined);
-  h.dealUpdate.mockResolvedValue({ id: "deal-1" });
+  h.dealUpdate.mockResolvedValue({
+    id: "deal-1",
+    title: "Lead",
+    status: "OPEN",
+    stageId: "stage-b",
+    position: 3,
+    updatedAt: new Date("2026-10-06T12:00:01.000Z"),
+    stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+  });
   h.stageFindUnique.mockResolvedValue({
     id: "stage-b",
     name: "Contato",
@@ -94,7 +120,7 @@ beforeEach(() => {
     status: "OPEN",
     stageId: "stage-a",
     contactId: "c1",
-    stage: { name: "Novo", pipelineId: "pipe-1" },
+    stage: { name: "Novo", pipelineId: "pipe-1", isWon: false, isLost: false },
   });
 });
 
@@ -104,10 +130,92 @@ describe("automação move_stage", () => {
 
     expect(h.dealUpdate).toHaveBeenCalledTimes(1);
     expect(h.publishActiveDealMoved).toHaveBeenCalledTimes(1);
-    expect(h.publishActiveDealMoved).toHaveBeenCalledWith("deal-1", "stage-a");
+    expect(h.publishActiveDealMoved).toHaveBeenCalledWith({
+      dealId: "deal-1",
+      fromStageId: "stage-a",
+      fromPipelineId: "pipe-1",
+      deal: expect.objectContaining({ id: "deal-1", stageId: "stage-b", status: "OPEN" }),
+    });
     const updateOrder = h.dealUpdate.mock.invocationCallOrder[0]!;
     const publishOrder = h.publishActiveDealMoved.mock.invocationCallOrder[0]!;
     expect(publishOrder).toBeGreaterThan(updateOrder);
+  });
+
+  it("mensagem recebida move Qualificado → Novo e publica deal_moved depois do update", async () => {
+    const saved = {
+      id: "deal-caio",
+      title: "Caio",
+      status: "OPEN",
+      stageId: "stage-novo",
+      position: 4,
+      updatedAt: new Date("2026-10-06T15:00:00.000Z"),
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+    };
+    h.dealUpdate.mockResolvedValue(saved);
+    h.stageFindUnique.mockResolvedValue({
+      id: "stage-novo",
+      name: "Novo",
+      isWon: false,
+      isLost: false,
+      pipelineId: "pipe-1",
+    });
+    h.dealFindUnique.mockResolvedValue({
+      status: "OPEN",
+      stageId: "stage-qualificado",
+      contactId: "c-caio",
+      stage: { name: "Qualificado", pipelineId: "pipe-1", isWon: false, isLost: false },
+    });
+
+    await executeStep(
+      "move_stage",
+      { stageId: "stage-novo" },
+      {
+        ...rt,
+        dealId: "deal-caio",
+        event: "message_received",
+        data: { stageMatchedDealIds: ["deal-caio"] },
+      },
+    );
+
+    expect(h.dealUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "deal-caio" },
+        data: { stageId: "stage-novo" },
+      }),
+    );
+    expect(h.publishActiveDealMoved).toHaveBeenCalledTimes(1);
+    expect(h.publishActiveDealMoved).toHaveBeenCalledWith({
+      dealId: "deal-caio",
+      fromStageId: "stage-qualificado",
+      fromPipelineId: "pipe-1",
+      deal: saved,
+    });
+    const updateOrder = h.dealUpdate.mock.invocationCallOrder[0]!;
+    const publishOrder = h.publishActiveDealMoved.mock.invocationCallOrder[0]!;
+    expect(publishOrder).toBeGreaterThan(updateOrder);
+  });
+
+  it("mensagem recebida que move vários negócios não publica deal_moved", async () => {
+    h.dealFindUnique.mockImplementation(async (args: { where: { id: string } }) => ({
+      status: "OPEN",
+      stageId: "stage-qualificado",
+      contactId: "c1",
+      stage: { name: "Qualificado", pipelineId: "pipe-1", isWon: false, isLost: false },
+      id: args.where.id,
+    }));
+
+    await executeStep(
+      "move_stage",
+      { stageId: "stage-novo" },
+      {
+        ...rt,
+        event: "message_received",
+        data: { stageMatchedDealIds: ["deal-caio", "deal-outro"] },
+      },
+    );
+
+    expect(h.dealUpdate).toHaveBeenCalledTimes(2);
+    expect(h.publishActiveDealMoved).not.toHaveBeenCalled();
   });
 
   it("não publica se a etapa destino recusa o deal", async () => {
@@ -147,9 +255,20 @@ describe("automação move_stage", () => {
   });
 
   it("update_field de stageId também publica depois do update", async () => {
-    h.dealFindUnique.mockResolvedValue({ stageId: "stage-a", contactId: "c1" });
+    h.dealFindUnique.mockResolvedValue({
+      stageId: "stage-a",
+      contactId: "c1",
+      status: "OPEN",
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+    });
     await executeStep("update_field", { entity: "deal", field: "stageId", value: "stage-b" }, rt);
     expect(h.dealUpdate).toHaveBeenCalledTimes(1);
-    expect(h.publishActiveDealMoved).toHaveBeenCalledWith("deal-1", "stage-a");
+    expect(h.publishActiveDealMoved).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        fromStageId: "stage-a",
+        fromPipelineId: "pipe-1",
+      }),
+    );
   });
 });
