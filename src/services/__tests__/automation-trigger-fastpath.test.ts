@@ -23,7 +23,11 @@ const { enqueueAutomation, dispatchIntegrationWebhooks, prismaMock } = vi.hoiste
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
-    deal: { findFirst: vi.fn() },
+    deal: {
+      findFirst: vi.fn(),
+      // message_received consulta os OPEN do contato antes de disparar.
+      findMany: vi.fn(async () => []),
+    },
     // `shouldSkipIdleInboundAutomation` lê `conversation.closingProtocolEnabled`
     // pelo org-settings; sem linha vale o padrão (protocolo desligado).
     organizationSetting: { findUnique: vi.fn(async () => null) },
