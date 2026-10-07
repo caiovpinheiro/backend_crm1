@@ -770,8 +770,8 @@ export async function getPainelEvolution(
       SELECT date, "stageId", "openCount"
       FROM deal_stage_daily_snapshots
       WHERE "organizationId" = ${orgId}
-        AND date >= ${f.range.from}::date
-        AND date <= ${f.range.to}::date
+        AND date >= ${dayKeyFromDate(f.range.from)}::date
+        AND date <= ${dayKeyFromDate(f.range.to)}::date
         ${pipelineInSql(Prisma.sql`"pipelineId"`, f.pipelineIds)}
         ${stageFilter}
     `;
