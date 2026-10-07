@@ -372,7 +372,7 @@ const listInclude = {
 } satisfies Prisma.DealInclude;
 
 /** Mesma lista sem `contacts.lastMessageAt` — banco ainda sem a migration. */
-const listIncludeWithoutLastMessage: Prisma.DealInclude = {
+const listIncludeWithoutLastMessage = {
   ...listInclude,
   contact: {
     select: {
@@ -387,7 +387,7 @@ const listIncludeWithoutLastMessage: Prisma.DealInclude = {
       },
     },
   },
-};
+} satisfies Prisma.DealInclude;
 
 function missingLastMessageColumn(error: unknown): boolean {
   const message = error instanceof Error ? error.message : "";
@@ -523,7 +523,7 @@ export async function getDeals(params: GetDealsParams = {}) {
     loaded = await loadPage(
       // Mesmo formato do include normal, só sem `contact.lastMessageAt`: o tipo da
       // resposta continua o de `listInclude` para os chamadores não perderem as relações.
-      listIncludeWithoutLastMessage as typeof listInclude,
+      listIncludeWithoutLastMessage as unknown as typeof listInclude,
     );
   }
   const [rows, counted] = loaded;

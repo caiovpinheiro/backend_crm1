@@ -38,11 +38,22 @@ function readId(meta: Record<string, unknown>, key: string): string | null {
   return typeof v === "string" && v.trim() !== "" ? v : null;
 }
 
+function ownerIdFromDealEvent(raw: unknown): string | null {
+  const meta = asRecord(raw);
+  const direct = readId(meta, "toUserId") ?? readId(meta, "ownerId");
+  if (direct) return direct;
+  const to = meta.to;
+  if (typeof to === "string" && to.trim() !== "") return to;
+  if (to && typeof to === "object") return readId(asRecord(to), "id");
+  return null;
+}
+
 /**
  * `true` quando `userId` foi atribuído a ESTA conversa — por distribuição
- * (`LEAD_DISTRIBUTED`, meta.selectedUserId, ver `emitDistributionEvent`)
- * ou por atribuição/transferência manual (`ASSIGNEE_CHANGED`, meta.toUserId,
- * ver `api/conversations/[id]/actions`).
+ * (`LEAD_DISTRIBUTED`, meta.selectedUserId, ver `emitDistributionEvent`),
+ * por atribuição/transferência manual (`ASSIGNEE_CHANGED`, meta.toUserId,
+ * ver `api/conversations/[id]/actions`) ou pelo `assign_owner` da
+ * automação (`OWNER_CHANGED` no deal do contato, depois que o ticket abriu).
  *
  * ActivityEvent tem PK composta `(id, occurredAt)` por causa do
  * particionamento — sempre `findMany`/`findFirst`, nunca `findUnique`.
@@ -62,13 +73,35 @@ export async function humanWasAssignedInThisConversation(
       take: MAX_EVENTS,
       select: { meta: true },
     });
-    return events.some((ev) => {
+    const matchedConversationEvent = events.some((ev) => {
       const meta = asRecord(ev.meta);
       return (
         readId(meta, "selectedUserId") === userId ||
         readId(meta, "toUserId") === userId
       );
     });
+    if (matchedConversationEvent) return true;
+
+    // `assign_owner` da automação grava OWNER_CHANGED no deal e propaga
+    // o assignee no chat, mas não grava ASSIGNEE_CHANGED na conversa.
+    // Sem isso o próximo inbound trata o consultor como herança e solta
+    // o dono (DNAWORK #66305: Ketly atribuída, imagem seguinte zerou).
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { contactId: true, createdAt: true },
+    });
+    if (!conv?.contactId) return false;
+    const ownerChanges = await prisma.dealEvent.findMany({
+      where: {
+        type: "OWNER_CHANGED",
+        createdAt: { gte: conv.createdAt },
+        deal: { contactId: conv.contactId },
+      },
+      orderBy: { createdAt: "desc" },
+      take: MAX_EVENTS,
+      select: { meta: true },
+    });
+    return ownerChanges.some((ev) => ownerIdFromDealEvent(ev.meta) === userId);
   } catch (e) {
     // Feed indisponível: conservador — assume que houve atribuição e mantém
     // o consultor. Errar para "não soltar" só atrasa a IA; errar para o
