@@ -900,6 +900,23 @@ Tetos: as métricas de resposta usam no máximo os últimos 90 dias do período 
 
 Cache: `/api/painel/service` **não** tem cache de servidor (cada chamada recalcula). `/api/painel/team` e `/api/analytics/tabulations` usam `cachedReport`: por organização + parâmetros, fresco por 60 s e servido vencido por mais 120 s enquanto recalcula (sem invalidação por escrita; defasagem máxima 180 s). Teto de período: `/painel/team` 90 dias, `/analytics/tabulations` 366 dias (mantém o fim; a resposta traz `rangeClamped: true` quando cortou).
 
+#### `GET /api/analytics/tabulations` — ator do log
+
+Cada registro de `items` (log paginado) ganhou o campo aditivo `actor`, que diz quem tabulou:
+
+```json
+"actor": { "kind": "user" | "automation" | "ai_agent" | "system", "id": "string|null", "name": "string|null" }
+```
+
+| `kind` | Origem | `id` | `name` |
+|--------|--------|------|--------|
+| `user` | Pessoa (encerramento/retabulação pela conversa). | id do usuário | nome do usuário |
+| `ai_agent` | Agente de IA (tabulação/encerramento pela IA). | id do agente (`AIAgentConfig`), quando gravado | nome do agente |
+| `automation` | Passo de automação. | id da automação | nome da automação |
+| `system` | O resto: encerramento em massa, integração, evento sem ator. | `null` | rótulo gravado ou `"Sistema"` |
+
+O tipo gravado no evento (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que mandou a mensagem, ou nulo). Por isso `actorUserId` e `actorName` continuam como antes (só o usuário gravado no evento, `null`/`"—"` para IA e automação) e o front deve usar `actor`.
+
 ---
 
 ## 12. Settings (org & user)
