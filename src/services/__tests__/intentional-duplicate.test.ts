@@ -94,6 +94,10 @@ vi.mock("@/services/kanban-filters", () => ({
 import { runWithContext } from "@/lib/request-context";
 import { classifyMessageDeals } from "@/services/automation-triggers";
 import {
+  intentionalStageClusterIds,
+  shouldSkipIntentionalStageRetrigger,
+} from "@/services/intentional-stage-cluster";
+import {
   assignDealOwner,
   createDeal,
   duplicateDeal,
@@ -145,6 +149,57 @@ describe("classifyMessageDeals", () => {
     expect(classifyMessageDeals({ filterActive: true, matchedIds: [], openIds: ["a"] })).toEqual({
       mode: "filter-miss",
     });
+  });
+});
+
+describe("conjunto de duplicata de propósito na etapa", () => {
+  const rows = [
+    {
+      id: "origin",
+      intentionalDuplicate: false,
+      duplicatedFromDealId: null,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    },
+    {
+      id: "copy",
+      intentionalDuplicate: true,
+      duplicatedFromDealId: "origin",
+      createdAt: new Date("2026-02-01T00:00:00.000Z"),
+    },
+    {
+      id: "other",
+      intentionalDuplicate: false,
+      duplicatedFromDealId: null,
+      createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    },
+  ];
+
+  it("inclui origem e cópia, na ordem de criação, e deixa o card sem vínculo", () => {
+    expect(intentionalStageClusterIds(rows)).toEqual(["origin", "copy"]);
+  });
+
+  it("com fluxo já existente, quem chega não recomeça", () => {
+    expect(
+      shouldSkipIntentionalStageRetrigger({
+        dealId: "copy",
+        clusterIdsOldestFirst: ["origin", "copy"],
+        hasPriorContext: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldSkipIntentionalStageRetrigger({
+        dealId: "copy",
+        clusterIdsOldestFirst: ["origin", "copy"],
+        hasPriorContext: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSkipIntentionalStageRetrigger({
+        dealId: "only",
+        clusterIdsOldestFirst: ["only"],
+        hasPriorContext: true,
+      }),
+    ).toBe(false);
   });
 });
 

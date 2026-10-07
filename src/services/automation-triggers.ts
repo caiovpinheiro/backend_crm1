@@ -7,6 +7,10 @@ import {
 } from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { getActiveContext } from "@/services/automation-context";
+import {
+  loadIntentionalStageClusterIds,
+  shouldSkipIntentionalStageRetrigger,
+} from "@/services/intentional-stage-cluster";
 
 import {
   enqueueAutomation,
@@ -928,6 +932,35 @@ export async function fireTrigger(  event: string,
               /* best-effort: nunca derruba o disparo por causa do log */
             }
             continue;
+          }
+        }
+
+        if (
+          event === "stage_changed" &&
+          enriched.contactId &&
+          enriched.dealId
+        ) {
+          const stageData = asRecord(enriched.data) ?? {};
+          const toStageId = readString(stageData, "toStageId") ?? readString(stageData, "stageId");
+          if (toStageId) {
+            const cluster = await loadIntentionalStageClusterIds(enriched.contactId, toStageId);
+            const prior = await prisma.automationContext.findFirst({
+              where: { automationId: automation.id, contactId: enriched.contactId },
+              select: { id: true },
+            });
+            if (
+              shouldSkipIntentionalStageRetrigger({
+                dealId: enriched.dealId,
+                clusterIdsOldestFirst: cluster,
+                hasPriorContext: Boolean(prior),
+              })
+            ) {
+              log.info(
+                { automationName: automation.name, dealId: enriched.dealId },
+                "[fireTrigger] skip — duplicata de propósito entra no fluxo já existente",
+              );
+              continue;
+            }
           }
         }
 
