@@ -305,9 +305,25 @@ export function isNonTextMenuInbound(input: {
 }
 
 /**
+ * Botões WhatsApp com a aresta "Outra resposta" desenhada: qualquer inbound
+ * que não seja um dos botões (texto, imagem, PDF, áudio, sticker) segue
+ * essa saída. Sem a aresta, mídia continua no passo (`stay`).
+ */
+export function interactiveMenuOnNonText(input: {
+  stepType: string;
+  elseGotoStepId: string | null;
+  configured?: string | null;
+}): InteractiveOnNonText {
+  if (input.stepType === "send_whatsapp_interactive" && input.elseGotoStepId) {
+    return "else";
+  }
+  return String(input.configured ?? "stay").trim().toLowerCase() === "else" ? "else" : "stay";
+}
+
+/**
  * Decide o que fazer com um inbound enquanto o passo espera botões/lista.
  * nfm_reply não pode cair em "Outra resposta" se já houver um Flow aberto.
- * Mídia/unsupported ficam no passo (`stay`) por padrão — não reenviam o menu.
+ * Mídia/unsupported ficam no passo (`stay`) só quando `onNonText` não é `else`.
  */
 export function decideInteractiveMenuInbound(input: {
   buttons: InteractiveOption[];
@@ -1107,7 +1123,6 @@ export async function processIncomingMessage(
         const elseGoto = readStepRef(config, "elseGotoStepId");
         const defaultOut = readStepRef(config, "nextStepId");
         const awaitingFlow = readAwaitingFlow(variables);
-        const onNonTextRaw = String(config.onNonText ?? "stay").trim().toLowerCase();
         const decision = decideInteractiveMenuInbound({
           buttons,
           messageContent,
@@ -1116,7 +1131,11 @@ export async function processIncomingMessage(
           flowToken: opts?.flowToken,
           awaitingFlow,
           messageType: opts?.messageType,
-          onNonText: onNonTextRaw === "else" ? "else" : "stay",
+          onNonText: interactiveMenuOnNonText({
+            stepType: currentStep.type,
+            elseGotoStepId: elseGoto,
+            configured: typeof config.onNonText === "string" ? config.onNonText : null,
+          }),
         });
 
         const gotoFromButton = (matchedBtn: InteractiveOption, label: string) => {
