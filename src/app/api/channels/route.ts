@@ -4,6 +4,8 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createChannel, getChannels } from "@/services/channels";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 
 const log = getLogger("api/channels");
 
@@ -34,10 +36,13 @@ function isChannelProvider(v: unknown): v is ChannelProvider {
 // "[withOrgFromCtx] RequestContext sem organizationId" ao criar canal.
 // Migrado para withOrgContext.
 export async function GET() {
+  // `Server-Timing`: auth, query, serialize, total.
+  const timing = new ServerTiming();
   return withOrgContext(async () => {
+    timing.add("auth", timing.totalMs());
     try {
-      const channels = await getChannels();
-      return NextResponse.json({ channels });
+      const channels = await timing.time("query", () => getChannels());
+      return timedJson(timing, { channels });
     } catch (e: unknown) {
       log.error({ err: e }, "GET falhou");
       const msg = e instanceof Error ? e.message : "Erro ao listar canais.";

@@ -144,7 +144,9 @@ vi.mock("@/lib/authz/resource-policy", async () => {
     canEditFieldForUser: vi.fn(),
   };
 });
-vi.mock("@/lib/visibility", () => ({
+vi.mock("@/lib/visibility", async (importOriginal) => ({
+  // `canSeeDealByOwner` é a regra pura de posse — fica a real.
+  canSeeDealByOwner: (await importOriginal<typeof import("@/lib/visibility")>()).canSeeDealByOwner,
   // Não-ADMIN: lê `agentPermission` no Postgres.
   getVisibilityFilter: vi.fn(() =>
     pg("agentPermission.findFirst(visibilidade)", {

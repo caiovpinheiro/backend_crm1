@@ -66,8 +66,10 @@ import {
   activeDealMovedSelect,
   markDealLost,
   markDealWon,
-  publishActiveDealMoved,
   propagateOwnerToContactAndChat,
+  syncBoardsAfterDealChanges,
+  type ActiveDealMovedRow,
+  type DealBoardChange,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
@@ -2126,6 +2128,11 @@ export async function executeStep(
         select: { isWon: true, isLost: true, name: true, pipelineId: true },
       });
       let moved = 0;
+      // Negócios movidos neste passo, para o board (cache + deal_moved) DEPOIS
+      // do loop: uma invalidação por funil e um evento por card (até o teto do
+      // lote). Vale para qualquer destino, inclusive Ganho/Perdido.
+      const boardChanges: DealBoardChange[] = [];
+      const boardRows = new Map<string, ActiveDealMovedRow>();
       for (const dealId of dealIds) {
       const currentDeal = await prisma.deal.findUnique({
         where: { id: dealId },
@@ -2186,27 +2193,20 @@ export async function executeStep(
           contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
           depth: (rt.depth ?? 0) + 1,
         });
-        // Só o card que continua aberto. Ganho/Perdido não entra no realtime.
-        // Um passo que move vários negócios de uma vez é mudança em massa:
-        // o banco atualiza, o quadro espera o polling.
-        const fromPipelineId = currentDeal.stage?.pipelineId;
-        if (
-          dealIds.length === 1 &&
-          currentDeal.status === "OPEN" &&
-          !currentDeal.stage?.isWon &&
-          !currentDeal.stage?.isLost &&
-          !targetStage?.isWon &&
-          !targetStage?.isLost &&
-          fromPipelineId
-        ) {
-          publishActiveDealMoved({
-            dealId,
-            fromStageId: currentDeal.stageId,
-            fromPipelineId,
-            deal: updated,
-          });
-        }
+        boardChanges.push({
+          dealId,
+          fromStageId: currentDeal.stageId,
+          fromPipelineId: currentDeal.stage?.pipelineId ?? null,
+        });
+        boardRows.set(dealId, updated as ActiveDealMovedRow);
       }
+      }
+      if (boardChanges.length > 0) {
+        await syncBoardsAfterDealChanges({
+          changes: boardChanges,
+          rows: boardRows,
+          extraPipelineIds: [targetStage?.pipelineId],
+        });
       }
       return moved > 1 ? { note: `OK (${moved} negócios)` } : {};
     }
@@ -2251,7 +2251,12 @@ export async function executeStep(
       for (const targetDealId of wonDealIds) {
       const before = await prisma.deal.findUnique({
         where: { id: targetDealId },
-        select: { status: true, stageId: true, contactId: true },
+        select: {
+          status: true,
+          stageId: true,
+          contactId: true,
+          stage: { select: { pipelineId: true } },
+        },
       });
       if (!before) throw new Error(`${stepType}: negócio não encontrado`);
 
@@ -2260,6 +2265,19 @@ export async function executeStep(
         : await markDealWon(targetDealId, { pipelineId });
 
       const contactIdForEvents = rt.contactId ?? before.contactId ?? undefined;
+
+      // Board: markDealWon/Lost já invalidam o cache; falta avisar o quadro em
+      // tempo real (o card vai para a etapa Ganho/Perdido do funil).
+      await syncBoardsAfterDealChanges({
+        changes: [
+          {
+            dealId: targetDealId,
+            fromStageId: before.stageId,
+            fromPipelineId: before.stage?.pipelineId ?? null,
+          },
+        ],
+        rows: new Map([[targetDealId, updated as unknown as ActiveDealMovedRow]]),
+      });
 
       createDealEvent(
         targetDealId,
@@ -2850,9 +2868,7 @@ export async function executeStep(
           const isStageMove = field === "stageId" && typeof value === "string";
           let prevStageId: string | null = null;
           let moveContactId: string | null = null;
-          let prevStatus: string | null = null;
           let fromPipelineId: string | null = null;
-          let originTerminal = false;
           if (isStageMove) {
             const cur = await prisma.deal.findUnique({
               where: { id: targetDealId },
@@ -2865,9 +2881,7 @@ export async function executeStep(
             });
             prevStageId = cur?.stageId ?? null;
             moveContactId = cur?.contactId ?? null;
-            prevStatus = cur?.status ?? null;
             fromPipelineId = cur?.stage?.pipelineId ?? null;
-            originTerminal = Boolean(cur?.stage?.isWon || cur?.stage?.isLost);
           }
           const updated = isStageMove
             ? await prisma.deal.update({
@@ -2881,14 +2895,13 @@ export async function executeStep(
               contactId: rt.contactId ?? moveContactId ?? undefined,
               depth: (rt.depth ?? 0) + 1,
             });
-            if (prevStatus === "OPEN" && !originTerminal && fromPipelineId) {
-              publishActiveDealMoved({
-                dealId: targetDealId,
-                fromStageId: prevStageId,
-                fromPipelineId,
-                deal: updated,
-              });
-            }
+            // Qualquer etapa de destino (inclusive Ganho/Perdido): invalida o
+            // board do funil e publica o card.
+            await syncBoardsAfterDealChanges({
+              changes: [{ dealId: targetDealId, fromStageId: prevStageId, fromPipelineId }],
+              rows: new Map([[targetDealId, updated as unknown as ActiveDealMovedRow]]),
+              extraPipelineIds: [fromPipelineId],
+            });
           }
         } else {
           const customField = await prisma.customField.findFirst({

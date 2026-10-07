@@ -1970,6 +1970,31 @@ function optionalIso(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Dono e unidade do negócio para o payload do `deal_moved` (a rota SSE
+ * filtra o card por dono). Só devolve o que a linha realmente informa:
+ * campo desconhecido não vira `null` (null = "sem dono").
+ */
+function dealMovedOwnership(
+  deal: unknown,
+): Pick<DealMovedPayload, "ownerId" | "orgUnitId"> {
+  if (!deal || typeof deal !== "object") return {};
+  const row = deal as Record<string, unknown>;
+  const out: Pick<DealMovedPayload, "ownerId" | "orgUnitId"> = {};
+  if (typeof row.ownerId === "string" || row.ownerId === null) {
+    out.ownerId = row.ownerId;
+  } else if (row.owner && typeof row.owner === "object") {
+    const id = (row.owner as { id?: unknown }).id;
+    if (typeof id === "string") out.ownerId = id;
+  } else if (row.owner === null) {
+    out.ownerId = null;
+  }
+  if (typeof row.orgUnitId === "string" || row.orgUnitId === null) {
+    out.orgUnitId = row.orgUnitId;
+  }
+  return out;
+}
+
 /** Card mínimo para o cliente do funil destino, a partir do deal já lido. */
 function toDealMovedCard(
   deal: unknown,
@@ -2068,6 +2093,7 @@ function publishDealMovedAfterCacheBump(
     toStageId: snapshot.toStageId,
     position: snapshot.position,
     updatedAt,
+    ...dealMovedOwnership(deal),
   };
   const card = toDealMovedCard(deal, snapshot.position, updatedAt);
   const event = card ? { ...payload, card } : payload;
@@ -2096,6 +2122,8 @@ export const activeDealMovedSelect = {
   createdAt: true,
   updatedAt: true,
   stageId: true,
+  ownerId: true,
+  orgUnitId: true,
   contact: {
     select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
   },
@@ -2116,6 +2144,8 @@ export type ActiveDealMovedRow = {
   createdAt?: Date | string | null;
   updatedAt?: Date | string | null;
   stageId: string;
+  ownerId?: string | null;
+  orgUnitId?: string | null;
   contact?: {
     id: string;
     name: string;
@@ -2134,48 +2164,109 @@ export type ActiveDealMovedRow = {
 };
 
 /**
- * Publica `deal_moved` com a linha que o `UPDATE` acabou de devolver.
- * Não relê o deal: no worker essa segunda leitura pode voltar a etapa
- * antiga (ou falhar fora do contexto) e o catch engole o evento — o
- * banco fica certo e o quadro só anda no F5.
- *
- * Só deal que continua OPEN, fora de Ganho/Perdido. Lote não chama isto.
- * Falha de Redis não desfaz o update.
+ * Teto de negócios por lote com um `deal_moved` por card. Acima disso só o
+ * cache do board é invalidado (o quadro converge na próxima leitura): mil
+ * eventos de uma vez custam mais ao SSE e ao cliente do que um refetch.
  */
-export function publishActiveDealMoved(args: {
+export const DEAL_MOVED_BATCH_LIMIT = 50;
+
+/** Negócio alterado em lote: de onde saiu (se mudou de etapa). */
+export type DealBoardChange = {
   dealId: string;
-  fromStageId: string;
-  fromPipelineId: string;
-  deal: ActiveDealMovedRow;
-}): void {
-  const orgId = getOrgIdOrNull();
-  if (!orgId || !args.dealId || !args.fromStageId || !args.fromPipelineId) return;
-  const deal = args.deal;
-  if (deal.status !== "OPEN") return;
-  if (deal.stage?.isWon || deal.stage?.isLost) return;
-  const toPipelineId = deal.stage?.pipelineId;
-  if (!toPipelineId || !deal.stageId || deal.stageId === args.fromStageId) return;
-  const position = typeof deal.position === "number" ? deal.position : Number(deal.position);
-  if (!Number.isFinite(position)) return;
+  /** Etapa/funil de ANTES. Ausentes = o negócio não mudou de etapa (ex.: troca de responsável). */
+  fromStageId?: string | null;
+  fromPipelineId?: string | null;
+};
+
+/**
+ * Depois que um ou mais negócios foram gravados fora do `moveDeal`
+ * (troca de responsável pela transferência da conversa, automação que leva
+ * a Ganho/Perdido, lote): invalida o cache do board dos funis afetados e,
+ * quando o lote é pequeno (`DEAL_MOVED_BATCH_LIMIT`), publica um `deal_moved`
+ * por negócio com o card já atualizado.
+ *
+ * - O cache é invalidado ANTES de publicar (o refetch que o evento provoca
+ *   não pode ler o board antigo) e é aguardado: o HTTP só responde depois.
+ * - `rows`: linhas que o UPDATE já devolveu (evita reler); o que faltar sai
+ *   numa única leitura para o lote.
+ * - `extraPipelineIds`: funis a purgar além dos das linhas (origem de lote,
+ *   funis de negócios que ficaram fora do teto).
+ * - Best-effort: falha de Redis/SSE/leitura nunca desfaz a gravação.
+ */
+export async function syncBoardsAfterDealChanges(args: {
+  orgId?: string | null;
+  changes: DealBoardChange[];
+  rows?: ReadonlyMap<string, ActiveDealMovedRow>;
+  extraPipelineIds?: Iterable<string | null | undefined>;
+}): Promise<{ invalidatedPipelines: string[]; published: number }> {
+  const none = { invalidatedPipelines: [] as string[], published: 0 };
+  const orgId = args.orgId ?? getOrgIdOrNull();
+  if (!orgId) return none;
+  const changes = args.changes.filter((c) => c.dealId);
+  const extra = Array.from(args.extraPipelineIds ?? []).filter(
+    (p): p is string => typeof p === "string" && p.length > 0,
+  );
+  if (changes.length === 0 && extra.length === 0) return none;
+
+  const withinLimit = changes.length > 0 && changes.length <= DEAL_MOVED_BATCH_LIMIT;
+  const rows = new Map<string, ActiveDealMovedRow>(args.rows ?? []);
+  if (withinLimit) {
+    const missing = changes.filter((c) => !rows.has(c.dealId)).map((c) => c.dealId);
+    if (missing.length > 0) {
+      try {
+        const read = await prisma.deal.findMany({
+          where: { id: { in: missing } },
+          select: activeDealMovedSelect,
+        });
+        for (const row of read as ActiveDealMovedRow[]) rows.set(row.id, row);
+      } catch (err) {
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err), orgId },
+          "[deals.syncBoardsAfterDealChanges] leitura dos negócios falhou — só invalida",
+        );
+      }
+    }
+  }
+
+  const pipelines = new Set<string>(extra);
+  for (const c of changes) {
+    if (c.fromPipelineId) pipelines.add(c.fromPipelineId);
+    const toPipelineId = rows.get(c.dealId)?.stage?.pipelineId;
+    if (toPipelineId) pipelines.add(toPipelineId);
+  }
   try {
-    publishDealMovedAfterCacheBump(
-      orgId,
-      args.dealId,
-      {
-        fromStageId: args.fromStageId,
-        toStageId: deal.stageId,
-        fromPipelineId: args.fromPipelineId,
-        toPipelineId,
-        position,
-      },
-      deal,
-    );
+    await Promise.all([...pipelines].map((pipelineId) => invalidateBoardData(orgId, pipelineId)));
   } catch (err) {
     log.warn(
-      { err: err instanceof Error ? err.message : String(err), dealId: args.dealId },
-      "[deals.publishActiveDealMoved] deal_moved não publicado",
+      { err: err instanceof Error ? err.message : String(err), orgId },
+      "[deals.syncBoardsAfterDealChanges] invalidate do board falhou",
     );
   }
+
+  let published = 0;
+  if (!withinLimit) return { invalidatedPipelines: [...pipelines], published };
+  for (const c of changes) {
+    const row = rows.get(c.dealId);
+    const toPipelineId = row?.stage?.pipelineId;
+    const position = row ? Number(row.position) : Number.NaN;
+    if (!row || !row.stageId || !toPipelineId || !Number.isFinite(position)) continue;
+    const updatedAt = isoInstant(row.updatedAt);
+    const card = toDealMovedCard(row, position, updatedAt);
+    const payload: DealMovedPayload = {
+      organizationId: orgId,
+      dealId: c.dealId,
+      fromPipelineId: c.fromPipelineId ?? toPipelineId,
+      toPipelineId,
+      fromStageId: c.fromStageId ?? row.stageId,
+      toStageId: row.stageId,
+      position,
+      updatedAt,
+      ...dealMovedOwnership(row),
+    };
+    publishDealMoved(card ? { ...payload, card } : payload);
+    published += 1;
+  }
+  return { invalidatedPipelines: [...pipelines], published };
 }
 
 export async function moveDeal(

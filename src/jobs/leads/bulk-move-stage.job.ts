@@ -6,8 +6,11 @@ import { fireTrigger } from "@/services/automation-triggers";
 import {
   assertStageEntryFields,
   createDealEventsMany,
+  DEAL_MOVED_BATCH_LIMIT,
   invalidateBoardsForPipelines,
   StageFieldsRequiredError,
+  syncBoardsAfterDealChanges,
+  type DealBoardChange,
   type DealEventInput,
 } from "@/services/deals";
 import type { BulkMoveStagePayload } from "@/lib/queue";
@@ -108,6 +111,10 @@ export async function processBulkMoveStage(
 
   // Boards a invalidar no fim: destino + origem de cada deal movido.
   const touchedPipelineIds = new Set<string>();
+  // Negócios movidos, para um `deal_moved` por card quando o lote é pequeno.
+  // Guarda só até o teto + 1: passou dele, só o cache do board é invalidado.
+  const movedChanges: DealBoardChange[] = [];
+  let movedTotal = 0;
 
   // Processa em chunks. Cada chunk:
   //   - lê estado atual (1 SELECT)
@@ -205,7 +212,17 @@ export async function processBulkMoveStage(
         });
         chunkSucceeded += toMove.length;
         touchedPipelineIds.add(targetStage.pipelineId);
-        for (const deal of toMove) touchedPipelineIds.add(deal.stage.pipelineId);
+        for (const deal of toMove) {
+          touchedPipelineIds.add(deal.stage.pipelineId);
+          movedTotal += 1;
+          if (movedChanges.length <= DEAL_MOVED_BATCH_LIMIT) {
+            movedChanges.push({
+              dealId: deal.id,
+              fromStageId: deal.stageId,
+              fromPipelineId: deal.stage.pipelineId,
+            });
+          }
+        }
 
         // Efeitos colaterais do chunk. Antes eram disparados por deal sem
         // await: 50 deals × (2 inserts + findMany de automações + avaliação
@@ -317,10 +334,19 @@ export async function processBulkMoveStage(
 
   // Purga o cache-aside do board para o próximo GET (poll de 120 s ou F5)
   // não devolver a etapa antiga. Antes do "finished" — o FE refaz o GET
-  // quando a operação termina. Não publica `deal_moved`: lote não é
-  // realtime visual e não manda um evento por card.
+  // quando a operação termina. Lote pequeno (até DEAL_MOVED_BATCH_LIMIT
+  // negócios movidos) também publica um `deal_moved` por card; acima do teto
+  // só o cache é invalidado (um evento por card não compensa).
   if (touchedPipelineIds.size > 0) {
-    await invalidateBoardsForPipelines([...touchedPipelineIds]);
+    if (movedTotal > 0 && movedTotal <= DEAL_MOVED_BATCH_LIMIT) {
+      await syncBoardsAfterDealChanges({
+        orgId: organizationId,
+        changes: movedChanges,
+        extraPipelineIds: touchedPipelineIds,
+      });
+    } else {
+      await invalidateBoardsForPipelines([...touchedPipelineIds]);
+    }
   }
 
   await markOperationFinished(operationId, organizationId);
