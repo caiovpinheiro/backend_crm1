@@ -1218,7 +1218,7 @@ export type ConversationAssigneeChange = {
   toName: string | null;
 };
 
-async function logConversationAssigneeChanges(
+export async function logConversationAssigneeChanges(
   changes: ConversationAssigneeChange[],
 ) {
   const organizationId = getOrgIdOrNull();
@@ -1518,13 +1518,24 @@ export async function assignDealOwner(
         );
       }
     }
-    await propagateOwnerToContactAndChat(tx, row.contactId, ownerId);
+    const chatAssigneeChanges = await propagateOwnerToContactAndChat(
+      tx,
+      row.contactId,
+      ownerId,
+    );
     return {
       ...row,
       fromOwnerId: current?.ownerId ?? null,
       siblingPipelineIds,
+      chatAssigneeChanges,
     };
   });
+
+  // Sem ASSIGNEE_CHANGED na conversa, o próximo inbound trata o
+  // consultor como herança e apaga o dono para o 1º atendimento da IA.
+  if (deal.chatAssigneeChanges.length > 0) {
+    await logConversationAssigneeChanges(deal.chatAssigneeChanges);
+  }
 
   await invalidateBoardsForPipelines([
     deal.stage?.pipelineId,
@@ -1543,7 +1554,8 @@ export async function assignDealOwner(
       .catch(() => {});
   }
 
-  return deal;
+  const { chatAssigneeChanges: _logged, ...assigned } = deal;
+  return assigned;
 }
 
 /**

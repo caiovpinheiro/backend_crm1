@@ -388,7 +388,9 @@ export async function maybeDistributeNewInboundTicket(input: {
           );
           return;
         }
-        if (!conv?.hasHumanReply) {
+        const releaseForAi =
+          !conv?.hasHumanReply && (await isAiAttendanceEnabled());
+        if (releaseForAi) {
           debugWarn(
             "[DBG-e46688 maybeDist] release_human_for_first_attendance",
             () => JSON.stringify({
