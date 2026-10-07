@@ -120,11 +120,12 @@ vi.mock("@/lib/contact-avatar-fallback", () => ({
 
 import { runWithContext } from "@/lib/request-context";
 import {
+  DEAL_MOVED_BATCH_LIMIT,
   getBoardData,
   moveDeal,
   nextDealNumber,
-  publishActiveDealMoved,
   resolveBoardDealIds,
+  syncBoardsAfterDealChanges,
   StageFieldsRequiredError,
 } from "@/services/deals";
 
@@ -680,26 +681,26 @@ function activeMovedDeal(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("publishActiveDealMoved — automação, deal que continua aberto", () => {
-  async function flushPublish() {
+describe("syncBoardsAfterDealChanges — board depois de gravações fora do moveDeal", () => {
+  async function flush() {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   }
 
-  function publishRow(deal = activeMovedDeal(), fromStageId = "stage-a", fromPipelineId = "pipe-1") {
-    withOrg(ORG, () => {
-      publishActiveDealMoved({
-        dealId: deal.id,
-        fromStageId,
-        fromPipelineId,
-        deal,
-      });
-      return Promise.resolve();
-    });
+  const rowsOf = (...deals: Array<ReturnType<typeof activeMovedDeal>>) =>
+    new Map(deals.map((d) => [d.id, d]));
+
+  function sync(args: Parameters<typeof syncBoardsAfterDealChanges>[0], orgId: string | null = ORG) {
+    if (!orgId) return syncBoardsAfterDealChanges(args);
+    return withOrg(orgId, () => syncBoardsAfterDealChanges(args));
   }
 
-  it("Qualificado → Novo publica deal_moved com a linha já gravada, sem nova leitura", async () => {
+  function dealMovedEvents() {
+    return h.ssePublish.mock.calls.filter((c) => c[0] === "deal_moved").map((c) => c[1]);
+  }
+
+  it("Qualificado → Novo: publica deal_moved com a linha já gravada, sem nova leitura", async () => {
     const deal = activeMovedDeal({
       id: "deal-caio",
       title: "Caio",
@@ -708,11 +709,14 @@ describe("publishActiveDealMoved — automação, deal que continua aberto", () 
       stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
     });
 
-    publishRow(deal, "stage-qualificado", "pipe-1");
-    await flushPublish();
+    const out = await sync({
+      changes: [{ dealId: "deal-caio", fromStageId: "stage-qualificado", fromPipelineId: "pipe-1" }],
+      rows: rowsOf(deal),
+    });
+    await flush();
 
-    expect(h.prisma.deal.findUnique).not.toHaveBeenCalled();
-    expect(h.prisma.stage.findUnique).not.toHaveBeenCalled();
+    expect(out.published).toBe(1);
+    expect(h.prisma.deal.findMany).not.toHaveBeenCalled();
     expect(h.ssePublish).toHaveBeenCalledTimes(1);
     expect(h.ssePublish.mock.calls[0]![0]).toBe("deal_moved");
     expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
@@ -727,44 +731,157 @@ describe("publishActiveDealMoved — automação, deal que continua aberto", () 
       card: { id: "deal-caio", title: "Caio", status: "OPEN", position: 4 },
     });
     expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
-    const invalidateOrder = h.invalidateBoardData.mock.invocationCallOrder[0]!;
-    const publishOrder = h.ssePublish.mock.invocationCallOrder[0]!;
-    expect(invalidateOrder).toBeLessThan(publishOrder);
+    // Cache primeiro, evento depois.
+    expect(h.invalidateBoardData.mock.invocationCallOrder[0]!).toBeLessThan(
+      h.ssePublish.mock.invocationCallOrder[0]!,
+    );
   });
 
-  it("WON e LOST ficam fora", async () => {
-    publishRow(
-      activeMovedDeal({
-        status: "WON",
-        stage: { id: "stage-won", pipelineId: "pipe-1", isWon: true, isLost: false },
-        stageId: "stage-won",
-      }),
-    );
-    await flushPublish();
-    expect(h.ssePublish).not.toHaveBeenCalled();
+  it("Ganho e Perdido também invalidam o board e publicam o card com o status novo", async () => {
+    await sync({
+      changes: [{ dealId: "deal-1", fromStageId: "stage-a", fromPipelineId: "pipe-1" }],
+      rows: rowsOf(
+        activeMovedDeal({
+          status: "WON",
+          stageId: "stage-won",
+          stage: { pipelineId: "pipe-1", isWon: true, isLost: false },
+        }),
+      ),
+    });
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(dealMovedEvents()).toHaveLength(1);
+    expect(dealMovedEvents()[0]).toMatchObject({ toStageId: "stage-won", card: { status: "WON" } });
 
     h.ssePublish.mockClear();
-    publishRow(
-      activeMovedDeal({
-        status: "LOST",
-        stage: { id: "stage-lost", pipelineId: "pipe-1", isWon: false, isLost: true },
-        stageId: "stage-lost",
-      }),
-    );
-    await flushPublish();
-    expect(h.ssePublish).not.toHaveBeenCalled();
+    h.invalidateBoardData.mockClear();
+    await sync({
+      changes: [{ dealId: "deal-1", fromStageId: "stage-a", fromPipelineId: "pipe-1" }],
+      rows: rowsOf(
+        activeMovedDeal({
+          status: "LOST",
+          stageId: "stage-lost",
+          stage: { pipelineId: "pipe-1", isWon: false, isLost: true },
+        }),
+      ),
+    });
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(dealMovedEvents()[0]).toMatchObject({ toStageId: "stage-lost", card: { status: "LOST" } });
   });
 
-  it("não publica sem organizationId", async () => {
-    const deal = activeMovedDeal();
-    publishActiveDealMoved({
-      dealId: deal.id,
-      fromStageId: "stage-a",
-      fromPipelineId: "pipe-1",
-      deal,
+  it("troca de funil: invalida origem e destino, uma vez cada", async () => {
+    await sync({
+      changes: [
+        { dealId: "d1", fromStageId: "stage-x", fromPipelineId: "pipe-2" },
+        { dealId: "d2", fromStageId: "stage-x", fromPipelineId: "pipe-2" },
+      ],
+      rows: rowsOf(activeMovedDeal({ id: "d1" }), activeMovedDeal({ id: "d2" })),
     });
-    await flushPublish();
+
+    expect(h.invalidateBoardData).toHaveBeenCalledTimes(2);
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-2");
+    expect(dealMovedEvents()[0]).toMatchObject({ fromPipelineId: "pipe-2", toPipelineId: "pipe-1" });
+  });
+
+  it("sem origem informada (só troca de dono) o evento sai com from = to", async () => {
+    await sync({
+      changes: [{ dealId: "deal-1" }],
+      rows: rowsOf(activeMovedDeal({ ownerId: "user-9", orgUnitId: "unit-3" })),
+    });
+
+    expect(dealMovedEvents()[0]).toMatchObject({
+      fromStageId: "stage-b",
+      toStageId: "stage-b",
+      fromPipelineId: "pipe-1",
+      toPipelineId: "pipe-1",
+      ownerId: "user-9",
+      orgUnitId: "unit-3",
+    });
+  });
+
+  it("linhas que faltam saem numa única leitura para o lote", async () => {
+    h.prisma.deal.findMany.mockResolvedValueOnce([
+      activeMovedDeal({ id: "d1" }),
+      activeMovedDeal({ id: "d2" }),
+    ]);
+
+    const out = await sync({ changes: [{ dealId: "d1" }, { dealId: "d2" }] });
+
+    expect(h.prisma.deal.findMany).toHaveBeenCalledTimes(1);
+    expect(h.prisma.deal.findMany.mock.calls[0]![0]).toMatchObject({
+      where: { id: { in: ["d1", "d2"] } },
+    });
+    expect(out.published).toBe(2);
+  });
+
+  it("até o teto publica um evento por negócio; acima só invalida o board", async () => {
+    const small = Array.from({ length: DEAL_MOVED_BATCH_LIMIT }, (_, i) =>
+      activeMovedDeal({ id: `s${i}` }),
+    );
+    const outSmall = await sync({
+      changes: small.map((d) => ({ dealId: d.id })),
+      rows: rowsOf(...small),
+    });
+    expect(outSmall.published).toBe(DEAL_MOVED_BATCH_LIMIT);
+    expect(dealMovedEvents()).toHaveLength(DEAL_MOVED_BATCH_LIMIT);
+    // Um único purge do funil, não um por negócio.
+    expect(h.invalidateBoardData).toHaveBeenCalledTimes(1);
+
+    h.ssePublish.mockClear();
+    h.invalidateBoardData.mockClear();
+    h.prisma.deal.findMany.mockClear();
+    const many = Array.from({ length: DEAL_MOVED_BATCH_LIMIT + 1 }, (_, i) => ({ dealId: `m${i}` }));
+    const outMany = await sync({ changes: many, extraPipelineIds: ["pipe-1", "pipe-2"] });
+    expect(outMany.published).toBe(0);
+    expect(dealMovedEvents()).toHaveLength(0);
+    expect(h.prisma.deal.findMany).not.toHaveBeenCalled();
+    expect(h.invalidateBoardData).toHaveBeenCalledTimes(2);
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-2");
+  });
+
+  it("falha do Redis na invalidação não impede o evento nem lança", async () => {
+    h.invalidateBoardData.mockRejectedValueOnce(new Error("redis fora"));
+
+    const out = await sync({
+      changes: [{ dealId: "deal-1" }],
+      rows: rowsOf(activeMovedDeal()),
+    });
+
+    expect(out.published).toBe(1);
+  });
+
+  it("falha na leitura das linhas ainda invalida os funis conhecidos", async () => {
+    h.prisma.deal.findMany.mockRejectedValueOnce(new Error("banco fora"));
+
+    const out = await sync({
+      changes: [{ dealId: "d1", fromStageId: "stage-a", fromPipelineId: "pipe-2" }],
+    });
+
+    expect(out.published).toBe(0);
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-2");
+  });
+
+  it("não faz nada sem organizationId", async () => {
+    const out = await sync(
+      { changes: [{ dealId: "deal-1" }], rows: rowsOf(activeMovedDeal()) },
+      null,
+    );
+    await flush();
+
+    expect(out.published).toBe(0);
     expect(h.ssePublish).not.toHaveBeenCalled();
-    expect(h.prisma.deal.findUnique).not.toHaveBeenCalled();
+    expect(h.invalidateBoardData).not.toHaveBeenCalled();
+  });
+
+  it("orgId explícito funciona fora do contexto (job)", async () => {
+    const out = await sync(
+      { orgId: "org-job", changes: [{ dealId: "deal-1" }], rows: rowsOf(activeMovedDeal()) },
+      null,
+    );
+
+    expect(out.published).toBe(1);
+    expect(h.invalidateBoardData).toHaveBeenCalledWith("org-job", "pipe-1");
+    expect(dealMovedEvents()[0]).toMatchObject({ organizationId: "org-job" });
   });
 });
