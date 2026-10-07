@@ -8,8 +8,13 @@
  * - vê a origem e não o destino → sai sem `card` (só ids para tirar o card);
  * - vê o destino → sai com `card`, para inserir o negócio que não está em cache.
  *
- * Admin / sem restrição de funil recebe o payload intacto (mesma referência,
- * o frame pré-serializado do barramento é reaproveitado).
+ * Além do funil, o `card` (título, contato, valor, dono) só vai a quem VÊ o
+ * negócio pela posse (`canSeeDeal`, mesmo critério do GET /api/deals/:id):
+ * quem não vê recebe o evento sem `card` e sem `ownerId`/`orgUnitId` — só ids
+ * de funil/etapa/negócio, o bastante para tirar o card de uma coluna.
+ *
+ * Admin / sem restrição de funil e de posse recebe o payload intacto (mesma
+ * referência, o frame pré-serializado do barramento é reaproveitado).
  */
 import type { AuthzContext } from "@/lib/authz";
 import { canViewPipeline, canViewStage } from "@/lib/authz";
@@ -31,13 +36,17 @@ function canSeeSide(
   return true;
 }
 
+/** Posse: o assinante vê o negócio deste dono? `undefined` = o payload não informou. */
+export type DealMovedOwnerGate = (deal: { ownerId: string | null | undefined }) => boolean;
+
 /**
  * `null` = não entregar. O mesmo objeto de entrada = entregar intacto.
- * Objeto novo = entregar sem o `card`.
+ * Objeto novo = entregar sem o `card` (e sem dono/unidade se o negócio não é visível).
  */
 export function projectDealMovedForViewer(
   data: unknown,
   ctx: AuthzContext | null,
+  canSeeDeal?: DealMovedOwnerGate | null,
 ): unknown | null {
   if (!data || typeof data !== "object") return data;
   const rec = data as Record<string, unknown>;
@@ -48,13 +57,35 @@ export function projectDealMovedForViewer(
   if (!fromPipelineId && !toPipelineId && !fromStageId && !toStageId) {
     return data;
   }
-  if (!ctx || funnelScopeOf(ctx) === null) return data;
 
-  const seeFrom = canSeeSide(ctx, fromPipelineId, fromStageId);
-  const seeTo = canSeeSide(ctx, toPipelineId, toStageId);
-  if (!seeFrom && !seeTo) return null;
-  if (seeTo || !("card" in rec)) return data;
+  // Funil/etapa: só quando o usuário tem escopo restrito.
+  let seeTo = true;
+  if (ctx && funnelScopeOf(ctx) !== null) {
+    const seeFrom = canSeeSide(ctx, fromPipelineId, fromStageId);
+    seeTo = canSeeSide(ctx, toPipelineId, toStageId);
+    if (!seeFrom && !seeTo) return null;
+  }
+
+  // Posse: o `ownerId` do payload decide se o negócio é visível.
+  let dealVisible = true;
+  if (canSeeDeal) {
+    const ownerId =
+      !("ownerId" in rec) || rec.ownerId === undefined
+        ? undefined
+        : typeof rec.ownerId === "string"
+          ? rec.ownerId
+          : null;
+    dealVisible = canSeeDeal({ ownerId });
+  }
+
+  const dropCard = "card" in rec && (!seeTo || !dealVisible);
+  const dropOwnership = !dealVisible && ("ownerId" in rec || "orgUnitId" in rec);
+  if (!dropCard && !dropOwnership) return data;
   const rest = { ...rec };
-  delete rest.card;
+  if (dropCard) delete rest.card;
+  if (dropOwnership) {
+    delete rest.ownerId;
+    delete rest.orgUnitId;
+  }
   return rest;
 }

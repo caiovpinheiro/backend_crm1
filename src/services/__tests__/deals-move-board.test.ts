@@ -244,6 +244,49 @@ describe("moveDeal", () => {
     );
   });
 
+  it("o deal_moved leva ownerId e orgUnitId do negócio (a rota SSE filtra o card por dono)", async () => {
+    seedDeal("stage-a");
+    const base = h.prisma.deal.findUnique.getMockImplementation()!;
+    h.prisma.deal.findUnique.mockImplementation(async (args: { select?: unknown }) => {
+      const row = await base(args);
+      // Leitura final do move (include): linha completa do negócio.
+      return args.select
+        ? row
+        : { ...row, title: "Lead", ownerId: "user-7", orgUnitId: "unit-1", owner: { id: "user-7", name: "Ana" } };
+    });
+
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0));
+    await flushMovePublish();
+
+    expect(h.ssePublish.mock.calls[0]![0]).toBe("deal_moved");
+    expect(h.ssePublish.mock.calls[0]![1]).toMatchObject({
+      dealId: "deal-1",
+      ownerId: "user-7",
+      orgUnitId: "unit-1",
+      card: { id: "deal-1", owner: { id: "user-7" } },
+    });
+  });
+
+  it("negócio sem dono publica ownerId null (e sem a linha, o campo some)", async () => {
+    seedDeal("stage-a");
+    const base = h.prisma.deal.findUnique.getMockImplementation()!;
+    h.prisma.deal.findUnique.mockImplementation(async (args: { select?: unknown }) => {
+      const row = await base(args);
+      return args.select ? row : { ...row, title: "Lead", ownerId: null, owner: null };
+    });
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0));
+    await flushMovePublish();
+    expect(h.ssePublish.mock.calls[0]![1]).toHaveProperty("ownerId", null);
+    expect(h.ssePublish.mock.calls[0]![1]).not.toHaveProperty("orgUnitId");
+
+    // Linha sem informação de dono: não inventa "sem dono".
+    h.ssePublish.mockClear();
+    seedDeal("stage-a");
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0));
+    await flushMovePublish();
+    expect(h.ssePublish.mock.calls[0]![1]).not.toHaveProperty("ownerId");
+  });
+
   it("mover para Ganho sincroniza status WON + closedAt, mas continua sem mexer na conversa", async () => {
     seedDeal("stage-a");
     await withOrg(ORG, () => moveDeal("deal-1", "stage-won", 0));
