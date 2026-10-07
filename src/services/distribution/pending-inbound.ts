@@ -196,6 +196,13 @@ export async function maybeDistributeNewInboundTicket(input: {
   contactId: string;
   assignedToId?: string | null;
 }): Promise<void> {
+  // Toggle desligado: o inbound não entra. O widget instalado não basta —
+  // a reavaliação de expediente zerava o responsável da automação
+  // (DNA Work #66592) antes do gate que ficava no fim desta função.
+  if (!(await isDistributionEnabled())) {
+    return;
+  }
+
   // Widget desinstalado: este caminho não atribui, não tira responsável
   // e não enfileira. O gate de executeDistribution fica tarde demais —
   // a reavaliação de elegibilidade e o 1º atendimento rodavam antes dele
@@ -511,14 +518,6 @@ export async function maybeDistributeNewInboundTicket(input: {
           triggerSource: "SYSTEM",
         });
       }
-      return;
-    }
-
-    if (!(await isDistributionEnabled())) {
-      debugWarn(
-        "[DBG-e46688 maybeDist] distribution_disabled",
-        () => JSON.stringify({ convId: input.conversationId }),
-      );
       return;
     }
 
