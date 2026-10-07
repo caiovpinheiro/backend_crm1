@@ -19,6 +19,7 @@ import {
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
+  activeDealMovedSelect,
   assertLostReasonAllowed,
   assertStageEntryFields,
   assignDealOwner,
@@ -29,6 +30,9 @@ import {
   markDealLost,
   markDealWon,
   resolveBoardDealIds,
+  syncBoardsAfterDealChanges,
+  type ActiveDealMovedRow,
+  type DealBoardChange,
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getLogger } from "@/lib/logger";
@@ -394,8 +398,10 @@ export async function POST(request: Request) {
           throw err;
         }
 
-        // Lote síncrono: grava no banco e devolve `{ affected }`. Não publica
-        // `deal_moved` nem pede refetch do board — o Pipeline converge no poll.
+        // Lote síncrono: grava no banco e devolve `{ affected }`. Depois do
+        // loop o board é avisado (cache + deal_moved por card, até o teto).
+        const boardChanges: DealBoardChange[] = [];
+        const boardRows = new Map<string, ActiveDealMovedRow>();
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
             const pipelineChanged =
@@ -414,7 +420,17 @@ export async function POST(request: Request) {
                   ? {}
                   : { status: "OPEN" as const, closedAt: null, lostReason: null };
 
-            await prisma.deal.update({ where: { id: deal.id }, data: { stageId, ...statusPatch } });
+            const saved = await prisma.deal.update({
+              where: { id: deal.id },
+              data: { stageId, ...statusPatch },
+              select: activeDealMovedSelect,
+            });
+            boardChanges.push({
+              dealId: deal.id,
+              fromStageId: deal.stageId,
+              fromPipelineId: deal.stage.pipelineId,
+            });
+            boardRows.set(deal.id, saved as ActiveDealMovedRow);
             createDealEvent(deal.id, uid, "STAGE_CHANGED", {
               from: {
                 id: deal.stageId,
@@ -450,14 +466,14 @@ export async function POST(request: Request) {
             affected++;
           }
         }
-        // Mesmo purge do `moveDeal`: origem e destino.
+        // Mesmo purge do `moveDeal` (origem e destino) + um `deal_moved` por
+        // card quando o lote é pequeno.
         if (affected > 0) {
-          await invalidateBoardsForPipelines([
-            stage.pipelineId,
-            ...deals
-              .filter((d) => d.stageId !== stageId)
-              .map((d) => d.stage.pipelineId),
-          ]);
+          await syncBoardsAfterDealChanges({
+            changes: boardChanges,
+            rows: boardRows,
+            extraPipelineIds: [stage.pipelineId],
+          });
         }
       }
 

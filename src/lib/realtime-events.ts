@@ -476,10 +476,13 @@ export function publishConversationUpdated(
 }
 
 /**
- * Board: um negócio já está na etapa/posição novas. Só o move individual
- * (`moveDeal`). Lote (`POST /api/deals/bulk`, `bulkMoveStage` e qualquer
- * outra movimentação em massa) não publica este evento — o quadro converge
- * no polling. Best-effort: falha de Redis/SSE não desfaz o move.
+ * Board: um negócio já está na etapa/posição novas (ou trocou de dono, ou foi
+ * a Ganho/Perdido). Publicado por `moveDeal`, pela automação e pelos lotes
+ * pequenos (até `DEAL_MOVED_BATCH_LIMIT` negócios, via
+ * `syncBoardsAfterDealChanges`); acima do teto só o cache do board é
+ * invalidado e o quadro converge na próxima leitura. Mudança de dono sem
+ * troca de etapa sai com `fromStageId === toStageId`. Best-effort: falha de
+ * Redis/SSE não desfaz a gravação.
  */
 export function publishDealMoved(payload: DealMovedPayload): void {
   try {

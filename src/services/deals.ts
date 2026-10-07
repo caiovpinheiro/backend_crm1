@@ -2053,51 +2053,6 @@ export type ActiveDealMovedRow = {
 };
 
 /**
- * Publica `deal_moved` com a linha que o `UPDATE` acabou de devolver.
- * Não relê o deal: no worker essa segunda leitura pode voltar a etapa
- * antiga (ou falhar fora do contexto) e o catch engole o evento — o
- * banco fica certo e o quadro só anda no F5.
- *
- * Só deal que continua OPEN, fora de Ganho/Perdido. Lote não chama isto.
- * Falha de Redis não desfaz o update.
- */
-export function publishActiveDealMoved(args: {
-  dealId: string;
-  fromStageId: string;
-  fromPipelineId: string;
-  deal: ActiveDealMovedRow;
-}): void {
-  const orgId = getOrgIdOrNull();
-  if (!orgId || !args.dealId || !args.fromStageId || !args.fromPipelineId) return;
-  const deal = args.deal;
-  if (deal.status !== "OPEN") return;
-  if (deal.stage?.isWon || deal.stage?.isLost) return;
-  const toPipelineId = deal.stage?.pipelineId;
-  if (!toPipelineId || !deal.stageId || deal.stageId === args.fromStageId) return;
-  const position = typeof deal.position === "number" ? deal.position : Number(deal.position);
-  if (!Number.isFinite(position)) return;
-  try {
-    publishDealMovedAfterCacheBump(
-      orgId,
-      args.dealId,
-      {
-        fromStageId: args.fromStageId,
-        toStageId: deal.stageId,
-        fromPipelineId: args.fromPipelineId,
-        toPipelineId,
-        position,
-      },
-      deal,
-    );
-  } catch (err) {
-    log.warn(
-      { err: err instanceof Error ? err.message : String(err), dealId: args.dealId },
-      "[deals.publishActiveDealMoved] deal_moved não publicado",
-    );
-  }
-}
-
-/**
  * Teto de negócios por lote com um `deal_moved` por card. Acima disso só o
  * cache do board é invalidado (o quadro converge na próxima leitura): mil
  * eventos de uma vez custam mais ao SSE e ao cliente do que um refetch.
