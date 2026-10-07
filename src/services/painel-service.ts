@@ -61,14 +61,58 @@ export type PainelTimeStat = {
   sample: number;
 };
 
+/**
+ * Partição do período (aditivo). Os KPIs de `PainelVolume` NÃO formam uma
+ * partição entre si: `started` e `finished` medem conjuntos diferentes.
+ *
+ *  - COORTE `started` = conversas CRIADAS no período (`createdAt` no período).
+ *    Cada uma tem UMA situação atual, então
+ *      started = resolved + open + other
+ *      open    = stillOpen = openStarted + openWaiting
+ *  - FLUXO `finished` = conversas ENCERRADAS no período (`status` RESOLVED e
+ *    `closedAt` no período), seja qual for a data de criação, então
+ *      finished = finishedFromStarted + finishedCarryover
+ *
+ * Os dois só se encontram em `finishedFromStarted` (criada e encerrada no
+ * período). Por isso `finished + stillOpen` pode passar de `started` (as
+ * encerradas que vieram de antes do período entram em `finished` e não em
+ * `started`) e pode ficar abaixo (criada no período e encerrada depois dele,
+ * ou reaberta, não está em `finished`).
+ *
+ * Situação ATUAL, não histórica: encerrar limpa/define `closedAt`, reabrir
+ * (status OPEN) limpa `closedAt`. Conversa encerrada no período e reaberta
+ * depois sai de `finished`; reaberta, conta em `open` se foi criada no período.
+ * Cada conversa (linha em `conversations`) conta uma vez em `started`.
+ */
+export type PainelVolumePartition = {
+  /** Coorte: criadas no período, hoje encerradas (status RESOLVED, `closedAt` em qualquer data). */
+  resolved: number;
+  /** Coorte: criadas no período e abertas (= `stillOpen`). */
+  open: number;
+  /**
+   * Coorte: o resto. Criadas no período, fora de `resolved` e de `open`:
+   * status PENDING/SNOOZED que ainda guardam `closedAt` de um encerramento anterior.
+   */
+  other: number;
+  /** Fluxo: encerradas no período que também foram criadas nele. */
+  finishedFromStarted: number;
+  /** Fluxo: encerradas no período mas criadas ANTES dele. */
+  finishedCarryover: number;
+};
+
 export type PainelVolume = {
+  /** Criadas no período (coorte). Ver `PainelVolumePartition`. */
   started: { value: number; delta: PainelDelta };
+  /** Encerradas no período, de qualquer criação (fluxo). NÃO é subconjunto de `started`. */
   finished: { value: number; delta: PainelDelta };
+  /** Coorte `started` ainda aberta (status não RESOLVED e sem `closedAt`). */
   stillOpen: { value: number; delta: PainelDelta };
   /** Abertas do período que já tiveram resposta humana. */
   openStarted: { value: number; delta: PainelDelta };
   /** Abertas do período ainda aguardando primeira resposta humana. */
   openWaiting: { value: number; delta: PainelDelta };
+  /** Aditivo: como `started` e `finished` se decompõem. */
+  partition: PainelVolumePartition;
   messagesIn: number;
   messagesOut: number;
   byDay: { date: string; started: number; finished: number; incomplete: boolean }[];
@@ -594,6 +638,7 @@ export async function getPainelVolume(
         stillOpen: bigint;
         openStarted: bigint;
         openWaiting: bigint;
+        resolved: bigint;
       }[]
     >(Prisma.sql`
       SELECT
@@ -608,13 +653,19 @@ export async function getPainelVolume(
         COUNT(*) FILTER (
           WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
             AND conv."hasHumanReply" = false
-        )::bigint AS "openWaiting"
+        )::bigint AS "openWaiting",
+        COUNT(*) FILTER (
+          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
+        )::bigint AS resolved
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
         AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
     `),
-    db().$queryRaw<{ finished: bigint }[]>(Prisma.sql`
-      SELECT COUNT(*)::bigint AS finished
+    db().$queryRaw<{ finished: bigint; fromStarted: bigint }[]>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS finished,
+             COUNT(*) FILTER (
+               WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+             )::bigint AS "fromStarted"
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
         AND conv.status = 'RESOLVED'::"ConversationStatus"
@@ -649,6 +700,8 @@ export async function getPainelVolume(
   const stillOpen = Number(c?.stillOpen ?? 0);
   const openStarted = Number(c?.openStarted ?? 0);
   const openWaiting = Number(c?.openWaiting ?? 0);
+  const resolved = Number(c?.resolved ?? 0);
+  const finishedFromStarted = Number(finishedRow[0]?.fromStarted ?? 0);
   const hiddenDelta = painelDelta(0, 0, 0);
   // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
   // conversations; the chart subtitle omits message totals when they are 0.
@@ -684,6 +737,13 @@ export async function getPainelVolume(
     openWaiting: {
       value: openWaiting,
       delta: hiddenDelta,
+    },
+    partition: {
+      resolved,
+      open: stillOpen,
+      other: Math.max(0, started - resolved - stillOpen),
+      finishedFromStarted,
+      finishedCarryover: Math.max(0, finished - finishedFromStarted),
     },
     messagesIn,
     messagesOut,
