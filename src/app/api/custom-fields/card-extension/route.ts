@@ -14,6 +14,7 @@ type ExtensionField = {
   entity: string;
   type: string;
   options: string[];
+  highlightRules: unknown;
 };
 
 function parseIds(raw: string | null): string[] {
@@ -40,7 +41,7 @@ async function resolveFields(ids: string[]): Promise<ExtensionField[]> {
   if (ids.length === 0) return [];
   const rows = await prisma.customField.findMany({
     where: { id: { in: ids }, entity: { in: ["deal", "contact"] } },
-    select: { id: true, label: true, entity: true, type: true, options: true },
+    select: { id: true, label: true, entity: true, type: true, options: true, highlightRules: true },
   });
   const byId = new Map(rows.map((row) => [row.id, row]));
   return ids.flatMap((id) => {
@@ -53,6 +54,7 @@ async function resolveFields(ids: string[]): Promise<ExtensionField[]> {
         entity: row.entity,
         type: row.type,
         options: row.options,
+        highlightRules: row.highlightRules,
       },
     ];
   });
