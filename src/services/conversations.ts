@@ -2766,7 +2766,11 @@ export async function assignConversationAssignedTo(
   // escalares no RETURNING — incluindo hasHumanReply. Em DBs sem a coluna
   // (drift de migração), o assign/bulk-reassign quebrava mesmo sem tocar no
   // campo. O select lista só o que a rota de actions precisa.
+  // Negócios abertos cujo dono mudou de fato: depois do commit o board
+  // (cache + SSE) precisa saber — ver `syncBoardsAfterDealChanges`.
+  let reassignedDeals: Array<{ id: string; pipelineId: string | null }> = [];
   const updated = await prisma.$transaction(async (tx) => {
+    reassignedDeals = [];
     const conv = await tx.conversation.update({
       where: { id: conversationId },
       data: {
@@ -2787,15 +2791,102 @@ export async function assignConversationAssignedTo(
         // attribution ainda não rodou no DEV (SKIP_PRISMA_MIGRATE).
         select: { id: true, assignedToId: true },
       });
+      const openDeals = await tx.deal.findMany({
+        where: { contactId: conv.contactId, status: "OPEN" },
+        select: { id: true, ownerId: true, stage: { select: { pipelineId: true } } },
+      });
       await tx.deal.updateMany({
         where: { contactId: conv.contactId, status: "OPEN" },
         data: { ownerId: newAssigneeId, assignedVia: null },
       });
+      reassignedDeals = openDeals
+        .filter((d) => (d.ownerId ?? null) !== (newAssigneeId ?? null))
+        .map((d) => ({ id: d.id, pipelineId: d.stage?.pipelineId ?? null }));
     }
     return conv;
   });
 
+  if (reassignedDeals.length > 0) {
+    // Regra inalterada (a transferência leva o dono dos negócios abertos);
+    // só avisa o board: cache do funil invalidado + deal_moved com o card
+    // novo (dono) quando são poucos negócios. Best-effort.
+    try {
+      const { syncBoardsAfterDealChanges } = await import("@/services/deals");
+      await syncBoardsAfterDealChanges({
+        changes: reassignedDeals.map((d) => ({ dealId: d.id })),
+        extraPipelineIds: reassignedDeals.map((d) => d.pipelineId),
+      });
+    } catch (err) {
+      log.warn(
+        { err, conversationId },
+        "[conversations] board dos negócios reatribuídos não atualizado",
+      );
+    }
+  }
+
   return { ok: true, conversation: updated };
+}
+
+/**
+ * Avisa o inbox, em tempo real, que o responsável e/ou o departamento da
+ * conversa mudaram (atribuir, transferir, remover responsável).
+ *
+ * Sem isto só `conversation_timeline_updated` saía (chatter): a lista do
+ * Inbox seguia com o responsável, o departamento e a aba antigos até o F5.
+ * Publica `conversation_updated` — o mesmo evento do assign em lote e do
+ * resto do inbox —, então o barramento anexa o `card` e cada conexão o passa
+ * pelo gate de visibilidade dela: o responsável anterior (que pode ter
+ * perdido a conversa) e o novo recebem o evento; quem não vê a conversa
+ * recebe sem `card` (`cardOmitted: "hidden"`). O barramento também invalida
+ * os contadores das abas.
+ *
+ * Lê o estado FINAL da conversa (a distribuição de um departamento pode ter
+ * trocado o responsável depois da gravação). Best-effort: falha de leitura
+ * ou de SSE nunca desfaz a atribuição nem falha o HTTP.
+ */
+export async function publishConversationAssignmentUpdate(args: {
+  organizationId: string | null | undefined;
+  conversationId: string;
+  /** Responsável antes da troca (`null` = estava sem responsável). */
+  previousAssignedToId: string | null;
+}): Promise<void> {
+  if (!args.organizationId) return;
+  try {
+    const row = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: {
+        contactId: true,
+        assignedToId: true,
+        departmentId: true,
+        unreadCount: true,
+        lastMessageAt: true,
+        assignedTo: { select: { id: true, name: true, type: true } },
+      },
+    });
+    if (!row) return;
+    publishConversationUpdated({
+      organizationId: args.organizationId,
+      conversationId: args.conversationId,
+      contactId: row.contactId ?? null,
+      assignedToId: row.assignedToId ?? null,
+      assignedTo: row.assignedTo
+        ? {
+            id: row.assignedTo.id,
+            name: row.assignedTo.name,
+            type: row.assignedTo.type,
+          }
+        : null,
+      departmentId: row.departmentId ?? null,
+      previousAssignedToId: args.previousAssignedToId,
+      unreadCount: row.unreadCount,
+      lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
+    });
+  } catch (err) {
+    log.warn(
+      { err, conversationId: args.conversationId },
+      "[conversations] conversation_updated da atribuição não publicado",
+    );
+  }
 }
 
 /**
@@ -2897,8 +2988,13 @@ export async function assignConversationsInline(params: {
           conversationId,
           assignedToId: nextId,
           assignedTo: result.conversation.assignedTo
-            ? { type: result.conversation.assignedTo.type }
+            ? {
+                type: result.conversation.assignedTo.type,
+                id: result.conversation.assignedTo.id,
+                name: result.conversation.assignedTo.name,
+              }
             : null,
+          previousAssignedToId: prev?.assignedToId ?? null,
         });
         publishConversationTimelineUpdated({
           organizationId: params.organizationId,

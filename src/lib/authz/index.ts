@@ -74,9 +74,21 @@ export type ScopeLevel = "NONE" | "SELF" | "TEAM" | "ALL";
 
 /**
  * Grants de etapa/campo/extras resolvidos a partir dos PAPEIS do usuario
- * (uniao entre papeis). Substituem o antigo modelo por Grupo. Aplicados no
- * enforcement (resource-policy / visibility) atras da flag
- * `rbac_granular_scope_v1`.
+ * (uniao entre papeis). Substituem o antigo modelo por Grupo.
+ *
+ * A flag `rbac_granular_scope_v1` (por organizacao, default desligada — ver
+ * `feature-flags.ts`) NAO governa tudo abaixo. Hoje:
+ *   - SEMPRE valem, com a flag desligada: stageView/stageDeny/pipelineDeny/
+ *     stageEdit (`canViewStage`/`canViewPipeline`/`canEditStage`, usados por
+ *     `requireStageScope`/`requirePipelineScope`, pelo filtro de funil do SSE e
+ *     pelos filtros de listagem) e seeTeam/seeUnassigned (`getVisibilityFilter`).
+ *   - SO valem com a flag ligada: fieldDenyView/fieldDenyEdit
+ *     (`canViewFieldForUser`/`canEditFieldForUser`), sharedInbox (so tira as
+ *     "nao atribuidas dos meus contatos" de quem nao e MEMBER nem admin, em
+ *     `getVisibilityFilter`) e a politica escopada por usuario/papel
+ *     (`loadScopedPolicy`: funis liberados por usuario, edicao de funil/canal).
+ *   - mediaAccess: gravado e devolvido pela API de papeis, mas nenhum
+ *     enforcement o consulta hoje.
  *
  * Semantica:
  *   - stageView: `null` = sem allow-list. Conjunto = allow-list legado

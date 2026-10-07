@@ -22,6 +22,7 @@ import { loadAuthzContext } from "@/lib/authz";
 import { metrics } from "@/lib/metrics";
 import { redactNewMessageForUnlisted } from "@/lib/sse-redact";
 import {
+  canSeeDealByOwner,
   getDepartmentScopeForConversations,
   getVisibilityFilter,
   permissionsAllowKey,
@@ -93,6 +94,41 @@ export async function buildInboxSseCardGate(user: {
 
     // Atribuída a outro humano: só quem enxerga além das próprias.
     return visibility.canSeeAll;
+  };
+}
+
+/**
+ * Gate do `card` do `deal_moved` por usuário (mesma ideia do gate de
+ * conversa, critério de NEGÓCIO): o fan-out do bus é por organização, então
+ * todo agente recebia título/contato/valor de negócio de qualquer dono.
+ *
+ * Critério = o do `GET /api/deals/:id` (`canSeeDealByOwner`): quem vê tudo,
+ * o dono, ou — negócio sem dono — quem enxerga o pool livre. Não usa o recorte
+ * de departamento do gate de conversa: negócio não tem departamento (só
+ * `orgUnitId`), e o GET do negócio não o aplica; usá-lo esconderia o card de
+ * quem tem escopo de departamento sem motivo.
+ *
+ * `ownerId` `undefined` = o payload não informou (publisher antigo): fail-closed
+ * para quem só vê os próprios.
+ */
+export type DealSseGate = (deal: { ownerId: string | null | undefined }) => boolean;
+
+export const allowAllDealSseGate: DealSseGate = () => true;
+/** Fail-closed: usado enquanto o gate real não pôde ser montado. */
+export const denyAllDealSseGate: DealSseGate = () => false;
+
+export async function buildDealSseGate(user: {
+  id: string;
+  role: AppUserRole;
+  organizationId: string;
+  isSuperAdmin: boolean;
+}): Promise<DealSseGate> {
+  if (user.isSuperAdmin) return allowAllDealSseGate;
+  const visibility = await getVisibilityFilter({ id: user.id, role: user.role });
+  return (deal) => {
+    if (visibility.canSeeAll) return true;
+    if (deal.ownerId === undefined) return false;
+    return canSeeDealByOwner(visibility, user.id, deal.ownerId);
   };
 }
 
