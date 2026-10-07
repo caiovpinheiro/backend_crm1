@@ -1567,6 +1567,25 @@ type RuntimeContext = {
   nextStepType?: string | null;
 };
 
+/** Negócios que um passo de automação pode alterar.
+ *  Com filtro, o conjunto casado. Sem filtro, um OPEN só se houver exatamente um. */
+async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
+  const matched = Array.isArray(rt.data.stageMatchedDealIds)
+    ? rt.data.stageMatchedDealIds.filter(
+        (id): id is string => typeof id === "string" && id.trim() !== "",
+      )
+    : [];
+  if (matched.length > 0) return matched;
+  if (rt.dealId) return [rt.dealId];
+  if (!rt.contactId) return [];
+  const open = await prisma.deal.findMany({
+    where: { contactId: rt.contactId, status: "OPEN" },
+    select: { id: true },
+    take: 2,
+  });
+  return open.length === 1 ? [open[0]!.id] : [];
+}
+
 /**
  * Carrega tags do contato e do deal em arrays paralelos (ids + nomes).
  *
@@ -1757,15 +1776,21 @@ async function resolveRuntimeContext(
   // pela conversa, ou gatilhos de contato): resolve o negócio ABERTO mais
   // recente do contato pra que `{{deal.*}}` e os passos de negócio tenham
   // contexto. Mesmo padrão já usado por `consume_stock`/distribuição.
-  if (!dealId && contactId) {
-    const openDeal = await prisma.deal.findFirst({
+  const presetMatched = Array.isArray(data.stageMatchedDealIds)
+    ? data.stageMatchedDealIds.filter(
+        (id): id is string => typeof id === "string" && id.trim() !== "",
+      )
+    : [];
+  if (!dealId && presetMatched.length === 1) dealId = presetMatched[0];
+  if (!dealId && presetMatched.length === 0 && contactId) {
+    const openDeals = await prisma.deal.findMany({
       where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
       select: { id: true },
+      take: 2,
     });
-    if (openDeal) {
-      dealId = openDeal.id;
-    } else if (ctx.event === "manual") {
+    if (openDeals.length === 1) {
+      dealId = openDeals[0]!.id;
+    } else if (openDeals.length === 0 && ctx.event === "manual") {
       // 03/ago/26 — Execução manual é ação explícita do operador sobre a
       // conversa que ele está vendo (negócio visível no painel). Sem
       // fallback, `update_field` em deal abortava com "dealId ausente"
@@ -2093,11 +2118,12 @@ export async function executeStep(
         : [];
       let targetDealId = rt.dealId ?? readString(cfg, "dealId");
       if (!targetDealId && matchedIds.length === 0 && rt.contactId) {
-        const openDeal = await prisma.deal.findFirst({
+        const openDeals = await prisma.deal.findMany({
           where: { contactId: rt.contactId, status: "OPEN" },
           select: { id: true },
+          take: 2,
         });
-        targetDealId = openDeal?.id;
+        if (openDeals.length === 1) targetDealId = openDeals[0]!.id;
       }
       const dealIds = [...new Set(matchedIds.length > 0 ? matchedIds : targetDealId ? [targetDealId] : [])];
       if (dealIds.length === 0) {
@@ -2210,21 +2236,32 @@ export async function executeStep(
         throw new Error("mark_deal_lost: lostReason obrigatório");
       }
 
+      const wonMatched = Array.isArray(rt.data.stageMatchedDealIds)
+        ? rt.data.stageMatchedDealIds.filter(
+            (id): id is string => typeof id === "string" && id.trim() !== "",
+          )
+        : [];
       let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && rt.contactId) {
-        const openDeal = await prisma.deal.findFirst({
+      if (!targetDealId && wonMatched.length === 1) targetDealId = wonMatched[0];
+      if (!targetDealId && wonMatched.length === 0 && rt.contactId) {
+        const openDeals = await prisma.deal.findMany({
           where: { contactId: rt.contactId, status: "OPEN" },
           select: { id: true },
+          take: 2,
         });
-        targetDealId = openDeal?.id;
+        if (openDeals.length === 1) targetDealId = openDeals[0]!.id;
       }
-      if (!targetDealId) {
+      const wonDealIds = [
+        ...new Set(wonMatched.length > 0 ? wonMatched : targetDealId ? [targetDealId] : []),
+      ];
+      if (wonDealIds.length === 0) {
         if (cfg.continueIfNoDeal === true) {
           return { note: "ignorado (contato sem negócio aberto)" };
         }
         throw new Error(`${stepType}: dealId ausente no contexto`);
       }
 
+      for (const targetDealId of wonDealIds) {
       const before = await prisma.deal.findUnique({
         where: { id: targetDealId },
         select: {
@@ -2304,6 +2341,7 @@ export async function executeStep(
           depth: (rt.depth ?? 0) + 1,
         });
       }
+      }
 
       return {};
     }
@@ -2341,9 +2379,15 @@ export async function executeStep(
         // propagamos pras conversas abertas — isso é o que faz o agente
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
-        const chatAssigneeChanges = await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
-        );
+        // O dono também entra em todos os negócios OPEN do contato.
+        const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+          const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+          await tx.deal.updateMany({
+            where: { contactId: targetContactId, status: "OPEN" },
+            data: { ownerId },
+          });
+          return changes;
+        });
         if (chatAssigneeChanges.length > 0) {
           await logConversationAssigneeChanges(chatAssigneeChanges);
         }
@@ -2365,9 +2409,14 @@ export async function executeStep(
             }
           }
         } else if (targetContactId) {
-          const chatAssigneeChanges = await prisma.$transaction((tx) =>
-            propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
-          );
+          const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+            const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+            await tx.deal.updateMany({
+              where: { contactId: targetContactId, status: "OPEN" },
+              data: { ownerId },
+            });
+            return changes;
+          });
           if (chatAssigneeChanges.length > 0) {
             await logConversationAssigneeChanges(chatAssigneeChanges);
           }
@@ -2761,23 +2810,9 @@ export async function executeStep(
         update: {},
       });
 
-      // 27/mai/26 — Espelha a tag no deal aberto do contato (TagOnDeal)
-      // pra que kanban e inbox mostrem a mesma tag. Antes, `add_tag` só
-      // gravava `TagOnContact`: inbox exibia a tag (renderiza tags do
-      // contato) mas o card do kanban não (renderiza tags do deal).
-      // Operador relatou "no inbox aparece a TAG CLT, mas no kanban não".
-      // Buscamos o deal aberto via `rt.dealId` quando presente, ou caímos
-      // pro deal mais recente do contato — ambos best-effort.
-      const targetDealId =
-        rt.dealId ??
-        (await prisma.deal
-          .findFirst({
-            where: { contactId: targetContactId, status: "OPEN" },
-            select: { id: true },
-            orderBy: { updatedAt: "desc" },
-          })
-          .then((d) => d?.id));
-      if (targetDealId) {
+      // Espelha a tag nos negócios do conjunto (filtro) ou no único OPEN.
+      // Vários OPEN sem filtro não escolhem um card pelo updatedAt.
+      for (const targetDealId of await resolveAutomationDealIds(rt)) {
         try {
           await prisma.tagOnDeal.upsert({
             where: { dealId_tagId: { dealId: targetDealId, tagId: resolvedTagId } },
@@ -2817,18 +2852,7 @@ export async function executeStep(
         await prisma.tagOnContact.deleteMany({
           where: { contactId: targetContactId, tagId: resolvedTagId },
         });
-        // Simétrico ao `add_tag`: remove também do deal aberto do
-        // contato. Mantém inbox e kanban sincronizados.
-        const targetDealId =
-          rt.dealId ??
-          (await prisma.deal
-            .findFirst({
-              where: { contactId: targetContactId, status: "OPEN" },
-              select: { id: true },
-              orderBy: { updatedAt: "desc" },
-            })
-            .then((d) => d?.id));
-        if (targetDealId) {
+        for (const targetDealId of await resolveAutomationDealIds(rt)) {
           await prisma.tagOnDeal.deleteMany({
             where: { dealId: targetDealId, tagId: resolvedTagId },
           });
@@ -2851,8 +2875,11 @@ export async function executeStep(
       }
 
       if (entity === "deal") {
-        const targetDealId = rt.dealId ?? readString(cfg, "dealId");
-        if (!targetDealId) throw new Error("update_field: dealId ausente");
+        const dealIds = await resolveAutomationDealIds(rt);
+        const cfgDealId = readString(cfg, "dealId");
+        if (dealIds.length === 0 && cfgDealId) dealIds.push(cfgDealId);
+        if (dealIds.length === 0) throw new Error("update_field: dealId ausente");
+        for (const targetDealId of dealIds) {
         const data: Prisma.DealUncheckedUpdateInput = {};
         if (field === "title" && typeof value === "string") data.title = value;
         else if (field === "value" && (typeof value === "number" || typeof value === "string")) {
@@ -2924,7 +2951,7 @@ export async function executeStep(
               },
               select: { value: true },
             });
-            if (prev?.value?.trim()) return {};
+            if (prev?.value?.trim()) continue;
           }
           await prisma.dealCustomFieldValue.upsert({
             where: {
@@ -2940,6 +2967,7 @@ export async function executeStep(
               value: stored,
             }),
           });
+        }
         }
       } else {
         const targetContactId = rt.contactId ?? readString(cfg, "contactId");

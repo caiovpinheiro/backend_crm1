@@ -181,6 +181,7 @@ export async function unifyDuplicateOpenDealsInPipeline(
       AND d.status = 'OPEN'::"DealStatus"
       AND d."dealRole" = 'COMMERCIAL'::"DealRole"
       AND d."contactId" IS NOT NULL
+      AND d."intentionalDuplicate" = false
     ORDER BY d.id
     FOR UPDATE OF d
   `;
@@ -200,6 +201,7 @@ export async function unifyDuplicateOpenDealsInPipeline(
         AND d.status = 'OPEN'::"DealStatus"
         AND d."dealRole" = 'COMMERCIAL'::"DealRole"
         AND d."contactId" IS NOT NULL
+        AND d."intentionalDuplicate" = false
     ),
     ranked AS (
       SELECT

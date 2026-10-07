@@ -58,6 +58,36 @@ function triggerStageIds(cfg: Record<string, unknown>): string[] {
 }
 
 /**
+ * Mensagem com vários negócios do mesmo contato.
+ * Com filtro de funil/etapa/status, o conjunto é quem casa o filtro.
+ * Sem filtro, um único OPEN segue. Vários OPEN não elegem card.
+ */
+export function classifyMessageDeals(args: {
+  filterActive: boolean;
+  matchedIds: string[];
+  openIds: string[];
+}):
+  | { mode: "matched"; dealId: string; matchedIds: string[] }
+  | { mode: "single-open"; dealId: string }
+  | { mode: "ambiguous" }
+  | { mode: "no-open" }
+  | { mode: "filter-miss" } {
+  if (args.filterActive) {
+    if (args.matchedIds.length === 0) return { mode: "filter-miss" };
+    return {
+      mode: "matched",
+      dealId: args.matchedIds[0]!,
+      matchedIds: args.matchedIds,
+    };
+  }
+  if (args.openIds.length > 1) return { mode: "ambiguous" };
+  if (args.openIds.length === 1) {
+    return { mode: "single-open", dealId: args.openIds[0]! };
+  }
+  return { mode: "no-open" };
+}
+
+/**
  * Payload padrão dos gatilhos `message_received` / `message_sent`.
  * Sem `channelId` + `conversationId`, o filtro por conexão da org não casa.
  */
@@ -441,68 +471,108 @@ async function enrichContext(
     const channelId = await resolveMessageChannelId(context.contactId, data);
     const withChannel = channelId ? { ...data, channelId } : data;
 
-    // Gatilho "mensagem recebida na etapa X": o card que está nessa
-    // etapa é o alvo, mesmo que o contato tenha outro negócio mais
-    // novo em outra fase. Sem card nessa etapa o filtro fecha.
-    const stageIds = triggerStageIds(asRecord(triggerConfig) ?? {});
-    if (stageIds.length > 0) {
-      const matched = await prisma.deal.findMany({
-        where: { contactId: context.contactId, stageId: { in: stageIds } },
-        select: messageDealSelect,
-        orderBy: { updatedAt: "desc" },
-        take: 20,
-      });
-      const preferred = matched.find((d) => d.status === "OPEN") ?? matched[0];
-      if (!preferred) {
-        return {
-          ...context,
-          data: { ...withChannel, stageId: "__no_matching_stage__" },
-        };
-      }
+    const triggerCfg = asRecord(triggerConfig) ?? {};
+    const stageIds = triggerStageIds(triggerCfg);
+    const pipelineFilter = readString(triggerCfg, "pipelineId");
+    const statusFilter = (readString(triggerCfg, "dealStatus") ?? "")
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter((s): s is "OPEN" | "WON" | "LOST" =>
+        s === "OPEN" || s === "WON" || s === "LOST",
+      );
+    const filterActive =
+      stageIds.length > 0 || Boolean(pipelineFilter) || statusFilter.length > 0;
+
+    const matched = filterActive
+      ? await prisma.deal.findMany({
+          where: {
+            contactId: context.contactId,
+            ...(stageIds.length > 0 ? { stageId: { in: stageIds } } : {}),
+            ...(statusFilter.length > 0 ? { status: { in: statusFilter } } : {}),
+            ...(pipelineFilter ? { stage: { pipelineId: pipelineFilter } } : {}),
+          },
+          select: messageDealSelect,
+          orderBy: { createdAt: "asc" },
+          take: 20,
+        })
+      : [];
+    const openDeals = filterActive
+      ? []
+      : await prisma.deal.findMany({
+          where: { contactId: context.contactId, status: "OPEN" },
+          select: messageDealSelect,
+          orderBy: { createdAt: "asc" },
+          take: 2,
+        });
+    const choice = classifyMessageDeals({
+      filterActive,
+      matchedIds: matched.map((d) => d.id),
+      openIds: openDeals.map((d) => d.id),
+    });
+
+    if (choice.mode === "filter-miss") {
       return {
         ...context,
-        dealId: preferred.id,
+        dealId: undefined,
         data: {
           ...withChannel,
-          stageId: preferred.stageId,
-          pipelineId: preferred.stage.pipelineId,
-          dealStageId: preferred.stageId,
-          dealPipelineId: preferred.stage.pipelineId,
-          dealStatus: preferred.status,
-          stageMatchedDealIds: matched.map((d) => d.id),
+          ...(stageIds.length > 0 ? { stageId: "__no_matching_stage__" } : {}),
+          ...(pipelineFilter
+            ? {
+                pipelineId: "__no_matching_pipeline__",
+                dealPipelineId: "__no_matching_pipeline__",
+              }
+            : {}),
+          ...(statusFilter.length > 0 ? { dealStatus: "__none__" } : {}),
+          stageMatchedDealIds: [],
         },
       };
     }
+    if (choice.mode === "ambiguous") {
+      return {
+        ...context,
+        dealId: undefined,
+        data: { ...withChannel, stageMatchedDealIds: [] },
+      };
+    }
+    if (choice.mode === "matched" || choice.mode === "single-open") {
+      const pool = choice.mode === "matched" ? matched : openDeals;
+      const preferred = pool.find((d) => d.id === choice.dealId) ?? pool[0];
+      if (preferred) {
+        return {
+          ...context,
+          dealId: preferred.id,
+          data: {
+            ...withChannel,
+            stageId: preferred.stageId,
+            pipelineId: preferred.stage.pipelineId,
+            dealStageId: preferred.stageId,
+            dealPipelineId: preferred.stage.pipelineId,
+            dealStatus: preferred.status,
+            stageMatchedDealIds:
+              choice.mode === "matched" ? choice.matchedIds : [preferred.id],
+          },
+        };
+      }
+    }
 
-    // 27/mai/26 (v3) — Suporte ao filtro `dealStatus` (OPEN/WON/LOST).
-    // Antes pegavamos só o deal OPEN; agora priorizamos OPEN mas, se
-    // o contato não tem nenhum aberto, caímos no deal mais recente
-    // (qualquer status). Assim conseguimos enriquecer com `dealStatus`
-    // pra clientes que já viraram WON/LOST e voltaram a mandar
-    // mensagem (pós-venda, reengajamento, etc.).
-    let deal = await prisma.deal.findFirst({
-      where: { contactId: context.contactId, status: "OPEN" },
+    // Sem OPEN: o mais recente fechado ainda enriquece pós-venda.
+    const closed = await prisma.deal.findFirst({
+      where: { contactId: context.contactId, status: { in: ["WON", "LOST"] } },
       select: messageDealSelect,
       orderBy: { updatedAt: "desc" },
     });
-    if (!deal) {
-      deal = await prisma.deal.findFirst({
-        where: { contactId: context.contactId, status: { in: ["WON", "LOST"] } },
-        select: messageDealSelect,
-        orderBy: { updatedAt: "desc" },
-      });
-    }
-    if (deal) {
+    if (closed) {
       return {
         ...context,
-        dealId: context.dealId ?? deal.id,
+        dealId: context.dealId ?? closed.id,
         data: {
           ...withChannel,
-          stageId: deal.stageId,
-          pipelineId: deal.stage.pipelineId,
-          dealStageId: deal.stageId,
-          dealPipelineId: deal.stage.pipelineId,
-          dealStatus: deal.status,
+          stageId: closed.stageId,
+          pipelineId: closed.stage.pipelineId,
+          dealStageId: closed.stageId,
+          dealPipelineId: closed.stage.pipelineId,
+          dealStatus: closed.status,
         },
       };
     }

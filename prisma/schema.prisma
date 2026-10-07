@@ -1665,6 +1665,12 @@ model Deal {
   updatedAt DateTime  @updatedAt
   closedAt  DateTime?
 
+  /// Duplicação feita pelo operador em "Duplicar negócio". A unificação
+  /// de duplicata acidental não apaga nem reaproveita este card.
+  intentionalDuplicate Boolean @default(false)
+  /// Negócio de origem. Scalar, sem FK: excluir a origem não apaga a cópia.
+  duplicatedFromDealId String?
+
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
   // Índices removidos (prefixo / 0 scans):
