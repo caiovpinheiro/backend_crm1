@@ -10,35 +10,46 @@ vi.mock("@/lib/request-context", () => ({
 
 import {
   buildDealWhereFromFilters,
+  getContactLastMessageState,
   isContactLastMessageReady,
   resetContactLastMessageReadyForTests,
 } from "@/services/kanban-filters";
 
-/** Caminho antigo (organização ainda sem `contacts.lastMessageDirection`). */
+/** Condições "conversa ativa" do caminho antigo (alguma na direção e nenhuma na oposta). */
+function activeOnly(dir: "in" | "out") {
+  return [
+    {
+      conversations: {
+        some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
+      },
+    },
+    {
+      conversations: {
+        none: {
+          status: { not: "RESOLVED" },
+          lastMessageDirection: dir === "in" ? "out" : "in",
+        },
+      },
+    },
+  ];
+}
+
+/** Caminho antigo puro (sonda indisponível: a coluna do contato pode nem existir). */
 function expectedLegacy(dir: "in" | "out", closedOnlyIds: string[]) {
   return {
     OR: [
-      {
-        contact: {
-          is: {
-            AND: [
-              {
-                conversations: {
-                  some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
-                },
-              },
-              {
-                conversations: {
-                  none: {
-                    status: { not: "RESOLVED" },
-                    lastMessageDirection: dir === "in" ? "out" : "in",
-                  },
-                },
-              },
-            ],
-          },
-        },
-      },
+      { contact: { is: { AND: activeOnly(dir) } } },
+      { contactId: { in: closedOnlyIds } },
+    ],
+  };
+}
+
+/** Backfill em andamento: coluna onde existe, caminho antigo só para a coluna NULL. */
+function expectedPartial(dir: "in" | "out", closedOnlyIds: string[]) {
+  return {
+    OR: [
+      { contact: { is: { lastMessageDirection: dir } } },
+      { contact: { is: { AND: [{ lastMessageAt: null }, ...activeOnly(dir)] } } },
       { contactId: { in: closedOnlyIds } },
     ],
   };
@@ -47,6 +58,16 @@ function expectedLegacy(dir: "in" | "out", closedOnlyIds: string[]) {
 function sqlText(call: unknown[]): string {
   const [first] = call as [TemplateStringsArray | Prisma.Sql];
   return Array.isArray(first) ? first.join("?") : (first as Prisma.Sql).strings.join("?");
+}
+
+/** Texto do SQL com os fragmentos aninhados (`Prisma.sql` dentro do template). */
+function fullSqlText(call: unknown[]): string {
+  const nested = call
+    .slice(1)
+    .filter((a): a is Prisma.Sql => typeof a === "object" && a !== null && "strings" in a)
+    .map((a) => a.strings.join("?"))
+    .join(" ");
+  return `${sqlText(call)} ${nested}`;
 }
 
 const PENDING = [{ pending: true }];
@@ -84,10 +105,7 @@ describe("filtro de direção da última mensagem (Kanban) — coluna pronta", (
     // cobre a janela em que o backfill da conversa ainda não passou.
     expect(text).toMatch(/v\."lastMessageAt" IS NOT NULL\s+OR EXISTS \(\s+SELECT 1 FROM messages m/);
     // O recorte de mensagem de chat é o mesmo da prévia (fragmento aninhado).
-    const nested = (queryRaw.mock.calls[0] as unknown[])
-      .filter((a): a is Prisma.Sql => typeof a === "object" && a !== null && "strings" in a)
-      .map((a) => a.strings.join("?"))
-      .join(" ");
+    const nested = fullSqlText(queryRaw.mock.calls[0]!);
     expect(nested).toContain(`m."messageType" NOT LIKE 'event%'`);
     expect(nested).toContain(`m."direction" IN ('in', 'out')`);
     expect(queryRaw.mock.calls[0]).toContain("org-1");
@@ -113,30 +131,68 @@ describe("filtro de direção da última mensagem (Kanban) — coluna pronta", (
     expect(queryRaw).toHaveBeenCalledTimes(2);
   });
 
-  it("sonda falhando (migration pendente) mantém o caminho antigo", async () => {
-    queryRaw.mockRejectedValueOnce(new Error('column c."lastMessageAt" does not exist'));
-    queryRaw.mockResolvedValueOnce([{ id: "c-closed" }]);
-    const conds = await buildDealWhereFromFilters({ lastMessageDirection: "in" });
-    expect(conds).toContainEqual(expectedLegacy("in", ["c-closed"]));
+  it("requisições simultâneas dividem a mesma sonda (uma consulta, não uma por requisição)", async () => {
+    let release: (v: unknown) => void = () => undefined;
+    queryRaw.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const all = Promise.all([
+      buildDealWhereFromFilters({ lastMessageDirection: "in" }),
+      buildDealWhereFromFilters({ lastMessageDirection: "out" }),
+      getContactLastMessageState("org-1"),
+    ]);
+    release(READY);
+    const [a, b, state] = await all;
+    expect(state).toBe("ready");
+    expect(a).toContainEqual({ contact: { is: { lastMessageDirection: "in" } } });
+    expect(b).toContainEqual({ contact: { is: { lastMessageDirection: "out" } } });
+    expect(queryRaw).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("filtro de direção da última mensagem (Kanban) — caminho antigo (backfill pendente)", () => {
-  it("'Mensagem recebida': conversa ativa respondida não entra; só encerradas vale a mais recente", async () => {
+describe("filtro de direção da última mensagem (Kanban) — backfill em andamento", () => {
+  it("'Mensagem recebida': coluna onde existe; caminho antigo só para o contato com a coluna NULL", async () => {
     queryRaw.mockResolvedValueOnce(PENDING);
     queryRaw.mockResolvedValueOnce([{ id: "c-closed" }]);
     const conds = await buildDealWhereFromFilters({ lastMessageDirection: "in" });
-    expect(conds).toContainEqual(expectedLegacy("in", ["c-closed"]));
+    expect(conds).toContainEqual(expectedPartial("in", ["c-closed"]));
+    // Sonda + lista dos "só encerradas" — nada de lista da organização inteira.
     expect(queryRaw).toHaveBeenCalledTimes(2);
-    expect(queryRaw.mock.calls[1]).toContain("in");
+    const closed = queryRaw.mock.calls[1]!;
+    expect(closed).toContain("in");
+    expect(fullSqlText(closed)).toContain(`c."lastMessageAt" IS NULL`);
   });
 
   it("'Mensagem enviada' segue a mesma regra com a direção oposta", async () => {
     queryRaw.mockResolvedValueOnce(PENDING);
     queryRaw.mockResolvedValueOnce([]);
     const conds = await buildDealWhereFromFilters({ lastMessageDirection: "out" });
-    expect(conds).toContainEqual(expectedLegacy("out", []));
+    expect(conds).toContainEqual(expectedPartial("out", []));
     expect(queryRaw.mock.calls[1]).toContain("out");
+  });
+
+  it("um contato retardatário não derruba quem já está preenchido: o ramo da coluna sempre está no where", async () => {
+    queryRaw.mockResolvedValueOnce(PENDING);
+    queryRaw.mockResolvedValueOnce([]);
+    const [cond] = await buildDealWhereFromFilters({ lastMessageDirection: "in" });
+    const branches = (cond as { OR: Prisma.DealWhereInput[] }).OR;
+    expect(branches[0]).toEqual({ contact: { is: { lastMessageDirection: "in" } } });
+  });
+});
+
+describe("filtro de direção da última mensagem (Kanban) — coluna indisponível", () => {
+  it("sonda falhando (migration pendente) mantém o caminho antigo, sem tocar na coluna nova", async () => {
+    queryRaw.mockRejectedValueOnce(new Error('column c."lastMessageAt" does not exist'));
+    queryRaw.mockResolvedValueOnce([{ id: "c-closed" }]);
+    const conds = await buildDealWhereFromFilters({ lastMessageDirection: "in" });
+    expect(conds).toContainEqual(expectedLegacy("in", ["c-closed"]));
+    expect(fullSqlText(queryRaw.mock.calls[1]!)).not.toContain(`"lastMessageAt"`);
+    expect(await getContactLastMessageState("org-1")).toBe("unavailable");
+  });
+
+  it("sem organização no contexto: caminho antigo, sem sonda", async () => {
+    ctx.organizationId = "";
+    const conds = await buildDealWhereFromFilters({ lastMessageDirection: "out" });
+    expect(conds).toContainEqual(expectedLegacy("out", []));
+    expect(queryRaw).not.toHaveBeenCalled();
   });
 });
 
