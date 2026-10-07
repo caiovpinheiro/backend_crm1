@@ -49,6 +49,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "CustomField",
   "ContactCustomFieldValue",
   "DealCustomFieldValue",
+  "DealCardExtensionValue",
   "ProductCustomFieldValue",
   "Pipeline",
   "Stage",

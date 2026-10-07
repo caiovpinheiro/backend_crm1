@@ -50,6 +50,7 @@ model Organization {
   customFields             CustomField[]
   contactCustomFieldValues ContactCustomFieldValue[]
   dealCustomFieldValues    DealCustomFieldValue[]
+  dealCardExtensionValues  DealCardExtensionValue[]
   productCustomFieldValues ProductCustomFieldValue[]
   pipelines                Pipeline[]
   stages                   Stage[]
@@ -1440,9 +1441,10 @@ model CustomField {
   /// `src/lib/highlight.ts`. Null/[] = sem destaque.
   highlightRules       Json?
 
-  values            ContactCustomFieldValue[]
-  dealValues        DealCustomFieldValue[]
-  productValues     ProductCustomFieldValue[]
+  values              ContactCustomFieldValue[]
+  dealValues          DealCustomFieldValue[]
+  cardExtensionValues DealCardExtensionValue[]
+  productValues       ProductCustomFieldValue[]
   flowFieldMappings WhatsappFlowFieldMapping[]
 
   @@unique([organizationId, name, entity])
@@ -1517,6 +1519,22 @@ model DealCustomFieldValue {
   @@unique([dealId, customFieldId])
   @@index([organizationId])
   @@map("deal_custom_field_values")
+}
+
+/// Valor da extensão de card. Mesma definição de CustomField, valor só deste negócio.
+model DealCardExtensionValue {
+  id             String      @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  value          String
+  dealId         String
+  deal           Deal        @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  customFieldId  String
+  customField    CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+
+  @@unique([dealId, customFieldId])
+  @@index([organizationId])
+  @@map("deal_card_extension_values")
 }
 
 // ──────────────────────────────────────────────
@@ -1638,7 +1656,8 @@ model Deal {
 
   activities     Activity[]
   notes          Note[]
-  customFields   DealCustomFieldValue[]
+  customFields        DealCustomFieldValue[]
+  cardExtensionValues DealCardExtensionValue[]
   products       DealProduct[]
   tags           TagOnDeal[]
   events         DealEvent[]
