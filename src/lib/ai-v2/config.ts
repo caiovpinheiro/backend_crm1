@@ -427,6 +427,12 @@ export const v2AgentConfigSchema = z.object({
   // "model" (padrão): além das regras, um modelo confere cada afirmação da
   // resposta contra os materiais. "rules": só as regras fixas.
   groundingCheck: z.enum(["model", "rules"]).optional(),
+  /**
+   * Ligado: se o aluno responde um disparo, o agente lê o texto do modelo
+   * gravado no chat (e, se a bolha só tiver o nome, o texto salvo do modelo)
+   * e continua a partir dessa resposta. Desligado: não busca esse texto.
+   */
+  useDispatchText: z.boolean().optional().default(false),
   inactivity: inactivitySchema,
   tabulation: tabulationSchema,
   themeRecognition: themeRecognitionSchema,
