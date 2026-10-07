@@ -89,6 +89,17 @@ export async function POST(request: Request, ctx: Ctx) {
         update: {},
         create: { dealId, tagId: resolvedTagId },
       });
+      // O card só marca o negócio. Inbox e ficha leem TagOnContact; o lote
+      // já copiava, a marcação de um card não.
+      if (existing.contactId) {
+        await prisma.tagOnContact.upsert({
+          where: {
+            contactId_tagId: { contactId: existing.contactId, tagId: resolvedTagId },
+          },
+          update: {},
+          create: { contactId: existing.contactId, tagId: resolvedTagId },
+        });
+      }
 
       const uid = user.id;
       const resolvedTag = await prisma.tag.findUnique({ where: { id: resolvedTagId }, select: { name: true, color: true } });
@@ -131,6 +142,18 @@ export async function DELETE(request: Request, ctx: Ctx) {
       await prisma.tagOnDeal.delete({
         where: { dealId_tagId: { dealId, tagId } },
       }).catch(() => {});
+
+      if (existing.contactId) {
+        const stillOnAnotherDeal = await prisma.tagOnDeal.findFirst({
+          where: { tagId, deal: { contactId: existing.contactId } },
+          select: { dealId: true },
+        });
+        if (!stillOnAnotherDeal) {
+          await prisma.tagOnContact.deleteMany({
+            where: { contactId: existing.contactId, tagId },
+          });
+        }
+      }
 
       const uid = user.id;
       createDealEvent(dealId, uid, "TAG_REMOVED", { tagName: tagInfo?.name ?? tagId, tagColor: tagInfo?.color ?? "" }).catch(() => {});
