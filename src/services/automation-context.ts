@@ -1714,7 +1714,7 @@ export async function processTimeout(contextId: string) {
     );
   }
 
-  const abort = await abortTimeoutIfAttendanceStarted(
+  let abort = await abortTimeoutIfAttendanceStarted(
     ctx.contactId,
     ctx.updatedAt,
     nextStepId
@@ -1722,6 +1722,25 @@ export async function processTimeout(contextId: string) {
       : undefined,
     typeof variables.conversationId === "string" ? variables.conversationId : null,
   );
+  // Mídia/unsupported no menu fica no passo (`stay`) — não é resposta.
+  // `lastInboundAt` mesmo assim avança e o abort `stale_inbound` fechava
+  // o contexto sem seguir a aresta de timeout (DNAWORK: currículo em PDF
+  // no lugar do clique, lembrete "Ainda está por aí?" nunca saía).
+  if (abort === "stale_inbound" && menuStepStaysOnNonText(step)) {
+    const convId =
+      typeof variables.conversationId === "string"
+        ? variables.conversationId.trim()
+        : "";
+    if (
+      convId &&
+      (await inboundSincePauseIsOnlyIgnoredMenuMedia(convId, ctx.updatedAt))
+    ) {
+      log.info(
+        `question/interactive timeout: inbound desde a pausa é só mídia ignorada pelo menu — segue aresta — auto=${ctx.automation.name} contato=${ctx.contactId}`,
+      );
+      abort = null;
+    }
+  }
   if (abort) {
     log.warn(
       `question/interactive timeout abortado (${abort}) — auto=${ctx.automation.name} contato=${ctx.contactId} — não segue finish`,
@@ -1734,6 +1753,49 @@ export async function processTimeout(contextId: string) {
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
   await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
+}
+
+const MENU_STAY_ON_MEDIA_TYPES = new Set([
+  "question",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "send_whatsapp_template",
+]);
+
+/** Menu com botões/lista e `onNonText` stay: arquivo não escolhe opção. */
+function menuStepStaysOnNonText(step: { type: string; config: unknown }): boolean {
+  if (!MENU_STAY_ON_MEDIA_TYPES.has(step.type)) return false;
+  const config =
+    step.config && typeof step.config === "object"
+      ? (step.config as Record<string, unknown>)
+      : {};
+  if (String(config.onNonText ?? "stay").trim().toLowerCase() === "else") return false;
+  const buttons = Array.isArray(config.buttons) ? config.buttons : [];
+  const rows = Array.isArray(config.rows) ? config.rows : [];
+  return buttons.length > 0 || rows.length > 0;
+}
+
+async function inboundSincePauseIsOnlyIgnoredMenuMedia(
+  conversationId: string,
+  pausedAt: Date,
+): Promise<boolean> {
+  const rows = await prisma.message.findMany({
+    where: {
+      conversationId,
+      direction: "in",
+      createdAt: { gt: pausedAt },
+    },
+    select: { content: true, messageType: true },
+    orderBy: { createdAt: "asc" },
+    take: 30,
+  });
+  if (rows.length === 0) return false;
+  return rows.every((m) =>
+    isNonTextMenuInbound({
+      messageContent: m.content ?? "",
+      messageType: m.messageType,
+    }),
+  );
 }
 
 function applyVariableTransform(raw: unknown, transform?: string): string {
