@@ -1859,6 +1859,31 @@ function optionalIso(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Dono e unidade do negócio para o payload do `deal_moved` (a rota SSE
+ * filtra o card por dono). Só devolve o que a linha realmente informa:
+ * campo desconhecido não vira `null` (null = "sem dono").
+ */
+function dealMovedOwnership(
+  deal: unknown,
+): Pick<DealMovedPayload, "ownerId" | "orgUnitId"> {
+  if (!deal || typeof deal !== "object") return {};
+  const row = deal as Record<string, unknown>;
+  const out: Pick<DealMovedPayload, "ownerId" | "orgUnitId"> = {};
+  if (typeof row.ownerId === "string" || row.ownerId === null) {
+    out.ownerId = row.ownerId;
+  } else if (row.owner && typeof row.owner === "object") {
+    const id = (row.owner as { id?: unknown }).id;
+    if (typeof id === "string") out.ownerId = id;
+  } else if (row.owner === null) {
+    out.ownerId = null;
+  }
+  if (typeof row.orgUnitId === "string" || row.orgUnitId === null) {
+    out.orgUnitId = row.orgUnitId;
+  }
+  return out;
+}
+
 /** Card mínimo para o cliente do funil destino, a partir do deal já lido. */
 function toDealMovedCard(
   deal: unknown,
@@ -1957,6 +1982,7 @@ function publishDealMovedAfterCacheBump(
     toStageId: snapshot.toStageId,
     position: snapshot.position,
     updatedAt,
+    ...dealMovedOwnership(deal),
   };
   const card = toDealMovedCard(deal, snapshot.position, updatedAt);
   const event = card ? { ...payload, card } : payload;
@@ -1985,6 +2011,8 @@ export const activeDealMovedSelect = {
   createdAt: true,
   updatedAt: true,
   stageId: true,
+  ownerId: true,
+  orgUnitId: true,
   contact: {
     select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
   },
@@ -2005,6 +2033,8 @@ export type ActiveDealMovedRow = {
   createdAt?: Date | string | null;
   updatedAt?: Date | string | null;
   stageId: string;
+  ownerId?: string | null;
+  orgUnitId?: string | null;
   contact?: {
     id: string;
     name: string;
@@ -2165,6 +2195,7 @@ export async function syncBoardsAfterDealChanges(args: {
       toStageId: row.stageId,
       position,
       updatedAt,
+      ...dealMovedOwnership(row),
     };
     publishDealMoved(card ? { ...payload, card } : payload);
     published += 1;

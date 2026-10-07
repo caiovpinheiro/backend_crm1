@@ -331,6 +331,15 @@ export type DealMovedPayload = {
   toStageId: string;
   position: number;
   updatedAt: string;
+  /**
+   * Dono do negócio (`null` = sem dono). A rota SSE usa para entregar o
+   * `card` só a quem vê o negócio (mesma regra do GET /api/deals/:id) e
+   * tira o campo de quem não vê. Aditivo/opcional: ausente = desconhecido
+   * (o gate trata como "não vejo" para quem só vê os próprios).
+   */
+  ownerId?: string | null;
+  /** Unidade (filial) do negócio, quando conhecida. Aditivo/opcional. */
+  orgUnitId?: string | null;
   card?: DealMovedCard;
 };
 

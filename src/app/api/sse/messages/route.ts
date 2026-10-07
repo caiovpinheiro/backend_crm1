@@ -15,9 +15,13 @@ import { projectDealMovedForViewer } from "@/lib/authz/deal-moved-visibility";
 import { conversationBlockedByFunnel, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import { applyBrowserApiCors } from "@/lib/browser-api-cors-node";
 import {
+  allowAllDealSseGate,
   allowAllInboxSseCards,
+  buildDealSseGate,
   buildInboxSseCardGate,
+  denyAllDealSseGate,
   stripHiddenInboxSseCard,
+  type DealSseGate,
   type InboxSseCardGate,
 } from "@/lib/inbox-sse-card-visibility";
 import { getLogger } from "@/lib/logger";
@@ -150,6 +154,49 @@ export async function GET(request: Request) {
       cardGateFailed = true;
     }
   }
+
+  // Gate de posse do `card` do `deal_moved` (mesma regra do GET /api/deals/:id).
+  // Montado SOB DEMANDA, na primeira `deal_moved` de quem não é admin: a maioria
+  // das conexões nunca precisa dele. Falha = nega o card (evento sai só com ids)
+  // e a próxima tentativa remonta.
+  const buildDealGate =
+    gateRole && organizationId && !isSuperAdmin
+      ? async (): Promise<DealSseGate> =>
+          runWithContext({ organizationId, userId, isSuperAdmin: false }, () =>
+            buildDealSseGate({
+              id: userId,
+              role: gateRole,
+              organizationId,
+              isSuperAdmin: false,
+            }),
+          )
+      : null;
+  let dealGate: DealSseGate | null = null;
+  let dealGatePending: Promise<DealSseGate> | null = null;
+  const resolveDealGate = async (): Promise<DealSseGate> => {
+    if (dealGate) return dealGate;
+    if (!buildDealGate) return allowAllDealSseGate;
+    if (!dealGatePending) {
+      const pending = buildDealGate()
+        .then((gate) => {
+          dealGate = gate;
+          return gate;
+        })
+        .finally(() => {
+          if (dealGatePending === pending) dealGatePending = null;
+        });
+      dealGatePending = pending;
+    }
+    try {
+      return await dealGatePending;
+    } catch (err) {
+      log.warn(
+        { err, userId, organizationId },
+        "[sse] gate de posse do deal_moved falhou — card negado até remontar",
+      );
+      return denyAllDealSseGate;
+    }
+  };
 
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
@@ -335,7 +382,9 @@ export async function GET(request: Request) {
               let visible = envelope.data;
               if (event === "deal_moved") {
                 const ctx = isSuperAdmin ? null : await resolveAuthz();
-                const projected = projectDealMovedForViewer(visible, ctx);
+                // Admin vê todo negócio; os demais passam pelo gate de posse.
+                const ownerGate = isSuperAdmin || ctx?.isAdmin ? null : await resolveDealGate();
+                const projected = projectDealMovedForViewer(visible, ctx, ownerGate);
                 if (!projected) return;
                 visible = projected;
               }

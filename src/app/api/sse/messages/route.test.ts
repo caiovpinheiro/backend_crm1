@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   conversationBlockedByFunnel: vi.fn(),
   canViewPipeline: vi.fn(),
   buildInboxSseCardGate: vi.fn(),
+  buildDealSseGate: vi.fn(),
   stripHiddenInboxSseCard: vi.fn(),
   subscribe: vi.fn(),
   unsubscribe: vi.fn(),
@@ -48,6 +49,9 @@ vi.mock("@/lib/browser-api-cors-node", () => ({ applyBrowserApiCors: async () =>
 
 vi.mock("@/lib/inbox-sse-card-visibility", () => ({
   allowAllInboxSseCards: () => true,
+  allowAllDealSseGate: () => true,
+  denyAllDealSseGate: () => false,
+  buildDealSseGate: mocks.buildDealSseGate,
   buildInboxSseCardGate: mocks.buildInboxSseCardGate,
   stripHiddenInboxSseCard: mocks.stripHiddenInboxSseCard,
 }));
@@ -149,6 +153,7 @@ describe("GET /api/sse/messages — filtro, memo de authz e frame", () => {
       user: { id: USER, role: "MEMBER", organizationId: ORG, isSuperAdmin: false },
     });
     mocks.buildInboxSseCardGate.mockResolvedValue(() => true);
+    mocks.buildDealSseGate.mockResolvedValue(() => true);
     mocks.stripHiddenInboxSseCard.mockImplementation((data: unknown) => data);
     mocks.loadAuthzContext.mockResolvedValue(adminCtx());
     mocks.conversationBlockedByFunnel.mockResolvedValue(false);
@@ -354,6 +359,106 @@ describe("GET /api/sse/messages — filtro, memo de authz e frame", () => {
     expect(both).toContain('"dealId":"d2"');
     expect(both).not.toContain("d-hidden");
     expect(both).not.toContain("OUTRO");
+  });
+
+  describe("deal_moved por posse do negócio (dono)", () => {
+    const dealMoved = (extra: Record<string, unknown>) =>
+      envelope(
+        {
+          organizationId: ORG,
+          fromPipelineId: "p_ok",
+          toPipelineId: "p_ok",
+          fromStageId: "s1",
+          toStageId: "s2",
+          position: 1,
+          updatedAt: "2026-10-07T12:00:00.000Z",
+          ...extra,
+        },
+        "deal_moved",
+      );
+
+    it("MEMBER 'só meus' NÃO recebe título/contato/valor de negócio de outro dono (só os ids)", async () => {
+      mocks.loadAuthzContext.mockResolvedValue(restrictedCtx([]));
+      mocks.buildDealSseGate.mockResolvedValue((d: { ownerId?: string | null }) => d.ownerId === USER);
+      const { reader, next, emit } = await open();
+      openReader = reader;
+
+      emit(
+        "deal_moved",
+        dealMoved({
+          dealId: "d-outro",
+          ownerId: "u-outro",
+          orgUnitId: "unit-1",
+          card: { id: "d-outro", title: "SEGREDO", value: 9999, contact: { name: "CLIENTE ALHEIO" } },
+        }),
+      );
+      const other = await next();
+      expect(other).toContain('"dealId":"d-outro"');
+      expect(other).toContain('"toStageId":"s2"');
+      expect(other).not.toContain("SEGREDO");
+      expect(other).not.toContain("CLIENTE ALHEIO");
+      expect(other).not.toContain("9999");
+      expect(other).not.toContain('"card"');
+      expect(other).not.toContain("ownerId");
+      expect(other).not.toContain("unit-1");
+
+      emit(
+        "deal_moved",
+        dealMoved({
+          dealId: "d-meu",
+          ownerId: USER,
+          orgUnitId: "unit-1",
+          card: { id: "d-meu", title: "MEU NEGOCIO", value: 50 },
+        }),
+      );
+      const own = await next();
+      expect(own).toContain("MEU NEGOCIO");
+      expect(own).toContain(`"ownerId":"${USER}"`);
+    });
+
+    it("payload sem ownerId (publisher antigo): quem só vê os próprios fica sem card", async () => {
+      mocks.loadAuthzContext.mockResolvedValue(restrictedCtx([]));
+      mocks.buildDealSseGate.mockResolvedValue((d: { ownerId?: string | null }) => d.ownerId === USER);
+      const { reader, next, emit } = await open();
+      openReader = reader;
+
+      emit("deal_moved", dealMoved({ dealId: "d-legado", card: { id: "d-legado", title: "SEGREDO" } }));
+      const frame = await next();
+      expect(frame).toContain('"dealId":"d-legado"');
+      expect(frame).not.toContain("SEGREDO");
+    });
+
+    it("admin recebe o card de qualquer dono, sem montar o gate de posse", async () => {
+      mocks.loadAuthzContext.mockResolvedValue(adminCtx());
+      const { reader, next, emit } = await open();
+      openReader = reader;
+
+      emit(
+        "deal_moved",
+        dealMoved({ dealId: "d1", ownerId: "u-outro", card: { id: "d1", title: "VISIVEL" } }),
+      );
+      expect(await next()).toContain("VISIVEL");
+      expect(mocks.buildDealSseGate).not.toHaveBeenCalled();
+    });
+
+    it("gate de posse que falha nega o card (evento sai só com ids) e remonta no próximo evento", async () => {
+      mocks.loadAuthzContext.mockResolvedValue(restrictedCtx([]));
+      mocks.buildDealSseGate
+        .mockRejectedValueOnce(new Error("pool cheio"))
+        .mockResolvedValue((d: { ownerId?: string | null }) => d.ownerId === USER);
+      const { reader, next, emit } = await open();
+      openReader = reader;
+
+      emit("deal_moved", dealMoved({ dealId: "d1", ownerId: USER, card: { id: "d1", title: "MEU" } }));
+      const first = await next();
+      expect(first).toContain('"dealId":"d1"');
+      expect(first).not.toContain('"card"');
+      expect(mocks.logWarn).toHaveBeenCalled();
+
+      emit("deal_moved", dealMoved({ dealId: "d2", ownerId: USER, card: { id: "d2", title: "MEU" } }));
+      expect(await next()).toContain('"title":"MEU"');
+      expect(mocks.buildDealSseGate).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("sse_access_revoked fecha a conexão", async () => {
