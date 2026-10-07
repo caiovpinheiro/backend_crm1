@@ -63,6 +63,7 @@ import {
   activeDealMovedSelect,
   createDealEvent,
   findCanonicalOpenDealInPipeline,
+  logConversationAssigneeChanges,
   markDealLost,
   markDealWon,
   nextDealNumber,
@@ -2290,9 +2291,12 @@ export async function executeStep(
         // propagamos pras conversas abertas — isso é o que faz o agente
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
-        await prisma.$transaction((tx) =>
+        const chatAssigneeChanges = await prisma.$transaction((tx) =>
           propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
         );
+        if (chatAssigneeChanges.length > 0) {
+          await logConversationAssigneeChanges(chatAssigneeChanges);
+        }
       } else if (target === "both") {
         if (!targetDealId && !targetContactId) {
           throw new Error("assign_owner: nem dealId nem contactId disponíveis");
@@ -2303,14 +2307,20 @@ export async function executeStep(
           // do deal), propagamos também — idempotente se for o mesmo contato.
           await assignDealOwner(targetDealId, ownerId);
           if (rt.contactId) {
-            await prisma.$transaction((tx) =>
+            const extraChanges = await prisma.$transaction((tx) =>
               propagateOwnerToContactAndChat(tx, rt.contactId, ownerId),
             );
+            if (extraChanges.length > 0) {
+              await logConversationAssigneeChanges(extraChanges);
+            }
           }
         } else if (targetContactId) {
-          await prisma.$transaction((tx) =>
+          const chatAssigneeChanges = await prisma.$transaction((tx) =>
             propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
           );
+          if (chatAssigneeChanges.length > 0) {
+            await logConversationAssigneeChanges(chatAssigneeChanges);
+          }
         }
       } else {
         throw new Error(`assign_owner: target inválido "${target}"`);
