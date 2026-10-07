@@ -2766,7 +2766,11 @@ export async function assignConversationAssignedTo(
   // escalares no RETURNING — incluindo hasHumanReply. Em DBs sem a coluna
   // (drift de migração), o assign/bulk-reassign quebrava mesmo sem tocar no
   // campo. O select lista só o que a rota de actions precisa.
+  // Negócios abertos cujo dono mudou de fato: depois do commit o board
+  // (cache + SSE) precisa saber — ver `syncBoardsAfterDealChanges`.
+  let reassignedDeals: Array<{ id: string; pipelineId: string | null }> = [];
   const updated = await prisma.$transaction(async (tx) => {
+    reassignedDeals = [];
     const conv = await tx.conversation.update({
       where: { id: conversationId },
       data: {
@@ -2787,13 +2791,38 @@ export async function assignConversationAssignedTo(
         // attribution ainda não rodou no DEV (SKIP_PRISMA_MIGRATE).
         select: { id: true, assignedToId: true },
       });
+      const openDeals = await tx.deal.findMany({
+        where: { contactId: conv.contactId, status: "OPEN" },
+        select: { id: true, ownerId: true, stage: { select: { pipelineId: true } } },
+      });
       await tx.deal.updateMany({
         where: { contactId: conv.contactId, status: "OPEN" },
         data: { ownerId: newAssigneeId, assignedVia: null },
       });
+      reassignedDeals = openDeals
+        .filter((d) => (d.ownerId ?? null) !== (newAssigneeId ?? null))
+        .map((d) => ({ id: d.id, pipelineId: d.stage?.pipelineId ?? null }));
     }
     return conv;
   });
+
+  if (reassignedDeals.length > 0) {
+    // Regra inalterada (a transferência leva o dono dos negócios abertos);
+    // só avisa o board: cache do funil invalidado + deal_moved com o card
+    // novo (dono) quando são poucos negócios. Best-effort.
+    try {
+      const { syncBoardsAfterDealChanges } = await import("@/services/deals");
+      await syncBoardsAfterDealChanges({
+        changes: reassignedDeals.map((d) => ({ dealId: d.id })),
+        extraPipelineIds: reassignedDeals.map((d) => d.pipelineId),
+      });
+    } catch (err) {
+      log.warn(
+        { err, conversationId },
+        "[conversations] board dos negócios reatribuídos não atualizado",
+      );
+    }
+  }
 
   return { ok: true, conversation: updated };
 }

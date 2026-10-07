@@ -2067,6 +2067,111 @@ export function publishActiveDealMoved(args: {
   }
 }
 
+/**
+ * Teto de negócios por lote com um `deal_moved` por card. Acima disso só o
+ * cache do board é invalidado (o quadro converge na próxima leitura): mil
+ * eventos de uma vez custam mais ao SSE e ao cliente do que um refetch.
+ */
+export const DEAL_MOVED_BATCH_LIMIT = 50;
+
+/** Negócio alterado em lote: de onde saiu (se mudou de etapa). */
+export type DealBoardChange = {
+  dealId: string;
+  /** Etapa/funil de ANTES. Ausentes = o negócio não mudou de etapa (ex.: troca de responsável). */
+  fromStageId?: string | null;
+  fromPipelineId?: string | null;
+};
+
+/**
+ * Depois que um ou mais negócios foram gravados fora do `moveDeal`
+ * (troca de responsável pela transferência da conversa, automação que leva
+ * a Ganho/Perdido, lote): invalida o cache do board dos funis afetados e,
+ * quando o lote é pequeno (`DEAL_MOVED_BATCH_LIMIT`), publica um `deal_moved`
+ * por negócio com o card já atualizado.
+ *
+ * - O cache é invalidado ANTES de publicar (o refetch que o evento provoca
+ *   não pode ler o board antigo) e é aguardado: o HTTP só responde depois.
+ * - `rows`: linhas que o UPDATE já devolveu (evita reler); o que faltar sai
+ *   numa única leitura para o lote.
+ * - `extraPipelineIds`: funis a purgar além dos das linhas (origem de lote,
+ *   funis de negócios que ficaram fora do teto).
+ * - Best-effort: falha de Redis/SSE/leitura nunca desfaz a gravação.
+ */
+export async function syncBoardsAfterDealChanges(args: {
+  orgId?: string | null;
+  changes: DealBoardChange[];
+  rows?: ReadonlyMap<string, ActiveDealMovedRow>;
+  extraPipelineIds?: Iterable<string | null | undefined>;
+}): Promise<{ invalidatedPipelines: string[]; published: number }> {
+  const none = { invalidatedPipelines: [] as string[], published: 0 };
+  const orgId = args.orgId ?? getOrgIdOrNull();
+  if (!orgId) return none;
+  const changes = args.changes.filter((c) => c.dealId);
+  const extra = Array.from(args.extraPipelineIds ?? []).filter(
+    (p): p is string => typeof p === "string" && p.length > 0,
+  );
+  if (changes.length === 0 && extra.length === 0) return none;
+
+  const withinLimit = changes.length > 0 && changes.length <= DEAL_MOVED_BATCH_LIMIT;
+  const rows = new Map<string, ActiveDealMovedRow>(args.rows ?? []);
+  if (withinLimit) {
+    const missing = changes.filter((c) => !rows.has(c.dealId)).map((c) => c.dealId);
+    if (missing.length > 0) {
+      try {
+        const read = await prisma.deal.findMany({
+          where: { id: { in: missing } },
+          select: activeDealMovedSelect,
+        });
+        for (const row of read as ActiveDealMovedRow[]) rows.set(row.id, row);
+      } catch (err) {
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err), orgId },
+          "[deals.syncBoardsAfterDealChanges] leitura dos negócios falhou — só invalida",
+        );
+      }
+    }
+  }
+
+  const pipelines = new Set<string>(extra);
+  for (const c of changes) {
+    if (c.fromPipelineId) pipelines.add(c.fromPipelineId);
+    const toPipelineId = rows.get(c.dealId)?.stage?.pipelineId;
+    if (toPipelineId) pipelines.add(toPipelineId);
+  }
+  try {
+    await Promise.all([...pipelines].map((pipelineId) => invalidateBoardData(orgId, pipelineId)));
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), orgId },
+      "[deals.syncBoardsAfterDealChanges] invalidate do board falhou",
+    );
+  }
+
+  let published = 0;
+  if (!withinLimit) return { invalidatedPipelines: [...pipelines], published };
+  for (const c of changes) {
+    const row = rows.get(c.dealId);
+    const toPipelineId = row?.stage?.pipelineId;
+    const position = row ? Number(row.position) : Number.NaN;
+    if (!row || !row.stageId || !toPipelineId || !Number.isFinite(position)) continue;
+    const updatedAt = isoInstant(row.updatedAt);
+    const card = toDealMovedCard(row, position, updatedAt);
+    const payload: DealMovedPayload = {
+      organizationId: orgId,
+      dealId: c.dealId,
+      fromPipelineId: c.fromPipelineId ?? toPipelineId,
+      toPipelineId,
+      fromStageId: c.fromStageId ?? row.stageId,
+      toStageId: row.stageId,
+      position,
+      updatedAt,
+    };
+    publishDealMoved(card ? { ...payload, card } : payload);
+    published += 1;
+  }
+  return { invalidatedPipelines: [...pipelines], published };
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
