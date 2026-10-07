@@ -10,6 +10,7 @@ import {
   activeConversationOnAccountWhere,
   assignConversationAssignedTo,
   getConversationById,
+  publishConversationAssignmentUpdate,
   resolveReopenDepartmentId,
   updateConversationStatusInDb,
   updateConversationStatusInTx,
@@ -257,6 +258,12 @@ export async function POST(request: Request, context: RouteContext) {
             fromName: prev?.assignedTo?.name ?? null,
             toName: result.conversation.assignedTo?.name ?? null,
           });
+          // Lista do Inbox: responsável/aba novos sem F5 (além do chatter).
+          await publishConversationAssignmentUpdate({
+            organizationId: sessionUser.organizationId,
+            conversationId: id,
+            previousAssignedToId: prev?.assignedToId ?? null,
+          });
           // Assumir / reassign: cancela debounce IA pendente.
           cancelAiReplyDebounce(id, "assignee_changed");
           if (
@@ -326,6 +333,11 @@ export async function POST(request: Request, context: RouteContext) {
           canTransfer: flags.canTransfer,
         };
 
+        // Estado ANTES da transferência, para decidir (no fim) se há o que
+        // avisar ao Inbox em tempo real. `undefined` = ainda não lido.
+        let fromAssigneeId: string | null | undefined;
+        let fromDepartmentId: string | null | undefined;
+
         // --- Transferência para AGENTE (reusa o fluxo de assign) ---
         if (hasAgent) {
           const raw = b.assignedToId;
@@ -347,6 +359,7 @@ export async function POST(request: Request, context: RouteContext) {
               assignedTo: { select: { id: true, name: true } },
             },
           });
+          fromAssigneeId = prev?.assignedToId ?? null;
           const result = await assignConversationAssignedTo(id, newAssigneeId, user);
           if (!result.ok) {
             const status =
@@ -433,6 +446,10 @@ export async function POST(request: Request, context: RouteContext) {
               { message: "Conversa não encontrada." },
               { status: 404 },
             );
+          }
+          fromDepartmentId = prevConv.departmentId ?? null;
+          if (fromAssigneeId === undefined) {
+            fromAssigneeId = prevConv.assignedToId ?? null;
           }
 
           // Só `conversation:transfer` (sem reassign_others): não mexe em
@@ -559,6 +576,23 @@ export async function POST(request: Request, context: RouteContext) {
             },
           },
         });
+
+        // Lista do Inbox em tempo real: responsável/departamento/aba novos sem
+        // F5. Só quando algo mudou de fato (a distribuição pode ter trocado o
+        // responsável depois da gravação — `updated` é o estado final).
+        const assigneeChanged =
+          fromAssigneeId !== undefined &&
+          (fromAssigneeId ?? null) !== (updated?.assignedToId ?? null);
+        const departmentChanged =
+          fromDepartmentId !== undefined &&
+          (fromDepartmentId ?? null) !== (updated?.departmentId ?? null);
+        if (assigneeChanged || departmentChanged) {
+          await publishConversationAssignmentUpdate({
+            organizationId: sessionUser.organizationId,
+            conversationId: id,
+            previousAssignedToId: fromAssigneeId ?? null,
+          });
+        }
 
         return NextResponse.json({ conversation: updated, distribution });
       }
