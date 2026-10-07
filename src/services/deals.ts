@@ -442,7 +442,7 @@ const listInclude = {
 } satisfies Prisma.DealInclude;
 
 /** Mesma lista sem `contacts.lastMessageAt` — banco ainda sem a migration. */
-const listIncludeWithoutLastMessage: Prisma.DealInclude = {
+const listIncludeWithoutLastMessage = {
   ...listInclude,
   contact: {
     select: {
@@ -457,7 +457,7 @@ const listIncludeWithoutLastMessage: Prisma.DealInclude = {
       },
     },
   },
-};
+} satisfies Prisma.DealInclude;
 
 function missingLastMessageColumn(error: unknown): boolean {
   const message = error instanceof Error ? error.message : "";
