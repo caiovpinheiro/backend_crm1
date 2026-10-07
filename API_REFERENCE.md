@@ -935,6 +935,22 @@ Cada registro de `items` (log paginado) ganhou o campo aditivo `actor`, que diz 
 
 O tipo gravado no evento (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que mandou a mensagem, ou nulo). Por isso `actorUserId` e `actorName` continuam como antes (só o usuário gravado no evento, `null`/`"—"` para IA e automação) e o front deve usar `actor`.
 
+#### Cabeçalho `Server-Timing`
+
+`/api/painel/service`, `/api/painel/team`, `/api/painel/deals` e `/api/analytics/tabulations` (respostas 200) devolvem `Server-Timing` com fases em ms. O corpo não muda.
+
+| Fase | Onde | Significado |
+|------|------|-------------|
+| `auth` | todas | Autenticação/sessão antes do handler. |
+| `pipeline` | `deals` | Resolução do funil. |
+| `q-<seção>` | `service`, `team`, `deals` | Consulta daquela seção (`q-volume`, `q-heatmap`, `q-ranking`, `q-kpis`...). No `service`, `q-shared` é a carga compartilhada por `tempo`/`attendants`/`byDepartment`/`channels`. Seção pulada por falta de réplica aparece com `dur=0` e `desc="no_replica"`; seção não pedida não aparece. No `team`, só aparece quando o bloco foi calculado (não veio do cache). |
+| `query` | `tabulations` | Consulta ao banco; só aparece quando calculou (miss/stale). |
+| `cache` | `team`, `tabulations` | Espera pelo cache. `desc` = `hit` (servido do cache, inclui resultado calculado por outra requisição simultânea), `miss` (calculou e esperou) ou `stale` (serviu o vencido e recalcula em segundo plano). Com vários blocos que diferem: `deptHour=hit ranking=miss`. |
+| `serialize` | todas | `JSON.stringify` da resposta. |
+| `total` | todas | Da entrada do handler ao fim da serialização; sempre a última fase. |
+
+Seções/blocos rodam em paralelo: as fases `q-*` se sobrepõem e a soma pode passar do `total`.
+
 ---
 
 ## 12. Settings (org & user)

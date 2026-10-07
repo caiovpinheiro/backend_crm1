@@ -14,7 +14,8 @@ import { Prisma } from "@prisma/client";
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { localTs } from "@/lib/local-time-sql";
 import { getLogger } from "@/lib/logger";
-import { cachedReport } from "@/lib/report-cache";
+import { cachedReport, type ReportCacheStatus } from "@/lib/report-cache";
+import type { ServerTiming } from "@/lib/server-timing";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { loadPainelHours } from "@/services/painel-hours";
 import {
@@ -496,10 +497,29 @@ async function wrap<T>(
   orgId: string,
   parts: Record<string, unknown>,
   fn: () => Promise<T>,
+  timing?: ServerTiming,
+  cacheStatuses?: Map<string, ReportCacheStatus>,
 ): Promise<PainelBlock<T>> {
+  const waitStart = performance.now();
   try {
-    const data = await cachedReport(`painel_team:${name}`, orgId, parts, () =>
-      withReplicaRetry(fn),
+    // `q-<bloco>` mede só o loader (some quando o bloco vem do cache);
+    // `cache` mede a espera pelo cache + loader, com hit/miss/stale na descrição.
+    const data = await cachedReport(
+      `painel_team:${name}`,
+      orgId,
+      parts,
+      () => {
+        const run = () => withReplicaRetry(fn);
+        return timing ? timing.time(`q-${name}`, run) : run();
+      },
+      timing
+        ? {
+            onStatus: (status) => {
+              cacheStatuses?.set(name, status);
+              timing.add("cache", performance.now() - waitStart);
+            },
+          }
+        : undefined,
     );
     return { ok: true, data };
   } catch (e) {
@@ -513,6 +533,7 @@ export async function getPainelTeam(
   clock: ClockMode,
   scope: PainelTeamScope,
   sections: PainelTeamSection[] = [...TEAM_SECTIONS],
+  timing?: ServerTiming,
 ): Promise<PainelTeamResult> {
   const orgId = getOrgIdOrThrow();
   // Teto de 90 dias, como o painel de atendimentos: mantém o fim e recua o início.
@@ -526,19 +547,28 @@ export async function getPainelTeam(
     departmentIds: scope.departmentIds,
     userIds: scope.userIds,
   };
+  const cacheStatuses = new Map<string, ReportCacheStatus>();
   const [deptHour, ranking, transfers] = await Promise.all([
     want.has("deptHour")
-      ? wrap("deptHour", orgId, base, () => getPainelDeptHour(range, scope))
+      ? wrap("deptHour", orgId, base, () => getPainelDeptHour(range, scope), timing, cacheStatuses)
       : omit<PainelDeptHour>(),
     want.has("ranking")
-      ? wrap("ranking", orgId, { ...base, clock }, () =>
-          getPainelTeamRanking(range, clock, scope),
+      ? wrap(
+          "ranking",
+          orgId,
+          { ...base, clock },
+          () => getPainelTeamRanking(range, clock, scope),
+          timing,
+          cacheStatuses,
         )
       : omit<{ rows: PainelTeamRankRow[]; capped: boolean }>(),
     want.has("transfers")
-      ? wrap("transfers", orgId, base, () => getPainelTransfers(range, scope))
+      ? wrap("transfers", orgId, base, () => getPainelTransfers(range, scope), timing, cacheStatuses)
       : omit<PainelTransfers>(),
   ]);
+  // Os blocos rodam em paralelo: `cache` soma as esperas e se sobrepõe a `total`.
+  // O tempo já foi somado em `wrap`; aqui só a descrição (hit/miss/stale).
+  timing?.describeCache(cacheStatuses);
   return {
     deptHour,
     ranking,
