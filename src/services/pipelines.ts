@@ -1,17 +1,25 @@
 import type { Prisma } from "@prisma/client";
 
+import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import {
   duplicateDealsErrorMessage,
   invalidatePipelineBoard,
   unifyDuplicateOpenDealsInPipeline,
 } from "@/services/deal-duplicates";
-import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  getOrgIdOrNull,
+  getOrgIdOrThrow,
+  getRequestContext,
+  runWithContext,
+} from "@/lib/request-context";
 import {
   invalidateLocalVersioned,
   localVersioned,
 } from "@/lib/cache/local-versioned";
 import { slugify } from "@/lib/utils";
+
+const log = getLogger("pipelines");
 
 const DEFAULT_STAGES: Omit<
   Prisma.StageCreateWithoutPipelineInput,
@@ -550,6 +558,28 @@ export type UpdatePipelineInput = {
   allowDuplicateDeals?: boolean;
 };
 
+async function unifyPipelineDuplicatesInBackground(
+  pipelineId: string,
+  organizationId: string,
+) {
+  try {
+    const duplicatesRemoved = await prisma.$transaction(
+      (tx) => unifyDuplicateOpenDealsInPipeline(tx, pipelineId, organizationId),
+      { timeout: 120_000 },
+    );
+    await invalidatePipelineBoard(pipelineId, organizationId);
+    log.info(
+      { pipelineId, duplicatesRemoved },
+      "unificação de duplicatas concluída",
+    );
+  } catch (err) {
+    const message =
+      duplicateDealsErrorMessage(err) ??
+      (err instanceof Error ? err.message : "erro desconhecido");
+    log.error({ pipelineId, message }, "unificação de duplicatas falhou");
+  }
+}
+
 export async function updatePipeline(id: string, data: UpdatePipelineInput) {
   try {
     return await updatePipelineRow(id, data);
@@ -581,37 +611,31 @@ async function updatePipelineRow(id: string, data: UpdatePipelineInput) {
   }
 
   if (data.allowDuplicateDeals === false) {
-    try {
-      const pipeline = await prisma.$transaction(
-        async (tx) => {
-          if (data.isDefault === true) {
-            await tx.pipeline.updateMany({
-              where: { id: { not: id } },
-              data: { isDefault: false },
-            });
-          }
-          const updated = await tx.pipeline.update({
-            where: { id },
-            data: payload,
-            include: { stages: { orderBy: { position: "asc" } } },
-          });
-          const duplicatesRemoved = await unifyDuplicateOpenDealsInPipeline(
-            tx,
-            id,
-            updated.organizationId,
-          );
-          return Object.assign(updated, { duplicatesRemoved });
-        },
-        { timeout: 120_000 },
+    const pipeline = await prisma.$transaction(async (tx) => {
+      if (data.isDefault === true) {
+        await tx.pipeline.updateMany({
+          where: { id: { not: id } },
+          data: { isDefault: false },
+        });
+      }
+      return tx.pipeline.update({
+        where: { id },
+        data: payload,
+        include: { stages: { orderBy: { position: "asc" } } },
+      });
+    });
+    // A unificação do funil inteiro passa do tempo do proxy (o toast fica
+    // "Erro ao salvar." e a opção volta). A flag já está gravada; a limpeza
+    // segue neste processo, fora da resposta HTTP.
+    const ctx = getRequestContext();
+    if (!ctx) {
+      log.error({ pipelineId: id }, "unificação de duplicatas sem contexto de org");
+    } else {
+      void runWithContext(ctx, () =>
+        unifyPipelineDuplicatesInBackground(id, pipeline.organizationId),
       );
-      await invalidatePipelineBoard(id, pipeline.organizationId);
-      return pipeline;
-    } catch (err) {
-      const message =
-        duplicateDealsErrorMessage(err) ??
-        (err instanceof Error ? err.message : "erro desconhecido");
-      throw new Error(`DUPLICATE_DEALS:${message}`);
     }
+    return pipeline;
   }
 
   if (data.isDefault === true) {
