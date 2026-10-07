@@ -331,7 +331,74 @@ export type GetDealsParams = {
    * paginar isto em vez de N× GET /api/deals/:id.
    */
   updatedSince?: Date;
+  /**
+   * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
+   * instante que a coluna da lista mostra, e só então aplica skip/take.
+   * Ausente = `updatedAt` desc, como sempre.
+   */
+  sort?: "lastInteraction";
+  direction?: "asc" | "desc";
 };
+
+/**
+ * Página de ids já na ordem da coluna "Última interação":
+ * `GREATEST(deal.updatedAt, última mensagem do contato)`. A mensagem é
+ * `contacts.lastMessageAt` e, só se estiver NULL, o fallback de
+ * `conversations` — o mesmo de `attachLastInteractionAt`. O `ORDER BY`
+ * roda antes do LIMIT, então a página 1 no sentido antigo é o mais
+ * antigo do filtro, não o mais antigo dos que já estavam na tela.
+ */
+async function pageIdsByLastInteraction(
+  where: Prisma.DealWhereInput,
+  direction: "asc" | "desc",
+  skip: number,
+  take: number,
+): Promise<string[]> {
+  const idRows = await prisma.deal.findMany({ where, select: { id: true } });
+  if (idRows.length === 0 || take <= 0) return [];
+  const ids = idRows.map((row) => row.id);
+  const orgId = getOrgIdOrThrow();
+  const dir = direction === "asc" ? Prisma.raw("ASC") : Prisma.raw("DESC");
+  const orderByMessage = Prisma.sql`
+    ORDER BY GREATEST(
+      d."updatedAt",
+      COALESCE(ct."lastMessageAt", fb.last_at, d."updatedAt")
+    ) ${dir}, d.id ASC
+    OFFSET ${skip}
+    LIMIT ${take}
+  `;
+  try {
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      LEFT JOIN contacts ct
+        ON ct.id = d."contactId" AND ct."organizationId" = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = d."contactId"
+      ) fb ON TRUE
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ${orderByMessage}
+    `;
+    return ranked.map((row) => row.id);
+  } catch (error) {
+    if (!missingLastMessageColumn(error)) throw error;
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ORDER BY d."updatedAt" ${dir}, d.id ASC
+      OFFSET ${skip}
+      LIMIT ${take}
+    `;
+    return ranked.map((row) => row.id);
+  }
+}
 
 const listInclude = {
   contact: {
@@ -500,17 +567,35 @@ export async function getDeals(params: GetDealsParams = {}) {
   // `withTotal=0` e paga só a página. O padrão continua contando: a aba
   // Lista do frontend atual calcula a última página por `total`.
   const wantsTotal = params.withTotal !== false;
-  const loadPage = (include: typeof listInclude) =>
-    Promise.all([
-      prisma.deal.findMany({
-        where,
-        skip,
-        take: perPage + 1,
-        orderBy: [{ updatedAt: "desc" }],
-        include,
-      }),
-      wantsTotal ? prisma.deal.count({ where }) : Promise.resolve(null),
+  const sortByLastInteraction = params.sort === "lastInteraction";
+  const interactionDir = params.direction === "asc" ? "asc" : "desc";
+  const loadPage = async (include: typeof listInclude) => {
+    const counted = wantsTotal ? prisma.deal.count({ where }) : Promise.resolve(null);
+    if (!sortByLastInteraction) {
+      return Promise.all([
+        prisma.deal.findMany({
+          where,
+          skip,
+          take: perPage + 1,
+          orderBy: [{ updatedAt: "desc" }],
+          include,
+        }),
+        counted,
+      ]);
+    }
+    const [ids, total] = await Promise.all([
+      pageIdsByLastInteraction(where, interactionDir, skip, perPage + 1),
+      counted,
     ]);
+    if (ids.length === 0) return [[], total] as const;
+    const rows = await prisma.deal.findMany({
+      where: { id: { in: ids } },
+      include,
+    });
+    const order = new Map(ids.map((id, index) => [id, index]));
+    rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    return [rows, total] as const;
+  };
   let loaded: Awaited<ReturnType<typeof loadPage>>;
   try {
     loaded = await loadPage(listInclude);
