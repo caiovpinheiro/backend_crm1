@@ -124,9 +124,18 @@ export type ConversationUpdatedPayload = {
   closedAt?: string | null;
   followUpAt?: string | null;
   assignedToId?: string | null;
-  /** Só o tipo do responsável (HUMAN/AI) — decide a aba. */
-  assignedTo?: { type: string | null } | null;
+  /**
+   * Responsável. `type` (HUMAN/AI) decide a aba; `id`/`name` só vão quando o
+   * publisher tem o usuário em mãos (atribuição/transferência) — aditivo.
+   */
+  assignedTo?: { type: string | null; id?: string; name?: string | null } | null;
+  /** Departamento atual (`null` = sem departamento). Só em atribuição/transferência. */
+  departmentId?: string | null;
+  /** Responsável antes da troca (`null` = estava sem). Só em atribuição/transferência. */
+  previousAssignedToId?: string | null;
   unreadCount?: number;
+  /** Horário da última mensagem de chat (ISO); atribuir/transferir não o altera. */
+  lastMessageAt?: string | null;
   whatsappCallConsentStatus?: string;
 };
 
