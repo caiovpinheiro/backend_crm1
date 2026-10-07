@@ -35,6 +35,7 @@ import {
   type PainelRange,
 } from "@/services/painel-period";
 import { getLogger } from "@/lib/logger";
+import type { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("painel-service");
 
@@ -1484,16 +1485,29 @@ export async function getPainelService(
   range: PainelRange,
   clock: ClockMode,
   sections: PainelServiceSection[] = [...SERVICE_SECTIONS],
+  timing?: ServerTiming,
 ): Promise<PainelServiceResult> {
   const want = new Set(sections);
+  // `Server-Timing`: uma fase `q-<seção>` por seção que rodou (soma as tentativas,
+  // se a réplica caiu e o bloco repetiu) e `q-shared` para a carga compartilhada
+  // por tempo/atendentes/departamento/canais. Seções rodam em paralelo: as fases
+  // se sobrepõem e a soma passa do `total`. Seção pulada por falta de réplica
+  // leva `desc = no_replica` e dur 0; seção não pedida não aparece.
+  const timed = <T,>(phase: string, fn: () => Promise<T>): Promise<T> =>
+    timing ? timing.time(phase, fn) : fn();
   // Seção NÃO pedida: sempre "omitido", sem `reason`.
   const omit = <T,>(): PainelBlock<T> => ({ ok: false, error: "omitido" });
   // Seção pedida, mas que só roda na réplica de leitura e ela não está disponível.
-  const noReplica = <T,>(): PainelBlock<T> => ({
-    ok: false,
-    error: PAINEL_NO_REPLICA_MESSAGE,
-    reason: "no_replica",
-  });
+  const noReplica = <T,>(block: PainelServiceSection): PainelBlock<T> => {
+    timing?.describe(`q-${block}`, "no_replica");
+    return {
+      ok: false,
+      error: PAINEL_NO_REPLICA_MESSAGE,
+      reason: "no_replica",
+    };
+  };
+  const run = <T,>(block: PainelServiceSection, fn: () => Promise<T>) =>
+    wrap(block, () => timed(`q-${block}`, fn));
 
   const replicaOk = isReplicaActive() && !isReplicaTripped();
   const needReplyMetrics =
@@ -1503,7 +1517,7 @@ export async function getPainelService(
       want.has("byDepartment") ||
       want.has("channels"));
   const sharedPromise = needReplyMetrics
-    ? loadSharedServiceMetrics(range)
+    ? timed("q-shared", () => loadSharedServiceMetrics(range))
     : Promise.resolve(null);
 
   const withShared = <T,>(
@@ -1512,7 +1526,7 @@ export async function getPainelService(
   ): Promise<PainelBlock<T>> => {
     if (!want.has(block)) return Promise.resolve(omit<T>());
     return sharedPromise.then(
-      (shared) => (shared ? wrap(block, () => fn(shared)) : Promise.resolve(noReplica<T>())),
+      (shared) => (shared ? run(block, () => fn(shared)) : Promise.resolve(noReplica<T>(block))),
       (e): PainelBlock<T> => {
         log.error({ err: e, block }, "[painel/service] bloco falhou");
         return { ok: false, error: PAINEL_BLOCK_ERROR };
@@ -1521,10 +1535,10 @@ export async function getPainelService(
   };
 
   const agora = want.has("agora")
-    ? await wrap("agora", () => getPainelAgora(clock))
+    ? await run("agora", () => getPainelAgora(clock))
     : omit<PainelAgora>();
   const volume = want.has("volume")
-    ? await wrap("volume", () => getPainelVolume(range, clock))
+    ? await run("volume", () => getPainelVolume(range, clock))
     : omit<PainelVolume>();
   const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
@@ -1532,16 +1546,16 @@ export async function getPainelService(
       !want.has("heatmap")
         ? Promise.resolve(omit<PainelHeatmap>())
         : replicaOk
-          ? wrap("heatmap", () => getPainelHeatmap(range))
-          : Promise.resolve(noReplica<PainelHeatmap>()),
+          ? run("heatmap", () => getPainelHeatmap(range))
+          : Promise.resolve(noReplica<PainelHeatmap>("heatmap")),
       withShared("byDepartment", (shared) =>
         getPainelByDepartment(range, clock, shared),
       ),
       !want.has("connections")
         ? Promise.resolve(omit<PainelConnections>())
         : replicaOk
-          ? wrap("connections", () => getPainelConnections(range))
-          : Promise.resolve(noReplica<PainelConnections>()),
+          ? run("connections", () => getPainelConnections(range))
+          : Promise.resolve(noReplica<PainelConnections>("connections")),
       withShared("attendants", (shared) =>
         getPainelAttendants(range, clock, shared),
       ),
@@ -1549,7 +1563,7 @@ export async function getPainelService(
         getPainelChannels(range, clock, shared),
       ),
       want.has("exceptions")
-        ? wrap("exceptions", () => getPainelServiceExceptions(clock))
+        ? run("exceptions", () => getPainelServiceExceptions(clock))
         : Promise.resolve(omit<PainelServiceException[]>()),
     ]);
 

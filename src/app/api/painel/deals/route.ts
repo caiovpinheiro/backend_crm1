@@ -15,6 +15,8 @@ import {
   resolvePipelineByPublicRef,
 } from "@/services/pipelines";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 
 const log = getLogger("api/painel/deals");
 
@@ -59,7 +61,11 @@ async function resolvePipelineIds(
 }
 
 export async function GET(request: Request) {
+  // `Server-Timing`: auth, pipeline (resolução do funil), q-<bloco> (um por bloco
+  // que rodou, em paralelo), serialize, total. Sem cache de servidor.
+  const timing = new ServerTiming();
   return withOrgContext(async () => {
+    timing.add("auth", timing.totalMs());
     try {
       const { searchParams } = new URL(request.url);
       const range = computePainelRange(
@@ -67,10 +73,12 @@ export async function GET(request: Request) {
         searchParams.get("startDate"),
         searchParams.get("endDate"),
       );
-      const pipelineIds = await resolvePipelineIds(
-        searchParams.get("pipelineIds") || "",
-        searchParams.get("pipelineId") || "",
-        searchParams.get("pipeline"),
+      const pipelineIds = await timing.time("pipeline", () =>
+        resolvePipelineIds(
+          searchParams.get("pipelineIds") || "",
+          searchParams.get("pipelineId") || "",
+          searchParams.get("pipeline"),
+        ),
       );
       const filters: PainelDealFilters = {
         range,
@@ -85,8 +93,9 @@ export async function GET(request: Request) {
       const data = await getPainelDeals(
         filters,
         parseDealSections(searchParams.get("section")),
+        timing,
       );
-      return NextResponse.json(data);
+      return timedJson(timing, data);
     } catch (e) {
       log.error({ err: e }, "[api/painel/deals] falhou");
       return NextResponse.json(
