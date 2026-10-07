@@ -411,7 +411,13 @@ export async function GET(request: Request) {
                 return;
               }
               if (closed) return;
-              data = stripHiddenInboxSseCard(visible, cardGate, event);
+              // O `card` do `deal_moved` é de NEGÓCIO: o gate de conversa lê
+              // `assignedToId`/`departmentId` (que ele não tem) e o trataria como
+              // "sem dono". A posse já foi aplicada acima (`ownerGate`).
+              data =
+                event === "deal_moved"
+                  ? visible
+                  : stripHiddenInboxSseCard(visible, cardGate, event);
             } catch (err) {
               log.warn(
                 { err, event, userId, organizationId },
