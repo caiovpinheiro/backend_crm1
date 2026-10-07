@@ -416,6 +416,33 @@ describe("GET /api/sse/messages — filtro, memo de authz e frame", () => {
       expect(own).toContain(`"ownerId":"${USER}"`);
     });
 
+    it("o card de negócio NÃO passa pelo gate de conversa (que o trataria como 'sem dono')", async () => {
+      mocks.loadAuthzContext.mockResolvedValue(restrictedCtx([]));
+      mocks.buildDealSseGate.mockResolvedValue((d: { ownerId?: string | null }) => d.ownerId === USER);
+      // Gate de conversa realista para um card de negócio: sem assignedToId/
+      // departmentId nega e marca hidden.
+      mocks.stripHiddenInboxSseCard.mockImplementation((data: unknown) => {
+        const { card: _c, ...rest } = data as Record<string, unknown>;
+        return { ...rest, cardOmitted: "hidden" };
+      });
+      const { reader, next, emit } = await open();
+      openReader = reader;
+
+      emit(
+        "deal_moved",
+        dealMoved({ dealId: "d-meu", ownerId: USER, card: { id: "d-meu", title: "MEU NEGOCIO" } }),
+      );
+
+      const frame = await next();
+      expect(frame).toContain("MEU NEGOCIO");
+      expect(frame).not.toContain("cardOmitted");
+      expect(mocks.stripHiddenInboxSseCard).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "deal_moved",
+      );
+    });
+
     it("payload sem ownerId (publisher antigo): quem só vê os próprios fica sem card", async () => {
       mocks.loadAuthzContext.mockResolvedValue(restrictedCtx([]));
       mocks.buildDealSseGate.mockResolvedValue((d: { ownerId?: string | null }) => d.ownerId === USER);
