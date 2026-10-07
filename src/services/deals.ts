@@ -2995,6 +2995,46 @@ const BOARD_CONTACT_TEXT_COLUMNS: Readonly<Record<string, string>> = {
   lastMessageDirection: "lastMessageDirection",
 };
 
+/** Colunas de data de `contacts` usadas pelos filtros do board. */
+const BOARD_CONTACT_DATE_COLUMNS: Readonly<Record<string, string>> = {
+  // Contato ainda sem a coluna pronta (`IS NULL`) no filtro de direção (K1).
+  lastMessageAt: "lastMessageAt",
+};
+
+/**
+ * Relação `conversations` do contato: `some`/`none` só com `status`
+ * (`"RESOLVED"` ou `{ not: "RESOLVED" }`) e `lastMessageDirection` — o que o
+ * caminho antigo do filtro de direção produz (`kanban-filters.ts`). Qualquer
+ * outra chave → fallback. Sem filtro por organização, como no Prisma: o
+ * índice `(contactId, status)` atende.
+ */
+function translateContactConversationsFilter(value: unknown): Prisma.Sql | null {
+  if (!isPlainObject(value)) return null;
+  const parts: Prisma.Sql[] = [];
+  for (const [op, inner] of Object.entries(value)) {
+    if (inner === undefined) continue;
+    if ((op !== "some" && op !== "none") || !isPlainObject(inner)) return null;
+    const conds: Prisma.Sql[] = [];
+    for (const [k, v] of Object.entries(inner)) {
+      if (v === undefined) continue;
+      if (k === "status") {
+        if (v === "RESOLVED") conds.push(Prisma.sql`cv.status = 'RESOLVED'`);
+        else if (isPlainObject(v) && Object.keys(v).length === 1 && v.not === "RESOLVED") {
+          conds.push(Prisma.sql`cv.status <> 'RESOLVED'`);
+        } else return null;
+      } else if (k === "lastMessageDirection") {
+        if (v !== "in" && v !== "out") return null;
+        conds.push(Prisma.sql`cv."lastMessageDirection" = ${v}`);
+      } else {
+        return null;
+      }
+    }
+    const exists = Prisma.sql`EXISTS (SELECT 1 FROM conversations cv WHERE cv."contactId" = ct.id AND ${sqlAndAll(conds)})`;
+    parts.push(op === "some" ? exists : Prisma.sql`NOT ${exists}`);
+  }
+  return parts.length > 0 ? sqlAndAll(parts) : null;
+}
+
 /** Where de `contacts` (alias `ct`) só com colunas da lista e AND/OR. */
 function translateContactWhere(where: unknown): Prisma.Sql | null {
   if (!isPlainObject(where)) return null;
@@ -3017,6 +3057,13 @@ function translateContactWhere(where: unknown): Prisma.Sql | null {
         value,
         null,
       );
+    } else if (hasOwn(BOARD_CONTACT_DATE_COLUMNS, key)) {
+      frag = translateDateFilter(
+        Prisma.raw(`ct."${BOARD_CONTACT_DATE_COLUMNS[key] as string}"`),
+        value,
+      );
+    } else if (key === "conversations") {
+      frag = translateContactConversationsFilter(value);
     } else {
       frag = null;
     }
