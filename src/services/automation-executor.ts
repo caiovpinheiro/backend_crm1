@@ -62,8 +62,9 @@ import {
   assertStageEntryFields,
   assignDealOwner,
   createDeal,
-  createDealEvent,
   activeDealMovedSelect,
+  createDealEvent,
+  logConversationAssigneeChanges,
   markDealLost,
   markDealWon,
   propagateOwnerToContactAndChat,
@@ -2374,13 +2375,17 @@ export async function executeStep(
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
         // O dono também entra em todos os negócios OPEN do contato.
-        await prisma.$transaction(async (tx) => {
-          await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+        const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+          const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
           await tx.deal.updateMany({
             where: { contactId: targetContactId, status: "OPEN" },
             data: { ownerId },
           });
+          return changes;
         });
+        if (chatAssigneeChanges.length > 0) {
+          await logConversationAssigneeChanges(chatAssigneeChanges);
+        }
       } else if (target === "both") {
         if (!targetDealId && !targetContactId) {
           throw new Error("assign_owner: nem dealId nem contactId disponíveis");
@@ -2391,18 +2396,25 @@ export async function executeStep(
           // do deal), propagamos também — idempotente se for o mesmo contato.
           await assignDealOwner(targetDealId, ownerId);
           if (rt.contactId) {
-            await prisma.$transaction((tx) =>
+            const extraChanges = await prisma.$transaction((tx) =>
               propagateOwnerToContactAndChat(tx, rt.contactId, ownerId),
             );
+            if (extraChanges.length > 0) {
+              await logConversationAssigneeChanges(extraChanges);
+            }
           }
         } else if (targetContactId) {
-          await prisma.$transaction(async (tx) => {
-            await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+          const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+            const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
             await tx.deal.updateMany({
               where: { contactId: targetContactId, status: "OPEN" },
               data: { ownerId },
             });
+            return changes;
           });
+          if (chatAssigneeChanges.length > 0) {
+            await logConversationAssigneeChanges(chatAssigneeChanges);
+          }
         }
       } else {
         throw new Error(`assign_owner: target inválido "${target}"`);

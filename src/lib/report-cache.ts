@@ -9,6 +9,9 @@ export const REPORT_MAX_RANGE_MS = 366 * 24 * 60 * 60 * 1000;
 export const REPORT_FRESH_SEC = 60;
 export const REPORT_STALE_SEC = 120;
 
+/** Como o relatório foi servido (cabeçalho `Server-Timing`, fase `cache`). */
+export type ReportCacheStatus = "hit" | "miss" | "stale";
+
 /**
  * Relatórios do painel/analytics com cache por org + parâmetros, sem invalidação
  * ativa (o teto de staleness é REPORT_FRESH_SEC + REPORT_STALE_SEC). Requisições
@@ -21,10 +24,33 @@ export function cachedReport<T>(
   orgId: string,
   parts: Record<string, unknown>,
   loader: () => Promise<T>,
+  opts?: { onStatus?: (status: ReportCacheStatus) => void },
 ): Promise<T> {
-  return cache.wrapSwr(
+  let started = false;
+  let settled = false;
+  const tracked = opts?.onStatus
+    ? async () => {
+        started = true;
+        try {
+          return await loader();
+        } finally {
+          settled = true;
+        }
+      }
+    : loader;
+  const result = cache.wrapSwr(
     reportKey(name, orgId, reportFingerprint(parts)),
     { ttlSec: REPORT_FRESH_SEC, staleSec: REPORT_STALE_SEC },
-    loader,
+    tracked,
   );
+  if (!opts?.onStatus) return result;
+  const onStatus = opts.onStatus;
+  return result.then((value) => {
+    // O loader deste chamador terminou antes da resposta: miss. Começou e ainda
+    // roda: o vencido foi servido enquanto recalcula em segundo plano (stale).
+    // Nem começou: servido do cache (inclui valor calculado por outra
+    // requisição simultânea, que dividiu o loader).
+    onStatus(started ? (settled ? "miss" : "stale") : "hit");
+    return value;
+  });
 }

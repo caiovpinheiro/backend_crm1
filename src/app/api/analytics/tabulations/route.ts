@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getTabulationAnalytics } from "@/services/tabulation-analytics";
 import { getLogger } from "@/lib/logger";
-import { REPORT_MAX_RANGE_MS, cachedReport } from "@/lib/report-cache";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
+import { REPORT_MAX_RANGE_MS, cachedReport, type ReportCacheStatus } from "@/lib/report-cache";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { clampRangeFromEnd } from "@/services/painel-period";
 
@@ -41,7 +43,11 @@ function parseIdList(sp: URLSearchParams, ...keys: string[]): string[] {
  * /api/analytics/system-usage.
  */
 export async function GET(request: Request) {
+  // `Server-Timing`: auth, cache (espera pelo cache; desc = hit | miss | stale),
+  // query (só quando calculou, ou seja, miss/stale), serialize, total.
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     const role = session.user.role;
     if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json(
@@ -71,6 +77,7 @@ export async function GET(request: Request) {
       const safePerPage = Number.isFinite(perPage) ? perPage : 25;
       // Cache por org + período (ao minuto) + filtros (ids ordenados) + página.
       // Página e tamanho entram na chave como o serviço os normaliza.
+      const cacheWaitStart = performance.now();
       const data = await cachedReport(
         "tabulations",
         getOrgIdOrThrow(),
@@ -84,21 +91,30 @@ export async function GET(request: Request) {
           perPage: Math.min(100, Math.max(1, safePerPage)),
         },
         () =>
-          getTabulationAnalytics({
-            from,
-            to,
-            actorUserIds,
-            departmentIds,
-            actorUserId: actorUserIds[0] ?? null,
-            departmentId: departmentIds[0] ?? null,
-            tabulationIds,
-            tabulationId: tabulationIds[0] ?? null,
-            page: safePage,
-            perPage: safePerPage,
-          }),
+          timing.time("query", () =>
+            getTabulationAnalytics({
+              from,
+              to,
+              actorUserIds,
+              departmentIds,
+              actorUserId: actorUserIds[0] ?? null,
+              departmentId: departmentIds[0] ?? null,
+              tabulationIds,
+              tabulationId: tabulationIds[0] ?? null,
+              page: safePage,
+              perPage: safePerPage,
+            }),
+          ),
+        {
+          onStatus: (status: ReportCacheStatus) =>
+            timing.describeCache(
+              new Map([["tabulations", status]]),
+              performance.now() - cacheWaitStart,
+            ),
+        },
       );
       // Aditivo: só aparece quando o período foi cortado.
-      return NextResponse.json(rangeClamped ? { ...data, rangeClamped: true } : data);
+      return timedJson(timing, rangeClamped ? { ...data, rangeClamped: true } : data);
     } catch (e) {
       log.error({ err: e }, "[analytics/tabulations] falhou");
       // Rota restrita a gestor/admin: devolve a causa junto. Sem isso, a única
