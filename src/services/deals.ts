@@ -808,6 +808,9 @@ export type CreateDealInput = {
   ownerId?: string | null;
   /** Papel do deal (PRD catálogo): default COMMERCIAL no schema. */
   dealRole?: DealRole;
+  /** Só `duplicateDeal`. Criação normal deixa o default false. */
+  intentionalDuplicate?: boolean;
+  duplicatedFromDealId?: string | null;
 };
 
 /**
@@ -845,6 +848,7 @@ export async function findCanonicalOpenDealInPipeline(
       contactId,
       status: "OPEN",
       dealRole: "COMMERCIAL",
+      intentionalDuplicate: false,
       stage: { pipelineId },
     },
     orderBy: [
@@ -931,8 +935,14 @@ async function insertNewDeal(
       stageId: data.stageId,
       ownerId: data.ownerId === undefined ? undefined : data.ownerId,
       dealRole: data.dealRole === undefined ? undefined : data.dealRole,
+      ...(data.intentionalDuplicate ? { intentionalDuplicate: true } : {}),
+      ...(data.duplicatedFromDealId
+        ? { duplicatedFromDealId: data.duplicatedFromDealId }
+        : {}),
     }),
-    include: listInclude,
+    // Sem `contacts.lastMessageAt`: o include completo aborta o INSERT
+    // inteiro enquanto a migration 20261006120000 não está no banco.
+    include: listIncludeWithoutLastMessage,
   });
 }
 
@@ -972,6 +982,69 @@ export async function createDeal(data: CreateDealInput) {
   }
 
   const created = await insertNewDeal(prisma, data);
+  await invalidateBoardsForPipelines([created.stage?.pipelineId]);
+  return created;
+}
+
+/** Etapa terminal não serve: a duplicata nasce OPEN. */
+export function duplicateTargetError(
+  stage: { pipelineId: string; isWon: boolean; isLost: boolean } | null,
+  pipelineId: string,
+): "STAGE_NOT_FOUND" | "STAGE_PIPELINE_MISMATCH" | "TERMINAL_STAGE" | null {
+  if (!stage) return "STAGE_NOT_FOUND";
+  if (stage.pipelineId !== pipelineId) return "STAGE_PIPELINE_MISMATCH";
+  if (stage.isWon || stage.isLost) return "TERMINAL_STAGE";
+  return null;
+}
+
+/**
+ * Cópia intencional: mesmo contato, título e responsável; estrutura
+ * comercial vazia. Não passa por `createDeal` (esse reaproveita o aberto
+ * quando o funil não aceita duplicata).
+ */
+export async function duplicateDeal(
+  sourceId: string,
+  input: { pipelineId: string; stageId: string },
+) {
+  const source = await prisma.deal.findUnique({
+    where: { id: sourceId },
+    select: {
+      id: true,
+      title: true,
+      contactId: true,
+      ownerId: true,
+      dealRole: true,
+    },
+  });
+  if (!source) throw new Error("NOT_FOUND");
+
+  const [stage, pipeline] = await Promise.all([
+    prisma.stage.findUnique({
+      where: { id: input.stageId },
+      select: { id: true, pipelineId: true, isWon: true, isLost: true },
+    }),
+    prisma.pipeline.findUnique({
+      where: { id: input.pipelineId },
+      select: { id: true, archivedAt: true },
+    }),
+  ]);
+  if (!pipeline || pipeline.archivedAt) throw new Error("PIPELINE_NOT_FOUND");
+  const stageError = duplicateTargetError(stage, input.pipelineId);
+  if (stageError) throw new Error(stageError);
+
+  const created = await prisma.$transaction((tx) =>
+    insertNewDeal(tx, {
+      title: source.title,
+      contactId: source.contactId,
+      ownerId: source.ownerId,
+      stageId: input.stageId,
+      status: "OPEN",
+      value: 0,
+      dealRole: source.dealRole,
+      intentionalDuplicate: true,
+      duplicatedFromDealId: source.id,
+    }),
+  );
   await invalidateBoardsForPipelines([created.stage?.pipelineId]);
   return created;
 }
@@ -1088,6 +1161,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
 
   // REGRA DE HERANÇA DE RESPONSÁVEL (ver `assignDealOwner` abaixo).
   let chatAssigneeChanges: ConversationAssigneeChange[] = [];
+  let siblingPipelineIds: Array<string | null> = [];
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.deal.update({
       where: { id },
@@ -1098,6 +1172,19 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     if (data.ownerId !== undefined) {
       const contactId =
         data.contactId !== undefined ? data.contactId : row.contactId;
+      if (contactId) {
+        const siblings = await tx.deal.findMany({
+          where: { contactId, status: "OPEN", id: { not: row.id } },
+          select: { id: true, stage: { select: { pipelineId: true } } },
+        });
+        if (siblings.length > 0) {
+          await tx.deal.updateMany({
+            where: { id: { in: siblings.map((s) => s.id) } },
+            data: { ownerId: data.ownerId },
+          });
+          siblingPipelineIds = siblings.map((s) => s.stage?.pipelineId ?? null);
+        }
+      }
       chatAssigneeChanges = await propagateOwnerToContactAndChat(
         tx,
         contactId,
@@ -1115,6 +1202,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   await invalidateBoardsForPipelines([
     updated.stage?.pipelineId,
     previousPipelineId,
+    ...siblingPipelineIds,
   ]);
 
   return updated;
@@ -1402,7 +1490,7 @@ export async function assignDealOwner(
   const deal = await prisma.$transaction(async (tx) => {
     const current = await tx.deal.findUnique({
       where: { id: dealId },
-      select: { ownerId: true },
+      select: { ownerId: true, contactId: true },
     });
     const row = await tx.deal.update({
       where: { id: dealId },
@@ -1414,11 +1502,34 @@ export async function assignDealOwner(
         stage: { select: { pipelineId: true } },
       },
     });
+    const siblingPipelineIds: Array<string | null> = [];
+    if (row.contactId) {
+      const siblings = await tx.deal.findMany({
+        where: { contactId: row.contactId, status: "OPEN", id: { not: row.id } },
+        select: { id: true, stage: { select: { pipelineId: true } } },
+      });
+      if (siblings.length > 0) {
+        await tx.deal.updateMany({
+          where: { id: { in: siblings.map((s) => s.id) } },
+          data: { ownerId },
+        });
+        siblingPipelineIds.push(
+          ...siblings.map((s) => s.stage?.pipelineId ?? null),
+        );
+      }
+    }
     await propagateOwnerToContactAndChat(tx, row.contactId, ownerId);
-    return { ...row, fromOwnerId: current?.ownerId ?? null };
+    return {
+      ...row,
+      fromOwnerId: current?.ownerId ?? null,
+      siblingPipelineIds,
+    };
   });
 
-  await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
+  await invalidateBoardsForPipelines([
+    deal.stage?.pipelineId,
+    ...deal.siblingPipelineIds,
+  ]);
 
   if (deal.fromOwnerId !== ownerId) {
     void import("@/services/automation-triggers")

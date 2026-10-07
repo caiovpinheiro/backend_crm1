@@ -20,6 +20,8 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
+  assignOwnerToContactClusterTx,
+  invalidateBoardsForPipelines,
   propagateOwnerToContactAndChat,
   syncOwnershipForContact,
 } from "@/services/deals";
@@ -252,12 +254,12 @@ async function hydrateDistributionIds(
   const contactId = input.contactId ?? conv?.contactId ?? null;
   let dealId = input.dealId ?? null;
   if (!dealId && contactId) {
-    const openDeal = await prisma.deal.findFirst({
+    const openDeals = await prisma.deal.findMany({
       where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
       select: { id: true },
+      take: 2,
     });
-    dealId = openDeal?.id ?? null;
+    if (openDeals.length === 1) dealId = openDeals[0]!.id;
   }
   return { ...input, contactId, dealId };
 }
@@ -1066,14 +1068,23 @@ export async function executeDistribution(
     await assignDealOwner(input.dealId, selected.userId);
   } else if (input.contactId) {
     const contactId = input.contactId;
-    const openDeal = await prisma.deal.findFirst({
+    const openDeals = await prisma.deal.findMany({
       where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
       select: { id: true },
+      take: 2,
     });
-    if (openDeal) {
-      assignedDealId = openDeal.id;
-      await assignDealOwner(openDeal.id, selected.userId);
+    if (openDeals.length === 1) {
+      assignedDealId = openDeals[0]!.id;
+      await assignDealOwner(openDeals[0]!.id, selected.userId);
+    } else if (openDeals.length > 1) {
+      const synced = await prisma.$transaction((tx) =>
+        assignOwnerToContactClusterTx(tx, {
+          userId: selected.userId,
+          contactId,
+        }),
+      );
+      assignedDealId = synced.dealIds[0] ?? null;
+      await invalidateBoardsForPipelines(synced.pipelineIds);
     } else {
       await prisma.$transaction((tx) =>
         propagateOwnerToContactAndChat(tx, contactId, selected.userId),
@@ -1091,14 +1102,23 @@ export async function executeDistribution(
       select: { contactId: true },
     });
     if (conv?.contactId) {
-      const openDeal = await prisma.deal.findFirst({
+      const openDeals = await prisma.deal.findMany({
         where: { contactId: conv.contactId, status: "OPEN" },
-        orderBy: { updatedAt: "desc" },
         select: { id: true },
+        take: 2,
       });
-      if (openDeal) {
-        assignedDealId = openDeal.id;
-        await assignDealOwner(openDeal.id, selected.userId);
+      if (openDeals.length === 1) {
+        assignedDealId = openDeals[0]!.id;
+        await assignDealOwner(openDeals[0]!.id, selected.userId);
+      } else if (openDeals.length > 1) {
+        const synced = await prisma.$transaction((tx) =>
+          assignOwnerToContactClusterTx(tx, {
+            userId: selected.userId,
+            contactId: conv.contactId,
+          }),
+        );
+        assignedDealId = synced.dealIds[0] ?? null;
+        await invalidateBoardsForPipelines(synced.pipelineIds);
       } else {
         await prisma.$transaction((tx) =>
           propagateOwnerToContactAndChat(tx, conv.contactId!, selected.userId),
