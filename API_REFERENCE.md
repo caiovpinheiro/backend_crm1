@@ -855,6 +855,102 @@ Response do POST:
 |--------|------|-----------|
 | GET | `/api/bulk-operations/[id]` | Status de uma operação em massa (polling). Retorna `{ id, status, total, processed, succeeded, failed, progressPercent, errors[] }`. |
 
+### 11.6. Painel (Dashboard)
+
+Rotas: `GET /api/painel/service` (atendimentos), `GET /api/painel/team` (equipe, só gestor/admin), `GET /api/painel/deals` (negócios) e `GET /api/analytics/tabulations` (log de tabulações, só gestor/admin). Todas aceitam `?section=a,b,c` (CSV) para pedir só alguns blocos; sem `section`, todos os blocos.
+
+Período (`/painel/*`): `?period=today|yesterday|last_7|last_30|this_month|last_month|custom` (+ `startDate`/`endDate` `YYYY-MM-DD` em `custom`) e `?clock=elapsed|business`. `/analytics/tabulations` usa `?from=ISO&to=ISO`.
+
+#### Formato de bloco
+
+Cada seção volta como um bloco independente; uma seção que falha não derruba as outras:
+
+```json
+{ "ok": true,  "data": { } }
+{ "ok": false, "error": "omitido" }
+{ "ok": false, "error": "Indisponível sem réplica de leitura", "reason": "no_replica" }
+{ "ok": false, "error": "Falha ao carregar este bloco." }
+```
+
+`reason` é aditivo e só existe quando há um motivo estruturado. O front deve ramificar por `reason`, nunca pelo texto de `error`.
+
+| `error` | `reason` | Significado |
+|---------|----------|-------------|
+| `omitido` | (ausente) | Seção **não pedida** em `?section=`. |
+| `Indisponível sem réplica de leitura` | `no_replica` | Seção **pedida**, mas pulada: ela só roda na réplica de leitura e a réplica está ausente (`DATABASE_URL_REPLICA` não definida) ou derrubada (circuito aberto após erro de conexão). |
+| `Falha ao carregar este bloco.` | (ausente) | A consulta falhou. O erro do banco não vai ao cliente: fica no log estruturado (`painel-service`, campo `block`). |
+
+#### `GET /api/painel/service` — seções
+
+| Seção | Roda em | Exige réplica | Conteúdo |
+|-------|---------|---------------|----------|
+| `agora` | réplica se ativa, senão primário | não | Estado atual da fila. |
+| `volume` | réplica se ativa, senão primário | não | Iniciados/finalizados/abertos do período (ver partição abaixo). |
+| `exceptions` | réplica se ativa, senão primário | não | Contadores de exceção (sem resposta, abertas há 24 h, sem dono, falha de envio). |
+| `tempo` | réplica | **sim** | Primeira resposta e tempos de atendimento. |
+| `heatmap` | réplica | **sim** | Mapa de calor dia da semana x hora. |
+| `byDepartment` | réplica | **sim** | Volume e tempos por departamento. |
+| `connections` | réplica | **sim** | Volume por conexão (canal) e por plataforma. |
+| `attendants` | réplica | **sim** | Carga e tempos por atendente. |
+| `channels` | réplica | **sim** | Canais e motivos (tabulações). |
+
+As seções que exigem réplica são consultas pesadas de período (até 90 dias); por decisão de projeto **não rodam no banco primário**, para não competir com as escritas: sem réplica ativa voltam com `reason: "no_replica"`. Com réplica ativa e saudável, rodam normalmente.
+
+Tetos: as métricas de resposta usam no máximo os últimos 90 dias do período (mantém o fim, recua o início); respostas subsequentes, no máximo 14 dias. O bloco `volume` conta o período inteiro pedido.
+
+Cache: `/api/painel/service` **não** tem cache de servidor (cada chamada recalcula). `/api/painel/team` e `/api/analytics/tabulations` usam `cachedReport`: por organização + parâmetros, fresco por 60 s e servido vencido por mais 120 s enquanto recalcula (sem invalidação por escrita; defasagem máxima 180 s). Teto de período: `/painel/team` 90 dias, `/analytics/tabulations` 366 dias (mantém o fim; a resposta traz `rangeClamped: true` quando cortou).
+
+#### `volume` — como `started`, `finished` e `stillOpen` se relacionam
+
+Os KPIs de `volume` não formam uma partição entre si, porque `started` e `finished` medem **conjuntos diferentes**:
+
+- **Coorte `started`**: conversas **criadas** no período (`createdAt`). Cada uma tem uma situação atual, e vale (campo aditivo `partition`):
+  `started = partition.resolved + partition.open + partition.other`, com `partition.open = stillOpen = openStarted + openWaiting`.
+  - `resolved`: criadas no período e hoje com status `RESOLVED` (encerradas em qualquer data, inclusive depois do fim do período).
+  - `open` / `stillOpen`: criadas no período, status diferente de `RESOLVED` e sem `closedAt`. `openStarted` já teve resposta humana; `openWaiting` aguarda a primeira.
+  - `other`: o resto da coorte, hoje só status `PENDING`/`SNOOZED` que ainda guardam `closedAt` de um encerramento anterior.
+- **Fluxo `finished`**: conversas **encerradas** no período (`status = RESOLVED` e `closedAt` no período), seja qual for a data de criação:
+  `finished = partition.finishedFromStarted + partition.finishedCarryover`.
+  - `finishedFromStarted`: criadas e encerradas no período.
+  - `finishedCarryover`: encerradas no período mas criadas **antes** dele. Não estão em `started`.
+
+Por isso `finished + stillOpen` pode passar de `started` (há `finishedCarryover`) e pode ficar abaixo (criada no período e encerrada depois dele, ou `other`). Exemplo da evidência de QA (30 dias): 275 + 1.040 + 3 = 1.318 contra 1.312 iniciadas; a diferença é o fluxo que veio de antes do período (`finishedCarryover`) menos a coorte que não entra nas três parcelas (`resolved` fora do período e `other`). **A definição dos KPIs existentes não mudou**: `finished` continua contando encerradas no período e o rótulo "finalizados" deve dizer isso, ou o front deve exibir `partition` quando quiser uma soma que fecha.
+
+A situação é a **atual**, não a histórica: encerrar define `closedAt` e reabrir (status `OPEN`) o limpa. Conversa encerrada no período e reaberta depois sai de `finished`; reaberta, conta em `open` se foi criada no período. Cada conversa (linha em `conversations`) conta **uma vez** em `started`; reabertura não duplica.
+
+#### `GET /api/analytics/tabulations` — ator do log
+
+Cada registro de `items` (log paginado) ganhou o campo aditivo `actor`, que diz quem tabulou:
+
+```json
+"actor": { "kind": "user" | "automation" | "ai_agent" | "system", "id": "string|null", "name": "string|null" }
+```
+
+| `kind` | Origem | `id` | `name` |
+|--------|--------|------|--------|
+| `user` | Pessoa (encerramento/retabulação pela conversa). | id do usuário | nome do usuário |
+| `ai_agent` | Agente de IA (tabulação/encerramento pela IA). | id do agente (`AIAgentConfig`), quando gravado | nome do agente |
+| `automation` | Passo de automação. | id da automação | nome da automação |
+| `system` | O resto: encerramento em massa, integração, evento sem ator. | `null` | rótulo gravado ou `"Sistema"` |
+
+O tipo gravado no evento (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que mandou a mensagem, ou nulo). Por isso `actorUserId` e `actorName` continuam como antes (só o usuário gravado no evento, `null`/`"—"` para IA e automação) e o front deve usar `actor`.
+
+#### Cabeçalho `Server-Timing`
+
+`/api/painel/service`, `/api/painel/team`, `/api/painel/deals` e `/api/analytics/tabulations` (respostas 200) devolvem `Server-Timing` com fases em ms. O corpo não muda.
+
+| Fase | Onde | Significado |
+|------|------|-------------|
+| `auth` | todas | Autenticação/sessão antes do handler. |
+| `pipeline` | `deals` | Resolução do funil. |
+| `q-<seção>` | `service`, `team`, `deals` | Consulta daquela seção (`q-volume`, `q-heatmap`, `q-ranking`, `q-kpis`...). No `service`, `q-shared` é a carga compartilhada por `tempo`/`attendants`/`byDepartment`/`channels`. Seção pulada por falta de réplica aparece com `dur=0` e `desc="no_replica"`; seção não pedida não aparece. No `team`, só aparece quando o bloco foi calculado (não veio do cache). |
+| `query` | `tabulations` | Consulta ao banco; só aparece quando calculou (miss/stale). |
+| `cache` | `team`, `tabulations` | Espera pelo cache. `desc` = `hit` (servido do cache, inclui resultado calculado por outra requisição simultânea), `miss` (calculou e esperou) ou `stale` (serviu o vencido e recalcula em segundo plano). Com vários blocos que diferem: `deptHour=hit ranking=miss`. |
+| `serialize` | todas | `JSON.stringify` da resposta. |
+| `total` | todas | Da entrada do handler ao fim da serialização; sempre a última fase. |
+
+Seções/blocos rodam em paralelo: as fases `q-*` se sobrepõem e a soma pode passar do `total`.
+
 ---
 
 ## 12. Settings (org & user)

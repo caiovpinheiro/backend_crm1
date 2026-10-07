@@ -30,6 +30,7 @@ import {
   type PainelRange,
 } from "@/services/painel-period";
 import { getLogger } from "@/lib/logger";
+import type { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("painel-deals");
 
@@ -1123,30 +1124,35 @@ export function parseDealSections(raw: string | null): PainelDealSection[] {
 export async function getPainelDeals(
   f: PainelDealFilters,
   sections: PainelDealSection[] = [...DEAL_SECTIONS],
+  timing?: ServerTiming,
 ): Promise<PainelDealsResult> {
   const want = new Set(sections);
+  // `Server-Timing`: uma fase `q-<bloco>` por bloco que rodou. Os blocos rodam em
+  // paralelo: as fases se sobrepõem e a soma passa do `total`. Sem cache.
+  const run = <T,>(block: PainelDealSection, fn: () => Promise<T>) =>
+    wrap(() => (timing ? timing.time(`q-${block}`, fn) : fn()));
   const [kpis, funnel, evolution, agents, sources, exceptions, customFields] =
     await Promise.all([
       want.has("kpis")
-        ? wrap(() => getPainelDealsKpis(f))
+        ? run("kpis", () => getPainelDealsKpis(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelDealsKpis>),
       want.has("funnel")
-        ? wrap(() => getPainelFunnel(f))
+        ? run("funnel", () => getPainelFunnel(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelFunnel>),
       want.has("evolution")
-        ? wrap(() => getPainelEvolution(f))
+        ? run("evolution", () => getPainelEvolution(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelEvolution>),
       want.has("agents")
-        ? wrap(() => getPainelAgents(f))
+        ? run("agents", () => getPainelAgents(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelAgentRow[]>),
       want.has("sources")
-        ? wrap(() => getPainelSources(f))
+        ? run("sources", () => getPainelSources(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelSourceRow[]>),
       want.has("exceptions")
-        ? wrap(() => getPainelDealExceptions(f))
+        ? run("exceptions", () => getPainelDealExceptions(f))
         : Promise.resolve({ ok: false, error: "omitido" } as PainelBlock<PainelDealException[]>),
       want.has("customFields") && (f.fieldIds?.length ?? 0) > 0
-        ? wrap(() => getPainelCustomFieldCards(f, f.fieldIds ?? []))
+        ? run("customFields", () => getPainelCustomFieldCards(f, f.fieldIds ?? []))
         : Promise.resolve(
             (f.fieldIds?.length
               ? { ok: false, error: "omitido" }
