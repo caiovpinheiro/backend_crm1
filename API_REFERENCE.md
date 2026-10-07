@@ -903,6 +903,24 @@ Tetos: as métricas de resposta usam no máximo os últimos 90 dias do período 
 
 Cache: `/api/painel/service` **não** tem cache de servidor (cada chamada recalcula). `/api/painel/team` e `/api/analytics/tabulations` usam `cachedReport`: por organização + parâmetros, fresco por 60 s e servido vencido por mais 120 s enquanto recalcula (sem invalidação por escrita; defasagem máxima 180 s). Teto de período: `/painel/team` 90 dias, `/analytics/tabulations` 366 dias (mantém o fim; a resposta traz `rangeClamped: true` quando cortou).
 
+#### `volume` — como `started`, `finished` e `stillOpen` se relacionam
+
+Os KPIs de `volume` não formam uma partição entre si, porque `started` e `finished` medem **conjuntos diferentes**:
+
+- **Coorte `started`**: conversas **criadas** no período (`createdAt`). Cada uma tem uma situação atual, e vale (campo aditivo `partition`):
+  `started = partition.resolved + partition.open + partition.other`, com `partition.open = stillOpen = openStarted + openWaiting`.
+  - `resolved`: criadas no período e hoje com status `RESOLVED` (encerradas em qualquer data, inclusive depois do fim do período).
+  - `open` / `stillOpen`: criadas no período, status diferente de `RESOLVED` e sem `closedAt`. `openStarted` já teve resposta humana; `openWaiting` aguarda a primeira.
+  - `other`: o resto da coorte, hoje só status `PENDING`/`SNOOZED` que ainda guardam `closedAt` de um encerramento anterior.
+- **Fluxo `finished`**: conversas **encerradas** no período (`status = RESOLVED` e `closedAt` no período), seja qual for a data de criação:
+  `finished = partition.finishedFromStarted + partition.finishedCarryover`.
+  - `finishedFromStarted`: criadas e encerradas no período.
+  - `finishedCarryover`: encerradas no período mas criadas **antes** dele. Não estão em `started`.
+
+Por isso `finished + stillOpen` pode passar de `started` (há `finishedCarryover`) e pode ficar abaixo (criada no período e encerrada depois dele, ou `other`). Exemplo da evidência de QA (30 dias): 275 + 1.040 + 3 = 1.318 contra 1.312 iniciadas; a diferença é o fluxo que veio de antes do período (`finishedCarryover`) menos a coorte que não entra nas três parcelas (`resolved` fora do período e `other`). **A definição dos KPIs existentes não mudou**: `finished` continua contando encerradas no período e o rótulo "finalizados" deve dizer isso, ou o front deve exibir `partition` quando quiser uma soma que fecha.
+
+A situação é a **atual**, não a histórica: encerrar define `closedAt` e reabrir (status `OPEN`) o limpa. Conversa encerrada no período e reaberta depois sai de `finished`; reaberta, conta em `open` se foi criada no período. Cada conversa (linha em `conversations`) conta **uma vez** em `started`; reabertura não duplica.
+
 #### `GET /api/analytics/tabulations` — ator do log
 
 Cada registro de `items` (log paginado) ganhou o campo aditivo `actor`, que diz quem tabulou:
